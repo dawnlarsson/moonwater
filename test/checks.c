@@ -124476,6 +124476,53 @@ b32 main()
         frames_at(5000000000ll);
         frames_at(5016666667ll);
         frames_write((string_address) "gallery", 0, 0, 0, SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
+
+        // The settings window's Canvas group, light and dark, over the glass a light or a dark theme gives it: the kit's
+        // switches, the theme's and the motion's segmented tabs and the accent's swatches in the rows.
+        if (settings_map())
+                for (int dark = 0; dark < 2; dark++)
+                {
+                        unsigned int glass = dark ? 0x2b2b2eu : 0xb4b4b4u;
+
+                        settings_gallery.on = 0;
+                        settings.editing = -1, settings.menu = -1, settings.pane = 1, settings.shown = -1;
+                        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                        {
+                                const struct settings_row address_to row = &settings_rows[at];
+
+                                settings.state[at] = SETTINGS_READ;
+                                string_copy_bounded((string_address)settings.value[at],
+                                                    (string_address)(row->kind == SETTINGS_SWITCH ? (at % 2 ? "on" : "off")
+                                                                     : row->path && string_equals((string_address)row->path, (string_address)SETTING_THEME_PATH) ? (dark ? "dark" : "light")
+                                                                     : row->path && string_equals((string_address)row->path, (string_address)SETTING_ACCENT_PATH) ? "amber"
+                                                                     : row->path && string_equals((string_address)row->path, (string_address)SETTING_MOTION_PATH) ? "full"
+                                                                     : row->standard ? row->standard : "1"),
+                                                    SETTINGS_VALUE);
+                                memory_zero(&settings_kit[at], sizeof(settings_kit[at]));
+                        }
+                        static struct windows table;
+
+                        table.stride = 700;
+                        settings.own.table = &table;
+                        settings.width = 700, settings.height = 520;
+                        settings.ui.pitch = 700, settings.ui.width = 700, settings.ui.height = 520;
+                        settings_refilter();
+                        settings_layout();
+                        settings_group_choose(1); // Canvas
+                        ui_inks(&settings.ui, glass);
+                        ui_kit_theme(dark ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 1);
+                        ui_kit.now = 6000000000ll;
+                        settings_draw_rows(frames_pixels, 0, 0);
+                        // The picture is premultiplied over the glass: laid on the glass's colour to be seen.
+                        for (positive left = 700 * 520; left > 0; left--) // backwards: the wider rows are laid over the narrow ones
+                        {
+                                positive at = left - 1, y = at / 700, x = at % 700;
+                                unsigned int pixel = frames_pixels[y * 700 + x];
+
+                                frames_pixels[y * SETTINGS_GALLERY_W + x] = ui_over(pixel, 0xff000000u | glass);
+                        }
+                        frames_write((string_address)(dark ? "settings-dark" : "settings-light"), 0, 0, 0, 700, 520);
+                }
         string_format(log, "  kit frames: %p frames drawn\n", frames_count);
         return test_report(null);
 }

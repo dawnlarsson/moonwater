@@ -3234,6 +3234,120 @@ static b32 settings_key(const struct window_event address_to event)
         return true;
 }
 
+/* ---- the kit in the rows ---- */
+
+/*
+        The rows are drawn with the kit's controls where the kit has one: a
+        switch is the kit's switch (its bars grow across it over .2s when the
+        verb says it changed, hovered 1.05 and pressed 1.1, a press ripples the
+        row in the accent), the theme and the motion are the kit's segmented
+        tabs (a press on a segment sets it), and the accent is a row of swatches
+        of its named accents, the one it is ringed. Each row keeps its control,
+        and its motion, while the window is open; where the control is drawn is
+        worked out at each picture from the row's place.
+*/
+static struct ui_control settings_kit[SETTINGS_ROWS];
+static int settings_kit_down = -1; // the row a press went down on, whose ripple goes out at the release
+
+static b32 settings_row_is(int at, const char address_to path)
+{
+        return at >= 0 && at < (int)SETTINGS_ROWS && settings_rows[at].path && string_equals((string_address)settings_rows[at].path, (string_address)path);
+}
+
+// A row drawn as the kit's segmented tabs: the theme and the motion.
+static b32 settings_row_segmented(int at)
+{
+        return settings_row_is(at, SETTING_THEME_PATH) || settings_row_is(at, SETTING_MOTION_PATH);
+}
+
+// The accent's row, drawn as swatches.
+static b32 settings_row_swatches(int at)
+{
+        return settings_row_is(at, SETTING_ACCENT_PATH) && settings_rows[at].kind == SETTINGS_CHOICE;
+}
+
+// A row's control, made the first time it is drawn: a switch, or tabs of the row's choices.
+static struct ui_control address_to settings_kit_of(int at)
+{
+        struct ui_control address_to c = &settings_kit[at];
+
+        if (!c->kind)
+        {
+                memory_zero(c, sizeof(*c));
+                if (settings_row_segmented(at))
+                {
+                        c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED;
+                }
+                else
+                        c->kind = UI_SWITCH;
+                c->label = "";
+                ui_control_start(c);
+        }
+        return c;
+}
+
+// The choices of a row, as tabs' items: the words of its choices, kept in the control's text.
+static fn settings_kit_items(struct ui_control address_to c, int at)
+{
+        char address_to into = c->text;
+        positive left = sizeof(c->text);
+
+        c->count = 0;
+        for (positive k = 0; k < UI_ITEMS; k++)
+        {
+                positive length;
+
+                if (!settings_word(settings_rows[at].choices, k, into, left))
+                        break;
+                c->items[c->count++] = into;
+                length = string_length((string_address)into) + 1;
+                into += length, left -= length;
+        }
+}
+
+// The width of a row's segmented tabs, logical pixels.
+static int settings_kit_tabs_width(struct ui address_to ui, struct ui_control address_to c)
+{
+        return c->count ? ui_tab_left(ui, c, c->count - 1) - c->x + ui_tab_width(ui, c, c->count - 1) : 0;
+}
+
+// The swatches: each named accent a 20 circle 8 apart, the last at the right edge; which is under x, or -1.
+#define SETTINGS_SWATCH 20
+#define SETTINGS_SWATCH_GAP 8
+static int settings_swatch_at(int right, int x)
+{
+        positive count = sizeof(settings_accents) / sizeof(settings_accents[0]);
+        int left = right - (int)count * ui_px(&settings.ui, SETTINGS_SWATCH + SETTINGS_SWATCH_GAP) + ui_px(&settings.ui, SETTINGS_SWATCH_GAP);
+
+        if (x < left || x >= right)
+                return -1;
+        return (x - left) / ui_px(&settings.ui, SETTINGS_SWATCH + SETTINGS_SWATCH_GAP);
+}
+
+static fn settings_draw_swatches(struct ui address_to ui, int at, int right, int middle)
+{
+        positive count = sizeof(settings_accents) / sizeof(settings_accents[0]);
+        int size = ui_px(ui, SETTINGS_SWATCH), step = ui_px(ui, SETTINGS_SWATCH + SETTINGS_SWATCH_GAP);
+        int left = right - (int)count * step + ui_px(ui, SETTINGS_SWATCH_GAP);
+
+        for (positive k = 0; k < count; k++)
+        {
+                long colour = window_colour_parse((string_address)settings_accents[k].colour);
+                b32 x = (left + (int)k * step) * 256, y = (middle - size / 2) * 256, s = size * 256;
+                struct ui_box dot = {x, y, x + s, y + s, s / 2, s / 2};
+
+                ui_kit_fill(ui, &dot, 0xff000000u | (unsigned int)colour, null);
+                // The accent it is: a ring of the ink round it, 2 out.
+                if (string_equals((string_address)settings.value[at], (string_address)settings_accents[k].name))
+                {
+                        struct ui_box ring = {x - 3 * 256 * ui->scale, y - 3 * 256 * ui->scale, x + s + 3 * 256 * ui->scale,
+                                              y + s + 3 * 256 * ui->scale, s / 2 + 3 * 256 * ui->scale, s / 2 + 3 * 256 * ui->scale};
+
+                        ui_kit_ring(ui, &ring, 2 * 256 * ui->scale, 0xff000000u | ui->ink);
+                }
+        }
+}
+
 /* ---- the gallery ---- */
 
 /*
@@ -3642,6 +3756,13 @@ static b32 settings_event(const struct window_event address_to event)
                 break;
         }
         case WINDOW_EVENT_BUTTON:
+                // The release: a switch row's ripple goes out (a finger's as a mouse's).
+                if (!(event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings_kit_down >= 0)
+                {
+                        ui_kit_ripples_exit(&settings_kit[settings_kit_down]);
+                        settings_kit_down = -1;
+                        settings_dirty();
+                }
                 if (event->flags & WINDOW_KEY_TOUCH)
                 {
                         settings_finger(event);
@@ -3715,6 +3836,49 @@ static fn settings_press_at(void)
                 settings_edit_end();
         if (row < 0)
                 return;
+        // The kit's rows: a segment or a swatch is set where it is pressed; a switch's row ripples from the press.
+        if (row < SETTINGS_ANY && settings.state[row] == SETTINGS_READ)
+        {
+                int right = settings_pane_right() - ui_px(&settings.ui, UI_INSET);
+
+                if (settings_row_segmented(row) && settings_kit[row].kind == UI_TABS)
+                {
+                        struct ui_control address_to c = &settings_kit[row];
+                        int hit = ui_control_hit(&settings.ui, c, settings.pointer_x, settings.pointer_y);
+                        char word[SETTINGS_VALUE];
+
+                        if (hit >= 0 && settings_word(settings_rows[row].choices, (positive)hit, word, sizeof(word)))
+                        {
+                                settings.focus = row;
+                                settings.pane = 1;
+                                settings_change(row, word);
+                                settings_dirty();
+                                return;
+                        }
+                }
+                if (settings_row_swatches(row))
+                {
+                        int hit = settings_swatch_at(right, settings.pointer_x);
+
+                        if (hit >= 0)
+                        {
+                                settings.focus = row;
+                                settings.pane = 1;
+                                settings_change(row, settings_accents[hit].name);
+                                settings_dirty();
+                                return;
+                        }
+                }
+                if (settings_rows[row].kind == SETTINGS_SWITCH && settings_kit[row].kind == UI_SWITCH)
+                {
+                        struct ui_control address_to c = &settings_kit[row];
+
+                        settings_kit_down = row;
+                        ui_kit_ripple_start(&settings.ui, c, settings.pointer_x, settings.pointer_y, settings_pane_left(),
+                                            ui_dev(&settings.ui, c->y) + ui_dev(&settings.ui, 24) - ui_px(&settings.ui, UI_ROW) / 2,
+                                            settings_pane_right() - settings_pane_left(), ui_px(&settings.ui, UI_ROW), 0);
+                }
+        }
         if (row != settings.focus)
         {
                 settings.confirm = 0;
@@ -3915,7 +4079,42 @@ static fn settings_draw_row(struct ui address_to ui, int at, int y)
         }
 
         if (row->kind == SETTINGS_SWITCH && state == SETTINGS_READ)
-                ui_switch(ui, right - inset, y + height / 2, string_equals(shown, (string_address) "on"), true);
+        {
+                // The kit's switch: its pill's right edge at the row's inset, in the row's middle; the row's label is the row's own.
+                struct ui_control address_to c = settings_kit_of(at);
+
+                c->on = string_equals(shown, (string_address) "on");
+                c->x = (right - inset) / ui->scale - 52;
+                c->w = 52;
+                c->y = (y + height / 2) / ui->scale - 24;
+                c->h = 48;
+                c->hover = settings.pointer_x >= right - inset - ui_px(ui, 52) && settings.pointer_x < right - inset &&
+                           settings.pointer_y >= y && settings.pointer_y < y + height;
+                c->down = settings_kit_down == at;
+                ui_control_draw(ui, c);
+        }
+        else if (settings_row_segmented(at) && state == SETTINGS_READ)
+        {
+                // The theme and the motion: the kit's segmented tabs, the value's segment chosen.
+                struct ui_control address_to c = settings_kit_of(at);
+                long place;
+
+                settings_kit_items(c, at);
+                place = setting_place(settings_rows[at].choices, shown);
+                if (place >= 0 && place != c->at)
+                {
+                        if (c->pip_x.placed)
+                                ui_tabs_choose(ui, c, (int)place);
+                        else
+                                c->at = (int)place;
+                }
+                c->y = (y + height / 2) / ui->scale - 16;
+                c->x = 0;
+                c->x = (right - inset) / ui->scale - settings_kit_tabs_width(ui, c);
+                ui_control_draw(ui, c);
+        }
+        else if (settings_row_swatches(at) && state == SETTINGS_READ)
+                settings_draw_swatches(ui, at, right - inset, y + height / 2);
         else
         {
                 // A value longer than the room the label leaves is cut at its end and says so.
