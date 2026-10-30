@@ -1411,29 +1411,20 @@ static positive bowl_accounts_add(p8 address_to text, positive used,
         return used;
 }
 
-static b32 bowl_read_in_root(string_address root, string_address path,
-                             p8 address_to into, positive capacity)
-{
-        bipolar handle = bowl_open_in_root(root, path, FILE_READ | O_CLOEXEC);
-        bipolar got;
-
-        if (handle < 0)
-                return 0;
-        got = system_read_retry((positive)handle, into, capacity);
-        system_close(handle);
-        return got > 0 ? (b32)got : 0;
-}
-
 /*
         The files for the launch that is about to be of this bowl's program,
         or of the bus, which a service of any bowl connects to as the account
         its bowl made and which refuses an id it has no name for: that one
-        has every bowl's, the bowl asked for first.
+        has every bowl's, the bowl asked for first. A guest's passwd and group
+        are read as bowl_slurp_in_root reads the guest's conf files, regular
+        and without waiting: they were opened blocking, so a FIFO a guest made
+        at its /etc/passwd held every launch of its programs, and the bus,
+        which reads every bowl's, for every bowl.
 */
 static fn bowl_accounts_prepare(string_address root, bool every)
 {
         p8 text[BOWL_ACCOUNTS_ROOM * 2];
-        p8 other[BOWL_ACCOUNTS_ROOM];
+        p8 other[BOWL_ACCOUNTS_ROOM + 1];
         p8 path[BOWL_PATH_LIMIT];
 
         bowl_quiet = true;
@@ -1463,14 +1454,14 @@ static fn bowl_accounts_prepare(string_address root, bool every)
 
                 for (string_address from = root;;)
                 {
-                        b32 more = bowl_read_in_root(from, bowl_accounts[at].path,
-                                                     other, sizeof(other));
+                        bipolar more = bowl_slurp_in_root(from, bowl_accounts[at].path,
+                                                          other, sizeof(other));
 
-                        if (more)
+                        if (more > 0)
                                 used = bowl_accounts_add(text, used,
                                                          sizeof(text),
                                                          (string_address)other,
-                                                         more,
+                                                         (positive)more,
                                                          every ? from + sizeof(BOWL_ROOT_PREFIX) - 1
                                                                : null);
                         if (!every)
@@ -7099,7 +7090,7 @@ static fn bowl_bus_service(string_address root, bipolar directory,
                            string_address name)
 {
         static const p8 ask[] = "Exec=/bowl bus run ";
-        p8 text[BOWL_BUS_REQUEST];
+        p8 text[BOWL_BUS_REQUEST + 1];
         p8 out[BOWL_BUS_REQUEST + BOWL_PATH_LIMIT + sizeof(ask) + 4];
         p8 program[BOWL_PATH_LIMIT];
         p8 path[BOWL_PATH_LIMIT];
@@ -7107,20 +7098,17 @@ static fn bowl_bus_service(string_address root, bipolar directory,
         positive exec_size = 0;
         positive used = 0;
         positive root_size = string_length(root);
-        bipolar handle;
         bipolar got;
 
         if (!path_join(path, sizeof(path), BOWL_BUS_SERVICES, name) ||
             system_access_at(AT_FDCWD, path, 0) >= 0)
                 return;
 
-        handle = system_open_at(directory, name,
-                                FILE_READ | O_NOFOLLOW | O_CLOEXEC);
-        if (handle < 0)
-                return;
-        got = system_read_retry((positive)handle, text, sizeof(text));
-        system_close(handle);
-        if (got <= 0 || (positive)got >= sizeof(text))
+        //      A regular file, read without waiting: the open blocked, so a FIFO a
+        //      guest made among its service files held every launch that set up
+        //      the bus.
+        got = file_slurp_regular_at(directory, name, text, sizeof(text), O_NOFOLLOW);
+        if (got <= 0 || (positive)got >= BOWL_BUS_REQUEST)
                 return;
 
         for (positive at = 0; at < (positive)got;)

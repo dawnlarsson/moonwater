@@ -46058,6 +46058,25 @@ def harness_moonwater_cli(argv):
               "a bowl whose /etc/hosts is a link to the host's file is not read through it, and a FIFO there does not hold the verb",
               repr((block("hosts"), [line for line in lines if line.startswith("@@ fifo")])))
 
+        # And so are a guest's accounts and its bus's service files: a FIFO a
+        # guest made at its /etc/passwd held `bowl bus run` (each service the
+        # bus starts) and `bowl bus`, which reads every bowl's, and one among
+        # its service files held `bowl bus`. Each has to end, not time out.
+        lines, finished = session(
+            "cp /tmp/moonwater /tmp/bowl; mkdir -p /bowls/x/etc /bowls/x/bin /bowls/x/usr/bin "
+            "/bowls/x/usr/share/dbus-1/system-services\n"
+            "mkfifo /bowls/x/etc/passwd\n"
+            "timeout 20 /tmp/bowl bus run /bowls/x /bin/true > /dev/null 2>&1; echo \"@@ accounts $?\"\n"
+            "cp /tmp/moonwater /bowls/x/usr/bin/dbus-daemon\n"
+            "mkfifo /bowls/x/usr/share/dbus-1/system-services/a.service\n"
+            "timeout 20 /tmp/bowl bus > /dev/null 2>&1; echo \"@@ services $?\"\n"
+            "rm -rf /bowls/x /tmp/bowl /run/dbus\n")
+        held = {line.split()[1]: line.split()[2] for line in lines
+                if line.startswith(("@@ accounts ", "@@ services ")) and len(line.split()) == 3}
+        check(finished and len(held) == 2 and "124" not in held.values(),
+              "a FIFO at a bowl's /etc/passwd or among its bus service files holds neither bowl bus run nor bowl bus",
+              repr((held, lines[-4:])))
+
         # A FIFO at /etc/localtime, or at a bowl's, is not the zone's file and
         # is replaced by it: the read that asks whether the file already says
         # the same does not wait for a writer, so timezone answers.
