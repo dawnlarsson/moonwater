@@ -2321,8 +2321,17 @@ typedef union matrix4
         file is least the kernel's to take.
 */
 #ifdef KERNEL_MODE
+#if ARM64
+//      A kernel is built with -mgeneral-regs-only. GNU as takes a vector
+//      instruction whatever the compiler was told; clang's own assembler
+//      refuses it ("instruction requires: neon") unless the block says it
+//      means it, which is all these two directives are for.
+#define ASM_SIMD_SECTION ".pushsection .text.moonwater_simd, \"ax\"\n.arch_extension simd\n"
+#define ASM_SIMD_SECTION_END ".arch_extension nosimd\n.popsection\n"
+#else
 #define ASM_SIMD_SECTION ".pushsection .text.moonwater_simd, \"ax\"\n"
 #define ASM_SIMD_SECTION_END ".popsection\n"
+#endif
 #else
 //      A program's wide bodies go where its other routines go.
 #define ASM_SIMD_SECTION ""

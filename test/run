@@ -3300,6 +3300,9 @@ kernel_split_one()
         kernel_split_base=$2
         shift 2
         kernel_split_nm=${target_compiler%gcc}nm
+        case $target_compiler in
+        *clang*) kernel_split_nm=llvm-nm ;;
+        esac
         command -v "$kernel_split_nm" > /dev/null 2>&1 || kernel_split_nm=nm
 
         for kernel_split_side in whole core canvas; do
@@ -3359,6 +3362,10 @@ kernel_split_one()
 kernel_narrow_one()
 {
         kernel_narrow_objcopy=${target_compiler%gcc}objcopy
+        #       A clang object is cut by llvm-objcopy, which reads every machine.
+        case $target_compiler in
+        *clang*) kernel_narrow_objcopy=llvm-objcopy ;;
+        esac
         command -v "$kernel_narrow_objcopy" > /dev/null 2>&1 ||
                 kernel_narrow_objcopy=objcopy
         command -v "$kernel_narrow_objcopy" > /dev/null 2>&1 ||
