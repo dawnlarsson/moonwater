@@ -124392,6 +124392,63 @@ b32 main()
         settings_gallery.on = 1;
         ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
 
+        /*
+                The cost of a frame, for perf stat: kit-frames ... OUTDIR bench press|drag|still N draws N frames of
+                what the window draws while a button is pressed (its rows cleared to the paper and the button drawn,
+                pressed again every 30 frames so the ripple, the state layer and the fill always move), while the
+                slider is dragged back and forth past its end, or of a switch at rest; the cost of a frame is the
+                difference of two counts over the difference of their N.
+        */
+        if (program_argument_count() > 7 && string_equals(program_argument(5), (string_address) "bench"))
+        {
+                string_address what = program_argument(6);
+                positive count = (positive)string_to_number_unsigned(program_argument(7), null, 10);
+                struct ui_control address_to c = null;
+                b64 now = 3000000000ll;
+                int band_top, band_bottom, x, y;
+
+                settings_gallery_build();
+                for (int k = 0; k < settings_gallery.count; k++)
+                {
+                        struct ui_control address_to each = &settings_gallery.control[k];
+
+                        if ((string_equals(what, (string_address) "press") && each->kind == UI_BUTTON && each->label && string_equals((string_address)each->label, (string_address) "Deploy")) ||
+                            (string_equals(what, (string_address) "drag") && each->kind == UI_SLIDER && each->label && string_equals((string_address)each->label, (string_address) "Log verbosity")) ||
+                            (string_equals(what, (string_address) "still") && each->kind == UI_SWITCH && each->label && string_equals((string_address)each->label, (string_address) "Telemetry")))
+                                c = each;
+                }
+                if (!c)
+                        return 1;
+                band_top = c->y - 40, band_bottom = c->y + c->h + 40;
+                x = c->x + c->w / 2, y = c->y + c->h / 2;
+                ui_kit.now = now;
+                frames_at(now);
+                for (positive frame = 0; frame < count; frame++)
+                {
+                        now += 16666667;
+                        ui_kit.now = now;
+                        if (string_equals(what, (string_address) "press") && frame % 30 == 0)
+                        {
+                                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_BUTTON, x, y, false, 0);
+                                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_BUTTON, x - 10 + (int)(frame % 20), y, true, 0);
+                        }
+                        if (string_equals(what, (string_address) "drag"))
+                        {
+                                if (frame == 0)
+                                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_BUTTON, x, y + 30, true, 0);
+                                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_MOTION,
+                                               c->x + (int)(frame * 7 % (unsigned int)(c->w + 120)), y + 30 + (int)(frame % 9), true, 0);
+                        }
+                        // What the window does for a frame: the rows the moving control reaches cleared, the control drawn.
+                        ui_kit.busy = 0;
+                        settings.ui.band_top = band_top, settings.ui.band_bottom = band_bottom;
+                        ui_fill(&settings.ui, 0, band_top, SETTINGS_GALLERY_W, band_bottom - band_top, ui_role(UI_SURFACE) | 0xff000000u);
+                        ui_control_draw(&settings.ui, c);
+                }
+                string_format(log, "  kit bench %s: %p frames, busy at the end %p\n", what, count, (positive)ui_kit.busy);
+                return 0;
+        }
+
         // The shots each recording took, after its release (or change), in hundredths of a millisecond.
 #define SHOT(ms) {(int)((ms) * 100), FRAMES_SHOT, 0, 0}
         {
