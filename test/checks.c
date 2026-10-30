@@ -27947,7 +27947,7 @@ positive reference_trailing_positive(string_address input)
 bipolar reference_trailing_bipolar(string_address input)
 {
         if (string_is(input, '-'))
-                return -(bipolar)reference_trailing_positive(input + 1);
+                return (bipolar)(0 - reference_trailing_positive(input + 1));
 
         return (bipolar)reference_trailing_positive(input);
 }
@@ -51001,6 +51001,20 @@ b32 main(void)
 #endif
 #ifdef CHECK_format
 #include "../src/lib.util.c"
+#if defined(FORMAT_STANDALONE) && \
+    (defined(__SSP__) || defined(__SSP_ALL__) || defined(__SSP_STRONG__) || \
+     defined(__SSP_EXPLICIT__))
+//      The stack protector's guard and its failure live with stdlib, which
+//      this arrangement leaves out; a build with the protector on (MW_HARDEN=1)
+//      would not link without them.
+KEEP unsigned long __stack_chk_guard = 0x2f5a8c1d93e6b700ul;
+
+KEEP DEAD_END fn __stack_chk_fail(void)
+{
+        system_call_1(syscall(exit_group), 134);
+        __builtin_unreachable();
+}
+#endif
 /*
         Experimental C standard library
 

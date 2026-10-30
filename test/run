@@ -4424,9 +4424,43 @@ format_differential_one()
         return 1
 }
 
+#       The inline forms of the byte and bit routines are called with every
+#       int there is, INT_MIN among them, and a subtraction on the signed
+#       value overflows there: gcc wraps it and nothing shows, so the one
+#       check that holds them to their assembly runs once more with the
+#       compiler's undefined-behaviour traps on (the flags MW_UBSAN=1 gives a
+#       whole lane).
+known_undefined()
+{
+        if [ "$host_system" != Linux ] || [ "$host_arch" != x86_64 ]; then
+                note "known-undefined: NOT RUN -- the trap build is run on x86_64 Linux"
+                return 2
+        fi
+        freestanding_check single "$work/single.undefined" x86_64 \
+                -fsanitize=undefined -fno-sanitize=alignment \
+                -fsanitize-undefined-trap-on-error || return 1
+        if timeout 60 "$work/single.undefined" > "$work/single.undefined.out" 2>&1
+        then
+                tally known-undefined 1 1
+                return 0
+        fi
+        tally known-undefined 0 1
+        note "the single check trapped on undefined behaviour:"
+        sed 's/^/    /' "$work/single.undefined.out" | head -5
+        return 1
+}
+
 lane_known()
 {
         target_lane known_one
+        known_lane_outcome=$?
+        known_undefined
+        case $? in
+        0) ;;
+        2) [ "$known_lane_outcome" != 0 ] || known_lane_outcome=2 ;;
+        *) known_lane_outcome=1 ;;
+        esac
+        return "$known_lane_outcome"
 }
 
 #

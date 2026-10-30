@@ -7726,23 +7726,23 @@ static inline INLINE positive into_base_known(p8 address_to into,
         addressable assembly routine.
 */
 static inline INLINE b32 known_is_digit(b32 value)
-{ return (p32)(value - 48) < 10; }
+{ return ((p32)value - 48) < 10; }
 static inline INLINE b32 known_is_upper(b32 value)
-{ return (p32)(value - 65) < 26; }
+{ return ((p32)value - 65) < 26; }
 static inline INLINE b32 known_is_lower(b32 value)
-{ return (p32)(value - 97) < 26; }
+{ return ((p32)value - 97) < 26; }
 static inline INLINE b32 known_is_alpha(b32 value)
-{ return (p32)((value | 32) - 97) < 26; }
+{ return (((p32)value | 32) - 97) < 26; }
 static inline INLINE b32 known_is_alnum(b32 value)
 { return known_is_alpha(value) | known_is_digit(value); }
 static inline INLINE b32 known_is_space(b32 value)
-{ return ((p32)(value - 9) < 5) | (value == 32); }
+{ return (((p32)value - 9) < 5) | (value == 32); }
 static inline INLINE b32 known_is_hexadecimal(b32 value)
-{ return known_is_digit(value) | ((p32)((value | 32) - 97) < 6); }
+{ return known_is_digit(value) | ((((p32)value | 32) - 97) < 6); }
 static inline INLINE b32 known_is_printable(b32 value)
-{ return (p32)(value - 32) < 95; }
+{ return ((p32)value - 32) < 95; }
 static inline INLINE b32 known_is_graphic(b32 value)
-{ return (p32)(value - 33) < 94; }
+{ return ((p32)value - 33) < 94; }
 static inline INLINE b32 known_is_control(b32 value)
 { return ((p32)value < 32) | (value == 127); }
 static inline INLINE b32 known_is_punctuation(b32 value)
@@ -7759,7 +7759,7 @@ static inline INLINE b32 known_to_ascii(b32 value)
 static inline INLINE b32 known_to_upper(b32 value)
 {
 #if X64 || ARM64
-        return (p32)(value - 'a') < 26 ? value - 32 : value;
+        return ((p32)value - 'a') < 26 ? value - 32 : value;
 #else
         return value - (known_is_lower(value) << 5);
 #endif
@@ -7767,7 +7767,7 @@ static inline INLINE b32 known_to_upper(b32 value)
 static inline INLINE b32 known_to_lower(b32 value)
 {
 #if X64 || ARM64
-        return (p32)(value - 'A') < 26 ? value + 32 : value;
+        return ((p32)value - 'A') < 26 ? value + 32 : value;
 #else
         return value + (known_is_upper(value) << 5);
 #endif
