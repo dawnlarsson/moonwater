@@ -124891,6 +124891,28 @@ static fn check_kit_theme(void)
                 ui_theme_make(&theme, 0, UI_ACCENT_STANDARD);
                 check("kit theme: an accent that does not stand out from the surfaces (white on light) fills with the theme's ink",
                       theme.role[UI_PRIMARY] == 0xff18181bu && theme.role[UI_ON_PRIMARY] == 0xffffffffu);
+                // The chrome follows the theme: the lit line, and the tabs' glass (on a table of its own when none is mapped).
+                {
+                        static struct windows table_of_its_own;
+                        struct windows *was_table = compositor.table;
+
+                        if (!compositor.table)
+                                compositor.table = &table_of_its_own;
+                        unsigned int themed = compositor.table->themed, mode = compositor.table->theme, accent = compositor.table->accent;
+                        b32 before = compositor_line_lit() == COMPOSITOR_INK_LINE_LIT || themed, standard, light, white, tabs;
+
+                        compositor.table->themed = 1, compositor.table->theme = 1, compositor.table->accent = 0xffffff;
+                        standard = compositor_line_lit() == 0x4d4d4du;
+                        tabs = compositor_tab_target(0) == 0x111113 && compositor_tab_target(1) == 0xffffff;
+                        compositor.table->theme = 0, compositor.table->accent = 0xff8800;
+                        light = compositor_line_lit() == 0xff8800u && compositor_tab_target(0) == 0xf7f7f8;
+                        compositor.table->accent = 0xffffff;
+                        white = compositor_line_lit() == 0x18181bu && compositor_tab_target(1) == 0x18181b;
+                        compositor.table->themed = themed, compositor.table->theme = mode, compositor.table->accent = accent;
+                        check("kit theme: the lit window line and the tabs follow the theme (the standard's line is 4d4d4d, as it was)",
+                              before && standard && light && white && tabs);
+                        compositor.table = was_table;
+                }
         }
 
         // A turn: light to dark over .2s --ease from the first frame, the roles between the two halfway.

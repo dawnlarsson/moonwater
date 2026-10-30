@@ -46,6 +46,7 @@ static const unsigned int taskbar_clear[TASKBAR_TAB_CHUNK];
 // What the band takes from compositor.c, which comes before this file in every build and defines them: the meet of two
 // rectangles, the grain a glass row is made with, and a colour made more vivid.
 static void compositor_meet(int *into, const int *other);
+static long compositor_tab_target(b32 lit);
 static const unsigned int *compositor_grain_row(unsigned int light, int x, int y);
 static unsigned int compositor_vivid(unsigned int pixel);
 
@@ -457,6 +458,11 @@ static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, i
         unsigned int middle = compositor_vivid(view->glass[(long)(y + height / 2 - gy) * gw + x - gx + width / 2]);
         unsigned int target = window_light(middle) ? 0xffffffu : 0x000000u;
         unsigned int amount = slot >= 0 && (mark & COMPOSITOR_TAB_LIT) ? 140 : 179;
+        // With a theme the tabs follow it: toward its surface, and the tab of the window with the keys toward its fill.
+        long themed = compositor_tab_target(slot >= 0 && (mark & COMPOSITOR_TAB_LIT));
+
+        if (themed >= 0)
+                target = (unsigned int)themed;
 
         for (int row = y; row < y + height; row++)
         {

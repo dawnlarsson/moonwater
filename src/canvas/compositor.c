@@ -101,6 +101,7 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #include "ui/taskbar.h"
 
 static struct taskbar_view compositor_taskbar_view(void);
+static unsigned int compositor_line_lit(void); // the lit line of the window with the keys, the theme's (compositor_theme_read)
 
 struct compositor_target
 {
@@ -2927,7 +2928,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            (int)compositor.h[row], compositor.scale, compositor_pixels(row),
                                            (unsigned long)compositor_stride(), 0, null, 0,
                                            line ? COMPOSITOR_RADIUS * compositor.scale : 0, line,
-                                           row == compositor.focus ? COMPOSITOR_INK_LINE_LIT : COMPOSITOR_INK_LINE};
+                                           row == compositor.focus ? compositor_line_lit() : COMPOSITOR_INK_LINE};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         // The edge or corner the hand holds or is over, or all of the line of a window being moved.
         if (row == compositor.lit_row && line)
@@ -6083,6 +6084,40 @@ static unsigned int compositor_theme_day(void)
         if (!localtime_r(&seconds, &broken))
                 return 1;
         return broken.tm_hour >= 7 && broken.tm_hour < 19;
+}
+
+/*
+        The theme's inks for the compositor's own chrome, the minimal look kept (frameless, 8 px corners, a 1 px line):
+        the lit line of the window with the keys is the theme's fill at 30% over black on the dark theme (white's is
+        4d4d4d, the line it always was), and the fill itself on the light one (the ink where the fill is too light to
+        show); a tab's glass is tinted toward the theme's surface, and the tab of the window with the keys toward its
+        fill. A table the compositor has not themed yet is drawn as before there was a theme.
+*/
+static unsigned int compositor_theme_fill(void)
+{
+        unsigned int accent = compositor.table ? compositor.table->accent & 0xffffffu : 0xffffffu;
+
+        // Too light to show on the light theme's surfaces (as the kit's rule, under 1.5:1: every channel past e0): the ink.
+        b32 pale = (accent >> 16 & 255) > 0xe0 && (accent >> 8 & 255) > 0xe0 && (accent & 255) > 0xe0;
+
+        return compositor.table && !compositor.table->theme && pale ? 0x18181bu : accent;
+}
+
+static unsigned int compositor_line_lit(void)
+{
+        if (!compositor.table || !compositor.table->themed)
+                return COMPOSITOR_INK_LINE_LIT;
+        return compositor.table->theme ? window_mix(0, compositor_theme_fill(), 77) : compositor_theme_fill();
+}
+
+// The colour a tab's glass is tinted toward: the theme's surface (or its fill, lit), or -1 for its own side of lightness.
+static long compositor_tab_target(b32 lit)
+{
+        if (!compositor.table || !compositor.table->themed)
+                return -1;
+        if (lit)
+                return compositor_theme_fill();
+        return compositor.table->theme ? 0x111113 : 0xf7f7f8;
 }
 
 static void compositor_theme_read(void)
