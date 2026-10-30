@@ -52154,12 +52154,29 @@ static fn several(void)
         after the scan rather than by scanning again, so that a failure says
         which of the two halves was wrong.
 */
-#define SCAN_TEST_FILE "/tmp/dawning-scan-test"
+//      One file for each run: the name used to be the same for everybody, so
+//      a second run at once, or a file left behind with another mode, stopped
+//      every row that reads one back.
+static p8 scan_test_path[48];
+
+static string_address scan_test_file(void)
+{
+        if (scan_test_path[0] == 0)
+        {
+                positive length = 23;
+
+                memory_copy(scan_test_path, "/tmp/dawning-scan-test.", length);
+                length += positive_into(scan_test_path + length,
+                                        (positive)getpid());
+                scan_test_path[length] = 0;
+        }
+
+        return (string_address)scan_test_path;
+}
 
 static fn lay_down(string_address text)
 {
-        FILE address_to handle = fopen((string_address)SCAN_TEST_FILE,
-                                       (string_address) "w");
+        FILE address_to handle = fopen(scan_test_file(), (string_address) "w");
         positive length = string_length(text);
 
         if (handle == null)
@@ -52173,7 +52190,7 @@ static fn lay_down(string_address text)
 
 static FILE address_to pick_up(void)
 {
-        return fopen((string_address)SCAN_TEST_FILE, (string_address) "r");
+        return fopen(scan_test_file(), (string_address) "r");
 }
 
 //      vfscanf reached the way a caller reaches it. The list cannot be
@@ -52310,7 +52327,7 @@ static fn streams(void)
               through_stream(null, (string_address) "%d",
                              address_of first) == EOF);
 
-        unlink((string_address)SCAN_TEST_FILE);
+        unlink(scan_test_file());
 }
 
 /*
