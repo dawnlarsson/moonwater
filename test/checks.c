@@ -106905,10 +106905,13 @@ static fn storage_test_net_files(void)
         check("resolver contents publish through the same atomic path",
               previous_mask >= 0 && resolver_written == 0);
         file_facts resolver_facts;
-        check("a fresh resolver file honors a restrictive umask",
+        //      The machine's resolvers, read by every user's lookups: 0644 under
+        //      a root shell's umask 077 as under any other (c8b1bd32). This row
+        //      held it to the umask, 0600, which is the bug that commit fixed.
+        check("a fresh resolver file is 0644 under a restrictive umask, readable by every user",
               file_look(AT_FDCWD, target, AT_SYMLINK_NOFOLLOW,
                         address_of resolver_facts) &&
-                  (resolver_facts.mode & 0777) == 0600);
+                  (resolver_facts.mode & 0777) == 0644);
         static p8 wanted[] = "nameserver 10.0.0.1\n";
         got = storage_test_file_read(target, bytes, sizeof bytes);
         check("resolver writes are complete: the network's resolver, and nothing behind it",
