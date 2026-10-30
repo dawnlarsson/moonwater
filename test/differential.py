@@ -72869,7 +72869,8 @@ int main(void)
         if (header >= 0) {
                 assert(header >= 2 && (positive)header <= size);
                 assert(bytes[header - 1] == '\n' && bytes[header - 2] == '\n' ||
-                       (header >= 4 && bytes[header - 1] == '\n' && bytes[header - 2] == '\r'));
+                       (header >= 3 && bytes[header - 1] == '\n' && bytes[header - 2] == '\r' &&
+                        bytes[header - 3] == '\n'));
         }
         http_response response = {.code = nondet_bool() ? 200 : 301};
         http_framing_fields fields;
