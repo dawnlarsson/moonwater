@@ -16574,6 +16574,14 @@ stick="$stick -device usb-storage,bus=xhci.0,drive=stick,removable=on"
 #       here can type into, and the serial shell's moonwater ask then has
 #       nothing to ask.
 #
+#       loglevel=4 on every guest of this lane: the shell's prompt comes while
+#       the kernel is still registering drivers, and each of those info lines
+#       went to the same console and could land inside an answer ('t[ 0.715880]
+#       Bluetooth: HIDP ...' and then 'wins- ksa': 'two installs of this build
+#       are asked about' red, and 'use succeeds' the same way, in one of two
+#       runs on 2026-10-30). What this lane reads of the kernel on the console
+#       is a panic, an oops, an ext4 error and the power-down line, all more
+#       urgent than that; the rest is still in the guest's own log for dmesg.
 install_boot()
 {
         name=$1
@@ -16584,7 +16592,7 @@ install_boot()
         # shellcheck disable=SC2086
         timeout $((240 * install_slow)) "$install_emulator" -m "${install_memory:-2G}" -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio $coverage_serial \
-                -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
+                -append "console=$install_console loglevel=4 drm_client_lib.active= moonwater.desktop=none" \
                 -device qemu-xhci,id=xhci \
                 -drive if=none,id=disk,format=raw,file="${install_disk:-$work/disk.img}" \
                 -device nvme,serial=moonwater,drive=disk \
@@ -17043,7 +17051,7 @@ if [ "$install_loader" = BOOTX64.EFI ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] &&
                         "$work/$name.sent" 240 -- \
                         "$install_emulator" -m 2G -smp 2 $install_board $install_machine \
                         -kernel "$image" -no-reboot -display none -serial stdio \
-                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
+                        -append "console=$install_console loglevel=4 drm_client_lib.active= moonwater.desktop=none" \
                         -device qemu-xhci,id=xhci \
                         -drive if=none,id=disk,format=raw,file="$disk" \
                         -device nvme,serial=moonwater,drive=disk "$@" \
@@ -17627,7 +17635,7 @@ COMMANDS
         # shellcheck disable=SC2086
         timeout $((300 * install_slow)) "$install_emulator" -m 1G -smp 2 $install_board $install_machine \
                 -kernel "$image" -no-reboot -display none -serial stdio \
-                -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
+                -append "console=$install_console loglevel=4 drm_client_lib.active= moonwater.desktop=none" \
                 $lan -device virtio-net-pci,netdev=lan,mac=52:54:00:66:00:02 \
                 < "$work/neighbour.in" > "$work/neighbour" 2>&1 &
         neighbour_qemu=$!
@@ -18162,7 +18170,7 @@ PY
                         -drive if=pflash,format=raw,file="$work/$name.vars" \
                         -kernel "$work/$name.efi" -no-reboot -display none \
                         -serial stdio $coverage_serial \
-                        -append "console=$install_console drm_client_lib.active= moonwater.desktop=none" \
+                        -append "console=$install_console loglevel=4 drm_client_lib.active= moonwater.desktop=none" \
                         < "$work/serial.in" > "$work/$name" 2>&1 &
                 booting=$!
                 exec 9> "$work/serial.in"
