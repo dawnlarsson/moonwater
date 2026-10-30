@@ -3320,6 +3320,7 @@ static fn ui_tabs_choose(struct ui address_to ui, struct ui_control address_to c
         and two soft ones under it -- that lift on hover and turn to the bright
         accent's glow on focus, with a 4% wash of it in the face (.18s --ease).
 */
+#define UI_FIELD_BARE 1 // a field's variant: no label above it, the well at the control's top and its own height
 #define UI_FIELD_REST 0
 #define UI_FIELD_HOVER 1
 #define UI_FIELD_FOCUS 2
@@ -3351,15 +3352,17 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         int state = c->focused ? UI_FIELD_FOCUS : c->hover ? UI_FIELD_HOVER : UI_FIELD_REST;
         b64 want[15], now[15], p;
-
-        b32 fy = ui_dev(ui, c->y) + ui_dev(ui, 24 + 6);
-        struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y + 24 + 6), ui_q(c->w), ui_q(48), ui_q(6));
+        b32 bare = c->variant == UI_FIELD_BARE;
+        int above = bare ? 0 : 24 + 6, tall = bare && c->h ? c->h : 48;
+        b32 fy = ui_dev(ui, c->y) + ui_dev(ui, above);
+        struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y + above), ui_q(c->w), ui_q(tall), ui_q(6));
         unsigned int fill;
         int baseline;
 
-        // The label above.
-        ui_kit_text(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), UI_BODY_LARGE), (string_address)c->label, UI_BODY_LARGE,
-                    ui_role(UI_ON_SURFACE), 0);
+        // The label above (a bare field has none).
+        if (!bare && c->label)
+                ui_kit_text(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), UI_BODY_LARGE), (string_address)c->label, UI_BODY_LARGE,
+                            ui_role(UI_ON_SURFACE), 0);
         // The shadows move as one transition (.18s --ease), from wherever they are when the state changes.
         ui_field_shadows(state, want);
         p = c->field_start ? ui_bezier_at(&ui_ease, ui_progress(ui_kit.now - c->field_start, 180 * UI_MS)) : UI_ONE;
@@ -3429,16 +3432,19 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                         }
                 }
         }
-        baseline = ui_kit_baseline(ui, fy + (ui_dev(ui, 48) - ui_dev(ui, 20)) / 2, UI_FIELD);
+        baseline = ui_kit_baseline(ui, fy + (ui_dev(ui, tall) - ui_dev(ui, 20)) / 2, UI_FIELD);
         if (c->text[0])
         {
-                int drawn = ui_run_in(ui, (const font_face address_to const[]){ui->regular, ui->regular}, ui_dev(ui, c->x + 14), baseline,
-                                      (string_address)c->text, 15, ui_role(UI_ON_SURFACE) & 0xffffffu, 255, ui_dev(ui, c->x + 14),
-                                      ui_dev(ui, c->x + c->w - 14), 0);
+                // Typed in, a line wider than the well shows its end, the caret after it.
+                const font_face address_to const faces[2] = {ui->regular, ui->regular};
+                int room = ui_dev(ui, c->w - 28), wide = ui_run_in(ui, faces, 0, 0, (string_address)c->text, 15, 0, 0, 0, ui->width, 0) + ui_dev(ui, 2);
+                int shift = c->focused && wide > room ? wide - room : 0;
+                int drawn = ui_run_in(ui, faces, ui_dev(ui, c->x + 14) - shift, baseline, (string_address)c->text, 15,
+                                      ui_role(UI_ON_SURFACE) & 0xffffffu, 255, ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), 0);
 
                 if (c->focused)
-                        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 14) + drawn * 256 + 256, (baseline - ui_dev(ui, 14)) * 256,
-                                                       ui_q8(ui, c->x + 14) + drawn * 256 + 256 + ui_q8(ui, 1) + ui_q8(ui, 1) / 2,
+                        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 14) + (drawn - shift) * 256 + 256, (baseline - ui_dev(ui, 14)) * 256,
+                                                       ui_q8(ui, c->x + 14) + (drawn - shift) * 256 + 256 + ui_q8(ui, 1) + ui_q8(ui, 1) / 2,
                                                        (baseline + ui_dev(ui, 4)) * 256, 0, 0}, ui_role(UI_PRIMARY), null);
         }
         else

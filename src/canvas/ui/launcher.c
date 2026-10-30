@@ -763,15 +763,19 @@ static fn launcher_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, launcher.own.table->stride, launcher.width, launcher.height);
 
-        // The field is its text, a caret and one line under it: no well and no ring.
+        // The field is the kit's, bare (no label): its raised well, the focus it always has, the text and the accent's caret.
         {
-                int left = pad + inset, right = pad + width - inset, baseline = ui_baseline(ui, pad, field, LAUNCHER_TEXT_SIZE);
+                static struct ui_control search;
 
-                ui_field_text(ui, left, right, baseline, (string_address)launcher.text, LAUNCHER_TEXT_SIZE, true);
-                if (!launcher.text[0])
-                        ui_text(ui, left + 3 * ui->scale, baseline, (string_address) "Search programs, or type a command", LAUNCHER_TEXT_SIZE,
-                                false, ui->quiet, 255);
-                ui_fill(ui, pad, pad + field, width, ui->scale, ui_tone(ui->ink, 26));
+                if (!search.kind)
+                {
+                        search.kind = UI_INPUT, search.variant = UI_FIELD_BARE, search.focused = 1;
+                        search.items[0] = "Search programs, or type a command";
+                }
+                search.x = pad / ui->scale, search.y = pad / ui->scale, search.w = width / ui->scale, search.h = field / ui->scale;
+                string_copy_bounded((string_address)search.text, (string_address)launcher.text, sizeof(search.text));
+                ui_control_draw(ui, &search);
+                (void)inset;
         }
 
         for (positive at = 0; at < launcher.entries; at++)
