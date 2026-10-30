@@ -858,6 +858,701 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
         drag->owed = 0;
 }
 
+
+/* ---- kit: motion ---- */
+
+/*
+        The kit's motion, Dawning Native's Rubber Band standard (its ui.js and
+        ui.css), to the number. A value is Q30 in a b64 (UI_ONE is one), a time
+        is nanoseconds on the monotonic clock, and nothing here is floating
+        point, so the same frame times make the same values, and the same
+        pictures, on x86-64, arm64 and riscv64. The host check (test/checks.c,
+        the kit rows) holds every curve below to numbers the kit's own
+        JavaScript produced at the same frame times, at 60 Hz, at 120 Hz and at
+        an uneven pace.
+
+        The pieces, each the one in ui.js or ui.css it is named for:
+
+            spring      P(): the release, a damped ring from --rb-spring-freq
+                        4.905 rad/s and --rb-spring-decay 24.164 /s; a channel
+                        rests below 0.0001 (a scale) or 0.05 px (a nudge), and
+                        its clock starts at the first frame drawn after it is let go
+            squash      C() and BB(): the pull of a drag, 400 px to the unit
+            stretch     the domino: up 80 ms (ease out), held 15, back 210 (ease in)
+            ripple      NB(): grows in 225 ms and travels to the middle in 425
+                        on cubic-bezier(.4,0,.2,1) solved as ui.js solves it, is
+                        in for 75 ms, held to 225 ms after the press and out in 150
+            tween       a CSS transition: a cubic-bezier solved as Chrome
+                        solves it, starting at the first frame after the change,
+                        and turned back the way the CSS Transitions spec turns
+                        a transition back (the reversing shortening factor)
+            keyframes   a CSS animation, its timing function within each interval
+            slide       the slider's click: 120 ms plus 180 for the whole track,
+                        ease-out cubic, snapped to the step, then the landing
+                        squish (60 ms up, 220 back)
+*/
+#define UI_Q 30
+#define UI_ONE (1ll << UI_Q)
+#define UI_HALF (1ll << (UI_Q - 1))
+#define UI_LN2 744261118ll                 // ln 2
+#define UI_INV_LN2 1549082005ll            // 1 / ln 2
+#define UI_PI_2_Q60 1811004864519280711ll  // pi / 2, in Q60
+#define UI_TWO_OVER_PI 683565276ll         // 2 / pi
+#define UI_MS 1000000ll                    // a millisecond in nanoseconds
+
+static inline b64 ui_qmul(b64 a, b64 b)
+{
+        return (b64)(((b128)a * b + UI_HALF) >> UI_Q);
+}
+
+// a / b, both Q30, rounded to the nearest. A large a shifts less and b loses as many of its last places.
+static inline b64 ui_qdiv(b64 a, b64 b)
+{
+        p64 n = (p64)(a < 0 ? -a : a), d = (p64)(b < 0 ? -b : b);
+        int shift = UI_Q;
+
+        while (shift > 0 && n >> (62 - shift))
+                shift--;
+        d >>= UI_Q - shift;
+        if (!d)
+                return 0;
+        n = ((n << shift) + d / 2) / d;
+        return (a < 0) != (b < 0) ? -(b64)n : (b64)n;
+}
+
+// A whole number of logical pixels, or a count, as Q30.
+static inline b64 ui_q(b64 whole)
+{
+        return whole * UI_ONE;
+}
+
+// A span of nanoseconds as milliseconds in Q30; past a minute it is a minute.
+static inline b64 ui_ms(b64 ns)
+{
+        ns = ns < 0 ? 0 : ns > 60000 * UI_MS ? 60000 * UI_MS : ns;
+        return (ns << 24) / 15625; // 2^30 / 10^6 is 2^24 / 15625
+}
+
+// How far through a span of duration a time elapsed is, 0 to UI_ONE.
+static inline b64 ui_progress(b64 elapsed, b64 duration)
+{
+        if (elapsed <= 0 || duration <= 0)
+                return duration <= 0 ? UI_ONE : 0;
+        if (elapsed >= duration)
+                return UI_ONE;
+        // Both under 2^33 ns (8 s), so the shifted time stays in 64 bits; longer spans lose their last places.
+        while (duration >= 1ll << 33)
+                duration >>= 1, elapsed >>= 1;
+        return (elapsed << UI_Q) / duration;
+}
+
+// e to the -x, x 0 or more: x taken down by ln 2 till under it, the rest's series, and the halvings.
+static b64 ui_exp_neg(b64 x)
+{
+        b64 n, r, sum = UI_ONE;
+
+        if (x <= 0)
+                return UI_ONE;
+        if (x >= 22 * UI_ONE)
+                return 0; // under half the last place
+        n = (b64)(((b128)x * UI_INV_LN2) >> (2 * UI_Q));
+        r = x - n * UI_LN2;
+        while (r >= UI_LN2)
+                r -= UI_LN2, n++;
+        while (r < 0)
+                r += UI_LN2, n--;
+        for (int k = 14; k >= 1; k--)
+                sum = UI_ONE - ui_qmul(r, sum) / k;
+        return n ? (sum + (1ll << (n - 1))) >> n : sum;
+}
+
+// The sine and cosine of x radians, x 0 or more: x less the nearest quarter turn, and the two series.
+static void ui_sincos(b64 x, b64 address_to sine, b64 address_to cosine)
+{
+        b64 k = (b64)(((b128)x * UI_TWO_OVER_PI + ((b128)1 << (2 * UI_Q - 1))) >> (2 * UI_Q));
+        b64 r = (b64)((((b128)x << UI_Q) - (b128)k * UI_PI_2_Q60 + ((b128)1 << (UI_Q - 1))) >> UI_Q);
+        b64 r2 = ui_qmul(r, r), s = UI_ONE, c = UI_ONE;
+
+        for (int n = 16; n >= 2; n -= 2)
+        {
+                s = UI_ONE - ui_qmul(r2, s) / ((n + 1) * n);
+                c = UI_ONE - ui_qmul(r2, c) / (n * (n - 1));
+        }
+        s = ui_qmul(r, s);
+        switch (k & 3)
+        {
+        case 0: *sine = s, *cosine = c; break;
+        case 1: *sine = c, *cosine = -s; break;
+        case 2: *sine = -s, *cosine = -c; break;
+        default: *sine = -c, *cosine = s; break;
+        }
+}
+
+// The whole square root of n.
+static p64 ui_isqrt(p64 n)
+{
+        p64 root = 0, bit = 1ull << 62;
+
+        while (bit > n)
+                bit >>= 2;
+        while (bit)
+        {
+                if (n >= root + bit)
+                        n -= root + bit, root = (root >> 1) + bit;
+                else
+                        root >>= 1;
+                bit >>= 2;
+        }
+        return root;
+}
+
+// The square root of a Q30 value 0 or more, Q30: of x shifted by as much of 30 as it holds, and the rest after.
+static inline b64 ui_qsqrt(b64 x)
+{
+        int shift = UI_Q;
+
+        if (x <= 0)
+                return 0;
+        while (shift > 0 && (p64)x >> (63 - shift))
+                shift -= 2;
+        return (b64)(ui_isqrt((p64)x << shift) << ((UI_Q - shift) / 2));
+}
+
+/*
+        A cubic-bezier timing function: x(t) and y(t) as polynomials, Q30. CSS's
+        are solved for t as Chrome solves them (gfx::CubicBezier: Newton's steps
+        from the straight guess, then halving the bracket), to under 1e-7 of x.
+*/
+struct ui_bezier
+{
+        b64 ax, bx, cx, ay, by, cy;
+};
+
+#define UI_BEZIER(x1, y1, x2, y2)                                                                                     \
+        {(UI_ONE - 3 * (x1) - (3 * ((x2) - (x1)) - 3 * (x1))), (3 * ((x2) - (x1)) - 3 * (x1)), 3 * (x1),                \
+         (UI_ONE - 3 * (y1) - (3 * ((y2) - (y1)) - 3 * (y1))), (3 * ((y2) - (y1)) - 3 * (y1)), 3 * (y1)}
+#define UI_Q2(hundredths) ((b64)(hundredths) * UI_ONE / 100)
+
+static const struct ui_bezier ui_ease = UI_BEZIER(UI_Q2(20), 0, 0, UI_ONE);                  // --ease, --ease-emphasized
+static const struct ui_bezier ui_ease_rise = UI_BEZIER(UI_Q2(40), UI_Q2(65), UI_Q2(30), UI_ONE); // --rb-ease-rise
+static const struct ui_bezier ui_ease_out = UI_BEZIER(0, 0, UI_Q2(58), UI_ONE);              // CSS ease-out
+static const struct ui_bezier ui_ease_ripple = UI_BEZIER(UI_Q2(40), 0, UI_Q2(20), UI_ONE);   // ui.js i()
+
+static inline b64 ui_bezier_x(const struct ui_bezier address_to e, b64 t)
+{
+        return ui_qmul(ui_qmul(ui_qmul(e->ax, t) + e->bx, t) + e->cx, t);
+}
+
+static inline b64 ui_bezier_y(const struct ui_bezier address_to e, b64 t)
+{
+        return ui_qmul(ui_qmul(ui_qmul(e->ay, t) + e->by, t) + e->cy, t);
+}
+
+static inline b64 ui_bezier_dx(const struct ui_bezier address_to e, b64 t)
+{
+        return ui_qmul(ui_qmul(3 * e->ax, t) + 2 * e->bx, t) + e->cx;
+}
+
+static b64 ui_bezier_at(const struct ui_bezier address_to e, b64 x)
+{
+        b64 t = x, low = 0, high = UI_ONE;
+
+        if (x <= 0)
+                return 0;
+        if (x >= UI_ONE)
+                return UI_ONE;
+        for (int step = 0; step < 8; step++)
+        {
+                b64 off = ui_bezier_x(e, t) - x, slope = ui_bezier_dx(e, t);
+
+                if (off >= -1 && off <= 1)
+                        return ui_bezier_y(e, t);
+                if (slope < 108) // 1e-7
+                        break;
+                t -= ui_qdiv(off, slope);
+                t = t < 0 ? 0 : t > UI_ONE ? UI_ONE : t;
+        }
+        t = x;
+        for (int step = 0; step < 48 && low < high; step++)
+        {
+                b64 at = ui_bezier_x(e, t);
+
+                if (at - x >= -1 && at - x <= 1)
+                        break;
+                if (x > at)
+                        low = t;
+                else
+                        high = t;
+                t = (low + high) / 2;
+        }
+        return ui_bezier_y(e, t);
+}
+
+// ui.js's i(): the ripple's cubic-bezier(.4,0,.2,1) by five of Newton's steps from t = x, no bracket.
+static b64 ui_ripple_ease(b64 x)
+{
+        const struct ui_bezier address_to e = &ui_ease_ripple;
+        b64 t = x;
+
+        if (x <= 0)
+                return 0;
+        if (x >= UI_ONE)
+                return UI_ONE;
+        for (int step = 0; step < 5; step++)
+        {
+                b64 off = ui_bezier_x(e, t) - x, slope = ui_bezier_dx(e, t);
+
+                if (slope > -11 && slope < 11) // 1e-8
+                        break;
+                t -= ui_qdiv(off, slope);
+        }
+        return ui_bezier_y(e, t);
+}
+
+// ui.js's C(): how far a pull of k units squashes, 0.064 of it and 0.064 more that comes on fast.
+static b64 ui_squash_curve(b64 k)
+{
+        b64 z = k < 0 ? -k : k;
+        b64 out = ui_qmul(68719477, z) + ui_qmul(68719477, UI_ONE - ui_exp_neg(ui_qmul(z, 8844645117ll)));
+
+        return k < 0 ? -out : out;
+}
+
+// BB(): a drag of dx, dy logical pixels (Q30) as the scale it squashes by along each axis and the nudge with it.
+struct ui_squash
+{
+        b64 sx, sy, tx, ty; // scales less one, and nudges in logical pixels, Q30
+};
+
+static struct ui_squash ui_squash_of(b64 dx, b64 dy)
+{
+        b64 z = ui_squash_curve((dx < 0 ? -dx : dx) / 400), w = ui_squash_curve((dy < 0 ? -dy : dy) / 400);
+        struct ui_squash out;
+
+        out.sx = z - ui_qmul(w, UI_Q2(35));
+        out.sy = w - ui_qmul(z, UI_Q2(35));
+        out.tx = dx > 0 ? out.sx * 8 : dx < 0 ? -out.sx * 8 : 0;
+        out.ty = dy > 0 ? out.sy * 8 : dy < 0 ? -out.sy * 8 : 0;
+        return out;
+}
+
+/*
+        P(): channels let go at amplitudes, the first a scale (at rest under
+        0.0001) and the second a nudge (at rest under 0.05 px). The clock starts
+        at the first frame drawn after the release, as ui.js's rAF does; a
+        channel at rest is 0, and the spring is live while either is not.
+*/
+#define UI_SPRING_DECAY 25945897435ll // --rb-spring-decay 24.164
+#define UI_SPRING_FREQ 5266703647ll   // --rb-spring-freq 4.905
+#define UI_SPRING_UB 5289683473ll     // decay / freq, ui.js's UB
+#define UI_REST_SCALE 107374ll        // 0.0001
+#define UI_REST_PX 53687091ll         // 0.05
+
+struct ui_spring
+{
+        b64 amplitude[2];
+        b64 value[2];
+        b64 start; // the first frame's time, 0 before it
+        b32 live;
+};
+
+static fn ui_spring_go(struct ui_spring address_to s, b64 scale, b64 nudge)
+{
+        s->amplitude[0] = s->value[0] = scale;
+        s->amplitude[1] = s->value[1] = nudge;
+        s->start = 0;
+        s->live = 1; // the first frame says whether any of it is past rest
+}
+
+static fn ui_spring_stop(struct ui_spring address_to s)
+{
+        s->live = 0;
+        s->value[0] = s->value[1] = 0;
+}
+
+static b32 ui_spring_at(struct ui_spring address_to s, b64 now)
+{
+        b64 h, j, sine, cosine;
+        b32 live = 0;
+
+        if (!s->live)
+                return 0;
+        if (!s->start)
+                s->start = now;
+        h = ui_ms(now - s->start) / 1000;
+        j = ui_exp_neg(ui_qmul(UI_SPRING_DECAY, h));
+        ui_sincos(ui_qmul(UI_SPRING_FREQ, h), &sine, &cosine);
+        for (int k = 0; k < 2; k++)
+        {
+                b64 a = s->amplitude[k], f = ui_qmul(j, ui_qmul(a, cosine) + ui_qmul(ui_qmul(UI_SPRING_UB, a), sine));
+                b64 rest = k ? UI_REST_PX : UI_REST_SCALE;
+
+                s->value[k] = f < rest && f > -rest ? 0 : f;
+                live |= s->value[k] != 0;
+        }
+        s->live = live;
+        return live;
+}
+
+/*
+        The domino stretch(): a scale along one axis to most and back, called at
+        a time (a cascade calls it late, by its place along the travel) and drawn
+        from the first frame at or after it. 1 before and after.
+*/
+struct ui_stretch
+{
+        b64 at;   // when it was called, 0 for none
+        b64 most; // the peak scale, Q30
+};
+
+static fn ui_stretch_go(struct ui_stretch address_to s, b64 at, b64 most)
+{
+        s->at = at ? at : 1;
+        s->most = most;
+}
+
+static b64 ui_stretch_at(struct ui_stretch address_to s, b64 now, b32 address_to live)
+{
+        b64 e, p, u;
+
+        if (!s->at)
+                return UI_ONE;
+        if (now < s->at)
+        {
+                *live = 1;
+                return UI_ONE;
+        }
+        e = ui_ms(now - s->at);
+        if (e < ui_q(80))
+        {
+                u = UI_ONE - e / 80;
+                p = UI_ONE - ui_qmul(u, u);
+        }
+        else if (e < ui_q(95))
+                p = UI_ONE;
+        else if (e < ui_q(305))
+        {
+                u = UI_ONE - (e - ui_q(95)) / 210;
+                p = ui_qmul(u, u);
+        }
+        else
+        {
+                s->at = 0;
+                return UI_ONE;
+        }
+        *live = 1;
+        return UI_ONE + ui_qmul(s->most - UI_ONE, p);
+}
+
+/*
+        A CSS transition of one value. A change is taken at the first frame
+        after it (the style change event), from the value the transition has
+        then; a change back to where a running one came from is shortened by
+        the spec's reversing shortening factor. kind says how a value moves:
+        a number, or a colour (four 16-bit channels of 8.8, premultiplied).
+*/
+#define UI_TWEEN_NUMBER 0
+#define UI_TWEEN_COLOUR 1
+
+struct ui_tween
+{
+        b64 from, to, adjusted;   // the start, the end, and the reversing-adjusted start
+        b64 start, duration;      // ns; start 0 is done (or never begun)
+        b64 factor;               // the reversing shortening factor, Q30
+        b64 want;                 // a change not yet taken
+        b64 want_duration;
+        const struct ui_bezier address_to ease;
+        b32 pending, kind;
+};
+
+// A colour 0xaarrggbb as a tween's value: each channel premultiplied, 8.8.
+static b64 ui_tween_colour(unsigned int argb)
+{
+        p64 a = argb >> 24, out = a << 56 | a << 48;
+
+        for (int shift = 0; shift < 24; shift += 8)
+                out |= (((p64)(argb >> shift & 255) * a * 256 + 127) / 255) << (shift * 2);
+        return (b64)out;
+}
+
+// And back: 0xaarrggbb, not premultiplied, rounded.
+static unsigned int ui_tween_argb(b64 value)
+{
+        p64 v = (p64)value, a = v >> 48 & 0xffff;
+        unsigned int out = (unsigned int)((a + 128) >> 8) << 24;
+
+        if (!a)
+                return 0;
+        for (int shift = 0; shift < 24; shift += 8)
+        {
+                p64 c = ((v >> (shift * 2) & 0xffff) * 256 + a / 2) / a;
+
+                out |= (unsigned int)((c + 128) >> 8 > 255 ? 255 : (c + 128) >> 8) << shift;
+        }
+        return out;
+}
+
+static b64 ui_tween_mix(b32 kind, b64 from, b64 to, b64 eased)
+{
+        p64 out = 0;
+
+        if (kind == UI_TWEEN_NUMBER)
+                return from + ui_qmul(to - from, eased);
+        for (int shift = 0; shift < 64; shift += 16)
+        {
+                b64 a = (b64)((p64)from >> shift & 0xffff), b = (b64)((p64)to >> shift & 0xffff);
+
+                out |= (p64)(a + ui_qmul(b - a, eased)) << shift;
+        }
+        return (b64)out;
+}
+
+// Start where it is: a value with no transition running.
+static fn ui_tween_put(struct ui_tween address_to t, b64 value, b32 kind)
+{
+        memory_zero(t, sizeof(*t));
+        t->from = t->to = t->adjusted = t->want = value;
+        t->kind = kind;
+        t->factor = UI_ONE;
+}
+
+// The value wanted from now on, over duration ns on ease (0: at once).
+static fn ui_tween_set(struct ui_tween address_to t, b64 value, b64 duration, const struct ui_bezier address_to ease)
+{
+        if (value == (t->pending ? t->want : t->to))
+                return;
+        t->want = value;
+        t->want_duration = duration;
+        t->ease = ease ? ease : &ui_ease;
+        t->pending = 1;
+}
+
+// The value at a frame, taking a change first; live is set while it moves.
+static b64 ui_tween_at(struct ui_tween address_to t, b64 now, b32 address_to live)
+{
+        b64 eased = UI_ONE, current;
+
+        if (t->start)
+                eased = ui_bezier_at(t->ease, ui_progress(now - t->start, t->duration));
+        current = t->start ? ui_tween_mix(t->kind, t->from, t->to, eased) : t->to;
+        if (t->pending)
+        {
+                b64 want = t->want, duration = t->want_duration;
+
+                t->pending = 0;
+                if (current == want || duration <= 0)
+                {
+                        t->from = t->to = t->adjusted = want;
+                        t->start = 0;
+                        t->factor = UI_ONE;
+                        return want;
+                }
+                if (t->start && t->adjusted == want)
+                {
+                        // Back the way it came: the new one runs for the share the old had covered.
+                        b64 factor = ui_qmul(eased, t->factor) + UI_ONE - t->factor;
+
+                        factor = factor < 0 ? -factor : factor;
+                        t->factor = factor > UI_ONE ? UI_ONE : factor;
+                        t->adjusted = t->to;
+                        t->duration = ui_qmul(duration, t->factor);
+                }
+                else
+                {
+                        t->factor = UI_ONE;
+                        t->adjusted = current;
+                        t->duration = duration;
+                }
+                t->from = current;
+                t->to = want;
+                t->start = now;
+                eased = 0;
+                current = t->from;
+                if (t->duration <= 0)
+                {
+                        t->start = 0;
+                        return t->to;
+                }
+        }
+        if (t->start && now - t->start >= t->duration)
+        {
+                t->start = 0;
+                return t->to;
+        }
+        if (t->start)
+                *live = 1;
+        return current;
+}
+
+// A tween that is done or never ran: its end, at once.
+static inline b32 ui_tween_still(const struct ui_tween address_to t)
+{
+        return !t->start && !t->pending;
+}
+
+/*
+        A CSS animation over stops (offset and value, Q30), its timing function
+        within each interval as CSS applies it, from start (the first frame) for
+        duration. The value at the end is the last stop's.
+*/
+struct ui_stop
+{
+        b64 at, value;
+};
+
+static b64 ui_keyframes_at(const struct ui_stop address_to stops, int count, const struct ui_bezier address_to ease, b64 start,
+                           b64 duration, b64 now, b32 address_to live)
+{
+        b64 p = ui_progress(now - start, duration);
+
+        if (!start)
+                return stops[count - 1].value;
+        if (p < UI_ONE)
+                *live = 1;
+        for (int at = 1; at < count; at++)
+                if (p <= stops[at].at)
+                {
+                        b64 within = ui_qdiv(p - stops[at - 1].at, stops[at].at - stops[at - 1].at);
+
+                        return stops[at - 1].value + ui_qmul(stops[at].value - stops[at - 1].value,
+                                                             ease ? ui_bezier_at(ease, within) : within);
+                }
+        return stops[count - 1].value;
+}
+
+/*
+        NB()'s ripple, for a press at x, y (Q30 logical pixels) in a box of w by
+        h whose clip reaches margin past it on every side (8 for a button). Its
+        size reaches the clip's farthest corner from the box's middle. The clock
+        starts at the first frame; exit is when the pointer went up or away.
+*/
+struct ui_ripple
+{
+        b64 x, y, w, h, margin;   // the press and the box, Q30 logical pixels
+        b64 reach;                // the radius at full size
+        b64 start, exit, hold;    // ns: the first frame, the exit (0 before it), what the exit waits
+        b32 live;
+};
+
+static fn ui_ripple_go(struct ui_ripple address_to r, b64 x, b64 y, b64 w, b64 h, b64 margin)
+{
+        b64 f = margin + w / 2, v = margin + h / 2, across = w + 2 * margin, down = h + 2 * margin;
+        b64 rx = f > across - f ? f : across - f, ry = v > down - v ? v : down - v;
+
+        r->x = x, r->y = y, r->w = w, r->h = h, r->margin = margin;
+        r->reach = ui_qsqrt(ui_qmul(rx, rx) + ui_qmul(ry, ry));
+        r->start = r->exit = r->hold = 0;
+        r->live = 1;
+}
+
+static fn ui_ripple_exit(struct ui_ripple address_to r, b64 now)
+{
+        b64 shown;
+
+        if (!r->live || r->exit)
+                return;
+        r->exit = now;
+        shown = r->start ? now - r->start : 0;
+        r->hold = shown > 0 && shown < 225 * UI_MS ? 225 * UI_MS - shown : 0;
+}
+
+// The ripple at a frame: its middle in the clip's own place (x, y from the clip's top left), its radius and its
+// opacity (Q30, the 0.2 of the kit included). False when it is gone.
+static b32 ui_ripple_at(struct ui_ripple address_to r, b64 now, b64 address_to cx, b64 address_to cy, b64 address_to radius,
+                        b64 address_to opacity)
+{
+        b64 h, grow, travel, f, v, a;
+
+        if (!r->live)
+                return 0;
+        if (!r->start)
+                r->start = now;
+        h = now - r->start;
+        grow = ui_ripple_ease(ui_progress(h, 225 * UI_MS));
+        travel = ui_ripple_ease(ui_progress(h, 425 * UI_MS));
+        f = r->margin + r->w / 2;
+        v = r->margin + r->h / 2;
+        *cx = f + ui_qmul(r->x + r->margin - f, UI_ONE - travel);
+        *cy = v + ui_qmul(r->y + r->margin - v, UI_ONE - travel);
+        *radius = ui_qmul(r->reach, grow);
+        if (!r->exit)
+                a = ui_progress(h, 75 * UI_MS);
+        else
+        {
+                b64 n = now - r->exit - r->hold;
+
+                a = n < 0 ? UI_ONE : UI_ONE - ui_progress(n, 150 * UI_MS);
+        }
+        *opacity = ui_qmul(a, UI_Q2(20));
+        if (r->exit && a <= 0)
+        {
+                r->live = 0;
+                return 0;
+        }
+        return 1;
+}
+
+/*
+        The slider's click (its pointerdown handler): the value slides from
+        where it was to the value clicked over 120 ms and 180 more for the whole
+        track, ease-out cubic, and on the release the bar stretches toward the
+        throw by a peak of 0.015 and 0.04 of the share of the track (at most
+        0.045): 60 ms up, ease out, then 220 back, cubic.
+*/
+struct ui_slide
+{
+        b64 from, to;      // values, Q30
+        b64 at, duration;  // ns: the press, and how long
+        b64 peak;          // the landing's peak, Q30
+        b64 landed;        // ns: the release, 0 for none
+};
+
+static fn ui_slide_go(struct ui_slide address_to s, b64 from, b64 to, b64 span, b64 at)
+{
+        b64 jump = to > from ? to - from : from - to, ratio = ui_qdiv(jump, span ? span : UI_ONE);
+        b64 peak = UI_Q2(1) + UI_Q2(1) / 2 + ui_qmul(ratio, UI_Q2(4));
+
+        s->from = from, s->to = to, s->at = at ? at : 1, s->landed = 0;
+        s->duration = 120 * UI_MS + ui_qmul(ratio, 180 * UI_MS);
+        s->peak = peak > UI_Q2(4) + UI_Q2(1) / 2 ? UI_Q2(4) + UI_Q2(1) / 2 : peak;
+}
+
+// The value the slide has reached at a frame: ease-out cubic of the time.
+static b64 ui_slide_value(const struct ui_slide address_to s, b64 now, b32 address_to live)
+{
+        b64 p = ui_progress(now - s->at, s->duration), u = UI_ONE - p;
+
+        if (p < UI_ONE)
+                *live = 1;
+        return s->from + ui_qmul(s->to - s->from, UI_ONE - ui_qmul(ui_qmul(u, u), u));
+}
+
+// The landing squish at a frame, a scale (UI_ONE at rest).
+static b64 ui_slide_land(struct ui_slide address_to s, b64 now, b32 address_to live)
+{
+        b64 e, u;
+
+        if (!s->landed)
+                return UI_ONE;
+        e = ui_ms(now - s->landed);
+        if (e < ui_q(60))
+        {
+                u = UI_ONE - e / 60;
+                *live = 1;
+                return UI_ONE + ui_qmul(s->peak, UI_ONE - ui_qmul(u, u));
+        }
+        if (e < ui_q(280))
+        {
+                u = UI_ONE - (e - ui_q(60)) / 220;
+                *live = 1;
+                return UI_ONE + ui_qmul(s->peak, ui_qmul(ui_qmul(u, u), u));
+        }
+        s->landed = 0;
+        return UI_ONE;
+}
+
+/* ---- end of the kit's motion ---- */
+
 // Anonymous memory for an app's own state, or a negative errno.
 static long ui_map(positive size)
 {
