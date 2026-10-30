@@ -2029,6 +2029,25 @@ static unsigned int ui_blurred(b32 x, b32 low, b32 high, b32 sigma)
 }
 
 /*
+        The kit is flat: it draws no shadow and no outline of its own. The owner asked for both to go
+        (2026-10-30); a control's states are its fills, its text and its motion. Turning either back on
+        is these two numbers, and every shadow and every decorative outline in this file goes through them.
+        Rings that are a shape and not an edge (a spinner's track, a swatch's mark of the one chosen) are
+        drawn with ui_kit_ring as before.
+*/
+#define UI_KIT_SHADOWS 0
+#define UI_KIT_OUTLINES 0
+
+static fn ui_kit_outline(struct ui address_to ui, const struct ui_box address_to box, b32 thickness, unsigned int argb)
+{
+#if UI_KIT_OUTLINES
+        ui_kit_ring(ui, box, thickness, argb);
+#else
+        (void)ui, (void)box, (void)thickness, (void)argb;
+#endif
+}
+
+/*
         A box-shadow: the box moved by dx, dy, grown by spread (all 256ths of a
         device pixel) and blurred by blur (CSS's blur radius, twice the
         Gaussian's sigma), in a colour at its own alpha. The blur is the box's
@@ -2042,6 +2061,9 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
 {
         struct ui_box s = *box;
         b32 sigma = blur / 2, reach = blur + 256;
+
+        if (!UI_KIT_SHADOWS)
+                return;
         b32 first, last, top, bottom;
 
         if (!(argb >> 24))
@@ -2537,7 +2559,7 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         face = ui_box_transform(face, sx, sy, ox, oy, tx, ty);
         ui_kit_fill(ui, &face, fill, null);
         if (c->variant == UI_BUTTON_OUTLINED && !c->disabled)
-                ui_kit_ring(ui, &face, ui_q8(ui, 1), ui_role(c->focused ? UI_PRIMARY : c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
+                ui_kit_outline(ui, &face, ui_q8(ui, 1), ui_role(c->focused ? UI_PRIMARY : c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
         if (layer)
                 ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
         {
@@ -3104,7 +3126,7 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
 
                         ring.x0 -= ui_q8(ui, 2), ring.y0 -= ui_q8(ui, 2), ring.x1 += ui_q8(ui, 2), ring.y1 += ui_q8(ui, 2);
                         ring.rx += ui_q8(ui, 2), ring.ry += ui_q8(ui, 2);
-                        ui_kit_ring(ui, &ring, ui_q8(ui, 2), ui_role(UI_PRIMARY));
+                        ui_kit_outline(ui, &ring, ui_q8(ui, 2), ui_role(UI_PRIMARY));
                 }
         }
         for (int item = 0; item < c->count; item++)
@@ -3292,7 +3314,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                         struct ui_box ring = {face.x0 - spread + x, face.y0 - spread + y, face.x1 + spread + x, face.y1 + spread + y,
                                               face.rx + spread, face.ry + spread};
 
-                        ui_kit_ring(ui, &ring, spread, colour);
+                        ui_kit_outline(ui, &ring, spread, colour);
                 }
                 else
                         ui_kit_shadow(ui, &face, x, y, blur, spread, colour);
@@ -3414,7 +3436,7 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
         if (fill)
                 ui_kit_fill(ui, &box, fill, null);
         if (role < 0)
-                ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
+                ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         if (dot)
                 ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 9), ui_q8(ui, c->y + 8), ui_q8(ui, c->x + 15), ui_q8(ui, c->y + 14), ui_q8(ui, 3), ui_q8(ui, 3)},
                             ink, null);
@@ -3432,7 +3454,7 @@ static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
         c->h = 26;
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(26), ui_q(6));
         ui_kit_fill(ui, &box, ui_role(UI_SURFACE_LOW), null);
-        ui_kit_ring(ui, &box, ui_q8(ui, 1), c->on ? ui_mix(ui_role(UI_PRIMARY), 35, ui_role(UI_OUTLINE_VARIANT)) : ui_role(UI_OUTLINE_VARIANT));
+        ui_kit_outline(ui, &box, ui_q8(ui, 1), c->on ? ui_mix(ui_role(UI_PRIMARY), 35, ui_role(UI_OUTLINE_VARIANT)) : ui_role(UI_OUTLINE_VARIANT));
         ui_kit_text(ui, ui_dev(ui, c->x + 10), ui_kit_baseline(ui, ui_dev(ui, c->y + 5), UI_MONO), (string_address)c->label, UI_MONO, ink, 0);
 }
 
@@ -3518,7 +3540,7 @@ static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to 
 
                 outer.x0 -= ui_q8(ui, 1), outer.y0 -= ui_q8(ui, 1), outer.x1 += ui_q8(ui, 1), outer.y1 += ui_q8(ui, 1);
                 outer.rx += ui_q8(ui, 1), outer.ry += ui_q8(ui, 1);
-                ui_kit_ring(ui, &outer, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
+                ui_kit_outline(ui, &outer, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
                 if (c->label)
                 {
                         ui_kit_text(ui, ui_dev(ui, c->x + 24), ui_kit_baseline(ui, ui_dev(ui, c->y + 24), UI_TITLE_LARGE), (string_address)c->label,
@@ -3528,7 +3550,7 @@ static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to 
                 }
         }
         else
-                ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
+                ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
 }
 
 static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -3540,7 +3562,7 @@ static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to 
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(14));
 
         ui_kit_fill(ui, &box, fill, null);
-        ui_kit_ring(ui, &box, ui_q8(ui, 1), line);
+        ui_kit_outline(ui, &box, ui_q8(ui, 1), line);
         ui_kit_text(ui, ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14), UI_LABEL_LARGE), (string_address)c->label,
                     UI_LABEL_LARGE, role ? ink : ui_role(UI_ON_SURFACE), 0);
         if (c->text[0])
@@ -3556,7 +3578,7 @@ static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit_fill(ui, &box, ui_role(UI_SURFACE_HIGHEST), null);
         ui_kit_fill(ui, &head, ui_role(UI_SURFACE_LOW), &box);
         ui_kit_fill(ui, &(struct ui_box){head.x0, head.y1 - ui_q8(ui, 1), head.x1, head.y1, 0, 0}, ui_role(UI_OUTLINE_VARIANT), null);
-        ui_kit_ring(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
+        ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         ui_kit_text(ui, ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 10), UI_MONO), (string_address)c->label, UI_MONO,
                     ui_role(UI_ON_SURFACE_VARIANT), 0);
         for (int k = 0; k < c->count; k++)
@@ -4460,7 +4482,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
         int y = UI_MENU_PAD * ui->scale, row = ui_popmenu_row(ui, m);
 
         ui_kit_fill(ui, &face, ui_role(UI_SURFACE_CONTAINER), null);
-        ui_kit_ring(ui, &face, ui->scale, ui_role(UI_OUTLINE_VARIANT));
+        ui_kit_outline(ui, &face, ui->scale, ui_role(UI_OUTLINE_VARIANT));
         for (int at = m->top; at < m->count && y < m->height - UI_MENU_PAD * ui->scale; at++)
         {
                 const struct ui_menu_item address_to item = &m->items[at];
@@ -5229,7 +5251,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
 
                 ui_kit_fill(ui, &box, ui_role(UI_SECONDARY_CONTAINER), null);
                 if (l->keys)
-                        ui_kit_ring(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY));
+                        ui_kit_outline(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY));
         }
         // The row's own control: a switch is its row's (the kit's switch is a row), any other row the list's row.
         if (own)
