@@ -107425,7 +107425,11 @@ static fn install_census(void)
 {
         static host_census census;
         p8 path[HOST_NAME_ROOM + 16];
-        p8 name[HOST_NAME_ROOM + 2];
+        //      "/dev/" and a name one byte past the room, and its end: the
+        //      array was HOST_NAME_ROOM + 2, and the rows below wrote four bytes
+        //      past it (a UBSan build traps on the index; a plain one wrote over
+        //      the stack beside it).
+        p8 name[5 + HOST_NAME_ROOM + 1];
         bool held = true;
 
         memory_zero(address_of census, sizeof(census));
