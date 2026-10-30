@@ -129,6 +129,16 @@ TEST_TALLY=${TEST_LANE_TALLY:-$work/tally}
 export TEST_TALLY
 [ -n "${TEST_SHARED_WORK:-}" ] || : > "$TEST_TALLY"
 
+#       Rows a lane that did run could not run here, each with what they
+#       need: a tier image not named, firmware or a tool not on this machine.
+#       Said where the lane is and again at the end, where the verdict is, for
+#       the reason a lane that does not run at all is (see "A lane that did
+#       not run" below): a note thirty lines up scrolls past a run that ends
+#       saying everything agrees.
+TEST_PARTIAL="$work/partial"
+export TEST_PARTIAL
+[ -n "${TEST_SHARED_WORK:-}" ] || : > "$TEST_PARTIAL"
+
 #       Where the time went: a line of seconds and a name for every build and
 #       every harness, from this file and from differential.py, shown at the
 #       end of a run with the slowest first.
@@ -393,6 +403,14 @@ tally()
 note()
 {
         printf '  %s\n' "$*"
+}
+
+#       Rows of a lane that ran which did not run here: said now, and listed
+#       again at the end of the run. LANE: WHAT, and what it needs.
+not_run_part()
+{
+        printf '  %s\n' "$*"
+        [ -z "${TEST_PARTIAL:-}" ] || printf '%s\n' "$*" >> "$TEST_PARTIAL"
 }
 
 #       One check counted once: run the test, then call this on its status.
@@ -14615,7 +14633,7 @@ if command -v python3 > /dev/null 2>&1; then
                 lost 'specialization map' "$(tail -8 "$work/specialization.out" | tr '\n' ' ')"
         fi
 else
-        printf '  %-10s %s\n' compact 'no python3, skipped'
+        not_run_part 'kit: compact -- no python3'
 fi
 
 #       CVE-2026-98432 (Oct 2026, kernel CNA CVSS 9.8): a remote peer sends a
@@ -16415,6 +16433,8 @@ PY
         says layout 'every section is aligned'     'layout-aligned-yes'
         says layout 'every section is inside it'   'layout-inside-yes'
         says layout 'settings are where moonwater looks' 'layout-settings-yes'
+else
+        not_run_part 'install: the image layout -- no python3'
 fi
 
 mkdir -p "$work/stick/EFI/BOOT" &&
@@ -16507,7 +16527,7 @@ disk_checks()
 {
         if ! command -v sfdisk > /dev/null 2>&1 ||
                 ! command -v e2fsck > /dev/null 2>&1; then
-                printf '  %-30s no sfdisk or e2fsck here to read it\n' "$1 disk"
+                not_run_part "install: $1 disk checks -- no sfdisk or e2fsck here to read the disk"
                 return
         fi
 
@@ -17101,6 +17121,16 @@ COMMANDS
         says plain 'and says so too'                             'update-said-7'
         says plain 'and the disk has the image as it is'         'image-new'
         rm -f "$work/cut.img"
+else
+        #       Every row of the section above, which used to end with fi and
+        #       nothing said: an arm64 or riscv64 image, or a machine without
+        #       KVM, python3 or sfdisk, ran none of them and agreed.
+        install_cut_need=
+        [ "$install_loader" = BOOTX64.EFI ] || install_cut_need="an x86-64 image (this is $install_loader)"
+        { [ -r /dev/kvm ] && [ -w /dev/kvm ]; } || install_cut_need="${install_cut_need:+$install_cut_need, }KVM"
+        command -v python3 > /dev/null 2>&1 || install_cut_need="${install_cut_need:+$install_cut_need, }python3"
+        command -v sfdisk > /dev/null 2>&1 || install_cut_need="${install_cut_need:+$install_cut_need, }sfdisk"
+        not_run_part "install: power cuts, staging files, a short image, an image with no settings -- need $install_cut_need"
 fi
 
 if [ "${MOONWATER_INSTALL_ONLY:-}" = cut ]; then
@@ -17350,7 +17380,7 @@ if [ -n "$link_host" ]; then
                 lost 'disk link' 'link log showed no kernel log line'
         fi
 else
-        printf '  %-30s NOT RUN -- no unprivileged namespaces for a second machine\n' 'disk link'
+        not_run_part 'install: disk link -- no unprivileged namespaces for a second machine'
 fi
 disk_checks disk
 
@@ -17387,6 +17417,8 @@ COMMANDS
         says two 'a disk with none is refused'   'two-refused-41'
         says two 'and said to have none'         'two-said-7'
         rm -f "$work/disk2.img"
+else
+        not_run_part 'install: two installs of another build -- no sfdisk'
 fi
 
 #
@@ -17624,6 +17656,8 @@ if command -v python3 > /dev/null 2>&1; then
         says update-settings 'and what the disk wrote in place' 'settings-init-3-echo disk >> /root/disk'
         says update-settings 'and its exit list'          'settings-exit-1-echo stop >> /root/stops'
         says update-settings 'and its security list'      'settings-security-4-1-5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1'
+else
+        not_run_part 'install: the settings the update kept -- no python3'
 fi
 
 cat > "$work/use.commands" <<'COMMANDS'
@@ -17678,6 +17712,8 @@ COMMANDS
                 -device nvme,serial=moonwater2,drive=disk2
         says twins 'two installs of this build are asked about' 'twins- ksa'
         rm -f "$work/disk2.img"
+else
+        not_run_part 'install: two installs of this build -- no sfdisk'
 fi
 
 #       The firmware, finally: no -kernel, just the disk.
@@ -17710,9 +17746,9 @@ mounts_of()
 }
 
 if [ -z "$firmware" ]; then
-        printf '  %-30s no UEFI firmware here, the firmware boot did not run\n' 'firmware'
+        not_run_part "install: the firmware boot -- no UEFI firmware here (looked for: $install_firmwares)"
 elif ! command -v sfdisk > /dev/null 2>&1; then
-        printf '  %-30s no sfdisk here to find the data partition\n' 'firmware'
+        not_run_part 'install: the firmware boot -- no sfdisk here to find the data partition'
 else
         cp "$firmware_vars" "$work/vars.fd"
 
@@ -17896,6 +17932,8 @@ COMMANDS
                         "$(data_lines /root/boots boot)"
                 same 'exit ran at its power off' "$((stops_before + 1))" \
                         "$(data_lines /root/stops stop)"
+        else
+                not_run_part 'install: init and exit from the firmware boot -- no debugfs'
         fi
 fi
 
@@ -23770,7 +23808,7 @@ if [ ! -f "$image" ]; then
         exit 2
 fi
 if [ ! -f "${MOONWATER_USB_TIER:-}" ]; then
-        note "usb tier: NOT RUN -- MOONWATER_USB_TIER names no image built with sec_host_locked"
+        not_run_part "usb: the tier rows -- MOONWATER_USB_TIER names no image built with sec_host_locked"
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-usb.XXXXXX") || exit 1
@@ -24132,7 +24170,7 @@ if [ ! -f "$image" ]; then
         exit 2
 fi
 if [ ! -f "${MOONWATER_NET_TIER:-}" ]; then
-        note "firewall tier: NOT RUN -- MOONWATER_NET_TIER names no image built with a tight net tier"
+        not_run_part "firewall: the tier rows -- MOONWATER_NET_TIER names no image built with a tight net tier"
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-firewall.XXXXXX") || exit 1
@@ -26455,16 +26493,27 @@ if [ "$total_pass" -ne "$total_all" ]; then
         broken="$broken tally"
 fi
 
+#       Lanes that ran with rows they could not run here, and what those rows
+#       need, once each.
+partial_said()
+{
+        [ -s "$TEST_PARTIAL" ] || return 0
+        echo "ran in part:"
+        awk '!seen[$0]++ { print "  " $0 }' "$TEST_PARTIAL"
+}
+
 if [ -n "$broken" ]; then
         echo
         echo "failed:$broken"
         [ -n "$notrun" ] && echo "did not run:$notrun"
+        partial_said
         exit 1
 fi
 
-if [ -n "$notrun" ]; then
+if [ -n "$notrun" ] || [ -s "$TEST_PARTIAL" ]; then
         echo
-        echo "did not run:$notrun"
+        [ -n "$notrun" ] && echo "did not run:$notrun"
+        partial_said
         echo "so this is not everything agreeing, it is everything that ran"
         exit 1
 fi
