@@ -2273,6 +2273,9 @@ static b32 terminal_clip_event(b32 master, const struct window_event address_to 
 
                 if (windows_clip_read(&terminal.own, (unsigned int)event->a, &bytes, &length) > 0)
                 {
+                        // As a key does: the block is a cell turned round in the ring, and the line the paste writes
+                        // over it was turned back by the next hide, a block left on the cell where the paste began.
+                        cursor_hide();
                         term_paste(bytes, length);
                         windows_clip_free(bytes, length);
                         return term_send(master);
