@@ -1183,6 +1183,10 @@ static positive tar_seen_fill;
 /* A member's name as GNU tar quotes it: C's escapes for the controls it
    has letters for, three octal digits for any other control or byte past
    ASCII, and the backslash doubled, so no name can drive the terminal. */
+static bool text_locale_utf8();
+static positive file_terminal_step(const p8 address_to at, positive left,
+                                   bool utf8, bool address_to printable);
+
 static fn tar_quoted(writer output, string_address name)
 {
         positive length = string_length(name);
@@ -1196,6 +1200,36 @@ static fn tar_quoted(writer output, string_address name)
                                 HEX_CONTROL | HEX_TAB | HEX_SLASH | HEX_HIGH) == length)
         {
                 output(name, length);
+                return;
+        }
+        //      Where the locale is UTF-8, GNU's isprint lets a valid sequence
+        //      for a printable character through as it is, as ls does: only
+        //      a C1 control, a byte that starts no sequence and a sequence
+        //      the name cuts off are spelled, so 日本語 is not a run of octal.
+        if (memory_escape_index(name, length, HEX_HIGH) != length &&
+            text_locale_utf8())
+        {
+                positive spelled = 0;
+
+                for (positive at = 0; at < length;)
+                {
+                        bool printable;
+                        positive step = file_terminal_step((const p8 address_to)name + at,
+                                                           length - at, true, address_of printable);
+
+                        if (step > 1 && printable)
+                        {
+                                if (at > spelled)
+                                        writer_spelled(output, (address_any)(name + spelled),
+                                                       at - spelled, spelling_c(0));
+                                output(name + at, step);
+                                spelled = at + step;
+                        }
+                        at += step;
+                }
+                if (length > spelled)
+                        writer_spelled(output, (address_any)(name + spelled),
+                                       length - spelled, spelling_c(0));
                 return;
         }
         writer_spelled(output, (address_any)name, length, spelling_c(0));

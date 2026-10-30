@@ -11484,6 +11484,58 @@ def files_tar_short_archive(farm):
     return won, total, notes
 
 
+def files_tar_utf8_names(farm):
+    """tar -t spells a member name as the reference does in each locale.
+
+    Where LC_ALL names a UTF-8 locale a valid sequence for a printable
+    character goes out as it is, as ls writes it, and only a C1 control, a
+    byte that starts no sequence, an overlong or surrogate sequence and one
+    the name cuts off are octal; in the C locale every byte past ASCII is
+    octal, so 日本語 was a run of escapes under a UTF-8 locale.
+    """
+    import io
+    import shutil
+    import subprocess
+    import tarfile
+    import tempfile
+
+    reference = shutil.which("tar", path=os.defpath)
+    candidate = Path(farm) / "tar"
+    if not reference or not candidate.exists():
+        return 0, 1, ["tar names check needs tar on both sides"]
+
+    names = [b"plain", "café".encode(), "日本語".encode(), "😀x".encode(), b"bad\xffbyte",
+             b"cut\xe6\x97", b"c1\xc2\x9bCSI", b"c1end\xc2\x85", b"ovr\xc0\x80",
+             b"surr\xed\xa0\x80", b"big\xf4\x90\x80\x80", b"nbsp\xc2\xa0x", b"tab\there",
+             b"back\\slash", b"mix\xc3\xa9\xffz\xe6\x97\xa5", b"\xc2\x9f\xc2\xa0"]
+    won = total = 0
+    notes = []
+    with tempfile.TemporaryDirectory(prefix="tar-names-") as work:
+        archive = Path(work) / "names.tar"
+        with tarfile.open(archive, "w", format=tarfile.GNU_FORMAT, encoding="latin-1",
+                          errors="surrogateescape") as packed:
+            for name in names:
+                member = tarfile.TarInfo(name.decode("latin-1"))
+                member.size = 1
+                packed.addfile(member, io.BytesIO(b"x"))
+        for locale in ("C", "C.UTF-8", "en_US.UTF-8"):
+            environment = dict(os.environ, LC_ALL=locale)
+            environment.pop("LANG", None)
+            want = subprocess.run([reference, "-tf", str(archive)], capture_output=True,
+                                  env=environment, timeout=60)
+            got = subprocess.run([str(candidate), "-tf", str(archive)], capture_output=True,
+                                 env=environment, timeout=60)
+            total += 1
+            if got.returncode == want.returncode and got.stdout == want.stdout:
+                won += 1
+            else:
+                for expected, seen in zip(want.stdout.split(b"\n"), got.stdout.split(b"\n")):
+                    if expected != seen:
+                        notes.append(f"tar -tf under {locale}: reference {expected!r}, candidate {seen!r}")
+                        break
+    return won, total, notes
+
+
 def files_find_write_error(farm):
     """find whose output cannot be written says why, and answers 1.
 
@@ -12159,7 +12211,7 @@ def files_du_long_name_list(farm):
 FILES_CHECKS = (files_uname_identity, files_cp_into_self, files_locale_names, files_collation_ls, files_large_inputs, files_column_layout, files_xargs_parallel, files_zones, files_tar,
                 files_tar_formats,
                 files_find_terminal, files_zone_names, files_hostname_set, files_move_across,
-                files_address_cap, files_kill_bash_word, files_tar_short_archive, files_find_write_error, files_ls_address_cap,
+                files_address_cap, files_kill_bash_word, files_tar_short_archive, files_tar_utf8_names, files_find_write_error, files_ls_address_cap,
                 files_floor_address_cap, files_daystart_zones, files_statfs_names,
                 files_deep_walks, files_parents_deep, files_write_error_stdout,
                 files_find_write_error, files_exec_refusals, files_regex_switch,
