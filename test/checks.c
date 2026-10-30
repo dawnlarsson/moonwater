@@ -41391,10 +41391,10 @@ test(an_unnamed_way_of_leaving_reaches_the_trap)
 
 test(environment_reads_what_the_kernel_gave)
 {
-        //      PATH is not guaranteed, but something has to be, and a vector
-        //      with nothing in it would make every other check here vacuous.
+        //      The kernel hands over a vector, and with nothing in it (env -i)
+        //      it is the null that ends it: the lane runs this under that
+        //      too, so no entry is looked for.
         fail(!is_null(program_environment_list()));
-        fail(!is_null(program_environment_list()[0]));
         fail(is_null(getenv(text("A NAME NOTHING WOULD SET"))));
 
         return true;
@@ -41514,6 +41514,7 @@ test(environment_grows_past_its_first_vector)
         p8 value[512];
         positive index;
         positive fill;
+        string_address kernel_first = program_environment_list()[0];
 
         for (fill = 0; fill < sizeof(value) - 1; fill++)
                 value[fill] = (p8)('a' + (fill % 26));
@@ -41590,7 +41591,7 @@ test(environment_grows_past_its_first_vector)
         }
 
         //      What the kernel gave is still there under all of that.
-        fail(!is_null(program_environment_list()[0]));
+        fail(program_environment_list()[0] == kernel_first);
 
         return true;
 }
@@ -51719,6 +51720,20 @@ b32 main(void)
         is the thing being measured.
 */
 #include "../src/lib.util.c"
+#if defined(FORMAT_STANDALONE) && \
+    (defined(__SSP__) || defined(__SSP_ALL__) || defined(__SSP_STRONG__) || \
+     defined(__SSP_EXPLICIT__))
+//      The stack protector's guard and its failure live with stdlib, which
+//      this arrangement leaves out; a build with the protector on (MW_HARDEN=1)
+//      would not link without them.
+KEEP unsigned long __stack_chk_guard = 0x2f5a8c1d93e6b700ul;
+
+KEEP DEAD_END fn __stack_chk_fail(void)
+{
+        system_call_1(syscall(exit_group), 134);
+        __builtin_unreachable();
+}
+#endif
 
 static void fd_text(const char *text)
 {

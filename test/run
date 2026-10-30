@@ -3961,52 +3961,59 @@ lane_script()
 #       and grows past that: where a setenv grows depends on how many entries
 #       the process was started with. So the one binary runs once for each
 #       size from none to forty, under env -i, and every size has to agree.
-leaving_environments_one()
+#       The suite is $sweep_suite, built by the lane before this runs.
+environment_sizes_one()
 {
-        leaving_runner=$target_runner
-        leaving_binary=$work/leaving.$target
-        leaving_bad=0
-        leaving_total=0
-        leaving_env_command=$(command -v env)
+        sweep_runner=$target_runner
+        sweep_binary=$work/$sweep_suite.$target
+        sweep_bad=0
+        sweep_total=0
+        sweep_env_command=$(command -v env)
 
         #       Every size on the machine itself; an emulator starts in about
         #       three seconds, so it takes the sizes at the edges of the
         #       slack and of the growth after it (the arithmetic is the same
         #       on every machine).
-        if [ -z "$leaving_runner" ]; then
-                leaving_sizes=$(seq 0 40)
+        if [ -z "$sweep_runner" ]; then
+                sweep_sizes=$(seq 0 40)
         else
-                leaving_runner=$(command -v "$leaving_runner")
-                leaving_sizes="0 8 24 25 33"
+                sweep_runner=$(command -v "$sweep_runner")
+                sweep_sizes="0 8 24 25 33"
         fi
 
-        for leaving_size in $leaving_sizes; do
-                leaving_fill=
-                leaving_index=0
-                while [ "$leaving_index" -lt "$leaving_size" ]; do
-                        leaving_fill="$leaving_fill LEAVING_FILL_$leaving_index=x"
-                        leaving_index=$((leaving_index + 1))
+        for sweep_size in $sweep_sizes; do
+                sweep_fill=
+                sweep_index=0
+                while [ "$sweep_index" -lt "$sweep_size" ]; do
+                        sweep_fill="$sweep_fill SWEEP_FILL_$sweep_index=x"
+                        sweep_index=$((sweep_index + 1))
                 done
-                leaving_total=$((leaving_total + 1))
+                sweep_total=$((sweep_total + 1))
                 # shellcheck disable=SC2086
-                if ! "$leaving_env_command" -i $leaving_fill $leaving_runner \
-                        "$leaving_binary" > "$work/leaving.$target.env" 2>&1
+                if ! "$sweep_env_command" -i $sweep_fill $sweep_runner \
+                        "$sweep_binary" > "$work/$sweep_suite.$target.env" 2>&1
                 then
-                        note "$target: leaving fails with $leaving_size environment entries:"
-                        sed -n '/FAILED/p' "$work/leaving.$target.env" | sed 's/^/    /' | head -5
-                        leaving_bad=$((leaving_bad + 1))
+                        note "$target: $sweep_suite fails with $sweep_size environment entries:"
+                        sed -n '/FAILED/p' "$work/$sweep_suite.$target.env" | sed 's/^/    /' | head -5
+                        sweep_bad=$((sweep_bad + 1))
                 fi
         done
 
-        tally "leaving-environments-$target" "$((leaving_total - leaving_bad))" "$leaving_total"
-        [ "$leaving_bad" = 0 ]
+        tally "$sweep_suite-environments-$target" "$((sweep_total - sweep_bad))" "$sweep_total"
+        [ "$sweep_bad" = 0 ]
+}
+
+environment_sizes()
+{
+        sweep_suite=$1
+        target_lane environment_sizes_one
 }
 
 lane_leaving()
 {
         freestanding_checks_lane leaving leaving
         leaving_outcome=$?
-        target_lane leaving_environments_one
+        environment_sizes leaving
         case $? in
         0) ;;
         2) [ "$leaving_outcome" != 0 ] || leaving_outcome=2 ;;
@@ -4223,6 +4230,12 @@ lane_stdlib()
 {
         freestanding_checks_lane stdlib stdlib
         stdlib_outcome=$?
+        environment_sizes stdlib
+        case $? in
+        0) ;;
+        2) [ "$stdlib_outcome" != 0 ] || stdlib_outcome=2 ;;
+        *) stdlib_outcome=1 ;;
+        esac
         freestanding_checks_lane environment environment
         environment_outcome=$?
         transcript_against_glibc environment '1,/^shared-end$/p' \
