@@ -71,6 +71,13 @@
 // encoded as short as it can be.
 #define MWSET(name) ".set " #name ", " __stringify(name) "\n"
 
+// arm64's asm/fixmap.h, which core.c has by then, defines TRAMP_VALIAS as
+// the expression and asm-offsets.h defines it again as the number it comes
+// to, for entry.S: a redefinition warning in every arm64 build of the
+// module. The number is the same value, and the one that stands.
+#ifdef TRAMP_VALIAS
+#undef TRAMP_VALIAS
+#endif
 #include <generated/asm-offsets.h>
 
 #ifdef CONFIG_X86_64
