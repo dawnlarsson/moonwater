@@ -94626,6 +94626,19 @@ def scale_known_literal(table):
     return "\n".join(lines) + "\n"
 
 
+class ScaleTemporary(tempfile.TemporaryDirectory):
+    """The scale lane's directory, taken away by rm when Python cannot: a tree
+    nineteen hundred levels deep is removed by shutil with a descriptor a
+    level, and the usual limit of 1024 ends it with "Too many open files" and
+    the tree left behind on the disk after every run."""
+
+    def cleanup(self):
+        try:
+            super().cleanup()
+        except OSError:
+            subprocess.run(["rm", "-rf", "--", self.name], check=False)
+
+
 def harness_scale(argv):
     """--harness scale: every tool against the host's, at every size."""
     parser = argparse.ArgumentParser(prog="differential.py --harness scale")
@@ -94668,7 +94681,7 @@ def harness_scale(argv):
         for part in options.cpus.split(","):
             low, _, high = part.partition("-")
             cpus.update(range(int(low), int(high or low) + 1))
-    with tempfile.TemporaryDirectory(prefix="scale-") as temporary:
+    with ScaleTemporary(prefix="scale-") as temporary:
         root = Path(temporary)
         data = ScaleData(options.data or root / "data")
         bench_scratch = root / "scratch"
