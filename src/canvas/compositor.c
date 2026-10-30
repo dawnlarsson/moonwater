@@ -8607,6 +8607,10 @@ static void compositor_wheel(int v120, int horizontal)
 {
         int row = compositor.grab;
 
+        // A motion read with the wheel in one batch has moved the pointer and not yet kept it on a screen (that is
+        // done when the batch is over): kept first, as before a button, or a flick past the edge sends the wheel to
+        // no window, or to one in the room beside a shorter screen.
+        compositor_pointer_clamp();
         if (row < 0)
                 row = compositor.hover = compositor_picture_under(compositor.pointer_x, compositor.pointer_y);
         // Where the pointer is goes first, as it does before a button: a window that turns a wheel by where the pointer

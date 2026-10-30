@@ -117142,6 +117142,29 @@ static void check_compositor_wheel(void)
     compositor.touchpad[0] = 0;
 
     /*
+            A motion and a wheel in one read: the motion takes the pointer past the screen's edge and nothing keeps
+            it on the screen until the read is over. The wheel goes to the window at the edge, where the pointer is
+            drawn, and not to no window at all.
+    */
+    {
+        int was_x = compositor.x[1];
+
+        compositor.x[1] = GLASS_SIDE - 120;
+        table->event_tail[1] = table->event_head[1];
+        wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_X, 4000);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        wheel_notch(1);
+        compositor_input_read(0);
+        sum = wheel_unread(1, &events, &last);
+        check("wheel: a wheel read with a motion past the screen's edge goes to the window at the edge",
+              sum == 120 && compositor.pointer_x == GLASS_SIDE - 1);
+        compositor.x[1] = was_x;
+        compositor.pointer_x = 100;
+        compositor.pointer_y = 40;
+        table->event_tail[1] = table->event_head[1];
+    }
+
+    /*
             A button held over a window whose program goes is let go nowhere: the row is the next program's, which
             never had the press, and a release with no press is a click it did not get (a terminal reports it).
     */
