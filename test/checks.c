@@ -124773,7 +124773,7 @@ static fn check_kit_motion(void)
         for (positive at = 0; at < sizeof(kit_reference) / sizeof(kit_reference[0]); at++)
         {
                 const struct kit_reference address_to r = &kit_reference[at];
-                b64 x = (r->t << 30) / 1000000000, got = 0, error;
+                b64 x = (r->t * (1ll << 30)) / 1000000000, got = 0, error;
                 b32 live = 0;
 
                 switch (r->kind)
