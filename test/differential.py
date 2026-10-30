@@ -41788,16 +41788,6 @@ def harness_host_writes(argv):
             failures.append("%s:%d %s opens for writing through a link" % (name, line, owner))
 
     host = (root / "src/sh/host.c").read_text()
-    marks = ("static bipolar host_open_state(", "static bipolar host_write_text(",
-             "static fn host_state_directory(", "static b32 host_verdict_set(")
-    if not all(mark in host for mark in marks):
-        for failure in failures:
-            print("  FAIL " + failure)
-        print("  FAIL host.c has no host_open_state and host_state_directory to cut out")
-        write_tally("host-writes", 0, 1)
-        return 1
-    writer = host[host.index(marks[0]):host.index(marks[1])]
-    ready = host[host.index(marks[2]):host.index(marks[3])]
     parent = r'''
 static bipolar host_write_file(string_address path, p8 address_to bytes,
                                positive length, positive mode, bool sync)
@@ -41970,25 +41960,182 @@ int main(void) {
 }
 '''
 
+    #   What the driver calls is cut out of host.c by name, and so is whatever
+    #   that reaches in host.c, as the compiler finds it missing: a helper the
+    #   writer gains is cut out with it. The cut was two spans between fixed
+    #   signatures, and it broke whenever the writer took a new helper or the
+    #   function after a span changed its type. Only a name that is not in
+    #   host.c needs the shim, and one the shim lacks is named, with the line
+    #   that asks for it, rather than left as a compile error to read.
+    def blank_text(text):
+        #   Comments, strings and character literals as blanks, newlines kept,
+        #   so braces and semicolons inside them are not counted.
+        return re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'',
+                      lambda m: re.sub(r"[^\n]", " ", m.group(0)), text, flags=re.S)
+
+    host_blank = blank_text(host)
+
+    def closing(at, opening="{", ending="}"):
+        depth = 0
+        while at < len(host_blank):
+            depth += {opening: 1, ending: -1}.get(host_blank[at], 0)
+            at += 1
+            if not depth:
+                return at
+        return None
+
+    def statement_end(at):
+        #   The ; that ends a file-scope statement starting at at.
+        depth = 0
+        while at < len(host_blank):
+            character = host_blank[at]
+            depth += {"{": 1, "(": 1, "[": 1, "}": -1, ")": -1, "]": -1}.get(character, 0)
+            if character == ";" and not depth:
+                return at + 1
+            at += 1
+        return None
+
+    def definition(name):
+        """host.c's definition of name: (kind, line, text, prototype), kind
+        function, macro or data; None where host.c defines no such name."""
+        word = re.escape(name)
+        for found in re.finditer(r"(?m)^#[ \t]*define[ \t]+%s\b" % word, host_blank):
+            stop = found.start()
+            while True:
+                stop = host.index("\n", stop) if "\n" in host[stop:] else len(host)
+                if host[stop - 1] != "\\":
+                    break
+                stop += 1
+            return ("macro", host.count("\n", 0, found.start()) + 1,
+                    host[found.start():stop] + "\n", None)
+        for found in re.finditer(r"(?m)^(?!#)[A-Za-z_][^;{}()=\n]*\b%s[ \t]*\(" % word, host_blank):
+            shut = closing(found.end() - 1, "(", ")")
+            if shut is None:
+                continue
+            after = re.match(r"\s*([{;])", host_blank[shut:])
+            if not after or after.group(1) != "{":
+                continue
+            body_end = closing(shut + after.end() - 1)
+            if body_end is None:
+                continue
+            return ("function", host.count("\n", 0, found.start()) + 1,
+                    host[found.start():body_end] + "\n", host[found.start():shut] + ";\n")
+        #   A file-scope declaration of it, on a line that starts at the margin:
+        #   the name before an initializer, an array bound or the ;, or a
+        #   function pointer's (*name) in a typedef.
+        for found in re.finditer(r"(?m)^(?![#\s}/])[^\n]*\b%s\b" % word, host_blank):
+            stop = statement_end(found.start())
+            if stop is None:
+                continue
+            statement = host_blank[found.start():stop]
+            typedef = statement.startswith("typedef")
+            head = statement if typedef else statement.split("=")[0]
+            if not typedef and "(" in head:
+                continue
+            if re.search(r"\b%s\s*(?:\[[^\]]*\]\s*)*;?\s*$" % word, head.rstrip()) or \
+               (typedef and re.search(r"\(\s*\*\s*%s\s*\)" % word, head)):
+                return ("data", host.count("\n", 0, found.start()) + 1,
+                        host[found.start():stop] + "\n", None)
+        #   And the } name; that ends a typedef of a struct or a union.
+        for found in re.finditer(r"(?m)^\}\s*%s\s*;" % word, host_blank):
+            depth, at = 0, found.start()
+            while at >= 0:
+                depth += {"}": 1, "{": -1}.get(host_blank[at], 0)
+                if not depth:
+                    break
+                at -= 1
+            start = host_blank.rfind("\n", 0, max(at, 0)) + 1
+            if at >= 0 and host_blank.startswith("typedef", start):
+                return ("data", host.count("\n", 0, start) + 1,
+                        host[start:found.end()] + "\n", None)
+        return None
+
+    shim_names = set(re.findall(r"(?m)^#define\s+(\w+)", shim)) | \
+        set(re.findall(r"(?m)^static\s+[^(;=]*?\b(\w+)\s*\(", shim)) | \
+        set(re.findall(r"(?m)^typedef\b[^;]*?\b(\w+)\s*;", shim))
+    #   The compilers' words for a name used and never declared, and the
+    #   linker's for one declared by nobody (an old gcc warns where -w is quiet).
+    missing_said = re.compile(
+        r"^(?:[^:\n]*?host\.c:(\d+):\d+:)?.*?(?:implicit declaration of function|call to undeclared "
+        r"function|use of undeclared identifier|unknown type name|undefined reference to|"
+        r"undefined symbol:)\s*['‘`]?(\w+)['’]?|"
+        r"^(?:[^:\n]*?host\.c:(\d+):\d+:)?.*?['‘](\w+)['’] undeclared", re.M)
+
+    def compiled(body, top):
+        (top / "fixture.c").write_text(shim + body + driver)
+        return build_run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
+                         capture_output=True, text=True, env=dict(os.environ, LC_ALL="C"))
+
+    def cut(top):
+        """The host.c the driver needs, built: (source, None), or (None, why)."""
+        pulled = {}
+        for name in ("host_write_file", "host_state_ready"):
+            found = definition(name)
+            if not found or found[0] != "function":
+                return None, ("host.c defines no function %s, which the driver calls: it was "
+                              "renamed, and the harness has to be told the new name" % name)
+            pulled[name] = found
+        for _ in range(64):
+            ordered = sorted(pulled.items(), key=lambda item: item[1][1])
+            body = "".join('#line %d "src/sh/host.c"\n%s' % (found[1], found[2])
+                           for _, found in ordered if found[0] != "function")
+            body += "".join(found[3] for _, found in ordered if found[0] == "function")
+            body += "".join('#line %d "src/sh/host.c"\n%s' % (found[1], found[2])
+                            for _, found in ordered if found[0] == "function")
+            body += "#line 1 \"driver\"\n"
+            built = compiled(body, top)
+            if not built.returncode:
+                return body, None
+            asked, unknown = [], []
+            for said in missing_said.finditer(built.stderr):
+                line, name = (said.group(1), said.group(2)) if said.group(2) else \
+                    (said.group(3), said.group(4))
+                if name in pulled or name in shim_names or name in [a for a, _ in asked]:
+                    continue
+                asked.append((name, line))
+            if not asked:
+                return None, ("what the driver needs from host.c does not build, and not for a "
+                              "name it lacks:\n" + built.stderr[-2000:])
+            for name, line in asked:
+                found = definition(name)
+                if found:
+                    pulled[name] = found
+                else:
+                    unknown.append((name, line))
+            if unknown:
+                return None, "".join(
+                    "host.c:%s asks for %s, which host.c does not define and the shim in "
+                    "differential.py's harness_host_writes has no stand-in for: give it a hosted "
+                    "one there, as file_publish_with and system_open_at_mode have\n"
+                    % (line or "?", name) for name, line in unknown).rstrip("\n")
+        return None, "what the driver needs from host.c still did not build after 64 rounds"
+
     def run(body):
         with tempfile.TemporaryDirectory(prefix="host-writes-") as temporary:
             top = Path(temporary).resolve()
-            (top / "fixture.c").write_text(shim + body + driver)
-            built = build_run(["cc", "-w", "-o", str(top / "fixture"), str(top / "fixture.c")],
-                                   capture_output=True, text=True)
-            if built.returncode:
-                return None, built.stderr[-2000:]
+            if body is None:
+                body, why = cut(top)
+                if body is None:
+                    return None, why
+            else:
+                built = compiled(body, top)
+                if built.returncode:
+                    return None, built.stderr[-2000:]
             ran = subprocess.run([str(top / "fixture")], cwd=top, capture_output=True, text=True,
                                  timeout=30)
             return ran.returncode, ran.stdout
 
-    now, said = run(writer + ready)
+    now, said = run(None)
     if now is None:
-        print("  FAIL the writer did not build:\n" + said)
+        for failure in failures:
+            print("  FAIL " + failure)
+        print("  FAIL the writer cut from host.c did not build: " + said)
+        write_tally("host-writes", 0, 1)
         return 1
     then, before = run(parent)
     if then is None:
         print("  FAIL the parent writer did not build:\n" + before)
+        write_tally("host-writes", 0, 1)
         return 1
     for line in said.splitlines():
         if line.startswith("  FAIL"):
