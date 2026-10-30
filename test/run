@@ -16652,7 +16652,8 @@ disk_checks()
 #       disk took from the trigger to the command's last line is the length
 #       of the write; the cuts come at fractions of it (MOONWATER_CUT_PERCENT,
 #       MOONWATER_CUT_INSTALL_PERCENT), each when the count, polled over QMP,
-#       reaches its share. The grid used to be milliseconds after the trigger,
+#       reaches its share, and a last one when the command says its last
+#       line. The grid used to be milliseconds after the trigger,
 #       0 to 70, and the update's write runs past that: the old loader copied
 #       to previous, the new one read off the stick and renamed into place
 #       took about 100 ms from the trigger to the command's last line on an
@@ -16856,9 +16857,12 @@ import json, os, re, socket, subprocess, sys, threading, time
 # BYTES may be pull:N instead: once the stick (the drive with id "stick") has
 # given N bytes of reads since the trigger, the device with id "stickdev" is
 # unplugged over QMP and the guest goes on with its commands (pulled-yes).
+# Or line:TEXT: killed once a line with TEXT shows after the trigger, which
+# is how a cut is placed after a write whose length varies from run to run.
 log, trigger, k, commands, limit = sys.argv[1:6]
 pull = k.startswith('pull:')
-k, limit = int(k[5:] if pull else k), float(limit)
+endline = k[5:].encode() if k.startswith('line:') else None
+k, limit = (-1 if endline else int(k[5:] if pull else k)), float(limit)
 argv = sys.argv[sys.argv.index('--') + 1:]
 trigger = trigger.encode()
 #       QEMU's own count of what the disk took, the one clock a cut can be
@@ -16930,6 +16934,8 @@ def reader():
                                          line.decode('latin-1', 'replace').strip()))
                 times.flush()
                 state['said'] += 1
+                if endline is not None and endline in line:
+                    state['ended'] = True
 
 thread = threading.Thread(target=reader, daemon=True)
 thread.start()
@@ -16952,7 +16958,8 @@ while control and p.poll() is None and time.monotonic() - begun < limit:
         if pull and not pulled and base is not None and got - read_base >= k:
             ask(control, {'execute': 'device_del', 'arguments': {'id': 'stickdev'}})
             pulled = True
-        elif not pull and k >= 0 and base is not None and now - base >= k:
+        elif (not pull and k >= 0 and base is not None and now - base >= k) or \
+                state.get('ended'):
             p.kill()
             cut = True
             break
@@ -17082,15 +17089,22 @@ COMMANDS
 
         landed_begun=0
         landed_after=0
-        for f in ${MOONWATER_CUT_PERCENT:-0 15 30 45 60 75 90 100}; do
-                k=$((cut_whole * f / 100))
+        #       And a last cut once the command has said its last line: the
+        #       bytes an update writes vary a little from run to run, so the
+        #       whole length of one is no promise of being past the rename in
+        #       the next, and its line is.
+        for f in ${MOONWATER_CUT_PERCENT:-0 15 30 45 60 75 90} end; do
+                case $f in
+                end) k="line:keeps its own settings" at='its last line' ;;
+                *) k=$((cut_whole * f / 100)) at="$f% of its write" ;;
+                esac
                 rm -f "$work/cut.img"
                 cp --sparse=always "$work/cutbase.img" "$work/cut.img" || exit 1
                 # shellcheck disable=SC2086
                 install_cut "cutu$f" "$k" "$work/cut.img" "$work/cutupdate.commands" $stick
-                says "cutu$f" "update cut at $f% of its write: the guest was writing" 'fired-yes'
-                says "cutu$f" "update cut at $f% of its write: the loader is old or new, never torn" 'image-whole'
-                never "cutu$f" "update cut at $f% of its write: the FAT's chains hold" 'fat-bad'
+                says "cutu$f" "update cut at $at: the guest was writing" 'fired-yes'
+                says "cutu$f" "update cut at $at: the loader is old or new, never torn" 'image-whole'
+                never "cutu$f" "update cut at $at: the FAT's chains hold" 'fat-bad'
                 if grep -q 'image-old' "$work/cutu$f" && ! grep -q 'leftover-none' "$work/cutu$f"; then
                         landed_begun=$((landed_begun + 1))
                 fi
@@ -17106,7 +17120,7 @@ COMMANDS
                         "$loader_sha" >> "$work/again$f" 2>&1
                 disk_checks "again$f"
                 install_disk=""
-                says "again$f" "update after a cut at $f% succeeds" 'again-40'
+                says "again$f" "update after a cut at $at succeeds" 'again-40'
                 says "again$f" "and the disk has this build's loader" 'image-new'
                 says "again$f" "and nothing is left beside the loaders" 'leftover-none'
                 says "again$f" "and the FAT's chains hold" 'fat-ok'
@@ -17277,18 +17291,24 @@ COMMANDS
                 cut_whole=0
         fi
 
-        for f in ${MOONWATER_CUT_INSTALL_PERCENT:-0 10 25 40 55 70 85 92 97 100}; do
-                k=$((cut_whole * f / 100))
+        #       The last cut, as the update's: the install's length varies
+        #       more (the ext4 journal's commits come when they come), and on
+        #       2026-10-30 one run's 100% landed before the loader's rename.
+        for f in ${MOONWATER_CUT_INSTALL_PERCENT:-0 10 25 40 55 70 85 92 97} end; do
+                case $f in
+                end) k="line:Moonwater is installed on" at='its last line' ;;
+                *) k=$((cut_whole * f / 100)) at="$f% of its write" ;;
+                esac
                 rm -f "$work/cut.img"
                 truncate -s 4G "$work/cut.img" || exit 1
                 # shellcheck disable=SC2086
                 install_cut "cuti$f" "$k" "$work/cut.img" "$work/cutinstall.commands" $stick
                 cut_data "cuti$f" "$work/cut.img"
-                says "cuti$f" "install cut at $f% of its write: the guest was installing" 'fired-yes'
-                says "cuti$f" "install cut at $f% of its write: no loader, or a whole one" 'image-whole'
-                never "cuti$f" "install cut at $f% of its write: the FAT's chains hold" 'fat-bad'
+                says "cuti$f" "install cut at $at: the guest was installing" 'fired-yes'
+                says "cuti$f" "install cut at $at: no loader, or a whole one" 'image-whole'
+                never "cuti$f" "install cut at $at: the FAT's chains hold" 'fat-bad'
                 if grep -q 'image-new' "$work/cuti$f"; then
-                        says "cuti$f" "install cut at $f% of its write: a disk with its loader has all its data" 'data-whole'
+                        says "cuti$f" "install cut at $at: a disk with its loader has all its data" 'data-whole'
                         landed_image=$((landed_image + 1))
                 elif grep -q 'image-absent' "$work/cuti$f" && grep -q 'copying /root' "$work/cuti$f.console"; then
                         landed_copy=$((landed_copy + 1))
@@ -17308,7 +17328,7 @@ COMMANDS
                 if grep -q 'image-absent' "$work/cuti$f" && ! grep -q 'no-partitions' "$work/cuti$f"; then
                         says "redo$f" "and is asked about, not trusted" 'verdict- ksa'
                 fi
-                says "redo$f" "a disk after the cut at $f% comes out of an install whole" 'image-new'
+                says "redo$f" "a disk after the cut at $at comes out of an install whole" 'image-new'
                 says "redo$f" "and nothing left beside the loader" 'leftover-none'
                 says "redo$f" "and the FAT's chains hold" 'fat-ok'
         done
