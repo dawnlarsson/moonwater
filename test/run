@@ -13801,6 +13801,62 @@ else
         printf '  %-10s %s\n' compact 'no python3, skipped'
 fi
 
+#       CVE-2026-98432 (Oct 2026, kernel CNA CVSS 9.8): a remote peer sends a
+#       SYN carrying IPv4 Record Route or Timestamp options, finishes the
+#       handshake and closes, then replays the SYN. tcp_v4_syn_recv_sock()
+#       hands the request socket's ip_options_rcu to the child by pointer;
+#       before the upstream fix (e3f33b0a1d89) the child freed it with a plain
+#       kfree() while another CPU still read it to answer the replayed SYN
+#       (tcp_v4_send_synack -> ip_options_build), a use-after-free. The fix
+#       frees the options only after an RCU grace period: kfree_rcu() in
+#       inet_sock_destruct() and tcp_v4_reqsk_destructor(), and kfree_rcu(old)
+#       when IP_OPTIONS is replaced. We pin Linux 7.3, which carries the fix;
+#       this row guards a later fetch that quietly reverts it to a plain free.
+#       The kernel source is here only during a build, so where it is not this
+#       says so and counts nothing (the Mac and the rsync test copies have no
+#       linux/ tree and no tarball).
+group kernel_cve
+kernel_cve_src=
+if [ -f linux/net/ipv4/af_inet.c ]; then
+        kernel_cve_src=linux
+else
+        for kernel_cve_tb in artifacts/linux-*.tar.xz; do
+                [ -f "$kernel_cve_tb" ] || continue
+                kernel_cve_src=$work/kernel-cve-src
+                kernel_cve_top=$(tar -tf "$kernel_cve_tb" 2>/dev/null |
+                        head -1 | cut -d/ -f1)
+                mkdir -p "$kernel_cve_src/net/ipv4"
+                for kernel_cve_f in af_inet.c tcp_ipv4.c ip_sockglue.c; do
+                        tar --occurrence=1 -xOf "$kernel_cve_tb" \
+                                "$kernel_cve_top/net/ipv4/$kernel_cve_f" \
+                                > "$kernel_cve_src/net/ipv4/$kernel_cve_f" \
+                                2>/dev/null
+                done
+                break
+        done
+fi
+if [ -z "$kernel_cve_src" ]; then
+        printf '  %-10s %s\n' kernel_cve 'no kernel source, not checked'
+else
+        kernel_cve_ok=1
+        grep -q -F 'kfree_rcu(rcu_dereference_protected(inet->inet_opt, 1), rcu)' \
+                "$kernel_cve_src/net/ipv4/af_inet.c" 2>/dev/null || kernel_cve_ok=0
+        grep -q -F 'kfree_rcu(rcu_dereference_protected(inet_rsk(req)->ireq_opt, 1), rcu)' \
+                "$kernel_cve_src/net/ipv4/tcp_ipv4.c" 2>/dev/null || kernel_cve_ok=0
+        grep -q -F 'kfree_rcu(old, rcu)' \
+                "$kernel_cve_src/net/ipv4/ip_sockglue.c" 2>/dev/null || kernel_cve_ok=0
+        grep -Eq 'kfree\(rcu_dereference_protected\(inet->inet_opt' \
+                "$kernel_cve_src/net/ipv4/af_inet.c" 2>/dev/null && kernel_cve_ok=0
+        grep -Eq 'kfree\(rcu_dereference_protected\(inet_rsk\(req\)->ireq_opt' \
+                "$kernel_cve_src/net/ipv4/tcp_ipv4.c" 2>/dev/null && kernel_cve_ok=0
+        if [ "$kernel_cve_ok" = 1 ]; then
+                won
+        else
+                lost 'ip options freed after an rcu grace period' \
+                        'CVE-2026-98432: inet_opt/ireq_opt not kfree_rcu in the kernel source'
+        fi
+fi
+
 counted
 )
 
