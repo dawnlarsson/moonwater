@@ -8154,7 +8154,8 @@ static int compositor_popup_root(int row)
         return row;
 }
 
-// The topmost popup of a window, which the keys go to while it is open, or the window itself.
+// The topmost popup of a window, which the keys go to while it is open, or the window itself. A popup asked to go (a press
+// outside it, its window losing the keys) has none: until it has gone it is no one's to type to, and a hung one would keep them.
 static int compositor_popup_top(int root)
 {
         if (root < 0)
@@ -8163,7 +8164,8 @@ static int compositor_popup_top(int root)
         {
                 int row = compositor.stack[at];
 
-                if (compositor_popup_parent[row] >= 0 && compositor.showing[row] && compositor_popup_root(row) == root)
+                if (compositor_popup_parent[row] >= 0 && compositor.showing[row] && !(compositor.state[row] & WINDOW_CLOSING) &&
+                    compositor_popup_root(row) == root)
                         return row;
         }
         return root;

@@ -116861,6 +116861,83 @@ static void check_compositor_dismiss(void)
 }
 
 /*
+        A popup's keys. While it is open, the topmost popup of the window with the keys has them. Once a press has asked
+        it to go it has none, and the window has them; and a popup whose window went is nobody's, so the window that
+        takes its row has the keys and not the popup still on the screen.
+*/
+static void check_compositor_popup(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+
+    // compositor_popup_parent is no part of the compositor struct: it is cleared here and after, so no popup is left for
+    // a later section to take a row of the compositor for one.
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("popup keys: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+
+    // A popup of row 3 for row 1 (popup_parent is the row + 1), 10 pixels in from the window's top left, 60 by 40.
+    table->popup_parent[3] = 2;
+    table->popup_x[3] = 10;
+    table->popup_y[3] = 10;
+    table->popup_w[3] = 0;
+    table->popup_h[3] = 0;
+    table->popup_flags[3] = WINDOW_POPUP_POINT;
+    table->width[3] = 60;
+    table->height[3] = 40;
+    table->glass[3] = WINDOW_NO_CLOSE;
+    glass_paint(3, 0, 0, 60, 40, 0x303030, true);
+    compositor_present();
+    check("popup keys: a popup of the window with the keys has them while it is open",
+          compositor_popup_parent[3] == 1 && compositor_popup_top(1) == 3);
+
+    compositor.pointer_x = 5;
+    compositor.pointer_y = 5;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.press = COMPOSITOR_NONE;
+    check("popup keys: a press outside it asks it to go", (table->state[3] & WINDOW_CLOSING) != 0);
+    check("popup keys: a popup asked to go has none, and the window has them", compositor_popup_top(1) == 1 && compositor.focus == 1);
+
+    // The window goes (its program hung up) while that popup is still on the screen, and a new window takes its row.
+    compositor_popup_leave(1);
+    compositor_stack_remove(1);
+    compositor.showing[1] = 0;
+    compositor.focus = COMPOSITOR_NONE;
+    table->x[1] = 60;
+    table->y[1] = 40;
+    table->width[1] = 100;
+    table->height[1] = 70;
+    glass_paint(1, 0, 0, 100, 70, 0x202020, true);
+    compositor_present();
+    check("popup keys: a window that takes the row of a popup's window has the keys, not the popup",
+          compositor.focus == 1 && compositor_popup_top(1) == 1);
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+}
+
+/*
         The tray (the clock and the battery) pressed twice quickly opens the settings: a window named settings that is
         up is brought up and given the keys, and with none the script is asked to start it. One press, a press of the
         middle button, and two too far apart do nothing.
@@ -128201,6 +128278,7 @@ b32 main()
         check_ui_press();
 #endif
         check_compositor_dismiss();
+        check_compositor_popup();
         check_compositor_tray();
         check_compositor_place();
         check_compositor_remember();
