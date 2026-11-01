@@ -3211,7 +3211,7 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
         {
                 struct ui_box pip = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
 
-                if (!c->disabled)
+                if (!c->disabled && c->count > 0) // no items, no chosen one to show
                         ui_kit_fill(ui, &pip, ui_role(UI_PRIMARY), null);
                 // The keys in the column: the kit's focus ring, 2 out from the chosen item.
                 if (c->focused && !c->disabled)

@@ -126776,6 +126776,20 @@ static fn check_kit_controls(void)
                 check("kit radios: a group with no items draws no pip", group_clear);
                 check("kit tabs: a strip with no items draws no pip, and no word is measured", strip_clear);
         }
+
+        // A column of tabs with no items draws no pip either: its top item's place is paper.
+        {
+                struct ui_control column;
+                unsigned int paper = 0xff111113u;
+
+                memory_zero(&column, sizeof(column));
+                column.kind = UI_TABS, column.variant = UI_TABS_VERTICAL, column.x = 10, column.y = 10, column.w = 150, column.h = 34, column.count = 0;
+                ui_control_start(&column);
+                ui_fill(&ui, 0, 0, 340, 80, paper);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &column);
+                check("kit tabs on end: a column with no items draws no pip", pixels[27 * 600 + 30] == paper);
+        }
 }
 #endif
 
