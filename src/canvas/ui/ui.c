@@ -426,9 +426,13 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
 
         // The coverage, as the ink at that alpha, over the picture: one tone for each coverage, made once. The columns
         // drawn are those in low to high and in the picture, worked out once, so the walk over a row has no test in it.
+        //
+        // Text lies mostly on one ground (the surface the band was cleared to, or a fill under it): the tone over that
+        // ground is kept for each coverage as it is first met, so a pixel on it is a compare and a load, and only a
+        // pixel on anything else is laid over (ui_over) -- the same pixel either way.
         {
-                unsigned int tone[256];
-                unsigned long long known[4] = {0, 0, 0, 0};
+                unsigned int tone[256], over[256], ground = ui->opaque ? ui_role_surface() : 0;
+                unsigned long long known[4] = {0, 0, 0, 0}, made[4] = {0, 0, 0, 0};
                 int pen_x = x - left, first = 0, last = wide;
 
                 if (low - pen_x > first)
@@ -450,9 +454,22 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                         picture = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(pen_x + first);
                         for (int column = first; column < last; column++, picture++)
                         {
-                                unsigned int value = coverage[column] >> 8 & 255;
-                                unsigned int cover = light ? value : 255 - value, bit;
+                                unsigned int value, cover, bit;
 
+                                // Paper no glyph touched (most of the run's rows) is no cover: passed a word at a time.
+                                // A stroke reaches into it from a neighbour, and reads every pixel.
+                                if (!stroke && coverage[column] == paper)
+                                {
+                                        int from = column;
+
+                                        while (++column < last && coverage[column] == paper)
+                                                ;
+                                        picture += column - from;
+                                        if (column >= last)
+                                                break;
+                                }
+                                value = coverage[column] >> 8 & 255;
+                                cover = light ? value : 255 - value;
                                 if (stroke && cover < 255)
                                 {
                                         // The stroke: a pixel takes a share of its strongest neighbour's cover.
@@ -476,6 +493,16 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
 
                                 if (!cover)
                                         continue;
+                                if (*picture == ground)
+                                {
+                                        if (!(made[cover >> 6] >> bit & 1))
+                                        {
+                                                over[cover] = ui_over(ui_tone(colour, cover * alpha / 255), ground);
+                                                made[cover >> 6] |= 1ull << bit;
+                                        }
+                                        *picture = over[cover];
+                                        continue;
+                                }
                                 if (!(known[cover >> 6] >> bit & 1))
                                 {
                                         tone[cover] = ui_tone(colour, cover * alpha / 255);
@@ -2314,14 +2341,38 @@ static const struct ui_type
                 {14, 20, 1, 0}, {12, 16, 0, 0}, {12, 16, 0, 1}, {13, 21, 0, 1}, {15, 20, 0, 0}};
 
 // Text of a role at x on the baseline (device pixels, whole), in a colour at its own alpha, with a stroke; its width.
-static int ui_kit_text(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
-                       unsigned int stroke)
+static int ui_kit_text_width(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
+                             unsigned int stroke)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to faces[2] = {t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular,
                                                ui->regular};
 
         return ui_run_in(ui, faces, x, baseline, text, t->size, argb & 0xffffffu, argb >> 24, 0, ui->width, stroke);
+}
+
+// Whether any of the rows top to bottom (device pixels) may be written: in the picture, the region and a repaint's band.
+static b32 ui_rows_seen(const struct ui address_to ui, int top, int bottom)
+{
+        return bottom > ui->top && top < ui->bottom && top < ui->height &&
+               (ui->band_bottom <= ui->band_top || (bottom > ui->band_top && top < ui->band_bottom));
+}
+
+/*
+        The same, its width not asked: a run whose rows (ui_run_in's, the face's cell and the room round it) are all
+        outside those the ui may write -- a repaint's band, the region's top and bottom -- writes nothing there, and
+        is not measured either. A repaint of a row of a list was measuring every other row's every word.
+*/
+static fn ui_kit_text(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke)
+{
+        const struct ui_type address_to t = &ui_types[type];
+        const font_face address_to face = t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular;
+        font_metrics metrics = font_metrics_at(face, (p32)(t->size * ui->scale) << 6);
+        int rows = metrics.cell_height + 4 * ui->scale, top = baseline - metrics.baseline - 2 * ui->scale;
+
+        rows = rows > UI_SCRATCH_ROWS * ui->scale ? UI_SCRATCH_ROWS * ui->scale : rows;
+        if (ui_rows_seen(ui, top, top + rows))
+                ui_kit_text_width(ui, x, baseline, text, type, argb, stroke);
 }
 
 static int ui_kit_measure(struct ui address_to ui, string_address text, int type)
@@ -5405,6 +5456,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         unsigned int ink = ui_role(UI_ON_SURFACE), quiet = ui_role(UI_ON_SURFACE_VARIANT);
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null;
         char cut[UI_CUT_TEXT];
+        // Whether any of its rows may be written, with room for a run's rows round its line.
+        b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
 
         ui_list_describe(l, id, &row);
         baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM);
@@ -5461,8 +5514,10 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 trailing = ui_list_trailing(ui, l, id, &row, right, y, 0);
         label_room = right - text_left - (row.kind == UI_ROW_SWITCH ? ui_dev(ui, 52) + gap : trailing ? ui_dev(ui, trailing->w) + gap
                                          : row.kind == UI_ROW_FIELD && row.head ? (w - 2 * inset) * 2 / 3 : (w - 2 * inset) / 3);
-        if (row.label)
-                wide = ui_kit_text(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
+        // A row no pixel of which may be written (a repaint of other rows) has its controls drawn, which is where its
+        // motion is read, and no word measured: its label's width places only its value and a field's well.
+        if (row.label && (seen || row.kind == UI_ROW_FIELD))
+                wide = ui_kit_text_width(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
                                                                   label_room < ui_dev(ui, 40) ? ui_dev(ui, 40) : label_room, cut, sizeof(cut)),
                                    UI_BODY_MEDIUM, ink, 0);
         if (trailing)
@@ -5479,7 +5534,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         ui_control_draw(ui, trailing);
                 return;
         }
-        if (row.kind == UI_ROW_SWITCH)
+        if (row.kind == UI_ROW_SWITCH || !seen)
                 return;
         if (row.value)
         {
