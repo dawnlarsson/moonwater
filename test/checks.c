@@ -126595,11 +126595,14 @@ static fn check_kit_place(void)
                 b32 fine = false, thrown = false;
                 b32 pulled = false, limited = false, sprang = false, passed = false, bottom = false;
                 b32 jumped = true, revealed = false, reveal_steps = false, shown_again = true;
+                b64 notch_clock = 0;
+                int settle_ms = 0;
 
 #ifdef UI_SCROLL_GLIDE
                 ui_kit.now = 6000000000ll, ui_kit.busy = 0;
                 ui_scroll_wheel(&ui, &glide, -120);
                 aimed = glide.aim == (b64)UI_ROW * 256 && glide.scroll == 0;
+                notch_clock = ui_kit.now + 16666667;
                 for (frame = 0; frame < 240 && glide.gliding; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
@@ -126611,6 +126614,7 @@ static fn check_kit_place(void)
                         last = glide.scroll;
                 }
                 reached = glide.scroll == UI_ROW && !glide.gliding;
+                settle_ms = (int)((ui_kit.now - notch_clock) / 1000000);
                 steps = rising >= 3;
                 ui_kit.now += 16666667, ui_kit.busy = 0;
                 idle = !ui_scroll_glide(&ui, &glide) && !ui_kit.busy;
@@ -126660,22 +126664,23 @@ static fn check_kit_place(void)
                 shown_again = ui_scroll_reveal(&glide, 400, UI_ROW);
                 revealed = revealed && reveal_steps && jumped && glide.scroll + glide.view >= 500 + UI_ROW;
 
-                // A throw is a finger's let go at 600 pixels a second: it glides the 195 pixels its speed carries it, and
-                // after 19 moving frames (317 ms, the first frame only starts the clock) it has gone the share 1 - 1/e of
-                // that, 121 pixels.
+                // A throw is a finger's let go at 600 pixels a second: it glides the speed times the time constant (600 x 36 ms,
+                // 21.6 pixels), and it stops at 22 once it has settled.
                 ui_scroll_set(&glide, 0);
                 ui_scroll_drag(&glide, 0);
                 ui_scroll_let_go(&glide, 1, 600);
-                for (frame = 0; frame < 20; frame++)
+                for (frame = 0; frame < 240 && glide.gliding; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &glide);
                 }
-                thrown = glide.gliding && glide.scroll >= 118 && glide.scroll <= 125;
+                thrown = !glide.gliding && glide.scroll == 22;
 #endif
                 check("kit glide: a wheel notch aims one row on, and the position reaches it over several frames from below, never past it, in 256ths",
                       aimed && steps && reached && notch_monotone && !overshot && idle && fine);
-                check("kit glide: a throw glides on from the finger's let go at the wheel's decay, a time constant's share of its way by then",
+                check("kit glide: a wheel notch settles in 150 to 200 ms, to half a device pixel from one row (36 ms a time constant)",
+                      settle_ms >= 150 && settle_ms <= 200);
+                check("kit glide: a throw glides on from the finger's let go, the speed times the time constant (22 pixels), and stops there",
                       thrown);
                 check("kit glide: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
                 check("kit glide: a keyboard reveal glides to the row it shows, from where the region is, and a row in view is not moved",

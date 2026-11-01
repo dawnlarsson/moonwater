@@ -4357,6 +4357,7 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
         region by the time since its last.
 */
 #define UI_SCROLL_REVEAL_NS 100000000l // a reveal's glide: its speed falls by e in this long
+#define UI_SCROLL_TAU_NS 36000000l     // a wheel notch's and a throw's glide: its speed falls by e in this long (a notch settles in 158 ms at 1x)
 #define UI_SCROLL_REST 128             // a glide within half a device pixel of its aim is at it
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel
 #define UI_SCROLL_GLIDE 1              // the glide is built (the checks ask for it)
@@ -4543,7 +4544,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
         if (thrown)
         {
                 s->speed = (b64)speed * UI_SCROLL_SCALE;
-                ui_scroll_glide_to(s, s->at + s->speed * UI_DRAG_SLOW_NS / 1000000000ll, UI_DRAG_SLOW_NS);
+                ui_scroll_glide_to(s, s->at + s->speed * UI_SCROLL_TAU_NS / 1000000000ll, UI_SCROLL_TAU_NS);
         }
         ui_scroll_show(s);
 }
@@ -4621,8 +4622,8 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
                 s->dragging = 0, s->speed = 0;
         ui_scroll_rest(s);
         // The notch's own speed is its distance over the time constant, the throw's rule, so a notch and a throw decay alike.
-        s->speed += (aim - base) * 1000000000ll / UI_DRAG_SLOW_NS;
-        ui_scroll_glide_to(s, aim, UI_DRAG_SLOW_NS);
+        s->speed += (aim - base) * 1000000000ll / UI_SCROLL_TAU_NS;
+        ui_scroll_glide_to(s, aim, UI_SCROLL_TAU_NS);
         return true;
 }
 
