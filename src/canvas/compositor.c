@@ -97,6 +97,7 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_RADIUS_MOST 64
 
 #include "ui/theme.h"
+#include "ui/motion.h"
 #include "ui/taskbar.h"
 
 static struct taskbar_view compositor_taskbar_view(void);
@@ -142,6 +143,9 @@ struct compositor_frame
         // What of its line is lit, and in what ink (COMPOSITOR_INK_LINE_HELD or _HOVER): one edge (CP_EDGE_*) lit whole,
         // two that meet a corner lit with COMPOSITOR_LIT_REACH of each, COMPOSITOR_LIT_ALL all of it; 0 none.
         unsigned int lit, lit_ink;
+        // A window landing is drawn at less than its picture's size, source_w by source_h: its contents are that
+        // picture scaled (compositor_scaled). 0 for a frame drawn at its picture's size.
+        int source_w, source_h;
 };
 
 /*
@@ -194,6 +198,57 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
                 memory_copy(t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox),
                             source + (unsigned long)(row - y) * pitch + (unsigned long)(x1 - x),
                             (unsigned long)(x2 - x1) * 4);
+}
+
+/*
+        A picture drawn at a size that is not its own, which only a window landing is (compositor_land): nearest
+        neighbour, the source pixel under the centre of each target pixel. The source position steps in 24-bit
+        fixed point, so a pixel costs an add and a store and no divide; a row's first position is worked out once.
+        The step is rounded down, so the position never reaches the picture's last column or row.
+*/
+static void compositor_blit_scaled(const struct compositor_target *t, int x, int y, int width, int height,
+                                   const unsigned int *source, unsigned long pitch, int source_w, int source_h)
+{
+        int x1 = x > t->x1 ? x : t->x1;
+        int y1 = y > t->y1 ? y : t->y1;
+        int x2 = x + width < t->x2 ? x + width : t->x2;
+        int y2 = y + height < t->y2 ? y + height : t->y2;
+        unsigned long step_x, step_y, fy;
+
+        if (x2 <= x1 || y2 <= y1 || width <= 0 || height <= 0)
+                return;
+        step_x = ((unsigned long)source_w << 24) / (unsigned long)width;
+        step_y = ((unsigned long)source_h << 24) / (unsigned long)height;
+        fy = ((unsigned long)(2 * (y1 - y) + 1) * (unsigned long)source_h << 23) / (unsigned long)height;
+        for (int row = y1; row < y2; row++, fy += step_y)
+        {
+                const unsigned int *from = source + (fy >> 24) * pitch;
+                unsigned int *to = t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                unsigned long fx = ((unsigned long)(2 * (x1 - x) + 1) * (unsigned long)source_w << 23) / (unsigned long)width;
+
+                for (int col = x1; col < x2; col++, fx += step_x)
+                        *to++ = from[fx >> 24];
+        }
+}
+
+// A frame whose contents are its picture at another size (a window landing), so they are scaled from it.
+static int compositor_scaled(const struct compositor_frame *frame)
+{
+        return frame->source_w && (frame->width != frame->source_w || frame->height != frame->source_h);
+}
+
+// The picture's pixel at dx, dy from a frame's contents' top left: the frame's own, or, a frame scaled, the one
+// compositor_blit_scaled draws there (the source cell whose centre is the point's).
+static unsigned int compositor_picture_at(const struct compositor_frame *frame, int dx, int dy)
+{
+        unsigned long sx = (unsigned long)dx, sy = (unsigned long)dy;
+
+        if (compositor_scaled(frame))
+        {
+                sx = (2 * sx + 1) * (unsigned long)frame->source_w / (2 * (unsigned long)frame->width);
+                sy = (2 * sy + 1) * (unsigned long)frame->source_h / (2 * (unsigned long)frame->height);
+        }
+        return frame->pixels[sy * frame->pitch + sx];
 }
 
 // A title's length in characters, the bytes that begin one, to its end or the listing's.
@@ -425,7 +480,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
                         if (!halo)
                                 continue;
 
-                        unsigned int under = frame->pixels[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)];
+                        unsigned int under = compositor_picture_at(frame, px - frame->x, py - frame->y);
                         unsigned int pixel = compositor_mix(under, window_mix(under, tone, 140), halo * 255 / 16);
 
                         if (cross)
@@ -441,6 +496,9 @@ static void compositor_contents(const struct compositor_target *t, const struct 
                 compositor_panel_tab(t, frame->slot,
                                      frame->slot >= 0 && frame->slot < (int)frame->mark_count ? frame->marks[frame->slot] : 0,
                                      frame->x, frame->y, frame->width, frame->height);
+        else if (compositor_scaled(frame))
+                compositor_blit_scaled(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
+                                       frame->source_w, frame->source_h);
         else
                 compositor_blit(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch);
 }
@@ -575,8 +633,7 @@ static void compositor_draw(const struct compositor_target *t,
                                 {
                                         unsigned int in = inner ? inner[(my - b) * ri + (mx - b)] : 0;
                                         unsigned int ink = frame->builtin ? tab
-                                                           : frame->pixels[(unsigned long)(py - y) * frame->pitch +
-                                                                           (unsigned long)(px - x)];
+                                                           : compositor_picture_at(frame, px - x, py - y);
 
                                         if (!b)
                                                 in = cover;
@@ -2409,6 +2466,8 @@ static struct
         unsigned int woken;  // the rows to knock on at the end of the pass, a bit each
         unsigned int seen[WINDOWS];     // the frame last taken
         unsigned int showing[WINDOWS];  // it has shown a picture: it is on the screen and has a tab
+        unsigned char landing[WINDOWS]; // its first show is landing: drawn smaller, growing to its size (compositor_land)
+        positive land_at[WINDOWS];      // when its landing began, at the first present that drew it; 0 until then
         unsigned int made[WINDOWS];     // the order the windows first showed in, which their tabs are in
         int x[WINDOWS], y[WINDOWS];
         unsigned int w[WINDOWS], h[WINDOWS], front[WINDOWS], state[WINDOWS]; // w and h as it is shown
@@ -2889,6 +2948,87 @@ static int compositor_line(int row)
         return compositor.arranged[row] == COMPOSITOR_FLOATING ? COMPOSITOR_LINE * compositor.scale : 0;
 }
 
+/*
+        A window's first show lands: its picture starts at 96 percent of its size and grows to all of it over
+        COMPOSITOR_LAND_NS, on the kit's --ease, about its centre. A scale only: no fade, no shadow, no outline.
+        The clock starts at the first present that draws the window (compositor_land_keep), so that frame is the
+        96 percent one. Reduced motion, the table's as the kit reads it, lands nothing: the window is drawn at its
+        size at once. A window shown again, moved or resized does not land.
+*/
+#define COMPOSITOR_LAND_NS (170 * UI_MS)  // the landing, from the first present to its size
+#define COMPOSITOR_LAND_SMALL UI_Q2(96)  // the size it starts at, as a part of its own (Q30)
+
+// How much of a landing window's size is still to grow back, Q30: 4 percent before its first present, none once landed.
+static b64 compositor_land_short(int row)
+{
+        b64 done;
+
+        if (!compositor.landing[row])
+                return 0;
+        if (!compositor.land_at[row])
+                return UI_ONE - COMPOSITOR_LAND_SMALL;
+        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.land_at[row]), COMPOSITOR_LAND_NS));
+        return ui_qmul(UI_ONE - COMPOSITOR_LAND_SMALL, UI_ONE - done);
+}
+
+// A landing window's frame: its rectangle less the part still to grow back, about its centre, with its picture's size.
+static void compositor_land_frame(int row, struct compositor_frame *frame)
+{
+        b64 shrink = compositor_land_short(row);
+        int dw, dh;
+
+        if (!shrink || !compositor.w[row] || !compositor.h[row])
+                return;
+        dw = (int)(((b64)compositor.w[row] * shrink + UI_HALF) >> UI_Q);
+        dh = (int)(((b64)compositor.h[row] * shrink + UI_HALF) >> UI_Q);
+        frame->x += dw / 2;
+        frame->y += dh / 2;
+        frame->width -= dw;
+        frame->height -= dh;
+        frame->source_w = (int)compositor.w[row];
+        frame->source_h = (int)compositor.h[row];
+}
+
+// The whole of a landing window's rectangle at its size: every frame of its landing lies in it.
+static void compositor_land_damage(int row)
+{
+        int line = compositor_line(row);
+
+        compositor_damage(compositor.x[row] - line, compositor.y[row] - line, (int)compositor.w[row] + 2 * line,
+                          (int)compositor.h[row] + 2 * line);
+}
+
+// A window's first show: it lands from COMPOSITOR_LAND_SMALL, unless motion is reduced.
+static void compositor_land(int row)
+{
+        if (!compositor.table || compositor.table->motion)
+                return;
+        compositor.landing[row] = 1;
+        compositor.land_at[row] = 0;
+        compositor_land_damage(row);
+}
+
+/*
+        After a present: a window still landing is damaged again, so the next present draws it, and the one that
+        lands it is drawn at its size once more. Nothing is damaged after that, and the loop goes idle.
+*/
+static void compositor_land_keep(void)
+{
+        for (unsigned int row = 0; row < WINDOWS; row++)
+        {
+                positive now;
+
+                if (!compositor.landing[row])
+                        continue;
+                now = clock_monotonic_nanoseconds();
+                if (!compositor.land_at[row])
+                        compositor.land_at[row] = now;
+                if (!compositor.showing[row] || !compositor_visible(row) || now - compositor.land_at[row] >= COMPOSITOR_LAND_NS)
+                        compositor.landing[row] = 0;
+                compositor_land_damage(row);
+        }
+}
+
 // The buffer a window's picture is in, where the compositor made it: every row of it the output's width.
 static unsigned int *compositor_pixels(int row)
 {
@@ -2935,6 +3075,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            line ? COMPOSITOR_RADIUS * compositor.scale : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
+        compositor_land_frame(row, frame);
         // The edge or corner the hand holds or is over, or all of the line of a window being moved.
         if (row == compositor.lit_row && line)
         {
@@ -3854,7 +3995,7 @@ static void compositor_close_mean(struct compositor_frame *frame)
         for (int py = by; py < by + side; py++)
                 for (int px = bx; px < bx + side; px++)
                 {
-                        unsigned int under = frame->pixels[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)];
+                        unsigned int under = compositor_picture_at(frame, px - frame->x, py - frame->y);
 
                         sum[0] += under >> 16 & 255;
                         sum[1] += under >> 8 & 255;
@@ -4134,7 +4275,7 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
             compositor.drag >= 0 || compositor.resize >= 0 || compositor_output_count() > 1 || compositor_spots_any(0))
                 return -1;
         row = rows[windows - 1];
-        if (compositor.table->glass[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
+        if (compositor.table->glass[row] || compositor.landing[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
             compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
             compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
             compositor.asking[row] || compositor_radius(&frames[windows - 1]) || compositor_line(row))
@@ -4687,6 +4828,8 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (compositor.table->glass[row])
                 return *why = 5, -1;
+        if (compositor.landing[row])
+                return *why = 4, -1; // a window landing is drawn smaller than its picture
         if (compositor.asking[row] || compositor.picture_w[row] != compositor.w[row] ||
             compositor.picture_h[row] != compositor.h[row])
                 return *why = 6, -1;
@@ -7623,6 +7766,7 @@ static void compositor_take(int row)
                 compositor_raise(row);
                 if (compositor_visible(row))
                         compositor_focus(row);
+                compositor_land(row);
                 compositor_tabs_changed();
                 return;
         }
@@ -7738,6 +7882,7 @@ static void compositor_leave(int row)
         }
 
         compositor.showing[row] = compositor.seen[row] = compositor.state[row] = 0;
+        compositor.landing[row] = 0;
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
         compositor.picture_w[row] = compositor.picture_h[row] = compositor.asking[row] = 0;
         compositor.asks[row] = 0;
@@ -10628,6 +10773,7 @@ static b32 compositor_main()
                         {
                                 compositor.presented = stamp;
                                 compositor_present();
+                                compositor_land_keep();
                                 if (compositor.motion_ts)
                                 {
                                         compositor_latency(1, compositor.motion_ts, clock_monotonic_nanoseconds());

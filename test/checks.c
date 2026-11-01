@@ -115852,6 +115852,75 @@ static fn check_take(void)
 }
 
 /*
+        A window's first show lands: 96 percent of its size at its first present, eased up to all of it once its
+        time is past, and then nothing is damaged, so the loop goes idle. A window shown again does not land, and
+        reduced motion lands nothing.
+*/
+static fn check_land_setup(struct windows address_to table, unsigned int motion)
+{
+        memory_zero(&compositor, sizeof(compositor));
+        memory_zero(table, sizeof(*table));
+        compositor.table = table;
+        compositor.width = compositor.height = 512;
+        compositor.scale = 1;
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        table->width[2] = 200;
+        table->height[2] = 100;
+        table->x[2] = 100;
+        table->y[2] = 100;
+        table->frame[2] = 2;
+        table->buffer_index[2] = 1;
+        table->motion = motion;
+        string_copy((string_address)table->title[2], (string_address) "land");
+}
+
+static fn check_land(void)
+{
+        static struct windows table;
+        struct compositor_frame frame;
+        positive now;
+
+        check_land_setup(&table, 0);
+        compositor_take(2);
+        compositor_frame_of(2, &frame);
+        check("compositor: a window's first frame is at 96 percent of its size, about its centre",
+              compositor.landing[2] && compositor.w[2] == 200 && frame.width == 192 && frame.height == 96 &&
+                  frame.x == compositor.x[2] + 4 && frame.y == compositor.y[2] + 2 && frame.source_w == 200 &&
+                  frame.source_h == 100);
+
+        now = clock_monotonic_nanoseconds();
+        compositor.land_at[2] = now - 85 * UI_MS;
+        compositor_frame_of(2, &frame);
+        check("compositor: half way through its landing the window is between 96 and 100 percent",
+              compositor.landing[2] && frame.width > 192 && frame.width < 200 && frame.height >= 96 && frame.height <= 100);
+
+        compositor.damages = 0;
+        compositor.land_at[2] = now - 200 * UI_MS;
+        compositor_land_keep();
+        check("compositor: once its time is past the window has landed, and the frame that lands it is damaged",
+              !compositor.landing[2] && compositor.damages > 0);
+        compositor_frame_of(2, &frame);
+        check("compositor: a landed window is drawn at its own size and not scaled",
+              frame.width == 200 && frame.height == 100 && frame.x == compositor.x[2] && frame.y == compositor.y[2] &&
+                  !frame.source_w);
+        compositor.damages = 0;
+        compositor_land_keep();
+        check("compositor: a landed window damages nothing, so the compositor is idle", compositor.damages == 0);
+
+        table.frame[2] = 3;
+        table.buffer_index[2] = 0;
+        compositor_take(2);
+        check("compositor: a window shown again does not land", !compositor.landing[2]);
+
+        check_land_setup(&table, 1);
+        compositor_take(2);
+        compositor_frame_of(2, &frame);
+        check("compositor: with reduced motion a window's first picture is at its size at once",
+              !compositor.landing[2] && frame.width == 200 && frame.height == 100 && !frame.source_w);
+}
+
+/*
         Glass. A window that asks for it is what is under it, blurred and
         tinted, with its premultiplied picture over that: an opaque pixel
         is its own colour, a clear one the tint of the blur, and one between
@@ -115872,6 +115941,7 @@ static unsigned int address_to glass_table_map(void)
         if (mapped < 0 && mapped > -4096)
                 return null;
         compositor.table = (struct windows address_to)mapped;
+        compositor.table->motion = 1; // a window's first picture is drawn at its size: these checks compare pictures
         compositor.pixels = compositor.table->pixels = header;
         compositor.buffer = compositor.table->buffer = buffer;
         compositor.table->stride = compositor.table->output_width = compositor.table->output_height = GLASS_SIDE;
@@ -116137,6 +116207,7 @@ static void check_compositor_screens(void)
         return;
     }
     table = compositor.table = (struct windows address_to)mapped;
+    table->motion = 1; // a window's first picture is drawn at its size: these checks compare pictures
     compositor.pixels = table->pixels = header;
     compositor.buffer = table->buffer = buffer;
     table->stride = SCREENS_A_W;
@@ -130374,6 +130445,7 @@ b32 main()
         check_keys();
         check_pointer();
         check_take();
+        check_land();
         check_glass();
         check_compositor_partial();
         check_compositor_held();

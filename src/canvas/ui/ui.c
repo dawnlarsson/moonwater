@@ -619,8 +619,7 @@ static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int 
                                            the app steps it again UI_DRAG_FRAME_NS later while it flies
             ui_drag_stop(drag)             it stops at once: a press, a key, the end of the list
 */
-#define UI_Q 30                    // the kit's fixed point, Q30: the drag's throw is kept in it, and the glide's
-#define UI_ONE (1ll << UI_Q)
+#include "motion.h"
 static inline b64 ui_qmul(b64 a, b64 b);
 static b64 ui_exp_neg(b64 x);
 #define UI_DRAG_FRAME_NS 16000000l
@@ -738,32 +737,10 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
                         ease-out cubic, snapped to the step, then the landing
                         squish (60 ms up, 220 back)
 */
-#define UI_HALF (1ll << (UI_Q - 1))
 #define UI_LN2 744261118ll                 // ln 2
 #define UI_INV_LN2 1549082005ll            // 1 / ln 2
 #define UI_PI_2_Q60 1811004864519280711ll  // pi / 2, in Q60
 #define UI_TWO_OVER_PI 683565276ll         // 2 / pi
-#define UI_MS 1000000ll                    // a millisecond in nanoseconds
-
-static inline b64 ui_qmul(b64 a, b64 b)
-{
-        return (b64)(((b128)a * b + UI_HALF) >> UI_Q);
-}
-
-// a / b, both Q30, rounded to the nearest. A large a shifts less and b loses as many of its last places.
-static inline b64 ui_qdiv(b64 a, b64 b)
-{
-        p64 n = (p64)(a < 0 ? -a : a), d = (p64)(b < 0 ? -b : b);
-        int shift = UI_Q;
-
-        while (shift > 0 && n >> (62 - shift))
-                shift--;
-        d >>= UI_Q - shift;
-        if (!d)
-                return 0;
-        n = ((n << shift) + d / 2) / d;
-        return (a < 0) != (b < 0) ? -(b64)n : (b64)n;
-}
 
 // A whole number of logical pixels, or a count, as Q30.
 static inline b64 ui_q(b64 whole)
@@ -776,19 +753,6 @@ static inline b64 ui_ms(b64 ns)
 {
         ns = ns < 0 ? 0 : ns > 60000 * UI_MS ? 60000 * UI_MS : ns;
         return (ns << 24) / 15625; // 2^30 / 10^6 is 2^24 / 15625
-}
-
-// How far through a span of duration a time elapsed is, 0 to UI_ONE.
-static inline b64 ui_progress(b64 elapsed, b64 duration)
-{
-        if (elapsed <= 0 || duration <= 0)
-                return duration <= 0 ? UI_ONE : 0;
-        if (elapsed >= duration)
-                return UI_ONE;
-        // Both under 2^33 ns (8 s), so the shifted time stays in 64 bits; longer spans lose their last places.
-        while (duration >= 1ll << 33)
-                duration >>= 1, elapsed >>= 1;
-        return (elapsed << UI_Q) / duration;
 }
 
 // e to the -x, x 0 or more: x taken down by ln 2 till under it, the rest's series, and the halvings.
@@ -863,75 +827,9 @@ static inline b64 ui_qsqrt(b64 x)
         return (b64)(ui_isqrt((p64)x << shift) << ((UI_Q - shift) / 2));
 }
 
-/*
-        A cubic-bezier timing function: x(t) and y(t) as polynomials, Q30. CSS's
-        are solved for t as Chrome solves them (gfx::CubicBezier: Newton's steps
-        from the straight guess, then halving the bracket), to under 1e-7 of x.
-*/
-struct ui_bezier
-{
-        b64 ax, bx, cx, ay, by, cy;
-};
-
-#define UI_BEZIER(x1, y1, x2, y2)                                                                                     \
-        {(UI_ONE - 3 * (x1) - (3 * ((x2) - (x1)) - 3 * (x1))), (3 * ((x2) - (x1)) - 3 * (x1)), 3 * (x1),                \
-         (UI_ONE - 3 * (y1) - (3 * ((y2) - (y1)) - 3 * (y1))), (3 * ((y2) - (y1)) - 3 * (y1)), 3 * (y1)}
-#define UI_Q2(hundredths) ((b64)(hundredths) * UI_ONE / 100)
-
-static const struct ui_bezier ui_ease = UI_BEZIER(UI_Q2(20), 0, 0, UI_ONE);                  // --ease, --ease-emphasized
 static const struct ui_bezier ui_ease_rise = UI_BEZIER(UI_Q2(40), UI_Q2(65), UI_Q2(30), UI_ONE); // --rb-ease-rise
 static const struct ui_bezier ui_ease_out = UI_BEZIER(0, 0, UI_Q2(58), UI_ONE);              // CSS ease-out
 static const struct ui_bezier ui_ease_ripple = UI_BEZIER(UI_Q2(40), 0, UI_Q2(20), UI_ONE);   // ui.js i()
-
-static inline b64 ui_bezier_x(const struct ui_bezier address_to e, b64 t)
-{
-        return ui_qmul(ui_qmul(ui_qmul(e->ax, t) + e->bx, t) + e->cx, t);
-}
-
-static inline b64 ui_bezier_y(const struct ui_bezier address_to e, b64 t)
-{
-        return ui_qmul(ui_qmul(ui_qmul(e->ay, t) + e->by, t) + e->cy, t);
-}
-
-static inline b64 ui_bezier_dx(const struct ui_bezier address_to e, b64 t)
-{
-        return ui_qmul(ui_qmul(3 * e->ax, t) + 2 * e->bx, t) + e->cx;
-}
-
-static b64 ui_bezier_at(const struct ui_bezier address_to e, b64 x)
-{
-        b64 t = x, low = 0, high = UI_ONE;
-
-        if (x <= 0)
-                return 0;
-        if (x >= UI_ONE)
-                return UI_ONE;
-        for (int step = 0; step < 8; step++)
-        {
-                b64 off = ui_bezier_x(e, t) - x, slope = ui_bezier_dx(e, t);
-
-                if (off >= -1 && off <= 1)
-                        return ui_bezier_y(e, t);
-                if (slope < 108) // 1e-7
-                        break;
-                t -= ui_qdiv(off, slope);
-                t = t < 0 ? 0 : t > UI_ONE ? UI_ONE : t;
-        }
-        t = x;
-        for (int step = 0; step < 48 && low < high; step++)
-        {
-                b64 at = ui_bezier_x(e, t);
-
-                if (at - x >= -1 && at - x <= 1)
-                        break;
-                if (x > at)
-                        low = t;
-                else
-                        high = t;
-                t = (low + high) / 2;
-        }
-        return ui_bezier_y(e, t);
-}
 
 // ui.js's i(): the ripple's cubic-bezier(.4,0,.2,1) by five of Newton's steps from t = x, no bracket.
 static b64 ui_ripple_ease(b64 x)
