@@ -12,9 +12,9 @@
         size is crisp, and nothing in the kernel knows what a cell is.
 
         What it draws is what the kernel's cells draw: the same palette, the
-        same folding of a stored line at the width it is drawn in, a bar down
-        the right that is the scrollback, seen while the view is scrolled
-        back, and the wheel and a drag on the bar to move over it. It owes
+        same folding of a stored line at the width it is drawn in, the kit's
+        scroll bar down the right where there is a scrollback, and the wheel
+        and a drag on the bar to move over it. It owes
         the shell what the kernel's window owed it -- keys, the pointer when
         a program has asked for it, a window size on the pty before SIGWINCH,
         the hangup when the X is pressed -- and those come through the same
@@ -107,8 +107,6 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 #define TERMINAL_IDLE_NANOSECONDS 1000000000ll
 // The longest a frame of the output lasts, when the compositor does not say.
 #define TERMINAL_FRAME_NANOSECONDS 16666667ll
-// How long the scroll bar takes to fade once the view is back at the live end.
-#define TERMINAL_FADE_NANOSECONDS 250000000ll
 // A frame that has waited this long for the compositor to take the last picture draws into the one it has
 // not taken regardless: the compositor not on the screen is not reading it, and a terminal that never draws
 // again is worse.
@@ -132,10 +130,10 @@ static struct
         unsigned int plain_count, bold_count;
         font_metrics grid;
         unsigned int size; // in 26.6, which is what font.c takes
-        // The paper round the grid: margin at least on every side, at the left (pad), at the right (bar),
-        // where the scroll bar is, and above and below (pad_y), which also takes half of what is left of the
-        // window's height under its whole rows, so the grid sits in the middle of it.
-        unsigned int cell_w, cell_h, bar, pad, pad_y, margin;
+        // The paper round the grid: margin at least on every side, at the left (pad), at the right (the gutter, which
+        // is terminal_gutter(): the kit's scroll bar and a margin either side), and above and below (pad_y), which
+        // also takes half of what is left of the window's height under its whole rows, so the grid sits in the middle of it.
+        unsigned int cell_w, cell_h, pad, pad_y, margin;
         unsigned int width, height; // the window, in pixels
         unsigned int pitch;         // pixels a row of a buffer, which is the output's width
         unsigned int ground;        // the window's ground as the runner last saw it (the terminal draws its own paper)
@@ -153,17 +151,14 @@ static struct
         unsigned int cursor_at;    // the frame's cell a block cursor turned round, or ~0
         b32 forced;                // a frame waited too long for the compositor: the buffer is taken
         unsigned int bar_first[2], bar_shown[2], bar_total[2], bar_drawn[2];
-        // How much of the bar is seen, in 256ths: all of it while the view is off the live end or the bar is held,
-        // and fading to none from when the view is back at the end.
-        unsigned int bar_level;
-        unsigned long bar_fading;
+        // The kit's scroll bar: its track and thumb as the kit draws them, and its hover and grab as the kit keeps them.
+        struct ui_scroll bar;
 
         // Where the view sits in the ring: a line and how many of its rows are above.
         unsigned int view, view_skip;
 
-        // The pointer, in buffer pixels, and the button being held on the bar.
+        // The pointer, in buffer pixels.
         int pointer_x, pointer_y;
-        int bar_grab;
         unsigned int modifiers; // from the keys, which are the only events that say
         b32 pressed;
         int wheel_remainder;
@@ -466,40 +461,83 @@ static unsigned int terminal_track(void)
         return ROWS * terminal.cell_h;
 }
 
-// The thumb's height, never under a cell, and where its top is: the rows above the view over the rows it
-// can start at, across the span the thumb travels.
-static unsigned int terminal_thumb(unsigned int shown, unsigned int total)
+// The scale the kit draws at: the runner's, or 1 where there is no runner (the checks).
+static int terminal_scale(void)
 {
-        unsigned int thumb = (unsigned int)((unsigned long)terminal_track() * shown / total);
-
-        return thumb < terminal.cell_h ? terminal.cell_h : thumb > terminal_track() ? terminal_track() : thumb;
+        return terminal.ui.scale > 0 ? terminal.ui.scale : 1;
 }
 
-static unsigned int terminal_thumb_top(unsigned int first, unsigned int shown, unsigned int total)
+// The gutter at the right of the grid: the kit's scroll bar's width, with the margin either side of it.
+static unsigned int terminal_gutter(void)
 {
-        unsigned int span = terminal_track() - terminal_thumb(shown, total);
-
-        return total > shown ? (unsigned int)((unsigned long)span * first / (total - shown)) : 0;
+        return 2 * terminal.margin + UI_SCROLL_WIDTH * (unsigned int)terminal_scale();
 }
 
-// The bar put under the hand: where the pointer is in it, as a place in the rows.
-static b32 terminal_bar_move(int y)
+// The kit's ui for the window's picture: the terminal's own engine and faces, at the scale, over the buffer whole.
+static struct ui terminal_kit(unsigned int address_to whole)
+{
+        struct ui kit = terminal.ui;
+
+        kit.pixels = whole;
+        kit.pitch = terminal.pitch;
+        kit.width = terminal.width;
+        kit.height = terminal.height;
+        kit.top = 0;
+        kit.bottom = terminal.height;
+        kit.band_top = kit.band_bottom = 0;
+        kit.opaque = false;
+        kit.scale = terminal_scale();
+        return kit;
+}
+
+// The kit's scroll bar where the view is: the track beside the grid's rows, the view's rows over the scrollback's, and
+// first, the rows above the view. Its hover and grab stay as the kit keeps them, from one frame to the next.
+static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned int total)
+{
+        terminal.bar.x = (int)(terminal.pad + COLUMNS * terminal.cell_w + terminal.margin);
+        terminal.bar.y = (int)terminal.pad_y;
+        terminal.bar.height = (int)terminal_track();
+        terminal.bar.content = (int)total;
+        terminal.bar.view = (int)shown;
+        terminal.bar.scroll = (int)first;
+}
+
+// The bar is there when the view has a scrollback to go back through.
+static b32 terminal_bar_shown(void)
 {
         unsigned int first, shown, total;
-        unsigned int span, thumb, track = terminal_track();
-        int top;
 
-        if (!terminal_extent(&first, &shown, &total) || !track)
+        return terminal_extent(&first, &shown, &total) && total > shown;
+}
+
+// What the bar is drawn in beyond its place: held and hovered, the two states the kit draws it in.
+static unsigned int terminal_bar_key(void)
+{
+        return (terminal.bar.held ? 1u : 0u) | (terminal.bar.hover ? 2u : 0u);
+}
+
+// The bar's pointer, through the kit's own (ui_scroll_pointer): a press, a release or a motion at x, y in the window.
+// Answers whether the bar took it, and sets moved when the view went somewhere.
+static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to moved)
+{
+        unsigned int first, shown, total;
+        struct ui kit = terminal_kit(null);
+        int scroll, most;
+
+        *moved = false;
+        if (!terminal_extent(&first, &shown, &total) || total <= shown)
+        {
+                terminal.bar.hover = terminal.bar.held = 0;
                 return false;
-
-        thumb = terminal_thumb(shown, total);
-        span = track > thumb ? track - thumb : 0;
-        top = y - terminal.bar_grab;
-        top = top < 0 ? 0 : (unsigned int)top > span ? (int)span : top;
-
-        // The thumb's top over the span it travels is the view over the rows it can start at, so the
-        // bottom of the track is the live end even when the thumb was made taller than its share.
-        return terminal_view_set(span ? (unsigned int)((unsigned long)top * (total - shown) / span) : 0);
+        }
+        terminal_bar_place(first, shown, total);
+        scroll = ui_scroll_pointer(&kit, &terminal.bar, type, x, y, down);
+        if (scroll < 0)
+                return false;
+        most = (int)(total - shown);
+        scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
+        *moved = terminal_view_set((unsigned int)scroll);
+        return true;
 }
 
 static void terminal_select_mark(struct window_cell address_to out, unsigned int line, unsigned int from);
@@ -589,6 +627,7 @@ static void terminal_span(const struct window_cell address_to now, const struct 
 
 /* ---- the pixels ---- */
 
+// SGR dim, the program's own attribute on its text: content, which the kit has no role for, so it stays.
 static unsigned int terminal_mix(unsigned int ink, unsigned int paper)
 {
         return ((ink & 0xfefefe) >> 1) + ((paper & 0xfefefe) >> 1);
@@ -720,13 +759,10 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 unsigned int ink = terminal_colour[cell->ink];
                 unsigned int paper = terminal_colour[cell->paper];
 
-                // A selected cell lies on the theme's selection colour, which is a tint over its own paper.
+                // A selected cell lies on the theme's selection colour, which is a tint over its own paper, blended as the kit
+                // blends its fills (the paper is the program's, the tint the kit's; the alpha stays as the buffer's, 0).
                 if (cell->flags & WINDOW_CELL_SELECTED)
-                {
-                        unsigned int tint = ui_role(UI_SELECTION);
-
-                        paper = window_mix(paper, tint & 0xffffffu, (tint >> 24) * 256 / 255);
-                }
+                        paper = ui_over(ui_premultiplied(ui_role(UI_SELECTION), UI_FULL), paper) & 0xffffffu;
                 // A wide character is both its cells; one cut by the edge of a row, or whose
                 // other half is on another row of a folded line, is blank here.
                 b32 pair = (cell->flags & WINDOW_CELL_WIDE) && at + 1 < COLUMNS &&
@@ -881,53 +917,17 @@ static void terminal_margin(unsigned int address_to whole, const struct window_c
 }
 
 /*
-        The coverage of the pill's pixels: how many of each pixel's sixteen sample points are inside its round ends. It
-        depends on the pill's size and nothing else, and the thumb moves a line at a time, so its size changes about
-        once in every few lines; the table is worked out again only when the size changes. Sampling every pixel of the
-        pill at each redraw was most of the bar's cost (about 75000 instructions a frame at 680 pixels).
-*/
-#define TERMINAL_BAR_COVER 32768
-static unsigned char terminal_bar_cover[TERMINAL_BAR_COVER];
-static int terminal_bar_across = -1, terminal_bar_along = -1;
-
-// How many of the sixteen sample points of one pixel of the scroll bar's pill are inside its round ends (see terminal_bar).
-static unsigned int terminal_bar_inside(int column, int row, int across, int along, int radius)
-{
-        unsigned int inside = 0;
-
-        for (int sy = 0; sy < 4; sy++)
-                for (int sx = 0; sx < 4; sx++)
-                {
-                        int px = 2 * (column * 4 + sx) + 1, py = 2 * (row * 4 + sy) + 1;
-                        int dx = px - across;
-                        int dy = py < 2 * radius ? py - 2 * radius
-                                 : py > 2 * (along - radius) ? py - 2 * (along - radius) : 0;
-
-                        inside += dx * dx + dy * dy <= across * across;
-                }
-        return inside;
-}
-
-/*
         The right of the grid: each row's paper, from its last cell, to the
-        window's right edge, and the scroll bar's thumb a pill on it, as wide
-        as half the gutter, round at both ends, a quarter of the gutter in
-        from every side of the place the thumb has, in a colour between the
-        paper and the ink that stands out on the row's paper (window_contrast),
-        so it is seen on any ground a program paints. Where a pixel is part of
-        a round end it is the share of its sixteen points inside the pill,
-        mixed with that ground, which is known: nothing is read back. No
-        track, and no pill when everything fits or the view is at the live end
-        and the bar has faded: it is seen only while the view is scrolled back.
-
-        Not the kit's scrollbar (ui_scroll), on purpose: its paper is what the program paints, row by row, so its ink
-        is window_contrast of each row's ground and not a theme role, and it is drawn inside the grid's row bands.
+        window's right edge, and the kit's scroll bar on it where the view has
+        a scrollback. The kit draws the bar (ui_scroll_draw) in its own colours
+        and at its own width, and takes the pointer on the same track
+        (terminal_bar_pointer), so what is drawn and what is pressed agree.
 */
 static void terminal_bar(unsigned int address_to whole, const struct window_cell address_to frame, unsigned int first,
                          unsigned int shown, unsigned int total)
 {
-        unsigned int x = terminal.pad + COLUMNS * terminal.cell_w, track = terminal_track();
-        unsigned int thumb, at, gutter = terminal.bar, inset, wide, top, height;
+        unsigned int x = terminal.pad + COLUMNS * terminal.cell_w, top, height;
+        struct ui kit;
 
         for (unsigned int row = 0; row < ROWS; row++)
         {
@@ -936,73 +936,12 @@ static void terminal_bar(unsigned int address_to whole, const struct window_cell
                               terminal_ground(frame, row, COLUMNS - 1));
         }
 
-        if (!gutter || x + gutter > terminal.width || total <= shown || !terminal.bar_level)
+        if (x + terminal_gutter() > terminal.width || total <= shown)
                 return;
 
-        // The thumb and its top are the ones the pointer is tested against (terminal_thumb, terminal_thumb_top): the
-        // two must agree when the thumb is made taller than its share, or a press on the thumb is not on it.
-        thumb = terminal_thumb(shown, total);
-        at = terminal_thumb_top(first, shown, total);
-        at = at + thumb > track ? track - thumb : at;
-
-        inset = gutter / 4 ? gutter / 4 : 1;
-        wide = gutter > 2 * inset ? gutter - 2 * inset : 1;
-        if (thumb <= 2 * inset + wide)
-                return;
-
-        // In eighths of a pixel from the pill's top left (sample centres are odd): its ends are half
-        // circles of radius wide / 2.
-        int across = (int)wide * 4, along = (int)(thumb - 2 * inset) * 4, radius = across / 2;
-        unsigned int left = x + inset, pill = terminal.pad_y + at + inset;
-        int columns = across / 4, rows = along / 4;
-        b32 kept = (unsigned long)columns * (unsigned long)rows <= TERMINAL_BAR_COVER;
-
-        if (kept && (across != terminal_bar_across || along != terminal_bar_along))
-        {
-                for (int row = 0; row < rows; row++)
-                        for (int column = 0; column < columns; column++)
-                                terminal_bar_cover[row * columns + column] =
-                                    (unsigned char)terminal_bar_inside(column, row, across, along, radius);
-                terminal_bar_across = across;
-                terminal_bar_along = along;
-        }
-
-        unsigned int ink = 0, inked_ground = 0;
-        b32 inked = false;
-
-        for (int row = 0; row < rows; row++)
-        {
-                unsigned int y = pill + (unsigned int)row, cell_row = (y - terminal.pad_y) / terminal.cell_h;
-                unsigned int address_to line = whole + (unsigned long)y * terminal.pitch + left;
-                unsigned int ground = terminal_ground(frame, cell_row < ROWS ? cell_row : ROWS - 1, COLUMNS - 1);
-
-                // The ink is a function of the ground and the level alone, and most rows have the same ground: it is
-                // worked out again only when the ground changes.
-                if (!inked || ground != inked_ground)
-                {
-                        ink = window_mix(ground, window_contrast(ground), 160 * terminal.bar_level / 256);
-                        inked_ground = ground;
-                        inked = true;
-                }
-
-                for (int column = 0; column < columns; column++)
-                {
-                        unsigned int inside = kept ? terminal_bar_cover[row * columns + column]
-                                                   : terminal_bar_inside(column, row, across, along, radius);
-
-                        if (inside == 16)
-                                line[column] = ink;
-                        else if (inside)
-                        {
-                                unsigned int mixed = 0;
-
-                                for (unsigned int shift = 0; shift < 24; shift += 8)
-                                        mixed |= (((ground >> shift & 255) * (16 - inside) + (ink >> shift & 255) * inside + 8) / 16)
-                                                 << shift;
-                                line[column] = mixed;
-                        }
-                }
-        }
+        kit = terminal_kit(whole);
+        terminal_bar_place(first, shown, total);
+        ui_scroll_draw(&kit, &terminal.bar);
 }
 
 // The grid's top left in a buffer, which the cells and the bar are drawn from.
@@ -1227,9 +1166,9 @@ static b32 terminal_frame(void)
         // The bar is drawn where the buffer's own was not the same, and the compositor is
         // told where the one on the screen was not.
         bar = !terminal.valid[slot] || terminal.bar_first[slot] != first || terminal.bar_shown[slot] != shown ||
-              terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != terminal.bar_level;
+              terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != terminal_bar_key();
         bar_told = !screen || terminal.bar_first[front] != first || terminal.bar_shown[front] != shown ||
-                   terminal.bar_total[front] != total || terminal.bar_drawn[front] != terminal.bar_level;
+                   terminal.bar_total[front] != total || terminal.bar_drawn[front] != terminal_bar_key();
 
         // A top margin a spoil reached is drawn again, which makes the frame whether or not a cell changed.
         b32 margin = terminal.margin_spoiled[slot];
@@ -1292,7 +1231,7 @@ static b32 terminal_frame(void)
                 terminal.bar_first[slot] = first;
                 terminal.bar_shown[slot] = shown;
                 terminal.bar_total[slot] = total;
-                terminal.bar_drawn[slot] = terminal.bar_level;
+                terminal.bar_drawn[slot] = terminal_bar_key();
         }
 
         // What the compositor reads again: one rectangle round the rows and the bar that differ from what
@@ -1325,12 +1264,12 @@ static b32 terminal_frame(void)
                         y2 = y2 > (int)terminal.pad_y ? y2 : (int)terminal.pad_y;
                 }
 
-                if (bar_told && terminal.bar)
+                if (bar_told && terminal_gutter())
                 {
                         int left = (int)(terminal.pad + COLUMNS * terminal.cell_w), top = (int)terminal.pad_y;
 
                         x1 = left < x1 ? left : x1;
-                        x2 = left + (int)terminal.bar > x2 ? left + (int)terminal.bar : x2;
+                        x2 = left + (int)terminal_gutter() > x2 ? left + (int)terminal_gutter() : x2;
                         y1 = top < y1 ? top : y1;
                         y2 = top + (int)terminal_track() > y2 ? top + (int)terminal_track() : y2;
                 }
@@ -1359,14 +1298,14 @@ static b32 terminal_frame(void)
 
 /* ---- the program ---- */
 
-// The paper round the grid, for the cell the font gives: a third of a cell's height on every side.
+// The paper round the grid, for the cell the font gives: a third of a cell's height on every side. A function of the
+// font's cell, not a kit metric: the kit's pad is for its own rows and sections, and the grid is the font's.
 static void terminal_margins(void)
 {
         unsigned int margin = terminal.cell_h / 3 ? terminal.cell_h / 3 : 1;
 
         terminal.margin = margin;
         terminal.pad = margin;
-        terminal.bar = margin;
         terminal.pad_y = margin;
 }
 
@@ -1433,13 +1372,14 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
 static unsigned int terminal_pixels(unsigned int columns, unsigned int rows, unsigned int address_to height)
 {
         address_to height = rows * terminal.cell_h + 2 * terminal.margin;
-        return columns * terminal.cell_w + terminal.pad + terminal.bar;
+        return columns * terminal.cell_w + terminal.pad + terminal_gutter();
 }
 
-// The cells a window's width or height has room for, the paper and the gutter taken off.
+// The cells a window's width or height has room for, the paper and the gutter taken off. The grid is the app's own
+// geometry (a terminal's cells, not a kit metric), so it stays as it is.
 static unsigned int terminal_columns(unsigned int width)
 {
-        unsigned int edge = terminal.pad + terminal.bar;
+        unsigned int edge = terminal.pad + terminal_gutter();
 
         return width > edge ? (width - edge) / terminal.cell_w : 1;
 }
@@ -1825,12 +1765,12 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         b32 moved, sent;
 
         *handled = false;
-        if (!(event->flags & WINDOW_KEY_TOUCH) || mouse_mode || terminal.bar_grab >= 0)
+        if (!(event->flags & WINDOW_KEY_TOUCH) || mouse_mode || terminal.bar.held)
                 return true;
         if (event->type == WINDOW_EVENT_MOTION && terminal.finger)
         {
                 long dx = (long)terminal.pointer_x - terminal.finger_x, dy = (long)terminal.pointer_y - terminal.finger_y;
-                long slop = (long)UI_SLOP * (terminal.ui.scale > 0 ? terminal.ui.scale : 1);
+                long slop = (long)UI_SLOP * terminal_scale();
 
                 *handled = true;
                 if (!terminal.finger_moved && dx * dx + dy * dy >= slop * slop)
@@ -1846,7 +1786,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         if (event->type != WINDOW_EVENT_BUTTON || event->a != 0x110)
                 return true;
         // The gutter is the bar's, for a finger as for the mouse.
-        if ((event->flags & WINDOW_KEY_DOWN) && terminal.bar_level && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
+        if ((event->flags & WINDOW_KEY_DOWN) && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) && terminal_bar_shown())
                 return true;
         *handled = true;
         if (event->flags & WINDOW_KEY_DOWN)
@@ -2118,7 +2058,7 @@ static fn terminal_menu_open(int x, int y, b32 touch)
                         menu_face_state = ui_face_load(&menu_face, (string_address)UI_FONT_REGULAR) ? 1 : -1;
                 menu_ui.regular = menu_ui.bold = menu_face_state > 0 ? &menu_face : terminal.plain[0];
         }
-        ui_scratch_fit(&terminal.ui, 640u * (unsigned int)(terminal.ui.scale > 0 ? terminal.ui.scale : 1));
+        ui_scratch_fit(&terminal.ui, 640u * (unsigned int)terminal_scale());
         menu_ui.scratch = terminal.ui.scratch, menu_ui.scratch_width = terminal.ui.scratch_width;
         ui_popup_open(&terminal_menu, &terminal.own, &menu_ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
@@ -2347,21 +2287,26 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 return term_input(master, &key);
 
         case WINDOW_EVENT_MOTION:
-                // Where the pointer is from the grid's top left: the paper round it is no cell's.
-                terminal.pointer_x = event->a - (int)terminal.pad;
-                terminal.pointer_y = event->b - (int)terminal.pad_y;
-
-                if (terminal.bar_grab < 0 && terminal_select_event(event, dirty))
-                        return true;
-                if (!mouse_mode && terminal.bar_grab < 0)
-                        return true;
-
-                if (terminal.bar_grab >= 0)
                 {
-                        if (terminal_bar_move(terminal.pointer_y))
+                        // Where the pointer is from the grid's top left: the paper round it is no cell's.
+                        b32 moved = false, lit = terminal.bar.hover;
+
+                        terminal.pointer_x = event->a - (int)terminal.pad;
+                        terminal.pointer_y = event->b - (int)terminal.pad_y;
+
+                        // The kit's bar takes the motion that is over it or held; what it lights or moves is drawn again.
+                        if (terminal.bar.held || terminal.bar.hover || terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
+                                terminal_bar_pointer(WINDOW_EVENT_MOTION, event->a, event->b, false, &moved);
+                        if (moved || lit != terminal.bar.hover)
                                 address_to dirty = true;
-                        return true;
+                        if (terminal.bar.held)
+                                return true;
                 }
+
+                if (terminal_select_event(event, dirty))
+                        return true;
+                if (!mouse_mode)
+                        return true;
 
                 terminal_pointer_key(0, WINDOW_KEY_POINTER_MOVE | (terminal.pressed ? WINDOW_KEY_DOWN : 0), &key);
                 return term_input(master, &key);
@@ -2370,31 +2315,23 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
         {
                 unsigned int button = event->a == 0x111 ? 2 : event->a == 0x112 ? 1 : 0;
                 b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
-                unsigned int first, shown, total;
 
                 if (event->a != 0x110 && event->a != 0x111 && event->a != 0x112)
                         return true;
 
-                // The gutter is the bar's, not the program's.
-                if (event->a == 0x110 && down && terminal.bar_level &&
-                    terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) && terminal_extent(&first, &shown, &total))
+                // The gutter is the bar's, not the program's, where there is a bar: its press, and the release of a held
+                // thumb, go to the kit's pointer.
+                if (event->a == 0x110 && (terminal.bar.held || (down && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) &&
+                                                               terminal_bar_shown())))
                 {
-                        unsigned int thumb = terminal_thumb(shown, total), top = terminal_thumb_top(first, shown, total);
+                        b32 moved = false;
 
-                        terminal.bar_grab = (unsigned int)terminal.pointer_y >= top &&
-                                                    (unsigned int)terminal.pointer_y < top + thumb
-                                                ? terminal.pointer_y - (int)top
-                                                : (int)thumb / 2;
-                        if (terminal_bar_move(terminal.pointer_y))
+                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, event->a, event->b, down, &moved);
+                        if (moved)
                                 address_to dirty = true;
                         return true;
                 }
 
-                if (!down && terminal.bar_grab >= 0)
-                {
-                        terminal.bar_grab = -1;
-                        return true;
-                }
                 // A left press in the gutter, and its release when the press was not the program's, is the scroll bar's
                 // whether or not there is anything to scroll: a report there would be clamped onto the grid's last column.
                 if (event->a == 0x110 && (down || !terminal.pressed) && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
@@ -2585,8 +2522,8 @@ static unsigned int terminal_cells[2];
         The loop, as the runner drives it. The runner waits on the compositor and on the pty, and each pass takes the
         compositor's events, the table's asks, and a picture when one is due; the hooks below are that body in its
         order: the pass's start (the cells touched and the far end's modes), the events, the focus, the size, the
-        closing, the frame and its holds, then the far end's report, the title, the synchronized frame's hold, the bar's
-        fade, and the timers that say how long the wait may be.
+        closing, the frame and its holds, then the far end's report, the title, the synchronized frame's hold, and the
+        timers that say how long the wait may be.
 */
 
 // The far end's output, read: what is read is a change, and the frame is due. Waited on after every pass, as the loop read it.
@@ -2799,7 +2736,7 @@ static void terminal_leave(b32 show)
 
 /*
         The rest of a pass, after the frame: the modes and the title, the report the far end is owed, the synchronized frame's
-        hold, the bar's fade, and the timers. The answer is the wait's timeout: -1 for ever, else the longest the wait may
+        hold, and the timers. The answer is the wait's timeout: -1 for ever, else the longest the wait may
         last; 0 when a frame is due now and not held, so the loop runs again before it waits. The pty the wait is on is set
         too: none while the window stays.
 */
@@ -2873,33 +2810,6 @@ static long terminal_tick(long timeout, long address_to other)
                 terminal.sync_held = false;
 
         terminal.dirty |= terminal.changed;
-
-        // The bar: seen while the view is scrolled back or the bar is held, and faded out over a quarter of a second once the
-        // view is back at the live end, a frame a step.
-        {
-                unsigned int level = 256;
-
-                if (terminal.view != TERMINAL_LIVE || terminal.bar_grab >= 0)
-                        terminal.bar_fading = 0;
-                else if (!terminal.bar_level)
-                        level = 0;
-                else
-                {
-                        now = clock_monotonic_nanoseconds();
-                        terminal.bar_fading = terminal.bar_fading ? terminal.bar_fading : now;
-                        level = now - terminal.bar_fading >= (positive)TERMINAL_FADE_NANOSECONDS
-                                    ? 0
-                                    : (unsigned int)(256 - 256 * (now - terminal.bar_fading) / TERMINAL_FADE_NANOSECONDS);
-                        terminal.bar_fading = level ? terminal.bar_fading : 0;
-                }
-                if (level != terminal.bar_level)
-                {
-                        terminal.bar_level = level;
-                        terminal.dirty = true;
-                }
-                if (terminal.bar_fading)
-                        timeout = timeout < 0 || timeout > (long)TERMINAL_FRAME_NANOSECONDS ? (long)TERMINAL_FRAME_NANOSECONDS : timeout;
-        }
 
         if (hold >= 0 && (timeout < 0 || hold < timeout))
                 timeout = hold;
@@ -3016,7 +2926,6 @@ static int terminal_start(void)
         terminal_open(terminal.reading ? TERMINAL_LOG_WIDE : TERMINAL_WIDE, terminal.reading ? TERMINAL_LOG_HIGH : TERMINAL_HIGH,
                       terminal.reading ? TERMINAL_LOG_LEFT : TERMINAL_LEFT, terminal.reading ? TERMINAL_LOG_TOP : TERMINAL_TOP,
                       &columns, &rows, terminal_cells);
-        terminal.bar_grab = -1;
 
         // The ring is cut for the smallest text a zoom reaches, so that every size after this one has room in it.
         font_metrics least = font_metrics_at(terminal.plain[0], terminal_steps[0] << 6);

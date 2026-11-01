@@ -129600,9 +129600,8 @@ b32 main()
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);
         term_palette = terminal_palette;
-        terminal.bar_grab = -1;
-        // The bar as it is while the view is scrolled back, so the frames are held to it too.
-        terminal.bar_level = 256;
+        // The kit's bar is drawn wherever the view has a scrollback, with nothing held or hovered, so the frames are held to it too.
+        terminal.bar.held = terminal.bar.hover = 0;
 
         window = window_grid_open(30, 8, 80, 256);
         check("grid: a ring in the program's own memory", window != null);
