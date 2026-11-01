@@ -127342,6 +127342,99 @@ static fn field_check(struct ui address_to wui)
         field_key(wui, &t, FIELD_KEY_BACKSPACE, 0, 0);
         check("field: Backspace takes a character of three bytes whole", field_is(&t, "a\xc3\xa9\xf0\x9f\x98\x80" "b") && field_caret(&t) == 3);
 
+        // A cluster is walked back from its end: a run of marks longer than a kilobyte is one cluster, to its base.
+        {
+                static p8 marks[1 + 600 * 2];
+                positive length = 0;
+
+                marks[length++] = 'a';
+                for (int k = 0; k < 600; k++)
+                        marks[length++] = 0xcc, marks[length++] = 0x81;
+                ui_text_set(&t, marks, length);
+                field_key(wui, &t, FIELD_KEY_LEFT, 0, 0);
+                check("field: Left over a run of combining marks longer than a kilobyte goes to where its cluster starts",
+                      field_caret(&t) == 0);
+                field_key(wui, &t, FIELD_KEY_HOME, 0, 0);
+                field_key(wui, &t, FIELD_KEY_RIGHT, 0, 0);
+                check("field: and Right over the same run goes to its end", field_caret(&t) == (p64)length);
+
+                // Three clusters, two of them long: the walk back from each one's end lands on the end before it.
+                {
+                        static p8 runs[1 + 600 * 2 + 1 + 600 * 2 + 1];
+                        positive count = 0;
+                        b32 walked = true;
+
+                        runs[count++] = 'a';
+                        for (int k = 0; k < 600; k++)
+                                runs[count++] = 0xcc, runs[count++] = 0x81;
+                        runs[count++] = 'b';
+                        for (int k = 0; k < 600; k++)
+                                runs[count++] = 0xcc, runs[count++] = 0x81;
+                        runs[count++] = 'c';
+                        ui_text_set(&t, runs, count);
+                        for (p64 begin = 0, finish; begin < (p64)count; begin = finish)
+                        {
+                                finish = doc_cluster_end(&t.doc, begin);
+                                walked &= doc_cluster_start(&t.doc, finish) == begin;
+                        }
+                        check("field: every cluster of a text with two long runs is where the walk back from its end lands", walked);
+                }
+        }
+        {
+                static const struct
+                {
+                        const char address_to text;
+                        positive length, left;
+                } clusters[] = {
+                    {"\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa7", 18, 0}, // a family
+                    {"\xf0\x9f\x87\xba\xf0\x9f\x87\xb8\xf0\x9f\x87\xa9\xf0\x9f\x87\xaa", 16, 8},         // two flags
+                    {"1\xef\xb8\x8f\xe2\x83\xa3", 7, 0},                                                 // a keycap
+                    {"\xe1\x84\x80\xe1\x85\xa1\xe1\x86\xa8", 9, 0},                                      // Hangul jamo
+                    {"\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xb7", 9, 0},                                      // a conjunct
+                    {"x\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xb7", 10, 1},                                    // a conjunct after x
+                };
+                b32 all = true;
+
+                for (positive k = 0; k < sizeof(clusters) / sizeof(clusters[0]); k++)
+                {
+                        ui_text_set(&t, (const p8 address_to)clusters[k].text, clusters[k].length);
+                        field_key(wui, &t, FIELD_KEY_LEFT, 0, 0);
+                        all &= field_caret(&t) == clusters[k].left;
+                }
+                check("field: Left from the end of a cluster of several code points goes to where it starts", all);
+        }
+
+        // The history and the selections: a typed word over a backwards selection, a double click on a letter of two
+        // bytes, the undo of a typing over a selection, the undo and redo of a word's delete, and a paste cut to its room.
+        ui_text_set(&t, (const p8 address_to) "abc def", 7);
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT);
+        field_type(wui, &t, "X");
+        check("field: typing over a word selected backwards leaves the caret after it, with no selection",
+              field_is(&t, "abc X") && field_caret(&t) == 5 && !doc_any_selected(&t.doc));
+        ui_text_set(&t, (const p8 address_to) "h\xc3\xa9llo w\xc3\xb6rld", 13);
+        ui_text_draw(wui, &t, 20, 20, 300, 30, 0);
+        field_button(wui, &t, 0x110, true, field_x(wui, &t, 8) + 1, t.top + t.line_height / 2, 0);
+        field_button(wui, &t, 0x110, false, field_x(wui, &t, 8) + 1, t.top + t.line_height / 2, 0);
+        field_button(wui, &t, 0x110, true, field_x(wui, &t, 8) + 1, t.top + t.line_height / 2, 0);
+        field_button(wui, &t, 0x110, false, field_x(wui, &t, 8) + 1, t.top + t.line_height / 2, 0);
+        check("field: a double click on a letter of two bytes takes its word", field_selected(&t, 7, 13));
+        ui_text_set(&t, (const p8 address_to) "abc", 3);
+        field_key(wui, &t, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+        field_type(wui, &t, "x");
+        field_key(wui, &t, FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
+        check("field: undo of a typing over a selection gives the text back with it selected", field_is(&t, "abc") && field_selected(&t, 0, 3));
+        ui_text_set(&t, (const p8 address_to) "abc def", 7);
+        field_key(wui, &t, FIELD_KEY_BACKSPACE, 0, WINDOW_KEY_CONTROL);
+        field_key(wui, &t, FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
+        check("field: undo of a word's delete puts the caret back at the end", field_is(&t, "abc def") && field_caret(&t) == 7);
+        field_key(wui, &t, 21, 25, WINDOW_KEY_CONTROL);
+        check("field: and its redo puts the caret after the word's delete", field_is(&t, "abc ") && field_caret(&t) == 4);
+        ui_text_set(&t, (const p8 address_to) "ab", 2);
+        t.most = 5, t.most_said = "five";
+        ui_text_paste(&t, (const p8 address_to) "\xc3\xa9\xc3\xa9", 4);
+        check("field: a paste cut to its room keeps whole characters", field_is(&t, "ab\xc3\xa9"));
+        t.most = 0;
+
         // A paste is one line: line ends and tabs are blanks, any other control is left out.
         ui_text_set(&t, (const p8 address_to) "", 0);
         check("field: a paste of lines is one line of blanks for its line ends, with no control in it",

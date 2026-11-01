@@ -1857,9 +1857,40 @@ static p64 doc_cluster_end(const struct doc address_to doc, p64 at)
 }
 
 /*
+        Whether a cluster surely begins at the boundary between before and now (the code point before it and the one at
+        it): no rule of UAX #29 joins the two. Where one might -- a mark, a Hangul vowel or trailer after a leader or a
+        vowel, a joiner before a pictograph, a regional indicator after one, a conjunct's linker -- it answers no, and a
+        walk back goes on to a boundary it is sure of.
+*/
+static b32 doc_cluster_cut(p32 before, p32 now)
+{
+        p32 b = DOC_GCB(doc_props(before)), n = DOC_GCB(doc_props(now));
+
+        if (b == GCB_CR && n == GCB_LF)
+                return false;
+        if (b == GCB_CR || b == GCB_LF || b == GCB_CONTROL || n == GCB_CR || n == GCB_LF || n == GCB_CONTROL)
+                return true;
+        if (n == GCB_EXTEND || n == GCB_ZWJ || n == GCB_SPACING || b == GCB_PREPEND)
+                return false;
+        if (b == GCB_L && (n == GCB_L || n == GCB_V || n == GCB_LV || n == GCB_LVT))
+                return false;
+        if ((b == GCB_LV || b == GCB_V) && (n == GCB_V || n == GCB_T))
+                return false;
+        if ((b == GCB_LVT || b == GCB_T) && n == GCB_T)
+                return false;
+        if (b == GCB_ZWJ || (b == GCB_RI && n == GCB_RI))
+                return false;
+        if (DOC_INCB(doc_props(now)) == INCB_CONSONANT &&
+            (DOC_INCB(doc_props(before)) == INCB_LINKER || DOC_INCB(doc_props(before)) == INCB_EXTEND))
+                return false;
+        return true;
+}
+
+/*
         Where the cluster that ends at at begins. The walk starts where a cluster surely does -- after a control or
-        a line end, or the document's start, at most 1024 bytes back but through a run of regional indicators, whose
-        pairs count from the run's start, and never more than 64 KiB -- and goes forward to at.
+        a line end, or the document's start -- and goes back to at, cut short only past 1024 bytes and at a boundary
+        doc_cluster_cut is sure of, so a long run of marks is walked to its base and a run of regional indicators to
+        its pairs' start; never more than 64 KiB back. Then it goes forward from there to at.
 */
 static p64 doc_cluster_start(const struct doc address_to doc, p64 at)
 {
@@ -1885,12 +1916,16 @@ static p64 doc_cluster_start(const struct doc address_to doc, p64 at)
         doc_reader_start(&reader, doc);
         while (from && (size = doc_code_before(&reader, from, &code)))
         {
-                p32 gcb = DOC_GCB(doc_props(code));
+                p32 gcb = DOC_GCB(doc_props(code)), now;
 
                 // A cluster starts after a control or a line end; a CR is one only when no LF follows it.
                 if (from < at && (gcb == GCB_LF || gcb == GCB_CONTROL || (gcb == GCB_CR && doc_byte(doc, from) != '\n')))
                         break;
-                if ((at - from >= 1024 && gcb != GCB_RI) || at - from >= 65536)
+                // Past a kilobyte the walk stops at the first boundary that surely starts a cluster, the code point at from
+                // being one that no rule joins to the one before it; a mark run stays joined, so it is walked to its base.
+                if (at - from >= 1024 && doc_code_at(&reader, from, &now) && doc_cluster_cut(code, now))
+                        break;
+                if (at - from >= 65536)
                         break;
                 from -= size;
         }
