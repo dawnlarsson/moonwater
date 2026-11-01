@@ -322,6 +322,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_copy_apart__room
       'paired timing against the memory_copy_apart its callers had, over the lines '
       'of src/lib.c into a buffer nothing reads and one read at once, and at fixed '
       '40 and 76 bytes, with AVX2 and SSE2')
+cover('direct_benchmark', 'test/checks.c#BENCH_first_differs', 'memory_first_differs_u32',
+      'paired timing against the word loop ui_run_in had, over rows of paper '
+      'ended by a difference after one, three, twelve, sixty and three hundred '
+      'words, with AVX2 and SSE2, NEON, and V and scalar on riscv64')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '

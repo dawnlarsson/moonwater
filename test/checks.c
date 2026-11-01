@@ -114656,6 +114656,80 @@ static fn check_copy_changed()
 }
 
 /*
+        memory_first_differs_u32 against the loop it replaces in ui_run_in: every count from 0 to 200, and for each
+        count every place of the first word that is not the value, and none; the words after that place all
+        different or all the value again, and the differing word different in one bit, the bit walked over every
+        lane, so each lane of each vector is the answer once. The answer is the index of that word, or the count.
+        The words end against a guard page and a zero count points at the guard itself, so a word read past the
+        count faults. On x86_64 with AVX2 and without, on riscv64 with V and without, and on arm64.
+*/
+static fn check_first_differs(void)
+{
+        static const unsigned int values[] = {0xffffffu, 0u, 0x80000000u, 0x00ff00ffu};
+        unsigned int address_to pages = (unsigned int address_to)memory(2 * 4096);
+        bool guarded = pages != null;
+
+        if (guarded)
+                guarded = system_call_3(syscall(mprotect), (positive)((p8 address_to)pages + 4096), 4096, 0) == 0;
+        check("first differs: guard page", guarded);
+        if (!guarded)
+                return;
+#if X64
+        p8 wide2 = cpu_has_avx2;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier == 0 ? wide2 : 0;
+#elif RISCV64
+        cpu_has_vector = 0;
+        memory_first_differs_u32(pages + 1024, 0, 0);
+        p8 vector = cpu_has_vector;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+#else
+        for (positive tier = 0; tier < 1; tier++)
+        {
+#endif
+                bool answers = true;
+                unsigned int address_to ends = pages + 1024;
+
+                for (positive count = 0; count <= 200; count++)
+                        for (positive v = 0; v < 4; v++)
+                                for (b64 place = -1; place < (b64)count; place++)
+                                        for (positive shape = 0; shape < 2; shape++)
+                                        {
+                                                unsigned int address_to words = ends - count;
+                                                unsigned int value = values[v];
+                                                positive want = count;
+
+                                                for (positive i = 0; i < count; i++)
+                                                {
+                                                        if (place >= 0 && (b64)i == place)
+                                                                words[i] = value ^ (1u << (place % 32));
+                                                        else if (place >= 0 && (b64)i > place)
+                                                                words[i] = shape ? value : value ^ 0x40000000u;
+                                                        else
+                                                                words[i] = value;
+                                                }
+                                                for (positive i = 0; i < count && want == count; i++)
+                                                        if (words[i] != value)
+                                                                want = i;
+                                                VECTOR_FIRST_CALL(tier == 0);
+                                                answers = answers && memory_first_differs_u32(words, count, value) == want;
+                                        }
+                check("first differs: the first word that is not the value, or the count", answers);
+#if X64
+        }
+        cpu_has_avx2 = wide2;
+#elif RISCV64
+        }
+        cpu_has_vector = vector;
+#else
+        }
+#endif
+}
+
+/*
         memory_sweep_coverage against the loop it replaces in font_raster:
         every count from 0 to 80 and runs of 127 to 1000, cells sparse as an
         outline leaves them and dense, sums that run past full both ways and
@@ -115169,6 +115243,7 @@ b32 main()
         check_glass_routines();
         check_fill_rect();
         check_copy_changed();
+        check_first_differs();
         check_sweep();
         check_edges(&one, &two);
 
@@ -144034,6 +144109,108 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_copy_changed */
+
+#ifdef BENCH_first_differs
+/* memory_first_differs_u32 against the loop ui_run_in had: a row of scratch paper, a word that is not paper at the
+   end of a run of the length given, the run from the start of the row. The kit's text gives runs of one to three
+   words most of the time (a stroke's edge) and runs of tens to hundreds across a row's paper; the lengths here cover
+   both. On x86_64 with AVX2 and without, riscv64 with V and without, and arm64 NEON. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define PAPER 0xffffffu
+#define WORDS 4096
+
+static unsigned int row[WORDS];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static positive former_first(const unsigned int address_to words, positive count, unsigned int value)
+{
+        positive at = 0;
+
+        while (at < count && words[at] == value)
+                at++;
+        return at;
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+{
+        positive answers = 0;
+        p64 start;
+
+        row[length] = PAPER ^ 0x10000u;
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                const unsigned int address_to words = row + round % 8;
+                positive count = length + 8;
+
+                if (assembly)
+                        answers += memory_first_differs_u32(words, count, PAPER) + round;
+                else
+                        answers += former_first(words, count, PAPER) + round;
+        }
+        sink = answers;
+        row[length] = PAPER;
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive lengths[] = {1, 3, 12, 60, 300};
+        static const string_address names[] = {"one run", "three words", "twelve words", "sixty words", "three hundred words"};
+
+        for (positive at = 0; at < WORDS; at++)
+                row[at] = PAPER;
+#if X64
+        p8 wide2 = cpu_has_avx2;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier == 0 ? wide2 : 0;
+                if (tier == 0 && !wide2)
+                        continue;
+#elif RISCV64
+        p8 vector = cpu_has_vector;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+#else
+        for (positive tier = 0; tier < 1; tier++)
+        {
+#endif
+                for (positive at = 0; at < sizeof(lengths) / sizeof(lengths[0]); at++)
+                {
+                        positive ratios[TRIES];
+                        positive rounds = 4000000 / (lengths[at] + 8) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, lengths[at], rounds);
+                        string_format(log, "memory_first_differs_u32 %s, %s: paired median ASM/C %p.", names[at],
+#if X64
+                                      cpu_has_avx2 ? (string_address) "avx2" : (string_address) "sse2",
+#elif RISCV64
+                                      cpu_has_vector == 2 ? (string_address) "vector" : (string_address) "scalar",
+#else
+                                      (string_address) "neon",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+        }
+#if X64
+        cpu_has_avx2 = wide2;
+#elif RISCV64
+        cpu_has_vector = vector;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_first_differs */
 
 #ifdef BENCH_ranged
 /* The call-site entries at the shapes their callers have, against what the

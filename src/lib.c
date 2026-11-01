@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        424 routines (400 public, 24 local), 414 of them on all three and 10 local to one.
+        425 routines (401 public, 24 local), 415 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -246,6 +246,7 @@
           memory_fill_u32                public  yes     yes     yes
           memory_fill_u32_rect           public  yes     yes     yes
           memory_fill_u64_aligned        public  yes     yes     yes
+          memory_first_differs_u32       public  yes     yes     yes
           memory_first_of                public  yes     yes     yes
           memory_first_of_ascii_case     public  yes     yes     yes
           memory_fold_lines__room_64     public  yes     yes     yes
@@ -13707,6 +13708,80 @@ __asm__(
     ASM_END(memory_fill_u32_rect)
 
     //
+    //       memory_first_differs_u32 -- rdi words, rsi count, edx value;
+    //       answers in rax the index of the first word that is not value, or
+    //       count when every word is. Only the count's words are read. AVX2:
+    //       four ymm compares a turn, thirty two words, their bits joined by
+    //       vmovmskps into one mask, so a turn with a difference is resolved
+    //       by not and bsf, not a second pass; eight a step after that, and
+    //       the count's last eight as one overlapped compare, the words before
+    //       the index already known equal. SSE2 is the same shape at sixteen
+    //       and four. Under eight words (under four for SSE2) a word at a time,
+    //       and kernel builds keep only that: no vector register is theirs to
+    //       take (ASM_USERSPACE_WIDE).
+    //
+    //       The vector bodies never use vzeroupper where the SSE2 path runs,
+    //       since a machine without AVX has no encoding for it.
+    //
+    ASM_FUNC(memory_first_differs_u32)
+    "xor %eax, %eax\n"
+    ASM_USERSPACE_WIDE(
+        ASM_NARROW("cpu_has_avx2", ".Lfirst_differs_x64_sse")
+        "cmp $8, %rsi\n   jb .Lfirst_differs_x64_scalar\n"
+        //  Most calls stop within three words (a glyph's stroke), so the first four are compared word by word
+        //  before any vector is set up: a word that differs answers at once, with no mask and no vzeroupper.
+        "cmp %edx, (%rdi)\n   jne .Lfirst_differs_x64_done\n   cmp %edx, 4(%rdi)\n   jne .Lfirst_differs_x64_one\n"
+        "cmp %edx, 8(%rdi)\n   jne .Lfirst_differs_x64_two\n   cmp %edx, 12(%rdi)\n   jne .Lfirst_differs_x64_three\n"
+        "mov $4, %eax\n"
+        "vmovd %edx, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n"
+        ".Lfirst_differs_x64_avx32:\n   lea 32(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lfirst_differs_x64_avx8\n"
+        "vpcmpeqd (%rdi,%rax,4), %ymm0, %ymm1\n   vpcmpeqd 32(%rdi,%rax,4), %ymm0, %ymm2\n"
+        "vpcmpeqd 64(%rdi,%rax,4), %ymm0, %ymm3\n   vpcmpeqd 96(%rdi,%rax,4), %ymm0, %ymm4\n"
+        "vpand %ymm2, %ymm1, %ymm5\n   vpand %ymm4, %ymm3, %ymm6\n   vpand %ymm6, %ymm5, %ymm5\n"
+        "vpmovmskb %ymm5, %ecx\n   cmp $-1, %ecx\n   jne .Lfirst_differs_x64_avx_hit\n"
+        "add $32, %rax\n   jmp .Lfirst_differs_x64_avx32\n"
+        ".Lfirst_differs_x64_avx_hit:\n"
+        "vmovmskps %ymm1, %ecx\n   vmovmskps %ymm2, %edx\n   shl $8, %edx\n   or %edx, %ecx\n"
+        "vmovmskps %ymm3, %edx\n   shl $16, %edx\n   or %edx, %ecx\n"
+        "vmovmskps %ymm4, %edx\n   shl $24, %edx\n   or %edx, %ecx\n"
+        "not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
+        ".Lfirst_differs_x64_avx8:\n   lea 8(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lfirst_differs_x64_avx_tail\n"
+        "vpcmpeqd (%rdi,%rax,4), %ymm0, %ymm1\n   vmovmskps %ymm1, %ecx\n   cmp $255, %ecx\n   jne .Lfirst_differs_x64_avx_eight\n"
+        "add $8, %rax\n   jmp .Lfirst_differs_x64_avx8\n"
+        ".Lfirst_differs_x64_avx_eight:\n   not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
+        ".Lfirst_differs_x64_avx_tail:\n   lea -8(%rsi), %rcx\n   vpcmpeqd (%rdi,%rcx,4), %ymm0, %ymm1\n   vmovmskps %ymm1, %edx\n"
+        "not %edx\n   and $255, %edx\n   jnz 1f\n   mov %rsi, %rax\n   vzeroupper\n" ASM_RET
+        "1:  bsf %edx, %edx\n   add %rdx, %rcx\n   mov %rcx, %rax\n   vzeroupper\n" ASM_RET
+        ".Lfirst_differs_x64_one:\n   mov $1, %eax\n" ASM_RET
+        ".Lfirst_differs_x64_two:\n   mov $2, %eax\n" ASM_RET
+        ".Lfirst_differs_x64_three:\n   mov $3, %eax\n" ASM_RET
+        ".Lfirst_differs_x64_sse:\n   movd %edx, %xmm0\n   pshufd $0, %xmm0, %xmm0\n"
+        "cmp $4, %rsi\n   jb .Lfirst_differs_x64_scalar\n"
+        ".Lfirst_differs_x64_sse16:\n   lea 16(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lfirst_differs_x64_sse4\n"
+        "movdqu (%rdi,%rax,4), %xmm1\n   movdqu 16(%rdi,%rax,4), %xmm2\n   movdqu 32(%rdi,%rax,4), %xmm3\n   movdqu 48(%rdi,%rax,4), %xmm4\n"
+        "pcmpeqd %xmm0, %xmm1\n   pcmpeqd %xmm0, %xmm2\n   pcmpeqd %xmm0, %xmm3\n   pcmpeqd %xmm0, %xmm4\n"
+        "movdqa %xmm1, %xmm5\n   pand %xmm2, %xmm5\n   movdqa %xmm3, %xmm6\n   pand %xmm4, %xmm6\n   pand %xmm6, %xmm5\n"
+        "pmovmskb %xmm5, %ecx\n   cmp $0xffff, %ecx\n   jne .Lfirst_differs_x64_sse_hit\n"
+        "add $16, %rax\n   jmp .Lfirst_differs_x64_sse16\n"
+        ".Lfirst_differs_x64_sse_hit:\n"
+        "movmskps %xmm1, %ecx\n   movmskps %xmm2, %edx\n   shl $4, %edx\n   or %edx, %ecx\n"
+        "movmskps %xmm3, %edx\n   shl $8, %edx\n   or %edx, %ecx\n"
+        "movmskps %xmm4, %edx\n   shl $12, %edx\n   or %edx, %ecx\n"
+        "not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rax\n" ASM_RET
+        ".Lfirst_differs_x64_sse4:\n   lea 4(%rax), %rcx\n   cmp %rsi, %rcx\n   ja .Lfirst_differs_x64_sse_tail\n"
+        "movdqu (%rdi,%rax,4), %xmm1\n   pcmpeqd %xmm0, %xmm1\n   movmskps %xmm1, %ecx\n   cmp $15, %ecx\n   jne .Lfirst_differs_x64_four_hit\n"
+        "add $4, %rax\n   jmp .Lfirst_differs_x64_sse4\n"
+        ".Lfirst_differs_x64_four_hit:\n   not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rax\n" ASM_RET
+        ".Lfirst_differs_x64_sse_tail:\n   lea -4(%rsi), %rcx\n   movdqu (%rdi,%rcx,4), %xmm1\n   pcmpeqd %xmm0, %xmm1\n   movmskps %xmm1, %edx\n"
+        "not %edx\n   and $15, %edx\n   jnz 1f\n   mov %rsi, %rax\n" ASM_RET
+        "1:  bsf %edx, %edx\n   add %rdx, %rcx\n   mov %rcx, %rax\n" ASM_RET
+    )
+    ".Lfirst_differs_x64_scalar:\n   cmp %rsi, %rax\n   jae .Lfirst_differs_x64_done\n"
+    "cmp %edx, (%rdi,%rax,4)\n   jne .Lfirst_differs_x64_done\n   inc %rax\n   jmp .Lfirst_differs_x64_scalar\n"
+    ".Lfirst_differs_x64_done:\n" ASM_RET
+    ASM_END(memory_first_differs_u32)
+
+    //
     //       memory_copy_changed_u32 -- rdi into, rsi mirror, rdx from, rcx
     //       count in words; answers in rax how many 64-byte chunks were
     //       stored. A chunk of from is compared with mirror's and, where any
@@ -23447,6 +23522,34 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_fill_u32_rect)
 
+    //       memory_first_differs_u32: x0 words, x1 count, w2 value; answers
+    //       in x0 the index of the first word that is not value, or count.
+    //       NEON: sixteen words a turn in four q loads, cmeq against value
+    //       and and-ed down to one vector, uminv to a word that is all ones
+    //       when every lane matched; a turn with a difference is taken again
+    //       four words at a time, and a word at a time for what is left. Only
+    //       the count's words are read. Kernel builds keep the word at a time
+    //       body alone (#ifndef KERNEL_MODE): no vector register is theirs.
+    //       The x86_64 block carries the contract.
+    ASM_FUNC(memory_first_differs_u32)
+    "mov x3, #0\n"
+#ifndef KERNEL_MODE
+        "cmp x1, #4\n   b.lo .Lfirst_differs_a64_scalar\n   dup v31.4s, w2\n"
+        ".Lfirst_differs_a64_16:\n   add x4, x3, #16\n   cmp x4, x1\n   b.hi .Lfirst_differs_a64_4\n"
+        "add x5, x0, x3, lsl #2\n   ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x5]\n"
+        "cmeq v0.4s, v0.4s, v31.4s\n   cmeq v1.4s, v1.4s, v31.4s\n   cmeq v2.4s, v2.4s, v31.4s\n   cmeq v3.4s, v3.4s, v31.4s\n"
+        "and v0.16b, v0.16b, v1.16b\n   and v2.16b, v2.16b, v3.16b\n   and v0.16b, v0.16b, v2.16b\n"
+        "uminv s0, v0.4s\n   fmov w4, s0\n   cmn w4, #1\n   b.ne .Lfirst_differs_a64_4\n"
+        "add x3, x3, #16\n   b .Lfirst_differs_a64_16\n"
+        ".Lfirst_differs_a64_4:\n   add x4, x3, #4\n   cmp x4, x1\n   b.hi .Lfirst_differs_a64_scalar\n"
+        "add x5, x0, x3, lsl #2\n   ldr q0, [x5]\n   cmeq v0.4s, v0.4s, v31.4s\n   uminv s0, v0.4s\n   fmov w4, s0\n"
+        "cmn w4, #1\n   b.ne .Lfirst_differs_a64_scalar\n   add x3, x3, #4\n   b .Lfirst_differs_a64_4\n"
+#endif
+    ".Lfirst_differs_a64_scalar:\n   cmp x3, x1\n   b.hs .Lfirst_differs_a64_done\n"
+    "ldr w4, [x0, x3, lsl #2]\n   cmp w4, w2\n   b.ne .Lfirst_differs_a64_done\n   add x3, x3, #1\n   b .Lfirst_differs_a64_scalar\n"
+    ".Lfirst_differs_a64_done:\n   mov x0, x3\n" ASM_RET
+    ASM_END(memory_first_differs_u32)
+
     //       memory_copy_changed_u32: a chunk is two ldp of q from each side,
     //       four eor and three orr folded by umaxp to one doubleword, and on
     //       a difference two stp pairs to each of mirror and into; under 16
@@ -32313,6 +32416,31 @@ __asm__(
     "4:  add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 6b\n"
     "9:  " ASM_RET
     ASM_END(memory_fill_u32_rect)
+
+    //       memory_first_differs_u32: a0 words, a1 count, a2 value; answers
+    //       in a0 the index of the first word that is not value, or count.
+    //       With V, strips of as many words as four registers hold, vmsne
+    //       against value and vfirst, which answers the index in the strip
+    //       itself; without V, a word at a time, zero extended value against
+    //       lwu. A zero count reads nothing in either. The x86_64 block
+    //       carries the contract. Kernel builds take the word at a time body
+    //       alone, since no vector register is theirs to take.
+    ASM_FUNC(memory_first_differs_u32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM) && !defined(KERNEL_MODE)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lfirst_differs_rv_vector\n   bnez t3, .Lfirst_differs_rv_scalar\n"
+    "addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a0, 0(sp)\n   sd a1, 8(sp)\n   sd a2, 16(sp)\n   call cpu_vector_detect\n"
+    "ld a0, 0(sp)\n   ld a1, 8(sp)\n   ld a2, 16(sp)\n   ld ra, 24(sp)\n   addi sp, sp, 32\n   j memory_first_differs_u32\n"
+    ".Lfirst_differs_rv_vector:\n   mv t1, a0\n   mv t2, a1\n   li a0, 0\n"
+    ".Lfirst_differs_rv_strip:\n   beqz t2, .Lfirst_differs_rv_done\n"
+    "vsetvli t0, t2, e32, m4, ta, ma\n   vle32.v v8, (t1)\n   vmsne.vx v0, v8, a2\n   vfirst.m t3, v0\n"
+    "bgez t3, .Lfirst_differs_rv_hit\n   slli t4, t0, 2\n   add t1, t1, t4\n   add a0, a0, t0\n   sub t2, t2, t0\n   j .Lfirst_differs_rv_strip\n"
+    ".Lfirst_differs_rv_hit:\n   add a0, a0, t3\n   j .Lfirst_differs_rv_done\n"
+#endif
+    ".Lfirst_differs_rv_scalar:\n   slli t5, a2, 32\n   srli t5, t5, 32\n   mv t1, a0\n   mv t2, a1\n   li a0, 0\n"
+    ".Lfirst_differs_rv_word:\n   beqz t2, .Lfirst_differs_rv_done\n   lwu t3, 0(t1)\n   bne t3, t5, .Lfirst_differs_rv_done\n"
+    "addi t1, t1, 4\n   addi a0, a0, 1\n   addi t2, t2, -1\n   j .Lfirst_differs_rv_word\n"
+    ".Lfirst_differs_rv_done:\n" ASM_RET
+    ASM_END(memory_first_differs_u32)
 
     //       memory_copy_changed_u32: with V, a chunk is up to 16 words at
     //       e32 m4 (64 bytes at the smallest VLEN), vmsne and vfirst, and on
@@ -44407,6 +44535,9 @@ positive memory_blend_u32_rect(p32 address_to into, positive into_stride,
                                const p8 address_to from, positive from_stride,
                                positive width, positive height,
                                const p32 address_to table);
+// The index of the first of count 32-bit words that is not value, or count when every word is value. A zero count
+// answers zero and reads nothing; only the count's words are read, so a run that ends at a page's end is safe.
+positive memory_first_differs_u32(const unsigned int address_to words, positive count, unsigned int value);
 // Each of count bytes from data becomes the mean of itself and the byte distance after it, rounded up, first to
 // last and in place: a byte is averaged only with one that has not been yet, so the pass is the same however wide
 // the body takes it. Reads count + distance bytes. A blur is passes of it across a frame (a pixel's four bytes and
