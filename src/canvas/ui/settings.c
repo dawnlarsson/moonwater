@@ -2611,6 +2611,7 @@ static fn settings_activate(int row, int way)
         {
         case SETTINGS_FIELD:
                 settings_edit_begin(row, settings.value[row], false);
+                settings_say((string_address) "Enter sets it, Escape keeps it, a click outside sets it too");
                 return;
         case SETTINGS_INFO:
                 return;
@@ -2743,6 +2744,23 @@ static fn settings_edit_asked(p32 asks)
                 settings_edit_end();
         else if (asks)
                 settings_dirty();
+}
+
+/*
+        A press outside the field a row is typed in ends the typing. A plain value is set, as Enter sets it: a click is
+        the way out of a value's field, and what was typed is not thrown away by it. A passphrase, a name to join or add
+        and a command are left as Escape leaves them, because a click is no Enter for them (a click must not join a
+        network or run a command).
+*/
+static fn settings_edit_outside(void)
+{
+        const struct settings_item address_to item = settings.editing >= 0 ? settings_item(settings.editing) : null;
+        b32 plain = settings.editing >= 0 && settings.editing < SETTINGS_ANY && !item && !settings.edit.masked;
+
+        if (plain)
+                settings_edit_commit();
+        else
+                settings_edit_end();
 }
 
 // A key in a field being typed in: the field's (a key between a command's two Enters asks again).
@@ -3480,8 +3498,24 @@ static b32 settings_event(const struct window_event address_to event)
                 if (settings.filter_open && (asks = ui_field_event(&settings.ui, &settings.filter_edit, &settings.popup, event, x, y)))
                 {
                         if (event->type == WINDOW_EVENT_BUTTON && settings.editing >= 0)
-                                settings_edit_end();
+                                settings_edit_outside();
                         settings_filter_asked(asks);
+                        settings_dirty();
+                        return true;
+                }
+        }
+        /*
+                A press that the field a row is typed in did not take is outside it: the typing ends (settings_edit_outside),
+                and the press goes on to the row it is on, unless that is the row typed in, whose label a press only leaves.
+        */
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings.editing >= 0 &&
+            settings.menu.owner < 0 && !settings.view)
+        {
+                b32 own = settings_press_target(settings.page.pointer_x, settings.page.pointer_y) == settings.editing;
+
+                settings_edit_outside();
+                if (own)
+                {
                         settings_dirty();
                         return true;
                 }
@@ -3656,7 +3690,8 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         {
                 ui_page_groups(ui, &settings.page, settings_group_name, settings_groups());
                 ui_page_column(ui, &settings.page, settings.group, settings.focused && !settings.pane, settings.filter_length != 0);
-                settings.list.lit = settings.pane || settings.filter_length;
+                // A row typed in is a field on the page, not a band: its well is the only thing lit there.
+                settings.list.lit = (settings.pane || settings.filter_length) && settings.editing < 0;
                 settings.list.keys = settings.focused && settings.pane;
                 ui_list_draw(ui, &settings.list);
         }

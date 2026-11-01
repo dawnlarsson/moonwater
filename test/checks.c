@@ -128258,6 +128258,34 @@ static fn check_field_hands(string_address regular)
                               settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "patient-x-cricket"));
                 }
+                // A value typed in: a field on the row with no band behind it, its status says what Enter, Escape and a click
+                // do, Escape keeps the value, and a click outside sets what the field holds.
+                {
+                        // The pointer's place below the rows, where no row is: a click there is outside every row.
+                        struct window_event move = {WINDOW_EVENT_MOTION, 0, 400, 480}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0},
+                                            release = {WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0};
+
+                        settings.queued = 0;
+                        settings.state[name] = SETTINGS_READ;
+                        string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
+                        settings.list.focus = name;
+                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_draw_rows((unsigned int address_to)pixels, 0, 0);
+                        check("settings: a value typed in is a field on the row, with no band behind it", settings.editing == name && !settings.list.lit);
+                        check("settings: a value typed in says what Enter, Escape and a click outside do",
+                              string_equals((string_address)settings.status, (string_address) "Enter sets it, Escape keeps it, a click outside sets it too"));
+                        settings_type_code('y');
+                        settings_press(FIELD_KEY_ESCAPE);
+                        check("settings: Escape keeps the value as it was", settings.editing < 0 && settings.queued == 0);
+                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_type_code('y');
+                        settings_event(&move);
+                        settings_event(&press);
+                        settings_event(&release);
+                        check("settings: a click outside a value sets what its field holds",
+                              settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "patient-crickety"));
+                }
                 settings.queued = 0, settings.child = 0;
                 settings_group_choose(0);
         }
