@@ -29,8 +29,9 @@
 #define EDITOR_MAP_FROM (8u << 20)
 #define EDITOR_READ_MOST (64u << 20)
 #define EDITOR_PATH 512
-#define EDITOR_BAR 26 // the status bar's height, logical pixels
-#define EDITOR_FIND 34 // the find bar's
+#define EDITOR_BAR UI_PAGE_FOOT // the status bar: the kit's status line band, logical pixels
+#define EDITOR_FIND (UI_SEARCH_H + 2 * UI_GAP1) // the find bar: the kit's search field, a gap of UI_GAP1 above and below
+#define EDITOR_TAB_STRIP 32 // the file tabs' strip: a kit segmented tab's height (ui_tabs_draw in ui.c)
 #define EDITOR_QUERY 1024 // the bytes of what the find bar holds
 
 struct editor_tab
@@ -464,13 +465,13 @@ static fn editor_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &editor.ui;
         struct editor_tab address_to tab = editor_now();
-        int bar = ui_px(ui, EDITOR_BAR), find = editor.finding ? ui_px(ui, EDITOR_FIND) : 0, tabs = editor.count > 1 ? ui_px(ui, 30) : 0;
+        int bar = ui_px(ui, EDITOR_BAR), find = editor.finding ? ui_px(ui, EDITOR_FIND) : 0, tabs = editor.count > 1 ? ui_px(ui, EDITOR_TAB_STRIP) : 0;
         unsigned int paper = ui_role(UI_SURFACE) & 0xffffffu;
 
         ui_begin(ui, pixels, editor.own.stride, editor.width, editor.height);
-        ui_fill(ui, 0, 0, editor.width, editor.height, 0xff000000u | paper);
-        // The tabs: each file's name, the one shown lit, a dot after a name that has changes.
-        for (int at = 0, x = ui_px(ui, 8); at < editor.count && tabs; at++)
+        ui_fill(ui, 0, 0, editor.width, editor.height, ui_role_surface());
+        // The tabs: each file's name, the one shown lit, a dot after a name that has changes. A name sits a kit inset in from its tab's sides.
+        for (int at = 0, x = ui_px(ui, UI_GAP2); at < editor.count && tabs; at++)
         {
                 const char address_to name = editor.tabs[at].path;
                 int wide;
@@ -478,14 +479,15 @@ static fn editor_draw(unsigned int address_to pixels)
                 for (const char address_to c = editor.tabs[at].path; *c; c++)
                         if (*c == '/')
                                 name = c + 1;
-                wide = ui_kit_measure(ui, (string_address)(name[0] ? name : "untitled"), UI_BODY_MEDIUM) + ui_px(ui, 28);
+                wide = ui_kit_measure(ui, (string_address)(name[0] ? name : "untitled"), UI_BODY_MEDIUM) + ui_px(ui, 2 * UI_INSET);
                 if (at == editor.tab)
-                        ui_fill(ui, x, 0, wide, tabs, ui_tone(ui_role(UI_SURFACE_HIGH) & 0xffffffu, 255));
-                ui_kit_text(ui, x + ui_px(ui, 10), ui_kit_baseline(ui, ui_px(ui, 5), UI_BODY_MEDIUM), (string_address)(name[0] ? name : "untitled"),
+                        ui_fill(ui, x, 0, wide, tabs, ui_role(UI_SURFACE_HIGH) | 0xff000000u);
+                ui_kit_text(ui, x + ui_px(ui, UI_INSET), ui_kit_baseline(ui, (tabs - ui_px(ui, UI_LINE)) / 2, UI_BODY_MEDIUM), (string_address)(name[0] ? name : "untitled"),
                             UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0);
+                // The dot is 6 px, as the kit badge's (ui_badge_draw draws its dot at 6 px, and the kit names no constant for it).
                 if (doc_dirty(&editor.tabs[at].view.doc))
                         ui_round(ui, x + wide - ui_px(ui, 12), tabs / 2 - ui_px(ui, 3), ui_px(ui, 6), ui_px(ui, 6), ui_px(ui, 3),
-                                 ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 200));
+                                 ui_role(UI_ON_SURFACE) | 0xff000000u);
                 x += wide;
         }
         if (find)
@@ -494,7 +496,7 @@ static fn editor_draw(unsigned int address_to pixels)
                 static const char address_to const hints[4] = {"", "Find", "Find/Replace with", "Line"};
 
                 c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
-                c->x = 8, c->y = (tabs + ui_px(ui, 3)) / ui->scale, c->w = editor.width / ui->scale - 16, c->h = EDITOR_FIND - 6;
+                c->x = UI_GAP2, c->y = (tabs + ui_px(ui, UI_GAP1)) / ui->scale, c->w = editor.width / ui->scale - 2 * UI_GAP2, c->h = UI_SEARCH_H;
                 c->items[0] = hints[editor.finding];
                 c->focused = editor.find.focused;
                 c->edit = &editor.find;
@@ -511,7 +513,7 @@ static fn editor_draw(unsigned int address_to pixels)
 
                 for (positive s = 0; s < doc->selection_count; s++)
                         selected += doc_sel_end(&doc->selections[s]) - doc_sel_start(&doc->selections[s]);
-                ui_fill(ui, 0, y, editor.width, bar, ui_tone(ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 255));
+                ui_fill(ui, 0, y, editor.width, bar, ui_role(UI_SURFACE_CONTAINER) | 0xff000000u);
                 at += (positive)string_length(string_copy((string_address)text, (string_address) "Ln "));
                 at += positive_into_string((string_address)text + at, (positive)(line + 1));
                 at += (positive)string_length(string_copy((string_address)text + at, (string_address) ", Col "));
@@ -528,14 +530,14 @@ static fn editor_draw(unsigned int address_to pixels)
                 at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->insert_spaces ? "    Spaces: " : "    Tab: ")));
                 at += positive_into_string((string_address)text + at, doc->tab_size);
                 text[at] = 0;
-                ui_kit_text(ui, ui_px(ui, 10), ui_kit_baseline(ui, y + ui_px(ui, 3), UI_LABEL_MEDIUM), (string_address)text, UI_LABEL_MEDIUM,
-                            ui_role(UI_ON_SURFACE_VARIANT), 0);
+                ui_kit_text(ui, ui_px(ui, UI_INSET), ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM),
+                            (string_address)text, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
                 if (tab->changed_on_disk || editor.status[0])
                 {
                         const char address_to say = tab->changed_on_disk ? "changed on disk: Ctrl+R reads it again" : editor.status;
 
-                        ui_kit_text(ui, editor.width - ui_px(ui, 10) - ui_kit_measure(ui, (string_address)say, UI_LABEL_MEDIUM),
-                                    ui_kit_baseline(ui, y + ui_px(ui, 3), UI_LABEL_MEDIUM), (string_address)say, UI_LABEL_MEDIUM,
+                        ui_kit_text(ui, editor.width - ui_px(ui, UI_INSET) - ui_kit_measure(ui, (string_address)say, UI_LABEL_MEDIUM),
+                                    ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), (string_address)say, UI_LABEL_MEDIUM,
                                     ui_role(tab->changed_on_disk ? UI_WARNING : UI_ON_SURFACE_VARIANT), 0);
                 }
         }
