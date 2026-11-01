@@ -2108,6 +2108,19 @@ static long settings_feed_tick(void)
 }
 
 
+/*
+        What a row says changed (its value or whether it was read): where it shows, its rows are drawn again, and
+        nothing else is (a row is its band of the list whatever it holds, and what is typed matches no value). The
+        menu it opened lists its value, and is drawn whole.
+*/
+static fn settings_reading_changed(int row)
+{
+        if (settings.menu.owner == row)
+                settings_dirty();
+        else if (!settings.view)
+                ui_list_damage(&settings.ui, &settings.list, row);
+}
+
 // The verb running has finished, or taken too long: what it said, put where it belongs.
 static fn settings_finished(b32 killed)
 {
@@ -2177,7 +2190,7 @@ static fn settings_finished(b32 killed)
                         // A row asked again that says what it said is no change to draw.
                         if (settings.state[other] != was ||
                             !string_equals((string_address)before, (string_address)settings.value[other]))
-                                settings_dirty();
+                                settings_reading_changed((int)other);
                 }
         }
 

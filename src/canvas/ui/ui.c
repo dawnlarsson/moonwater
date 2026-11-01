@@ -3644,6 +3644,11 @@ static fn ui_kit_mark(const struct ui address_to ui, const struct ui_control add
                         return;
                 top = ui_kit.reach_top - 8, bottom = ui_kit.reach_bottom + 8;
         }
+        // A list's row (its own state layer and ripple, or its switch) draws nothing past the row: no list row is
+        // squashed or moved, its ripple is cut to the row, and a switch's bars are 28 of its 40 grown at most 1.1.
+        // The row is in logical pixels, cut from device ones: one more each way holds what the cut left off.
+        else if (c->row_w > 0 && (c->kind == UI_LIST_ROW || c->kind == UI_SWITCH || c->kind == UI_CHECKBOX))
+                top = c->row_y - 1, bottom = c->row_y + c->row_h + 1;
         top = ui_dev(ui, top < 0 ? 0 : top);
         bottom = ui_dev(ui, bottom);
         if (ui_kit.damage_bottom <= ui_kit.damage_top)

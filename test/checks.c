@@ -120883,7 +120883,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
                                 settings.queued--;
                                 memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
                                 settings_say((string_address) "done");
-                                settings_dirty();
+                                settings_reading_changed(row);
                         }
                         settings_frames_pass();
                 }
@@ -120983,7 +120983,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                                 settings.queued--;
                                 memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
                                 settings_say((string_address) "done");
-                                settings_dirty();
+                                settings_reading_changed(changed);
                         }
                         break;
                 case SF_THEME:
@@ -126101,10 +126101,11 @@ b32 main()
                         settings-hover moves the pointer over the rows, a row a frame, drawn the same way.
                 */
                 if (string_equals(what, (string_address) "settings") || string_equals(what, (string_address) "settings-keys") ||
-                    string_equals(what, (string_address) "settings-hover"))
+                    string_equals(what, (string_address) "settings-hover") || string_equals(what, (string_address) "settings-toggle") ||
+                    string_equals(what, (string_address) "settings-column"))
                 {
                         static struct windows table;
-                        int top, bottom;
+                        int top, bottom, wired = 0;
 
                         if (!settings_map())
                                 return 1;
@@ -126132,6 +126133,23 @@ b32 main()
                         ui_kit_inks(&settings.ui);
                         settings_refilter();
                         settings_group_choose(1);
+                        /*
+                                settings-toggle throws the Wired switch every 15 frames, its verb's reading taken as the
+                                window takes it, and settings-column moves the column a group down and back every 30
+                                frames: each frame drawn as the loop draws it, the rows that changed and those the kit
+                                says still move (the cost of an animation, frame by frame).
+                        */
+                        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                                wired = string_equals((string_address)settings_rows[at].label, (string_address) "Wired") ? (int)at : wired;
+                        if (string_equals(what, (string_address) "settings-toggle"))
+                        {
+                                settings.pane = 1;
+                                settings_group_choose(settings_group_of(wired));
+                                settings.pane = 1;
+                                settings.list.focus = wired;
+                        }
+                        if (string_equals(what, (string_address) "settings-column"))
+                                settings.pane = 0;
                         ui_kit.now = now;
                         settings_draw_rows(frames_pixels, 0, 0);
                         for (positive frame = 0; frame < count; frame++)
@@ -126142,6 +126160,24 @@ b32 main()
                                 if (string_equals(what, (string_address) "settings"))
                                 {
                                         settings_draw_rows(frames_pixels, 0, 0);
+                                        continue;
+                                }
+                                if (string_equals(what, (string_address) "settings-toggle") || string_equals(what, (string_address) "settings-column"))
+                                {
+                                        if (wired && frame % 15 == 0 && what[9] == 't')
+                                        {
+                                                b32 on = string_equals((string_address)settings.value[wired], (string_address) "on");
+
+                                                string_copy_bounded((string_address)settings.value[wired], (string_address)(on ? "off" : "on"), SETTINGS_VALUE);
+                                                settings_reading_changed(wired);
+                                        }
+                                        if (frame % 30 == 0 && what[9] == 'c')
+                                                settings_press(frame % 60 ? SETTINGS_KEY_UP : SETTINGS_KEY_DOWN);
+                                        ui_kit.damage_top = ui_kit.damage_bottom = 0;
+                                        ui_kit_turn();
+                                        settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
+                                        if (ui_kit.busy)
+                                                settings_moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
                                         continue;
                                 }
                                 if (string_equals(what, (string_address) "settings-keys"))
