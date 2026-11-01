@@ -3148,14 +3148,14 @@ static fn settings_gallery_build(void)
         settings_gallery_put(UI_RULE, 0, 405, 233, 282, 1, null);
         settings_gallery_put(UI_RULE, 0, 49, 927, 282, 1, null);
         settings_gallery_put(UI_RULE, 0, 49, 1420, 994, 1, null);
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 49, 282, 24, "System preferences")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 49, 282, 24, "Navigation")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 679, 282, 24, "Build target")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 679, 282, 24, "Actions")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 1210, 994, 24, "System upgrades")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1250, 994, 20, "Firmware DB-9 patching in progress\xe2\x80\xa6")->role = UI_ON_SURFACE_VARIANT;
-        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1338, 994, 20, "Node replication (80%)")->role = UI_ON_SURFACE_VARIANT;
-        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1461, 221, 20, "3 nodes pending a kernel rebuild.")->role = UI_ON_SURFACE_VARIANT;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 49, 282, ui_types[UI_TITLE_MEDIUM].line, "System preferences")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 49, 282, ui_types[UI_TITLE_MEDIUM].line, "Navigation")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Build target")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Actions")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 1210, 994, ui_types[UI_TITLE_MEDIUM].line, "System upgrades")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1250, 994, ui_types[UI_BODY_MEDIUM].line, "Firmware DB-9 patching in progress\xe2\x80\xa6")->role = UI_ON_SURFACE_VARIANT;
+        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1338, 994, ui_types[UI_BODY_MEDIUM].line, "Node replication (80%)")->role = UI_ON_SURFACE_VARIANT;
+        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1461, 221, ui_types[UI_BODY_MEDIUM].line, "3 nodes pending a kernel rebuild.")->role = UI_ON_SURFACE_VARIANT;
         // The fields are the kit's, typed in as any is: the node's name takes what a machine's name takes and says so.
         for (int k = 0; k < 2; k++)
         {
@@ -3210,7 +3210,7 @@ static fn settings_gallery_build(void)
         settings_gallery_put(UI_PROGRESS, 0, 49, 1382, 994, 6, null)->value = UI_ONE / 100 * 80;
         // The pieces, in the grid's cell the demo leaves empty: a heading, then rows that flow left to right (x -1).
         settings_gallery_put(UI_CARD, 0, 736, 654, 332, 507, null);
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 679, 282, 24, "Pieces")->role = UI_ON_SURFACE;
+        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Pieces")->role = UI_ON_SURFACE;
         settings_gallery_put(UI_BADGE, 1, 761, 719, 0, 22, "Accent")->role = UI_PRIMARY;
         settings_gallery_put(UI_BADGE, 1, -1, 719, 0, 22, "Healthy")->role = UI_SUCCESS;
         settings_gallery_put(UI_BADGE, 0, -1, 719, 0, 22, "Degraded")->role = UI_WARNING;
@@ -3258,7 +3258,7 @@ static fn settings_gallery_draw(struct ui address_to ui)
         scroll = settings_gallery.scroll.scroll / ui->scale;
         ui->top = 0;
         ui->bottom = ui->height;
-        ui_fill(ui, 0, 0, ui->width, ui->height, ui_role(UI_SURFACE) | 0xff000000u);
+        ui_fill(ui, 0, 0, ui->width, ui->height, ui_role_surface());
         for (int at = 0; at < settings_gallery.count; at++)
         {
                 struct ui_control address_to c = &settings_gallery.control[at];
