@@ -473,18 +473,23 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                                 cover = light ? value : 255 - value;
                                 if (stroke && cover < 255)
                                 {
-                                        // The stroke: a pixel takes a share of its strongest neighbour's cover.
-                                        unsigned int most = 0;
+                                        // The stroke: a pixel takes a share of its strongest neighbour's cover (left, right,
+                                        // above, below, those inside the run's scratch). A pixel of paper among paper takes none.
+                                        const unsigned int address_to here = coverage + column;
+                                        unsigned int most = 0, n[4], have = 0;
 
-                                        for (int n = 0; n < 4; n++)
+                                        if (column > 0)
+                                                n[have++] = here[-1];
+                                        if (column + 1 < wide)
+                                                n[have++] = here[1];
+                                        if (row > 0)
+                                                n[have++] = here[-wide];
+                                        if (row + 1 < rows)
+                                                n[have++] = here[wide];
+                                        for (unsigned int k = 0; k < have; k++)
                                         {
-                                                int nx = column + (n == 0 ? -1 : n == 1 ? 1 : 0), ny = row + (n == 2 ? -1 : n == 3 ? 1 : 0);
-                                                unsigned int v, c;
+                                                unsigned int v = n[k] >> 8 & 255, c = light ? v : 255 - v;
 
-                                                if (nx < 0 || nx >= wide || ny < 0 || ny >= rows)
-                                                        continue;
-                                                v = ui->scratch[(unsigned long)ny * (unsigned long)wide + (unsigned long)nx] >> 8 & 255;
-                                                c = light ? v : 255 - v;
                                                 most = c > most ? c : most;
                                         }
                                         cover += most * stroke / 128;
@@ -2188,23 +2193,47 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
 
                                         if (!ui_span_ends(first, width, spans[k][0], spans[k][1], &p0, &p1, &c0, &c1))
                                                 continue;
-                                        for (b32 x = p0; x <= p1; x++)
-                                                row[x] = ui_over(ui_premultiplied(argb, x == p0 ? c0 : x == p1 ? c1 : UI_FULL), row[x]);
+                                        row[p0] = ui_over(ui_premultiplied(argb, c0), row[p0]);
+                                        if (p1 > p0)
+                                        {
+                                                ui_kit_run(row + p0 + 1, p1 - p0 - 1, ui_premultiplied(argb, UI_FULL));
+                                                row[p1] = ui_over(ui_premultiplied(argb, c1), row[p1]);
+                                        }
                                 }
                                 continue;
                         }
                 }
-                if (!ui_box_row(box, y, ui_kit_line, first, width))
-                        continue;
-                ui_box_row(&inner, y, ui_kit_clip, first, width);
-                row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
-                for (b32 x = 0; x < width; x++)
+                // Any other row: the box's spans less the inner box's, pixel by pixel at the edges, and where both are
+                // whole (the box's cover less the inner's, none where the inner covers what the box does) one run.
                 {
-                        int cover = (int)ui_kit_line[x] - (int)ui_kit_clip[x];
+                        struct ui_spans outer, hole;
+                        b32 holed, a, b;
+                        int inside;
 
-                        ui_kit_line[x] = ui_kit_clip[x] = 0;
-                        if (cover > 0)
-                                row[x] = ui_over(ui_premultiplied(argb, (unsigned int)cover > UI_FULL ? UI_FULL : (unsigned int)cover), row[x]);
+                        if (!ui_box_spans(box, y, first, width, &outer))
+                                continue;
+                        holed = ui_box_spans(&inner, y, first, width, &hole);
+                        row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
+                        a = holed ? (hole.a > outer.a ? hole.a : outer.a) : outer.a;
+                        b = holed ? (hole.b < outer.b ? hole.b : outer.b) : outer.b;
+                        inside = (int)outer.inside - (holed ? (int)hole.inside : 0);
+                        if (b <= a || (holed && hole.a >= hole.b))
+                                a = b = outer.hi;
+                        for (b32 x = outer.lo; x < outer.hi; x++)
+                        {
+                                int cover;
+
+                                if (x == a && b > a)
+                                {
+                                        if (inside > 0)
+                                                ui_kit_run(row + a, b - a, ui_premultiplied(argb, (unsigned int)inside > UI_FULL ? UI_FULL : (unsigned int)inside));
+                                        x = b - 1;
+                                        continue;
+                                }
+                                cover = (int)ui_spans_cover(&outer, x) - (holed ? (int)ui_spans_cover(&hole, x) : 0);
+                                if (cover > 0)
+                                        row[x] = ui_over(ui_premultiplied(argb, (unsigned int)cover > UI_FULL ? UI_FULL : (unsigned int)cover), row[x]);
+                        }
                 }
         }
 }
