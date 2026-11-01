@@ -127683,6 +127683,31 @@ static fn field_check(struct ui address_to wui)
                 ui_text_close(&shrink);
                 ui_text_close(&fresh);
         }
+        // A composition in a masked field is drawn as dots, whatever it says; in a field it is drawn as its text.
+        {
+                static unsigned int first[400 * 100], second[400 * 100];
+                static struct ui_text mask, plain;
+
+                ui_field_open(&mask, &own, "");
+                mask.masked = true;
+                ui_text_preedit(&mask, (const p8 address_to) "ab", 2);
+                field_picture(wui, &mask, first);
+                ui_text_preedit(&mask, (const p8 address_to) "mn", 2);
+                field_picture(wui, &mask, second);
+                check("field: a masked field's composition is drawn as dots, the same whatever it says", !memory_compare(first, second, sizeof(first)));
+                ui_text_preedit_end(&mask, false);
+                ui_text_close(&mask);
+
+                ui_field_open(&plain, &own, "");
+                ui_text_preedit(&plain, (const p8 address_to) "ab", 2);
+                field_picture(wui, &plain, first);
+                ui_text_preedit(&plain, (const p8 address_to) "mn", 2);
+                field_picture(wui, &plain, second);
+                check("field: a field's composition is drawn as the text it is", memory_compare(first, second, sizeof(first)) != 0);
+                ui_text_preedit_end(&plain, false);
+                ui_text_close(&plain);
+        }
+
         // A paste is one line: line ends and tabs are blanks, any other control is left out.
         ui_text_set(&t, (const p8 address_to) "", 0);
         check("field: a paste of lines is one line of blanks for its line ends, with no control in it",

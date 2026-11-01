@@ -7784,6 +7784,32 @@ static p64 ui_text_indent(const struct ui_text address_to t, p64 line)
 }
 
 /*
+        A composition as it is drawn: the text it is making, or for a masked field a dot for each character of it, so
+        what is typed for a passphrase is not on the screen while it is made. Whole and NUL-terminated in into.
+*/
+static positive ui_text_preedit_shown(const struct ui_text address_to t, p8 address_to into)
+{
+        positive length = 0;
+
+        if (!t->masked)
+        {
+                memory_copy(into, t->preedit, t->preedit_length);
+                length = t->preedit_length;
+        }
+        for (positive at = 0; t->masked && at < t->preedit_length;)
+        {
+                p32 code;
+                positive size = doc_decode(t->preedit + at, t->preedit_length - at, &code);
+
+                memory_copy(into + length, "\xe2\x80\xa2", 3);
+                length += 3;
+                at += size ? size : 1;
+        }
+        into[length] = 0;
+        return length;
+}
+
+/*
         One laid line on the picture at its baseline: the selection behind it, then the text, then each caret on it.
         Proportional: the kit's text, cut to the box. The code view: whole cells, a run of one colour at a time, on the
         paper of its line (ground: the current line's, a line range's) and a highlight's; then the indent's guides,
@@ -7948,8 +7974,12 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 if (caret >= l->offset[0] && caret <= l->offset[l->count])
                 {
                         int x = origin + ui_text_x_of(l, caret);
-                        int wide = ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, x, baseline, t->preedit,
-                                             t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0);
+                        p8 shown[sizeof(t->preedit) * 3];
+                        int wide;
+
+                        ui_text_preedit_shown(t, shown);
+                        wide = ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, x, baseline, shown,
+                                         t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0);
 
                         ui_fill(ui, x, baseline + 2 * ui->scale, wide, ui->scale, ui_tone(text & 0xffffffu, 255));
                 }
