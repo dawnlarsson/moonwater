@@ -3072,10 +3072,15 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
                             c->hover || c->down ? 64 : 0);
         }
         {
-                positive length = positive_into_string((p8 address_to)shown, (positive)((value + UI_HALF) >> UI_Q));
+                b64 whole = (value + UI_HALF) >> UI_Q;
+                positive length = 0;
                 int width;
                 b32 vx;
 
+                // A negative value is its sign and then its digits (the digits are unsigned, so the sign is put here).
+                if (whole < 0)
+                        shown[length++] = '-', whole = -whole;
+                length += positive_into_string((p8 address_to)shown + length, (positive)whole);
                 shown[length] = 0;
                 width = ui_kit_measure(ui, (string_address)shown, UI_BODY_LARGE);
                 vx = origin + (b32)ui_qmul(rx + rw - width * 256 - origin, UI_ONE + squish);

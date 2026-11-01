@@ -126728,6 +126728,29 @@ static fn check_kit_controls(void)
                 check("kit progress: a value past its whole fills the track to its end, and nothing past it", inside && past);
         }
 
+        // A negative value's readout is its sign and its digits, at the right edge: nothing of the text is left of it.
+        {
+                struct ui_control neg;
+                unsigned int paper = 0xff111113u;
+                b32 right_ink = 0, middle_clear = 1;
+
+                memory_zero(&neg, sizeof(neg));
+                neg.kind = UI_SLIDER, neg.x = 20, neg.y = 100, neg.w = 300, neg.h = 88, neg.label = "";
+                neg.low = ui_q(-10), neg.high = ui_q(10), neg.step = 0, neg.value = ui_q(-4);
+                ui_control_start(&neg);
+                ui_fill(&ui, 0, 90, 340, 80, paper);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &neg);
+                for (int y = 108; y < 126; y++)
+                {
+                        for (int x = 300; x < 316; x++)
+                                right_ink = right_ink || pixels[y * 600 + x] != paper;
+                        for (int x = 250; x < 280; x++)
+                                middle_clear = middle_clear && pixels[y * 600 + x] == paper;
+                }
+                check("kit slider: a negative value's readout is drawn at the right edge, its sign and digits, and nothing across the middle",
+                      right_ink && middle_clear);
+        }
 }
 #endif
 
