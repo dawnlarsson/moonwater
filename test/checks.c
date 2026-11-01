@@ -120725,8 +120725,8 @@ static fn check_settings_keys(void)
         picture drawn at that frame's time, and so is the other buffer once
         it is drawn again with nothing new.
 */
-#define SETTINGS_FRAMES_W (2 * SETTINGS_WIDTH) // the buffers are the window's at scale 2
-#define SETTINGS_FRAMES_H (2 * SETTINGS_HEIGHT)
+#define SETTINGS_FRAMES_W (2 * SETTINGS_WIDTH) // the buffers hold the window at scale 2, and the gallery (1092 by 1538)
+#define SETTINGS_FRAMES_H 1600
 #define SETTINGS_FRAMES_PERIOD 16666667ull
 #define SETTINGS_FRAMES_MS 1000000ull
 
@@ -121016,6 +121016,69 @@ static fn settings_frames_play(string_address name, int group, const struct sett
         settings.queued = 0;
 }
 
+/*
+        The gallery (moonwater settings -g) drawn by the same loop: every control the hand works pressed at its middle
+        and let go (a slider dragged on the way), the page scrolled while they move, and every buffer shown the whole
+        picture at its time. The spinners and the running bar never rest, so neither does the loop.
+*/
+static fn settings_frames_gallery(void)
+{
+        positive start;
+        int pressed = 0;
+
+        settings_frames.scenario = (string_address) "the gallery";
+        settings_frames.wrong = false;
+        settings_gallery.on = 1;
+        settings_gallery_build();
+        settings_gallery.scroll.scroll = 0;
+        settings_size(SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
+        settings_frames_until(settings_frames.now + 500 * SETTINGS_FRAMES_MS);
+        start = settings_frames.now;
+        for (int at = 0; at < settings_gallery.count && !settings_frames.wrong; at++)
+        {
+                const struct ui_control address_to c = &settings_gallery.control[at];
+                int kind = c->kind, x = c->x + c->w / 2, y = c->y + (kind == UI_RADIOS ? UI_RADIO_PITCH * 2 : c->h) / 2;
+
+                if (kind != UI_BUTTON && kind != UI_SWITCH && kind != UI_CHECKBOX && kind != UI_RADIOS && kind != UI_SLIDER && kind != UI_TABS)
+                        continue;
+                y -= settings_gallery.scroll.scroll;
+                settings_frames_until(start + (positive)pressed * 300 * SETTINGS_FRAMES_MS);
+                settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
+                settings_frames_pass();
+                settings_frames_until(settings_frames.now + 20 * SETTINGS_FRAMES_MS);
+                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0);
+                settings_frames_pass();
+                if (kind == UI_SLIDER)
+                        for (int step = 1; step <= 6; step++)
+                        {
+                                settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
+                                settings_frames_event(WINDOW_EVENT_MOTION, 0, x - 60 + step * 25, y + 3);
+                                settings_frames_pass();
+                        }
+                settings_frames_until(settings_frames.now + 90 * SETTINGS_FRAMES_MS);
+                settings_frames_event(WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0);
+                settings_frames_pass();
+                // Every third, the page scrolled a notch while what was let go still moves, and back.
+                if (pressed % 3 == 2)
+                {
+                        settings_frames_until(settings_frames.now + 40 * SETTINGS_FRAMES_MS);
+                        settings_frames_event(WINDOW_EVENT_WHEEL, 0, -120, 0);
+                        settings_frames_pass();
+                        settings_frames_until(settings_frames.now + 40 * SETTINGS_FRAMES_MS);
+                        settings_frames_event(WINDOW_EVENT_WHEEL, 0, 120, 0);
+                        settings_frames_pass();
+                }
+                pressed++;
+        }
+        settings_frames_until(settings_frames.now + 600 * SETTINGS_FRAMES_MS);
+        string_format(log, "  settings frames (the gallery): %p controls pressed\n", (positive)pressed);
+        check("settings frames: every buffer the gallery shows is the whole picture drawn at its time", !settings_frames.wrong && pressed > 10);
+        settings_frames_event(WINDOW_EVENT_MOTION, 0, -100, -100);
+        settings_gallery.on = 0;
+        settings_size(SETTINGS_WIDTH * settings.ui.scale, SETTINGS_HEIGHT * settings.ui.scale);
+        settings_frames_until(settings_frames.now + 200 * SETTINGS_FRAMES_MS);
+}
+
 static fn check_settings_frames(string_address regular, string_address bold)
 {
         static font_face faces[2];
@@ -121152,6 +121215,9 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 settings_frames_play((string_address) "a choice's menu", canvas, menu, sizeof(menu) / sizeof(menu[0]));
         }
         }
+        settings.ui.scale = 1;
+        ui_kit_settle();
+        settings_frames_gallery();
         string_format(log, "  settings frames: %p frames drawn and compared, at scales 1 and 2\n", settings_frames.frames);
 
         settings.ui = saved.ui;
