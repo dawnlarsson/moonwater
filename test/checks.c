@@ -120392,11 +120392,23 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: a list with less room than it needs shows what fits, within the window",
                               shown >= 1 && shown < 10 && settings.menu.y >= 0 && settings.menu.y + settings.menu.h <= settings.height);
                         settings_press(SETTINGS_KEY_END);
+#ifdef UI_SCROLL_GLIDE
+                        for (int frame = 0; frame < 600 && settings.menu.scroll.gliding; frame++)
+                                ui_kit.now += 16666667ll, ui_menu_glide(&settings.ui, &settings.menu);
+#endif
                         check("settings: End on it scrolls to the last, which then shows", settings.menu.at == 9 && ui_menu_top(&settings.ui, &settings.menu) == 10 - shown);
                         settings_event(&wheel);
+#ifdef UI_SCROLL_GLIDE
+                        for (int frame = 0; frame < 600 && settings.menu.scroll.gliding; frame++)
+                                ui_kit.now += 16666667ll, ui_menu_glide(&settings.ui, &settings.menu);
+#endif
                         check("settings: the wheel scrolls it a choice, and the keys' choice stays in view",
                               ui_menu_top(&settings.ui, &settings.menu) == 9 - shown && settings.menu.at < ui_menu_top(&settings.ui, &settings.menu) + shown && settings.menu.at >= ui_menu_top(&settings.ui, &settings.menu));
                         settings_press(SETTINGS_KEY_HOME);
+#ifdef UI_SCROLL_GLIDE
+                        for (int frame = 0; frame < 600 && settings.menu.scroll.gliding; frame++)
+                                ui_kit.now += 16666667ll, ui_menu_glide(&settings.ui, &settings.menu);
+#endif
                         check("settings: Home scrolls back to the first", settings.menu.at == 0 && ui_menu_top(&settings.ui, &settings.menu) == 0);
                         settings_press(SETTINGS_KEY_ESCAPE);
 
@@ -121204,7 +121216,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                 }
                 settings_frames_pass();
         }
-        settings_frames_until(settings_frames.now + 2000 * SETTINGS_FRAMES_MS);
+        settings_frames_until(settings_frames.now + 4000 * SETTINGS_FRAMES_MS);
         check("settings frames: the loop comes to rest after a script", !settings.dirty);
         for (int again = 0; again < 2 && !settings_frames.wrong; again++)
         {
@@ -121392,6 +121404,12 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {14, SF_KEY, null, SETTINGS_KEY_UP, 0}, {20, SF_KEY, null, SETTINGS_KEY_SPACE, 0},
                     {40, SF_ANSWER, null, 0, 0}, {60, SF_WHEEL, null, 120, 0}, {80, SF_WHEEL, null, 120, 0}, {100, SF_DOWN, null, 0, 0},
                     {130, SF_WHEEL, null, -120, 0}, {150, SF_UP, null, 0, 0}, {170, SF_WHEEL, null, 360, 0}, {190, SF_WHEEL, null, -720, 0}};
+                static const struct settings_frames_step turns[] = {
+                    {0, SF_ROW, "Theme", 450, 0}, {10, SF_WHEEL, null, -120, 0}, {20, SF_WHEEL, null, -120, 0},
+                    {30, SF_WHEEL, null, -120, 0}, {40, SF_WHEEL, null, -120, 0}, {200, SF_WHEEL, null, -360, 0},
+                    {230, SF_WHEEL, null, 120, 0}, {600, SF_WHEEL, null, 720, 0}, {900, SF_KEY, null, SETTINGS_KEY_END, 0},
+                    {1000, SF_KEY, null, SETTINGS_KEY_HOME, 0}, {1400, SF_KEY, null, SETTINGS_KEY_DOWN, 0},
+                    {1420, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {1440, SF_WHEEL, null, -240, 0}};
                 static const struct settings_frames_step column[] = {
                     {0, SF_GROUP, null, 3, 0}, {40, SF_GROUP, null, 4, 0}, {80, SF_DOWN, null, 0, 0}, {200, SF_UP, null, 0, 0},
                     {230, SF_GROUP, null, 6, 0}, {240, SF_DOWN, null, 0, 0}, {250, SF_UP, null, 0, 0}, {260, SF_GROUP, null, 1, 0},
@@ -121415,6 +121433,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 settings_frames_play((string_address) "switches pressed and let go", canvas, press, sizeof(press) / sizeof(press[0]));
                 settings_frames_play((string_address) "segments and swatches pressed", canvas, parts, sizeof(parts) / sizeof(parts[0]));
                 settings_frames_play((string_address) "the wheel while a switch moves", canvas, wheel, sizeof(wheel) / sizeof(wheel[0]));
+                settings_frames_play((string_address) "wheel turns, then keys reveal", canvas, turns, sizeof(turns) / sizeof(turns[0]));
                 settings_frames_play((string_address) "the column hovered and pressed", canvas, column, sizeof(column) / sizeof(column[0]));
                 settings_frames_play((string_address) "the theme turned while things move", canvas, theme, sizeof(theme) / sizeof(theme[0]));
                 settings_frames_play((string_address) "the window resized while things move", canvas, size, sizeof(size) / sizeof(size[0]));
@@ -126358,6 +126377,104 @@ static fn check_kit_place(void)
                 check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
         }
 
+        // The glide: a wheel's notch aims one row on and the position reaches it over several frames, from below and never
+        // past it; a pull past an end is limited and springs back to that end when let go, at either end; a settled glide
+        // leaves the kit idle; a keyboard reveal glides to the row it shows, from where the region is, and a row in view
+        // is not moved. Each is a frame at a time, as the kit's loop draws it.
+        {
+                struct ui_scroll glide = {100, 10, 200, 1000, 200, 0, false, false, 0};
+                int last = 0, rising = 0, frame = 0;
+                b32 aimed = false, steps = false, notch_monotone = true, monotone = true, reached = false, overshot = false, idle = false;
+                b32 fine = false, thrown = false;
+                b32 pulled = false, limited = false, sprang = false, passed = false, bottom = false;
+                b32 jumped = true, revealed = false, reveal_steps = false, shown_again = true;
+
+#ifdef UI_SCROLL_GLIDE
+                ui_kit.now = 6000000000ll, ui_kit.busy = 0;
+                ui_scroll_wheel(&ui, &glide, -120);
+                aimed = glide.aim == (b64)UI_ROW * 256 && glide.scroll == 0;
+                for (frame = 0; frame < 240 && glide.gliding; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &glide);
+                        notch_monotone = notch_monotone && glide.scroll >= last;
+                        overshot = overshot || glide.scroll > UI_ROW;
+                        rising += glide.scroll > 0 && glide.scroll < UI_ROW;
+                        fine = fine || (glide.at & 255) != 0;
+                        last = glide.scroll;
+                }
+                reached = glide.scroll == UI_ROW && !glide.gliding;
+                steps = rising >= 3;
+                ui_kit.now += 16666667, ui_kit.busy = 0;
+                idle = !ui_scroll_glide(&ui, &glide) && !ui_kit.busy;
+
+                ui_scroll_set(&glide, 0);
+                ui_scroll_drag(&glide, -150);
+                pulled = glide.scroll < 0 && glide.scroll > -100;
+                limited = glide.scroll > -100 && glide.scroll < 0;
+                ui_scroll_let_go(&glide, 0, 0);
+                last = glide.scroll;
+                for (frame = 0; frame < 240 && glide.back.live; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &glide);
+                        monotone = monotone && glide.scroll >= last && glide.scroll <= 0;
+                        passed = passed || glide.scroll > 0;
+                        last = glide.scroll;
+                }
+                sprang = !glide.back.live && glide.scroll == 0 && glide.at == 0 && !passed;
+
+                ui_scroll_set(&glide, glide.content - glide.view);
+                ui_scroll_drag(&glide, 150);
+                bottom = glide.scroll > glide.content - glide.view && glide.scroll < glide.content - glide.view + 100;
+                ui_scroll_let_go(&glide, 0, 0);
+                for (frame = 0; frame < 240 && glide.back.live; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &glide);
+                        monotone = monotone && glide.scroll <= glide.content - glide.view;
+                }
+                bottom = bottom && !glide.back.live && glide.scroll == glide.content - glide.view;
+
+                ui_scroll_set(&glide, 0);
+                revealed = ui_scroll_reveal(&glide, 500, UI_ROW);
+                jumped = glide.scroll == 0 && glide.gliding;
+                last = 0;
+                rising = 0;
+                for (frame = 0; frame < 240 && glide.gliding; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &glide);
+                        monotone = monotone && glide.scroll >= last;
+                        rising += glide.scroll > 0 && glide.scroll < 340;
+                        last = glide.scroll;
+                }
+                reveal_steps = rising >= 3 && glide.scroll == 340;
+                shown_again = ui_scroll_reveal(&glide, 400, UI_ROW);
+                revealed = revealed && reveal_steps && jumped && glide.scroll + glide.view >= 500 + UI_ROW;
+
+                // A throw is a finger's let go at 600 pixels a second: it glides the 195 pixels its speed carries it, and
+                // after 19 moving frames (317 ms, the first frame only starts the clock) it has gone the share 1 - 1/e of
+                // that, 121 pixels.
+                ui_scroll_set(&glide, 0);
+                ui_scroll_drag(&glide, 0);
+                ui_scroll_let_go(&glide, 1, 600);
+                for (frame = 0; frame < 20; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &glide);
+                }
+                thrown = glide.gliding && glide.scroll >= 118 && glide.scroll <= 125;
+#endif
+                check("kit glide: a wheel notch aims one row on, and the position reaches it over several frames from below, never past it, in 256ths",
+                      aimed && steps && reached && notch_monotone && !overshot && idle && fine);
+                check("kit glide: a throw glides on from the finger's let go at the wheel's decay, a time constant's share of its way by then",
+                      thrown);
+                check("kit glide: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
+                check("kit glide: a keyboard reveal glides to the row it shows, from where the region is, and a row in view is not moved",
+                      revealed && !shown_again);
+        }
+
         // Tabs stood on end: the pip starts on the chosen item, slides along y to another over .35s with the items it
         // passes stretched (and only those), rests on it, and a point hits the item it is on.
         {
@@ -126670,6 +126787,30 @@ b32 main()
         {
                 string_address what = program_argument(6);
                 positive count = (positive)string_to_number_unsigned(program_argument(7), null, 10);
+
+                if (string_equals(what, (string_address) "scroll-step"))
+                {
+#ifdef UI_SCROLL_GLIDE
+                        // The glide's frame alone: a region turned a notch, then its frame at a time to rest, count times over.
+                        struct ui_scroll glide = {100, 10, 200, 1000, 200, 0, false, false, 0};
+                        struct ui scroll_ui;
+                        positive frames = 0;
+
+                        memory_zero(&scroll_ui, sizeof(scroll_ui));
+                        scroll_ui.scale = 1;
+                        ui_kit.now = 1000000000ll;
+                        for (positive turn = 0; turn < count; turn++)
+                        {
+                                ui_scroll_wheel(&scroll_ui, &glide, turn % 2 ? 120 : -120);
+                                ui_kit.now += 16666667;
+                                ui_scroll_glide(&scroll_ui, &glide);
+                                while (glide.gliding)
+                                        ui_kit.now += 16666667, ui_scroll_glide(&scroll_ui, &glide), frames++;
+                        }
+                        string_format(log, "  kit bench scroll-step: %p turns, %p frames\n", count, frames);
+#endif
+                        return 0;
+                }
                 struct ui_control address_to c = null;
                 b64 now = 3000000000ll;
                 int band_top, band_bottom, x, y;
@@ -126682,7 +126823,7 @@ b32 main()
                 */
                 if (string_equals(what, (string_address) "settings") || string_equals(what, (string_address) "settings-keys") ||
                     string_equals(what, (string_address) "settings-hover") || string_equals(what, (string_address) "settings-toggle") ||
-                    string_equals(what, (string_address) "settings-column"))
+                    string_equals(what, (string_address) "settings-column") || string_equals(what, (string_address) "settings-wheel"))
                 {
                         static struct windows table;
                         int top, bottom, wired = 0;
@@ -126753,6 +126894,28 @@ b32 main()
                                         }
                                         if (frame % 30 == 0 && what[9] == 'c')
                                                 settings_press(frame % 60 ? SETTINGS_KEY_UP : SETTINGS_KEY_DOWN);
+                                        ui_kit.damage_top = ui_kit.damage_bottom = 0;
+                                        ui_kit_turn();
+                                        settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
+                                        if (ui_kit.busy)
+                                                settings_moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
+                                        continue;
+                                }
+                                if (string_equals(what, (string_address) "settings-wheel"))
+                                {
+                                        // A notch of the wheel over the rows every 20 frames, turned down and back: the frames it moves are drawn.
+                                        if (frame == 1)
+                                        {
+                                                struct window_event over = {WINDOW_EVENT_MOTION, 0, 450, 200};
+
+                                                settings_event(&over);
+                                        }
+                                        if (frame % 20 == 0)
+                                        {
+                                                struct window_event turn = {WINDOW_EVENT_WHEEL, 0, frame % 40 ? -120 : 120, 0};
+
+                                                settings_event(&turn);
+                                        }
                                         ui_kit.damage_top = ui_kit.damage_bottom = 0;
                                         ui_kit_turn();
                                         settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
