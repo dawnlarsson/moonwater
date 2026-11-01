@@ -127549,6 +127549,56 @@ static fn editor_tabs_check(struct ui address_to wui);
 static fn editor_disk_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
+/*
+        The text menu's keys are the keymap's: the first key each command is bound to, written as the menu shows it, and
+        none for a command with no key. A key rebound shows its new one, and a command whose keys are taken away shows none.
+*/
+static b32 text_menu_keys_are(const char address_to keys, const char address_to want)
+{
+        return keys && string_equals((string_address)keys, (string_address)want);
+}
+
+static const char address_to text_menu_key(const struct ui_popmenu address_to m, int id)
+{
+        for (int at = 0; at < m->count; at++)
+                if (m->items[at].id == id && !(m->items[at].flags & UI_MENU_SEPARATOR))
+                        return m->items[at].keys;
+        return null;
+}
+
+static fn text_menu_keys_check(void)
+{
+        static struct doc_keymap map;
+        static struct ui_text t;
+        static struct ui_popmenu m;
+
+        doc_keymap_defaults(&map);
+        ui_text_open(&t, UI_TEXT_FIELD, (const p8 address_to) "hello", 5, &map);
+        m.count = 0;
+        ui_text_menu_items(&m, &t);
+        check("text menu keys: the defaults are the keymap's first keys (Ctrl+Z, Ctrl+Y, Ctrl+X, Ctrl+C, Ctrl+V, Delete, Ctrl+A)",
+              text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_UNDO), "Ctrl+Z") &&
+                  text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_REDO), "Ctrl+Y") &&
+                  text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_CUT), "Ctrl+X") &&
+                  text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_COPY), "Ctrl+C") &&
+                  text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_PASTE), "Ctrl+V") &&
+                  text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_DELETE), "Delete") &&
+                  text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_ALL), "Ctrl+A"));
+
+        doc_keymap_line(&map, "ctrl+x none", 11);
+        doc_keymap_line(&map, "shift+delete none", 17);
+        m.count = 0;
+        ui_text_menu_items(&m, &t);
+        check("text menu keys: a command with no key left shows none (Cut, with its two keys taken away)",
+              text_menu_key(&m, UI_TEXT_MENU_CUT) == null);
+
+        doc_keymap_line(&map, "ctrl+k cut", 10);
+        m.count = 0;
+        ui_text_menu_items(&m, &t);
+        check("text menu keys: the key the keymap binds shows, rebound or not (Cut is Ctrl+K)",
+              text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_CUT), "Ctrl+K"));
+}
+
 static fn text_widget_check(string_address inter, string_address mono)
 {
         static struct ui wui;
@@ -129843,6 +129893,7 @@ b32 main()
 
         if (program_argument_count() > 3)
                 text_widget_check(program_argument(3), program_argument(1));
+        text_menu_keys_check();
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);
         term_palette = terminal_palette;

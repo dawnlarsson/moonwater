@@ -4863,7 +4863,8 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 }
                 if (item->keys)
                         ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale - ui_kit_measure(ui, (string_address)item->keys, UI_BODY_MEDIUM), baseline,
-                                    (string_address)item->keys, UI_BODY_MEDIUM, (alpha * 6 / 10) << 24 | (ink & 0xffffffu), 0);
+                                    (string_address)item->keys, UI_BODY_MEDIUM,
+                                    (alpha << 24) | (ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu), 0);
                 if (item->flags & UI_MENU_SUBMENU)
                         ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale, baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
                                     (alpha << 24) | (ink & 0xffffffu), 0);
@@ -7687,20 +7688,35 @@ static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, c
 #define UI_TEXT_MENU_DELETE 6
 #define UI_TEXT_MENU_ALL 7
 
+// The keys each item of a text menu shows, by its id: the keymap's first key for the item's command (doc_keymap_name),
+// kept here while the menu is open. Every widget reads the one keymap, so a command's words are the same in each.
+static char ui_text_menu_keys[UI_TEXT_MENU_ALL + 1][40];
+
+static const char address_to ui_text_menu_key(const struct ui_text address_to t, int id, p32 command)
+{
+        if (!t->keymap || !doc_keymap_name(t->keymap, command, ui_text_menu_keys[id], sizeof(ui_text_menu_keys[id])))
+                return null;
+        return ui_text_menu_keys[id];
+}
+
 static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_text address_to t)
 {
         p32 none = doc_any_selected(&t->doc) ? 0 : UI_MENU_DISABLED, fixed = t->read_only ? UI_MENU_DISABLED : 0;
         p32 hidden = t->masked ? UI_MENU_DISABLED : 0;
 
-        ui_popmenu_add(m, "&Undo", "Ctrl+Z", t->doc.done && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_UNDO);
-        ui_popmenu_add(m, "&Redo", "Ctrl+Y", t->doc.done < t->doc.group_count && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_REDO);
+        ui_popmenu_add(m, "&Undo", ui_text_menu_key(t, UI_TEXT_MENU_UNDO, DOC_CMD_UNDO),
+                       t->doc.done && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_UNDO);
+        ui_popmenu_add(m, "&Redo", ui_text_menu_key(t, UI_TEXT_MENU_REDO, DOC_CMD_REDO),
+                       t->doc.done < t->doc.group_count && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_REDO);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, "Cu&t", "Ctrl+X", none | fixed | hidden, UI_TEXT_MENU_CUT);
-        ui_popmenu_add(m, "&Copy", "Ctrl+C", none | hidden, UI_TEXT_MENU_COPY);
-        ui_popmenu_add(m, "&Paste", "Ctrl+V", fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
-        ui_popmenu_add(m, "&Delete", "Delete", none | fixed, UI_TEXT_MENU_DELETE);
+        ui_popmenu_add(m, "Cu&t", ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
+        ui_popmenu_add(m, "&Copy", ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
+        ui_popmenu_add(m, "&Paste", ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
+                       fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
+        ui_popmenu_add(m, "&Delete", ui_text_menu_key(t, UI_TEXT_MENU_DELETE, DOC_CMD_DELETE), none | fixed, UI_TEXT_MENU_DELETE);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, "Select &All", "Ctrl+A", doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
+        ui_popmenu_add(m, "Select &All", ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
+                       doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
 }
 
 static b32 ui_text_menu_open(struct ui_popup address_to p, struct ui_text address_to t, const struct ui address_to ui, int x, int y, b32 touch)

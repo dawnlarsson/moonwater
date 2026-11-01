@@ -4449,6 +4449,54 @@ static p32 doc_keymap_find(const struct doc_keymap address_to map, p32 code, p32
 }
 
 /*
+        The first key the keymap binds a command to, written as a menu shows it: its modifiers and its key joined by +
+        (Ctrl+X, Shift+Delete, F3), each name capitalised and a letter upper case. A binding of a character no menu can
+        show (not printable ASCII) is passed over. Answers the length written into out, which gets a NUL, or 0 when
+        no key is bound to the command.
+*/
+static positive doc_keymap_name(const struct doc_keymap address_to map, p32 command, char address_to out, positive room)
+{
+        static const struct
+        {
+                p32 bit;
+                const char address_to word;
+        } modifiers[] = {{DOC_MOD_CONTROL, "Ctrl"}, {DOC_MOD_SHIFT, "Shift"}, {DOC_MOD_ALT, "Alt"}, {DOC_MOD_SUPER, "Super"}};
+
+        for (p32 b = 0; room && command && b < map->count; b++)
+        {
+                const struct doc_binding address_to binding = &map->bindings[b];
+                positive at = 0;
+                b32 named = false;
+
+                if (binding->command != command || (!binding->code && (binding->character < 32 || binding->character >= 128)))
+                        continue;
+                for (p32 k = 0; k < sizeof(modifiers) / sizeof(modifiers[0]); k++)
+                        if (binding->modifiers & modifiers[k].bit)
+                        {
+                                for (positive w = 0; modifiers[k].word[w] && at + 1 < room; w++)
+                                        out[at++] = modifiers[k].word[w];
+                                if (at + 1 < room)
+                                        out[at++] = '+';
+                        }
+                for (p32 k = 0; binding->code && k < sizeof(doc_key_names) / sizeof(doc_key_names[0]); k++)
+                        if (doc_key_names[k].code == binding->code)
+                        {
+                                for (positive w = 0; doc_key_names[k].name[w] && at + 1 < room; w++)
+                                        out[at++] = (char)(w ? doc_key_names[k].name[w]
+                                                             : byte_to_upper((b8)doc_key_names[k].name[w]));
+                                named = true;
+                        }
+                if (!binding->code && !named && at + 1 < room)
+                        out[at++] = (char)byte_to_upper((b8)binding->character);
+                out[at] = 0;
+                return at;
+        }
+        if (room)
+                out[0] = 0;
+        return 0;
+}
+
+/*
         A command that needs only the document, done: the moves (by lines, since only a view knows its rows), the
         edits and the selections. Answers whether it was one of these; the rest (the clipboard, pages, find, zoom,
         files) are the view's.
