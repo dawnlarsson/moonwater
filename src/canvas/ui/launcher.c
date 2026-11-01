@@ -587,7 +587,7 @@ static fn launcher_move(int way)
 static struct ui_text address_to launcher_field(void)
 {
         if (!launcher.field.doc.selections && ui_field_open(&launcher.field, &launcher.own, ""))
-                launcher.field.most = LAUNCHER_TEXT - 1;
+                launcher.field.most = LAUNCHER_TEXT - 1, launcher.field.keeps_vertical = true; // Up and Down move the list
         return &launcher.field;
 }
 

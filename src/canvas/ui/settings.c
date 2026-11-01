@@ -2761,6 +2761,7 @@ static struct ui_text address_to settings_filter_field(void)
         {
                 ui_field_open(&settings.filter_edit, &settings.own, "");
                 settings.filter_edit.most = SETTINGS_FILTER - 1;
+                settings.filter_edit.keeps_vertical = true; // Up and Down move the rows
                 settings.filter_open = true;
         }
         return &settings.filter_edit;
@@ -3165,6 +3166,7 @@ static fn settings_gallery_build(void)
                         ui_field_open(&settings_gallery.field[k], &settings.own, "");
                 settings_gallery.field[k].focused = false;
                 settings_gallery.field[k].most = 63;
+                settings_gallery.field[k].keeps_vertical = true; // Up and Down scroll the page
                 field->items[0] = k ? "moon-1" : "my-kernel";
                 field->edit = &settings_gallery.field[k];
         }

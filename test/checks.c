@@ -127719,6 +127719,7 @@ static fn field_check(struct ui address_to wui)
         // The keys a field does not take are its app's; Enter and Escape are its submit and cancel.
         field_type(wui, &t, "abc");
         field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_SHIFT);
+        t.keeps_vertical = true; // an app that takes Up and Down (a list's moves) leaves them to it
         check("field: Up, Down, Page Down, Tab and a chord it has no use for are not the field's",
               !ui_field_event(wui, &t, null, &up, 0, 0) && !field_key(wui, &t, FIELD_KEY_DOWN, 0, 0) && !field_key(wui, &t, 109, 0, 0) &&
                   !field_key(wui, &t, FIELD_KEY_TAB, '\t', 0) && !field_key(wui, &t, 25, 16, WINDOW_KEY_CONTROL) &&

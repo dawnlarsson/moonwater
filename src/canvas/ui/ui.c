@@ -6760,6 +6760,7 @@ struct ui_text
         const char address_to (*accept)(p32 code);
         const char address_to refused;
         b32 masked;
+        b32 keeps_vertical;                     // the app takes Up and Down (a list's, rows', a scroll): else they go to the ends, as Home and End
         b32 pasting;                            // it asked the clipboard, and the answer is its
         int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
         positive awake_at;                      // the last key or move, from which the caret blinks a while
@@ -7387,6 +7388,20 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
         return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
 }
 
+// A field whose app does not take Up and Down: they are Home and End (Shift selects), as a single line's ends are on
+// the desktop. Any other command is left as it is.
+static p32 ui_text_as_line(p32 command)
+{
+        switch (command)
+        {
+        case DOC_CMD_UP: return DOC_CMD_HOME;
+        case DOC_CMD_DOWN: return DOC_CMD_END;
+        case DOC_CMD_SELECT_UP: return DOC_CMD_SELECT_HOME;
+        case DOC_CMD_SELECT_DOWN: return DOC_CMD_SELECT_END;
+        }
+        return command;
+}
+
 // A key: the keymap's command, or the character typed. AltGr always types; a key with Control or Alt that is no
 // binding is not typed.
 static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event)
@@ -7400,6 +7415,8 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
                 modifiers = (flags & WINDOW_KEY_SHIFT ? DOC_MOD_SHIFT : 0) | (flags & WINDOW_KEY_CONTROL ? DOC_MOD_CONTROL : 0) |
                             (flags & WINDOW_KEY_ALT ? DOC_MOD_ALT : 0) | (flags & WINDOW_KEY_SUPER ? DOC_MOD_SUPER : 0);
                 command = t->keymap ? doc_keymap_find(t->keymap, (p32)event->a, character, modifiers) : DOC_CMD_NONE;
+                if (t->mode == UI_TEXT_FIELD && !t->keeps_vertical)
+                        command = ui_text_as_line(command);
                 // Escape in a field is its cancel, for its app to do (leave it, clear it, close the window).
                 if (command == DOC_CMD_SINGLE && t->mode == UI_TEXT_FIELD && t->doc.selection_count == 1)
                         return UI_TEXT_CANCEL;
@@ -7518,7 +7535,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         t->drag_box = false;
                         // A masked field has no words: a double click takes it all, as a triple does.
                         if (t->clicks == 2 && t->masked)
-                                start = 0, finish = doc_length(&t->doc), t->clicks = 3;
+                                start = 0, finish = doc_length(&t->doc);
                         else if (t->clicks == 2)
                                 doc_word_at(&t->doc, at, &start, &finish);
                         else if (t->clicks == 3)
