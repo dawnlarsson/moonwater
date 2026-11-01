@@ -1280,6 +1280,7 @@ struct ui_ripple
         b64 reach;                // the radius at full size
         b64 start, exit, hold;    // ns: the first frame, the exit (0 before it), what the exit waits
         b32 live;
+        b32 rides;                // a tab's ripple from a press on the tab the indicator was on: it moves with the indicator
 };
 
 static fn ui_ripple_go(struct ui_ripple address_to r, b64 x, b64 y, b64 w, b64 h, b64 margin)
@@ -1291,6 +1292,7 @@ static fn ui_ripple_go(struct ui_ripple address_to r, b64 x, b64 y, b64 w, b64 h
         r->reach = ui_qsqrt(ui_qmul(rx, rx) + ui_qmul(ry, ry));
         r->start = r->exit = r->hold = 0;
         r->live = 1;
+        r->rides = 0;
 }
 
 static fn ui_ripple_exit(struct ui_ripple address_to r, b64 now)
@@ -2514,34 +2516,51 @@ struct ui_place
         b32 ox, oy, tx, ty;
 };
 
-static fn ui_kit_ripples(struct ui address_to ui, struct ui_control address_to c, b32 x0, b32 y0, const struct ui_place address_to place,
-                         const struct ui_box address_to clip, unsigned int argb)
+static fn ui_kit_ripples_on(struct ui address_to ui, struct ui_control address_to c, b32 x0, b32 y0, const struct ui_place address_to place,
+                            const struct ui_box address_to clip, unsigned int argb, const struct ui_box address_to pill)
 {
         for (int k = 0; k < 3; k++)
         {
                 b64 cx, cy, radius, opacity;
                 struct ui_box dot;
+                struct ui_place frame = *place;
+                const struct ui_box address_to cut = clip;
+                b32 ox = x0, oy = y0;
 
                 if (!ui_ripple_at(&c->ripple[k], ui_kit.now, &cx, &cy, &radius, &opacity))
                         continue;
                 ui_kit.busy = 1;
-                dot.x0 = x0 + (b32)(((cx - radius) * ui->scale) >> 22);
-                dot.x1 = x0 + (b32)(((cx + radius) * ui->scale) >> 22);
-                dot.y0 = y0 + (b32)(((cy - radius) * ui->scale) >> 22);
-                dot.y1 = y0 + (b32)(((cy + radius) * ui->scale) >> 22);
+                // A tab's ripple that rides the indicator is measured from the indicator's own rectangle this frame, and cut to it.
+                if (pill && c->ripple[k].rides)
+                {
+                        struct ui_place still = {UI_ONE, UI_ONE, 0, 0, 0, 0};
+
+                        ox = pill->x0 - ui_q8(ui, 8), oy = pill->y0 - ui_q8(ui, 8), frame = still, cut = pill;
+                }
+                dot.x0 = ox + (b32)(((cx - radius) * ui->scale) >> 22);
+                dot.x1 = ox + (b32)(((cx + radius) * ui->scale) >> 22);
+                dot.y0 = oy + (b32)(((cy - radius) * ui->scale) >> 22);
+                dot.y1 = oy + (b32)(((cy + radius) * ui->scale) >> 22);
                 dot.rx = dot.ry = (b32)((radius * ui->scale) >> 22);
-                dot = ui_box_transform(dot, place->sx, place->sy, place->ox, place->oy, place->tx, place->ty);
-                ui_kit_fill(ui, &dot, ui_mix(argb, (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), clip);
+                dot = ui_box_transform(dot, frame.sx, frame.sy, frame.ox, frame.oy, frame.tx, frame.ty);
+                ui_kit_fill(ui, &dot, ui_mix(argb, (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), cut);
         }
 }
 
+static fn ui_kit_ripples(struct ui address_to ui, struct ui_control address_to c, b32 x0, b32 y0, const struct ui_place address_to place,
+                         const struct ui_box address_to clip, unsigned int argb)
+{
+        ui_kit_ripples_on(ui, c, x0, y0, place, clip, argb, null);
+}
+
 // A ripple from a press at device x, y in a box (device px) whose clip reaches margin (logical) past it.
-static fn ui_kit_ripple_start(const struct ui address_to ui, struct ui_control address_to c, int x, int y, int bx, int by, int bw, int bh, int margin)
+static struct ui_ripple address_to ui_kit_ripple_start(const struct ui address_to ui, struct ui_control address_to c, int x, int y, int bx, int by, int bw, int bh,
+                                                       int margin)
 {
         struct ui_ripple address_to r = &c->ripple[0];
 
         if (ui_kit.motion)
-                return;
+                return null;
         for (int k = 0; k < 3; k++)
                 if (!c->ripple[k].live)
                 {
@@ -2550,6 +2569,7 @@ static fn ui_kit_ripple_start(const struct ui address_to ui, struct ui_control a
                 }
         ui_ripple_go(r, ui_qdiv(ui_q(x - bx), ui_q(ui->scale)), ui_qdiv(ui_q(y - by), ui_q(ui->scale)), ui_qdiv(ui_q(bw), ui_q(ui->scale)),
                      ui_qdiv(ui_q(bh), ui_q(ui->scale)), ui_q(margin));
+        return r;
 }
 
 static fn ui_kit_ripples_exit(struct ui_control address_to c)
@@ -3184,8 +3204,9 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                                 ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
                         {
                                 struct ui_place place = {dom, UI_ONE, anchor, 0, 0, 0};
+                                struct ui_box pill = ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2);
 
-                                ui_kit_ripples(ui, c, bx - ui_q8(ui, 8), ui_q8(ui, c->y - 8), &place, &face, ink);
+                                ui_kit_ripples_on(ui, c, bx - ui_q8(ui, 8), ui_q8(ui, c->y - 8), &place, &face, ink, seg ? &pill : null);
                         }
                 }
                 width = ui_kit_measure(ui, (string_address)c->items[item], UI_LABEL_LARGE);
@@ -3267,7 +3288,12 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                         layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
                         if (layer)
                                 ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
-                        ui_kit_ripples(ui, c, ui_q8(ui, c->x - 8), by - ui_q8(ui, 8), &place, &face, ink);
+                        {
+                                b64 radius = ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8);
+                                struct ui_box pill = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), radius);
+
+                                ui_kit_ripples_on(ui, c, ui_q8(ui, c->x - 8), by - ui_q8(ui, 8), &place, &face, ink, &pill);
+                        }
                 }
                 // The text at whole pixels where the stretch takes the item's middle.
                 middle = anchor + (b32)ui_qmul(by + bh / 2 - anchor, dom);
@@ -4109,8 +4135,17 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         if (c->kind == UI_BUTTON)
                                 ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y), ui_dev(ui, c->w), ui_dev(ui, c->h), 8);
                         else if (c->kind == UI_TABS)
-                                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y), ui_dev(ui, ui_tab_width(ui, c, hit)),
-                                                    ui_dev(ui, c->variant ? 32 : 40), 8);
+                        {
+                                // The tab's own box (on end, its item's row); a press on the chosen tab rides its indicator.
+                                struct ui_ripple address_to r = c->variant == UI_TABS_VERTICAL
+                                                                    ? ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + hit * c->h),
+                                                                                          ui_dev(ui, c->w), ui_dev(ui, c->h), 8)
+                                                                    : ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y),
+                                                                                          ui_dev(ui, ui_tab_width(ui, c, hit)), ui_dev(ui, c->variant ? 32 : 40), 8);
+
+                                if (r)
+                                        r->rides = hit == c->at && c->variant != UI_TABS_UNDERLINE;
+                        }
                         else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_LIST_ROW)
                         {
                                 ui_spring_stop(&c->held_squish);

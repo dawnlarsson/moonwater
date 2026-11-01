@@ -126762,6 +126762,111 @@ static fn check_kit_place(void)
 }
 
 /*
+        A tab's ripple belongs to the tab: a ripple on a segmented strip is cut to the indicator's own rectangle this frame
+        and moves with it, so a tab that slides does not leave its ripple behind; a strip on end starts its ripple at the
+        press, on the item pressed. The frame is drawn twice, with the ripple and with the same control and no ripple live,
+        and the pixels the two differ in are the ripple's.
+*/
+struct check_ink
+{
+        int count, x, y, outside;   // the pixels the ripple changed: how many, the sums of their x and y, how many lie outside
+};
+
+static fn check_ink_diff(const unsigned int address_to with, const unsigned int address_to without, int x0, int y0, int x1, int y1,
+                         struct check_ink address_to ink)
+{
+        memory_zero(ink, sizeof(*ink));
+        for (int y = 0; y < 300; y++)
+                for (int x = 0; x < 600; x++)
+                        if (with[y * 600 + x] != without[y * 600 + x])
+                        {
+                                ink->count++, ink->x += x, ink->y += y;
+                                if (x < x0 || x >= x1 || y < y0 || y >= y1)
+                                        ink->outside++;
+                        }
+}
+
+static fn check_ripple_frame(struct ui address_to ui, struct ui_control address_to c, unsigned int address_to with, unsigned int address_to without,
+                             unsigned int background)
+{
+        struct ui_control bare = *c;
+
+        for (int k = 0; k < 3; k++)
+                bare.ripple[k].live = 0;
+        for (int k = 0; k < 600 * 300; k++)
+                with[k] = without[k] = background;
+        ui->pixels = without;
+        ui_control_draw(ui, &bare);
+        ui->pixels = with;
+        ui_control_draw(ui, c);
+}
+
+static fn check_kit_tab_ripple(void)
+{
+        static unsigned int with[600 * 300], without[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui ui = terminal.ui;
+        struct ui_control tabs, column;
+        struct check_ink ink;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        b32 live = 0, midway, slid, placed;
+        int press_x, press_y, left, right;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit tab ripple: the face loads", false);
+                return;
+        }
+        ui.pixels = with, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = 7000000000ll;
+
+        // A segmented strip: a press on the chosen tab 0, its ripple grown; then the indicator is sent to 2 (a key) while
+        // the press holds, and it is part way along its slide when sampled. The ripple is the indicator's to carry.
+        memory_zero(&tabs, sizeof(tabs));
+        tabs.kind = UI_TABS, tabs.variant = UI_TABS_SEGMENTED, tabs.x = 20, tabs.y = 80, tabs.count = 3;
+        tabs.items[0] = "All", tabs.items[1] = "Running", tabs.items[2] = "Stopped";
+        ui_control_start(&tabs);
+        ui_control_draw(&ui, &tabs);
+        press_x = ui_tab_left(&ui, &tabs, 0) + ui_tab_width(&ui, &tabs, 0) / 2;
+        ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, press_x, 96, true, 0);
+        for (int frame = 0; frame < 4; frame++)
+                ui_kit.now += 16666667, ui_kit.busy = 0, ui_control_draw(&ui, &tabs);
+        ui_tabs_choose(&ui, &tabs, 2);
+        for (int frame = 0; frame < 9; frame++)
+                ui_kit.now += 16666667, ui_kit.busy = 0, ui_control_draw(&ui, &tabs);
+        midway = ui_tween_at(&tabs.pip_x, ui_kit.now, &live) > ui_q(ui_tab_left(&ui, &tabs, 0) - tabs.x) &&
+                 ui_tween_at(&tabs.pip_x, ui_kit.now, &live) < ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
+        left = tabs.x + (int)(ui_tween_at(&tabs.pip_x, ui_kit.now, &live) >> UI_Q);
+        right = left + (int)(ui_tween_at(&tabs.pip_w, ui_kit.now, &live) >> UI_Q);
+        check_ripple_frame(&ui, &tabs, with, without, 0xff202020u);
+        check_ink_diff(with, without, left - 1, 79, right + 2, 113, &ink);
+        slid = midway && ink.count > 0 && ink.outside == 0;
+
+        // A strip on end: a press on item 5 (its middle), and the ripple starts there, not where the same press would
+        // land on the strip's top item.
+        memory_zero(&column, sizeof(column));
+        column.kind = UI_TABS, column.variant = UI_TABS_VERTICAL, column.x = 10, column.y = 10, column.w = 150, column.h = 34, column.count = 12;
+        for (int k = 0; k < 12; k++)
+                column.items[k] = "Group";
+        ui_control_start(&column);
+        ui_control_draw(&ui, &column);
+        press_y = column.y + 5 * column.h + 17;
+        ui_kit_pointer(&ui, &column, 1, WINDOW_EVENT_BUTTON, 60, press_y, true, 0);
+        for (int frame = 0; frame < 4; frame++)
+                ui_kit.now += 16666667, ui_kit.busy = 0, ui_control_draw(&ui, &column);
+        check_ripple_frame(&ui, &column, with, without, 0xff202020u);
+        check_ink_diff(with, without, 9, column.y + 5 * column.h - 1, 161, column.y + 6 * column.h + 1, &ink);
+        placed = ink.count > 0 && ink.outside == 0 && ink.x / ink.count > 60 - 12 && ink.x / ink.count < 60 + 12 &&
+                 ink.y / ink.count > press_y - 12 && ink.y / ink.count < press_y + 12;
+
+        check("kit tab ripple: on a sliding segmented tab the ripple is cut to the indicator it moves with, nothing outside it", slid);
+        check("kit tab ripple: on a strip on end the ripple starts at the press, on the item pressed", placed);
+}
+
+/*
         The control widgets' pointer: a finger reaches what it presses UI_TARGET each way (a tab strip 32 tall is pressed
         4 above and below it), a mouse does not; the slider's thumb rings where the hand hovers it; a value past the last
         step lands on that step, not past the range; a value fixed in place is placed, not faded; a progress bar's fill
@@ -130087,6 +130192,7 @@ b32 main()
         check_kit_slider_below();
         check_kit_place();
         check_kit_controls();
+        check_kit_tab_ripple();
 #endif
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
