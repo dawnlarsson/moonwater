@@ -120728,6 +120728,25 @@ static fn check_settings_keys(void)
                       state == SETTINGS_READ && string_equals((string_address)value, (string_address)"90%, Full"));
         }
 
+        //      Commands are not states: a join, a forget and a command typed in the Run any row, each waiting behind a
+        //      verb that is running, are all kept and run in order; a change to a row waiting replaces it, as it did.
+        settings.child = 1;
+        settings.job = 0;
+        settings.job_sets = false;
+        settings.queued = 0;
+        settings_act('j', "alpha", "first passphrase");
+        settings_act('j', "beta", "second passphrase");
+        settings_act('f', "gamma", null);
+        check("settings: three network changes waiting behind a verb are all kept", settings.queued == 3);
+        settings_run(SETTINGS_ANY, "wifi scan");
+        settings_run(SETTINGS_ANY, "bluetooth scan");
+        check("settings: two commands typed in the Run any row, waiting behind a verb, are both kept", settings.queued == 5);
+        settings_change(0, "mw-one");
+        settings_change(0, "mw-two");
+        check("settings: a second change to a row waiting replaces the first", settings.queued == 6 &&
+              string_equals((string_address)settings.queue[5].value, (string_address)"mw-two"));
+        settings.queued = 0;
+
         settings.child = 0;
         settings.queued = 0;
         settings.group = 0;
