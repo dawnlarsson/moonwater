@@ -126911,6 +126911,7 @@ b32 main()
 static fn menu_check(struct ui address_to wui);
 static fn kit_composites_check(struct ui address_to wui);
 static fn editor_check(struct ui address_to wui);
+static fn editor_close_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
 static fn text_widget_check(string_address inter, string_address mono)
@@ -127117,6 +127118,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         menu_check(&wui);
         kit_composites_check(&wui);
         editor_check(&wui);
+        editor_close_check(&wui);
         field_check(&wui);
 }
 
@@ -127875,6 +127877,67 @@ static fn editor_check(struct ui address_to wui)
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)link_path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)fifo, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
+}
+
+/*
+        The editor's close. Ctrl+W on a file with changes keeps it open and says why; the second Ctrl+W closes it and the
+        changes go. A window asked to go with changes in it is held and says why, and goes once nothing in it is unsaved.
+        A link to a file that is not there yet is saved at the file it names, and the link stays a link.
+*/
+static fn editor_close_check(struct ui address_to wui)
+{
+        char dir[48], path[96], link_path[96], later[96], got[64], target[64];
+        positive named = string_length(string_copy((string_address)dir, (string_address) "editor-close."));
+        bipolar handle, length, linked;
+
+        named += positive_into_string((string_address)dir + named, (positive)system_call(syscall(getpid)));
+        string_copy((string_address)dir + named, (string_address) ".tmp");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
+        string_copy(string_copy((string_address)path, (string_address)dir) + string_length((string_address)dir), (string_address) "/file.c");
+        string_copy(string_copy((string_address)later, (string_address)dir) + string_length((string_address)dir), (string_address) "/later.c");
+        string_copy(string_copy((string_address)link_path, (string_address)dir) + string_length((string_address)dir), (string_address) "/link.c");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "int x;\n", 7);
+        system_close(handle);
+        editor.ui = *wui;
+        editor.count = 0;
+        check("editor close: a file opens", editor_open((string_address)path) && editor.count == 1);
+        doc_select_set(&editor_now()->view.doc, 0, 0);
+        doc_type(&editor_now()->view.doc, (const p8 address_to) "// ", 3);
+        editor_command(DOC_CMD_CLOSE);
+        check("editor close: Ctrl+W on a file with changes keeps it open and says why", editor.count == 1 && doc_dirty(&editor_now()->view.doc) && editor.status[0]);
+        editor_command(DOC_CMD_CLOSE);
+        check("editor close: the second Ctrl+W closes it, the changes given up", editor.count == 1 && editor_now()->path[0] == 0 && !doc_dirty(&editor_now()->view.doc));
+
+        editor.count = 0;
+        check("editor close: a file opens again", editor_open((string_address)path) && editor.count == 1);
+        doc_select_set(&editor_now()->view.doc, 0, 0);
+        doc_type(&editor_now()->view.doc, (const p8 address_to) "// ", 3);
+        check("editor close: a window asked to go with changes in it is held, and says why",
+              editor_app.closing && editor_app.done && (editor_app.closing(), !editor_app.done()) && editor.status[0]);
+        check("editor close: and goes once nothing in it is unsaved", editor_save(editor_now()) && editor_app.closing && (editor_app.closing(), editor_app.done()));
+
+        // A link to a file that is not there yet: saved at the file it names, the link still a link.
+        system_call_3(syscall(symlinkat), (positive) "later.c", (positive)AT_FDCWD, (positive)link_path);
+        editor.count = 0;
+        check("editor close: a link to nothing yet opens", editor_open((string_address)link_path) && editor.count == 1);
+        doc_type(&editor_now()->view.doc, (const p8 address_to) "int y;\n", 7);
+        check("editor close: its save succeeds", editor_save(editor_now()));
+        linked = system_call_4(syscall(readlinkat), (positive)AT_FDCWD, (positive)link_path, (positive)target, sizeof(target));
+        check("editor close: the link is still a link, to the file it names", linked == (bipolar)string_length((string_address) "later.c") &&
+              !memory_compare(target, "later.c", (positive)linked));
+        handle = system_open_at(AT_FDCWD, (string_address)later, FILE_READ | O_CLOEXEC);
+        length = handle >= 0 ? system_read_once((b32)handle, got, sizeof(got)) : -1;
+        if (handle >= 0)
+                system_close(handle);
+        check("editor close: and the file it names has the save", length == 7 && !memory_compare(got, "int y;\n", 7));
+
+        editor.count = 0;
+        editor_open(null);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)link_path, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)later, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
 }
 

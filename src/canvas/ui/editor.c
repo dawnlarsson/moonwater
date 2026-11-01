@@ -61,6 +61,8 @@ static struct
         struct doc_find search;
         char status[160];
         struct ui_popup menu;
+        b32 armed;   // a Ctrl+W asked once of a file with changes: the next one closes it
+        b32 leaving; // the window may go: asked to, and nothing in it unsaved
 } editor = {.shown = -1};
 
 static struct editor_tab address_to editor_now(void)
@@ -80,8 +82,25 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
         tab->bytes = null, tab->length = tab->mapped = 0;
         if (handle < 0)
         {
-                // A file that is not there yet is a new file of that name.
+                // A file that is not there yet is a new file of that name. A link to nothing is a new file of the name it
+                // holds, beside the link (a save writes that file, and the link stays a link).
                 string_copy_bounded((string_address)tab->path, path, EDITOR_PATH);
+                if (handle == -2)
+                {
+                        char named[EDITOR_PATH];
+                        long named_length = (long)system_call_4(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)named, sizeof(named) - 1);
+                        positive directory = string_length((string_address)path);
+
+                        while (directory && path[directory - 1] != '/')
+                                directory--;
+                        if (named_length > 0 && named[0] == '/')
+                                string_copy_bounded((string_address)tab->path, (string_address)named, EDITOR_PATH);
+                        else if (named_length > 0 && directory + (positive)named_length < EDITOR_PATH)
+                        {
+                                memory_copy(tab->path + directory, named, (positive)named_length);
+                                tab->path[directory + (positive)named_length] = 0;
+                        }
+                }
                 tab->mode = 0644;
                 return handle == -2;
         }
@@ -249,6 +268,40 @@ static fn editor_close_tab(void)
                 editor_open(null);
                 editor.tab = 0;
         }
+}
+
+/*
+        Ctrl+W: a file with changes is not closed by the first, which says why; the second, with no other key or press
+        between them (editor_event disarms it), closes it and the changes go with it.
+*/
+static fn editor_close_tab_asked(void)
+{
+        if (doc_dirty(&editor_now()->view.doc) && !editor.armed)
+        {
+                editor.armed = true;
+                string_copy_bounded((string_address)editor.status, (string_address) "unsaved changes: Ctrl+S saves them, Ctrl+W again closes without saving", sizeof(editor.status));
+                return;
+        }
+        editor.armed = false;
+        editor_close_tab();
+}
+
+// The window asked to go (its close box, Alt+F4): held while a file in it has changes, which it says, and gone once none has.
+static void editor_closing(void)
+{
+        for (int at = 0; at < editor.count; at++)
+                if (doc_dirty(&editor.tabs[at].view.doc))
+                {
+                        string_copy_bounded((string_address)editor.status, (string_address) "unsaved changes: save them, or close each with Ctrl+W twice", sizeof(editor.status));
+                        editor.dirty = true;
+                        return;
+                }
+        editor.leaving = true;
+}
+
+static b32 editor_done(void)
+{
+        return editor.leaving;
 }
 
 // The find bar opened for what (1 find, 2 replace, 3 go to a line), its field emptied for a line, holding the selection for a find.
@@ -490,7 +543,7 @@ static fn editor_command(p32 command)
         else if (command == DOC_CMD_NEW)
                 editor_open(null);
         else if (command == DOC_CMD_CLOSE)
-                editor_close_tab();
+                editor_close_tab_asked();
         else if (command == DOC_CMD_NEXT_TAB || command == DOC_CMD_PREVIOUS_TAB)
                 editor.tab = (editor.tab + (command == DOC_CMD_NEXT_TAB ? 1 : editor.count - 1)) % editor.count;
 }
@@ -510,6 +563,10 @@ static b32 editor_event(const struct window_event address_to event)
         struct editor_tab address_to tab = editor_now();
         p32 asks;
 
+        // A key or a press other than the Ctrl+W that asked is a change of mind: the next Ctrl+W asks again.
+        if (editor.armed && (event->flags & WINDOW_KEY_DOWN) &&
+            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && editor_key_command(event) != DOC_CMD_CLOSE)))
+                editor.armed = false;
         if (event->type == WINDOW_EVENT_MOTION)
                 editor.pointer_x = event->a, editor.pointer_y = event->b;
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && (event->flags & WINDOW_KEY_CONTROL) &&
@@ -642,6 +699,8 @@ static struct ui_app editor_app = {
     .tick = editor_tick,
     .popup = &editor.menu,
     .chose = editor_chose,
+    .closing = editor_closing,
+    .done = editor_done,
     .mono = true,
 };
 
