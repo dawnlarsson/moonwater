@@ -127989,6 +127989,43 @@ static fn terminal_selection_check(void)
         full_reset();
 }
 
+/*
+        A press and a release in the gutter to the right of the grid are the scroll bar's, scrolled back or not, and a
+        program that asked for the pointer is not told of them: a report there would be clamped onto the grid's last column.
+*/
+static fn terminal_gutter_check(void)
+{
+        int ends[2];
+        struct window_event event;
+        b32 dirty = false;
+        char got[64];
+        bipolar length = -1;
+
+        if (system_pipe(ends, O_NONBLOCK | O_CLOEXEC) != 0)
+        {
+                check("terminal gutter: a pipe to catch the reports", false);
+                return;
+        }
+        full_reset();
+        mouse_mode = 1000;
+        mouse_sgr = true;
+        terminal.modifiers = 0;
+        terminal.pressed = false;
+        terminal.pointer_x = (int)(COLUMNS * terminal.cell_w) + 2;
+        terminal.pointer_y = 2 * (int)terminal.cell_h;
+        event.type = WINDOW_EVENT_BUTTON, event.a = 0x110, event.b = 0, event.flags = WINDOW_KEY_DOWN;
+        terminal_receive((b32)ends[1], &event, &dirty);
+        event.flags = 0;
+        terminal_receive((b32)ends[1], &event, &dirty);
+        length = system_read_once((b32)ends[0], got, sizeof(got));
+        check("terminal gutter: a press and a release in the gutter are not the program's", length < 0);
+        mouse_mode = 0;
+        mouse_sgr = false;
+        system_close(ends[0]);
+        system_close(ends[1]);
+        full_reset();
+}
+
 b32 main()
 {
         string_address paths[1];
@@ -128053,6 +128090,7 @@ b32 main()
         render_surface();
         cursor_show();
         terminal_selection_check();
+        terminal_gutter_check();
         cursor_show();
 
         //      The glyphs a program prints, btop's among them, each in its own cell of a

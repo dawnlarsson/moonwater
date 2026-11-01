@@ -2395,6 +2395,10 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         terminal.bar_grab = -1;
                         return true;
                 }
+                // A left press in the gutter, and its release when the press was not the program's, is the scroll bar's
+                // whether or not there is anything to scroll: a report there would be clamped onto the grid's last column.
+                if (event->a == 0x110 && (down || !terminal.pressed) && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
+                        return true;
                 if (terminal_select_event(event, dirty))
                         return true;
 
