@@ -224,12 +224,14 @@ static unsigned int ui_inside(int x, int y, int width, int height, int radius)
         for (int sy = 0; sy < 4; sy++)
                 for (int sx = 0; sx < 4; sx++)
                 {
-                        // In eighths of a pixel, from the nearest corner's circle's centre.
-                        int px = 8 * x + 2 * sx + 1, py = 8 * y + 2 * sy + 1;
-                        int cx = x < radius ? 8 * radius : 8 * (width - radius), cy = y < radius ? 8 * radius : 8 * (height - radius);
-                        int dx = px - cx, dy = py - cy;
+                        // In eighths of a pixel, from the nearest corner's circle's centre. In 64 bits: past a radius of
+                        // 5792 px the squares leave int (the corner's sides are two radii and more).
+                        b64 px = 8 * (b64)x + 2 * sx + 1, py = 8 * (b64)y + 2 * sy + 1;
+                        b64 cx = x < radius ? 8 * (b64)radius : 8 * (b64)(width - radius);
+                        b64 cy = y < radius ? 8 * (b64)radius : 8 * (b64)(height - radius);
+                        b64 dx = px - cx, dy = py - cy;
 
-                        inside += dx * dx + dy * dy <= 64 * radius * radius;
+                        inside += dx * dx + dy * dy <= 64 * (b64)radius * (b64)radius;
                 }
         return (inside * 255 + 8) / 16;
 }

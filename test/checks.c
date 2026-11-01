@@ -126200,6 +126200,48 @@ static fn check_kit_fills(void)
 }
 
 /*
+        A rounded corner's cover (ui_inside) at radii the window's clamp allows: its sixteen samples square 8 radius and
+        64 radius squared, and past 5792 px those leave int, so the kit takes them in 64 bits. The reference is the same
+        test written out in 64 bits, over the corner squares of rectangles whose sides are two radii and more.
+*/
+static unsigned int kit_corner_reference(int x, int y, int width, int height, int radius)
+{
+        b64 inside = 0;
+
+        if (x < 0 || y < 0 || x >= width || y >= height)
+                return 0;
+        if ((x >= radius && x < width - radius) || (y >= radius && y < height - radius))
+                return 255;
+        for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++)
+                {
+                        b64 px = 8 * (b64)x + 2 * sx + 1, py = 8 * (b64)y + 2 * sy + 1;
+                        b64 cx = x < radius ? 8 * (b64)radius : 8 * (b64)(width - radius);
+                        b64 cy = y < radius ? 8 * (b64)radius : 8 * (b64)(height - radius);
+                        b64 dx = px - cx, dy = py - cy;
+
+                        inside += dx * dx + dy * dy <= 64 * (b64)radius * (b64)radius;
+                }
+        return (unsigned int)((inside * 255 + 8) / 16);
+}
+
+static fn check_kit_corners(void)
+{
+        static const int radii[] = {8, 40, 1000, 5792, 5793, 6000, 9000};
+        positive wrong = 0;
+
+        for (positive k = 0; k < sizeof(radii) / sizeof(radii[0]); k++)
+        {
+                int r = radii[k], side = 2 * r + 8;
+
+                for (int y = 0; y < side; y += (r > 1000 ? 311 : 1))
+                        for (int x = 0; x < side; x += (r > 1000 ? 297 : 1))
+                                wrong += ui_inside(x, y, side, side, r) != kit_corner_reference(x, y, side, side, r);
+        }
+        check("kit: a rounded corner's cover is the 64-bit cover at every radius, past the int square too", !wrong);
+}
+
+/*
         A control appears settled: a switch made off and then given its value on (as a settings row is, when the verb
         answers), tabs and radios given their chosen item, are drawn there at their first frame with nothing moving;
         one forgotten (its page shown again) and changed while unseen is placed again; a change after its first frame
@@ -129591,6 +129633,7 @@ b32 main()
         check_kit_theme();
         check_kit_arc();
         check_kit_fills();
+        check_kit_corners();
         check_kit_place();
         check_kit_controls();
 #endif
