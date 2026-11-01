@@ -2877,9 +2877,12 @@ static b64 ui_slider_ratio(const struct ui_control address_to c, b64 value)
 static b64 ui_slider_snap(const struct ui_control address_to c, b64 value)
 {
         b64 step = c->step > 0 ? c->step : UI_ONE, n = ui_qdiv(value - c->low, step);
+        b64 last = c->high > c->low ? ui_qdiv(c->high - c->low, step) >> UI_Q : 0; // the last step the range holds
 
-        n = (n + UI_HALF) >> UI_Q << UI_Q;
-        value = c->low + ui_qmul(n, step);
+        // The nearest step, and past the range's end the last step under it, never the end itself when no step is there.
+        n = (n + UI_HALF) >> UI_Q;
+        n = n < 0 ? 0 : n > last ? last : n;
+        value = c->low + ui_qmul(n << UI_Q, step);
         return value < c->low ? c->low : value > c->high ? c->high : value;
 }
 

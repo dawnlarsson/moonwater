@@ -126603,6 +126603,28 @@ static fn check_kit_controls(void)
                 check("kit slider: hovering the thumb rings it where the hand is, a faint ring", ringed);
                 check("kit slider: leaving the thumb lets the ring go, nothing animating once it has", let_go);
         }
+
+        // A stepped slider from 0 to 110 in steps of 40 has its steps at 0, 40 and 80: a press at its far end lands on 80,
+        // the last step the range holds (as an input range's does), never on 110, which no step is.
+        {
+                struct ui_control stepped;
+                b64 landed;
+
+                memory_zero(&stepped, sizeof(stepped));
+                stepped.kind = UI_SLIDER, stepped.variant = UI_SLIDER_STEPS, stepped.x = 20, stepped.y = 100, stepped.w = 300, stepped.h = 88;
+                stepped.label = "Steps";
+                stepped.low = ui_q(0), stepped.high = ui_q(110), stepped.step = ui_q(40), stepped.value = ui_q(0);
+                ui_control_start(&stepped);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &stepped);
+                ui_kit_pointer(&ui, &stepped, 1, WINDOW_EVENT_BUTTON, 318, 140, true, 0);
+                ui_kit_pointer(&ui, &stepped, 1, WINDOW_EVENT_BUTTON, 318, 140, false, 0);
+                ui_kit.now += 2000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &stepped);
+                landed = stepped.value;
+                check("kit slider: a press at the far end of a stepped range lands on its last step (80 of 0 to 110 by 40), not past it",
+                      landed == ui_q(80));
+        }
 }
 #endif
 
