@@ -125715,6 +125715,20 @@ static fn check_kit_theme(void)
 }
 
 /*
+        A corner's root (ui_arc) is the bit loop's for every place in a corner, taken by the hardware where its table
+        misses and from the table where it holds the place: 65536 places, each asked twice.
+*/
+static fn check_kit_arc(void)
+{
+        positive wrong = 0;
+
+        for (int pass = 0; pass < 2; pass++)
+                for (p64 u = 0; u < 65536; u++)
+                        wrong += ui_arc(u) != ui_isqrt((1ull << 32) - u * u);
+        check("kit: a corner's root is the integer root at every place in the corner, missed or kept", !wrong);
+}
+
+/*
         A control appears settled: a switch made off and then given its value on (as a settings row is, when the verb
         answers), tabs and radios given their chosen item, are drawn there at their first frame with nothing moving;
         one forgotten (its page shown again) and changed while unseen is placed again; a change after its first frame
@@ -127580,6 +127594,7 @@ b32 main()
 #if MOONWATER_UI_ANY
         check_kit_motion();
         check_kit_theme();
+        check_kit_arc();
         check_kit_place();
 #endif
 #if MOONWATER_UI_TASKBAR

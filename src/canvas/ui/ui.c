@@ -1746,10 +1746,13 @@ static p64 ui_arc(p64 u)
 {
         unsigned int slot = (unsigned int)(u * 2654435761u) >> 22 & 1023u;
 
+        // A root missed is the hardware's: 2^32 less u squared is at most 2^32, well inside a double's 53 bits, and a
+        // root just short of a whole number k is short of it by 1/2k at least (k at most 65536), far past a double's
+        // last place, so the root truncated is ui_isqrt's for every u -- one instruction for its bit loop's 33 turns.
         if (ui_arcs[slot].u != u + 1)
         {
                 ui_arcs[slot].u = (unsigned int)u + 1;
-                ui_arcs[slot].root = (unsigned int)ui_isqrt((1ull << 32) - u * u);
+                ui_arcs[slot].root = (unsigned int)__builtin_sqrt((f64)((1ull << 32) - u * u));
         }
         return ui_arcs[slot].root;
 }
@@ -1835,6 +1838,117 @@ static b32 ui_box_row(const struct ui_box address_to box, b32 y, unsigned short 
         return any;
 }
 
+/*
+        A box over one row of pixels as its lines' spans, the cover a line would make worked out pixel by pixel only
+        at the shape's edges. Each of the UI_SUB lines is a span (256ths, from pixel first, cut to width pixels);
+        where every line there is covers a pixel whole, the pixel's cover is the same, inside (the lines there times
+        256): pixels a to b. Edge pixels, lo to a and b to hi, are the sums of what each line covers of them -- the
+        cover ui_box_row's line holds, without a pass over every pixel for every line.
+*/
+struct ui_spans
+{
+        b32 lo, hi, a, b;     // the pixels touched, and those of them every line covers whole
+        unsigned int inside;  // the cover of a pixel from a to b
+        int count;            // the lines that cover anything
+        b32 left[UI_SUB], right[UI_SUB];
+};
+
+static b32 ui_box_spans(const struct ui_box address_to box, b32 y, b32 first, b32 width, struct ui_spans address_to s)
+{
+        b32 top = y * 256, bottom = top + 256, ry = box->ry, rx = box->rx, low = 0, high = 0, inner_low = 0, inner_high = 0;
+        b32 straight, last = -1;
+        p64 step = 0, rest = 0, quotient = 0, remainder = 0;
+
+        s->count = 0;
+        if (bottom <= box->y0 || top >= box->y1 || box->x1 <= box->x0)
+                return 0;
+        ui_box_radii(box, &rx, &ry);
+        // A row in the straight middle, all of it inside, is every line the box's own span.
+        straight = top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1;
+        // A line's place in a corner over its radius is ui_box_span's (dy << 16) / ry. The lines are 256 / UI_SUB
+        // apart, so from one to the next dy moves by that and the quotient by a step and a rest, kept with its
+        // remainder: one division a row for the step, and one more wherever dy does not follow the line before.
+        if (!straight && ry > 0)
+                step = ((p64)(256 / UI_SUB) << 16) / (p64)ry, rest = ((p64)(256 / UI_SUB) << 16) % (p64)ry;
+        for (b32 sub = 0; sub < UI_SUB; sub++)
+        {
+                b32 left = box->x0, right = box->x1, at = top + sub * (256 / UI_SUB) + 256 / UI_SUB / 2, dy = 0;
+
+                if (!straight)
+                {
+                        // ui_box_span, with the quotient carried from line to line.
+                        if (at < box->y0 || at >= box->y1)
+                                continue;
+                        if (at < box->y0 + ry)
+                                dy = box->y0 + ry - at;
+                        else if (at >= box->y1 - ry)
+                                dy = at - (box->y1 - ry) + 1;
+                        if (dy > 0 && ry > 0 && rx > 0)
+                        {
+                                b32 dx;
+
+                                if (last > 0 && dy == last + 256 / UI_SUB)
+                                {
+                                        quotient += step, remainder += rest;
+                                        if (remainder >= (p64)ry)
+                                                quotient++, remainder -= (p64)ry;
+                                }
+                                else if (last > 0 && dy == last - 256 / UI_SUB)
+                                {
+                                        quotient -= step;
+                                        if (remainder < rest)
+                                                quotient--, remainder += (p64)ry;
+                                        remainder -= rest;
+                                }
+                                else
+                                        quotient = ((p64)dy << 16) / (p64)ry, remainder = ((p64)dy << 16) % (p64)ry;
+                                last = dy;
+                                dx = quotient >= 65536 ? 0 : (b32)(((p64)rx * ui_arc(quotient)) >> 16);
+                                left = box->x0 + rx - dx;
+                                right = box->x1 - rx + dx;
+                                if (right <= left)
+                                        continue;
+                        }
+                }
+                left -= first * 256, right -= first * 256;
+                left = left < 0 ? 0 : left;
+                right = right > width * 256 ? width * 256 : right;
+                if (right <= left)
+                        continue;
+                if (!s->count)
+                        low = inner_low = left, high = inner_high = right;
+                low = left < low ? left : low, high = right > high ? right : high;
+                inner_low = left > inner_low ? left : inner_low, inner_high = right < inner_high ? right : inner_high;
+                s->left[s->count] = left, s->right[s->count] = right;
+                s->count++;
+        }
+        if (!s->count)
+                return 0;
+        s->lo = low >> 8, s->hi = (high + 255) >> 8;
+        s->a = (inner_low + 255) >> 8, s->b = inner_high >> 8;
+        if (s->b <= s->a)
+                s->a = s->b = s->hi;
+        s->inside = (unsigned int)s->count * 256;
+        return 1;
+}
+
+// The cover of pixel x of a row's spans: what each line covers of it, summed.
+static unsigned int ui_spans_cover(const struct ui_spans address_to s, b32 x)
+{
+        b32 p0 = x * 256, p1 = p0 + 256;
+        unsigned int cover = 0;
+
+        if (x >= s->a && x < s->b)
+                return s->inside;
+        for (int k = 0; k < s->count; k++)
+        {
+                b32 from = s->left[k] > p0 ? s->left[k] : p0, to = s->right[k] < p1 ? s->right[k] : p1;
+
+                cover += to > from ? (unsigned int)(to - from) : 0;
+        }
+        return cover;
+}
+
 // A straight colour (0xaarrggbb) at a cover of UI_FULL, as the premultiplied pixel ui_over takes.
 static inline unsigned int ui_premultiplied(unsigned int argb, unsigned int cover)
 {
@@ -1880,11 +1994,59 @@ static inline b32 ui_span_ends(b32 first, b32 width, b32 left, b32 right, b32 ad
         return true;
 }
 
+// A pixel of a row at a cover of a colour (0xaarrggbb), over what is there.
+static inline fn ui_kit_put(unsigned int address_to row, b32 x, unsigned int cover, unsigned int argb)
+{
+        if (!cover)
+                return;
+        if (cover >= UI_FULL && argb >> 24 == 255)
+                row[x] = argb | 0xff000000u;
+        else
+                row[x] = ui_over(ui_premultiplied(argb, cover > UI_FULL ? UI_FULL : cover), row[x]);
+}
+
+/*
+        A run of pixels laid over with one premultiplied tone, which is what ui_over gives each of them: an opaque tone
+        is the library's fill, and any other the library's over (memory_glass_over_u32, its grain none) of a line of
+        the tone. A short run is done a pixel at a time, where a call costs more than its pixels.
+*/
+static unsigned int ui_kit_tones[UI_KIT_LINE];
+static const unsigned int ui_kit_grainless[80];
+
+static fn ui_kit_run(unsigned int address_to row, b32 count, unsigned int tone)
+{
+        if (count <= 0 || !(tone >> 24))
+                return;
+        if (tone >> 24 == 255)
+        {
+                memory_fill_u32(row, (positive)count, tone);
+                return;
+        }
+        if (count < 8)
+        {
+                for (b32 x = 0; x < count; x++)
+                        row[x] = ui_over(tone, row[x]);
+                return;
+        }
+        memory_fill_u32(ui_kit_tones, (positive)count, tone);
+        memory_glass_over_u32(row, ui_kit_tones, row, (positive)count, ui_kit_grainless);
+}
+
+// The tone of a colour at a cover, as ui_kit_put lays it: a colour wholly over is itself, opaque or premultiplied.
+static inline unsigned int ui_kit_tone(unsigned int argb, unsigned int cover)
+{
+        if (cover >= UI_FULL && argb >> 24 == 255)
+                return argb | 0xff000000u;
+        return ui_premultiplied(argb, cover > UI_FULL ? UI_FULL : cover);
+}
+
 /*
         A box filled with a colour, cut to clip when there is one (a ripple to its
         button): over the picture, in the rows the ui may write. A row in the box's
         straight middle is its one span, laid on without the cover line: the same
-        pixels, without a pass over them for each.
+        pixels, without a pass over them for each. Any other row is its lines' spans
+        (ui_box_spans): the pixels at its edges each their sum, and those every line
+        covers whole one run of one tone.
 */
 static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, const struct ui_box address_to clip)
 {
@@ -1919,43 +2081,39 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
                         if (!ui_span_ends(first, width, box->x0, box->x1, &p0, &p1, &c0, &c1))
                                 continue;
                         row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
-                        for (b32 x = p0; x <= p1; x++)
+                        ui_kit_put(row, p0, c0, argb);
+                        if (p1 > p0)
                         {
-                                unsigned int cover = x == p0 ? c0 : x == p1 ? c1 : UI_FULL;
-
-                                if (cover >= UI_FULL && argb >> 24 == 255)
-                                        row[x] = whole;
-                                else if (cover >= UI_FULL)
-                                        row[x] = ui_over(whole, row[x]);
-                                else if (cover)
-                                        row[x] = ui_over(ui_premultiplied(argb, cover), row[x]);
+                                ui_kit_run(row + p0 + 1, p1 - p0 - 1, whole);
+                                ui_kit_put(row, p1, c1, argb);
                         }
                         continue;
                 }
-                if (!ui_box_row(box, y, ui_kit_line, first, width))
-                        continue;
-                if (clip && !ui_box_row(clip, y, ui_kit_clip, first, width))
                 {
-                        memory_zero(ui_kit_line, (positive)width * sizeof(ui_kit_line[0]));
-                        continue;
-                }
-                row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
-                for (b32 x = 0; x < width; x++)
-                {
-                        unsigned int cover = ui_kit_line[x];
+                        struct ui_spans spans, cut;
+                        b32 lo, hi, a, b;
+                        unsigned int inside;
 
+                        if (!ui_box_spans(box, y, first, width, &spans) || (clip && !ui_box_spans(clip, y, first, width, &cut)))
+                                continue;
+                        row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
+                        lo = spans.lo, hi = spans.hi, a = spans.a, b = spans.b, inside = spans.inside;
+                        // Cut to clip: the pixels both touch, whole where both are whole, each pixel the product of the two.
                         if (clip)
                         {
-                                cover = cover * ui_kit_clip[x] / UI_FULL;
-                                ui_kit_clip[x] = 0;
+                                lo = cut.lo > lo ? cut.lo : lo, hi = cut.hi < hi ? cut.hi : hi;
+                                a = cut.a > a ? cut.a : a, b = cut.b < b ? cut.b : b;
+                                inside = inside * cut.inside / UI_FULL;
                         }
-                        ui_kit_line[x] = 0;
-                        if (!cover)
-                                continue;
-                        if (cover >= UI_FULL && argb >> 24 == 255)
-                                row[x] = argb | 0xff000000u;
-                        else
-                                row[x] = ui_over(ui_premultiplied(argb, cover > UI_FULL ? UI_FULL : cover), row[x]);
+                        a = a < lo ? lo : a, b = b > hi ? hi : b;
+                        if (b <= a)
+                                a = b = hi;
+                        for (b32 x = lo; x < a; x++)
+                                ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
+                        if (b > a && inside)
+                                ui_kit_run(row + a, b - a, ui_kit_tone(argb, inside));
+                        for (b32 x = b > a ? b : hi; x < hi; x++)
+                                ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                 }
         }
 }
