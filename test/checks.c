@@ -128196,6 +128196,24 @@ static fn check_field_hands(string_address regular)
                 launcher_event(&release);
                 launcher_typed('k');
                 check("launcher: a drag across the field selects it, and a key types over it", launcher_holds("k"));
+                // A row runs on its release, where its press went down: a press shows the row pressed and runs nothing, a
+                // press slid off the row shows none and a release off it runs nothing, and a release on the row runs it.
+                {
+                        int row_y = ui_list_row_y(&launcher.list, 0) + ui_px(&launcher.ui, UI_ROW) / 2, row_x = left + 100;
+                        struct window_event on = {WINDOW_EVENT_MOTION, 0, row_x, row_y}, off = {WINDOW_EVENT_MOTION, 0, row_x, row_y + 400};
+
+                        launcher_event(&on);
+                        check("launcher: a press on a row shows it pressed and runs nothing", launcher_event(&press) && launcher.list.down == 0 && launcher.press.down);
+                        launcher_event(&off);
+                        check("launcher: a press slid off its row shows none", launcher.list.down < 0 && launcher.press.down);
+                        launcher_event(&on);
+                        check("launcher: and shows it again on coming back to it", launcher.list.down == 0);
+                        launcher_event(&off);
+                        check("launcher: a release off the row runs nothing", launcher_event(&release) && !launcher.press.down && launcher.list.down < 0);
+                        launcher_event(&on);
+                        launcher_event(&press);
+                        check("launcher: a release on the row runs it", !launcher_event(&release) && !launcher.press.down);
+                }
         }
 
         // The settings' filter, worked by the keys: the caret moves in it, and a blank between letters parts its words.
@@ -128285,6 +128303,30 @@ static fn check_field_hands(string_address regular)
                         check("settings: a click outside a value sets what its field holds",
                               settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "patient-crickety"));
+                }
+                // A row is done on its mouse's release, where the press went down: the press alone opens nothing, the release on
+                // the row opens it, and a press let go off its row opens nothing.
+                {
+                        int y = ui_list_row_y(&settings.list, settings_pos(name)) + ui_px(&settings.ui, UI_ROW) / 2;
+                        struct window_event on = {WINDOW_EVENT_MOTION, 0, 400, y}, off = {WINDOW_EVENT_MOTION, 0, 400, 480},
+                                            press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0},
+                                            release = {WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0};
+
+                        settings.queued = 0;
+                        settings_edit_end();
+                        settings.state[name] = SETTINGS_READ;
+                        string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
+                        settings_event(&on);
+                        settings_event(&press);
+                        check("settings: a mouse press on a row is not done until it is let go", settings.editing < 0);
+                        settings_event(&release);
+                        check("settings: a mouse's release on the row does it", settings.editing == name);
+                        settings_edit_end();
+                        settings_event(&on);
+                        settings_event(&press);
+                        settings_event(&off);
+                        settings_event(&release);
+                        check("settings: a press let go off its row does nothing", settings.editing < 0 && settings.queued == 0);
                 }
                 settings.queued = 0, settings.child = 0;
                 settings_group_choose(0);

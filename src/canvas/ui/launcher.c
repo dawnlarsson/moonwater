@@ -728,33 +728,33 @@ static b32 launcher_event(const struct window_event address_to event)
                         ui_list_let_go(&launcher.ui, &launcher.list);
                         launcher.dirty = true;
                 }
+                // A mouse held on a row shows it pressed while the pointer is on that row, and not once it slides off.
+                if (launcher.press.down && !(event->flags & WINDOW_KEY_TOUCH) && (row == launcher.press.target ? row : -1) != launcher.list.down)
+                {
+                        ui_list_let_go(&launcher.ui, &launcher.list);
+                        if (row == launcher.press.target)
+                                launcher.list.down = row;
+                        launcher.dirty = true;
+                }
                 break;
         case WINDOW_EVENT_BUTTON:
                 if (event->a != LAUNCHER_BUTTON_LEFT)
                         break;
                 row = ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y);
-                // A finger: the row it lands on is shown pressed, and run as the finger lifts there, so a finger that
-                // lands on the wrong row and slides off runs nothing.
-                if (event->flags & WINDOW_KEY_TOUCH)
+                // A press is done where it went down, on its release: a finger's and a mouse's alike. The row it lands on is
+                // shown pressed, and a press that slides off it (a finger past the slop, a mouse off the row) runs nothing.
+                if (event->flags & WINDOW_KEY_DOWN)
                 {
-                        if (event->flags & WINDOW_KEY_DOWN)
-                        {
-                                ui_press_begin(&launcher.press, launcher.pointer_x, launcher.pointer_y, row, true);
-                                if (row >= 0)
-                                        launcher.list.focus = launcher.list.down = row;
-                                launcher.dirty = true;
-                                break;
-                        }
-                        ui_list_let_go(&launcher.ui, &launcher.list);
+                        ui_press_begin(&launcher.press, launcher.pointer_x, launcher.pointer_y, row, (event->flags & WINDOW_KEY_TOUCH) != 0);
+                        if (row >= 0)
+                                launcher.list.focus = launcher.list.down = row;
                         launcher.dirty = true;
-                        if ((row = ui_press_end(&launcher.press, (event->flags & WINDOW_KEY_CANCEL) != 0)) >= 0 &&
-                            row == ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y))
-                                return !launcher_run(row);
                         break;
                 }
-                // A mouse's press runs its row at once, which the kit shows pressed and rippling till the bar goes.
-                if ((row = ui_list_pointer(&launcher.ui, &launcher.list, WINDOW_EVENT_BUTTON, launcher.pointer_x, launcher.pointer_y,
-                                           (event->flags & WINDOW_KEY_DOWN) != 0)) >= 0)
+                ui_list_let_go(&launcher.ui, &launcher.list);
+                launcher.dirty = true;
+                if ((row = ui_press_end(&launcher.press, (event->flags & WINDOW_KEY_CANCEL) != 0)) >= 0 &&
+                    row == ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y))
                         return !launcher_run(row);
                 break;
         }

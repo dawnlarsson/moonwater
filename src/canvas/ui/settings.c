@@ -691,6 +691,7 @@ static struct
         struct ui_list list;
         struct ui_menu menu;
         struct ui_finger finger;
+        struct ui_press press;   // a mouse's press on a row, done on its release where it went down
         struct ui_scroll card;
         int editing;             // the row typed in, -1 none
         int group;               // the group whose rows are at the right
@@ -3408,6 +3409,53 @@ static int settings_press_target(int x, int y)
 static fn settings_press_at(void);
 
 /*
+        A mouse's press on a row is begun here and done on its release, where it went down, as a finger's is: the row shows
+        pressed while the pointer is on it, a slide off it shows none, and a release off it runs nothing. True when the press
+        was a row's and is held; any other press is done at once, as it always was.
+*/
+static b32 settings_press_begin(void)
+{
+        int x = settings.page.pointer_x, y = settings.page.pointer_y, target = settings_press_target(x, y);
+
+        if (target < 0 || target >= SETTINGS_PRESS_GROUP)
+                return false;
+        ui_press_begin(&settings.press, x, y, target, false);
+        settings.list.down = target;
+        settings_dirty();
+        return true;
+}
+
+// The pointer moved with a mouse's press held: the row is shown pressed while it is on the row the press went down on.
+static fn settings_press_slide(int x, int y)
+{
+        b32 on = settings_press_target(x, y) == settings.press.target;
+
+        if (on == (settings.list.down == settings.press.target))
+                return;
+        ui_list_let_go(&settings.ui, &settings.list);
+        if (on)
+                settings.list.down = settings.press.target;
+        settings_dirty();
+}
+
+// A mouse's release with a row's press held: done where it went down, if the release is on that row too.
+static fn settings_press_up(void)
+{
+        int clicked = ui_press_end(&settings.press, false), x = settings.page.pointer_x, y = settings.page.pointer_y;
+
+        ui_list_let_go(&settings.ui, &settings.list);
+        settings_dirty();
+        if (clicked < 0 || clicked != settings_press_target(x, y))
+                return;
+        settings.page.pointer_x = settings.press.x, settings.page.pointer_y = settings.press.y;
+        settings_press_at();
+        // The row was pressed again to be done (as a finger's press is): let it go now, the release has come.
+        ui_list_let_go(&settings.ui, &settings.list);
+        ui_kit_ripples_exit(&settings.page.column);
+        settings.page.pointer_x = x, settings.page.pointer_y = y;
+}
+
+/*
         A finger: down, what it is on shows pressed and nothing is done yet; past the slop it drags the region it went
         down on, which follows it; up, the press is done where it went down if it did not move off it (as a mouse's
         press is done at once), and the region is thrown if it was moving; a press taken back does nothing.
@@ -3531,6 +3579,8 @@ static b32 settings_event(const struct window_event address_to event)
                         settings_finger(event);
                         break;
                 }
+                if (settings.press.down)
+                        settings_press_slide(event->a, event->b);
                 // Over the menu the keys' choice follows the pointer; over the rows and the column, what is under it is lit.
                 if (settings.menu.owner >= 0)
                 {
@@ -3558,6 +3608,8 @@ static b32 settings_event(const struct window_event address_to event)
                         ui_kit_ripples_exit(&settings.page.column);
                         ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, settings.page.pointer_x, settings.page.pointer_y, false);
                         settings_dirty();
+                        if (!(event->flags & WINDOW_KEY_TOUCH) && settings.press.down)
+                                settings_press_up();
                 }
                 if (event->flags & WINDOW_KEY_TOUCH)
                 {
@@ -3567,7 +3619,8 @@ static b32 settings_event(const struct window_event address_to event)
                 if (event->flags & WINDOW_KEY_DOWN)
                 {
                         ui_drag_stop(&settings.finger.drag);
-                        settings_press_at();
+                        if (!settings_press_begin())
+                                settings_press_at();
                 }
                 break;
         case WINDOW_EVENT_WHEEL:
