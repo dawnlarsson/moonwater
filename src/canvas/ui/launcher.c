@@ -61,7 +61,6 @@
 
 #define LAUNCHER_WIDTH 560 // logical pixels, times the scale: the bar's width; its field, its gap and its rows are the kit's
 #define LAUNCHER_ROWS 7    // rows the list shows at most
-#define LAUNCHER_TEXT_SIZE 17        // the field's text, a little larger than a row's
 #define LAUNCHER_TEXT 256  // bytes of the field
 #define LAUNCHER_NAMES 4096
 #define LAUNCHER_NAME 40
