@@ -2833,6 +2833,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                         c->pip_press = 0;
                 ui_kit.busy |= l;
         }
+        if (c->count > 0) // a group with no items has no chosen one to show
         {
                 b32 py = (b32)((pip_y * ui->scale) >> 22);
                 struct ui_box pip = {cx - ui_q8(ui, 14), py - ui_q8(ui, 14), cx + ui_q8(ui, 14), py + ui_q8(ui, 14), ui_q8(ui, 14), ui_q8(ui, 14)};

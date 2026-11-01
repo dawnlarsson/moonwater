@@ -126751,6 +126751,23 @@ static fn check_kit_controls(void)
                 check("kit slider: a negative value's readout is drawn at the right edge, its sign and digits, and nothing across the middle",
                       right_ink && middle_clear);
         }
+
+        // A group or a strip with no items has no pip: its place is paper, and the strip draws without measuring a word.
+        {
+                struct ui_control group;
+                unsigned int paper = 0xff111113u;
+                b32 group_clear;
+
+                memory_zero(&group, sizeof(group));
+                group.kind = UI_RADIOS, group.x = 20, group.y = 120, group.w = 300, group.h = 48, group.count = 0;
+                ui_control_start(&group);
+                ui_fill(&ui, 0, 110, 340, 80, paper);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &group);
+                group_clear = pixels[144 * 600 + 294] == paper;
+
+                check("kit radios: a group with no items draws no pip", group_clear);
+        }
 }
 #endif
 
