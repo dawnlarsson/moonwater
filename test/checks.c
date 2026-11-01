@@ -118960,6 +118960,38 @@ static fn check_launcher(void)
                               launcher.dir_count == 2 && launcher.count == 4 &&
                                   string_equals((string_address)launcher_name(3), (string_address)"zz"));
                 }
+                //      A PATH with more directories than the list has room for, and a PATH longer than its buffer: each
+                //      directory it names is read, the last one too (the two directories that do not exist are read as none).
+                for (positive wide_case = 0; wide_case < 2; wide_case++)
+                {
+                        char wide[1024];
+                        positive used = 0;
+
+                        for (positive each = 0; each < 20; each++)
+                        {
+                                const char address_to const prefix = wide_case ? "/tmp/mw-launcher-check/gone-" : "/nowhere/a";
+                                positive size = string_length((string_address)prefix);
+
+                                memory_copy(wide + used, prefix, size);
+                                used += size;
+                                wide[used++] = (char)('0' + each / 10);
+                                wide[used++] = (char)('0' + each % 10);
+                                wide[used++] = ':';
+                        }
+                        string_copy((string_address)wide + used, (string_address)"/tmp/mw-launcher-check/two");
+                        memory_zero(&launcher, sizeof(launcher));
+                        launcher.names = (char address_to)names;
+                        launcher.from = from;
+                        launcher.hashed = scan_hashed;
+                        memory_zero(scan_hashed, sizeof(scan_hashed));
+                        launcher_scan(wide);
+                        if (wide_case)
+                                check("launcher: a PATH longer than its buffer is read to its end, its last directory too",
+                                      launcher.dir_count == 21 && launcher.count == 2 && (string_equals((string_address)launcher_name(0), (string_address)"zz") || string_equals((string_address)launcher_name(1), (string_address)"zz")));
+                        else
+                                check("launcher: a PATH of more directories than the list had room for is read to its last",
+                                      launcher.dir_count == 21 && launcher.count == 2 && (string_equals((string_address)launcher_name(0), (string_address)"zz") || string_equals((string_address)launcher_name(1), (string_address)"zz")));
+                }
                 for (positive at = 0; at < sizeof(files) / sizeof(files[0]); at++)
                 {
                         launcher_check_path(path, files[at][0], files[at][1]);

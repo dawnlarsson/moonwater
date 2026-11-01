@@ -65,13 +65,13 @@
 #define LAUNCHER_TEXT 256  // bytes of the field
 #define LAUNCHER_NAMES 4096
 #define LAUNCHER_NAME 40
-#define LAUNCHER_DIRS 16
-#define LAUNCHER_PATH 512
+#define LAUNCHER_DIRS 64
+#define LAUNCHER_PATH 4096
 #define LAUNCHER_HASH 8192
 #define LAUNCHER_DIRENTS 16384
 #define LAUNCHER_DIRENT_HEADER 19
 #define LAUNCHER_WORDS 16
-#define LAUNCHER_FULL 576
+#define LAUNCHER_FULL (LAUNCHER_PATH + LAUNCHER_NAME + 2) // a directory of PATH, its slash and a name
 
 // What a row starts.
 #define LAUNCHER_WINDOW 1u  // a program of the desktop: a window of its own
