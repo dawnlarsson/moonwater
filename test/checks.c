@@ -126242,6 +126242,23 @@ static fn check_kit_corners(void)
 }
 
 /*
+        A range's value below its low end is the low end. The snap takes the whole steps of such a value, a negative count,
+        and shifts them left by Q30, which is undefined for a negative count: the kit multiplies instead, the same number
+        for every count, and the clamp then answers low. Under MW_UBSAN the shift is what traps.
+*/
+static fn check_kit_slider_below(void)
+{
+        struct ui_control c;
+
+        memory_zero(&c, sizeof(c));
+        c.low = 0;
+        c.high = ui_q(10);
+        c.step = UI_ONE;
+        check("kit: a slider's value below its low end snaps to the low end, with no shift of a negative count",
+              ui_slider_snap(&c, -2 * UI_ONE - UI_ONE / 3) == c.low);
+}
+
+/*
         A control appears settled: a switch made off and then given its value on (as a settings row is, when the verb
         answers), tabs and radios given their chosen item, are drawn there at their first frame with nothing moving;
         one forgotten (its page shown again) and changed while unseen is placed again; a change after its first frame
@@ -129634,6 +129651,7 @@ b32 main()
         check_kit_arc();
         check_kit_fills();
         check_kit_corners();
+        check_kit_slider_below();
         check_kit_place();
         check_kit_controls();
 #endif

@@ -3549,8 +3549,10 @@ static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to 
                         {
                                 b64 px = ((b64)x * 256 + (s & 3) * 64 + 32 - cx), py = ((b64)y * 256 + (s >> 2) * 64 + 32 - cy);
                                 // Turned back by the spin: is the point in the top quarter of the ring?
-                                b64 ux = (ui_qmul(px << 22, cosine) + ui_qmul(py << 22, sine)) >> 22;
-                                b64 uy = (ui_qmul(py << 22, cosine) - ui_qmul(px << 22, sine)) >> 22;
+                                // px and py are negative left of and above the ring's middle, and a left shift of a
+                                // negative is undefined: they are multiplied.
+                                b64 ux = (ui_qmul(px * (1ll << 22), cosine) + ui_qmul(py * (1ll << 22), sine)) >> 22;
+                                b64 uy = (ui_qmul(py * (1ll << 22), cosine) - ui_qmul(px * (1ll << 22), sine)) >> 22;
                                 b64 r2 = ux * ux + uy * uy;
 
                                 hits += r2 <= (b64)outer * outer && r2 >= (b64)inner * inner && uy < 0 && (ux < 0 ? -ux : ux) <= -uy;
@@ -7916,7 +7918,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                                 break;
                                         if (origin + l->x[k] >= t->left - t->cell && origin + l->x[k] < t->right)
                                                 font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
-                                                          (b32)(origin + l->x[k]) << 16, baseline, ink & 0xffffffu, FONT_UNKNOWN);
+                                                          (b32)((b64)(origin + l->x[k]) * 65536), baseline, ink & 0xffffffu, FONT_UNKNOWN);
                                         k++;
                                         run = 0;
                                         goto next;
