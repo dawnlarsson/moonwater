@@ -1739,16 +1739,30 @@ static positive settings_slot(int row)
 
 static fn settings_feed_drop(void);
 
-// A row changed to value, now or once the verb running has finished: a change to a row already waiting replaces it. A
-// command is not a state: a join, a forget, or a command typed in the Run any row (all of them the same row here) waits
-// in its own place, so none replaces another waiting.
+/*
+        Where a change to value waits: a change to a settings row takes the place of the one waiting for that row. A command is
+        not a state: a join, a forget, or a command typed in the Run any row (all of them the same row here) waits in its own
+        place, after the others, unless the same command already waits (a double click asks it twice, and it is done once).
+*/
+static positive settings_waiting(int row, const char address_to value)
+{
+        positive at = 0;
+
+        if (row >= 0 && row < SETTINGS_ANY)
+                return settings_slot(row);
+        while (at < settings.queued && !(settings.queue[at].row == row && string_equals((string_address)settings.queue[at].value, (string_address)value)))
+                at++;
+        return at;
+}
+
+// A row changed to value, now or once the verb running has finished (see settings_waiting for where it waits).
 static fn settings_change(int row, const char address_to value)
 {
         positive at;
 
         // A feed's reading is one that can be had again: a change waits for no feed.
         settings_feed_drop();
-        at = row >= 0 && row < SETTINGS_ANY ? settings_slot(row) : settings.queued;
+        at = settings_waiting(row, value);
 
         if (at == settings.queued)
         {

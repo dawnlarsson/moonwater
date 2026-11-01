@@ -120738,6 +120738,8 @@ static fn check_settings_keys(void)
         settings_act('j', "beta", "second passphrase");
         settings_act('f', "gamma", null);
         check("settings: three network changes waiting behind a verb are all kept", settings.queued == 3);
+        settings_act('f', "gamma", null);
+        check("settings: the same command asked again while it waits is done once", settings.queued == 3);
         settings_run(SETTINGS_ANY, "wifi scan");
         settings_run(SETTINGS_ANY, "bluetooth scan");
         check("settings: two commands typed in the Run any row, waiting behind a verb, are both kept", settings.queued == 5);
