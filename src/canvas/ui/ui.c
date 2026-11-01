@@ -3928,7 +3928,7 @@ static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to 
 */
 static fn ui_control_place(struct ui_control address_to c)
 {
-        struct ui_tween address_to unplaced[] = {&c->layer, &c->fill, &c->ink, &c->label_ink, &c->stroke, &c->scale, &c->pip_x, &c->pip_w, &c->pip_y};
+        struct ui_tween address_to unplaced[] = {&c->layer, &c->fill, &c->ink, &c->label_ink, &c->stroke, &c->scale, &c->pip_x, &c->pip_w, &c->pip_y, &c->shadow};
 
         for (positive k = 0; k < sizeof(unplaced) / sizeof(unplaced[0]); k++)
                 unplaced[k]->placed = 0;
@@ -3938,8 +3938,11 @@ static fn ui_control_place(struct ui_control address_to c)
                 ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
                 c->item_dom[k].at = 0;
         }
-        ui_tween_put(&c->extent, c->kind == UI_PROGRESS ? (c->value < 0 ? 0 : c->value) : c->kind == UI_SLIDER ? 0 : c->on ? UI_ONE : 0,
-                     UI_TWEEN_NUMBER);
+        // A slider's extent is its thumb's halo radius, which is its state's at the first frame, as its shadow is: unplaced.
+        if (c->kind == UI_SLIDER)
+                c->extent.placed = 0;
+        else
+                ui_tween_put(&c->extent, c->kind == UI_PROGRESS ? (c->value < 0 ? 0 : c->value) : c->on ? UI_ONE : 0, UI_TWEEN_NUMBER);
         ui_tween_put(&c->spot, 0, UI_TWEEN_NUMBER);
         for (int k = 0; k < 3; k++)
                 c->ripple[k].live = 0;

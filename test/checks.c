@@ -126091,6 +126091,26 @@ static fn check_kit_place(void)
         check("kit place: a control shown again after a change it did not see is placed, not moved", forgot_still);
         check("kit place: a change after the first frame moves, and the kit settled (a resize) puts it at its end at once", change_moves && settled);
 
+        // A slider's thumb halo (its shadow and its radius) is placed with the control: settled while the thumb was not
+        // hovered, and hovered before the next frame, the halo is at the thumb on that frame, with nothing moving to it.
+        {
+                struct ui_control slider;
+                b32 halo_placed;
+
+                memory_zero(&slider, sizeof(slider));
+                slider.kind = UI_SLIDER, slider.x = 20, slider.y = 190, slider.w = 300, slider.h = 48, slider.label = "Volume";
+                slider.low = 0, slider.high = UI_ONE, slider.value = 0;
+                ui_control_start(&slider);
+                ui_kit.busy = 0;
+                ui_control_draw(&ui, &slider);
+                ui_kit_settle();
+                slider.hover = 1, slider.pointer_x = slider.x + 10, slider.pointer_y = slider.y + 24;
+                ui_kit.now += 16666667, ui_kit.busy = 0;
+                ui_control_draw(&ui, &slider);
+                halo_placed = !ui_kit.busy && ui_kit_tween(&slider.shadow) == UI_Q2(8) && ui_kit_tween(&slider.extent) == ui_q(10);
+                check("kit place: a slider's thumb halo hovered once the kit settled is drawn at the thumb, nothing moving", halo_placed);
+        }
+
         // A resize moves the controls (the layout is laid again): the pips go with their strip and group, nothing lerps.
         {
                 b32 moved_still;
