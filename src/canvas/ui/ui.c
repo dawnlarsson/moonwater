@@ -4277,7 +4277,8 @@ struct ui_scroll
         struct ui_spring back;
 };
 
-// The thumb's top and length (device pixels); false when everything shows and there is no bar.
+// The thumb's top and length (device pixels); false when everything shows and there is no bar. A held thumb is drawn at its
+// target, the pointer's or a wheel turn's glide aim, and not at where a glide is now: it never lags the hand.
 static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to length)
 {
         int track = s->height, least = UI_SCROLL_LEAST * ui->scale, rest = s->content - s->view, scroll;
@@ -4286,7 +4287,8 @@ static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll
                 return 0;
         *length = (int)((b64)track * s->view / s->content);
         *length = *length < least ? least : *length > track ? track : *length;
-        scroll = s->scroll < 0 ? 0 : s->scroll > rest ? rest : s->scroll;
+        scroll = s->held ? (int)((s->aim + 128) >> 8) : s->scroll; // the aim in 256ths, rounded as ui_scroll_show rounds it
+        scroll = scroll < 0 ? 0 : scroll > rest ? rest : scroll;
         *top = s->y + (int)((b64)(track - *length) * scroll / rest);
         return 1;
 }

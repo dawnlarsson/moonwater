@@ -126603,6 +126603,25 @@ static fn check_kit_place(void)
                 check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
         }
 
+        // A dragged thumb is at the pointer on the frame the pointer moved it, with no glide. A wheel turn while it is held
+        // starts a glide, and the thumb is drawn at that glide's target (the place the region is going), not where it is.
+        {
+                struct ui_scroll held = {100, 10, 200, 1000, 200, 0, false, false, 0};
+                int top = 0, length = 0;
+                b32 same_frame = false, no_glide = false, target_drawn = false;
+
+                ui_scroll_pointer(&ui, &held, WINDOW_EVENT_BUTTON, 104, 20, true);
+                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true));
+                same_frame = held.held && held.scroll == 400 && ui_scroll_thumb(&ui, &held, &top, &length) && top == 100 - 10;
+                no_glide = !held.gliding;
+                ui_scroll_wheel(&ui, &held, -120);
+                target_drawn = held.scroll == 400 && held.gliding && ui_scroll_thumb(&ui, &held, &top, &length) && top == 10 + 160 * 440 / 800;
+                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true));
+                check("kit scrollbar: a dragged thumb is at the pointer on the frame the pointer moved it, and does not glide", same_frame && no_glide);
+                check("kit scrollbar: a held thumb is drawn at its glide's target, and at the pointer again once it moves", target_drawn &&
+                      ui_scroll_thumb(&ui, &held, &top, &length) && top == 100 - 10);
+        }
+
         // The glide: a wheel's notch aims one row on and the position reaches it over several frames, from below and never
         // past it; a pull past an end is limited and springs back to that end when let go, at either end; a settled glide
         // leaves the kit idle; a keyboard reveal glides to the row it shows, from where the region is, and a row in view
