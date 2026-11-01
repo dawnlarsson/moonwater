@@ -684,8 +684,13 @@ static fn launcher_layout(void)
         launcher.list.count = (int)launcher.entries;
         for (int at = 0; at < launcher.list.count; at++)
                 launcher.list.id[at] = (unsigned short)at;
-        ui_list_place(ui, &launcher.list, pad, pad + ui_px(ui, UI_TARGET) + ui_px(ui, UI_GAP2), launcher.width - 2 * pad,
-                      (int)launcher.entries * ui_px(ui, UI_ROW));
+        // The rows fill the window below the field; a list longer than the window scrolls (the wheel, and the keys reveal).
+        {
+                int top = pad + ui_px(ui, UI_TARGET) + ui_px(ui, UI_GAP2), rows = (int)launcher.entries * ui_px(ui, UI_ROW), room = launcher.height - top - pad;
+
+                ui_list_place(ui, &launcher.list, pad, top, launcher.width - 2 * pad,
+                              launcher.height > 0 && rows > room ? (room > 0 ? room : 0) : rows);
+        }
         ui_list_layout(ui, &launcher.list);
 }
 
@@ -736,6 +741,11 @@ static b32 launcher_event(const struct window_event address_to event)
                                 launcher.list.down = row;
                         launcher.dirty = true;
                 }
+                break;
+        case WINDOW_EVENT_WHEEL:
+                // The list turns under the wheel with the kit's glide, as the settings list does: a notch is a row.
+                if (!event->b && ui_scroll_wheel(&launcher.ui, &launcher.list.scroll, event->a))
+                        launcher.dirty = true;
                 break;
         case WINDOW_EVENT_BUTTON:
                 if (event->a != LAUNCHER_BUTTON_LEFT)

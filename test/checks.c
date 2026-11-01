@@ -128214,6 +128214,20 @@ static fn check_field_hands(string_address regular)
                         launcher_event(&press);
                         check("launcher: a release on the row runs it", !launcher_event(&release) && !launcher.press.down);
                 }
+                // The wheel turns a list longer than its window: the three desktop programs in a window one row tall, a notch a
+                // row, and the list glides to it (its aim moves, and a frame is asked for).
+                {
+                        int pad = ui_px(&launcher.ui, UI_PAD);
+                        struct window_event turn = {WINDOW_EVENT_WHEEL, 0, -120, 0};
+
+                        launcher.text[0] = 0;
+                        launcher_search();
+                        launcher.height = pad * 2 + ui_px(&launcher.ui, UI_TARGET) + ui_px(&launcher.ui, UI_GAP2) + ui_px(&launcher.ui, UI_ROW);
+                        launcher.dirty = false;
+                        launcher_event(&turn);
+                        check("launcher: the wheel turns a list longer than its window, a notch a row, with the glide",
+                              launcher.entries == 3 && launcher.list.scroll.aim > 0 && launcher.dirty);
+                }
         }
 
         // The settings' filter, worked by the keys: the caret moves in it, and a blank between letters parts its words.
