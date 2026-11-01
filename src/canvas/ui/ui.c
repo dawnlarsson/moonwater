@@ -4224,7 +4224,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 c->item = hit;
                         }
                         if (c->kind == UI_SLIDER)
-                                c->hover_x = hit >= 0 ? x : -1;
+                                c->hover_x = hit >= 0 ? x : -1, c->pointer_x = x, c->pointer_y = y; // the thumb's ring follows the hand
                 }
                 return null;
         }

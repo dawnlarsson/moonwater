@@ -126098,6 +126098,35 @@ static fn check_kit_controls(void)
                 check("kit tabs: a finger presses a tab UI_TARGET each way (4 above or below its 32 strip), a mouse only what it is on",
                       finger_top && finger_bottom && mouse_off && column_finger && !column_mouse);
         }
+
+        // A slider's thumb rings where the hand hovers it (the halo, 8%), and the ring goes when the hand leaves.
+        {
+                struct ui_control slider;
+                b32 ringed, let_go, live = 0;
+
+                memory_zero(&slider, sizeof(slider));
+                slider.kind = UI_SLIDER, slider.x = 20, slider.y = 100, slider.w = 300, slider.h = 88, slider.label = "Level";
+                slider.low = ui_q(0), slider.high = ui_q(100), slider.step = 0, slider.value = ui_q(50);
+                ui_control_start(&slider);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &slider);
+                // The thumb's middle at the half: 20 + (300 - 20) / 2 + 10 = 170, on the track's middle row, 156.
+                ui_kit_pointer(&ui, &slider, 1, WINDOW_EVENT_MOTION, 170, 156, false, 0);
+                ui_kit.now += 400000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &slider);
+                ui_kit.now += 400000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &slider);
+                ringed = ui_tween_at(&slider.shadow, ui_kit.now, &live) == UI_Q2(8) && !live;
+                ui_kit_pointer(&ui, &slider, 1, WINDOW_EVENT_MOTION, 400, 20, false, 0);
+                ui_kit.now += 400000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &slider);
+                ui_kit.now += 400000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &slider);
+                let_go = ui_tween_at(&slider.shadow, ui_kit.now, &live) == 0 && !live;
+
+                check("kit slider: hovering the thumb rings it where the hand is, a faint ring", ringed);
+                check("kit slider: leaving the thumb lets the ring go, nothing animating once it has", let_go);
+        }
 }
 #endif
 
