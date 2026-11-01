@@ -118940,6 +118940,26 @@ static fn check_launcher(void)
                               launcher.count == 4);
                         check("launcher: a name in two directories is listed once, with the first directory", same == 1 && from[0] == 0);
                 }
+                //      A PATH that repeats a directory sixteen times, and then has another: the repeats are one directory, so the
+                //      other is read too (the directories it reads are counted once each, and a PATH holds at most sixteen).
+                {
+                        static const char one[] = "/tmp/mw-launcher-check/one:";
+                        char repeated[LAUNCHER_PATH];
+                        positive used = 0;
+
+                        for (positive each = 0; each < 16; each++, used += string_length((string_address)one))
+                                string_copy((string_address)repeated + used, (string_address)one);
+                        string_copy((string_address)repeated + used, (string_address)"/tmp/mw-launcher-check/two");
+                        memory_zero(&launcher, sizeof(launcher));
+                        launcher.names = (char address_to)names;
+                        launcher.from = from;
+                        launcher.hashed = scan_hashed;
+                        memory_zero(scan_hashed, sizeof(scan_hashed));
+                        launcher_scan(repeated);
+                        check("launcher: repeated PATH directories are one each, so the directory after them is read",
+                              launcher.dir_count == 2 && launcher.count == 4 &&
+                                  string_equals((string_address)launcher_name(3), (string_address)"zz"));
+                }
                 for (positive at = 0; at < sizeof(files) / sizeof(files[0]); at++)
                 {
                         launcher_check_path(path, files[at][0], files[at][1]);

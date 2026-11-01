@@ -453,6 +453,15 @@ static b32 launcher_runnable(b32 directory, const struct linux_dirent64 address_
         return opened < 0;
 }
 
+// Whether a directory is one already listed from PATH.
+static b32 launcher_listed(const char address_to directory)
+{
+        for (positive which = 0; which < launcher.dir_count; which++)
+                if (string_equals((string_address)launcher.dirs[which], (string_address)directory))
+                        return true;
+        return false;
+}
+
 // Every directory of a PATH once, into the names.
 static fn launcher_scan(const char address_to variable)
 {
@@ -467,14 +476,16 @@ static fn launcher_scan(const char address_to variable)
 
         for (positive at = 0; launcher.path[at] && launcher.dir_count < LAUNCHER_DIRS;)
         {
-                positive stop = at;
+                positive stop = at, next;
 
                 while (launcher.path[stop] && launcher.path[stop] != ':')
                         stop++;
-                if (stop > at)
-                        launcher.dirs[launcher.dir_count++] = launcher.path + at;
-                at = launcher.path[stop] ? stop + 1 : stop;
+                next = launcher.path[stop] ? stop + 1 : stop;
                 launcher.path[stop] = 0;
+                // An empty entry is no directory, and a directory a PATH repeats is listed once: a repeat takes no room.
+                if (stop > at && !launcher_listed(launcher.path + at))
+                        launcher.dirs[launcher.dir_count++] = launcher.path + at;
+                at = next;
         }
 
         for (positive which = 0; which < launcher.dir_count; which++)
