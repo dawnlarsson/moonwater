@@ -126684,6 +126684,24 @@ static fn check_kit_controls(void)
                 check("kit slider: a press at the far end of a stepped range lands on its last step (80 of 0 to 110 by 40), not past it",
                       landed == ui_q(80));
         }
+
+        // A determinate bar's fill stops at the track's end, however far past its whole the value is.
+        {
+                struct ui_control bar;
+                unsigned int paper = 0xff111113u;
+                b32 inside, past;
+
+                memory_zero(&bar, sizeof(bar));
+                bar.kind = UI_PROGRESS, bar.x = 20, bar.y = 50, bar.w = 200, bar.h = 6, bar.value = UI_ONE * 2;
+                ui_control_start(&bar);
+                ui_fill(&ui, 0, 40, 300, 30, paper);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &bar);
+                inside = pixels[53 * 600 + 215] != paper;
+                past = pixels[53 * 600 + 230] == paper;
+                check("kit progress: a value past its whole fills the track to its end, and nothing past it", inside && past);
+        }
+
 }
 #endif
 

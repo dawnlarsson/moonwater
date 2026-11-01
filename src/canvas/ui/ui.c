@@ -2443,6 +2443,9 @@ static inline fn ui_control_forget(struct ui_control address_to c)
 static inline b32 ui_dev(const struct ui address_to ui, int logical) { return logical * ui->scale; }
 static inline b32 ui_q8(const struct ui address_to ui, int logical) { return logical * ui->scale * 256; }
 
+// A determinate progress's fill as a whole: at most the track's end, UI_ONE (a value past its whole fills the track, no more).
+static inline b64 ui_progress_whole(b64 value) { return value > UI_ONE ? UI_ONE : value; }
+
 // A control before its first frame: its transitions have no value yet, so the first frame puts each at its state's.
 static fn ui_control_start(struct ui_control address_to c)
 {
@@ -2451,7 +2454,7 @@ static fn ui_control_start(struct ui_control address_to c)
         for (int k = 0; k < UI_ITEMS; k++)
                 ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
         if (c->kind == UI_PROGRESS && c->value >= 0)
-                ui_tween_put(&c->extent, c->value, UI_TWEEN_NUMBER);
+                ui_tween_put(&c->extent, ui_progress_whole(c->value), UI_TWEEN_NUMBER);
         c->hover_x = -1;
         c->item = -1;
         c->pip_squash = c->pip_press = 0;
@@ -3451,7 +3454,7 @@ static fn ui_progress_draw(struct ui address_to ui, struct ui_control address_to
                         ui_kit.busy = 1;
                 return;
         }
-        ui_kit_number_to(&c->extent, c->value, 450, &ui_ease);
+        ui_kit_number_to(&c->extent, ui_progress_whole(c->value), 450, &ui_ease);
         fill.x1 = fill.x0 + (b32)ui_qmul(ui_kit_tween(&c->extent), track.x1 - track.x0);
         if (fill.x1 > fill.x0)
                 ui_kit_fill(ui, &fill, ui_role(UI_PRIMARY), null);
@@ -3754,7 +3757,7 @@ static fn ui_control_place(struct ui_control address_to c)
         if (c->kind == UI_SLIDER)
                 c->extent.placed = 0;
         else
-                ui_tween_put(&c->extent, c->kind == UI_PROGRESS ? (c->value < 0 ? 0 : c->value) : c->on ? UI_ONE : 0, UI_TWEEN_NUMBER);
+                ui_tween_put(&c->extent, c->kind == UI_PROGRESS ? (c->value < 0 ? 0 : ui_progress_whole(c->value)) : c->on ? UI_ONE : 0, UI_TWEEN_NUMBER);
         ui_tween_put(&c->spot, 0, UI_TWEEN_NUMBER);
         for (int k = 0; k < 3; k++)
                 c->ripple[k].live = 0;
