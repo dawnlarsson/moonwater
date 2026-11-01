@@ -127343,6 +127343,15 @@ static const char address_to field_says_five(p32 code)
         return null;
 }
 
+// The picture a field draws into the window's pixels, its box at 20, 20: the frame cleared, the field drawn, and the
+// whole frame copied into into (400 by 100 pixels).
+static fn field_picture(struct ui address_to wui, struct ui_text address_to t, unsigned int address_to into)
+{
+        ui_begin(wui, wui->pixels, wui->pitch, wui->width, wui->height);
+        ui_text_draw(wui, t, 20, 20, 300, 30, 0);
+        memory_copy(into, wui->pixels, 400 * 100 * sizeof(unsigned int));
+}
+
 static fn field_check(struct ui address_to wui)
 {
         static struct ui_text t;
@@ -127493,6 +127502,24 @@ static fn field_check(struct ui address_to wui)
         check("field: a paste cut to its room keeps whole characters", field_is(&t, "ab\xc3\xa9"));
         t.most = 0;
 
+        // A composition that shrank draws what it says now: the picture of what it was is the picture of what it is.
+        {
+                static unsigned int first[400 * 100], second[400 * 100];
+                static struct ui_text shrink, fresh;
+
+                ui_field_open(&shrink, &own, "");
+                ui_text_preedit(&shrink, (const p8 address_to) "abc", 3);
+                ui_text_preedit(&shrink, (const p8 address_to) "ab", 2);
+                field_picture(wui, &shrink, first);
+                ui_field_open(&fresh, &own, "");
+                ui_text_preedit(&fresh, (const p8 address_to) "ab", 2);
+                field_picture(wui, &fresh, second);
+                check("field: a composition that shrinks draws what it says now", !memory_compare(first, second, sizeof(first)));
+                ui_text_preedit_end(&shrink, false);
+                ui_text_preedit_end(&fresh, false);
+                ui_text_close(&shrink);
+                ui_text_close(&fresh);
+        }
         // A paste is one line: line ends and tabs are blanks, any other control is left out.
         ui_text_set(&t, (const p8 address_to) "", 0);
         check("field: a paste of lines is one line of blanks for its line ends, with no control in it",

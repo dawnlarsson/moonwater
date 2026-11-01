@@ -6669,6 +6669,8 @@ static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_t
                         return false;
                 at += size;
         }
+        // Whole: the buffer is drawn as a string, so what the composition said before, past this length, is cleared.
+        memory_zero(t->preedit, sizeof(t->preedit));
         memory_copy(t->preedit, text, length);
         t->preedit_length = (p32)length;
         t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_off = false;
