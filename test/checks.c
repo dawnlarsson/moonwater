@@ -126989,6 +126989,7 @@ static fn menu_check(struct ui address_to wui);
 static fn kit_composites_check(struct ui address_to wui);
 static fn editor_check(struct ui address_to wui);
 static fn editor_close_check(struct ui address_to wui);
+static fn editor_tabs_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
 static fn text_widget_check(string_address inter, string_address mono)
@@ -127196,6 +127197,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         kit_composites_check(&wui);
         editor_check(&wui);
         editor_close_check(&wui);
+        editor_tabs_check(&wui);
         field_check(&wui);
 }
 
@@ -128015,6 +128017,51 @@ static fn editor_close_check(struct ui address_to wui)
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)link_path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)later, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
+}
+
+/*
+        The editor's tabs: a file read again (Ctrl+R) keeps its place among them and is the one shown, and the others keep
+        theirs.
+*/
+static fn editor_tabs_check(struct ui address_to wui)
+{
+        char dir[48], one[96], two[96], three[96];
+        positive named = string_length(string_copy((string_address)dir, (string_address) "editor-tabs."));
+        bipolar handle;
+        p8 got[8];
+
+        named += positive_into_string((string_address)dir + named, (positive)system_call(syscall(getpid)));
+        string_copy((string_address)dir + named, (string_address) ".tmp");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
+        string_copy(string_copy((string_address)one, (string_address)dir) + string_length((string_address)dir), (string_address) "/one.c");
+        string_copy(string_copy((string_address)two, (string_address)dir) + string_length((string_address)dir), (string_address) "/two.c");
+        string_copy(string_copy((string_address)three, (string_address)dir) + string_length((string_address)dir), (string_address) "/three.c");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)one, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "one\n", 4);
+        system_close(handle);
+        handle = system_open_at_mode(AT_FDCWD, (string_address)two, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "two\n", 4);
+        system_close(handle);
+        handle = system_open_at_mode(AT_FDCWD, (string_address)three, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "three\n", 6);
+        system_close(handle);
+        editor.ui = *wui;
+        editor.count = 0;
+        check("editor tabs: three files open in order", editor_open((string_address)one) && editor_open((string_address)two) &&
+              editor_open((string_address)three) && editor.count == 3);
+        editor.tab = 1;
+        editor_reload();
+        check("editor tabs: a file read again keeps its place among the tabs, and is the one shown",
+              editor.count == 3 && editor.tab == 1 && doc_length(&editor.tabs[1].view.doc) == 4 &&
+                  doc_read(&editor.tabs[1].view.doc, 0, got, 4) == 4 && !memory_compare(got, "two\n", 4));
+        check("editor tabs: and the others keep theirs", doc_length(&editor.tabs[0].view.doc) == 4 &&
+              doc_length(&editor.tabs[2].view.doc) == 6);
+        editor.count = 0;
+        editor_open(null);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)two, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)three, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
 }
 

@@ -243,6 +243,7 @@ static fn editor_reload(void)
 {
         struct editor_tab address_to tab = editor_now();
         char path[EDITOR_PATH];
+        int at = editor.tab, count = editor.count;
 
         string_copy_bounded((string_address)path, (string_address)tab->path, EDITOR_PATH);
         ui_text_close(&tab->view);
@@ -251,6 +252,15 @@ static fn editor_reload(void)
         editor.count--;
         memory_copy(&editor.tabs[editor.tab], &editor.tabs[editor.tab + 1], (positive)(editor.count - editor.tab) * sizeof(editor.tabs[0]));
         editor_open((string_address)path);
+        // The file read again goes back to its place among the tabs, and is the one shown: it is not moved to the end.
+        if (editor.count == count && at + 1 < count)
+        {
+                struct editor_tab again = editor.tabs[count - 1];
+
+                memory_copy(&editor.tabs[at + 1], &editor.tabs[at], (positive)(count - 1 - at) * sizeof(editor.tabs[0]));
+                editor.tabs[at] = again;
+                editor.tab = at;
+        }
 }
 
 static fn editor_close_tab(void)
