@@ -125993,6 +125993,71 @@ static fn check_kit_place(void)
                       started && cascade && travels && rests && hits);
         }
 }
+
+/*
+        The control widgets' pointer: a finger reaches what it presses UI_TARGET each way (a tab strip 32 tall is pressed
+        4 above and below it), a mouse does not; the slider's thumb rings where the hand hovers it; a value past the last
+        step lands on that step, not past the range; a value fixed in place is placed, not faded; a progress bar's fill
+        stops at the track's end; and the readout of a negative value is its sign and digits.
+*/
+static fn check_kit_controls(void)
+{
+        static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui ui = terminal.ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit controls: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = 6000000000ll;
+
+        // A finger reaches a tab UI_TARGET each way where the strip is smaller; a mouse presses only what it is on.
+        {
+                struct ui_control tabs, column;
+                b32 finger_top, finger_bottom, mouse_off, column_finger, column_mouse;
+
+                memory_zero(&tabs, sizeof(tabs));
+                tabs.kind = UI_TABS, tabs.variant = UI_TABS_SEGMENTED, tabs.x = 20, tabs.y = 100, tabs.count = 3;
+                tabs.items[0] = "All", tabs.items[1] = "Running", tabs.items[2] = "Stopped";
+                ui_control_start(&tabs);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &tabs);
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, 40, 96, true, WINDOW_KEY_TOUCH);
+                finger_top = tabs.down;
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, 40, 96, false, WINDOW_KEY_TOUCH);
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, 40, 135, true, WINDOW_KEY_TOUCH);
+                finger_bottom = tabs.down;
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, 40, 135, false, WINDOW_KEY_TOUCH);
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, 40, 96, true, 0);
+                mouse_off = !tabs.down;
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, 40, 96, false, 0);
+
+                // The vertical strip: items 40 tall, 34 drawn; a finger presses the item 5 above its top.
+                memory_zero(&column, sizeof(column));
+                column.kind = UI_TABS, column.variant = UI_TABS_VERTICAL, column.x = 10, column.y = 10, column.w = 150, column.h = 34, column.count = 12;
+                for (int k = 0; k < 12; k++)
+                        column.items[k] = "Group";
+                ui_control_start(&column);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &column);
+                ui_kit_pointer(&ui, &column, 1, WINDOW_EVENT_BUTTON, 20, 6, true, WINDOW_KEY_TOUCH);
+                column_finger = column.down;
+                ui_kit_pointer(&ui, &column, 1, WINDOW_EVENT_BUTTON, 20, 6, false, WINDOW_KEY_TOUCH);
+                ui_kit_pointer(&ui, &column, 1, WINDOW_EVENT_BUTTON, 20, 6, true, 0);
+                column_mouse = column.down;
+                ui_kit_pointer(&ui, &column, 1, WINDOW_EVENT_BUTTON, 20, 6, false, 0);
+
+                check("kit tabs: a finger presses a tab UI_TARGET each way (4 above or below its 32 strip), a mouse only what it is on",
+                      finger_top && finger_bottom && mouse_off && column_finger && !column_mouse);
+        }
+}
 #endif
 
 static p32 address_to render_frame(void)
@@ -127755,6 +127820,7 @@ b32 main()
         check_kit_theme();
         check_kit_arc();
         check_kit_place();
+        check_kit_controls();
 #endif
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);

@@ -4078,17 +4078,20 @@ static int ui_control_hit(struct ui address_to ui, const struct ui_control addre
                                 return k;
                 return -1;
         }
+        // A tab is a finger's UI_TARGET each way where it is smaller, as every control is (ui_hit).
         if (c->kind == UI_TABS && c->variant == UI_TABS_VERTICAL)
-                return lx >= c->x && lx < c->x + c->w && ly >= c->y && ly < c->y + c->count * c->h ? (ly - c->y) / c->h : -1;
+        {
+                for (int k = 0; k < c->count; k++)
+                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + k * c->h), ui_dev(ui, c->w), ui_dev(ui, c->h)))
+                                return k;
+                return -1;
+        }
         if (c->kind == UI_TABS)
         {
                 for (int k = 0; k < c->count; k++)
-                {
-                        int left = ui_tab_left(ui, c, k);
-
-                        if (lx >= left && lx < left + ui_tab_width(ui, c, k) && ly >= c->y && ly < c->y + (c->variant ? 32 : 40))
+                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, ui_tab_left(ui, c, k)), ui_dev(ui, c->y), ui_dev(ui, ui_tab_width(ui, c, k)),
+                                   ui_dev(ui, c->variant ? 32 : 40)))
                                 return k;
-                }
                 return -1;
         }
         if (c->kind == UI_INPUT && c->variant == UI_FIELD_BARE)
