@@ -126990,6 +126990,7 @@ static fn kit_composites_check(struct ui address_to wui);
 static fn editor_check(struct ui address_to wui);
 static fn editor_close_check(struct ui address_to wui);
 static fn editor_tabs_check(struct ui address_to wui);
+static fn editor_disk_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
 static fn text_widget_check(string_address inter, string_address mono)
@@ -127198,6 +127199,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_check(&wui);
         editor_close_check(&wui);
         editor_tabs_check(&wui);
+        editor_disk_check(&wui);
         field_check(&wui);
 }
 
@@ -128062,6 +128064,50 @@ static fn editor_tabs_check(struct ui address_to wui)
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)two, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)three, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
+}
+
+/*
+        A file another program changed since it was read: Ctrl+S says so and writes nothing, so that change is not written
+        over; the second Ctrl+S, with no key between, writes it.
+*/
+static fn editor_disk_check(struct ui address_to wui)
+{
+        char dir[48], path[96];
+        positive named = string_length(string_copy((string_address)dir, (string_address) "editor-disk."));
+        bipolar handle, length;
+        p8 got[32];
+
+        named += positive_into_string((string_address)dir + named, (positive)system_call(syscall(getpid)));
+        string_copy((string_address)dir + named, (string_address) ".tmp");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
+        string_copy(string_copy((string_address)path, (string_address)dir) + string_length((string_address)dir), (string_address) "/disk.c");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "one\n", 4);
+        system_close(handle);
+        editor.ui = *wui;
+        editor.count = 0;
+        check("editor disk: a file opens", editor_open((string_address)path) && editor.count == 1);
+        handle = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        system_write_all((b32)handle, "theirs\n", 7);
+        system_close(handle);
+        editor_focus(true);
+        check("editor disk: a change made on disk is seen when the window has the keys", editor_now()->changed_on_disk);
+        editor_command(DOC_CMD_SAVE);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        length = handle >= 0 ? system_read_once((b32)handle, got, sizeof(got)) : -1;
+        if (handle >= 0)
+                system_close(handle);
+        check("editor disk: the first Ctrl+S writes nothing over the change", length == 7 && !memory_compare(got, "theirs\n", 7));
+        editor_command(DOC_CMD_SAVE);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        length = handle >= 0 ? system_read_once((b32)handle, got, sizeof(got)) : -1;
+        if (handle >= 0)
+                system_close(handle);
+        check("editor disk: the second writes the editor's text", length == 4 && !memory_compare(got, "one\n", 4));
+        editor.count = 0;
+        editor_open(null);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
 }
 

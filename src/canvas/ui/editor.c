@@ -61,7 +61,7 @@ static struct
         struct doc_find search;
         char status[160];
         struct ui_popup menu;
-        b32 armed;   // a Ctrl+W asked once of a file with changes: the next one closes it
+        p32 armed;   // the command that asked once (Ctrl+W of a file with changes, Ctrl+S of one changed on disk): asked again, it is done
         b32 leaving; // the window may go: asked to, and nothing in it unsaved
 } editor = {.shown = -1};
 
@@ -286,14 +286,32 @@ static fn editor_close_tab(void)
 */
 static fn editor_close_tab_asked(void)
 {
-        if (doc_dirty(&editor_now()->view.doc) && !editor.armed)
+        if (doc_dirty(&editor_now()->view.doc) && editor.armed != DOC_CMD_CLOSE)
         {
-                editor.armed = true;
+                editor.armed = DOC_CMD_CLOSE;
                 string_copy_bounded((string_address)editor.status, (string_address) "unsaved changes: Ctrl+S saves them, Ctrl+W again closes without saving", sizeof(editor.status));
                 return;
         }
-        editor.armed = false;
+        editor.armed = 0;
         editor_close_tab();
+}
+
+/*
+        Ctrl+S of a file changed on disk since it was read or saved: the first says so and writes nothing, so the other change
+        is not written over; the second, with no other key or press between, writes it.
+*/
+static fn editor_save_asked(void)
+{
+        struct editor_tab address_to tab = editor_now();
+
+        if (tab->changed_on_disk && editor.armed != DOC_CMD_SAVE)
+        {
+                editor.armed = DOC_CMD_SAVE;
+                string_copy_bounded((string_address)editor.status, (string_address) "changed on disk: Ctrl+S again writes over it, Ctrl+R reads it again", sizeof(editor.status));
+                return;
+        }
+        editor.armed = 0;
+        editor_save(tab);
 }
 
 // The window asked to go (its close box, Alt+F4): held while a file in it has changes, which it says, and gone once none has.
@@ -545,7 +563,7 @@ static b32 editor_frame(void)
 static fn editor_command(p32 command)
 {
         if (command == DOC_CMD_SAVE || command == DOC_CMD_SAVE_AS)
-                editor_save(editor_now());
+                editor_save_asked();
         else if (command == DOC_CMD_FIND || command == DOC_CMD_REPLACE || command == DOC_CMD_GOTO_LINE)
                 editor_find_open(command == DOC_CMD_FIND ? 1 : command == DOC_CMD_REPLACE ? 2 : 3);
         else if (command == DOC_CMD_FIND_NEXT || command == DOC_CMD_FIND_PREVIOUS)
@@ -573,10 +591,10 @@ static b32 editor_event(const struct window_event address_to event)
         struct editor_tab address_to tab = editor_now();
         p32 asks;
 
-        // A key or a press other than the Ctrl+W that asked is a change of mind: the next Ctrl+W asks again.
+        // A key or a press other than the one that asked is a change of mind: the next such key asks again.
         if (editor.armed && (event->flags & WINDOW_KEY_DOWN) &&
-            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && editor_key_command(event) != DOC_CMD_CLOSE)))
-                editor.armed = false;
+            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && editor_key_command(event) != editor.armed)))
+                editor.armed = 0;
         if (event->type == WINDOW_EVENT_MOTION)
                 editor.pointer_x = event->a, editor.pointer_y = event->b;
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && (event->flags & WINDOW_KEY_CONTROL) &&
