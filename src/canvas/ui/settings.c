@@ -3362,7 +3362,7 @@ static b32 settings_gallery_event(const struct window_event address_to event)
 
                 if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
                         return true;
-                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0);
+                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0, 0);
                 if (bar >= 0)
                         moved = ui_scroll_set(s, bar) || true;
                 else

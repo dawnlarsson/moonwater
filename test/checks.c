@@ -115686,6 +115686,68 @@ static fn check_pointer(void)
                       to_shell_length == 0 && !terminal.finger && !terminal.finger_moved);
                 to_shell_length = 0;
         }
+
+        /*
+                The scroll bar by a finger: drawn four pixels wide, it is taken within UI_TARGET of it (the bar's reach), so a
+                finger on its thumb, or a little beside it, grabs the thumb and drags the view with it; a finger on the track
+                beside the thumb pages toward it. A mouse is exact: the same place there is the grid's, not the bar's.
+        */
+        {
+                struct window_event at = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+                struct window_event down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+                struct window_event up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0};
+                struct window_event mouse_at = {WINDOW_EVENT_MOTION, 0, 0, 0};
+                struct window_event mouse_down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+                struct window_event mouse_up = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+                struct ui kit;
+                unsigned int first, shown, total, start;
+                int scale = (int)terminal_scale(), top, length;
+
+                terminal_view_live();
+                terminal_extent(&first, &shown, &total);
+                terminal_bar_place(first, shown, total);
+                kit = terminal_kit(null);
+                ui_scroll_thumb(&kit, &terminal.bar, &top, &length);
+                at.a = terminal.bar.x - 8 * scale, at.b = top + length / 2;
+                terminal_receive(-1, &at, &dirty);
+                terminal_receive(-1, &down, &dirty);
+                check("pointer: a finger 8 pixels left of the bar takes its thumb, which is drawn four pixels wide",
+                      terminal.bar.held != 0);
+                start = first;
+                at.b -= 4 * (int)terminal.cell_h;
+                terminal_receive(-1, &at, &dirty);
+                terminal_extent(&first, &shown, &total);
+                check("pointer: a finger dragged up four cells on the thumb takes the view back with it", first < start);
+                terminal_receive(-1, &up, &dirty);
+                check("pointer: let go, the thumb is let go too", !terminal.bar.held);
+
+                terminal_view_live();
+                terminal_extent(&first, &shown, &total);
+                terminal_bar_place(first, shown, total);
+                ui_scroll_thumb(&kit, &terminal.bar, &top, &length);
+                start = first;
+                /* The thumb's reach is UI_TARGET tall, so a thumb shorter than that reaches a little past it: the track's top is beyond. */
+                at.a = terminal.bar.x + 5 * scale, at.b = terminal.bar.y + 2 * scale;
+                terminal_receive(-1, &at, &dirty);
+                terminal_receive(-1, &down, &dirty);
+                terminal_receive(-1, &up, &dirty);
+                terminal_extent(&first, &shown, &total);
+                check("pointer: a finger on the track above the thumb pages the view toward it, and grabs nothing",
+                      first < start && !terminal.bar.held);
+
+                terminal_view_live();
+                terminal_extent(&first, &shown, &total);
+                terminal_bar_place(first, shown, total);
+                ui_scroll_thumb(&kit, &terminal.bar, &top, &length);
+                mouse_at.a = terminal.bar.x - 8 * scale, mouse_at.b = top + length / 2;
+                terminal_receive(-1, &mouse_at, &dirty);
+                terminal_receive(-1, &mouse_down, &dirty);
+                check("pointer: a mouse 8 pixels left of the bar is the grid's, and takes no thumb", !terminal.bar.held);
+                terminal_receive(-1, &mouse_up, &dirty);
+                terminal.selecting = false;
+                terminal_view_live();
+        }
+
 #endif
 }
 
@@ -126581,15 +126643,19 @@ static fn check_kit_place(void)
                 bar.content = 100000;
                 least = ui_scroll_thumb(&ui, &bar, &top, &length) && length == UI_SCROLL_LEAST;
                 bar.content = 1000, bar.scroll = 0;
-                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 15, true);
-                scroll = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 95, true);
+                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 15, true, 0);
+                scroll = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 95, true, 0);
                 dragged = bar.held && scroll == 400;
                 bar.scroll = scroll;
-                dragged = dragged && ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 95, false) == 400 && !bar.held &&
-                          ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 150, false) == -1;
-                paged = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 200, true) == 600 &&
-                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 20, true) == 200 &&
-                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 150, true) == -1;
+                dragged = dragged && ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 95, false, 0) == 400 && !bar.held &&
+                          ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 150, false, 0) == -1;
+                paged = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 200, true, 0) == 600 &&
+                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 20, true, 0) == 200 &&
+                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 150, true, 0) == -1;
+                /* A finger's reach: UI_TARGET each way of the 10-wide track at 100, so 90 is the bar's and 60 is not; a mouse's 90 is not. */
+                paged = paged && ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 200, true, 1) == 600 &&
+                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 200, true, 0) == -1 &&
+                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 200, true, 1) == -1;
                 bar.scroll = 0;
                 ui_fill(&ui, 90, 0, 30, 220, paper);
                 ui.top = 0, ui.bottom = 300;
@@ -126610,13 +126676,13 @@ static fn check_kit_place(void)
                 int top = 0, length = 0;
                 b32 same_frame = false, no_glide = false, target_drawn = false;
 
-                ui_scroll_pointer(&ui, &held, WINDOW_EVENT_BUTTON, 104, 20, true);
-                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true));
+                ui_scroll_pointer(&ui, &held, WINDOW_EVENT_BUTTON, 104, 20, true, 0);
+                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true, 0));
                 same_frame = held.held && held.scroll == 400 && ui_scroll_thumb(&ui, &held, &top, &length) && top == 100 - 10;
                 no_glide = !held.gliding;
                 ui_scroll_wheel(&ui, &held, -120);
                 target_drawn = held.scroll == 400 && held.gliding && ui_scroll_thumb(&ui, &held, &top, &length) && top == 10 + 160 * 440 / 800;
-                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true));
+                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true, 0));
                 check("kit scrollbar: a dragged thumb is at the pointer on the frame the pointer moved it, and does not glide", same_frame && no_glide);
                 check("kit scrollbar: a held thumb is drawn at its glide's target, and at the pointer again once it moves", target_drawn &&
                       ui_scroll_thumb(&ui, &held, &top, &length) && top == 100 - 10);
@@ -129665,7 +129731,7 @@ static fn kit_composites_check(struct ui address_to wui)
                 int x = reopened.scroll.x + s, y = reopened.scroll.y + reopened.scroll.height / 2;
 
                 check("menu: a menu opened again has no thumb held over from its last opening",
-                      ui_scroll_pointer(wui, &reopened.scroll, WINDOW_EVENT_MOTION, x, y, false) == -1);
+                      ui_scroll_pointer(wui, &reopened.scroll, WINDOW_EVENT_MOTION, x, y, false, 0) == -1);
         }
 }
 

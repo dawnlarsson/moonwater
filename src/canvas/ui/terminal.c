@@ -516,9 +516,28 @@ static unsigned int terminal_bar_key(void)
         return (terminal.bar.held ? 1u : 0u) | (terminal.bar.hover ? 2u : 0u);
 }
 
+// Whether the pointer is within a finger's reach of the bar (ui_scroll_reach), which is wider than the bar drawn.
+static b32 terminal_bar_reach(void)
+{
+        unsigned int first, shown, total;
+        struct ui kit = terminal_kit(null);
+
+        if (!terminal_extent(&first, &shown, &total) || total <= shown)
+                return false;
+        terminal_bar_place(first, shown, total);
+        return ui_scroll_reach(&kit, &terminal.bar, terminal.pointer_x + (int)terminal.pad, terminal.pointer_y + (int)terminal.pad_y, 1);
+}
+
+// Whether a press at the pointer is the bar's: in the gutter where the bar is, or a finger's within its reach.
+static b32 terminal_bar_takes(b32 touch)
+{
+        return terminal_bar_shown() && (terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) || (touch && terminal_bar_reach()));
+}
+
 // The bar's pointer, through the kit's own (ui_scroll_pointer): a press, a release or a motion at x, y in the window.
-// Answers whether the bar took it, and sets moved when the view went somewhere.
-static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to moved)
+// A button's event carries its code and no place, so a press passes where the pointer is. Answers whether the bar took
+// it, and sets moved when the view went somewhere.
+static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 touch, b32 address_to moved)
 {
         unsigned int first, shown, total;
         struct ui kit = terminal_kit(null);
@@ -531,7 +550,7 @@ static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to
                 return false;
         }
         terminal_bar_place(first, shown, total);
-        scroll = ui_scroll_pointer(&kit, &terminal.bar, type, x, y, down);
+        scroll = ui_scroll_pointer(&kit, &terminal.bar, type, x, y, down, touch);
         if (scroll < 0)
                 return false;
         most = (int)(total - shown);
@@ -1786,7 +1805,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         if (event->type != WINDOW_EVENT_BUTTON || event->a != 0x110)
                 return true;
         // The gutter is the bar's, for a finger as for the mouse.
-        if ((event->flags & WINDOW_KEY_DOWN) && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) && terminal_bar_shown())
+        if ((event->flags & WINDOW_KEY_DOWN) && terminal_bar_takes(1))
                 return true;
         *handled = true;
         if (event->flags & WINDOW_KEY_DOWN)
@@ -2296,7 +2315,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                         // The kit's bar takes the motion that is over it or held; what it lights or moves is drawn again.
                         if (terminal.bar.held || terminal.bar.hover || terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
-                                terminal_bar_pointer(WINDOW_EVENT_MOTION, event->a, event->b, false, &moved);
+                                terminal_bar_pointer(WINDOW_EVENT_MOTION, event->a, event->b, false,
+                                                     (event->flags & WINDOW_KEY_TOUCH) != 0, &moved);
                         if (moved || lit != terminal.bar.hover)
                                 address_to dirty = true;
                         if (terminal.bar.held)
@@ -2321,12 +2341,13 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 // The gutter is the bar's, not the program's, where there is a bar: its press, and the release of a held
                 // thumb, go to the kit's pointer.
-                if (event->a == 0x110 && (terminal.bar.held || (down && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w) &&
-                                                               terminal_bar_shown())))
+                if (event->a == 0x110 && (terminal.bar.held || (down && terminal_bar_takes((event->flags & WINDOW_KEY_TOUCH) != 0))))
                 {
                         b32 moved = false;
 
-                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, event->a, event->b, down, &moved);
+                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, terminal.pointer_x + (int)terminal.pad,
+                                             terminal.pointer_y + (int)terminal.pad_y, down, (event->flags & WINDOW_KEY_TOUCH) != 0,
+                                             &moved);
                         if (moved)
                                 address_to dirty = true;
                         return true;

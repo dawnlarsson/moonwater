@@ -4341,19 +4341,30 @@ static fn ui_scroll_draw(struct ui address_to ui, const struct ui_scroll address
 }
 
 /*
+        Whether a press at x, y takes the bar: its track. A finger's reach is UI_TARGET each way, the track's middle kept
+        (ui_hit), so a finger lands on a bar four pixels wide; a pointer's is the track as drawn.
+*/
+static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll address_to s, int x, int y, b32 touch)
+{
+        return ui_hit(ui, touch, x, y, s->x, s->y, UI_SCROLL_WIDTH * ui->scale, s->height);
+}
+
+/*
         The pointer on a scrollbar: motion (a held thumb follows the hand; hover lights it), a press (on the thumb it is
-        held, on the track it pages) and a release. Answers the scroll it asks for, or -1 when the event was not its own
+        held, on the track it pages) and a release. A finger (touch) takes the bar within its reach (ui_scroll_reach) and
+        the thumb within UI_TARGET likewise. Answers the scroll it asks for, or -1 when the event was not its own
         (a press off it, a motion with nothing held); a press on it that pages answers the new scroll.
 */
-static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down)
+static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down, b32 touch)
 {
         int top, length, rest = s->content - s->view;
         b32 bar = ui_scroll_thumb(ui, s, &top, &length);
-        b32 on_track = bar && x >= s->x && x < s->x + UI_SCROLL_WIDTH * ui->scale && y >= s->y && y < s->y + s->height;
+        b32 on_track = bar && ui_scroll_reach(ui, s, x, y, touch);
+        b32 on_thumb = on_track && ui_hit(ui, touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale, length);
 
         if (type == WINDOW_EVENT_MOTION)
         {
-                s->hover = on_track && y >= top && y < top + length;
+                s->hover = on_thumb;
                 if (!s->held || !bar)
                         return -1;
                 if (s->height - length <= 0)
@@ -4371,7 +4382,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
         }
         if (!on_track)
                 return -1;
-        if (y >= top && y < top + length)
+        if (on_thumb)
         {
                 s->held = 1;
                 s->grab = y - top;
@@ -6324,7 +6335,7 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                 if (!bars[k])
                         continue;
                 lit = bars[k]->hover;
-                scroll = ui_scroll_pointer(ui, bars[k], type, p->pointer_x, p->pointer_y, down);
+                scroll = ui_scroll_pointer(ui, bars[k], type, p->pointer_x, p->pointer_y, down, 0);
                 if (scroll >= 0)
                 {
                         taken = true;
