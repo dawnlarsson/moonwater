@@ -125989,6 +125989,28 @@ static fn check_kit_fills(void)
                 ui.top = 0, ui.bottom = KIT_PAGE_HEIGHT;
                 check("kit fill: a fill is cut to the picture's rows, above its top and below its height", held);
         }
+
+        // A corner's cover from its cached quarter (ui_inside_cached, which a rounded rectangle reads) is ui_inside's at
+        // every pixel of every size a corner of that radius is drawn at: the mirror into each corner must be exact.
+        {
+                positive wrong = 0;
+
+                for (int radius = 1; radius <= UI_CORNER_MOST; radius++)
+                {
+                        const int grow[4] = {0, 1, 7, 20};
+
+                        for (int a = 0; a < 4; a++)
+                                for (int b = 0; b < 4; b++)
+                                {
+                                        int width = 2 * radius + grow[a], height = 2 * radius + grow[b];
+
+                                        for (int y = 0; y < height; y++)
+                                                for (int x = 0; x < width; x++)
+                                                        wrong += ui_inside_cached(x, y, width, height, radius) != ui_inside(x, y, width, height, radius);
+                                }
+                }
+                check("kit corners: a corner's cached cover is ui_inside's at every pixel, every radius to UI_CORNER_MOST and size", !wrong);
+        }
 }
 
 /*
