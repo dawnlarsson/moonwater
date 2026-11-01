@@ -126754,9 +126754,9 @@ static fn check_kit_controls(void)
 
         // A group or a strip with no items has no pip: its place is paper, and the strip draws without measuring a word.
         {
-                struct ui_control group;
+                struct ui_control group, strip;
                 unsigned int paper = 0xff111113u;
-                b32 group_clear;
+                b32 group_clear, strip_clear;
 
                 memory_zero(&group, sizeof(group));
                 group.kind = UI_RADIOS, group.x = 20, group.y = 120, group.w = 300, group.h = 48, group.count = 0;
@@ -126766,7 +126766,15 @@ static fn check_kit_controls(void)
                 ui_control_draw(&ui, &group);
                 group_clear = pixels[144 * 600 + 294] == paper;
 
+                memory_zero(&strip, sizeof(strip));
+                strip.kind = UI_TABS, strip.variant = UI_TABS_SEGMENTED, strip.x = 20, strip.y = 100, strip.count = 0;
+                ui_control_start(&strip);
+                ui_fill(&ui, 0, 90, 340, 80, paper);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &strip);
+                strip_clear = pixels[116 * 600 + 30] == paper;
                 check("kit radios: a group with no items draws no pip", group_clear);
+                check("kit tabs: a strip with no items draws no pip, and no word is measured", strip_clear);
         }
 }
 #endif

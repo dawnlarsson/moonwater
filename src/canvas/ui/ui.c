@@ -3122,6 +3122,9 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 ui_vtabs_draw(ui, c);
                 return;
         }
+        // A strip with no items has no pip to put on one, and no word to measure for its place.
+        if (c->count == 0)
+                return;
         int height = seg ? 32 : 40, chosen = c->at;
         b64 pip_x, pip_w;
 
