@@ -4310,10 +4310,12 @@ struct ui_scroll
         b64 at, aim, speed, stamp, tau;
         b32 gliding, dragging;
         struct ui_spring back;
+        struct ui_tween ink, grow; // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
 };
 
 // The thumb's top and length (device pixels); false when everything shows and there is no bar. A held thumb is drawn at its
-// target, the pointer's or a wheel turn's glide aim, and not at where a glide is now: it never lags the hand.
+// target, the pointer's or a wheel turn's glide aim, while a glide runs to it, and otherwise where the scroll is: a bar whose
+// aim was never set is not drawn at it, and nothing lags the hand.
 static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to length)
 {
         int track = s->height, least = UI_SCROLL_LEAST * ui->scale, rest = s->content - s->view, scroll;
@@ -4322,22 +4324,70 @@ static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll
                 return 0;
         *length = (int)((b64)track * s->view / s->content);
         *length = *length < least ? least : *length > track ? track : *length;
-        scroll = s->held ? (int)((s->aim + 128) >> 8) : s->scroll; // the aim in 256ths, rounded as ui_scroll_show rounds it
+        // The aim in 256ths, rounded as ui_scroll_show rounds it.
+        scroll = s->held && s->gliding ? (int)((s->aim + 128) >> 8) : s->scroll;
         scroll = scroll < 0 ? 0 : scroll > rest ? rest : scroll;
         *top = s->y + (int)((b64)(track - *length) * scroll / rest);
         return 1;
 }
 
-static fn ui_scroll_draw(struct ui address_to ui, const struct ui_scroll address_to s)
+/*
+        The thumb is lit while the pointer is on it or it is held: its ink the on-surface role at full strength, and its
+        thickness grown about the track's middle to UI_SCROLL_LIT (1.25 times). Unlit it is 18 of the on-surface ink at the
+        thickness it always had. Both move on the kit's own tween over UI_SCROLL_MS, so the kit is busy while they do and
+        idle when they settle. The track keeps its width, so the bar never moves the content; the thumb is flat.
+*/
+#define UI_SCROLL_LIT UI_Q2(125)
+#define UI_SCROLL_MS 120
+
+// The thumb's ink or its growth is between its states: the bar is drawn again while it is, and its rows marked to be.
+static b32 ui_scroll_moving(const struct ui_scroll address_to s)
 {
-        int top, length, border = UI_SCROLL_BORDER * ui->scale, width = UI_SCROLL_WIDTH * ui->scale;
+        return !ui_tween_still(&s->ink) || !ui_tween_still(&s->grow);
+}
+
+// The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth.
+static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll address_to s, int top, int length, struct ui_box address_to thumb)
+{
+        int border = UI_SCROLL_BORDER * ui->scale, width = UI_SCROLL_WIDTH * ui->scale;
+        b64 centre = (b64)(s->x + width / 2) * 256, half = (b64)(width / 2 - border) * 256;
+        b64 r = ui_qmul(half, ui_kit_tween(&s->grow));
+
+        thumb->x0 = (b32)(centre - r), thumb->x1 = (b32)(centre + r);
+        thumb->y0 = (b32)((top + border) * 256), thumb->y1 = (b32)((top + length - border) * 256);
+        thumb->rx = thumb->ry = (b32)r;
+}
+
+// The track's rows are drawn again next frame, as a moving control's are.
+static fn ui_scroll_mark(const struct ui_scroll address_to s)
+{
+        int top = s->y < 0 ? 0 : s->y, bottom = s->y + s->height;
+
+        if (ui_kit.damage_bottom <= ui_kit.damage_top)
+                ui_kit.damage_top = top, ui_kit.damage_bottom = bottom;
+        else
+        {
+                ui_kit.damage_top = top < ui_kit.damage_top ? top : ui_kit.damage_top;
+                ui_kit.damage_bottom = bottom > ui_kit.damage_bottom ? bottom : ui_kit.damage_bottom;
+        }
+}
+
+static fn ui_scroll_draw(struct ui address_to ui, struct ui_scroll address_to s)
+{
+        int top, length;
         struct ui_box thumb;
+        unsigned int ink;
+        b32 lit = s->hover || s->held;
 
         if (!ui_scroll_thumb(ui, s, &top, &length))
                 return;
-        thumb = (struct ui_box){(s->x + border) * 256, (top + border) * 256, (s->x + width - border) * 256, (top + length - border) * 256,
-                                (width / 2 - border) * 256, (width / 2 - border) * 256};
-        ui_kit_fill(ui, &thumb, ui_mix(ui_role(UI_ON_SURFACE), s->hover || s->held ? 30 : 18, 0), null);
+        ui_kit_colour_to(&s->ink, lit ? ui_role(UI_ON_SURFACE) : ui_mix(ui_role(UI_ON_SURFACE), 18, 0), UI_SCROLL_MS, &ui_ease);
+        ui_kit_number_to(&s->grow, lit ? UI_SCROLL_LIT : UI_ONE, UI_SCROLL_MS, &ui_ease);
+        ink = ui_kit_colour(&s->ink);
+        ui_scroll_box(ui, s, top, length, &thumb);
+        if (ui_scroll_moving(s))
+                ui_scroll_mark(s);
+        ui_kit_fill(ui, &thumb, ink, null);
 }
 
 /*

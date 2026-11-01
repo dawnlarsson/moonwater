@@ -126759,6 +126759,88 @@ static fn check_kit_place(void)
                       ui_scroll_thumb(&ui, &held, &top, &length) && top == 100 - 10);
         }
 
+        // A press on the thumb leaves it where it is: a bar whose aim was never set (the terminal's: it places the bar
+        // from the view, and no glide runs) is drawn at its scroll on the frame it is pressed, not at the top of its track.
+        {
+                struct ui_scroll pressed = {100, 10, 200, 1000, 200, 800, false, false, 0};
+                unsigned int paper = 0xff111113u;
+                b32 at_place = false, no_top = false;
+
+                ui_fill(&ui, 90, 0, 30, 220, paper);
+                ui.top = 0, ui.bottom = 300;
+                ui_scroll_draw(&ui, &pressed);
+                ui_scroll_pointer(&ui, &pressed, WINDOW_EVENT_BUTTON, 104, 180, true, 0);
+                for (int frame = 0; frame < 3; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 90, 0, 30, 220, paper);
+                        ui_scroll_draw(&ui, &pressed);
+                }
+                at_place = pressed.held && pixels[180 * 600 + 105] != paper && pixels[210 * 600 + 105] == paper;
+                no_top = pixels[30 * 600 + 105] == paper;
+                check("kit scrollbar: a pressed thumb is drawn at its place, not at the top of the track", at_place && no_top);
+        }
+
+        // A lit thumb (held, or the pointer on it) turns the on-surface ink and grows across its track to 1.25 of its width,
+        // over 120 ms, and goes back the same way on release. Settled it is the lit values and the kit is idle; mid-tween
+        // its ink and width are between the two. The rest is 4 wide in the track's 10, and the track never changes.
+        {
+                struct ui_scroll grip = {100, 10, 200, 1000, 200, 0, false, false, 0};
+                struct ui_box box;
+                unsigned int paper = 0xff111113u, ink = ui_role(UI_ON_SURFACE), idle = 0, held = 0, mid = 0;
+                int top = 0, length = 0, rest_width = 0, held_width = 0, mid_width = 0, back_width = 0;
+                b32 between = false, settled = false, back = false;
+
+                ui_fill(&ui, 90, 0, 30, 220, paper);
+                ui.top = 0, ui.bottom = 300;
+                ui_scroll_draw(&ui, &grip);
+                idle = ui_kit_colour(&grip.ink);
+                ui_scroll_thumb(&ui, &grip, &top, &length);
+                ui_scroll_box(&ui, &grip, top, length, &box);
+                rest_width = box.x1 - box.x0;
+                ui_scroll_pointer(&ui, &grip, WINDOW_EVENT_BUTTON, 104, 20, true, 0);
+                for (int frame = 0; frame < 4; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 90, 0, 30, 220, paper);
+                        ui_scroll_draw(&ui, &grip);
+                }
+                mid = ui_kit_colour(&grip.ink);
+                ui_scroll_box(&ui, &grip, top, length, &box);
+                mid_width = box.x1 - box.x0;
+                between = mid != idle && mid != ink && mid_width > rest_width && mid_width < rest_width * 5 / 4;
+                for (int shift = 0; shift < 32; shift += 8)
+                {
+                        unsigned int a = idle >> shift & 255, b = ink >> shift & 255, c = mid >> shift & 255;
+
+                        between = between && c >= (a < b ? a : b) && c <= (a < b ? b : a);
+                }
+                for (int frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 90, 0, 30, 220, paper);
+                        ui_scroll_draw(&ui, &grip);
+                }
+                held = ui_kit_colour(&grip.ink);
+                ui_scroll_box(&ui, &grip, top, length, &box);
+                held_width = box.x1 - box.x0;
+                settled = held == ink && !ui_kit.busy && held_width * 4 == rest_width * 5 && rest_width == 4 * 256 &&
+                          pixels[30 * 600 + 105] == ink;
+                ui_scroll_pointer(&ui, &grip, WINDOW_EVENT_BUTTON, 104, 20, false, 0);
+                for (int frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 90, 0, 30, 220, paper);
+                        ui_scroll_draw(&ui, &grip);
+                }
+                ui_scroll_box(&ui, &grip, top, length, &box);
+                back_width = box.x1 - box.x0;
+                back = ui_kit_colour(&grip.ink) == idle && back_width == rest_width && !ui_kit.busy;
+                check("kit scrollbar: a held thumb settles at the on-surface ink and 1.25 of its 4 px, the track 10, and the kit idle", settled);
+                check("kit scrollbar: mid-tween (120 ms) the held thumb's ink and width are between the unlit and held values", between);
+                check("kit scrollbar: released, the thumb goes back to its unlit ink and width, and the kit goes idle", back);
+        }
+
         // The glide: a wheel's notch aims one row on and the position reaches it over several frames, from below and never
         // past it; a pull past an end is limited and springs back to that end when let go, at either end; a settled glide
         // leaves the kit idle; a keyboard reveal glides to the row it shows, from where the region is, and a row in view

@@ -539,11 +539,12 @@ static b32 terminal_bar_takes(b32 touch)
 
 // The bar's pointer, through the kit's own (ui_scroll_pointer): a press, a release or a motion at x, y in the window.
 // A button's event carries its code and no place, so a press passes where the pointer is. Answers whether the bar took
-// it, and sets moved when the view went somewhere.
+// it, and sets moved when the view or the bar's lit state went somewhere (the bar is drawn again).
 static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 touch, b32 address_to moved)
 {
         unsigned int first, shown, total;
         struct ui kit = terminal_kit(null);
+        unsigned int lit;
         int scroll, most;
 
         *moved = false;
@@ -553,12 +554,14 @@ static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 touch, b32
                 return false;
         }
         terminal_bar_place(first, shown, total);
+        lit = terminal_bar_key();
         scroll = ui_scroll_pointer(&kit, &terminal.bar, type, x, y, down, touch);
+        *moved = terminal_bar_key() != lit;
         if (scroll < 0)
                 return false;
         most = (int)(total - shown);
         scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
-        *moved = terminal_view_set((unsigned int)scroll);
+        *moved = terminal_view_set((unsigned int)scroll) || *moved;
         return true;
 }
 
@@ -1168,7 +1171,7 @@ static b32 terminal_frame(void)
         unsigned int first, shown, total;
         unsigned int row_x0[1024], row_x1[1024];
         int x1 = 0x7fffffff, y1 = 0x7fffffff, x2 = 0, y2 = 0;
-        b32 bar, bar_told, any, right = false;
+        b32 bar, bar_told, any, right = false, turning;
 
         if (slot < 0)
                 return false;
@@ -1196,11 +1199,12 @@ static b32 terminal_frame(void)
         pixels = terminal_grid(whole);
 
         // The bar is drawn where the buffer's own was not the same, and the compositor is
-        // told where the one on the screen was not.
+        // told where the one on the screen was not. A thumb growing or shrinking across its track is drawn again each frame.
+        turning = total > shown && ui_scroll_moving(&terminal.bar);
         bar = !terminal.valid[slot] || terminal.bar_first[slot] != first || terminal.bar_shown[slot] != shown ||
-              terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != terminal_bar_key();
+              terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != terminal_bar_key() || turning;
         bar_told = !screen || terminal.bar_first[front] != first || terminal.bar_shown[front] != shown ||
-                   terminal.bar_total[front] != total || terminal.bar_drawn[front] != terminal_bar_key();
+                   terminal.bar_total[front] != total || terminal.bar_drawn[front] != terminal_bar_key() || turning;
 
         // A top margin a spoil reached is drawn again, which makes the frame whether or not a cell changed.
         b32 margin = terminal.margin_spoiled[slot];
