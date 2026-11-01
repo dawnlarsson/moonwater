@@ -115898,6 +115898,48 @@ static void check_compositor_partial(void)
 }
 
 /*
+        A picture the card shows straight from its buffer (a window on the overlay, or one filling the output) is
+        said taken only by the present that shows it, and a present comes only for damage: a picture that changed no
+        pixel still asks for one, or its program waits for the other buffer until something else is damaged.
+*/
+static void check_compositor_held(void)
+{
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.plane_row = compositor.flip_row = -1;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    static unsigned int made[GLASS_SIDE * GLASS_SIDE];
+    compositor.scanout = made;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("held: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 30, table->y[1] = 20, table->width[1] = 150, table->height[1] = 120;
+    glass_paint(1, 0, 0, 150, 120, 0x2060c0u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    // On the overlay now: the next picture, of nothing changed, into the other buffer.
+    compositor.direct_row = 1;
+    table->buffer_index[1] = 1;
+    table->damage_x[1] = 0, table->damage_y[1] = 0, table->damage_width[1] = 150, table->damage_height[1] = 0;
+    table->frame[1]++;
+    compositor_take(1);
+    check("held: a picture shown straight is not said taken before the present that shows it",
+          table->shown[1] != table->frame[1] && (compositor.held_rows & 2u));
+    check("held: and one that changed no pixel still asks for that present", compositor.damages > 0);
+    compositor.direct_row = -1;
+    compositor.held_rows = 0;
+}
+
+/*
         Two screens, one space. A is 320 by 192 at the left and B, taller at 256
         by 240, to its right; the scanout is the space, 576 by 240, and B's
         bottom rows under A's are no screen's. The pointer crosses where the
@@ -120482,7 +120524,7 @@ static struct ui_control settings_frames_controls[2 * SETTINGS_ALL];
 static struct
 {
         struct windows address_to table;
-        positive now, frames;
+        positive now, frames, moving, asked;
         b32 wrong;
         string_address scenario;
 } settings_frames;
@@ -120499,16 +120541,18 @@ static b32 settings_frames_same(int slot, string_address when)
         memory_copy(&settings, settings_frames_kept, sizeof(settings));
         memory_copy(&ui_kit, settings_frames_kit, sizeof(ui_kit));
         memory_copy(settings.list.controls, settings_frames_controls, sizeof(settings_frames_controls));
-        for (int y = 0; y < SETTINGS_FRAMES_H; y++)
-                for (int x = 0; x < SETTINGS_FRAMES_W; x++)
+        // The picture is the window's size, which a resize makes less than the buffer's.
+        for (int y = 0; y < settings.height; y++)
+                for (int x = 0; x < settings.width; x++)
                         if (shown[y * SETTINGS_FRAMES_W + x] != settings_frames_whole[y * SETTINGS_FRAMES_W + x])
                         {
                                 int at = ui_list_hit(&settings.ui, &settings.list, settings.list.x + 1, y);
                                 int group = ui_page_column_hit(&settings.ui, &settings.page, ui_dev(&settings.ui, UI_PAD) + 1, y);
                                 b32 in_column = x < settings.list.x && group >= 0;
 
-                                string_format(log, "  settings frames (%s): %s, frame %p, buffer %p: pixel %b,%b is %p, the whole draw %p (%s %s)\n",
-                                              settings_frames.scenario, when, settings_frames.frames, (positive)slot, (bipolar)x, (bipolar)y,
+                                string_format(log, "  settings frames (%s): %s, frame %p, buffer %p, %b by %b: pixel %b,%b is %p, the whole draw %p (%s %s)\n",
+                                              settings_frames.scenario, when, settings_frames.frames, (positive)slot, (bipolar)settings.width,
+                                              (bipolar)settings.height, (bipolar)x, (bipolar)y,
                                               (positive)shown[y * SETTINGS_FRAMES_W + x], (positive)settings_frames_whole[y * SETTINGS_FRAMES_W + x],
                                               (string_address)(in_column ? "the column's group" : "row"),
                                               (string_address)(in_column ? settings_group_name(group) : at >= 0 ? settings_label(at) : "none"));
@@ -120535,6 +120579,7 @@ static fn settings_frames_pass(void)
         {
                 settings.dirty = true;
                 settings_moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
+                settings_frames.moving++;
         }
         // The compositor takes the picture at once, and what it shows is the buffer named.
         settings_frames.table->shown[settings.own.row] = settings_frames.table->frame[settings.own.row];
@@ -120643,6 +120688,121 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
         settings.queued = 0;
 }
 
+/*
+        A script: steps at their times from the start (ms), each a key, the pointer put on a row (at x), on a segment
+        or a swatch of a row, or on a group of the column, the button down or up, the wheel, a verb's answer, the theme
+        turned (as the loop takes a new theme from the table) or the window resized; the loop runs between them, then
+        until nothing moves, and every buffer shown is compared as in a scenario.
+*/
+#define SF_KEY 1
+#define SF_ROW 2
+#define SF_PART 3
+#define SF_GROUP 4
+#define SF_DOWN 5
+#define SF_UP 6
+#define SF_WHEEL 7
+#define SF_ANSWER 8
+#define SF_THEME 9
+#define SF_SIZE 10
+struct settings_frames_step
+{
+        int ms, what;
+        const char address_to row;
+        int a, b;
+};
+
+static fn settings_frames_event(unsigned int type, unsigned int flags, int a, int b)
+{
+        struct window_event event = {type, flags, a, b};
+
+        settings_event(&event);
+}
+
+static fn settings_frames_play(string_address name, int group, const struct settings_frames_step address_to steps, int count)
+{
+        positive start, frames = settings_frames.frames, moving = settings_frames.moving, asked = settings_frames.asked;
+
+        settings_frames.scenario = name;
+        settings_frames.wrong = false;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.menu.owner = -1, settings.view = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.list.hover = settings.list.down = -1;
+        settings.group = group;
+        settings.list.scroll.scroll = 0;
+        settings_refilter();
+        settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
+        start = settings_frames.now;
+        for (int at = 0; at < count; at++)
+        {
+                const struct settings_frames_step address_to s = &steps[at];
+                int row = s->row ? settings_row_named(s->row) : -1, place = row >= 0 ? ui_list_at(&settings.list, row) : -1;
+                int y = place >= 0 ? ui_list_row_y(&settings.list, place) + ui_dev(&settings.ui, UI_ROW) / 2 : 0;
+
+                settings_frames_until(start + (positive)s->ms * SETTINGS_FRAMES_MS);
+                switch (s->what)
+                {
+                case SF_KEY: settings_press(s->a); break;
+                case SF_ROW: settings_frames_event(WINDOW_EVENT_MOTION, 0, s->a, y); break;
+                case SF_PART:
+                {
+                        const struct ui_control address_to c = ui_list_control(&settings.list, row, 1);
+                        int x = !c ? 0 : c->kind == UI_TABS ? ui_tab_left(&settings.ui, c, s->a) + ui_tab_width(&settings.ui, c, s->a) / 2
+                                                            : ui_swatches_left(&settings.ui, c) + s->a * (UI_SWATCH + UI_SWATCH_GAP) + UI_SWATCH / 2;
+
+                        settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
+                        break;
+                }
+                case SF_GROUP:
+                        settings_frames_event(WINDOW_EVENT_MOTION, 0, ui_dev(&settings.ui, UI_PAD) + 20,
+                                              settings.page.top + s->a * ui_dev(&settings.ui, UI_ROW) + ui_dev(&settings.ui, UI_ROW) / 2 -
+                                                  settings.page.column_scroll.scroll);
+                        break;
+                case SF_DOWN: settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0); break;
+                case SF_UP: settings_frames_event(WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0); break;
+                case SF_WHEEL: settings_frames_event(WINDOW_EVENT_WHEEL, 0, s->a, 0); break;
+                case SF_ANSWER:
+                        if (settings.queued)
+                        {
+                                int changed = settings.queue[0].row;
+
+                                string_copy_bounded((string_address)settings.value[changed], (string_address)settings.queue[0].value, SETTINGS_VALUE);
+                                settings_frames.asked++;
+                                settings.queued--;
+                                memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
+                                settings_say((string_address) "done");
+                                settings_dirty();
+                        }
+                        break;
+                case SF_THEME:
+                        ui_kit_theme((unsigned int)s->a, (unsigned int)s->b ? (unsigned int)s->b : UI_ACCENT_STANDARD, 0);
+                        ui_kit_inks(&settings.ui);
+                        settings_dirty();
+                        break;
+                case SF_SIZE:
+                        ui_kit_settle();
+                        settings_size((unsigned int)s->a, (unsigned int)s->b);
+                        break;
+                }
+                settings_frames_pass();
+        }
+        settings_frames_until(settings_frames.now + 2000 * SETTINGS_FRAMES_MS);
+        check("settings frames: the loop comes to rest after a script", !settings.dirty);
+        for (int again = 0; again < 2 && !settings_frames.wrong; again++)
+        {
+                settings.dirty = true;
+                settings_frames_until(settings_frames.now + SETTINGS_FRAMES_PERIOD);
+                settings_frames.wrong = !settings_frames_same(settings.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
+        }
+        check("settings frames: every buffer a script shows is the whole picture drawn at its time", !settings_frames.wrong);
+        string_format(log, "  settings frames (%s): %p frames, %p of them moving, %p changes answered\n", name,
+                      settings_frames.frames - frames, settings_frames.moving - moving, settings_frames.asked - asked);
+        // The pointer leaves, and nothing is held down.
+        settings_frames_event(WINDOW_EVENT_MOTION, 0, -100, -100);
+        settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
+        settings.child = 0;
+        settings.queued = 0;
+}
+
 static fn check_settings_frames(string_address regular, string_address bold)
 {
         static font_face faces[2];
@@ -120708,6 +120868,71 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_frames_scenario((string_address) "the column, Down every 33 ms", false, true, "Name", SETTINGS_KEY_DOWN, 0, 8, 33, 0);
         settings_frames_scenario((string_address) "the column, Up every 50 ms from the last group", false, true, "Mount kept disks",
                                  SETTINGS_KEY_UP, 0, 8, 50, 0);
+
+        // The pointer, the wheel, the theme and the size, with the rows read as a machine says them.
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const struct settings_row address_to row = &settings_rows[at];
+
+                if (row->kind == SETTINGS_SWITCH)
+                        continue;
+                settings.state[at] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[at],
+                                    (string_address)(settings_row_is((int)at, SETTING_THEME_PATH) ? "dark" : settings_row_is((int)at, SETTING_ACCENT_PATH) ? "amber"
+                                                     : settings_row_is((int)at, SETTING_MOTION_PATH) ? "full" : row->standard ? row->standard : "1"),
+                                    SETTINGS_VALUE);
+        }
+        {
+                int canvas = settings_group_of(settings_row_named("Scale"));
+                static const struct settings_frames_step hover[] = {
+                    {0, SF_ROW, "Scale", 450, 0}, {30, SF_ROW, "Screen modes", 450, 0}, {60, SF_ROW, "Background", 450, 0},
+                    {90, SF_ROW, "Theme", 300, 0}, {120, SF_ROW, "Accent", 300, 0}, {150, SF_ROW, "Motion", 300, 0},
+                    {180, SF_ROW, "Cursor size", 450, 0}, {400, SF_ROW, "Cursor look", 450, 0}, {420, SF_ROW, "Scale", 450, 0}};
+                static const struct settings_frames_step press[] = {
+                    {0, SF_KEY, null, SETTINGS_KEY_END, 0},
+                    {5, SF_ROW, "Shake the pointer to find it", 200, 0}, {20, SF_DOWN, null, 0, 0}, {140, SF_UP, null, 0, 0},
+                    {200, SF_ANSWER, null, 0, 0}, {260, SF_ROW, "Show touch area", 600, 0}, {280, SF_DOWN, null, 0, 0},
+                    {300, SF_UP, null, 0, 0}, {320, SF_ROW, "Clipboard", 400, 0}, {330, SF_DOWN, null, 0, 0}, {340, SF_UP, null, 0, 0},
+                    {360, SF_ANSWER, null, 0, 0}, {380, SF_ANSWER, null, 0, 0}};
+                static const struct settings_frames_step parts[] = {
+                    {0, SF_PART, "Theme", 0, 0}, {20, SF_DOWN, null, 0, 0}, {60, SF_UP, null, 0, 0}, {90, SF_ANSWER, null, 0, 0},
+                    {150, SF_PART, "Theme", 2, 0}, {160, SF_DOWN, null, 0, 0}, {170, SF_UP, null, 0, 0}, {175, SF_ANSWER, null, 0, 0},
+                    {200, SF_PART, "Accent", 4, 0}, {210, SF_DOWN, null, 0, 0}, {230, SF_UP, null, 0, 0}, {240, SF_ANSWER, null, 0, 0},
+                    {260, SF_PART, "Motion", 1, 0}, {270, SF_DOWN, null, 0, 0}, {280, SF_UP, null, 0, 0}, {300, SF_ANSWER, null, 0, 0},
+                    {320, SF_PART, "Motion", 0, 0}, {330, SF_DOWN, null, 0, 0}, {340, SF_UP, null, 0, 0}, {350, SF_ANSWER, null, 0, 0}};
+                static const struct settings_frames_step wheel[] = {
+                    {0, SF_ROW, "Theme", 450, 0}, {10, SF_KEY, null, SETTINGS_KEY_END, 0}, {12, SF_KEY, null, SETTINGS_KEY_UP, 0},
+                    {14, SF_KEY, null, SETTINGS_KEY_UP, 0}, {20, SF_KEY, null, SETTINGS_KEY_SPACE, 0},
+                    {40, SF_ANSWER, null, 0, 0}, {60, SF_WHEEL, null, 120, 0}, {80, SF_WHEEL, null, 120, 0}, {100, SF_DOWN, null, 0, 0},
+                    {130, SF_WHEEL, null, -120, 0}, {150, SF_UP, null, 0, 0}, {170, SF_WHEEL, null, 360, 0}, {190, SF_WHEEL, null, -720, 0}};
+                static const struct settings_frames_step column[] = {
+                    {0, SF_GROUP, null, 3, 0}, {40, SF_GROUP, null, 4, 0}, {80, SF_DOWN, null, 0, 0}, {200, SF_UP, null, 0, 0},
+                    {230, SF_GROUP, null, 6, 0}, {240, SF_DOWN, null, 0, 0}, {250, SF_UP, null, 0, 0}, {260, SF_GROUP, null, 1, 0},
+                    {270, SF_DOWN, null, 0, 0}, {300, SF_UP, null, 0, 0}, {500, SF_GROUP, null, 0, 0}};
+                static const struct settings_frames_step theme[] = {
+                    {0, SF_ROW, "Scale", 450, 0}, {20, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {40, SF_THEME, null, UI_THEME_LIGHT, 0},
+                    {60, SF_ROW, "Background", 450, 0}, {100, SF_DOWN, null, 0, 0}, {120, SF_UP, null, 0, 0},
+                    {300, SF_THEME, null, UI_THEME_DARK, 0}, {320, SF_THEME, null, UI_THEME_DARK, 0x40c0ff}, {340, SF_GROUP, null, 2, 0},
+                    {350, SF_DOWN, null, 0, 0}, {360, SF_UP, null, 0, 0}, {700, SF_THEME, null, UI_THEME_DARK, 0}};
+                static const struct settings_frames_step size[] = {
+                    {0, SF_KEY, null, SETTINGS_KEY_END, 0},
+                    {5, SF_ROW, "Shake the pointer to find it", 600, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
+                    {40, SF_ANSWER, null, 0, 0}, {60, SF_SIZE, null, 640, 470}, {90, SF_GROUP, null, 5, 0}, {100, SF_DOWN, null, 0, 0},
+                    {120, SF_SIZE, null, 690, 515}, {130, SF_UP, null, 0, 0}, {300, SF_SIZE, null, SETTINGS_FRAMES_W, SETTINGS_FRAMES_H}};
+                static const struct settings_frames_step menu[] = {
+                    {0, SF_ROW, "Cursor size", 450, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
+                    {60, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {80, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {200, SF_KEY, null, SETTINGS_KEY_ENTER, 0},
+                    {220, SF_ANSWER, null, 0, 0}, {300, SF_KEY, null, SETTINGS_KEY_ENTER, 0}, {320, SF_KEY, null, SETTINGS_KEY_ESCAPE, 0}};
+
+                settings_frames_play((string_address) "the pointer down the rows", canvas, hover, sizeof(hover) / sizeof(hover[0]));
+                settings_frames_play((string_address) "switches pressed and let go", canvas, press, sizeof(press) / sizeof(press[0]));
+                settings_frames_play((string_address) "segments and swatches pressed", canvas, parts, sizeof(parts) / sizeof(parts[0]));
+                settings_frames_play((string_address) "the wheel while a switch moves", canvas, wheel, sizeof(wheel) / sizeof(wheel[0]));
+                settings_frames_play((string_address) "the column hovered and pressed", canvas, column, sizeof(column) / sizeof(column[0]));
+                settings_frames_play((string_address) "the theme turned while things move", canvas, theme, sizeof(theme) / sizeof(theme[0]));
+                settings_frames_play((string_address) "the window resized while things move", canvas, size, sizeof(size) / sizeof(size[0]));
+                settings_frames_play((string_address) "a choice's menu", canvas, menu, sizeof(menu) / sizeof(menu[0]));
+        }
         string_format(log, "  settings frames: %p frames drawn and compared\n", settings_frames.frames);
 
         settings.ui = saved.ui;
@@ -126574,6 +126799,7 @@ b32 main()
         check_take();
         check_glass();
         check_compositor_partial();
+        check_compositor_held();
         check_compositor_screens();
         check_compositor_cycle();
         check_compositor_hover();

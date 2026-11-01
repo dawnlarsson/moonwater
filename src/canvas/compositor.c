@@ -7652,6 +7652,16 @@ static void compositor_take(int row)
                 else if (x2 > x1 && y2 > y1)
                         compositor_damage(compositor.x[row] + (int)x1, compositor.y[row] + (int)y1, (int)(x2 - x1),
                                           (int)(y2 - y1));
+                // A picture the card shows straight from its buffer is said taken by the present that puts it there,
+                // and a present comes only for damage: one that changed no pixel still asks for one (a pixel of the
+                // window on the output), or its program waits on it until something else is damaged.
+                else if (compositor.held_rows & (1u << row))
+                {
+                        int x = compositor.x[row], y = compositor.y[row];
+
+                        compositor_damage(x < 0 ? 0 : x >= compositor.width ? compositor.width - 1 : x,
+                                          y < 0 ? 0 : y >= compositor.height ? compositor.height - 1 : y, 1, 1);
+                }
                 compositor.damage_by = 0;
         }
 }
