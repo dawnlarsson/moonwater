@@ -127947,6 +127947,7 @@ static fn check_no_hand_typing(void)
         row is typed in (a click in the name puts the caret, and Enter sets what it then holds).
 */
 #if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER
+static fn check_input_matrix(struct ui address_to ui, unsigned int address_to pixels, struct windows address_to table);
 static fn check_field_hands(string_address regular)
 {
         static font_face face;
@@ -128073,8 +128074,822 @@ static fn check_field_hands(string_address regular)
                 settings.queued = 0, settings.child = 0;
                 settings_group_choose(0);
         }
+        check_input_matrix(&ui, (unsigned int address_to)pixels, &table);
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
 }
+#endif
+
+#if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER
+/*
+        The input matrix: every text input of Canvas against the features every one has. An input is opened empty, typed
+        its sample as a person types it, driven through the entry its window sends its events to (a kit field's
+        ui_field_event, launcher_event, settings_event or editor_event), and read back from its field. A feature an input
+        lacks is a line of the log naming the input and the feature. The one seam is the clipboard: the compositor answers
+        a paste with bytes this check cannot make, so a paste's text is given to the field the way its clip answer gives it
+        (ui_text_paste), after the ask was seen going out through the window's table. Where a rule takes a feature away (a
+        name has no blank, a passphrase has no words and no copy) the feature is the rule's, and the table says so.
+*/
+#define INPUTS_ENGINE 0   // a kit field on the engine: arg 0 plain, 1 masked, 2 digits, 3 a machine name
+#define INPUTS_LAUNCHER 1 // the launcher's search
+#define INPUTS_FILTER 2   // the settings' search field
+#define INPUTS_ROW 3      // a settings row typed in: by arg, or by its label
+#define INPUTS_GALLERY 4  // the settings gallery's fields: arg 0 the node name, 1 the region
+#define INPUTS_FIND 5     // the editor's bar: arg 1 find, 2 replace, 3 go to a line
+#define INPUTS_VIEW 6     // the editor's document
+
+struct inputs_input
+{
+        const char address_to name;
+        int kind, arg;
+        const char address_to label;   // a settings row by its label, when there is one
+        b32 masked;                    // a passphrase: dots, nothing copied out
+        const char address_to sample;  // typed as a person types it: "one two" where the words are checked
+        char fill, refuse;             // a character its rule takes past its room, and one it refuses (0: none)
+        b32 app_vertical, single, words, spaces, first_space, unicode, limited;
+};
+
+static struct ui inputs_ui;
+static struct windows address_to inputs_windows;
+static struct window_row inputs_own;
+static struct ui_popup inputs_popup;
+static struct ui_text inputs_plain, inputs_masked, inputs_digits, inputs_name;
+static unsigned int address_to inputs_pixels;
+static int inputs_pointer_x, inputs_pointer_y;
+
+static fn inputs_check(const char address_to label, b32 okay)
+{
+        checks++;
+        if (!okay)
+        {
+                failures++;
+                string_format(log, "  FAIL %s\n", (string_address)label);
+                log_flush();
+        }
+}
+
+static fn inputs_engine_open(struct ui_text address_to t, b32 masked, const char address_to (*accept)(p32 code), positive most, const char address_to said)
+{
+        if (t->doc.selections)
+                ui_text_close(t);
+        ui_field_open(t, &inputs_own, "");
+        t->masked = masked, t->accept = accept, t->most = most, t->most_said = said, t->focused = true;
+}
+
+static struct ui_text address_to inputs_target(const struct inputs_input address_to in)
+{
+        switch (in->kind)
+        {
+        case INPUTS_ENGINE: return in->arg == 0 ? &inputs_plain : in->arg == 1 ? &inputs_masked : in->arg == 2 ? &inputs_digits : &inputs_name;
+        case INPUTS_LAUNCHER: return launcher_field();
+        case INPUTS_FILTER: return settings_filter_field();
+        case INPUTS_ROW: return &settings.edit;
+        case INPUTS_GALLERY: return &settings_gallery.field[in->arg];
+        case INPUTS_FIND: return &editor.find;
+        case INPUTS_VIEW: return &editor_now()->view;
+        }
+        return &inputs_plain;
+}
+
+static fn inputs_editor_ensure(struct windows address_to table)
+{
+        editor.ui = inputs_ui;
+        editor.own.table = table, editor.own.row = 0, editor.own.door = -1;
+        if (editor.count == 0)
+                editor_open(null);
+        editor.width = 400, editor.height = 300;
+        editor.focused = true;
+}
+
+// The input empty and focused, its rules as its app sets them, and its keys its window's.
+static fn inputs_open(const struct inputs_input address_to in)
+{
+        switch (in->kind)
+        {
+        case INPUTS_ENGINE:
+                if (in->arg == 2)
+                        inputs_engine_open(inputs_target(in), false, ui_field_digits, 19, null);
+                else if (in->arg == 3)
+                        inputs_engine_open(inputs_target(in), false, settings_name_accepts, SETTINGS_NAME_MOST, "a name is under 32 characters");
+                else
+                        inputs_engine_open(inputs_target(in), in->masked, null, 0, null);
+                break;
+        case INPUTS_LAUNCHER:
+                launcher_clear();
+                break;
+        case INPUTS_FILTER:
+                settings_edit_end();
+                settings_gallery.on = 0;
+                settings_group_choose(0);
+                settings_layout();
+                settings_filter_field();
+                settings_filter_clear();
+                break;
+        case INPUTS_ROW:
+        {
+                int row = in->label ? settings_row_named(in->label) : in->arg;
+
+                settings_edit_end();
+                settings_gallery.on = 0;
+                if (row >= (int)SETTINGS_LIST)
+                {
+                        // The devices list as a feed of no devices leaves it: its one row is the Add row, which is what this is.
+                        struct settings_item address_to items = settings_large->item[1];
+
+                        memory_zero(items, sizeof(settings_large->item[1]));
+                        items[0].kind = SETTINGS_ADD;
+                        settings_item_label(&items[0], "Keep a device by its name", string_length((string_address) "Keep a device by its name"));
+                        settings.item_count[1] = 1;
+                        settings_refilter();
+                }
+                settings_group_choose(settings_group_of(row));
+                settings_layout();
+                settings_edit_begin(row, "", in->masked);
+                settings.list.focus = row;
+                settings_layout();
+                settings_reveal();
+                break;
+        }
+        case INPUTS_GALLERY:
+                settings_edit_end();
+                settings_gallery_build();
+                settings_gallery.on = 1;
+                for (int k = 0; k < 2; k++)
+                        settings_gallery.field[k].focused = k == in->arg;
+                ui_text_set(&settings_gallery.field[in->arg], (const p8 address_to) "", 0);
+                break;
+        case INPUTS_FIND:
+                inputs_editor_ensure(inputs_windows);
+                editor.finding = 0;
+                editor_find_open(in->arg);
+                ui_text_set(&editor.find, (const p8 address_to) "", 0);
+                editor.find.focused = true;
+                break;
+        case INPUTS_VIEW:
+                inputs_editor_ensure(inputs_windows);
+                editor.finding = 0;
+                editor.find.focused = false;
+                ui_text_set(&editor_now()->view, (const p8 address_to) "", 0);
+                editor_now()->view.focused = true;
+                break;
+        }
+}
+
+// One window event, as the window sends it to the input's app (a kit field takes it at its own entry).
+static fn inputs_event(const struct inputs_input address_to in, const struct window_event address_to event)
+{
+        switch (in->kind)
+        {
+        case INPUTS_ENGINE:
+                if (event->type == WINDOW_EVENT_MOTION)
+                        inputs_pointer_x = event->a, inputs_pointer_y = event->b;
+                ui_field_event(&inputs_ui, inputs_target(in), &inputs_popup, event, inputs_pointer_x, inputs_pointer_y);
+                break;
+        case INPUTS_LAUNCHER:
+                launcher_event(event);
+                break;
+        case INPUTS_FILTER: case INPUTS_ROW: case INPUTS_GALLERY:
+                settings_event(event);
+                break;
+        case INPUTS_FIND: case INPUTS_VIEW:
+                editor_event(event);
+                break;
+        }
+}
+
+// Drawn as its window draws it, so the well the hand reaches is where it is.
+static fn inputs_draw(const struct inputs_input address_to in)
+{
+        switch (in->kind)
+        {
+        case INPUTS_ENGINE: ui_text_draw(&inputs_ui, inputs_target(in), 20, 20, 300, 30, 0); break;
+        case INPUTS_LAUNCHER: launcher_draw(inputs_pixels); break;
+        case INPUTS_FILTER: case INPUTS_ROW: case INPUTS_GALLERY: settings_draw_rows(inputs_pixels, 0, 0); break;
+        case INPUTS_FIND: editor_draw(inputs_pixels); break;
+        case INPUTS_VIEW: ui_text_draw(&inputs_ui, &editor_now()->view, 0, 0, 400, 200, 0x111113); break;
+        }
+}
+
+static struct ui_popup address_to inputs_popup_of(const struct inputs_input address_to in)
+{
+        switch (in->kind)
+        {
+        case INPUTS_LAUNCHER: return &launcher.menu;
+        case INPUTS_FILTER: case INPUTS_ROW: case INPUTS_GALLERY: return &settings.popup;
+        case INPUTS_FIND: case INPUTS_VIEW: return &editor.menu;
+        }
+        return &inputs_popup;
+}
+
+static fn inputs_key(const struct inputs_input address_to in, int key, unsigned int code, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, (int)code};
+
+        inputs_event(in, &event);
+}
+
+// Each character of text as a key that types it, as a person types it.
+static fn inputs_type(const struct inputs_input address_to in, const char address_to text)
+{
+        positive length = string_length((string_address)text);
+
+        for (positive at = 0; at < length;)
+        {
+                p32 code;
+                positive size = doc_decode((const p8 address_to)text + at, length - at, &code);
+
+                inputs_key(in, 0, code, 0);
+                at += size ? size : 1;
+        }
+}
+
+static fn inputs_begin(const struct inputs_input address_to in)
+{
+        inputs_open(in);
+        inputs_type(in, in->sample);
+}
+
+static fn inputs_clear(const struct inputs_input address_to in)
+{
+        inputs_key(in, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+        inputs_key(in, FIELD_KEY_BACKSPACE, 0, 0);
+}
+
+static fn inputs_move(const struct inputs_input address_to in, int x, int y)
+{
+        struct window_event event = {WINDOW_EVENT_MOTION, 0, x, y};
+
+        inputs_event(in, &event);
+}
+
+static fn inputs_button(const struct inputs_input address_to in, int button, b32 down, int x, int y, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_BUTTON, (down ? WINDOW_KEY_DOWN : 0) | flags, button, 0};
+
+        inputs_move(in, x, y);
+        inputs_event(in, &event);
+}
+
+static fn inputs_click(const struct inputs_input address_to in, int button, int x, int y, unsigned int flags)
+{
+        inputs_button(in, button, true, x, y, flags);
+        inputs_button(in, button, false, x, y, flags);
+}
+
+static int inputs_x(const struct inputs_input address_to in, p64 offset)
+{
+        return field_x(&inputs_ui, inputs_target(in), offset);
+}
+
+static int inputs_y(const struct inputs_input address_to in)
+{
+        return inputs_target(in)->top + inputs_target(in)->line_height / 2;
+}
+
+// A field that is closed has no caret and no selection: an input that closed under its check fails it, and does not fault.
+static p64 inputs_caret(const struct inputs_input address_to in)
+{
+        return inputs_target(in)->doc.selections ? field_caret(inputs_target(in)) : ~(p64)0;
+}
+
+static b32 inputs_sel(const struct inputs_input address_to in, p64 start, p64 finish)
+{
+        return inputs_target(in)->doc.selections && field_selected(inputs_target(in), start, finish);
+}
+
+static b32 inputs_is(const struct inputs_input address_to in, const char address_to want)
+{
+        return field_is(inputs_target(in), want);
+}
+
+static b32 inputs_is_part(const struct inputs_input address_to in, positive from, positive to)
+{
+        char want[256];
+        positive k = 0;
+
+        for (positive at = from; at < to && k < sizeof(want) - 1; at++)
+                want[k++] = in->sample[at];
+        want[k] = 0;
+        return inputs_is(in, want);
+}
+
+static positive inputs_length(const struct inputs_input address_to in)
+{
+        return inputs_target(in)->doc.selections ? (positive)doc_length(&inputs_target(in)->doc) : 0;
+}
+
+static b32 inputs_offer_moved(unsigned int before)
+{
+        return inputs_windows->clip_offer_serial[0] != before;
+}
+
+static b32 inputs_f_left_right(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        if (inputs_caret(in) != n - 2)
+                return false;
+        inputs_key(in, FIELD_KEY_RIGHT, 0, 0);
+        return inputs_caret(in) == n - 1 && inputs_is(in, in->sample);
+}
+
+// Up and Down are the app's where it takes them (a list, rows, a scroll); where it does not they go to the two ends.
+static b32 inputs_f_up_down(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        if (!in->single)
+                return true;
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        inputs_key(in, FIELD_KEY_UP, 0, 0);
+        if (in->app_vertical)
+                return inputs_caret(in) == n - 2 && inputs_is(in, in->sample);
+        if (inputs_caret(in) != 0)
+                return false;
+        inputs_key(in, FIELD_KEY_DOWN, 0, 0);
+        if (inputs_caret(in) != n)
+                return false;
+        inputs_key(in, FIELD_KEY_UP, 0, WINDOW_KEY_SHIFT);
+        return inputs_sel(in, 0, n);
+}
+
+static b32 inputs_f_home_end(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        inputs_key(in, FIELD_KEY_HOME, 0, 0);
+        if (inputs_caret(in) != 0)
+                return false;
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        return inputs_caret(in) == n;
+}
+
+static b32 inputs_f_word_moves(const struct inputs_input address_to in)
+{
+        if (!in->words)
+                return true;
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_LEFT, 0, WINDOW_KEY_CONTROL);
+        if (inputs_caret(in) != 4)
+                return false;
+        inputs_key(in, FIELD_KEY_LEFT, 0, WINDOW_KEY_CONTROL);
+        if (inputs_caret(in) != 0)
+                return false;
+        inputs_key(in, FIELD_KEY_RIGHT, 0, WINDOW_KEY_CONTROL);
+        if (inputs_caret(in) != 3)
+                return false;
+        inputs_key(in, FIELD_KEY_RIGHT, 0, WINDOW_KEY_CONTROL);
+        return inputs_caret(in) == 7;
+}
+
+static b32 inputs_f_shift_select(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        for (int k = 0; k < 3; k++)
+                inputs_key(in, FIELD_KEY_LEFT, 0, WINDOW_KEY_SHIFT);
+        if (!inputs_sel(in, n - 3, n))
+                return false;
+        inputs_key(in, FIELD_KEY_HOME, 0, WINDOW_KEY_SHIFT);
+        return inputs_sel(in, 0, n);
+}
+
+static b32 inputs_f_shift_home_end(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        for (int k = 0; k < 3; k++)
+                inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        inputs_key(in, FIELD_KEY_HOME, 0, WINDOW_KEY_SHIFT);
+        if (!inputs_sel(in, 0, n - 3))
+                return false;
+        inputs_key(in, FIELD_KEY_END, 0, WINDOW_KEY_SHIFT);
+        return inputs_sel(in, n - 3, n);
+}
+
+static b32 inputs_f_select_all(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+        return inputs_sel(in, 0, n);
+}
+
+static b32 inputs_f_backspace_delete(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        inputs_key(in, FIELD_KEY_BACKSPACE, 0, 0);
+        if (!inputs_is_part(in, 0, n - 1))
+                return false;
+        inputs_key(in, FIELD_KEY_HOME, 0, 0);
+        inputs_key(in, FIELD_KEY_DELETE, 0, 0);
+        return inputs_is_part(in, 1, n - 1);
+}
+
+static b32 inputs_f_word_deletes(const struct inputs_input address_to in)
+{
+        if (!in->words)
+                return true;
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        inputs_key(in, FIELD_KEY_BACKSPACE, 0, WINDOW_KEY_CONTROL);
+        if (!inputs_is_part(in, 0, 4))
+                return false;
+        inputs_key(in, FIELD_KEY_HOME, 0, 0);
+        inputs_key(in, FIELD_KEY_DELETE, 0, WINDOW_KEY_CONTROL);
+        return inputs_is_part(in, 3, 4);
+}
+
+// What is typed last is undone by Control-Z and redone by Control-Y or Control-Shift-Z.
+static b32 inputs_f_undo_redo(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        inputs_key(in, 0, (unsigned int)in->fill, 0);
+        if (inputs_length(in) != n + 1)
+                return false;
+        inputs_key(in, FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
+        if (inputs_length(in) > n)
+                return false;
+        inputs_key(in, 21, 25, WINDOW_KEY_CONTROL);
+        if (inputs_length(in) != n + 1)
+                return false;
+        inputs_key(in, FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
+        if (inputs_length(in) > n)
+                return false;
+        inputs_key(in, FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT);
+        return inputs_length(in) == n + 1;
+}
+
+static b32 inputs_f_cut(const struct inputs_input address_to in)
+{
+        unsigned int before;
+
+        if (in->masked)
+                return true;
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+        before = inputs_windows->clip_offer_serial[0];
+        inputs_key(in, 45, 24, WINDOW_KEY_CONTROL);
+        return inputs_length(in) == 0 && inputs_offer_moved(before);
+}
+
+static b32 inputs_f_copy(const struct inputs_input address_to in)
+{
+        unsigned int before;
+
+        if (in->masked)
+                return true;
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+        before = inputs_windows->clip_offer_serial[0];
+        inputs_key(in, 46, 3, WINDOW_KEY_CONTROL);
+        return inputs_is(in, in->sample) && inputs_offer_moved(before);
+}
+
+// Paste asks the clipboard (Control-V and Shift-Insert) and its answer is one line: a line end is a blank, and a rule
+// takes what it takes of the answer, a refused one going in not at all.
+static b32 inputs_f_paste(const struct inputs_input address_to in)
+{
+        unsigned int before;
+        b32 asked, asked_shift;
+
+        inputs_begin(in);
+        inputs_clear(in);
+        before = inputs_windows->clip_ask_serial[0];
+        inputs_key(in, 47, 22, WINDOW_KEY_CONTROL);
+        asked = inputs_windows->clip_ask_serial[0] != before && inputs_target(in)->pasting;
+        inputs_target(in)->pasting = false;
+        before = inputs_windows->clip_ask_serial[0];
+        inputs_key(in, 110, 0, WINDOW_KEY_SHIFT);
+        asked_shift = inputs_windows->clip_ask_serial[0] != before && inputs_target(in)->pasting;
+        inputs_target(in)->pasting = false;
+        if (!asked || !asked_shift)
+                return false;
+        if (!in->single)
+                return true;
+        ui_text_paste(inputs_target(in), (const p8 address_to) "one\ntwo", 7);
+        if (in->refuse)
+                return inputs_length(in) == 0 && inputs_target(in)->refused != null;
+        return inputs_is(in, "one two");
+}
+
+static b32 inputs_f_primary_paste(const struct inputs_input address_to in)
+{
+        unsigned int before;
+        b32 asked;
+
+        inputs_begin(in);
+        inputs_draw(in);
+        inputs_target(in)->click_at = 0;
+        before = inputs_windows->clip_ask_serial[0];
+        inputs_click(in, 0x112, inputs_x(in, 0), inputs_y(in), 0);
+        asked = inputs_windows->clip_ask_serial[0] != before && inputs_windows->clip_ask_which[0] == WINDOWS_CLIP_PRIMARY;
+        inputs_target(in)->pasting = false;
+        return asked && inputs_caret(in) == 0;
+}
+
+static b32 inputs_f_click_caret(const struct inputs_input address_to in)
+{
+        inputs_begin(in);
+        inputs_draw(in);
+        inputs_target(in)->click_at = 0;
+        inputs_click(in, 0x110, inputs_x(in, 2), inputs_y(in), 0);
+        return inputs_caret(in) == 2 && inputs_target(in)->doc.selection_count == 1;
+}
+
+// A drag selects, and letting go offers what it selected as the primary selection, which a middle click pastes (a
+// passphrase offers nothing).
+static b32 inputs_f_drag_select(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+        unsigned int before;
+        int y;
+
+        inputs_begin(in);
+        inputs_draw(in);
+        inputs_target(in)->click_at = 0;
+        y = inputs_y(in);
+        before = inputs_windows->clip_offer_serial[0];
+        inputs_button(in, 0x110, true, inputs_x(in, 0), y, 0);
+        inputs_move(in, inputs_x(in, n), y);
+        inputs_button(in, 0x110, false, inputs_x(in, n), y, 0);
+        if (in->masked)
+                return inputs_sel(in, 0, n) && !inputs_offer_moved(before);
+        return inputs_sel(in, 0, n) && inputs_offer_moved(before) && inputs_windows->clip_offer_which[0] == WINDOWS_CLIP_PRIMARY;
+}
+
+// A passphrase has no words, so its double click takes all of it, as its triple click does.
+static b32 inputs_f_double_click(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+        int x;
+
+        if (!in->masked && !in->words)
+                return true;
+        inputs_begin(in);
+        inputs_draw(in);
+        inputs_target(in)->click_at = 0;
+        x = inputs_x(in, in->masked ? 2 : 5);
+        inputs_click(in, 0x110, x, inputs_y(in), 0);
+        inputs_click(in, 0x110, x, inputs_y(in), 0);
+        return in->masked ? inputs_sel(in, 0, n) : inputs_sel(in, 4, 7);
+}
+
+static b32 inputs_f_triple_click(const struct inputs_input address_to in)
+{
+        positive n = string_length((string_address)in->sample);
+
+        inputs_begin(in);
+        inputs_draw(in);
+        inputs_target(in)->click_at = 0;
+        for (int k = 0; k < 3; k++)
+                inputs_click(in, 0x110, inputs_x(in, 2), inputs_y(in), 0);
+        return inputs_sel(in, 0, n);
+}
+
+// The right button asks for the input's menu: Undo, Redo, Cut, Copy, Paste, Delete and Select All, in its popup.
+static b32 inputs_f_right_menu(const struct inputs_input address_to in)
+{
+        struct ui_popup address_to p = inputs_popup_of(in);
+        unsigned int seen = 0, all = (1u << UI_TEXT_MENU_UNDO) | (1u << UI_TEXT_MENU_REDO) | (1u << UI_TEXT_MENU_CUT) |
+                                    (1u << UI_TEXT_MENU_COPY) | (1u << UI_TEXT_MENU_PASTE) | (1u << UI_TEXT_MENU_DELETE) |
+                                    (1u << UI_TEXT_MENU_ALL);
+
+        inputs_begin(in);
+        inputs_draw(in);
+        inputs_target(in)->click_at = 0;
+        p->field = null;
+        p->menu.count = 0;
+        inputs_click(in, 0x111, inputs_x(in, 2), inputs_y(in), 0);
+        for (int j = 0; j < p->menu.count; j++)
+                seen |= 1u << (p->menu.items[j].id & 31);
+        return (seen & all) == all && (!in->single || p->field == inputs_target(in));
+}
+
+static b32 inputs_f_space_typed(const struct inputs_input address_to in)
+{
+        char want[256];
+        positive n = string_length((string_address)in->sample);
+
+        if (!in->spaces)
+                return true;
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        inputs_type(in, " x");
+        string_copy_bounded((string_address)want, (string_address)in->sample, sizeof(want));
+        string_copy_bounded((string_address)want + n, (string_address) " x", sizeof(want) - n);
+        return inputs_is(in, want);
+}
+
+// A blank typed first is typed as any blank is. The search field's one exception is the rows': with nothing in it a
+// Space works the row (table: first_space false), so the field does not take it first.
+static b32 inputs_f_space_first(const struct inputs_input address_to in)
+{
+        if (!in->spaces || !in->first_space)
+                return true;
+        inputs_begin(in);
+        inputs_clear(in);
+        inputs_type(in, " x");
+        return inputs_is(in, " x");
+}
+
+static b32 inputs_f_unicode(const struct inputs_input address_to in)
+{
+        if (!in->unicode)
+                return true;
+        inputs_begin(in);
+        inputs_clear(in);
+        inputs_type(in, "a\xc3\xa9\xe4\xb8\xad\xf0\x9f\x98\x80" "b");
+        if (!inputs_is(in, "a\xc3\xa9\xe4\xb8\xad\xf0\x9f\x98\x80" "b"))
+                return false;
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        inputs_key(in, FIELD_KEY_LEFT, 0, 0);
+        if (inputs_caret(in) != 6)
+                return false;
+        inputs_key(in, FIELD_KEY_BACKSPACE, 0, 0);
+        return inputs_is(in, "a\xc3\xa9\xf0\x9f\x98\x80" "b");
+}
+
+// A rule refuses its character with its words, and a field past its room refuses what would go over it.
+static b32 inputs_f_limits(const struct inputs_input address_to in)
+{
+        positive most;
+
+        inputs_begin(in);
+        if (in->refuse)
+        {
+                inputs_clear(in);
+                inputs_target(in)->refused = null;
+                inputs_key(in, 0, (unsigned int)in->refuse, 0);
+                if (inputs_length(in) != 0 || !inputs_target(in)->refused)
+                        return false;
+        }
+        if (!in->limited)
+                return true;
+        most = inputs_target(in)->most;
+        inputs_clear(in);
+        inputs_target(in)->refused = null;
+        for (positive k = 0; k < most + 8; k++)
+                inputs_key(in, 0, (unsigned int)in->fill, 0);
+        return inputs_length(in) == most && inputs_target(in)->refused != null;
+}
+
+// A passphrase is never copied out: a drag's copy, Control-C, Control-X, Control-Insert and Shift-Delete are all nothing.
+static b32 inputs_f_masked_no_copy(const struct inputs_input address_to in)
+{
+        unsigned int before;
+        positive n = string_length((string_address)in->sample);
+
+        if (!in->masked)
+                return true;
+        inputs_begin(in);
+        inputs_draw(in);
+        inputs_target(in)->click_at = 0;
+        before = inputs_windows->clip_offer_serial[0];
+        inputs_button(in, 0x110, true, inputs_x(in, 0), inputs_y(in), 0);
+        inputs_move(in, inputs_x(in, n), inputs_y(in));
+        inputs_button(in, 0x110, false, inputs_x(in, n), inputs_y(in), 0);
+        inputs_key(in, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+        inputs_key(in, 46, 3, WINDOW_KEY_CONTROL);
+        inputs_key(in, 45, 24, WINDOW_KEY_CONTROL);
+        inputs_key(in, 110, 0, WINDOW_KEY_CONTROL);
+        inputs_key(in, FIELD_KEY_DELETE, 0, WINDOW_KEY_SHIFT);
+        return !inputs_offer_moved(before) && inputs_is(in, in->sample);
+}
+
+// A passphrase has no words: Control-Left goes to its start, and Control-Backspace takes all of it.
+static b32 inputs_f_masked_no_words(const struct inputs_input address_to in)
+{
+        if (!in->masked)
+                return true;
+        inputs_begin(in);
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        inputs_key(in, FIELD_KEY_LEFT, 0, WINDOW_KEY_CONTROL);
+        if (inputs_caret(in) != 0)
+                return false;
+        inputs_key(in, FIELD_KEY_END, 0, 0);
+        inputs_key(in, FIELD_KEY_BACKSPACE, 0, WINDOW_KEY_CONTROL);
+        return inputs_length(in) == 0;
+}
+
+static const struct
+{
+        const char address_to name;
+        b32 (*run)(const struct inputs_input address_to in);
+} inputs_features[] = {
+    {"left and right move the caret", inputs_f_left_right},
+    {"up and down (to the ends, where the app does not take them)", inputs_f_up_down},
+    {"home and end", inputs_f_home_end},
+    {"ctrl-left and ctrl-right move by word", inputs_f_word_moves},
+    {"shift-arrows select", inputs_f_shift_select},
+    {"shift-home and shift-end select", inputs_f_shift_home_end},
+    {"ctrl-a selects all", inputs_f_select_all},
+    {"backspace and delete", inputs_f_backspace_delete},
+    {"ctrl-backspace and ctrl-delete take a word", inputs_f_word_deletes},
+    {"ctrl-z undoes, ctrl-y and ctrl-shift-z redo", inputs_f_undo_redo},
+    {"ctrl-x cuts", inputs_f_cut},
+    {"ctrl-c copies", inputs_f_copy},
+    {"ctrl-v pastes one line", inputs_f_paste},
+    {"middle click pastes the primary selection", inputs_f_primary_paste},
+    {"a click puts the caret", inputs_f_click_caret},
+    {"a drag selects", inputs_f_drag_select},
+    {"a double click takes the word", inputs_f_double_click},
+    {"a triple click takes the line", inputs_f_triple_click},
+    {"a space typed anywhere", inputs_f_space_typed},
+    {"a space typed first", inputs_f_space_first},
+    {"unicode typed and moved over by whole characters", inputs_f_unicode},
+    {"its rule refuses with its words, and its length holds", inputs_f_limits},
+    {"a passphrase is never copied out", inputs_f_masked_no_copy},
+    {"a passphrase has no words", inputs_f_masked_no_words},
+    {"the right button asks for the menu (undo, redo, cut, copy, paste, delete, select all)", inputs_f_right_menu},
+};
+
+// Every text input of Canvas, by what it is: the kind and arg say which widget and app it is, and the flags what its
+// rules and its app leave it. The sample is what is typed first; a ruled input's sample is what its rule takes.
+static const struct inputs_input inputs_table[] = {
+    {.name = "a kit field (the engine's, plain)", .kind = INPUTS_ENGINE, .arg = 0, .sample = "one two", .fill = 'a',
+     .single = true, .words = true, .spaces = true, .first_space = true, .unicode = true},
+    {.name = "a passphrase (a kit field, masked)", .kind = INPUTS_ENGINE, .arg = 1, .masked = true, .sample = "one two", .fill = 'a',
+     .single = true, .spaces = true, .first_space = true, .unicode = true},
+    {.name = "a number (a kit field, digits only)", .kind = INPUTS_ENGINE, .arg = 2, .sample = "1234", .fill = '7', .refuse = 'a',
+     .single = true, .limited = true},
+    {.name = "a machine name (a kit field, the name rule)", .kind = INPUTS_ENGINE, .arg = 3, .sample = "one-two", .fill = 'a', .refuse = ' ',
+     .single = true, .limited = true},
+    {.name = "the launcher search", .kind = INPUTS_LAUNCHER, .sample = "one two", .fill = 'a', .app_vertical = true, .single = true,
+     .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the settings search (the filter)", .kind = INPUTS_FILTER, .sample = "one two", .fill = 'a', .app_vertical = true, .single = true,
+     .words = true, .spaces = true, .unicode = true, .limited = true},
+    {.name = "the settings command field (All commands)", .kind = INPUTS_ROW, .arg = SETTINGS_ANY, .sample = "one two", .fill = 'a',
+     .single = true, .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the settings row Name", .kind = INPUTS_ROW, .arg = SETTINGS_NAME_ROW, .sample = "one-two", .fill = 'a', .refuse = ' ',
+     .single = true, .limited = true},
+    {.name = "the settings row Time server", .kind = INPUTS_ROW, .label = "Time server (auto for the pool)", .sample = "one two", .fill = 'a',
+     .single = true, .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the settings row Name servers (DNS)", .kind = INPUTS_ROW, .label = "Name servers (auto for the network)", .sample = "one two",
+     .fill = 'a', .single = true, .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the settings passphrase (masked, a network's)", .kind = INPUTS_ROW, .label = "Time server (auto for the pool)", .masked = true,
+     .sample = "one two", .fill = 'a', .single = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the settings add-a-device field", .kind = INPUTS_ROW, .arg = SETTINGS_LIST + SETTINGS_LIST_ROWS, .sample = "one two", .fill = 'a', .single = true,
+     .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the settings gallery node name", .kind = INPUTS_GALLERY, .arg = 0, .sample = "one-two", .fill = 'a', .refuse = ' ',
+     .app_vertical = true, .single = true, .limited = true},
+    {.name = "the settings gallery region", .kind = INPUTS_GALLERY, .arg = 1, .sample = "one two", .fill = 'a', .app_vertical = true,
+     .single = true, .words = true, .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the editor find bar", .kind = INPUTS_FIND, .arg = 1, .sample = "one two", .fill = 'a', .single = true, .words = true,
+     .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the editor replace bar", .kind = INPUTS_FIND, .arg = 2, .sample = "one two", .fill = 'a', .single = true, .words = true,
+     .spaces = true, .first_space = true, .unicode = true, .limited = true},
+    {.name = "the editor go-to-line bar", .kind = INPUTS_FIND, .arg = 3, .sample = "1234", .fill = '7', .refuse = 'a', .single = true,
+     .limited = true},
+    {.name = "the editor document (the code view)", .kind = INPUTS_VIEW, .sample = "one two", .fill = 'a', .words = true, .spaces = true,
+     .first_space = true, .unicode = true},
+};
+
+/*
+        Runs the matrix: every input against every feature, one check a pair, named by both. The window's state is set up
+        as check_field_hands sets it (its ui, its table, its pixels), and the gallery is shut again when it is done.
+*/
+static fn check_input_matrix(struct ui address_to ui, unsigned int address_to pixels, struct windows address_to table)
+{
+        inputs_ui = *ui;
+        inputs_pixels = pixels;
+        inputs_windows = table;
+        inputs_own.table = table, inputs_own.row = 0, inputs_own.door = -1;
+        ui_begin(&inputs_ui, pixels, 800, 800, 600);
+        for (positive i = 0; i < sizeof(inputs_table) / sizeof(inputs_table[0]); i++)
+                for (positive f = 0; f < sizeof(inputs_features) / sizeof(inputs_features[0]); f++)
+                {
+                        const struct inputs_input address_to in = &inputs_table[i];
+                        char label[192];
+                        b32 okay = inputs_features[f].run(in);
+
+                        string_copy_bounded((string_address)label, (string_address) "inputs: ", sizeof(label));
+                        string_append_bounded((string_address)label, (string_address)in->name, sizeof(label));
+                        string_append_bounded((string_address)label, (string_address) ": ", sizeof(label));
+                        string_append_bounded((string_address)label, (string_address)inputs_features[f].name, sizeof(label));
+                        inputs_check(label, okay);
+                }
+        settings_gallery.on = 0;
+        settings_edit_end();
+}
+
 #endif
 
 
