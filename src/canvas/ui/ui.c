@@ -2366,15 +2366,11 @@ struct ui_control
         b64 spot_gone;
         b64 out_at;                        // the pointer left: hovering ends 200 ms after
         b64 last_frame;
-        struct ui_text address_to edit;    // a field's text widget (the text agent's engine), or none: then text[] as it was
+        struct ui_text address_to edit;    // a field's text: the engine's widget, which types, selects, pastes and draws it
         b64 placed;                        // the kit's epoch it was last placed in; 0 before its first frame
         // The row the control is in, logical pixels: what its press ripples across and its hover lights, edge to edge.
         // None (row_w 0) is the kit's own: the box and the card's padding round it (24 across, 8 down, ui.css's ripple-clip).
         int row_x, row_y, row_w, row_h;
-        // A field's text when it is longer than text holds (what is typed in a list's row): drawn in place of text; and
-        // drawn as a dot for each character when masked (a passphrase), never as it is.
-        const char address_to source;
-        b32 masked;
 };
 
 // The row a control's ripple and hover cover, in logical pixels.
@@ -3256,7 +3252,6 @@ static fn ui_tabs_choose(struct ui address_to ui, struct ui_control address_to c
         accent's glow on focus, with a 4% wash of it in the face (.18s --ease).
 */
 #define UI_FIELD_BARE 1 // a field's variant: no label above it, the well at the control's top and its own height
-#define UI_FIELD_DOTS 96 // the most dots a masked field shows
 #define UI_FIELD_REST 0
 #define UI_FIELD_HOVER 1
 #define UI_FIELD_FOCUS 2
@@ -3297,20 +3292,6 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
         struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y + above), ui_q(c->w), ui_q(tall), ui_q(6));
         unsigned int fill;
         int baseline;
-        char dots[UI_FIELD_DOTS * 3 + 1];
-        const char address_to text = c->source ? c->source : c->text;
-
-        // A masked field shows a dot for each character it holds.
-        if (c->masked)
-        {
-                positive count = 0;
-
-                for (positive at = 0; text[at] && count < UI_FIELD_DOTS; at++)
-                        if (((unsigned char)text[at] & 0xc0) != 0x80)
-                                memory_copy(dots + 3 * count++, "\xe2\x80\xa2", 3);
-                dots[3 * count] = 0;
-                text = dots;
-        }
 
         // The label above (a bare field has none).
         if (!bare && c->label)
@@ -3386,37 +3367,14 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                 }
         }
         baseline = ui_kit_baseline(ui, fy + (ui_dev(ui, tall) - ui_dev(ui, 20)) / 2, UI_FIELD);
-        // A field with a text widget behind it: the widget draws the text, its selection and its carets in the well.
+        // What is in the well is the engine's: the text (dots when masked), its selection, its caret and its placeholder.
+        // A field with no engine is one nothing can be typed in, and shows its placeholder and no caret.
         if (c->edit)
-        {
                 ui_text_field_draw(ui, c, ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), fy, fy + ui_dev(ui, tall));
-                return;
-        }
-        if (text[0])
-        {
-                // Typed in, a line wider than the well shows its end, the caret after it.
-                const font_face address_to const faces[2] = {ui->regular, ui->regular};
-                int room = ui_dev(ui, c->w - 28), wide = ui_run_in(ui, faces, 0, 0, (string_address)text, 15, 0, 0, 0, ui->width, 0) + ui_dev(ui, 2);
-                int shift = c->focused && wide > room ? wide - room : 0;
-                int drawn = ui_run_in(ui, faces, ui_dev(ui, c->x + 14) - shift, baseline, (string_address)text, 15,
-                                      ui_role(UI_ON_SURFACE) & 0xffffffu, 255, ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), 0);
-
-                if (c->focused)
-                        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 14) + (drawn - shift) * 256 + 256, (baseline - ui_dev(ui, 14)) * 256,
-                                                       ui_q8(ui, c->x + 14) + (drawn - shift) * 256 + 256 + ui_q8(ui, 1) + ui_q8(ui, 1) / 2,
-                                                       (baseline + ui_dev(ui, 4)) * 256, 0, 0}, ui_role(UI_PRIMARY), null);
-        }
-        else
-        {
-                // The placeholder, the ink at 36%; the caret, in the accent, at its start while focused.
-                if (c->items[0])
-                        ui_run_in(ui, (const font_face address_to const[]){ui->regular, ui->regular}, ui_dev(ui, c->x + 14), baseline,
-                                  (string_address)c->items[0], 15, ui_role(UI_ON_SURFACE) & 0xffffffu, 92, 0, ui->width, 0);
-                if (c->focused)
-                        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 14), (baseline - ui_dev(ui, 14)) * 256,
-                                                       ui_q8(ui, c->x + 14) + ui_q8(ui, 1) + ui_q8(ui, 1) / 2, (baseline + ui_dev(ui, 4)) * 256, 0, 0},
-                                    ui_role(UI_PRIMARY), null);
-        }
+        else if (c->items[0])
+                ui_run_in(ui, (const font_face address_to const[]){ui->regular, ui->regular}, ui_dev(ui, c->x + 14), baseline,
+                          (string_address)c->items[0], 15, ui_role(UI_ON_SURFACE) & 0xffffffu, 92, ui_dev(ui, c->x + 14),
+                          ui_dev(ui, c->x + c->w - 14), 0);
 }
 
 /*
@@ -4704,6 +4662,7 @@ struct ui_popup
         struct ui_popmenu menu;
         b32 open;
         int shown, x, y;
+        struct ui_text address_to field; // the text widget its menu was opened for (ui_text_menu_open), or none
 };
 
 static fn ui_popup_present(struct ui_popup address_to p)
@@ -5031,8 +4990,8 @@ struct ui_row
         const char address_to note;        // a quiet word before the value: what the row is, where it is from
         const char address_to words;       // a tabs row's choices, a swatches row's colours (rrggbb): words a blank apart
         const char address_to header;      // the header of its section, over the section's first row
-        const char address_to typed;       // a field's text, and what it says while empty
-        const char address_to placeholder;
+        struct ui_text address_to edit;    // a field's engine (its text, dots when masked, its caret and its rules)
+        const char address_to placeholder; // and what it says while empty
         int section;                       // the section it is in: a header where it changes
         int kind;                          // UI_ROW_*
         int at;                            // a tabs or a swatches row's choice now, -1 none
@@ -5040,7 +4999,6 @@ struct ui_row
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
-        b32 masked;                        // a field shown as dots
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
 };
 
@@ -5237,7 +5195,8 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         }
         if (kind == UI_INPUT)
         {
-                c->source = row->typed ? row->typed : "", c->masked = row->masked, c->focused = 1;
+                // The engine draws and types it; it has the keys while the list has them.
+                c->edit = row->edit, c->focused = l->keys;
                 c->items[0] = row->placeholder;
                 c->y = (y + ui_dev(ui, 6)) / ui->scale, c->h = (height - ui_dev(ui, 12)) / ui->scale;
                 c->w = (room > ui_dev(ui, UI_ROW_FIELD_W) && !row->head ? ui_dev(ui, UI_ROW_FIELD_W) : room < ui_dev(ui, UI_ROW_FIELD_LEAST) ? ui_dev(ui, UI_ROW_FIELD_LEAST) : room) / ui->scale;
@@ -5981,11 +5940,11 @@ static fn ui_page_column_press(const struct ui address_to ui, struct ui_page add
 }
 
 /*
-        The page's own parts: cleared to the surface, the title in the title role, the search field (its text what the
-        app typed in it, ringed while it has the keys), and the status line at the foot, quiet, broken at a blank where
-        it does not fit one line.
+        The page's own parts: cleared to the surface, the title in the title role, the search field (the engine's field
+        the app gave it, search.edit, lit while it has the keys), and the status line at the foot, quiet, broken at a
+        blank where it does not fit one line.
 */
-static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, const char address_to searched, b32 keys)
+static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32 keys)
 {
         int pad = ui_dev(ui, UI_PAD), left = pad + ui_dev(ui, UI_PAGE_INSET), room = p->width - left - pad, foot = ui_dev(ui, UI_PAGE_FOOT);
 
@@ -6006,9 +5965,6 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, con
                 }
                 c->w = UI_SEARCH_W, c->h = UI_SEARCH_H;
                 c->x = (p->width - pad) / ui->scale - c->w, c->y = UI_SEARCH_Y;
-                // Its text is the text widget's when it has one (c->edit), else what the app typed in it.
-                if (!c->edit)
-                        c->source = searched ? searched : "";
                 c->focused = keys;
                 ui_control_draw(ui, c);
         }
@@ -6434,6 +6390,8 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_CANCEL 16u    // Escape in a field with nothing to cancel
 #define UI_TEXT_COMMAND 32u   // a command the app does (find, save, ...): command
 #define UI_TEXT_PASTE 64u     // a paste was asked of the compositor
+#define UI_TEXT_REFUSED 128u  // a field refused what was typed or pasted: refused says why, in the field's own words
+#define UI_TEXT_BLINK_FOR_NS 10000000000ull // the caret blinks this long after the last key or move, then stays
 
 struct ui_text
 {
@@ -6464,6 +6422,21 @@ struct ui_text
         int zoom;
         p8 preedit[64];                         // composition: text an input method is making, drawn at the caret
         p32 preedit_length;
+        /*
+                A field's rules, which its app sets and the widget keeps for every way text comes in (a key, a paste, a
+                composition): the bytes it holds at most (0 none) and what it says when that is reached, a character it
+                may not hold (accept answers what it says then, null when it may), and masked (a passphrase: a dot for
+                each character, nothing ever copied out of it, and no word of it told apart). refused is what the last
+                refusal said, for the app's status line.
+        */
+        positive most;
+        const char address_to most_said;
+        const char address_to (*accept)(p32 code);
+        const char address_to refused;
+        b32 masked;
+        b32 pasting;                            // it asked the clipboard, and the answer is its
+        int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
+        positive awake_at;                      // the last key or move, from which the caret blinks a while
 };
 
 /*
@@ -6509,11 +6482,41 @@ static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_
         t->numbers = mode == UI_TEXT_CODE;
         t->wrap = mode == UI_TEXT_AREA;
         t->comment = "//";
+        t->blink_at = t->awake_at = clock_monotonic_nanoseconds();
         return true;
 }
 
+/*
+        A field, as an app declares one: one line of the engine on text (kept by the caller while the field is open:
+        undo goes back to it and no further), the caret at its end, the keys in it, its clipboard the window own's.
+        Its rules (most, most_said, accept, masked) are the app's to set after; the kit holds every way in to them.
+*/
+static b32 ui_field_open(struct ui_text address_to t, const struct window_row address_to own, const char address_to text)
+{
+        positive length = text ? string_length((string_address)text) : 0;
+
+        if (!ui_text_open(t, UI_TEXT_FIELD, (const p8 address_to)(text ? text : ""), length, ui_text_keymap()))
+                return false;
+        doc_select_set(&t->doc, length, length);
+        t->own = own;
+        t->focused = true;
+        return true;
+}
+
+// A field's rule for a number: digits, and nothing else (a field's accept, for an app that asks a count or a line).
+static const char address_to ui_field_digits(p32 code)
+{
+        return code >= '0' && code <= '9' ? null : "a number is digits";
+}
+
+// The widget let go; a masked field's text (every byte ever typed into it is in the added buffer) and composition are
+// wiped first, so no passphrase outlives its field in memory handed back.
 static fn ui_text_close(struct ui_text address_to t)
 {
+        if (t->masked && t->doc.added)
+                memory_zero(t->doc.added, t->doc.added_room);
+        memory_zero(t->preedit, sizeof(t->preedit));
+        t->preedit_length = 0;
         doc_close(&t->doc);
 }
 
@@ -6532,6 +6535,44 @@ static fn ui_text_set(struct ui_text address_to t, const p8 address_to text, pos
 {
         doc_replace(&t->doc, 0, doc_length(&t->doc), text, length);
         doc_select_set(&t->doc, doc_length(&t->doc), doc_length(&t->doc));
+}
+
+/*
+        How much of text may go in at the carets under the field's rules: every character one it accepts (none of a
+        text with one it does not: refused says what accept said), and the text after it no longer than most bytes
+        (with cut, as much of it as fits, cut before a whole character, as a paste is; without, none: a key's character
+        goes in whole or not at all). refused says what most_said says when the room ran out.
+*/
+static positive ui_text_admit(struct ui_text address_to t, const p8 address_to text, positive length, b32 cut)
+{
+        positive at = 0, selected = 0, carets = t->doc.selection_count ? t->doc.selection_count : 1, room;
+
+        while (t->accept && at < length)
+        {
+                p32 code;
+                positive size = doc_decode(text + at, length - at, &code);
+                const char address_to said = size ? t->accept(code) : null;
+
+                if (said)
+                {
+                        t->refused = said;
+                        return 0;
+                }
+                at += size ? size : 1;
+        }
+        if (!t->most)
+                return length;
+        for (positive s = 0; s < t->doc.selection_count; s++)
+                selected += doc_sel_end(&t->doc.selections[s]) - doc_sel_start(&t->doc.selections[s]);
+        room = doc_length(&t->doc) - selected < t->most ? (t->most - (doc_length(&t->doc) - selected)) / carets : 0;
+        if (length <= room)
+                return length;
+        t->refused = t->most_said ? t->most_said : "that is as much as it holds";
+        if (!cut)
+                return 0;
+        while (room && (text[room] & 0xc0) == 0x80)
+                room--;
+        return room;
 }
 
 /*
@@ -6557,7 +6598,7 @@ static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_t
         }
         memory_copy(t->preedit, text, length);
         t->preedit_length = (p32)length;
-        t->blink_at = clock_monotonic_nanoseconds(), t->caret_off = false;
+        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_off = false;
         return true;
 }
 
@@ -6565,15 +6606,20 @@ static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_t
 static p32 SPARE ui_text_preedit_end(struct ui_text address_to t, b32 commit)
 {
         p64 version = t->doc.version;
+        b32 refused = false;
 
         if (commit && t->preedit_length && !t->read_only)
         {
+                // A field's rules hold for a composition as for a key: it goes in whole or not at all.
+                refused = ui_text_admit(t, t->preedit, t->preedit_length, false) < t->preedit_length;
                 t->doc.now = clock_monotonic_nanoseconds();
-                doc_type(&t->doc, t->preedit, t->preedit_length);
+                if (!refused)
+                        doc_type(&t->doc, t->preedit, t->preedit_length);
         }
+        memory_zero(t->preedit, sizeof(t->preedit));
         t->preedit_length = 0;
-        t->blink_at = clock_monotonic_nanoseconds(), t->caret_off = false;
-        return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_off = false;
+        return (t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED) | (refused ? UI_TEXT_REFUSED : 0);
 }
 
 /*
@@ -6635,7 +6681,10 @@ static fn ui_text_layout_line(struct ui address_to ui, const struct ui_text addr
                 positive shown_size = 0;
 
                 doc_decode(cluster, size, &code);
-                if (code == '\t')
+                // A masked field shows a dot for each character, whatever it is (a blank and a tab as well).
+                if (t->masked)
+                        memory_copy(shown, "\xe2\x80\xa2", shown_size = 3), width = 1;
+                else if (code == '\t')
                         for (p32 k = 0; k < width && shown_size < sizeof(shown); k++)
                                 shown[shown_size++] = ' ';
                 else if (code & DOC_INVALID)
@@ -6738,6 +6787,13 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
                 t->scroll_x = x - width / 4 > 0 ? x - width / 4 : 0;
         else if (x - t->scroll_x > width - 2 * ui->scale)
                 t->scroll_x = x - width + width / 4;
+        // A field whose line fits is not scrolled at all; one longer shows no blank past its end.
+        if (t->mode == UI_TEXT_FIELD && width > 0)
+        {
+                b64 most = (b64)l.x[l.count] - width + 2 * ui->scale;
+
+                t->scroll_x = t->scroll_x > most ? (most > 0 ? most : 0) : t->scroll_x;
+        }
 }
 
 // The document offset under device pixels x, y of the widget's text box (clamped to it).
@@ -6754,13 +6810,14 @@ static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int
 // The caret is drawn for the next half second whatever the blink says: it is moving, or just typed at.
 static fn ui_text_wake(struct ui_text address_to t)
 {
-        t->blink_at = clock_monotonic_nanoseconds();
+        t->blink_at = t->awake_at = clock_monotonic_nanoseconds();
         t->caret_off = false;
 }
 
 /*
         The blink: when the widget next needs a frame (0 for never: it has not the keys), the caret turned when its time
-        is up. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys.
+        is up. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys. Ten
+        seconds after the last key or move the caret stops blinking and stays drawn, so a field left alone wakes nothing.
 */
 static positive ui_text_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
 {
@@ -6768,6 +6825,12 @@ static positive ui_text_tick(struct ui_text address_to t, positive now, b32 addr
 
         if (!t->focused || t->read_only)
                 return 0;
+        if (now > t->awake_at && now - t->awake_at >= UI_TEXT_BLINK_FOR_NS)
+        {
+                if (t->caret_off)
+                        t->caret_off = false, *redraw = true;
+                return 0;
+        }
         due = t->blink_at + UI_TEXT_BLINK_NS;
         if (now >= due)
         {
@@ -6779,58 +6842,172 @@ static positive ui_text_tick(struct ui_text address_to t, positive now, b32 addr
         return due;
 }
 
-// A selection's text to a selection of the clipboard.
+// A selection's text to a selection of the clipboard; never a masked field's.
 static fn ui_text_copy(struct ui_text address_to t, unsigned int which)
 {
         p8 address_to text;
-        positive room, length = doc_copy_text(&t->doc, &text, &room);
+        positive room, length;
 
+        if (t->masked)
+                return;
+        length = doc_copy_text(&t->doc, &text, &room);
         if (length && t->own)
                 windows_clip_offer(t->own, which, text, length);
         array_store_release(text, room, length);
 }
 
-// What the clipboard said: a paste that may be read is typed in as one undo.
+// The clipboard asked for a paste into the widget: its answer is the widget's, not another's of the same window.
+static fn ui_text_ask(struct ui_text address_to t, unsigned int which)
+{
+        if (!t->own || t->read_only)
+                return;
+        windows_clip_ask(t->own, which);
+        t->pasting = true;
+}
+
+/*
+        Text pasted into the widget, as one undo. A field takes one line of what a person could type: a line end
+        (LF, CR or both) or a tab is one blank, any other control and a byte that is no UTF-8 is left out, and then its
+        rules hold, a paste with a character it refuses going in not at all and one too long cut to its room.
+*/
+static p32 ui_text_paste(struct ui_text address_to t, const p8 address_to bytes, positive length)
+{
+        p64 version = t->doc.version;
+        p32 asks = 0;
+
+        if (t->read_only)
+                return 0;
+        if (t->mode != UI_TEXT_FIELD)
+                doc_paste(&t->doc, bytes, length);
+        else
+        {
+                p8 address_to line = null;
+                positive room = 0, used = 0, admitted;
+
+                for (positive at = 0; at < length;)
+                {
+                        p32 code;
+                        positive size = doc_decode(bytes + at, length - at, &code);
+
+                        size = size ? size : 1;
+                        if (!array_store_reserve(line, room, used, used + 4, 4096))
+                                break;
+                        if (code == '\r' && at + 1 < length && bytes[at + 1] == '\n')
+                                size = 2;
+                        if (code == '\n' || code == '\r' || code == '\t')
+                                line[used++] = ' ';
+                        else if (!(code & DOC_INVALID) && code >= 0x20 && code != 0x7f && (code < 0x80 || code >= 0xa0))
+                                memory_copy(line + used, bytes + at, size), used += size;
+                        at += size;
+                }
+                admitted = used ? ui_text_admit(t, line, used, true) : 0;
+                if (admitted < used)
+                        asks |= UI_TEXT_REFUSED;
+                if (admitted)
+                {
+                        // The line has no line end left: the document's own normalising (a copy that is not wiped) is not wanted.
+                        b32 single = t->doc.single_line, normal = t->doc.normalize_paste;
+
+                        t->doc.single_line = t->doc.normalize_paste = false;
+                        doc_paste(&t->doc, line, admitted);
+                        t->doc.single_line = single, t->doc.normalize_paste = normal;
+                }
+                if (line)
+                        memory_zero(line, room);
+                array_store_release(line, room, used);
+        }
+        ui_text_wake(t);
+        return asks | (t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED);
+}
+
+// What the clipboard said: the paste this widget asked for, when it may be read.
 static p32 ui_text_clip(struct ui_text address_to t, const struct window_event address_to event)
 {
         if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
                 windows_clip_done((unsigned int)event->a);
-        if (event->b == WINDOWS_CLIP_READY && t->own && !t->read_only)
+        if ((event->b == WINDOWS_CLIP_READY || event->b == WINDOWS_CLIP_REFUSED) && t->pasting)
         {
                 p8 address_to bytes;
                 unsigned long length;
+                p32 asks = 0;
 
-                if (windows_clip_read(t->own, (unsigned int)event->a, &bytes, &length) > 0)
+                t->pasting = false;
+                if (event->b == WINDOWS_CLIP_READY && t->own && windows_clip_read(t->own, (unsigned int)event->a, &bytes, &length) > 0)
                 {
-                        doc_paste(&t->doc, bytes, length);
+                        asks = ui_text_paste(t, bytes, length);
                         windows_clip_free(bytes, length);
-                        ui_text_wake(t);
-                        return UI_TEXT_CHANGED;
                 }
+                return asks;
         }
         return 0;
 }
 
-// A command of the keymap that needs the view or the clipboard; the rest go to text.c's doc_command.
+/*
+        Whether a command is a field's: the moves along its line and the selections of it, the deletes, undo and redo,
+        the clipboard, Enter (its submit) and Escape (its cancel), the menu. Any other key a field leaves to its app
+        (Up and Down, Tab, a page, find, save, a chord the app means), which does with it what the app does.
+*/
+static b32 ui_text_field_command(p32 command)
+{
+        switch (command)
+        {
+        case DOC_CMD_LEFT: case DOC_CMD_RIGHT: case DOC_CMD_WORD_LEFT: case DOC_CMD_WORD_RIGHT: case DOC_CMD_HOME: case DOC_CMD_END:
+        case DOC_CMD_TOP: case DOC_CMD_BOTTOM: case DOC_CMD_SELECT_LEFT: case DOC_CMD_SELECT_RIGHT: case DOC_CMD_SELECT_WORD_LEFT:
+        case DOC_CMD_SELECT_WORD_RIGHT: case DOC_CMD_SELECT_HOME: case DOC_CMD_SELECT_END: case DOC_CMD_SELECT_TOP:
+        case DOC_CMD_SELECT_BOTTOM: case DOC_CMD_BACKSPACE: case DOC_CMD_DELETE: case DOC_CMD_DELETE_WORD_LEFT:
+        case DOC_CMD_DELETE_WORD_RIGHT: case DOC_CMD_DELETE_LINE_LEFT: case DOC_CMD_DELETE_LINE_RIGHT: case DOC_CMD_NEWLINE:
+        case DOC_CMD_TRANSPOSE: case DOC_CMD_UNDO: case DOC_CMD_REDO: case DOC_CMD_CUT: case DOC_CMD_COPY: case DOC_CMD_PASTE:
+        case DOC_CMD_SELECT_ALL: case DOC_CMD_SELECT_LINE: case DOC_CMD_EXPAND: case DOC_CMD_SHRINK: case DOC_CMD_SINGLE:
+        case DOC_CMD_MENU:
+                return true;
+        }
+        return false;
+}
+
+// A masked field has no words to tell apart: a word's move, delete or selection is the whole line's.
+static p32 ui_text_masked_command(p32 command)
+{
+        switch (command)
+        {
+        case DOC_CMD_WORD_LEFT: return DOC_CMD_HOME;
+        case DOC_CMD_WORD_RIGHT: return DOC_CMD_END;
+        case DOC_CMD_SELECT_WORD_LEFT: return DOC_CMD_SELECT_HOME;
+        case DOC_CMD_SELECT_WORD_RIGHT: return DOC_CMD_SELECT_END;
+        case DOC_CMD_DELETE_WORD_LEFT: return DOC_CMD_DELETE_LINE_LEFT;
+        case DOC_CMD_DELETE_WORD_RIGHT: return DOC_CMD_DELETE_LINE_RIGHT;
+        case DOC_CMD_EXPAND: return DOC_CMD_SELECT_ALL;
+        case DOC_CMD_TRANSPOSE: return DOC_CMD_NONE;
+        }
+        return command;
+}
+
+/*
+        A command of the keymap that needs the view or the clipboard; the rest go to text.c's doc_command. Answers 0
+        for a command that is not the widget's (a field's app does it), else what changed (UI_TEXT_MOVED at least).
+*/
 static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
 {
         p64 version = t->doc.version;
         int page = ui_text_rows(t) > 1 ? ui_text_rows(t) - 1 : 1;
 
+        if (t->mode == UI_TEXT_FIELD && !ui_text_field_command(command))
+                return 0;
+        if (t->masked && (command = ui_text_masked_command(command)) == DOC_CMD_NONE)
+                return UI_TEXT_MOVED;
         switch (command)
         {
         case DOC_CMD_COPY:
                 ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD);
-                return 0;
+                return UI_TEXT_MOVED;
         case DOC_CMD_CUT:
-                if (t->read_only)
-                        return 0;
+                // A masked field's text is never copied out, and so never cut out.
+                if (t->read_only || t->masked)
+                        return UI_TEXT_MOVED;
                 ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD);
                 doc_erase_selections(&t->doc);
                 break;
         case DOC_CMD_PASTE:
-                if (t->own && !t->read_only)
-                        windows_clip_ask(t->own, WINDOWS_CLIP_CLIPBOARD);
+                ui_text_ask(t, WINDOWS_CLIP_CLIPBOARD);
                 return UI_TEXT_PASTE;
         case DOC_CMD_PAGE_UP: case DOC_CMD_PAGE_DOWN: case DOC_CMD_SELECT_PAGE_UP: case DOC_CMD_SELECT_PAGE_DOWN:
         {
@@ -6869,10 +7046,8 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
         default:
                 if (t->read_only && command >= DOC_CMD_BACKSPACE && command <= DOC_CMD_SORT_DESCENDING)
                         return 0;
-                if (t->mode == UI_TEXT_FIELD && (command == DOC_CMD_NEWLINE || command == DOC_CMD_MOVE_LINE_UP || command == DOC_CMD_MOVE_LINE_DOWN ||
-                                                 command == DOC_CMD_COPY_LINE_UP || command == DOC_CMD_COPY_LINE_DOWN || command == DOC_CMD_LINE_BELOW ||
-                                                 command == DOC_CMD_LINE_ABOVE || command == DOC_CMD_TAB))
-                        return command == DOC_CMD_NEWLINE ? UI_TEXT_SUBMIT : 0;
+                if (t->mode == UI_TEXT_FIELD && command == DOC_CMD_NEWLINE)
+                        return UI_TEXT_SUBMIT;
                 if (!doc_command(&t->doc, command, t->comment))
                 {
                         t->command = command;
@@ -6897,20 +7072,28 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
                 modifiers = (flags & WINDOW_KEY_SHIFT ? DOC_MOD_SHIFT : 0) | (flags & WINDOW_KEY_CONTROL ? DOC_MOD_CONTROL : 0) |
                             (flags & WINDOW_KEY_ALT ? DOC_MOD_ALT : 0) | (flags & WINDOW_KEY_SUPER ? DOC_MOD_SUPER : 0);
                 command = t->keymap ? doc_keymap_find(t->keymap, (p32)event->a, character, modifiers) : DOC_CMD_NONE;
-                if (command == DOC_CMD_SINGLE && t->mode == UI_TEXT_FIELD && t->doc.selection_count == 1 && !doc_any_selected(&t->doc))
+                // Escape in a field is its cancel, for its app to do (leave it, clear it, close the window).
+                if (command == DOC_CMD_SINGLE && t->mode == UI_TEXT_FIELD && t->doc.selection_count == 1)
                         return UI_TEXT_CANCEL;
                 if (command != DOC_CMD_NONE)
                         return ui_text_command(ui, t, command);
                 if (modifiers & (DOC_MOD_CONTROL | DOC_MOD_ALT | DOC_MOD_SUPER))
                         return 0;
         }
-        if (t->read_only || character < 0x20 || character == 0x7f)
+        // A character: any but a control (a blank is one like any other); a C1 control is no character typed either.
+        if (t->read_only || character < 0x20 || character == 0x7f || (character >= 0x80 && character < 0xa0) || character > 0x10ffff)
                 return 0;
         {
                 p8 bytes[4];
                 positive size = memory_utf8_encode(bytes, sizeof(bytes), character);
                 p64 version = t->doc.version;
 
+                // A field's rules: a character it refuses, or one past its room, is not typed, and it says why.
+                if (t->mode == UI_TEXT_FIELD && ui_text_admit(t, bytes, size, false) < size)
+                {
+                        ui_text_wake(t);
+                        return UI_TEXT_REFUSED | UI_TEXT_MOVED;
+                }
                 t->doc.now = clock_monotonic_nanoseconds();
                 doc_type(&t->doc, bytes, size);
                 ui_text_wake(t);
@@ -6925,8 +7108,8 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
 */
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
-        b32 inside = x >= t->left - t->gutter && x < t->right && y >= t->top && y < t->bottom;
-        b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0;
+        b32 inside = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
+        b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0 && t->mode != UI_TEXT_FIELD;
         positive now = clock_monotonic_nanoseconds();
 
         if (event->type == WINDOW_EVENT_WHEEL)
@@ -6982,7 +7165,8 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         if (t->read_only || !t->own)
                                 return 0;
                         doc_select_set(&t->doc, at, at);
-                        windows_clip_ask(t->own, WINDOWS_CLIP_PRIMARY);
+                        ui_text_ask(t, WINDOWS_CLIP_PRIMARY);
+                        ui_text_wake(t);
                         return UI_TEXT_PASTE | UI_TEXT_MOVED;
                 }
                 if (event->a != 0x110)
@@ -7004,7 +7188,10 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         t->clicks = again ? t->clicks % 3 + 1 : 1;
                         t->click_at = now, t->click_x = x, t->click_y = y;
                         t->drag_box = false;
-                        if (t->clicks == 2)
+                        // A masked field has no words: a double click takes it all, as a triple does.
+                        if (t->clicks == 2 && t->masked)
+                                start = 0, finish = doc_length(&t->doc), t->clicks = 3;
+                        else if (t->clicks == 2)
                                 doc_word_at(&t->doc, at, &start, &finish);
                         else if (t->clicks == 3)
                         {
@@ -7104,6 +7291,93 @@ static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, c
         if (event->type == WINDOW_EVENT_CLIP)
                 return t->asks = ui_text_clip(t, event);
         return t->asks = ui_text_pointer(ui, t, event, x, y);
+}
+
+/*
+        The context menu of a text widget, the same in every window: Undo, Redo, Cut, Copy, Paste, Delete and Select
+        All, each one there and greyed when it can do nothing (nothing selected, nothing to undo, a masked field's
+        text that is never copied out, a widget that is read only). ui_text_menu_open opens it in the app's popup at a
+        point of its window; the app's chose hands the id back to ui_text_menu_do, for the widget the popup names.
+*/
+#define UI_TEXT_MENU_UNDO 1
+#define UI_TEXT_MENU_REDO 2
+#define UI_TEXT_MENU_CUT 3
+#define UI_TEXT_MENU_COPY 4
+#define UI_TEXT_MENU_PASTE 5
+#define UI_TEXT_MENU_DELETE 6
+#define UI_TEXT_MENU_ALL 7
+
+static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_text address_to t)
+{
+        p32 none = doc_any_selected(&t->doc) ? 0 : UI_MENU_DISABLED, fixed = t->read_only ? UI_MENU_DISABLED : 0;
+        p32 hidden = t->masked ? UI_MENU_DISABLED : 0;
+
+        ui_popmenu_add(m, "&Undo", "Ctrl+Z", t->doc.done && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_UNDO);
+        ui_popmenu_add(m, "&Redo", "Ctrl+Y", t->doc.done < t->doc.group_count && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_REDO);
+        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(m, "Cu&t", "Ctrl+X", none | fixed | hidden, UI_TEXT_MENU_CUT);
+        ui_popmenu_add(m, "&Copy", "Ctrl+C", none | hidden, UI_TEXT_MENU_COPY);
+        ui_popmenu_add(m, "&Paste", "Ctrl+V", fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
+        ui_popmenu_add(m, "&Delete", "Delete", none | fixed, UI_TEXT_MENU_DELETE);
+        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(m, "Select &All", "Ctrl+A", doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
+}
+
+static b32 ui_text_menu_open(struct ui_popup address_to p, struct ui_text address_to t, const struct ui address_to ui, int x, int y, b32 touch)
+{
+        if (!p || !t->own)
+                return false;
+        p->menu.count = 0;
+        ui_text_menu_items(&p->menu, t);
+        p->field = t;
+        return ui_popup_open(p, t->own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
+}
+
+// What an item of the menu does, to the widget it was opened for: what changed, as ui_text_event answers.
+static p32 ui_text_menu_do(struct ui address_to ui, struct ui_text address_to t, int id)
+{
+        static const p32 commands[] = {DOC_CMD_NONE, DOC_CMD_UNDO, DOC_CMD_REDO, DOC_CMD_CUT, DOC_CMD_COPY, DOC_CMD_PASTE,
+                                       DOC_CMD_DELETE, DOC_CMD_SELECT_ALL};
+
+        if (!t || id <= 0 || id > UI_TEXT_MENU_ALL)
+                return 0;
+        return ui_text_command(ui, t, commands[id]);
+}
+
+// Whether a point of the window (device pixels) is on the widget: a field's whole well, as it was last drawn.
+static b32 ui_text_inside(const struct ui_text address_to t, int x, int y)
+{
+        return x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
+}
+
+/*
+        A field's events, the one call an app makes for one: the keys while it has them, the pointer on its well (a
+        press of any button there, and the motion and the release of a drag it began), the clipboard's answer to a
+        paste it asked for, and the context menu it asks for, opened at once in menu (the app's popup; none: no
+        menu). The wheel is never a field's. Answers what changed (UI_TEXT_*); 0 when the event is not the field's,
+        which the app then does as its own: Enter is SUBMIT and Escape CANCEL for it to act on, and a key a field does
+        not take (Up, Down, Tab, a page, a chord) comes back 0.
+*/
+static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, struct ui_popup address_to menu,
+                          const struct window_event address_to event, int x, int y)
+{
+        p32 asks;
+        b32 ending = false;
+
+        if (event->type == WINDOW_EVENT_WHEEL || (event->type == WINDOW_EVENT_MOTION && !t->dragging))
+                return 0;
+        if (event->type == WINDOW_EVENT_BUTTON)
+        {
+                if ((event->flags & WINDOW_KEY_DOWN) ? !ui_text_inside(t, x, y) : !t->dragging)
+                        return 0;
+                ending = !(event->flags & WINDOW_KEY_DOWN);
+        }
+        asks = ui_text_event(ui, t, event, x, y);
+        if (ending)
+                asks |= UI_TEXT_MOVED;
+        if (asks & UI_TEXT_MENU)
+                ui_text_menu_open(menu, t, ui, t->menu_x, t->menu_y, (event->flags & WINDOW_KEY_TOUCH) != 0);
+        return asks;
 }
 
 /* ---- drawing ---- */
@@ -7379,8 +7653,13 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 t->gutter = (digits + 2) * t->cell;
         }
         t->left = x + t->gutter, t->top = y, t->right = x + width, t->bottom = y + height;
+        t->well_left = x, t->well_top = y, t->well_right = x + width, t->well_bottom = y + height;
+        // A field's caret is always in sight, in the box it is drawn in now (its text set by the app, or the box moved).
         if (t->mode == UI_TEXT_FIELD)
+        {
                 t->top = y + (height - t->line_height) / 2, t->bottom = t->top + t->line_height;
+                ui_text_reveal(ui, t);
+        }
         if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
         {
                 unsigned int text = ui_role(UI_ON_SURFACE);
@@ -7486,9 +7765,14 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
 {
         struct ui_text address_to t = c->edit;
 
+        // The keys coming to it wake the caret, which then blinks a while.
+        if (c->focused && !t->focused)
+                ui_text_wake(t);
         t->focused = c->focused;
         t->placeholder = c->items[0];
         ui_text_draw(ui, t, left, top, right - left, bottom - top, ui_role(UI_SURFACE_HIGH) & 0xffffffu);
+        // The hand reaches it anywhere in its well, its padding as well as its text.
+        t->well_left = ui_dev(ui, c->x), t->well_right = ui_dev(ui, c->x + c->w);
 }
 
 #endif // MOONWATER_CANVAS_UI

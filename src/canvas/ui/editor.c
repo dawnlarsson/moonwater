@@ -31,6 +31,7 @@
 #define EDITOR_PATH 512
 #define EDITOR_BAR 26 // the status bar's height, logical pixels
 #define EDITOR_FIND 34 // the find bar's
+#define EDITOR_QUERY 1024 // the bytes of what the find bar holds
 
 struct editor_tab
 {
@@ -258,10 +259,10 @@ static fn editor_find_open(int what)
         positive length = 0;
 
         if (!editor.find.doc.selections)
-        {
-                ui_text_open(&editor.find, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
-                editor.find.own = &editor.own;
-        }
+                ui_field_open(&editor.find, &editor.own, "");
+        // A line is asked for by its number: the field takes digits only, and says so of anything else.
+        editor.find.accept = what == 3 ? ui_field_digits : null;
+        editor.find.most = what == 3 ? 19 : EDITOR_QUERY - 1;
         if (what != 3 && doc_any_selected(&view->doc))
         {
                 const struct doc_selection address_to s = &view->doc.selections[view->doc.primary];
@@ -280,7 +281,7 @@ static fn editor_find_open(int what)
 static fn editor_find_step(b32 back)
 {
         struct ui_text address_to view = &editor_now()->view;
-        p8 query[1024];
+        p8 query[EDITOR_QUERY];
         positive length = ui_text_string(&editor.find, query, sizeof(query));
         p64 start, finish, from = back ? doc_sel_start(&view->doc.selections[view->doc.primary]) : doc_sel_end(&view->doc.selections[view->doc.primary]);
 
@@ -303,7 +304,7 @@ static fn editor_find_step(b32 back)
 static fn editor_find_enter(b32 back)
 {
         struct ui_text address_to view = &editor_now()->view;
-        p8 text[1024];
+        p8 text[EDITOR_QUERY];
         positive length = ui_text_string(&editor.find, text, sizeof(text));
 
         if (editor.finding == 3)
@@ -342,49 +343,37 @@ static fn editor_find_enter(b32 back)
 
 /* ---- the context menu ---- */
 
-#define EDITOR_MENU_UNDO 1
-#define EDITOR_MENU_REDO 2
-#define EDITOR_MENU_CUT 3
-#define EDITOR_MENU_COPY 4
-#define EDITOR_MENU_PASTE 5
-#define EDITOR_MENU_DELETE 6
-#define EDITOR_MENU_ALL 7
+// The kit's items are 1 to 7 (ui_text_menu_items); the code view's own come after them.
 #define EDITOR_MENU_FIND 8
 #define EDITOR_MENU_LINE 9
 #define EDITOR_MENU_COMMENT 10
 
+// The code view's menu: the kit's text menu, then find, go to a line and the comment. The find bar's is the kit's alone.
 static fn editor_menu_open(int x, int y)
 {
         struct ui_popmenu address_to m = &editor.menu.menu;
-        struct doc address_to doc = &editor_now()->view.doc;
-        p32 none = doc_any_selected(doc) ? 0 : UI_MENU_DISABLED;
+        struct ui_text address_to view = &editor_now()->view;
 
         m->count = 0;
-        ui_popmenu_add(m, "&Undo", "Ctrl+Z", doc->done ? 0 : UI_MENU_DISABLED, EDITOR_MENU_UNDO);
-        ui_popmenu_add(m, "&Redo", "Ctrl+Y", doc->done < doc->group_count ? 0 : UI_MENU_DISABLED, EDITOR_MENU_REDO);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, "Cu&t", "Ctrl+X", none, EDITOR_MENU_CUT);
-        ui_popmenu_add(m, "&Copy", "Ctrl+C", none, EDITOR_MENU_COPY);
-        ui_popmenu_add(m, "&Paste", "Ctrl+V", 0, EDITOR_MENU_PASTE);
-        ui_popmenu_add(m, "&Delete", "Delete", none, EDITOR_MENU_DELETE);
-        ui_popmenu_add(m, "Select &All", "Ctrl+A", 0, EDITOR_MENU_ALL);
+        ui_text_menu_items(m, view);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(m, "&Find", "Ctrl+F", 0, EDITOR_MENU_FIND);
         ui_popmenu_add(m, "&Go to Line", "Ctrl+G", 0, EDITOR_MENU_LINE);
         ui_popmenu_add(m, "Toggle Co&mment", "Ctrl+/", 0, EDITOR_MENU_COMMENT);
+        editor.menu.field = view;
         ui_popup_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
 }
 
 static fn editor_chose(int id)
 {
-        struct ui_text address_to view = &editor_now()->view;
-        static const p32 commands[] = {0, DOC_CMD_UNDO, DOC_CMD_REDO, DOC_CMD_CUT, DOC_CMD_COPY, DOC_CMD_PASTE, DOC_CMD_DELETE,
-                                       DOC_CMD_SELECT_ALL, 0, 0, DOC_CMD_COMMENT};
+        struct ui_text address_to view = &editor_now()->view, address_to field = editor.menu.field;
 
         if (id == EDITOR_MENU_FIND || id == EDITOR_MENU_LINE)
                 editor_find_open(id == EDITOR_MENU_FIND ? 1 : 3);
-        else if (id > 0 && id <= EDITOR_MENU_COMMENT && commands[id])
-                ui_text_command(&editor.ui, view, commands[id]);
+        else if (id == EDITOR_MENU_COMMENT)
+                ui_text_command(&editor.ui, view, DOC_CMD_COMMENT);
+        else if (field == &editor.find || field == view)
+                ui_text_menu_do(&editor.ui, field, id);
         editor.dirty = true;
 }
 
@@ -506,6 +495,16 @@ static fn editor_command(p32 command)
                 editor.tab = (editor.tab + (command == DOC_CMD_NEXT_TAB ? 1 : editor.count - 1)) % editor.count;
 }
 
+// The command the keymap names for a key, whoever has the keys (AltGr types: it is no chord).
+static p32 editor_key_command(const struct window_event address_to event)
+{
+        p32 flags = event->flags;
+        p32 modifiers = (flags & WINDOW_KEY_SHIFT ? DOC_MOD_SHIFT : 0) | (flags & WINDOW_KEY_CONTROL ? DOC_MOD_CONTROL : 0) |
+                        (flags & WINDOW_KEY_ALT ? DOC_MOD_ALT : 0) | (flags & WINDOW_KEY_SUPER ? DOC_MOD_SUPER : 0);
+
+        return flags & WINDOW_KEY_ALTGR ? DOC_CMD_NONE : doc_keymap_find(ui_text_keymap(), (p32)event->a, (p32)event->b, modifiers);
+}
+
 static b32 editor_event(const struct window_event address_to event)
 {
         struct editor_tab address_to tab = editor_now();
@@ -520,39 +519,52 @@ static b32 editor_event(const struct window_event address_to event)
                 editor.dirty = true;
                 return true;
         }
-        // The find bar has the keys while it is open: Enter does what it is for, Escape closes it, the rest edit it.
-        if (editor.finding && event->type == WINDOW_EVENT_KEY && editor.find.focused)
+        /*
+                The find bar is the kit's field: it has the keys while it is open and was the last pressed, and the
+                pointer on its well (a press there gives it the keys, a press on the view gives them back). Enter does
+                what it is for (Shift: the match before), Escape closes it, and of what the field does not take, Alt
+                with C, W or R turns case, whole words and a pattern, and a command of the files or the bar (save, find
+                the next, another tab) is done as from the view.
+        */
+        if (editor.finding && (event->type == WINDOW_EVENT_KEY ? editor.find.focused : event->type != WINDOW_EVENT_WHEEL))
         {
-                if ((event->flags & WINDOW_KEY_DOWN) && (event->a == 28 || event->a == 96))
+                if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
+                        editor.find.focused = ui_text_inside(&editor.find, editor.pointer_x, editor.pointer_y);
+                asks = ui_field_event(&editor.ui, &editor.find, &editor.menu, event, editor.pointer_x, editor.pointer_y);
+                if (asks & UI_TEXT_REFUSED)
+                        string_copy_bounded((string_address)editor.status, (string_address)editor.find.refused, sizeof(editor.status));
+                if (asks & UI_TEXT_SUBMIT)
                         editor_find_enter((event->flags & WINDOW_KEY_SHIFT) != 0);
-                else if ((event->flags & WINDOW_KEY_DOWN) && event->a == 1)
+                else if (asks & UI_TEXT_CANCEL)
                 {
                         editor.finding = 0;
                         editor.find.focused = false;
-                        tab->view.focused = true;
                 }
-                else if ((event->flags & WINDOW_KEY_DOWN) && (event->flags & WINDOW_KEY_ALT) && memory_first_of((address_any) "cwr", (b8)((p32)event->b | 0x20), 3))
-                        editor.find_flags ^= ((p32)event->b | 0x20) == 'c' ? DOC_FIND_CASE : ((p32)event->b | 0x20) == 'w' ? DOC_FIND_WORD : DOC_FIND_REGEX;
-                else
-                        ui_text_event(&editor.ui, &editor.find, event, editor.pointer_x, editor.pointer_y);
-                editor.dirty = true;
-                return true;
-        }
-        if (event->type == WINDOW_EVENT_CLIP && editor.find.focused)
-                ui_text_event(&editor.ui, &editor.find, event, 0, 0);
-        else
-        {
+                else if (!asks && event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
+                {
+                        p32 c = (p32)event->b | 0x20, command = editor_key_command(event);
+
+                        if ((event->flags & WINDOW_KEY_ALT) && memory_first_of((address_any) "cwr", (b8)c, 3))
+                                editor.find_flags ^= c == 'c' ? DOC_FIND_CASE : c == 'w' ? DOC_FIND_WORD : DOC_FIND_REGEX;
+                        else if (command >= DOC_CMD_FIND && command <= DOC_CMD_PREVIOUS_TAB && command != DOC_CMD_ZOOM_IN &&
+                                 command != DOC_CMD_ZOOM_OUT && command != DOC_CMD_ZOOM_RESET && command != DOC_CMD_WRAP &&
+                                 command != DOC_CMD_OVERWRITE)
+                                editor_command(command);
+                }
+                tab = editor_now();
                 tab->view.focused = editor.focused && !editor.find.focused;
-                asks = ui_text_event(&editor.ui, &tab->view, event, editor.pointer_x, editor.pointer_y);
-                if (asks & UI_TEXT_COMMAND)
-                        editor_command(tab->view.command);
-                if (asks & UI_TEXT_MENU)
-                        editor_menu_open(tab->view.menu_x, tab->view.menu_y);
-                if (asks)
-                        editor.dirty = true;
-                if (event->type == WINDOW_EVENT_BUTTON && editor.finding && (event->flags & WINDOW_KEY_DOWN))
-                        editor.find.focused = editor.pointer_y < tab->view.top;
+                editor.dirty = true;
+                if (asks || event->type == WINDOW_EVENT_KEY)
+                        return true;
         }
+        tab->view.focused = editor.focused && !editor.find.focused;
+        asks = ui_text_event(&editor.ui, &tab->view, event, editor.pointer_x, editor.pointer_y);
+        if (asks & UI_TEXT_COMMAND)
+                editor_command(tab->view.command);
+        if (asks & UI_TEXT_MENU)
+                editor_menu_open(tab->view.menu_x, tab->view.menu_y);
+        if (asks)
+                editor.dirty = true;
         return true;
 }
 

@@ -71,14 +71,22 @@
         keeps it, Escape leaves it as it was); Enter or Space throws a switch
         over, Left and Right move a step either way, and on a switch or any
         other row Left goes back to the column and Right does nothing.
-        Escape closes the window, as Alt-F4 and its close button do. Any
-        other key typed with no field open is a filter: the rows that
-        mention what is typed are the ones listed, from every group, with
-        the keys on the first of them; Backspace takes a letter off it, and
-        Escape clears it before it closes the window. Choosing another group
-        clears it too. With the mouse, a press on a group chooses it, a
-        press on a row is Enter on it, and the wheel scrolls what is under
-        the pointer.
+        Escape closes the window, as Alt-F4 and its close button do. A
+        character typed with no row typed in goes to the search field, the
+        filter: the rows that have each of its words, in any order, are the
+        ones listed, from every group, with the keys on the first of them.
+        While it holds something, every key goes to it first, as in any of
+        the kit's fields (the caret by the arrows, Home and End, a selection
+        by Shift, words by Control, Backspace and Delete, a blank, undo, the
+        clipboard), and what it does not take is the rows': Up and Down move
+        in them, Enter works the row the keys are on, and Escape clears it
+        before it closes the window. Choosing another group clears it too.
+        Every field (the search field, and the field a row is typed in) is
+        the kit's: the hand puts its caret, a drag selects, a double click a
+        word and a triple the line, the middle button pastes and the right
+        button opens its menu. With the mouse, a press on a group chooses
+        it, a press on a row is Enter on it, and the wheel scrolls what is
+        under the pointer.
 
         A choice opens a list of all its choices, under its row (over it
         where there is more room there, and slid up where it fits the window
@@ -141,7 +149,7 @@
 #define SETTINGS_STATUS 160
 #define SETTINGS_WORDS 24
 #define SETTINGS_WAIT_NS 20000000000ll
-#define SETTINGS_FILTER 24
+#define SETTINGS_FILTER 64   // what the filter holds, in bytes: its field holds no more
 #define SETTINGS_GENERATED 96 // rows of All commands, at most
 #define SETTINGS_POOL 8192    // the bytes of their words
 #define SETTINGS_CARD 12288   // the bytes of what a command said, shown as a card
@@ -698,7 +706,11 @@ static struct
         // which is the page's search field.
         struct ui_text filter_edit;
         b32 filter_open;
-        char typed[SETTINGS_TYPED];
+        // The field a row is typed in (the engine's, with the row's rules: a name's characters, a passphrase's dots, the
+        // room its value has), open while editing is a row; and the context menu of either field.
+        struct ui_text edit;
+        char edit_from[SETTINGS_VALUE];
+        struct ui_popup popup;
         char status[SETTINGS_STATUS];
         int width, height, shown;
         unsigned int ground;
@@ -2440,13 +2452,52 @@ static fn settings_act(char what, const char address_to name, const char address
         memory_zero(value, sizeof(value));
 }
 
-// A field typed in is done with, and nothing typed for a passphrase is kept.
+// What a machine's name may hold, said as the verb says it: letters, digits and hyphens (the kit's field asks it of each).
+static const char address_to settings_name_accepts(p32 code)
+{
+        return (code >= '0' && code <= '9') || ((code | 32) >= 'a' && (code | 32) <= 'z') || code == '-' ? null
+                                                                                                     : "a name is letters, digits and hyphens";
+}
+
+/*
+        A row typed in: the kit's field opened on what it holds now (text), with the row's rules -- a name's characters
+        and its length, a passphrase's dots, the room its value has (one word or line is kept in what a row reads; what
+        is typed for a list or a command is longer) -- and the keys in it, the caret at its end.
+*/
+static fn settings_edit_begin(int row, const char address_to text, b32 masked)
+{
+        struct ui_text address_to t = &settings.edit;
+
+        if (settings.editing >= 0)
+                ui_text_close(t);
+        // What it opens on is the document's own first text (kept here while it is open), so undo goes back to it and no further.
+        string_copy_bounded((string_address)settings.edit_from, (string_address)text, sizeof(settings.edit_from));
+        ui_field_open(t, &settings.own, settings.edit_from);
+        t->masked = masked;
+        t->most =row >= (int)SETTINGS_LIST ? SETTINGS_ITEM_LABEL - 1
+                  : row >= SETTINGS_ANY || (settings_rows[row].flags & SETTINGS_SPLIT) ? SETTINGS_TYPED - 1
+                                                                                        : SETTINGS_VALUE - 1;
+        if (row == SETTINGS_NAME_ROW)
+                t->accept = settings_name_accepts, t->most = SETTINGS_NAME_MOST, t->most_said = "a name is under 32 characters";
+        settings.editing = row;
+        settings_dirty();
+}
+
+// A field typed in is done with: closed, and a passphrase typed in it wiped (ui_text_close).
 static fn settings_edit_end(void)
 {
-        if (settings.editing >= (int)SETTINGS_LIST)
-                memory_zero(settings.typed, sizeof(settings.typed));
+        if (settings.editing >= 0)
+                ui_text_close(&settings.edit);
         settings.editing = -1;
         settings_dirty();
+}
+
+// Whether the row typed in is in view, so that the well its field was last drawn in is where it is.
+static b32 settings_edit_shown(void)
+{
+        int at = settings_pos(settings.editing), top = at >= 0 ? ui_list_row_y(&settings.list, at) : 0;
+
+        return at >= 0 && top + ui_px(&settings.ui, UI_ROW) > settings.list.y && top < settings.list.y + settings.list.h;
 }
 
 // A row of a list pressed: a network is joined (asking its passphrase when it has one), a device is said what can be done.
@@ -2468,16 +2519,14 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                         settings_act('j', item->label, null);
                 else
                 {
-                        settings.editing = row;
-                        settings.typed[0] = 0;
+                        settings_edit_begin(row, "", true);
                         string_copy_bounded((string_address)settings.joining, (string_address)item->label, sizeof(settings.joining));
                         settings_say((string_address) "type its passphrase: Enter joins it, Escape leaves it");
                 }
         }
         else if (item->kind == SETTINGS_ADD)
         {
-                settings.editing = row;
-                settings.typed[0] = 0;
+                settings_edit_begin(row, "", false);
                 settings_say((string_address) "type the name of a device: Enter keeps it, Escape leaves it");
         }
         else
@@ -2521,11 +2570,7 @@ static fn settings_activate(int row, int way)
         {
                 // A command with something to type opens a field; one without is run.
                 if (settings_takes(row))
-                {
-                        settings.editing = row;
-                        settings.typed[0] = 0;
-                        settings_dirty();
-                }
+                        settings_edit_begin(row, "", false);
                 else
                         settings_run(row, "");
                 return;
@@ -2536,9 +2581,7 @@ static fn settings_activate(int row, int way)
         switch (which->kind)
         {
         case SETTINGS_FIELD:
-                settings.editing = row;
-                string_copy_bounded((string_address)settings.typed, (string_address)settings.value[row], sizeof(settings.typed));
-                settings_dirty();
+                settings_edit_begin(row, settings.value[row], false);
                 return;
         case SETTINGS_INFO:
                 return;
@@ -2582,20 +2625,20 @@ static fn settings_move(int by)
         and the focus goes to the first row, which is where the keys go
         when the rows are entered.
 */
+static fn settings_filter_clear(void);
+static b32 settings_filter_typed(void);
+
 static fn settings_group_choose(int group)
 {
         int last = settings_groups() - 1, before = settings.group;
-        b32 typed = settings.filter_length != 0;
+        b32 typed = settings.filter_length != 0 || settings_filter_typed();
 
         group = group < 0 ? 0 : group > last ? last : group;
         if (group == before && !typed)
                 return;
         settings.group = group;
         settings.feed_due = 0;
-        settings.filter[0] = 0;
-        settings.filter_length = 0;
-        if (settings.filter_open)
-                ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
+        settings_filter_clear();
         settings.list.scroll.scroll = 0;
         settings.confirm = 0;
         settings_refilter();
@@ -2616,86 +2659,70 @@ static fn settings_rows_enter(void)
         settings_dirty();
 }
 
-// A key in a field being typed in: Enter keeps it, Escape leaves it, Backspace takes a character.
+/*
+        Enter in the field a row is typed in: what it holds is done with as the row says, its blanks at either end left
+        off (a passphrase's are its own, and kept). A passphrase joins the network and a name keeps the device, neither
+        kept here after; a command runs with what is typed, which may be nothing, the field staying when it asked for
+        another Enter; a value kept as it was, or typed to what it is, is no change and sends nothing.
+*/
+static fn settings_edit_commit(void)
+{
+        char typed[SETTINGS_TYPED];
+        positive length = ui_text_string(&settings.edit, (p8 address_to)typed, sizeof(typed)), start = 0;
+
+        while (!settings.edit.masked && start < length && typed[start] == ' ')
+                start++;
+        while (!settings.edit.masked && length > start && typed[length - 1] == ' ')
+                length--;
+        typed[length] = 0;
+        length -= start;
+        if (settings.editing >= (int)SETTINGS_LIST)
+        {
+                const struct settings_item address_to item = settings_item(settings.editing);
+
+                if (!length)
+                        settings_say((string_address) "nothing typed");
+                else if (item && item->kind == SETTINGS_NETWORK)
+                        settings_act('j', item->label, typed + start);
+                else if (item && item->kind == SETTINGS_ADD)
+                        settings_act('a', typed + start, null);
+                memory_zero(typed, sizeof(typed));
+                settings_edit_end();
+                return;
+        }
+        if (settings.editing >= SETTINGS_ANY)
+        {
+                if (settings_run(settings.editing, typed + start))
+                        settings_edit_end();
+                return;
+        }
+        if (!length)
+                settings_say((string_address) "nothing typed: the value is kept");
+        else if (!string_equals((string_address)typed + start, (string_address)settings.value[settings.editing]))
+                settings_change(settings.editing, typed + start);
+        settings_edit_end();
+}
+
+// What the field a row is typed in asked after an event: Enter keeps it, Escape leaves it, a refusal is said.
+static fn settings_edit_asked(p32 asks)
+{
+        if (asks & UI_TEXT_REFUSED)
+                settings_say((string_address)settings.edit.refused);
+        if (asks & UI_TEXT_SUBMIT)
+                settings_edit_commit();
+        else if (asks & UI_TEXT_CANCEL)
+                settings_edit_end();
+        else if (asks)
+                settings_dirty();
+}
+
+// A key in a field being typed in: the field's (a key between a command's two Enters asks again).
 static fn settings_type(const struct window_event address_to event)
 {
-        positive length = string_length((string_address)settings.typed);
-
         if (event->a != SETTINGS_KEY_ENTER && event->a != SETTINGS_KEY_ENTER_PAD)
                 settings.confirm = 0;
-        switch (event->a)
-        {
-        case SETTINGS_KEY_ENTER:
-        case SETTINGS_KEY_ENTER_PAD:
-                // A passphrase joins the network, a name keeps the device; neither is kept here after.
-                if (settings.editing >= (int)SETTINGS_LIST)
-                {
-                        const struct settings_item address_to item = settings_item(settings.editing);
-
-                        if (!length)
-                                settings_say((string_address) "nothing typed");
-                        else if (item && item->kind == SETTINGS_NETWORK)
-                                settings_act('j', item->label, settings.typed);
-                        else if (item && item->kind == SETTINGS_ADD)
-                                settings_act('a', settings.typed, null);
-                        settings_edit_end();
-                        break;
-                }
-                // A command runs with what is typed, which may be nothing; the field stays when it asked for another Enter.
-                if (settings.editing >= SETTINGS_ANY)
-                {
-                        if (settings_run(settings.editing, settings.typed))
-                                settings.editing = -1;
-                        break;
-                }
-                // Kept as it was, or typed to what it is, is no change and sends nothing.
-                if (!length)
-                        settings_say((string_address) "nothing typed: the value is kept");
-                else if (!string_equals((string_address)settings.typed, (string_address)settings.value[settings.editing]))
-                        settings_change(settings.editing, settings.typed);
-                settings.editing = -1;
-                break;
-        case SETTINGS_KEY_ESCAPE:
-                settings_edit_end();
-                break;
-        case SETTINGS_KEY_BACKSPACE:
-                while (length && ((unsigned char)settings.typed[length - 1] & 0xc0) == 0x80)
-                        length--;
-                settings.typed[length ? length - 1 : 0] = 0;
-                break;
-        default:
-        {
-                unsigned int c = (unsigned int)event->b;
-                p8 bytes[4];
-                positive size;
-                b32 name = settings.editing == SETTINGS_NAME_ROW;
-                // A value of one word or line is kept in what a row reads; what is typed for a list or a command is longer.
-                positive most = settings.editing >= (int)SETTINGS_LIST ? SETTINGS_ITEM_LABEL
-                                : settings.editing >= SETTINGS_ANY || (settings_rows[settings.editing].flags & SETTINGS_SPLIT)
-                                    ? sizeof(settings.typed)
-                                    : SETTINGS_VALUE;
-
-                if (c < ' ' || c == 0x7f || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
-                        return;
-                // What the verb takes a name for, and says so when it is not: a name is typed in, not cut short.
-                if (name && !((c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') || c == '-'))
-                {
-                        settings_say((string_address) "a name is letters, digits and hyphens");
-                        return;
-                }
-                if (name && length >= SETTINGS_NAME_MOST)
-                {
-                        settings_say((string_address) "a name is under 32 characters");
-                        return;
-                }
-                size = memory_utf8_encode(bytes, sizeof(bytes), c);
-                if (!size || length + size >= most)
-                        return;
-                memory_copy(settings.typed + length, bytes, size);
-                settings.typed[length + size] = 0;
-        }
-        }
-        settings_dirty();
+        settings.edit.focused = true;
+        settings_edit_asked(ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, 0, 0));
 }
 
 // The filter's field, made the first time it is wanted: one line of the text engine, its clipboard this window's.
@@ -2703,21 +2730,33 @@ static struct ui_text address_to settings_filter_field(void)
 {
         if (!settings.filter_open)
         {
-                ui_text_open(&settings.filter_edit, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
-                settings.filter_edit.own = &settings.own;
+                ui_field_open(&settings.filter_edit, &settings.own, "");
+                settings.filter_edit.most = SETTINGS_FILTER - 1;
                 settings.filter_open = true;
         }
         return &settings.filter_edit;
 }
 
-// The filter's text as the rows are matched against it: the field's, folded to lower case.
+// Whether the filter's field holds anything, a blank of its own as well.
+static b32 settings_filter_typed(void)
+{
+        return settings.filter_open && doc_length(&settings.filter_edit.doc) != 0;
+}
+
+// The filter's text as the rows are matched against it: the field's, folded to lower case, its blanks at either end left off.
 static b32 settings_filter_take(void)
 {
         p8 typed[SETTINGS_FILTER];
-        positive length = ui_text_string(settings_filter_field(), typed, sizeof(typed));
+        positive length = ui_text_string(settings_filter_field(), typed, sizeof(typed)), start = 0;
 
+        while (start < length && typed[start] == ' ')
+                start++;
+        while (length > start && typed[length - 1] == ' ')
+                length--;
+        length -= start;
         for (positive at = 0; at < length; at++)
-                typed[at] = (p8)byte_to_lower((b8)typed[at]);
+                typed[at] = (p8)byte_to_lower((b8)typed[start + at]);
+        typed[length] = 0;
         if (length == settings.filter_length && !memory_compare(typed, settings.filter, length))
                 return false;
         memory_copy(settings.filter, typed, length + 1);
@@ -2725,20 +2764,25 @@ static b32 settings_filter_take(void)
         return true;
 }
 
-/*
-        What is typed with no field open goes to the filter's field: a letter, Backspace, Ctrl+A and the rest of the
-        text keys, Ctrl+V's paste (whose text comes with the clipboard's answer).
-*/
-static fn settings_filter_key(const struct window_event address_to event)
+// The filter emptied: its field, and the rows of the group chosen again.
+static fn settings_filter_clear(void)
 {
-        struct ui_text address_to field = settings_filter_field();
+        if (settings.filter_open)
+                ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
+        settings.filter[0] = 0;
+        settings.filter_length = 0;
+}
 
-        // A blank is typed like any letter once there is something before it (the words of the filter are matched
-        // each on its own); as the first character it is nothing, as in the launcher's field.
-        if (event->b == ' ' && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) && !settings.filter_length)
+/*
+        What the filter's field asked after an event: a new filter lists the rows that match it from every group,
+        with the keys on the first of them; Escape (its cancel) is the window's to do, and a refusal is said.
+*/
+static fn settings_filter_asked(p32 asks)
+{
+        if (asks & UI_TEXT_REFUSED)
+                settings_say((string_address)settings.filter_edit.refused);
+        if (!asks || (asks & (UI_TEXT_SUBMIT | UI_TEXT_CANCEL)))
                 return;
-        field->focused = true;
-        ui_text_key(&settings.ui, field, event);
         if (!settings_filter_take())
         {
                 settings_dirty();
@@ -2747,12 +2791,40 @@ static fn settings_filter_key(const struct window_event address_to event)
         settings.list.scroll.scroll = 0;
         settings.pane = 1;
         settings_refilter();
-        // The keys are on the first row that matches.
         if (settings.list.count)
         {
                 settings.list.focus = settings.list.id[0];
                 settings_reveal();
         }
+}
+
+// A key to the filter's field, which has the keys while no row is typed in: what it asked (0: not its key).
+static p32 settings_filter_key(const struct window_event address_to event)
+{
+        struct ui_text address_to field = settings_filter_field();
+        p32 asks;
+
+        field->focused = true;
+        asks = ui_field_event(&settings.ui, field, &settings.popup, event, 0, 0);
+        settings_filter_asked(asks);
+        return asks;
+}
+
+/*
+        Whether a key goes to the filter's field when it holds nothing: what starts a filter does (a character, a
+        paste, an undo), and what works the rows does not -- Space, Enter, Escape, Tab, the arrows, Home, End, the
+        pages and Delete, which are the rows' and the column's.
+*/
+static b32 settings_filter_starts(const struct window_event address_to event)
+{
+        switch (event->a)
+        {
+        case SETTINGS_KEY_ESCAPE: case SETTINGS_KEY_TAB: case SETTINGS_KEY_ENTER: case SETTINGS_KEY_ENTER_PAD: case SETTINGS_KEY_SPACE:
+        case SETTINGS_KEY_HOME: case SETTINGS_KEY_UP: case SETTINGS_KEY_PAGE_UP: case SETTINGS_KEY_LEFT: case SETTINGS_KEY_RIGHT:
+        case SETTINGS_KEY_END: case SETTINGS_KEY_DOWN: case SETTINGS_KEY_PAGE_DOWN: case SETTINGS_KEY_DELETE: case SETTINGS_KEY_BACKSPACE:
+                return false;
+        }
+        return event->b != ' ';
 }
 
 // Whether Left and Right move a row: a step does. A switch is turned by Enter or Space only, so the arrows never change it.
@@ -2809,29 +2881,35 @@ static b32 settings_key(const struct window_event address_to event)
                 settings.confirm = 0;
         if (event->a != SETTINGS_KEY_DELETE)
                 settings.forget[0] = 0;
-        // With something typed, a move that selects or goes a word at a time is the filter's, as in any field: Shift or
-        // Ctrl with Left, Right, Home or End. Bare, they keep moving in the rows (a step's Left and Right among them).
-        if (settings.filter_length && (event->flags & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL)) &&
-            (event->a == SETTINGS_KEY_LEFT || event->a == SETTINGS_KEY_RIGHT || event->a == SETTINGS_KEY_HOME ||
-             event->a == SETTINGS_KEY_END))
+        /*
+                The search field has the keys while no row is typed in, and gets each key first: with something in it,
+                every key (the caret's moves and selections, Backspace and Delete, a blank, the clipboard, undo; Enter
+                and Escape come back as its submit and cancel), and with nothing in it what starts a filter. What it
+                does not take (Up, Down, the pages, Tab, a chord) is the rows' and the column's, below.
+        */
+        if (settings_filter_typed() || settings_filter_starts(event))
         {
-                settings_filter_key(event);
-                return true;
+                p32 asks = settings_filter_key(event);
+
+                if (asks & UI_TEXT_CANCEL)
+                {
+                        // What is typed is cleared first, a command running is stopped next, and only then the window closes.
+                        settings_filter_clear();
+                        settings_refilter();
+                        return true;
+                }
+                if ((asks & UI_TEXT_SUBMIT) && settings_pos(settings.list.focus) >= 0)
+                {
+                        settings.pane = 1;
+                        settings_activate(settings.list.focus, 1);
+                }
+                if (asks)
+                        return true;
         }
 
         switch (event->a)
         {
         case SETTINGS_KEY_ESCAPE:
-                // What is typed is cleared first, a command running is stopped next, and only then the window closes.
-                if (settings.filter_length)
-                {
-                        settings.filter[0] = 0;
-                        settings.filter_length = 0;
-                        if (settings.filter_open)
-                                ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
-                        settings_refilter();
-                        return true;
-                }
                 return settings_stop();
         case SETTINGS_KEY_TAB:
                 // Between the column of groups and the rows, whichever row or group is there.
@@ -2860,13 +2938,7 @@ static b32 settings_key(const struct window_event address_to event)
                         settings_group_choose(ui_page_column_key(&settings.page, (int)event->a, settings.group));
                 break;
         case SETTINGS_KEY_SPACE:
-                // With something typed in the filter a blank is typed; with nothing, it works the row as Enter does.
-                if (settings.filter_length)
-                {
-                        settings_filter_key(event);
-                        break;
-                }
-                // fall through
+                // With something in the filter a blank was typed in it, above; with nothing, Space works the row as Enter does.
         case SETTINGS_KEY_ENTER:
         case SETTINGS_KEY_ENTER_PAD:
                 if (!settings.pane)
@@ -2894,8 +2966,6 @@ static b32 settings_key(const struct window_event address_to event)
                 else if (settings_steps(settings.list.focus))
                         settings_activate(settings.list.focus, 1);
                 break;
-        default:
-                settings_filter_key(event);
         }
         return true;
 }
@@ -2930,12 +3000,9 @@ static fn settings_describe(int id, struct ui_row address_to row)
         {
                 const struct settings_generic address_to generic = settings_generic_of(id);
 
-                row->kind = UI_ROW_FIELD, row->typed = settings.typed;
+                row->kind = UI_ROW_FIELD, row->edit = &settings.edit;
                 if (item)
-                {
                         row->label = item->kind == SETTINGS_ADD ? "Name of the device" : settings.joining;
-                        row->masked = item->kind == SETTINGS_NETWORK;
-                }
                 else if (!which)
                 {
                         // A command being typed: its verb, and the field for what follows it, which says what it takes.
@@ -3019,6 +3086,7 @@ static struct
         struct ui_control control[SETTINGS_GALLERY_MOST];
         int count;
         struct ui_scroll scroll; // the page, device pixels: the wheel, the keys and its scrollbar move it
+        struct ui_text field[2]; // the fields' engines: a node's name, which takes a name's characters, and a region
 } settings_gallery;
 
 static struct ui_control address_to settings_gallery_put(int kind, int variant, int x, int y, int w, int h, const char address_to label)
@@ -3059,8 +3127,20 @@ static fn settings_gallery_build(void)
         settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1250, 994, 20, "Firmware DB-9 patching in progress\xe2\x80\xa6")->role = UI_ON_SURFACE_VARIANT;
         settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1338, 994, 20, "Node replication (80%)")->role = UI_ON_SURFACE_VARIANT;
         settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1461, 221, 20, "3 nodes pending a kernel rebuild.")->role = UI_ON_SURFACE_VARIANT;
-        settings_gallery_put(UI_INPUT, 0, 48, 117, 284, 78, "Node name")->items[0] = "my-kernel";
-        settings_gallery_put(UI_INPUT, 0, 48, 203, 284, 78, "Region")->items[0] = "moon-1";
+        // The fields are the kit's, typed in as any is: the node's name takes what a machine's name takes and says so.
+        for (int k = 0; k < 2; k++)
+        {
+                struct ui_control address_to field = settings_gallery_put(UI_INPUT, 0, 48, k ? 203 : 117, 284, 78, k ? "Region" : "Node name");
+
+                if (!settings_gallery.field[k].doc.selections)
+                        ui_field_open(&settings_gallery.field[k], &settings.own, "");
+                settings_gallery.field[k].focused = false;
+                settings_gallery.field[k].most = 63;
+                field->items[0] = k ? "moon-1" : "my-kernel";
+                field->edit = &settings_gallery.field[k];
+        }
+        settings_gallery.field[0].accept = settings_name_accepts;
+        settings_gallery.field[0].most = SETTINGS_NAME_MOST, settings_gallery.field[0].most_said = "a name is under 32 characters";
         settings_gallery_slider(settings_gallery_put(UI_SLIDER, 0, 48, 289, 284, 88, "vCPU allocation"), 1, 64, 1, 8);
         settings_gallery_slider(settings_gallery_put(UI_SLIDER, 0, 405, 266, 282, 88, "Log verbosity"), 0, 100, 1, 70);
         settings_gallery_slider(settings_gallery_put(UI_SLIDER, UI_SLIDER_STEPS, 405, 370, 282, 88, "Replication limit"), 0, 100, 25, 50);
@@ -3190,6 +3270,31 @@ static b32 settings_gallery_event(const struct window_event address_to event)
         b32 moved = false;
 
         settings_gallery_place();
+        if (event->type == WINDOW_EVENT_MOTION)
+                settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
+        // The fields are the kit's: the one a press focused has the keys first (Escape gives them back to the page),
+        // and each takes the pointer on its well, the drag it began and the clipboard's answer to its paste.
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
+                for (int k = 0; k < 2; k++)
+                        settings_gallery.field[k].focused = ui_text_inside(&settings_gallery.field[k], settings.page.pointer_x, settings.page.pointer_y);
+        for (int k = 0; k < 2; k++)
+        {
+                struct ui_text address_to t = &settings_gallery.field[k];
+                p32 asks = t->doc.selections && (event->type != WINDOW_EVENT_KEY || t->focused)
+                               ? ui_field_event(&settings.ui, t, &settings.popup, event, settings.page.pointer_x, settings.page.pointer_y)
+                               : 0;
+
+                if (asks & (UI_TEXT_CANCEL | UI_TEXT_SUBMIT))
+                        t->focused = false;
+                if (asks)
+                {
+                        for (int at = 0; at < settings_gallery.count; at++)
+                                if (settings_gallery.control[at].edit)
+                                        settings_gallery.control[at].focused = settings_gallery.control[at].edit->focused;
+                        settings_dirty();
+                        return true;
+                }
+        }
         if (event->type == WINDOW_EVENT_KEY)
         {
                 if ((event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_KEY_ESCAPE)
@@ -3201,25 +3306,26 @@ static b32 settings_gallery_event(const struct window_event address_to event)
                 moved = !event->b && ui_scroll_wheel(&settings.ui, s, event->a);
         else if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
         {
-                int y = event->type == WINDOW_EVENT_MOTION ? event->b : settings.page.pointer_y, bar;
+                int x = settings.page.pointer_x, y = settings.page.pointer_y, bar;
 
                 if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
                         return true;
-                if (event->type == WINDOW_EVENT_MOTION)
-                        settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
-                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, event->type == WINDOW_EVENT_MOTION ? event->a : settings.page.pointer_x, y,
-                                        (event->flags & WINDOW_KEY_DOWN) != 0);
+                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0);
                 if (bar >= 0)
                         moved = ui_scroll_set(s, bar) || true;
                 else
                 {
-                        // The controls are drawn with the scroll taken off; the pointer is put on the page.
+                        // The controls are drawn with the scroll taken off; the pointer is put on the page. A press off
+                        // the fields takes their keys away.
                         for (int at = 0; at < settings_gallery.count; at++)
                                 settings_gallery.control[at].y -= offset;
-                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, (int)event->type, event->a, y,
+                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, (int)event->type, x, y,
                                        (event->flags & WINDOW_KEY_DOWN) != 0, event->flags);
                         for (int at = 0; at < settings_gallery.count; at++)
                                 settings_gallery.control[at].y += offset;
+                        for (int at = 0; at < settings_gallery.count; at++)
+                                if (settings_gallery.control[at].edit)
+                                        settings_gallery.control[at].edit->focused = settings_gallery.control[at].focused;
                         moved = true;
                 }
         }
@@ -3321,24 +3427,31 @@ static b32 settings_event(const struct window_event address_to event)
             (event->type != WINDOW_EVENT_BUTTON || event->a == SETTINGS_BUTTON_LEFT) &&
             ui_page_bars(&settings.ui, &settings.page, (int)event->type, (event->flags & WINDOW_KEY_DOWN) != 0))
                 return true;
-        // The filter's field takes a press, a drag and a release over it (a selection by the hand), and the clipboard's answers.
-        if (!settings.view && settings.filter_open &&
-            (event->type == WINDOW_EVENT_CLIP ||
-             ((event->type == WINDOW_EVENT_BUTTON || event->type == WINDOW_EVENT_MOTION) &&
-              (settings.filter_edit.dragging ||
-               (event->type == WINDOW_EVENT_BUTTON &&
-                ui_control_hit(&settings.ui, &settings.page.search, settings.page.pointer_x, settings.page.pointer_y) >= 0)))))
+        /*
+                The fields take the pointer on their wells (a caret, a drag, a double or triple click, the middle
+                button's paste, the right button's menu), the motion and release of a drag they began, and the
+                clipboard's answer to a paste they asked for: the field a row is typed in while it shows, and the
+                search field. A press on the search field ends the typing in a row, as a press anywhere else does.
+        */
+        if (event->type != WINDOW_EVENT_KEY && event->type != WINDOW_EVENT_WHEEL && !settings.view && settings.menu.owner < 0)
         {
-                p32 asks = ui_text_event(&settings.ui, &settings.filter_edit, event, settings.page.pointer_x, settings.page.pointer_y);
+                int x = settings.page.pointer_x, y = settings.page.pointer_y;
+                p32 asks;
 
-                if (asks && settings_filter_take())
+                if (settings.editing >= 0 && (settings_edit_shown() || event->type == WINDOW_EVENT_CLIP || settings.edit.dragging) &&
+                    (asks = ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, x, y)))
                 {
-                        settings.list.scroll.scroll = 0;
-                        settings.pane = 1;
-                        settings_refilter();
+                        settings_edit_asked(asks);
+                        return true;
                 }
-                settings_dirty();
-                return true;
+                if (settings.filter_open && (asks = ui_field_event(&settings.ui, &settings.filter_edit, &settings.popup, event, x, y)))
+                {
+                        if (event->type == WINDOW_EVENT_BUTTON && settings.editing >= 0)
+                                settings_edit_end();
+                        settings_filter_asked(asks);
+                        settings_dirty();
+                        return true;
+                }
         }
         switch (event->type)
         {
@@ -3500,10 +3613,10 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         settings.page.title = settings.view ? settings.card_title : "Settings";
         settings.page.status = settings.status;
         // The search field is the filter: the kit's bare field, the text engine's field in it (typing, a selection, the
-        // clipboard, its carets), with the keys while no row is typed in.
+        // clipboard, its caret), with the keys while the window has them and no row is typed in.
         settings.page.search.items[0] = settings.view ? null : "Type to filter";
         settings.page.search.edit = settings.view ? null : settings_filter_field();
-        ui_page_draw(ui, &settings.page, settings.filter, settings.editing < 0 && (settings.filter_length || settings.focused));
+        ui_page_draw(ui, &settings.page, settings.editing < 0 && settings.focused);
         if (settings.view)
                 ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
         else
@@ -3653,9 +3766,47 @@ static int settings_open(void)
         return -1;
 }
 
-// The settings' timers: a verb's time, the due reading of a feed, and the descriptor of a verb running. 0 runs the loop again.
+// An item of a field's context menu, done to the field it was opened for.
+static fn settings_chose(int id)
+{
+        struct ui_text address_to t = settings.popup.field;
+
+        if (t == &settings.edit && settings.editing >= 0)
+                settings_edit_asked(ui_text_menu_do(&settings.ui, t, id));
+        else if (t == &settings.filter_edit && settings.editing < 0)
+        {
+                p32 asks = ui_text_menu_do(&settings.ui, t, id);
+
+                settings_filter_asked(asks);
+                settings_dirty();
+        }
+        else if (t && (t == &settings_gallery.field[0] || t == &settings_gallery.field[1]))
+        {
+                ui_text_menu_do(&settings.ui, t, id);
+                settings_dirty();
+        }
+}
+
+// The settings' timers: the caret's blink, a verb's time, the due reading of a feed, and the descriptor of a verb running.
+// 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
 {
+        // The field with the keys blinks its caret a while after its last key, its well drawn again at each turn.
+        if (!settings.view && (settings_gallery.on || settings.editing >= 0 || settings.filter_open))
+        {
+                struct ui_text address_to t = settings_gallery.on ? &settings_gallery.field[settings_gallery.field[1].focused]
+                                              : settings.editing >= 0 ? &settings.edit : &settings.filter_edit;
+                positive now = clock_monotonic_nanoseconds(), due;
+                b32 redraw = false;
+
+                if (!settings_gallery.on)
+                        t->focused = settings.focused;
+                due = t->doc.selections ? ui_text_tick(t, now, &redraw) : 0;
+                if (redraw)
+                        settings_changed(t->well_top, t->well_bottom);
+                if (due && (timeout < 0 || (long)(due - now) < timeout))
+                        timeout = (long)(due - now);
+        }
         // A region thrown by a finger moves a frame at a time until it is still.
         {
                 b32 moved;
@@ -3742,6 +3893,8 @@ static struct ui_app settings_app = {
         .tick = settings_tick,
         .ready = settings_ready,
         .close = settings_close,
+        .popup = &settings.popup,
+        .chose = settings_chose,
 };
 
 static b32 settings_main()

@@ -8,6 +8,12 @@
         typed, the nearest names first, and last a row that runs the text itself
         as a shell command, so the bar is also a shell prompt.
 
+        The field is the kit's (the text engine's field): a caret placed by the
+        hand, a drag, a double and a triple click, Shift and the arrows, Control
+        and the arrows by words, Home and End, Control-A, undo and redo, the
+        clipboard and the middle button's paste, its context menu, and a blank
+        typed anywhere, the first character too (the list is for the text with
+        its blanks at either end left off). What the field leaves is the bar's:
         Up and Down (or Control-P and Control-N) move in the list, Tab takes the
         highlighted name into the field, and Enter runs the highlighted row:
 
@@ -72,15 +78,9 @@
 #define LAUNCHER_PROGRAM 2u // a program of PATH: in a terminal
 #define LAUNCHER_COMMAND 3u // the text: the shell's, in a terminal
 
-#define LAUNCHER_KEY_ESCAPE 1
-#define LAUNCHER_KEY_BACKSPACE 14
 #define LAUNCHER_KEY_TAB 15
-#define LAUNCHER_KEY_W 17
-#define LAUNCHER_KEY_U 22
 #define LAUNCHER_KEY_P 25
-#define LAUNCHER_KEY_ENTER 28
 #define LAUNCHER_KEY_N 49
-#define LAUNCHER_KEY_ENTER_PAD 96
 #define LAUNCHER_KEY_UP 103
 #define LAUNCHER_KEY_DOWN 108
 #define LAUNCHER_BUTTON_LEFT 0x110
@@ -120,6 +120,11 @@ static struct
         const char address_to mono;
         const char address_to mono_bold;
 
+        // The field (the engine's, in the kit's well) and its context menu; text is what it holds, with the blanks at
+        // either end left off, which is what the list is for and what the command row runs.
+        struct ui_text field;
+        struct ui_control search;
+        struct ui_popup menu;
         char text[LAUNCHER_TEXT];
         struct launcher_entry entry[LAUNCHER_ROWS];
         positive entries;
@@ -568,91 +573,81 @@ static fn launcher_move(int way)
         launcher.dirty = true;
 }
 
-// A key: false when it closes the bar (or started what it was asked for).
+// The field, made the first time it is wanted: one line of the engine, its clipboard this window's, the list's room.
+static struct ui_text address_to launcher_field(void)
+{
+        if (!launcher.field.doc.selections && ui_field_open(&launcher.field, &launcher.own, ""))
+                launcher.field.most = LAUNCHER_TEXT - 1;
+        return &launcher.field;
+}
+
+// What the field holds now, its blanks at either end left off, into text: the list for it when it changed.
+static fn launcher_take(void)
+{
+        char held[LAUNCHER_TEXT];
+        positive length = ui_text_string(launcher_field(), (p8 address_to)held, sizeof(held)), start = 0;
+
+        while (start < length && held[start] == ' ')
+                start++;
+        while (length > start && held[length - 1] == ' ')
+                length--;
+        held[length] = 0;
+        if (string_equals((string_address)held + start, (string_address)launcher.text))
+                return;
+        string_copy_bounded((string_address)launcher.text, (string_address)held + start, sizeof(launcher.text));
+        launcher_changed();
+}
+
+/*
+        What the field asked after an event: Enter runs the highlighted row (false: what it started, and the bar goes),
+        Escape closes the bar, a change is a new list.
+*/
+static b32 launcher_asked(p32 asks)
+{
+        if (asks & UI_TEXT_SUBMIT)
+                return !launcher_run(launcher.list.focus);
+        if (asks & UI_TEXT_CANCEL)
+                return false;
+        if (asks & UI_TEXT_CHANGED)
+                launcher_take();
+        if (asks)
+                launcher.dirty = true;
+        return true;
+}
+
+// A key: the field's first, and what it leaves the bar's, which moves in the list. False when it closes the bar.
 static b32 launcher_key(const struct window_event address_to event)
 {
-        positive length = string_length((string_address)launcher.text);
-        b32 control = (event->flags & WINDOW_KEY_CONTROL) != 0;
+        p32 asks;
 
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
-
-        switch (event->a)
+        if ((asks = ui_field_event(&launcher.ui, launcher_field(), &launcher.menu, event, 0, 0)))
+                return launcher_asked(asks);
+        if (event->a == LAUNCHER_KEY_UP || event->a == LAUNCHER_KEY_DOWN ||
+            ((event->flags & WINDOW_KEY_CONTROL) && (event->a == LAUNCHER_KEY_P || event->a == LAUNCHER_KEY_N)))
+                launcher_move(event->a == LAUNCHER_KEY_UP || event->a == LAUNCHER_KEY_P ? -1 : 1);
+        else if (event->a == LAUNCHER_KEY_TAB && launcher.entries)
         {
-        case LAUNCHER_KEY_ESCAPE:
-                return false;
-        case LAUNCHER_KEY_ENTER:
-        case LAUNCHER_KEY_ENTER_PAD:
-                return !launcher_run(launcher.list.focus);
-        case LAUNCHER_KEY_UP:
-                launcher_move(-1);
-                return true;
-        case LAUNCHER_KEY_DOWN:
-                launcher_move(1);
-                return true;
-        case LAUNCHER_KEY_TAB:
-        {
-                // The highlighted name, where it is a name.
+                // The highlighted name into the field, where it is a name.
                 const struct launcher_entry address_to entry = &launcher.entry[launcher.list.focus];
-                const char address_to name = entry->kind == LAUNCHER_PROGRAM
-                                                 ? launcher_name(entry->index)
+                const char address_to name = entry->kind == LAUNCHER_PROGRAM ? launcher_name(entry->index)
                                              : entry->kind == LAUNCHER_WINDOW ? launcher_programs[entry->index].label
                                                                               : null;
 
-                if (launcher.entries && name)
+                if (name)
                 {
-                        string_copy_bounded((string_address)launcher.text, (string_address)name, sizeof(launcher.text));
-                        launcher_changed();
+                        ui_text_set(launcher_field(), (const p8 address_to)name, string_length((string_address)name));
+                        launcher_take();
                 }
-                return true;
-        }
-        case LAUNCHER_KEY_BACKSPACE:
-                while (length && ((unsigned char)launcher.text[length - 1] & 0xc0) == 0x80)
-                        length--;
-                launcher.text[length ? length - 1 : 0] = 0;
-                launcher_changed();
-                return true;
-        }
-
-        if (control && (event->a == LAUNCHER_KEY_P || event->a == LAUNCHER_KEY_N))
-        {
-                launcher_move(event->a == LAUNCHER_KEY_P ? -1 : 1);
-                return true;
-        }
-        if (control && event->a == LAUNCHER_KEY_U)
-        {
-                launcher.text[0] = 0;
-                launcher_changed();
-                return true;
-        }
-        if (control && event->a == LAUNCHER_KEY_W)
-        {
-                // The last word, and the blanks before it.
-                while (length && launcher.text[length - 1] == ' ')
-                        length--;
-                while (length && launcher.text[length - 1] != ' ')
-                        length--;
-                launcher.text[length] = 0;
-                launcher_changed();
-                return true;
-        }
-
-        {
-                unsigned int c = (unsigned int)event->b;
-                p8 bytes[4];
-                positive size;
-
-                // A character is a printable one, no chord's; a blank is not the first thing in the field.
-                if (c < ' ' || c == 0x7f || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) || (c == ' ' && !length))
-                        return true;
-                size = memory_utf8_encode(bytes, sizeof(bytes), c);
-                if (!size || length + size >= sizeof(launcher.text))
-                        return true;
-                memory_copy(launcher.text + length, bytes, size);
-                launcher.text[length + size] = 0;
-                launcher_changed();
         }
         return true;
+}
+
+// An item of the field's context menu, done to the field.
+static fn launcher_chose(int id)
+{
+        launcher_asked(ui_text_menu_do(&launcher.ui, launcher.menu.field, id));
 }
 
 static fn launcher_describe(int id, struct ui_row address_to row);
@@ -687,8 +682,20 @@ static fn launcher_layout(void)
 static b32 launcher_event(const struct window_event address_to event)
 {
         int row;
+        p32 asks;
 
         launcher_layout();
+        // The field takes the pointer on its well (a caret, a drag, the middle button's paste, its menu) and the
+        // clipboard's answers; the rest is the list's.
+        if (event->type != WINDOW_EVENT_KEY &&
+            (asks = ui_field_event(&launcher.ui, launcher_field(), &launcher.menu, event,
+                                   event->type == WINDOW_EVENT_MOTION ? event->a : launcher.pointer_x,
+                                   event->type == WINDOW_EVENT_MOTION ? event->b : launcher.pointer_y)))
+        {
+                if (event->type == WINDOW_EVENT_MOTION)
+                        launcher.pointer_x = event->a, launcher.pointer_y = event->b;
+                return launcher_asked(asks);
+        }
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
@@ -788,18 +795,20 @@ static fn launcher_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, launcher.own.table->stride, launcher.width, launcher.height);
 
-        // The field is the kit's, bare (no label): its raised well, the focus it always has, the text and the accent's caret.
+        // The field is the kit's, bare (no label): its well, and in it the engine's text, selection and caret, which
+        // have the keys while the bar does.
         {
-                static struct ui_control search;
+                struct ui_control address_to search = &launcher.search;
 
-                if (!search.kind)
+                if (!search->kind)
                 {
-                        search.kind = UI_INPUT, search.variant = UI_FIELD_BARE, search.focused = 1;
-                        search.items[0] = "Search programs, or type a command";
+                        search->kind = UI_INPUT, search->variant = UI_FIELD_BARE;
+                        search->items[0] = "Search programs, or type a command";
+                        search->edit = launcher_field();
                 }
-                search.x = pad / ui->scale, search.y = pad / ui->scale, search.w = (launcher.width - 2 * pad) / ui->scale, search.h = UI_TARGET;
-                string_copy_bounded((string_address)search.text, (string_address)launcher.text, sizeof(search.text));
-                ui_control_draw(ui, &search);
+                search->focused = launcher.focused || !launcher.had_focus;
+                search->x = pad / ui->scale, search->y = pad / ui->scale, search->w = (launcher.width - 2 * pad) / ui->scale, search->h = UI_TARGET;
+                ui_control_draw(ui, search);
         }
         // The rows: the kit's list, the highlighted one the row the keys are on (the keys themselves stay in the field).
         launcher_layout();
@@ -899,6 +908,21 @@ static b32 launcher_focus(b32 focused)
         return true;
 }
 
+// The caret's blink: the next frame it needs, and none once it has stopped (a while after the last key).
+static long launcher_tick(long timeout, long address_to other)
+{
+        positive now = clock_monotonic_nanoseconds(), due;
+        b32 redraw = false;
+
+        (void)other;
+        due = ui_text_tick(launcher_field(), now, &redraw);
+        if (redraw)
+                launcher.dirty = true;
+        if (due && (timeout < 0 || (long)(due - now) < timeout))
+                timeout = (long)(due - now);
+        return timeout;
+}
+
 static struct ui_app launcher_app = {
         .own = &launcher.own,
         .ui = &launcher.ui,
@@ -915,6 +939,9 @@ static struct ui_app launcher_app = {
         .event = launcher_event,
         .focus = launcher_focus,
         .size = launcher_size,
+        .tick = launcher_tick,
+        .popup = &launcher.menu,
+        .chose = launcher_chose,
 };
 
 static b32 launcher_main()

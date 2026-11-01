@@ -118389,6 +118389,21 @@ static fn check_glass(void)
         switch puts its knob on its side, and a rounded rectangle's corner is
         covered in part and its middle whole.
 */
+// The keys a field's checks press, as the compositor numbers them in a key's a.
+#define FIELD_KEY_ESCAPE 1
+#define FIELD_KEY_BACKSPACE 14
+#define FIELD_KEY_TAB 15
+#define FIELD_KEY_A 30
+#define FIELD_KEY_Z 44
+#define FIELD_KEY_ENTER 28
+#define FIELD_KEY_HOME 102
+#define FIELD_KEY_UP 103
+#define FIELD_KEY_LEFT 105
+#define FIELD_KEY_RIGHT 106
+#define FIELD_KEY_END 107
+#define FIELD_KEY_DOWN 108
+#define FIELD_KEY_DELETE 111
+
 #if MOONWATER_UI_SETTINGS
 static unsigned int settings_parsed(unsigned int row, const char address_to said, char address_to value)
 {
@@ -118426,6 +118441,76 @@ static positive settings_lit(const unsigned int address_to pixels, positive coun
         for (positive at = 0; at < count; at++)
                 lit += pixels[at] >> 24 > 64;
         return lit;
+}
+
+/*
+        The field a row is typed in, as the checks read and set it: on the kit's field (UI_TEXT_REFUSED is one of its
+        words) the engine's text and caret, opened as the row opens it; before it a typed buffer whose caret was its end.
+*/
+#ifdef UI_TEXT_REFUSED
+static positive settings_held(char address_to into, positive room)
+{
+        into[0] = 0;
+        return settings.editing >= 0 ? ui_text_string(&settings.edit, (p8 address_to)into, room) : 0;
+}
+
+static fn settings_hold(int row, const char address_to text)
+{
+        const struct settings_item address_to item = settings_item(row);
+
+        settings_edit_begin(row, text, item && item->kind == SETTINGS_NETWORK);
+}
+
+static p64 settings_caret(void)
+{
+        return settings.editing >= 0 ? settings.edit.doc.selections[settings.edit.doc.primary].active : 0;
+}
+#else
+static positive settings_held(char address_to into, positive room)
+{
+        string_copy_bounded((string_address)into, (string_address)settings.typed, room);
+        return string_length((string_address)into);
+}
+
+static fn settings_hold(int row, const char address_to text)
+{
+        settings.editing = row;
+        string_copy_bounded((string_address)settings.typed, (string_address)text, sizeof(settings.typed));
+}
+
+static p64 settings_caret(void)
+{
+        return string_length((string_address)settings.typed);
+}
+#endif
+
+// Whether the window keeps nothing of what was typed in a field that is done with (a passphrase above all).
+static b32 settings_kept_nothing(void)
+{
+#ifdef UI_TEXT_REFUSED
+        return settings.editing < 0 && !settings.edit.doc.added && !settings.edit.doc.selections && !settings.edit.preedit_length;
+#else
+        b32 wiped = true;
+
+        for (positive at = 0; at < sizeof(settings.typed); at++)
+                wiped &= settings.typed[at] == 0;
+        return wiped;
+#endif
+}
+
+static b32 settings_holds(const char address_to want)
+{
+        char held[SETTINGS_TYPED];
+
+        settings_held(held, sizeof(held));
+        return string_equals((string_address)held, (string_address)want);
+}
+
+static b32 settings_chord(int key, unsigned int code, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, (int)code};
+
+        return settings_key(&event);
 }
 #endif
 
@@ -118495,10 +118580,58 @@ static b32 launcher_pressed(int key, unsigned int flags)
         return launcher_key(&event);
 }
 
-static fn launcher_type_text(const char address_to text)
+/*
+        The launcher's field as the checks read it: its text and its caret. On the kit's field (UI_TEXT_REFUSED is one of
+        its words) they are the engine's; before it they were a typed buffer, whose caret was always its end, so the same
+        checks build on either and are red on the buffer.
+*/
+#ifdef UI_TEXT_REFUSED
+static fn launcher_clear(void)
+{
+        ui_text_set(launcher_field(), (const p8 address_to) "", 0);
+        launcher_take();
+        launcher_changed();
+}
+
+static positive launcher_held(char address_to into, positive room)
+{
+        return ui_text_string(launcher_field(), (p8 address_to)into, room);
+}
+
+static p64 launcher_caret(void)
+{
+        return launcher_field()->doc.selections[launcher_field()->doc.primary].active;
+}
+#else
+static fn launcher_clear(void)
 {
         launcher.text[0] = 0;
         launcher_changed();
+}
+
+static positive launcher_held(char address_to into, positive room)
+{
+        string_copy_bounded((string_address)into, (string_address)launcher.text, room);
+        return string_length((string_address)into);
+}
+
+static p64 launcher_caret(void)
+{
+        return string_length((string_address)launcher.text);
+}
+#endif
+
+static b32 launcher_holds(const char address_to want)
+{
+        char held[LAUNCHER_TEXT];
+
+        launcher_held(held, sizeof(held));
+        return string_equals((string_address)held, (string_address)want);
+}
+
+static fn launcher_type_text(const char address_to text)
+{
+        launcher_clear();
         for (positive at = 0; text[at]; at++)
                 launcher_typed((unsigned char)text[at]);
 }
@@ -118640,7 +118773,10 @@ static fn check_launcher(void)
         for (positive at = 0; at < sizeof(fixture) / sizeof(fixture[0]); at++)
                 string_copy((string_address)names[at], (string_address)fixture[at]);
         launcher_type_text(" ls");
-        check("launcher: a blank is not the first thing in the field", string_equals((string_address)launcher.text, (string_address) "ls"));
+        check("launcher: a blank typed first is typed, and the list is for the text without it",
+              launcher_holds(" ls") && string_equals((string_address)launcher.text, (string_address) "ls") &&
+                  launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,"));
+        launcher_type_text("ls");
         launcher_pressed(LAUNCHER_KEY_DOWN, 0);
         check("launcher: Down moves to the next row", launcher.list.focus == 1);
         launcher_pressed(LAUNCHER_KEY_UP, 0);
@@ -118651,7 +118787,7 @@ static fn check_launcher(void)
         launcher_pressed(LAUNCHER_KEY_DOWN, 0);
         launcher_typed('x');
         check("launcher: a key typed starts the list again from its top", launcher.list.focus == 0 && string_equals((string_address)launcher.text, (string_address) "lsx"));
-        launcher_pressed(LAUNCHER_KEY_BACKSPACE, 0);
+        launcher_pressed(FIELD_KEY_BACKSPACE, 0);
         check("launcher: Backspace takes a character back", string_equals((string_address)launcher.text, (string_address) "ls") && launcher.entries == 7);
         launcher_pressed(LAUNCHER_KEY_TAB, 0);
         check("launcher: Tab takes the highlighted name into the field", string_equals((string_address)launcher.text, (string_address) "ls"));
@@ -118659,15 +118795,51 @@ static fn check_launcher(void)
         launcher_pressed(LAUNCHER_KEY_TAB, 0);
         check("launcher: and the name of the row it is on", string_equals((string_address)launcher.text, (string_address) "lsof"));
         launcher_type_text("ls -l -a");
-        launcher_pressed(LAUNCHER_KEY_W, WINDOW_KEY_CONTROL);
-        check("launcher: Control-W takes the last word", string_equals((string_address)launcher.text, (string_address) "ls -l "));
-        launcher_pressed(LAUNCHER_KEY_U, WINDOW_KEY_CONTROL);
-        check("launcher: Control-U clears the field, and the list is the desktop's", launcher.text[0] == 0 && launcher.entries == LAUNCHER_PROGRAMS);
-        check("launcher: Escape closes it", !launcher_pressed(LAUNCHER_KEY_ESCAPE, 0));
+        launcher_pressed(FIELD_KEY_BACKSPACE, WINDOW_KEY_CONTROL);
+        check("launcher: Control-Backspace takes the last word", launcher_holds("ls -l -"));
+        launcher_pressed(FIELD_KEY_BACKSPACE, WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT);
+        check("launcher: Control-Shift-Backspace clears the field to the caret, and the list is the desktop's",
+              launcher_holds("") && launcher.text[0] == 0 && launcher.entries == LAUNCHER_PROGRAMS);
+        check("launcher: Escape closes it", !launcher_pressed(FIELD_KEY_ESCAPE, 0));
         launcher_type_text("caf");
         launcher_typed(0xe9);
-        launcher_pressed(LAUNCHER_KEY_BACKSPACE, 0);
+        launcher_pressed(FIELD_KEY_BACKSPACE, 0);
         check("launcher: Backspace takes a whole character back, not a byte of one", string_equals((string_address)launcher.text, (string_address) "caf"));
+
+        // The field is the kit's: the caret moves, a selection is typed over, a word goes at once, and undo brings it back.
+        launcher_type_text("lsof");
+        launcher_pressed(FIELD_KEY_LEFT, 0);
+        launcher_pressed(FIELD_KEY_LEFT, 0);
+        launcher_typed(' ');
+        check("launcher: Left moves the caret, and a blank is typed where it is", launcher_holds("ls of") && launcher_caret() == 3);
+        launcher_pressed(FIELD_KEY_HOME, 0);
+        launcher_typed('x');
+        launcher_pressed(FIELD_KEY_END, 0);
+        launcher_typed('!');
+        check("launcher: Home and End put the caret at the ends", launcher_holds("xls of!") && launcher_caret() == 7);
+        launcher_pressed(FIELD_KEY_LEFT, WINDOW_KEY_SHIFT);
+        launcher_pressed(FIELD_KEY_LEFT, WINDOW_KEY_SHIFT);
+        launcher_pressed(FIELD_KEY_LEFT, WINDOW_KEY_SHIFT);
+        launcher_typed('k');
+        check("launcher: Shift and the arrows select, and typing replaces what is selected", launcher_holds("xls k"));
+        launcher_pressed(FIELD_KEY_LEFT, WINDOW_KEY_CONTROL);
+        check("launcher: Control and Left go a word at a time", launcher_caret() == 4);
+        {
+                struct window_event all = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, FIELD_KEY_A, 1};
+                struct window_event undo = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, FIELD_KEY_Z, 26};
+
+                launcher_key(&all);
+                launcher_typed('t');
+                launcher_typed('e');
+                check("launcher: Control-A selects the whole field, and a letter typed is the field", launcher_holds("te"));
+                launcher_key(&undo);
+                check("launcher: Control-Z undoes the typing", !launcher_holds("te"));
+        }
+        launcher_type_text("kernel log");
+        check("launcher: a blank between words is typed, and names the program", launcher_list_is("w:Kernel log,c,"));
+        launcher_type_text("ls");
+        launcher_pressed(FIELD_KEY_DOWN, 0);
+        check("launcher: Down is the list's, not the field's", launcher.list.focus == 1 && launcher_holds("ls"));
         launcher_type_text("");
 
         // What a row starts.
@@ -119476,7 +119648,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.editing = -1;
                 settings.confirm = 0;
                 settings_activate(wipe, 1);
-                check("settings: Enter on a command with words to type opens its field", settings.editing == wipe && !settings.typed[0]);
+                check("settings: Enter on a command with words to type opens its field", settings.editing == wipe && settings_holds(""));
                 settings_type_code('y');
                 settings_type_code('e');
                 settings_type_code('s');
@@ -119691,55 +119863,89 @@ static fn check_settings(string_address regular, string_address bold)
                 ui_inks(&ui, 0x101012u);
 
                 // The name field, typed in as the verbs take a name, and the timezone field, which takes any text.
-                settings.editing = name;
-                settings.typed[0] = 0;
+                settings_hold(name, "");
                 settings.status[0] = 0;
                 settings_press(SETTINGS_KEY_ENTER);
                 check("settings: Enter on an empty name says so and keeps the old one",
                       settings.editing < 0 && string_equals((string_address)settings.status, (string_address) "nothing typed: the value is kept"));
-                settings.editing = name;
-                settings.typed[0] = 0;
+                settings_hold(name, "");
                 settings_type_code(0xe9);
                 check("settings: a name takes letters, digits and hyphens only, and says so",
-                      string_length((string_address)settings.typed) == 0 &&
-                          string_equals((string_address)settings.status, (string_address) "a name is letters, digits and hyphens"));
+                      settings_holds("") && string_equals((string_address)settings.status, (string_address) "a name is letters, digits and hyphens"));
                 for (int letter = 0; letter < 31; letter++)
                         settings_type_code('a');
-                check("settings: a name typed to 31 letters is kept", string_length((string_address)settings.typed) == 31);
+                check("settings: a name typed to 31 letters is kept", settings_holds("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
                 settings_type_code('a');
                 check("settings: and a 32nd is refused with the limit, not kept",
-                      string_length((string_address)settings.typed) == 31 &&
+                      settings_holds("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") &&
                           string_equals((string_address)settings.status, (string_address) "a name is under 32 characters"));
-                settings.typed[0] = 0;
-                settings.editing = zone;
+                // The name as a field of the kit's: the caret moves in it, a selection is typed over, Delete and
+                // Control-Backspace take what they reach, and a blank is refused as a name refuses it.
+                settings_hold(name, "patient-cricket");
+                settings_press(FIELD_KEY_HOME);
+                settings_chord(FIELD_KEY_RIGHT, 0, WINDOW_KEY_CONTROL);
+                check("settings: the name field opens with the name and the caret moves by words in it",
+                      settings_holds("patient-cricket") && settings_caret() == 7);
+                settings_chord(FIELD_KEY_END, 0, WINDOW_KEY_SHIFT);
+                settings_type_code('-');
+                settings_type_code('m');
+                settings_type_code('o');
+                settings_type_code('t');
+                settings_type_code('h');
+                check("settings: Shift and End select to the end, and typing replaces it", settings_holds("patient-moth") && settings_caret() == 12);
+                settings_press(FIELD_KEY_LEFT);
+                settings_press(FIELD_KEY_LEFT);
+                settings_press(FIELD_KEY_DELETE);
+                check("settings: Left moves the caret back, and Delete takes the character after it", settings_holds("patient-moh") && settings_caret() == 10);
+                settings.status[0] = 0;
+                settings_type_code(' ');
+                check("settings: a blank is refused in a name, and said", settings_holds("patient-moh") &&
+                          string_equals((string_address)settings.status, (string_address) "a name is letters, digits and hyphens"));
+                settings_chord(FIELD_KEY_BACKSPACE, 0, WINDOW_KEY_CONTROL);
+                check("settings: Control-Backspace takes the word before the caret", settings_holds("patient-h") && settings_caret() == 8);
+                settings_chord(FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
+                check("settings: Control-Z gives it back", settings_holds("patient-moh"));
+                settings_press(FIELD_KEY_ESCAPE);
+                check("settings: Escape leaves the field as it was", settings.editing < 0);
+                settings_hold(zone, "");
                 settings_type_code(0xe9);
                 settings_type_code(0xfc);
                 settings_press(SETTINGS_KEY_BACKSPACE);
-                check("settings: backspace takes a whole character of several bytes",
-                      string_equals((string_address)settings.typed, (string_address) "\xc3\xa9"));
-                settings.typed[0] = 0;
+                check("settings: backspace takes a whole character of several bytes", settings_holds("\xc3\xa9"));
+                settings_type_code(0xfc);
+                settings_press(FIELD_KEY_LEFT);
+                settings_type_code('x');
+                check("settings: Left steps over a whole character of several bytes", settings_holds("\xc3\xa9x\xc3\xbc"));
                 // A field kept as it is, or typed to what it is, sends nothing; a change does.
                 settings.child = 1;
                 settings.queued = 0;
-                settings.editing = zone;
                 settings.state[zone] = SETTINGS_READ;
                 string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Stockholm", SETTINGS_VALUE);
-                string_copy_bounded((string_address)settings.typed, (string_address) "Europe/Stockholm", sizeof(settings.typed));
+                settings_hold(zone, "Europe/Stockholm");
                 settings_press(SETTINGS_KEY_ENTER);
                 check("settings: a field typed to what it is sends nothing", settings.queued == 0 && settings.editing < 0);
-                settings.editing = zone;
-                string_copy_bounded((string_address)settings.typed, (string_address) "Europe/Berlin", sizeof(settings.typed));
+                settings_hold(zone, "Europe/Berlin");
                 settings_press(SETTINGS_KEY_ENTER);
                 check("settings: and a field typed to another is a change to it", settings.queued == 1 && settings.queue[0].row == zone &&
                           string_equals((string_address)settings.queue[0].value, (string_address) "Europe/Berlin"));
+                settings.queued = 0;
+                string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Berlin", SETTINGS_VALUE);
+                settings_hold(zone, "Europe/Berlin");
+                settings_type_code(' ');
+                settings_press(FIELD_KEY_HOME);
+                settings_type_code(' ');
+                settings_press(SETTINGS_KEY_ENTER);
+                check("settings: blanks typed at either end of a value are typed, and are no part of the value it is set to",
+                      settings.queued == 0 && settings.editing < 0);
                 settings.child = 0;
                 settings.queued = 0;
-                settings.typed[0] = 0;
+                settings_hold(zone, "");
+                settings_press(FIELD_KEY_ESCAPE);
                 settings.editing = -1;
                 settings.dirty = false;
 
                 // A field's text stays in its well: a name longer than the well is shown from its end, not drawn past it. The
-                // field is the kit's, bare, as a row's field is: its text is the row's (source), longer than the control holds.
+                // field is the kit's, bare, as a row's field is: its text is its engine's, the caret at its end.
                 ui_clear(&ui);
                 {
                         static struct ui_control field;
@@ -119748,7 +119954,18 @@ static fn check_settings(string_address regular, string_address bold)
                         memory_zero(&field, sizeof(field));
                         field.kind = UI_INPUT, field.variant = UI_FIELD_BARE, field.focused = 1;
                         field.x = 10, field.y = 10, field.w = 100, field.h = 40;
+#ifdef UI_TEXT_REFUSED
+                        static struct ui_text text;
+
+                        ui_field_open(&text, null, "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww");
+                        ui_text_reveal(&ui, &text);
+                        field.edit = &text;
+                        ui_control_draw(&ui, &field);
+                        ui_text_reveal(&ui, &text);
+                        ui_clear(&ui);
+#else
                         field.source = "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww";
+#endif
                         ui_control_draw(&ui, &field);
                         for (int row = 0; row < 80; row++)
                                 for (int column = 0; column < 320; column++)
@@ -120036,7 +120253,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 string_copy_bounded((string_address)settings.value[colour], (string_address) "#1e1e1e", SETTINGS_VALUE);
                                 settings_press(SETTINGS_KEY_ENTER);
                                 check("settings: Enter on the colour field opens it on the colour as the verb says it",
-                                      settings.editing == colour && string_equals((string_address)settings.typed, (string_address) "#1e1e1e"));
+                                      settings.editing == colour && settings_holds("#1e1e1e"));
                                 settings_press(SETTINGS_KEY_ENTER);
                                 check("settings: and Enter on what it already is sends nothing", settings.editing < 0 && settings.queued == 0);
                                 settings_press(SETTINGS_KEY_ENTER);
@@ -120231,10 +120448,8 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_type_code((unsigned int)*letter);
                         settings_press(SETTINGS_KEY_ESCAPE);
                         {
-                                b32 wiped = true;
+                                b32 wiped = settings_kept_nothing();
 
-                                for (positive at = 0; at < sizeof(settings.typed); at++)
-                                        wiped &= settings.typed[at] == 0;
                                 check("settings: Escape leaves it: nothing is sent and nothing typed is kept", settings.editing < 0 && settings.queued == 0 && wiped);
                         }
                         settings_press(SETTINGS_KEY_ENTER);
@@ -120242,10 +120457,8 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_type_code((unsigned int)*letter);
                         settings_press(SETTINGS_KEY_ENTER);
                         {
-                                b32 wiped = true;
+                                b32 wiped = settings_kept_nothing();
 
-                                for (positive at = 0; at < sizeof(settings.typed); at++)
-                                        wiped &= settings.typed[at] == 0;
                                 check("settings: Enter in it joins with the passphrase, and keeps none of it here",
                                       settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "j\nOld Cafe\nhunter22") && wiped);
@@ -126139,10 +126352,7 @@ b32 main()
                         settings.focused = 1, settings.pane = 1, settings.editing = -1, settings.menu.owner = -1;
                         settings_group_choose(state == 3 ? settings_group_of((int)SETTINGS_LIST) : 0);
                         if (state == 1)
-                        {
-                                settings.editing = SETTINGS_NAME_ROW;
-                                string_copy_bounded((string_address)settings.typed, (string_address) "patient-cricket", sizeof(settings.typed));
-                        }
+                                settings_hold(SETTINGS_NAME_ROW, "patient-cricket");
                         if (state == 2)
                         {
                                 int keyboard = -1;
@@ -126174,6 +126384,8 @@ b32 main()
                         }
                         frames_write((string_address)states[state], 0, 0, 0, 700, 520);
                         settings_menu_close();
+                        if (state == 1)
+                                settings_edit_end();
                         settings.editing = -1;
                 }
         }
@@ -126195,8 +126407,7 @@ b32 main()
                 launcher.ui = settings.ui;
                 launcher.ui.opaque = 1;
                 launcher.width = LAUNCHER_WIDTH;
-                string_copy((string_address)launcher.text, (string_address) "ls");
-                launcher_changed();
+                launcher_type_text("ls");
                 launcher_layout();
                 launcher.list.hover = 2;
                 ui_kit.now += 1000000000ll;
@@ -126218,6 +126429,7 @@ b32 main()
 */
 static fn menu_check(struct ui address_to wui);
 static fn editor_check(struct ui address_to wui);
+static fn field_check(struct ui address_to wui);
 
 static fn text_widget_check(string_address inter, string_address mono)
 {
@@ -126422,7 +126634,515 @@ static fn text_widget_check(string_address inter, string_address mono)
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
         menu_check(&wui);
         editor_check(&wui);
+        field_check(&wui);
 }
+
+/*
+        The kit's field (ui_field_event over the engine), the one every input of Canvas is, driven as a window drives
+        it: keys as the compositor sends them, the pointer on its well, a paste's text. A blank and any character are
+        typed anywhere; the caret moves by characters (whole ones of several bytes), words and ends; Shift selects and
+        typing replaces; the deletes and undo; a paste of lines is one line with no control in it; its rules hold for
+        a key, a paste and a composition alike (a character refused, with its words, and a length cut); a masked field
+        shows dots, lets nothing out and has no words; the keys a field does not take are its app's; the hand puts the
+        caret, a double click takes a word and a triple the line, a drag selects; the menu greys what cannot be done;
+        and a caret left alone stops blinking, so an idle field wakes nothing.
+*/
+#ifdef UI_TEXT_REFUSED
+static p32 field_key(struct ui address_to wui, struct ui_text address_to t, int key, unsigned int code, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, (int)code};
+
+        return ui_field_event(wui, t, null, &event, 0, 0);
+}
+
+// Each character of text as a key that types it; what the field answered, every key's together.
+static p32 field_type(struct ui address_to wui, struct ui_text address_to t, const char address_to text)
+{
+        p32 asks = 0;
+        positive length = string_length((string_address)text);
+
+        for (positive at = 0; at < length;)
+        {
+                p32 code;
+                positive size = doc_decode((const p8 address_to)text + at, length - at, &code);
+
+                asks |= field_key(wui, t, 0, code, 0);
+                at += size ? size : 1;
+        }
+        return asks;
+}
+
+static b32 field_is(const struct ui_text address_to t, const char address_to want)
+{
+        p8 held[256];
+        positive length = ui_text_string(t, held, sizeof(held));
+
+        return length == string_length((string_address)want) && !memory_compare(held, want, length);
+}
+
+static p64 field_caret(const struct ui_text address_to t)
+{
+        return t->doc.selections[t->doc.primary].active;
+}
+
+static b32 field_selected(const struct ui_text address_to t, p64 start, p64 finish)
+{
+        return doc_sel_start(&t->doc.selections[t->doc.primary]) == start && doc_sel_end(&t->doc.selections[t->doc.primary]) == finish;
+}
+
+static p32 field_button(struct ui address_to wui, struct ui_text address_to t, int button, b32 down, int x, int y, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_BUTTON, (down ? WINDOW_KEY_DOWN : 0) | flags, button, 0};
+
+        return ui_field_event(wui, t, null, &event, x, y);
+}
+
+static p32 field_motion(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        struct window_event event = {WINDOW_EVENT_MOTION, 0, x, y};
+
+        return ui_field_event(wui, t, null, &event, x, y);
+}
+
+// The x of an offset of a field's line, as the pen puts it: where a click lands on that boundary.
+static int field_x(struct ui address_to wui, struct ui_text address_to t, p64 offset)
+{
+        static struct ui_text_layout l;
+
+        ui_text_layout_line(wui, t, 0, &l);
+        return t->left - (int)t->scroll_x + ui_text_x_of(&l, offset);
+}
+
+static const char address_to field_says_five(p32 code)
+{
+        (void)code;
+        return null;
+}
+
+static fn field_check(struct ui address_to wui)
+{
+        static struct ui_text t;
+        static struct windows table;
+        static struct window_row own;
+        long pixels = ui_map(400 * 100 * 4);
+        const struct window_event up = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, FIELD_KEY_UP, 0};
+
+        own.table = &table, own.row = 0, own.door = -1;
+        ui_begin(wui, (unsigned int address_to)pixels, 400, 400, 100);
+
+        // Blanks and characters, anywhere.
+        ui_field_open(&t, &own, "");
+        check("field: a blank typed first is typed, as every blank is", (field_type(wui, &t, " a b ") & UI_TEXT_CHANGED) && field_is(&t, " a b "));
+        ui_text_set(&t, (const p8 address_to) "hello world", 11);
+        field_key(wui, &t, FIELD_KEY_HOME, 0, 0);
+        field_key(wui, &t, FIELD_KEY_RIGHT, 0, 0);
+        field_key(wui, &t, FIELD_KEY_RIGHT, 0, 0);
+        check("field: Home goes to the start and Right a character on", field_caret(&t) == 2);
+        field_key(wui, &t, FIELD_KEY_END, 0, 0);
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, 0);
+        check("field: End goes to the end and Left a character back", field_caret(&t) == 10);
+        field_key(wui, &t, FIELD_KEY_END, 0, 0);
+        for (int k = 0; k < 5; k++)
+                field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_SHIFT);
+        check("field: Shift and Left select back from the caret", field_selected(&t, 6, 11));
+        field_type(wui, &t, "there");
+        check("field: typing replaces what is selected", field_is(&t, "hello there") && field_caret(&t) == 11);
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_CONTROL);
+        check("field: Control and Left go to the start of the word", field_caret(&t) == 6);
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_CONTROL);
+        field_key(wui, &t, FIELD_KEY_RIGHT, 0, WINDOW_KEY_CONTROL);
+        check("field: Control and Right go to the end of the word", field_caret(&t) == 5);
+        field_key(wui, &t, FIELD_KEY_RIGHT, 0, WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT);
+        check("field: Control, Shift and Right select a word on", doc_sel_start(&t.doc.selections[0]) == 5 && field_caret(&t) == 11);
+        field_key(wui, &t, FIELD_KEY_END, 0, 0);
+        field_key(wui, &t, FIELD_KEY_BACKSPACE, 0, WINDOW_KEY_CONTROL);
+        check("field: Control-Backspace takes the word before the caret", field_is(&t, "hello "));
+        field_key(wui, &t, FIELD_KEY_HOME, 0, 0);
+        field_key(wui, &t, FIELD_KEY_DELETE, 0, WINDOW_KEY_CONTROL);
+        check("field: Control-Delete takes the word after it", field_is(&t, " "));
+        field_key(wui, &t, FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
+        check("field: Control-Z undoes the last edit", field_is(&t, "hello "));
+        field_key(wui, &t, 21, 25, WINDOW_KEY_CONTROL);
+        check("field: Control-Y does it again", field_is(&t, " "));
+        field_key(wui, &t, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+        check("field: Control-A selects it all", field_selected(&t, 0, 1));
+
+        // UTF-8: the caret steps over whole characters, and Backspace takes a whole one.
+        ui_text_set(&t, (const p8 address_to) "", 0);
+        field_type(wui, &t, "a\xc3\xa9\xe4\xb8\xad\xf0\x9f\x98\x80" "b");
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, 0);
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, 0);
+        check("field: Left steps over a character of four bytes whole", field_caret(&t) == 6);
+        field_key(wui, &t, FIELD_KEY_BACKSPACE, 0, 0);
+        check("field: Backspace takes a character of three bytes whole", field_is(&t, "a\xc3\xa9\xf0\x9f\x98\x80" "b") && field_caret(&t) == 3);
+
+        // A paste is one line: line ends and tabs are blanks, any other control is left out.
+        ui_text_set(&t, (const p8 address_to) "", 0);
+        check("field: a paste of lines is one line of blanks for its line ends, with no control in it",
+              (ui_text_paste(&t, (const p8 address_to) "one\ntwo\r\nthree\tfour\x1b[0m\x07!", 25) & UI_TEXT_CHANGED) &&
+                  field_is(&t, "one two three four[0m!") && doc_line_count(&t.doc) == 1);
+        field_key(wui, &t, FIELD_KEY_Z, 26, WINDOW_KEY_CONTROL);
+        check("field: and is one undo", field_is(&t, ""));
+
+        // The keys a field does not take are its app's; Enter and Escape are its submit and cancel.
+        field_type(wui, &t, "abc");
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_SHIFT);
+        check("field: Up, Down, Page Down, Tab and a chord it has no use for are not the field's",
+              !ui_field_event(wui, &t, null, &up, 0, 0) && !field_key(wui, &t, FIELD_KEY_DOWN, 0, 0) && !field_key(wui, &t, 109, 0, 0) &&
+                  !field_key(wui, &t, FIELD_KEY_TAB, '\t', 0) && !field_key(wui, &t, 25, 16, WINDOW_KEY_CONTROL) &&
+                  !field_key(wui, &t, 31, 19, WINDOW_KEY_CONTROL) && field_is(&t, "abc"));
+        check("field: Enter is its submit and Escape its cancel, a selection or none",
+              field_key(wui, &t, FIELD_KEY_ENTER, '\r', 0) == UI_TEXT_SUBMIT && field_key(wui, &t, FIELD_KEY_ESCAPE, 27, 0) == UI_TEXT_CANCEL);
+        t.focused = false;
+        check("field: a field without the keys takes no key", !field_type(wui, &t, "x") && field_is(&t, "abc"));
+        t.focused = true;
+
+        // Its rules: a character refused with its words, for a key, a paste and a composition; and its length.
+        ui_text_set(&t, (const p8 address_to) "", 0);
+        t.accept = ui_field_digits;
+        field_type(wui, &t, "12");
+        t.refused = null;
+        check("field: a character its rule refuses is not typed, and it says why",
+              (field_key(wui, &t, 0, 'a', 0) & UI_TEXT_REFUSED) && field_is(&t, "12") && t.refused &&
+                  string_equals((string_address)t.refused, (string_address) "a number is digits"));
+        field_type(wui, &t, "3");
+        check("field: a paste with a character it refuses goes in not at all",
+              (ui_text_paste(&t, (const p8 address_to) "4x5", 3) & UI_TEXT_REFUSED) && field_is(&t, "123"));
+        ui_text_preedit(&t, (const p8 address_to) "\xc3\xa9", 2);
+        check("field: and a composition it refuses is dropped", (ui_text_preedit_end(&t, true) & UI_TEXT_REFUSED) && field_is(&t, "123"));
+        t.accept = field_says_five;
+        t.most = 5, t.most_said = "five at most";
+        ui_text_set(&t, (const p8 address_to) "", 0);
+        check("field: past its length a key is refused with its words",
+              (field_type(wui, &t, "abcdefg") & UI_TEXT_REFUSED) && field_is(&t, "abcde") &&
+                  string_equals((string_address)t.refused, (string_address) "five at most"));
+        ui_text_set(&t, (const p8 address_to) "ab", 2);
+        check("field: a paste past it is cut to its room", (ui_text_paste(&t, (const p8 address_to) "cdefgh", 6) & UI_TEXT_REFUSED) && field_is(&t, "abcde"));
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, 0);
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_SHIFT);
+        field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_SHIFT);
+        check("field: what is selected is room for what replaces it", !(field_type(wui, &t, "X") & UI_TEXT_REFUSED) && field_is(&t, "abXe") &&
+                                                                       !(field_type(wui, &t, "Y") & UI_TEXT_REFUSED) && field_is(&t, "abXYe"));
+        t.accept = null, t.most = 0;
+
+        // Masked: dots, nothing let out, no words.
+        {
+                static struct ui_text_layout l;
+                unsigned int offered = table.clip_offer_serial[0];
+                static struct ui_popmenu m;
+
+                ui_text_close(&t);
+                ui_field_open(&t, &own, "");
+                t.masked = true;
+                field_type(wui, &t, "pa ss");
+                ui_text_layout_line(wui, &t, 0, &l);
+                check("field: a masked field holds what is typed and shows a dot for each character, its blank as well",
+                      field_is(&t, "pa ss") && l.count == 5 && l.shown_length == 15 &&
+                          !memory_compare(l.shown, "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2", 15));
+                field_key(wui, &t, FIELD_KEY_A, 1, WINDOW_KEY_CONTROL);
+                field_key(wui, &t, 46, 3, WINDOW_KEY_CONTROL);
+                field_key(wui, &t, 45, 24, WINDOW_KEY_CONTROL);
+                check("field: a masked field is never copied or cut out", field_is(&t, "pa ss") && table.clip_offer_serial[0] == offered);
+                m.count = 0;
+                ui_text_menu_items(&m, &t);
+                check("field: and its menu has Cut and Copy greyed", m.items[3].id == UI_TEXT_MENU_CUT && (m.items[3].flags & UI_MENU_DISABLED) &&
+                                                                     m.items[4].id == UI_TEXT_MENU_COPY && (m.items[4].flags & UI_MENU_DISABLED));
+                field_key(wui, &t, FIELD_KEY_END, 0, 0);
+                field_key(wui, &t, FIELD_KEY_LEFT, 0, WINDOW_KEY_CONTROL);
+                check("field: a masked field has no words: Control and Left go to its start", field_caret(&t) == 0);
+                field_key(wui, &t, FIELD_KEY_END, 0, 0);
+                field_key(wui, &t, FIELD_KEY_BACKSPACE, 0, WINDOW_KEY_CONTROL);
+                check("field: and Control-Backspace takes it all", field_is(&t, ""));
+                field_type(wui, &t, "pa ss");
+                ui_text_close(&t);
+                check("field: closed, a masked field keeps nothing", !t.doc.added && !t.preedit_length);
+        }
+
+        // The menu: what cannot be done is greyed, and what is chosen is done to the field.
+        {
+                static struct ui_popmenu m;
+
+                ui_field_open(&t, &own, "one two");
+                m.count = 0;
+                ui_text_menu_items(&m, &t);
+                check("field: the menu is Undo, Redo, Cut, Copy, Paste, Delete and Select All, greyed with nothing done or selected",
+                      m.count == 9 && (m.items[0].flags & UI_MENU_DISABLED) && (m.items[3].flags & UI_MENU_DISABLED) &&
+                          (m.items[4].flags & UI_MENU_DISABLED) && !(m.items[5].flags & UI_MENU_DISABLED) &&
+                          (m.items[6].flags & UI_MENU_DISABLED) && m.items[8].id == UI_TEXT_MENU_ALL && !(m.items[8].flags & UI_MENU_DISABLED));
+                ui_text_menu_do(wui, &t, UI_TEXT_MENU_ALL);
+                check("field: Select All selects it all", field_selected(&t, 0, 7));
+                ui_text_menu_do(wui, &t, UI_TEXT_MENU_DELETE);
+                check("field: Delete takes what is selected", field_is(&t, ""));
+                ui_text_menu_do(wui, &t, UI_TEXT_MENU_UNDO);
+                check("field: Undo brings it back", field_is(&t, "one two"));
+                ui_text_menu_do(wui, &t, UI_TEXT_MENU_PASTE);
+                check("field: Paste asks the clipboard, and the answer is this field's", t.pasting && table.clip_ask_serial[0]);
+                {
+                        struct window_event refused = {WINDOW_EVENT_CLIP, 0, WINDOWS_CLIP_CLIPBOARD, WINDOWS_CLIP_REFUSED};
+                        struct window_event ready = {WINDOW_EVENT_CLIP, 0, WINDOWS_CLIP_CLIPBOARD, WINDOWS_CLIP_READY};
+
+                        ui_field_event(wui, &t, null, &refused, 0, 0);
+                        check("field: a paste refused is over, and a paste it did not ask for is not its",
+                              !t.pasting && !ui_field_event(wui, &t, null, &ready, 0, 0) && field_is(&t, "one two"));
+                }
+        }
+
+        // The hand, on a field drawn in a well: a click puts the caret, a double click takes a word, a triple the line,
+        // a drag selects, Shift extends, the right button asks for the menu, and a press off the well is not the field's.
+        {
+                int y, beta, gamma;
+
+                ui_text_set(&t, (const p8 address_to) "alpha beta gamma", 16);
+                doc_select_set(&t.doc, 0, 0);
+                ui_text_draw(wui, &t, 20, 20, 300, 30, 0);
+                y = t.top + t.line_height / 2;
+                beta = field_x(wui, &t, 6), gamma = field_x(wui, &t, 11);
+                check("field: a press off its well is not the field's", !field_button(wui, &t, 0x110, true, 10, y, 0) && !field_button(wui, &t, 0x110, false, 10, y, 0));
+                field_button(wui, &t, 0x110, true, beta + 1, y, 0);
+                field_button(wui, &t, 0x110, false, beta + 1, y, 0);
+                check("field: a click puts the caret where it is", field_selected(&t, 6, 6));
+                field_button(wui, &t, 0x110, true, beta + 1, y, 0);
+                field_button(wui, &t, 0x110, false, beta + 1, y, 0);
+                check("field: a double click takes the word", field_selected(&t, 6, 10));
+                field_button(wui, &t, 0x110, true, beta + 1, y, 0);
+                field_button(wui, &t, 0x110, false, beta + 1, y, 0);
+                check("field: a triple click takes the line", field_selected(&t, 0, 16));
+                t.click_at = 0;
+                field_button(wui, &t, 0x110, true, field_x(wui, &t, 0) + 1, y, 0);
+                field_motion(wui, &t, gamma - 1, y + 40);
+                check("field: a drag selects, even off the well", (field_button(wui, &t, 0x110, false, gamma - 1, y + 40, 0) & UI_TEXT_MOVED) &&
+                                                                      field_selected(&t, 0, 11));
+                t.click_at = 0;
+                field_button(wui, &t, 0x110, true, beta + 1, y, 0);
+                field_button(wui, &t, 0x110, false, beta + 1, y, 0);
+                t.click_at = 0;
+                field_button(wui, &t, 0x110, true, field_x(wui, &t, 16) - 1, y, WINDOW_KEY_SHIFT);
+                field_button(wui, &t, 0x110, false, field_x(wui, &t, 16) - 1, y, WINDOW_KEY_SHIFT);
+                check("field: Shift with a click extends from the caret", field_selected(&t, 6, 16));
+                check("field: the right button asks for the menu", field_button(wui, &t, 0x111, true, beta + 1, y, 0) & UI_TEXT_MENU);
+                check("field: the wheel is never a field's", !ui_field_event(wui, &t, null, &(struct window_event){WINDOW_EVENT_WHEEL, 0, -120, 0}, beta, y));
+        }
+
+        // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
+        {
+                b32 redraw = false;
+                positive now;
+
+                t.focused = true;
+                field_type(wui, &t, "z");
+                now = clock_monotonic_nanoseconds();
+                check("field: the caret blinks after a key", ui_text_tick(&t, now, &redraw) != 0);
+                t.caret_off = true;
+                redraw = false;
+                check("field: and a while after the last it stays drawn, and no frame is due",
+                      !ui_text_tick(&t, now + UI_TEXT_BLINK_FOR_NS + 1, &redraw) && redraw && !t.caret_off);
+        }
+        ui_text_close(&t);
+        compositor_call(syscall(munmap), (positive)pixels, 400 * 100 * 4, 0, 0, 0, 0);
+}
+#else
+static fn field_check(struct ui address_to wui)
+{
+        (void)wui;
+        check("field: the kit has a field every input is (ui_field_event: rules, masked, its menu, the keys it leaves)", false);
+}
+#endif
+
+/*
+        No window types by hand: every input of Canvas is the kit's field, so no file of the windows (src/canvas/ui/,
+        and ui.c before its text engine) has the idioms of a field written by hand -- a key's character encoded into a
+        typed buffer, a Backspace stepping back over a character's bytes, a key's character tested for a printable one,
+        a blank refused as the first character. text.c and the engine's part of ui.c are where typing lives. Read from
+        the tree the check runs in (the repository's root); not run where the sources are not.
+*/
+static fn check_no_hand_typing(void)
+{
+        static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
+                                                      "src/canvas/ui/ui.c"};
+        static const char address_to const idioms[] = {"memory_utf8_encode(bytes, sizeof(bytes)", "[length - 1] & 0xc0) == 0x80",
+                                                       "c == 0x7f || (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT))",
+                                                       "c == ' ' && !length", "unsigned int c = (unsigned int)event->b;"};
+        positive found = 0, read = 0;
+
+        for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size), stop = size;
+                const char address_to text = (const char address_to)bytes;
+
+                if (!bytes)
+                        continue;
+                read++;
+                // ui.c is the kit up to its text engine, which is where a field's typing is.
+                if (f == sizeof(files) / sizeof(files[0]) - 1)
+                {
+                        const char address_to engine = (const char address_to)memory_search((address_any)text, size,
+                                                                                             (address_any) "/* ---- text: a field", 21);
+
+                        stop = engine ? (positive)(engine - text) : size;
+                }
+                for (positive i = 0; i < sizeof(idioms) / sizeof(idioms[0]); i++)
+                {
+                        positive length = string_length((string_address)idioms[i]);
+
+                        for (positive at = 0; at + length <= stop;)
+                        {
+                                const char address_to hit = (const char address_to)memory_search((address_any)(text + at), stop - at,
+                                                                                                  (address_any)idioms[i], length);
+
+                                if (!hit || (positive)(hit - text) + length > stop)
+                                        break;
+                                found++;
+                                string_format(log, "  typing by hand in %s: %s\n", (string_address)files[f], (string_address)idioms[i]);
+                                at = (positive)(hit - text) + length;
+                        }
+                }
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: no window types by hand, the sources are not here\n");
+                return;
+        }
+        check("fields: no window of Canvas types by hand: every input is the kit's field", read == sizeof(files) / sizeof(files[0]) && !found);
+}
+
+/*
+        The fields of the windows themselves, drawn with the repository's Inter and worked by the keys and the hand as
+        their windows are: the launcher's (a click puts the caret, a drag selects, and what is typed goes there), the
+        settings' filter (the arrows move in it, and a blank typed between letters parts its words) and the field a
+        row is typed in (a click in the name puts the caret, and Enter sets what it then holds).
+*/
+#if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER
+static fn check_field_hands(string_address regular)
+{
+        static font_face face;
+        static p8 atlas[512 * 512];
+        static unsigned int scratch[800 * UI_SCRATCH_ROWS];
+        static struct windows table;
+        positive size = 0, bytes = compositor_map_file(regular, &size);
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        long pixels = ui_map(800 * 600 * 4);
+        struct ui ui;
+
+        if (!bytes || (engine < 0 && engine > -4096) || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("fields of the windows: the face loads", false);
+                return;
+        }
+        memory_zero(&ui, sizeof(ui));
+        ui.engine = (font_engine address_to)engine;
+        font_start(ui.engine, atlas, 512, 512);
+        ui.regular = ui.bold = &face;
+        ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 800;
+        ui.opaque = 1;
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        ui_kit_inks(&ui);
+        table.stride = 800, table.output_width = 1920, table.output_height = 1080;
+
+        // The launcher: a click in its field puts the caret, a drag selects, and the keys type there.
+        {
+                static char names[3][LAUNCHER_NAME];
+                static unsigned char from[3];
+                static unsigned short hashed[LAUNCHER_HASH];
+                const font_face address_to faces[2] = {&face, &face};
+                int left = (UI_PAD + 14), y = UI_PAD + UI_TARGET / 2, ls = ui_run_in(&ui, faces, 0, 0, (string_address) "ls", 15, 0, 0, 0, 800, 0);
+                struct window_event move = {WINDOW_EVENT_MOTION, 0, left + ls, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, LAUNCHER_BUTTON_LEFT, 0},
+                                    release = {WINDOW_EVENT_BUTTON, 0, LAUNCHER_BUTTON_LEFT, 0};
+
+                string_copy((string_address)names[0], (string_address) "lsof");
+                memory_zero(&launcher, sizeof(launcher));
+                launcher.names = (char address_to)names, launcher.count = 1, launcher.from = from, launcher.hashed = hashed;
+                launcher.dirs[0] = "/bin", launcher.dir_count = 1;
+                launcher.own.table = &table;
+                launcher.ui = ui;
+                launcher.width = LAUNCHER_WIDTH;
+                launcher.focused = launcher.had_focus = true;
+                launcher_type_text("lsof");
+                launcher_draw((unsigned int address_to)pixels);
+                launcher_event(&move);
+                launcher_event(&press);
+                launcher_event(&release);
+                launcher_typed('X');
+                check("launcher: a click in the field puts the caret there, and a key types there", launcher_holds("lsXof"));
+                // From the well's padding, left of the text, across it and past its end.
+                move.a = left - 8;
+                launcher_event(&move);
+                launcher_event(&press);
+                move.a = left + 200;
+                launcher_event(&move);
+                launcher_event(&release);
+                launcher_typed('k');
+                check("launcher: a drag across the field selects it, and a key types over it", launcher_holds("k"));
+        }
+
+        // The settings' filter, worked by the keys: the caret moves in it, and a blank between letters parts its words.
+        {
+                int wifi = settings_row_named("Wi-Fi"), name = settings_row_named("Name");
+
+                settings.ui = ui;
+                settings.own.table = &table;
+                settings.width = 800, settings.height = 520;
+                settings.ui.pitch = 800, settings.ui.width = 800, settings.ui.height = 520;
+                settings.focused = 1, settings.pane = 1, settings.menu.owner = -1, settings.view = 0;
+                settings.child = 1, settings.queued = 0, settings.job = 0, settings.job_sets = false;
+                settings_edit_end();
+                settings_group_choose(0);
+                settings_layout();
+                for (const char address_to letter = "wifi"; *letter; letter++)
+                        settings_type_code((unsigned int)*letter);
+                settings_press(FIELD_KEY_LEFT);
+                settings_press(FIELD_KEY_LEFT);
+                settings_chord(SETTINGS_KEY_SPACE, ' ', 0);
+                {
+                        b32 listed = false, each = settings.list.count > 0;
+
+                        for (positive at = 0; at < settings.list.count; at++)
+                                listed |= settings.list.id[at] == wifi, each &= settings_matches(settings.list.id[at]);
+                        check("settings: Left moves the caret in the filter, and a blank typed there parts its words: wi fi lists Wi-Fi",
+                              string_equals((string_address)settings.filter, (string_address) "wi fi") && listed && each);
+                }
+                settings_chord(FIELD_KEY_HOME, 0, WINDOW_KEY_SHIFT);
+                settings_type_code('n');
+                check("settings: Shift and Home select in the filter, and a letter replaces what is selected", string_equals((string_address)settings.filter, (string_address) "nfi"));
+                settings_press(FIELD_KEY_ESCAPE);
+                check("settings: Escape clears the filter", !settings.filter_length);
+
+                // The name, typed in its row: a click puts the caret, and Enter sets what the field holds.
+                settings.state[name] = SETTINGS_READ;
+                string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
+                settings.list.focus = name;
+                settings_press(SETTINGS_KEY_ENTER);
+                settings_draw_rows((unsigned int address_to)pixels, 0, 0);
+                {
+#ifdef UI_TEXT_REFUSED
+                        int x = field_x(&settings.ui, &settings.edit, 7) + 1, y = settings.edit.top + settings.edit.line_height / 2;
+#else
+                        int x = 600, y = 100;
+#endif
+                        struct window_event move = {WINDOW_EVENT_MOTION, 0, x, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0},
+                                            release = {WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0};
+
+                        check("settings: Enter on the name opens its field on the name", settings.editing == name && settings_holds("patient-cricket"));
+                        settings_event(&move);
+                        settings_event(&press);
+                        settings_event(&release);
+                        settings_type_code('-');
+                        settings_type_code('x');
+                        check("settings: a click in the name's field puts the caret there, and a key types there",
+                              settings.editing == name && settings_holds("patient-x-cricket") && settings_caret() == 9);
+                        settings_press(SETTINGS_KEY_ENTER);
+                        check("settings: Enter sets the name to what the field holds",
+                              settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
+                                  string_equals((string_address)settings.queue[0].value, (string_address) "patient-x-cricket"));
+                }
+                settings.queued = 0, settings.child = 0;
+                settings_group_choose(0);
+        }
+        compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
+}
+#endif
 
 
 /*
@@ -126837,6 +127557,11 @@ b32 main()
                               program_argument_count() > 4 ? program_argument(4) : null);
         check_battery();
 #endif
+#if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER
+        if (program_argument_count() > 3)
+                check_field_hands(program_argument(3));
+#endif
+        check_no_hand_typing();
 
         // What the terminal says its paper and ink are is what it paints them with.
         {
