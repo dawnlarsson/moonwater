@@ -120725,8 +120725,8 @@ static fn check_settings_keys(void)
         picture drawn at that frame's time, and so is the other buffer once
         it is drawn again with nothing new.
 */
-#define SETTINGS_FRAMES_W SETTINGS_WIDTH
-#define SETTINGS_FRAMES_H SETTINGS_HEIGHT
+#define SETTINGS_FRAMES_W (2 * SETTINGS_WIDTH) // the buffers are the window's at scale 2
+#define SETTINGS_FRAMES_H (2 * SETTINGS_HEIGHT)
 #define SETTINGS_FRAMES_PERIOD 16666667ull
 #define SETTINGS_FRAMES_MS 1000000ull
 
@@ -120955,14 +120955,14 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                 switch (s->what)
                 {
                 case SF_KEY: settings_press(s->a); break;
-                case SF_ROW: settings_frames_event(WINDOW_EVENT_MOTION, 0, s->a, y); break;
+                case SF_ROW: settings_frames_event(WINDOW_EVENT_MOTION, 0, s->a * settings.ui.scale, y); break;
                 case SF_PART:
                 {
                         const struct ui_control address_to c = ui_list_control(&settings.list, row, 1);
                         int x = !c ? 0 : c->kind == UI_TABS ? ui_tab_left(&settings.ui, c, s->a) + ui_tab_width(&settings.ui, c, s->a) / 2
                                                             : ui_swatches_left(&settings.ui, c) + s->a * (UI_SWATCH + UI_SWATCH_GAP) + UI_SWATCH / 2;
 
-                        settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
+                        settings_frames_event(WINDOW_EVENT_MOTION, 0, x * settings.ui.scale, y);
                         break;
                 }
                 case SF_GROUP:
@@ -120993,7 +120993,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                         break;
                 case SF_SIZE:
                         ui_kit_settle();
-                        settings_size((unsigned int)s->a, (unsigned int)s->b);
+                        settings_size((unsigned int)(s->a * settings.ui.scale), (unsigned int)(s->b * settings.ui.scale));
                         break;
                 }
                 settings_frames_pass();
@@ -121062,7 +121062,12 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_frames.now = 5000000000ull;
         ui_kit.drawn = 0;
         ui_kit.busy = 0;
-        settings_size(SETTINGS_FRAMES_W, SETTINGS_FRAMES_H);
+        for (int scale = 1; scale <= 2; scale++)
+        {
+        // The window at a scale: placed again, its size the window's own at it, drawn whole once.
+        settings.ui.scale = scale;
+        ui_kit_settle();
+        settings_size(SETTINGS_WIDTH * scale, SETTINGS_HEIGHT * scale);
         settings_refilter();
         settings_frames_pass();
 
@@ -121131,7 +121136,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {0, SF_KEY, null, SETTINGS_KEY_END, 0},
                     {5, SF_ROW, "Shake the pointer to find it", 600, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
                     {40, SF_ANSWER, null, 0, 0}, {60, SF_SIZE, null, 640, 470}, {90, SF_GROUP, null, 5, 0}, {100, SF_DOWN, null, 0, 0},
-                    {120, SF_SIZE, null, 690, 515}, {130, SF_UP, null, 0, 0}, {300, SF_SIZE, null, SETTINGS_FRAMES_W, SETTINGS_FRAMES_H}};
+                    {120, SF_SIZE, null, 690, 515}, {130, SF_UP, null, 0, 0}, {300, SF_SIZE, null, SETTINGS_WIDTH, SETTINGS_HEIGHT}};
                 static const struct settings_frames_step menu[] = {
                     {0, SF_ROW, "Cursor size", 450, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
                     {60, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {80, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {200, SF_KEY, null, SETTINGS_KEY_ENTER, 0},
@@ -121146,7 +121151,8 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 settings_frames_play((string_address) "the window resized while things move", canvas, size, sizeof(size) / sizeof(size[0]));
                 settings_frames_play((string_address) "a choice's menu", canvas, menu, sizeof(menu) / sizeof(menu[0]));
         }
-        string_format(log, "  settings frames: %p frames drawn and compared\n", settings_frames.frames);
+        }
+        string_format(log, "  settings frames: %p frames drawn and compared, at scales 1 and 2\n", settings_frames.frames);
 
         settings.ui = saved.ui;
         settings.own = saved.own;

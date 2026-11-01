@@ -53,6 +53,7 @@ struct ui
         const font_face address_to mono; // the kit's mono (a tag, a code well, a key), or none: then the regular
         font_face face_mono;
         b32 opaque;                     // a window of the kit's surface, not glass: cleared to the theme's surface
+        int scratch_scale;              // the scale ui_scratch_fit mapped the scratch at, 0 for a scratch the caller gave
 };
 
 /*
@@ -4550,22 +4551,30 @@ static b32 ui_face_load(font_face address_to face, string_address path)
 #define UI_FONT_BOLD "/usr/share/fonts/inter/Inter-Bold.ttf"
 #define UI_FONT_MONO "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf"
 
-// The scratch line the text is drawn through is at least this wide: it is mapped again only when it must grow.
+/*
+        The scratch line the text is drawn through is at least this wide, and UI_SCRATCH_ROWS rows at the scale: it is
+        mapped again only when it must grow, wider or at a larger scale. What it gives back is the mapping it made, at
+        the scale it made it at: the size worked out at the scale now gave back the pages after it (a table, a buffer)
+        when the scale grew, and a scale grown with the width as it was left text written past the scratch's end. A
+        scratch the caller gave (scratch_scale 0) is never given back.
+*/
 static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 {
         unsigned int scratch = width + 8u * (unsigned int)ui->scale;
         long mapped;
 
-        if (scratch <= (unsigned int)ui->scratch_width)
+        if (scratch <= (unsigned int)ui->scratch_width && (!ui->scratch_scale ? ui->scratch != null : ui->scale <= ui->scratch_scale))
                 return;
+        scratch = scratch > (unsigned int)ui->scratch_width ? scratch : (unsigned int)ui->scratch_width;
         mapped = ui_map((positive)scratch * UI_SCRATCH_ROWS * (positive)ui->scale * 4);
         if (mapped < 0 && mapped > -4096)
                 return;
-        if (ui->scratch)
+        if (ui->scratch && ui->scratch_scale)
                 compositor_call(syscall(munmap), (positive)ui->scratch,
-                                (positive)ui->scratch_width * UI_SCRATCH_ROWS * (positive)ui->scale * 4, 0, 0, 0, 0);
+                                (positive)ui->scratch_width * UI_SCRATCH_ROWS * (positive)ui->scratch_scale * 4, 0, 0, 0, 0);
         ui->scratch = (unsigned int address_to)mapped;
         ui->scratch_width = (int)scratch;
+        ui->scratch_scale = ui->scale;
 }
 
 /* ---- menus: a popup surface and the list in it ---- */
