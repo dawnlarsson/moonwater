@@ -4714,7 +4714,8 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
         m->rows_shown = (m->height - 2 * UI_MENU_PAD * ui->scale) / ui_popmenu_row(ui, m);
 }
 
-// The item at y (device pixels from the menu's top), or -1.
+// The item at y (device pixels from the menu's top), or -1. A row that starts in the bottom padding is not drawn (the draw
+// stops there), so the padding under the last row drawn is no item.
 static int ui_popmenu_at(const struct ui address_to ui, const struct ui_popmenu address_to m, int y)
 {
         int top = UI_MENU_PAD * ui->scale;
@@ -4724,7 +4725,7 @@ static int ui_popmenu_at(const struct ui address_to ui, const struct ui_popmenu 
                 int tall = m->items[at].flags & UI_MENU_SEPARATOR ? (2 * UI_MENU_PAD + 1) * ui->scale : ui_popmenu_row(ui, m);
 
                 if (y >= top && y < top + tall)
-                        return m->items[at].flags & UI_MENU_SEPARATOR ? -1 : at;
+                        return (m->items[at].flags & UI_MENU_SEPARATOR) || top >= m->height - UI_MENU_PAD * ui->scale ? -1 : at;
                 top += tall;
         }
         return -1;
@@ -4784,10 +4785,11 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
         }
 }
 
-// The hot item moved by step over what can be chosen (wrapping), the view following it.
+// The hot item moved by step over what can be chosen (wrapping), the view following it. With none hot (-1) Down takes the
+// first that can be chosen and Up the last; with nothing that can be chosen the view stays at the top.
 static fn ui_popmenu_step(struct ui_popmenu address_to m, int step)
 {
-        for (int tries = 0, at = m->hot; tries < m->count; tries++)
+        for (int tries = 0, at = m->hot >= 0 ? m->hot : step > 0 ? -1 : m->count; tries < m->count; tries++)
         {
                 at = (at + step + m->count) % m->count;
                 if (ui_popmenu_choosable(m, at))
@@ -4797,7 +4799,7 @@ static fn ui_popmenu_step(struct ui_popmenu address_to m, int step)
                 }
         }
         if (m->hot < m->top)
-                m->top = m->hot;
+                m->top = m->hot < 0 ? 0 : m->hot;
         if (m->rows_shown > 0 && m->hot >= m->top + m->rows_shown)
                 m->top = m->hot - m->rows_shown + 1;
 }
@@ -5399,7 +5401,7 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
 
         if (last < 0)
                 return false;
-        at = (at < 0 ? 0 : at) + by;
+        at = (at < 0 ? -1 : at) + by; // with no row the keys count from above the first, so Down takes it
         at = at < 0 ? 0 : at > last ? last : at;
         l->focus = l->id[at];
         ui_list_damage(ui, l, before);
@@ -5748,6 +5750,7 @@ static fn ui_menu_open(struct ui_menu address_to m, int owner, b32 touch)
         m->owner = owner, m->touch = touch;
         m->count = 0, m->at = 0, m->current = -1, m->widest = 0, m->pressed = -1;
         m->scroll.scroll = m->scroll.wheel = m->scroll.left = 0;
+        m->scroll.held = m->scroll.hover = 0; // a thumb held when it closed (its release never came here) is not held now
 }
 
 static fn ui_menu_add(struct ui address_to ui, struct ui_menu address_to m, const char address_to word, b32 current)

@@ -126550,6 +126550,7 @@ b32 main()
         and every mode draws inside its box and nothing outside it.
 */
 static fn menu_check(struct ui address_to wui);
+static fn kit_composites_check(struct ui address_to wui);
 static fn editor_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
@@ -126755,6 +126756,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         }
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
         menu_check(&wui);
+        kit_composites_check(&wui);
         editor_check(&wui);
         field_check(&wui);
 }
@@ -127339,6 +127341,91 @@ static fn menu_check(struct ui address_to wui)
         check("menu: only an item that can be chosen is ever chosen", chosen_ok);
         check("menu: the keys keep the hot item on one that can be chosen", hot_ok);
         compositor_call(syscall(munmap), (positive)pixels, 600 * 900 * 4, 0, 0, 0, 0);
+}
+
+/*
+        The kit's composites where a key or a hand meets them: Up with nothing chosen takes a menu's last item and Down
+        its first; a menu with nothing that can be chosen, or no items, keeps its view at the top; the padding under a
+        menu's last row drawn is no item (no row is drawn there, so none is chosen); Down with no row chosen takes a
+        list's first row; and a menu opened again has no thumb held over from its last opening.
+*/
+static fn kit_composites_check(struct ui address_to wui)
+{
+        static struct ui_popmenu up_m, pad_m, empty_m, none_m;
+        static struct ui_list keyed;
+        static struct ui_menu reopened;
+        int s = wui->scale, bottom;
+        b32 tops_ok = true;
+        struct window_event up = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 103, 0}, down = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 108, 0};
+
+        up_m.count = 0;
+        ui_popmenu_add(&up_m, "Alpha", null, 0, 1);
+        ui_popmenu_add(&up_m, "Beta", null, 0, 2);
+        ui_popmenu_add(&up_m, "Gamma", null, 0, 3);
+        ui_popmenu_size(wui, &up_m, 900 * s);
+        up_m.hot = -1, up_m.top = 0;
+        ui_popmenu_event(wui, &up_m, &up, 0, 0);
+        check("menu: Up with nothing chosen takes the last item", up_m.hot == 2);
+
+        empty_m.count = 0;
+        ui_popmenu_add(&empty_m, "Heading", null, UI_MENU_HEADER, 0);
+        ui_popmenu_add(&empty_m, "&Off", null, UI_MENU_DISABLED, 1);
+        ui_popmenu_size(wui, &empty_m, 900 * s);
+        none_m.count = 0;
+        ui_popmenu_size(wui, &none_m, 900 * s);
+        for (int round = 0; round < 2; round++)
+        {
+                struct ui_popmenu address_to m = round ? &none_m : &empty_m;
+
+                m->hot = -1, m->top = 0;
+                ui_popmenu_event(wui, m, &down, 0, 0);
+                tops_ok &= m->top >= 0 && m->hot == -1;
+        }
+        check("menu: keys in a menu with nothing to choose keep its view at the top", tops_ok);
+
+        pad_m.count = 0;
+        for (int at = 0; at < 8; at++)
+                ui_popmenu_add(&pad_m, "Item", null, 0, at + 1);
+        ui_popmenu_size(wui, &pad_m, 96 * s);
+        bottom = pad_m.height - 3 * s;
+        {
+                int row = ui_popmenu_row(wui, &pad_m), middle = UI_MENU_PAD * s + 2 * row + row / 2;
+                struct window_event motion = {WINDOW_EVENT_MOTION, 0, 10 * s, middle};
+
+                pad_m.hot = -1;
+                ui_popmenu_event(wui, &pad_m, &motion, 10 * s, middle);
+                check("menu: the row drawn under the pointer is its item", pad_m.hot == 2 && ui_popmenu_at(wui, &pad_m, middle) == 2);
+                motion.b = bottom;
+                ui_popmenu_event(wui, &pad_m, &motion, 10 * s, bottom);
+                check("menu: the padding under the last row drawn is no item", pad_m.hot == -1 && ui_popmenu_at(wui, &pad_m, bottom) == -1);
+        }
+
+        keyed.count = 3;
+        keyed.id[0] = 10, keyed.id[1] = 11, keyed.id[2] = 12;
+        keyed.top[0] = 0, keyed.top[1] = 40 * s, keyed.top[2] = 80 * s;
+        keyed.content = keyed.scroll.content = 120 * s;
+        keyed.scroll.view = keyed.h = 400 * s;
+        keyed.focus = -1;
+        {
+                b32 moved = false;
+
+                ui_list_key(wui, &keyed, 108, &moved);
+                check("list: Down with no row chosen chooses the first row", keyed.focus == 10 && moved);
+        }
+
+        // A menu closed with its thumb held (the release never reached it), and opened again: nothing is held.
+        ui_menu_open(&reopened, 0, false);
+        for (int at = 0; at < 32; at++)
+                ui_menu_add(wui, &reopened, "Choice", at == 0);
+        ui_menu_place(wui, &reopened, 100 * s, 140 * s, 600 * s, 600 * s, 900 * s);
+        reopened.scroll.held = 1;
+        ui_menu_open(&reopened, 0, false);
+        {
+                int x = reopened.scroll.x + s, y = reopened.scroll.y + reopened.scroll.height / 2;
+
+                check("menu: a menu opened again has no thumb held over from its last opening",
+                      ui_scroll_pointer(wui, &reopened.scroll, WINDOW_EVENT_MOTION, x, y, false) == -1);
+        }
 }
 
 
