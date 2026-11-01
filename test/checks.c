@@ -126398,6 +126398,73 @@ static fn check_kit_place(void)
                 check("kit row: a press ripples across the whole row, edge to edge, and not past it", reached && kept);
         }
 
+        // A switch's hover is its row's state layer, the ink at .06 over the whole row (the box of the row, not the pill):
+        // it fades in and out, and it is the same rect the ripple is cut to. The row is 10 to 590 by 252 to 292.
+        {
+                struct ui_control hs;
+                unsigned int paper = 0xff111113u;
+                b32 inside, outside, back, corners, edges;
+                int frame;
+
+                memory_zero(&hs, sizeof(hs));
+                hs.kind = UI_SWITCH, hs.x = 520, hs.y = 252, hs.w = 52, hs.h = 40, hs.label = "";
+                hs.row_x = 10, hs.row_y = 252, hs.row_w = 580, hs.row_h = 40;
+                ui_control_start(&hs);
+                ui_kit.now += 1000000000ll;
+                ui_fill(&ui, 0, 248, 600, 52, paper);
+                ui_control_draw(&ui, &hs);
+                check("kit row: a switch not hovered draws its row paper", pixels[262 * 600 + 30] == paper);
+
+                hs.hover = 1;
+                for (frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 0, 248, 600, 52, paper);
+                        ui_control_draw(&ui, &hs);
+                }
+                inside = pixels[262 * 600 + 30] != paper && pixels[291 * 600 + 11] != paper && pixels[253 * 600 + 589] != paper;
+                outside = pixels[262 * 600 + 9] == paper && pixels[262 * 600 + 590] == paper &&
+                          pixels[251 * 600 + 300] == paper && pixels[292 * 600 + 300] == paper;
+
+                hs.hover = 0;
+                for (frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 0, 248, 600, 52, paper);
+                        ui_control_draw(&ui, &hs);
+                }
+                back = pixels[262 * 600 + 30] == paper && pixels[291 * 600 + 11] == paper;
+                check("kit row: a switch's hover is its row's state layer, edge to edge, and it fades out on leave",
+                      inside && outside && back);
+
+                // Hovered and pressed, then let go: the ripple goes and the hover stays over the row, its corners too.
+                memory_zero(&hs, sizeof(hs));
+                hs.kind = UI_SWITCH, hs.x = 520, hs.y = 252, hs.w = 52, hs.h = 40, hs.label = "";
+                hs.row_x = 10, hs.row_y = 252, hs.row_w = 580, hs.row_h = 40;
+                ui_control_start(&hs);
+                ui_kit.now += 1000000000ll;
+                hs.hover = 1;
+                ui_kit_pointer(&ui, &hs, 1, WINDOW_EVENT_BUTTON, 300, 272, true, 0);
+                for (frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 0, 248, 600, 52, paper);
+                        ui_control_draw(&ui, &hs);
+                }
+                ui_kit_pointer(&ui, &hs, 1, WINDOW_EVENT_BUTTON, 300, 272, false, 0);
+                hs.hover = 1;
+                for (frame = 0; frame < 40; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 0, 248, 600, 52, paper);
+                        ui_control_draw(&ui, &hs);
+                }
+                corners = pixels[252 * 600 + 10] != paper && pixels[291 * 600 + 589] != paper;
+                edges = pixels[252 * 600 + 9] == paper && pixels[252 * 600 + 590] == paper && pixels[292 * 600 + 300] == paper;
+                check("kit row: a hovered row's hover covers its corners once the ripple is gone, and nothing past the row",
+                      corners && edges);
+        }
+
         // The scrollbar: the thumb is the view's share of the track where the scroll puts it, none when all shows, 24 at
         // least; dragged it scrolls by the content's share of the move; a press on the track pages; it is drawn 4 wide.
         {

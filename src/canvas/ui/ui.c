@@ -2665,6 +2665,9 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
                                                                                       : ui_mix(ui_role(UI_ON_SURFACE), 50, 0), 200, &ui_ease);
         ui_kit_number_to(&c->stroke, c->on || (c->hover && !c->disabled) ? 64 * UI_ONE : 0, 200, &ui_ease);
         ui_kit_number_to(&c->scale, c->down ? UI_Q2(110) : c->hover ? UI_Q2(105) : UI_ONE, 150, &ui_ease);
+        // A switch's state layer over its row, as a list row's (ui_list_row_draw): the ink at .06 hovered, .10 pressed, .2s.
+        if (c->kind == UI_SWITCH)
+                ui_kit_number_to(&c->layer, c->disabled ? 0 : c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
         if (!c->moved)
                 ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
         label = ui_kit_colour(&c->label_ink);
@@ -2689,13 +2692,20 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         rest = ui_box_transform(rest, ui_qmul(UI_ONE + squish, scale), scale, origin_x, oy, 0, 0);
         fill = ui_box_transform(fill, sx, sy, ox, oy, tx, ty);
         rest = ui_box_transform(rest, sx, sy, ox, oy, tx, ty);
-        // The row's ripple, in the accent: its clip is the whole row, edge to edge (by default to the card's edges).
+        // The row the state layer and the ripple share: its box, edge to edge (by default to the card's edges), and not moved
+        // by the press, so a switch's hover and its ripple are one rect, as a list row's are. The ripple itself still moves.
         {
                 int cx, cy, cw, ch;
 
                 ui_control_row(c, &cx, &cy, &cw, &ch);
-                clip = ui_box_transform((struct ui_box){ui_q8(ui, cx), ui_q8(ui, cy), ui_q8(ui, cx + cw), ui_q8(ui, cy + ch), 0, 0},
-                                        sx, sy, ox, oy, tx, ty);
+                clip = (struct ui_box){ui_q8(ui, cx), ui_q8(ui, cy), ui_q8(ui, cx + cw), ui_q8(ui, cy + ch), 0, 0};
+        }
+        if (c->kind == UI_SWITCH)
+        {
+                unsigned int layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
+
+                if (layer)
+                        ui_kit_fill(ui, &clip, ui_mix(ui_role(UI_ON_SURFACE), layer, 0), null);
         }
         if (rest_w > 0)
                 ui_kit_fill(ui, &rest, ui_role(UI_CONTROL_OFF), null);
