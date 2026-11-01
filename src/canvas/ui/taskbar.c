@@ -142,7 +142,7 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->thick = lay->vertical ? lay->bw : lay->bh;
         lay->length = lay->vertical ? lay->bh : lay->bw;
         lay->origin = lay->vertical ? lay->by : lay->bx;
-        lay->gap = 4 * view->scale;
+        lay->gap = UI_GAP1 * view->scale; // the kit's gap between pieces that go together: the tabs of a row
         lay->inset = 3 * view->scale;
         lay->high = lay->thick - 3 * view->scale;
         lay->count = (int)view->count;
