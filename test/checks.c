@@ -116454,9 +116454,10 @@ static p64 band_hash(p64 hash)
     return hash;
 }
 
-/* A bottom and a top band are the bytes they were before a band on a side could turn its text,
-   made again when dots were set on the stems under them. */
-#define BAND_UPRIGHT 3704624447264607136ull
+/* A bottom and a top band in the standard theme (dark, with white) are the bytes the baseline draws, pinned there before
+   the kit's roles drew the band. The unthemed table had a tint of its own, which no shell draws: the compositor themes
+   its table at start. */
+#define BAND_UPRIGHT 0x48e6be0cc0b129e3ull
 
 /* The cut of a title to room: what it gives fits, a cut ends in "..." after a whole character, the next character more
    would not fit, and what fits whole is not cut. */
@@ -116503,6 +116504,13 @@ static void check_taskbar_text(string_address face_path)
         return;
     }
     font_start(&band_engine, band_atlas, 128, 128);
+    // The band is drawn in the standard theme, as the compositor draws it: dark, with white, the table themed.
+    static struct windows standard_table;
+    struct windows address_to kept_table = compositor.table;
+
+    memory_zero(&standard_table, sizeof(standard_table));
+    standard_table.themed = 1, standard_table.theme = 1, standard_table.accent = 0xffffffu;
+    compositor.table = &standard_table;
     for (int edge = 0; edge < 2; edge++)
     {
         p64 hash = 0xcbf29ce484222325ull;
@@ -116526,6 +116534,7 @@ static void check_taskbar_text(string_address face_path)
                  taskbar_turn(TASKBAR_RIGHT) == (edge ? FONT_TOPS_RIGHT : FONT_TOPS_LEFT) && !taskbar_turn(TASKBAR_BOTTOM) &&
                  !taskbar_turn(TASKBAR_TOP);
     }
+    compositor.table = kept_table;
     check("taskbar text: center turns a side band's tops toward the middle of the output, edge toward its edge, a bottom or top band none", turns);
 
     /* A band on each side with each word, after a bottom one: every tab is written in (the band with its titles is not
@@ -117740,7 +117749,7 @@ static void check_compositor_touch(void)
                                                                   glass_at(200, 84) == COMPOSITOR_INK_LINE_HELD);
     touch_one(172, 90, true);
     compositor_present();
-    check("touch: let go, its line is the line with the keys again", glass_at(151, 140) == COMPOSITOR_INK_LINE_LIT &&
+    check("touch: let go, its line is the line with the keys again", glass_at(151, 140) == compositor_line_lit() &&
                                                                         compositor.arranged[2] == COMPOSITOR_FLOATING);
 
     /* A tap on the top of a window at the top of the screen: a click, which raises it and fills nothing. */
@@ -117768,7 +117777,7 @@ static void check_compositor_touch(void)
               (int)compositor.w[1] == width + 20 && compositor.x[1] == 30 && (int)compositor.h[1] == height);
         compositor_present();
         check("touch: the edge it holds is lit in the held ink, and the edges it does not hold are not",
-              glass_at(29, 70) == COMPOSITOR_INK_LINE_HELD && glass_at(100, 29) == COMPOSITOR_INK_LINE_LIT);
+              glass_at(29, 70) == COMPOSITOR_INK_LINE_HELD && glass_at(100, 29) == compositor_line_lit());
         touch_one(18, 70, true);
         compositor_want(1, width, height);
         compositor_put(1, 50, 30);
@@ -117783,7 +117792,7 @@ static void check_compositor_touch(void)
         check("touch: a corner held is lit along both its edges for COMPOSITOR_LIT_REACH, and no further",
               glass_at(compositor.x[1] - 1, compositor.y[1] + 20) == COMPOSITOR_INK_LINE_HELD &&
                   glass_at(compositor.x[1] + 20, compositor.y[1] - 1) == COMPOSITOR_INK_LINE_HELD &&
-                  glass_at(compositor.x[1] - 1, compositor.y[1] + 60) == COMPOSITOR_INK_LINE_LIT);
+                  glass_at(compositor.x[1] - 1, compositor.y[1] + 60) == compositor_line_lit());
         touch_one(30, 30, true);
         compositor_want(1, width, height);
         compositor.w[1] = (unsigned int)width, compositor.h[1] = (unsigned int)height;
@@ -125896,15 +125905,17 @@ static fn check_kit_theme(void)
                         if (!compositor.table)
                                 compositor.table = &table_of_its_own;
                         unsigned int themed = compositor.table->themed, mode = compositor.table->theme, accent = compositor.table->accent;
-                        b32 before = compositor_line_lit() == COMPOSITOR_INK_LINE_LIT || themed, standard, light, white, tabs;
+                        b32 before, standard, light, white, tabs;
 
+                        compositor.table->themed = 0;
+                        before = compositor_line_lit() == 0x4d4d4du && compositor_tab_target(0) == 0x111113u;
                         compositor.table->themed = 1, compositor.table->theme = 1, compositor.table->accent = 0xffffff;
                         standard = compositor_line_lit() == 0x4d4d4du;
                         tabs = compositor_tab_target(0) == 0x111113 && compositor_tab_target(1) == 0xffffff;
                         compositor.table->theme = 0, compositor.table->accent = 0xff8800;
                         light = compositor_line_lit() == 0xff8800u && compositor_tab_target(0) == 0xf7f7f8;
                         compositor.table->accent = 0xffffff;
-                        white = compositor_line_lit() == 0x18181bu && compositor_tab_target(1) == 0x18181b;
+                        white = compositor_line_lit() == 0x18181bu && compositor_tab_target(1) == 0x18181bu;
                         compositor.table->themed = themed, compositor.table->theme = mode, compositor.table->accent = accent;
                         check("kit theme: the lit window line and the tabs follow the theme (the standard's line is 4d4d4d, as it was)",
                               before && standard && light && white && tabs);

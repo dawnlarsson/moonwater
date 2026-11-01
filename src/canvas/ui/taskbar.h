@@ -37,11 +37,11 @@
 #endif
 
 // The band's size and ink, which compositor.c draws with as well as taskbar.c: the panel's height in logical pixels,
-// the ink of the panel and of a tab (black, lighter while its window has the keys, a little off black while it is put
-// away) for a tab drawn without a font, and each tab's mark.
+// the ink of the panel and of a tab (the chrome's shadow, lighter while its window has the keys, a little off black
+// while it is put away) for a tab drawn without a font, and each tab's mark. The panel's and the lit tab's inks are
+// not kit roles; the shadow is compositor_ink_shadow.
 #define COMPOSITOR_PANEL 24
 #define COMPOSITOR_INK_PANEL 0x141416u
-#define COMPOSITOR_INK_BUTTON 0x000000u
 #define COMPOSITOR_INK_BUTTON_LIT 0x38383cu
 // A window's tab: lit while it has the keys, dim while it is put away.
 #define COMPOSITOR_TAB_LIT 1u

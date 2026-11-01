@@ -60,12 +60,10 @@
 
 /* ---- backend: the look on the CPU ---- */
 
-// The palette, neutral greys and no hue: the desktop, and the black line round a window. The band's inks are in
-// taskbar.h, with the tabs drawn without a font; with a font the tabs are glass, inked from what is under them.
+// The desktop's ink: neutral grey, no hue, and not a kit role. The line round a window, its line with the keys, the
+// chrome's shadow and the band's inks are the kit's roles (compositor_chrome, theme.h), which is what the windows
+// draw with, so the chrome turns with the theme; the tabs drawn without a font are in taskbar.h.
 #define COMPOSITOR_INK_DESKTOP 0x1e1e1eu
-#define COMPOSITOR_INK_LINE 0x000000u
-// The line of the window with the keys: white at 30%.
-#define COMPOSITOR_INK_LINE_LIT 0x4d4d4du
 /*
         An edge or a corner of a window the hand holds to resize it, or all of its line while it is moved: the text's
         ink, well over the line with the keys, so a person sees which handle they have; and an edge the pointer is over,
@@ -98,10 +96,13 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_CLOSE_IN 5
 #define COMPOSITOR_RADIUS_MOST 64
 
+#include "ui/theme.h"
 #include "ui/taskbar.h"
 
 static struct taskbar_view compositor_taskbar_view(void);
 static unsigned int compositor_line_lit(void); // the lit line of the window with the keys, the theme's (compositor_theme_read)
+static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: a line without the keys, the close button, a tab unlit
+static unsigned int compositor_tab_target(b32 lit); // what a tab's glass is tinted toward, the theme's
 
 struct compositor_target
 {
@@ -407,7 +408,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
         if (x2 <= x1 || y2 <= y1)
                 return;
 
-        unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : 0x000000u;
+        unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : compositor_ink_shadow();
         int half = frame->scale; // half the X's stroke
         int made = compositor_close_cover.side == side && compositor_close_cover.half == half;
 
@@ -2928,7 +2929,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            (int)compositor.h[row], compositor.scale, compositor_pixels(row),
                                            (unsigned long)compositor_stride(), 0, null, 0,
                                            line ? COMPOSITOR_RADIUS * compositor.scale : 0, line,
-                                           row == compositor.focus ? compositor_line_lit() : COMPOSITOR_INK_LINE};
+                                           row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         // The edge or corner the hand holds or is over, or all of the line of a window being moved.
         if (row == compositor.lit_row && line)
@@ -6096,36 +6097,55 @@ static unsigned int compositor_theme_day(void)
 
 /*
         The theme's inks for the compositor's own chrome, the minimal look kept (frameless, 8 px corners, a 1 px line):
-        the lit line of the window with the keys is the theme's fill at 30% over black on the dark theme (white's is
-        4d4d4d, the line it always was), and the fill itself on the light one (the ink where the fill is too light to
-        show); a tab's glass is tinted toward the theme's surface, and the tab of the window with the keys toward its
-        fill. A table the compositor has not themed yet is drawn as before there was a theme.
+        the lit line of the window with the keys is the kit's primary at 30% over the shadow on the dark theme (white's
+        is 4d4d4d, the line it always was), and the primary itself on the light one (the kit's ink where the accent is
+        too light to show); a tab's glass is tinted toward the theme's surface, and the tab of the window with the keys
+        toward its primary. A table the compositor has not themed yet has the standard, as the kit has.
 */
-static unsigned int compositor_theme_fill(void)
+struct compositor_chrome
 {
-        unsigned int accent = compositor.table ? compositor.table->accent & 0xffffffu : 0xffffffu;
+        struct ui_theme roles;
+        unsigned int dark; // the theme the roles are made for: UI_THEME_DARK, else light
+};
 
-        // Too light to show on the light theme's surfaces (as the kit's rule, under 1.5:1: every channel past e0): the ink.
-        b32 pale = (accent >> 16 & 255) > 0xe0 && (accent >> 8 & 255) > 0xe0 && (accent & 255) > 0xe0;
+// The roles the chrome is drawn with, made by the kit (theme.h) for the window table's theme and accent, made again
+// when either changes. A table not themed yet has the standard: dark, with white.
+static const struct compositor_chrome *compositor_chrome_now(void)
+{
+        static struct compositor_chrome chrome;
+        static unsigned int made, made_dark, made_accent;
+        struct windows address_to table = compositor.table;
+        unsigned int themed = table && table->themed, dark = themed ? table->theme == UI_THEME_DARK : 1;
+        unsigned int accent = themed ? table->accent & 0xffffffu : UI_ACCENT_STANDARD;
 
-        return compositor.table && !compositor.table->theme && pale ? 0x18181bu : accent;
+        if (!made || made_dark != dark || made_accent != accent)
+        {
+                ui_theme_make(&chrome.roles, dark, accent);
+                chrome.dark = dark;
+                made = 1, made_dark = dark, made_accent = accent;
+        }
+        return &chrome;
 }
 
+// The lit line of the window with the keys: on the dark theme the primary at 30% over the shadow, which on the
+// standard is white's 4d4d4d; on the light one the primary itself.
 static unsigned int compositor_line_lit(void)
 {
-        if (!compositor.table || !compositor.table->themed)
-                return COMPOSITOR_INK_LINE_LIT;
-        return compositor.table->theme ? window_mix(0, compositor_theme_fill(), 77) : compositor_theme_fill();
+        const struct compositor_chrome *chrome = compositor_chrome_now();
+
+        return (chrome->dark ? ui_mix(chrome->roles.role[UI_PRIMARY], 30, chrome->roles.role[UI_SHADOW])
+                             : chrome->roles.role[UI_PRIMARY]) & 0xffffffu;
 }
 
-// The colour a tab's glass is tinted toward: the theme's surface (or its fill, lit), or -1 for its own side of lightness.
-static long compositor_tab_target(b32 lit)
+static unsigned int compositor_ink_shadow(void)
 {
-        if (!compositor.table || !compositor.table->themed)
-                return -1;
-        if (lit)
-                return compositor_theme_fill();
-        return compositor.table->theme ? 0x111113 : 0xf7f7f8;
+        return compositor_chrome_now()->roles.role[UI_SHADOW] & 0xffffffu;
+}
+
+// The colour a tab's glass is tinted toward: the theme's surface, or its primary for the tab of the window with the keys.
+static unsigned int compositor_tab_target(b32 lit)
+{
+        return compositor_chrome_now()->roles.role[lit ? UI_PRIMARY : UI_SURFACE] & 0xffffffu;
 }
 
 static void compositor_theme_read(void)

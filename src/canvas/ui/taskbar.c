@@ -49,7 +49,6 @@ static const unsigned int taskbar_clear[TASKBAR_TAB_CHUNK];
 // What the band takes from compositor.c, which comes before this file in every build and defines them: the meet of two
 // rectangles, the grain a glass row is made with, and a colour made more vivid.
 static void compositor_meet(int *into, const int *other);
-static long compositor_tab_target(b32 lit);
 static const unsigned int *compositor_grain_row(unsigned int light, int x, int y);
 static unsigned int compositor_vivid(unsigned int pixel);
 
@@ -331,10 +330,10 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
 
 static unsigned int taskbar_tab_ink(int slot, unsigned int mark)
 {
-        return slot < 0                 ? COMPOSITOR_INK_BUTTON
+        return slot < 0                 ? compositor_ink_shadow()
                : mark & COMPOSITOR_TAB_AWAY ? COMPOSITOR_INK_PANEL
                : mark & COMPOSITOR_TAB_LIT  ? COMPOSITOR_INK_BUTTON_LIT
-                                            : COMPOSITOR_INK_BUTTON;
+                                            : compositor_ink_shadow();
 }
 
 // The corners the tabs keep square: the ones on the edge the band is along, so the round ones face the middle.
@@ -459,13 +458,9 @@ static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, i
                                       int x, int y, int width, int height, int slot, unsigned int mark)
 {
         unsigned int middle = compositor_vivid(view->glass[(long)(y + height / 2 - gy) * gw + x - gx + width / 2]);
-        unsigned int target = window_light(middle) ? 0xffffffu : 0x000000u;
         unsigned int amount = slot >= 0 && (mark & COMPOSITOR_TAB_LIT) ? 140 : 179;
-        // With a theme the tabs follow it: toward its surface, and the tab of the window with the keys toward its fill.
-        long themed = compositor_tab_target(slot >= 0 && (mark & COMPOSITOR_TAB_LIT));
-
-        if (themed >= 0)
-                target = (unsigned int)themed;
+        // The tabs follow the theme: toward its surface, and the tab of the window with the keys toward its fill.
+        unsigned int target = compositor_tab_target(slot >= 0 && (mark & COMPOSITOR_TAB_LIT));
 
         for (int row = y; row < y + height; row++)
         {
