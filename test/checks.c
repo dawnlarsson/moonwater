@@ -116947,6 +116947,87 @@ static void check_compositor_popup(void)
 }
 
 /*
+        A press outside an open popup asks it to go and goes no further: not to the window beneath it, the desktop or a tab,
+        by a mouse or by a finger alike (touch). A press on the popup itself still reaches the popup.
+*/
+static void check_compositor_popup_press(b32 touch)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("popup press: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->state[1] = table->state[3] = 0;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+
+    // A popup of row 3 for row 1: 10 pixels in from the window's top left, so on the screen 60 to 120 by 40 to 80.
+    table->popup_parent[3] = 2;
+    table->popup_x[3] = 10;
+    table->popup_y[3] = 10;
+    table->popup_w[3] = 0;
+    table->popup_h[3] = 0;
+    table->popup_flags[3] = WINDOW_POPUP_POINT;
+    table->width[3] = 60;
+    table->height[3] = 40;
+    table->glass[3] = WINDOW_NO_CLOSE;
+    glass_paint(3, 0, 0, 60, 40, 0x303030, true);
+    compositor_present();
+
+    compositor.touching = touch;
+    compositor.pointer_x = 70;
+    compositor.pointer_y = 50;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    if (touch)
+        check("popup press: a finger on the popup still reaches the popup", compositor.grab == 3);
+    else
+        check("popup press: a press on the popup still reaches the popup", compositor.grab == 3);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+
+    // Inside window 1 (50 to 170 by 30 to 110) and well outside the popup and its edge grip: the popup is asked to go and
+    // the press is its window's no further. (Just outside the popup's edge is the popup's own grip, not the window's.)
+    compositor.pointer_x = 150;
+    compositor.pointer_y = 100;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    if (touch)
+    {
+        check("popup press: a finger outside an open popup asks it to go", (table->state[3] & WINDOW_CLOSING) != 0);
+        check("popup press: and it does not reach the window beneath (no grab, no focus change)",
+              compositor.grab == COMPOSITOR_NONE && compositor.focus == 1);
+    }
+    else
+    {
+        check("popup press: a mouse press outside an open popup asks it to go", (table->state[3] & WINDOW_CLOSING) != 0);
+        check("popup press: and it does not reach the window beneath (no grab, no focus change)",
+              compositor.grab == COMPOSITOR_NONE && compositor.focus == 1);
+    }
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.touching = 0;
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+}
+
+/*
         The tray (the clock and the battery) pressed twice quickly opens the settings: a window named settings that is
         up is brought up and given the keys, and with none the script is asked to start it. One press, a press of the
         middle button, and two too far apart do nothing.
@@ -129892,6 +129973,8 @@ b32 main()
 #endif
         check_compositor_dismiss();
         check_compositor_popup();
+        check_compositor_popup_press(0);
+        check_compositor_popup_press(1);
         check_compositor_tray();
         check_compositor_place();
         check_compositor_remember();

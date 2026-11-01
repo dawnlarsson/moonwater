@@ -3006,7 +3006,7 @@ static int compositor_bands(void)
 // and on each of several, the windows whose screen it is on (compositor_screen_of).
 static int compositor_popup_parent[WINDOWS];
 static int compositor_popup_top(int root);
-static void compositor_popups_close(int root, int keep);
+static b32 compositor_popups_close(int root, int keep);
 static b32 compositor_popup_first(int row);
 static void compositor_popup_leave(int row);
 
@@ -8191,9 +8191,12 @@ static int compositor_popup_top(int root)
         return root;
 }
 
-// Every popup asked to go: of one window (root), or of every window (-1); one in keep's chain stays.
-static void compositor_popups_close(int root, int keep)
+// Every popup asked to go: of one window (root), or of every window (-1); one in keep's chain stays. True when a popup
+// that was still open is asked now: one already asked, on its way out, is not counted.
+static b32 compositor_popups_close(int root, int keep)
 {
+        b32 asked = false;
+
         for (int row = 0; row < WINDOWS; row++)
         {
                 b32 kept = false;
@@ -8205,8 +8208,12 @@ static void compositor_popups_close(int root, int keep)
                 for (int link = keep, hops = 0; link >= 0 && hops < WINDOWS; link = compositor_popup_parent[link], hops++)
                         kept |= link == row;
                 if (!kept)
+                {
+                        asked |= !(compositor.state[row] & WINDOW_CLOSING);
                         compositor_close(row);
+                }
         }
+        return asked;
 }
 
 /*
@@ -8839,7 +8846,10 @@ static void compositor_button(unsigned int code, int down)
                 }
                 return;
         }
-        compositor_popups_close(-1, -1);
+        // A press outside every popup that is open asks them to go, and is theirs: it goes no further, to the window
+        // below, the desktop or a tab, with a finger the same as a mouse (compositor_touch_button is this path too).
+        if (compositor_popups_close(-1, -1))
+                return;
 
         // A window that asked to be put away by a press anywhere but on it (WINDOW_DISMISS) is asked to go by one on
         // the desktop, a tab, another window or the tray alike; the press then goes on as it would have.
