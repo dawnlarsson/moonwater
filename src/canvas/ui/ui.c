@@ -619,23 +619,28 @@ static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int 
                                            the app steps it again UI_DRAG_FRAME_NS later while it flies
             ui_drag_stop(drag)             it stops at once: a press, a key, the end of the list
 */
+#define UI_Q 30                    // the kit's fixed point, Q30: the drag's throw is kept in it, and the glide's
+#define UI_ONE (1ll << UI_Q)
+static inline b64 ui_qmul(b64 a, b64 b);
+static b64 ui_exp_neg(b64 x);
 #define UI_DRAG_FRAME_NS 16000000l
 #define UI_DRAG_THROW 300   // the least speed a finger lets go at that throws the list
 #define UI_DRAG_STILL 20    // the speed a throw stops at
-#define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, near enough: a fifth of it every 65 ms
+#define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, whatever the step (the wheel glide's rule)
 
 struct ui_drag
 {
         int last;          // where the finger was at the last move
         long speed;        // pixels a second, signed
-        long owed;         // a throw's move not yet given, in pixel-nanoseconds
+        b64 owed;          // a throw's move not yet given, in Q30 pixels
+        b64 rate;          // a throw's speed in Q30 pixels a second, the one the steps fall by e of
         positive at;       // when the last move or step was
         b32 flying;
 };
 
 static fn ui_drag_start(struct ui_drag address_to drag, int at, positive now)
 {
-        drag->last = at, drag->speed = 0, drag->owed = 0, drag->at = now, drag->flying = false;
+        drag->last = at, drag->speed = 0, drag->owed = 0, drag->rate = 0, drag->at = now, drag->flying = false;
 }
 
 static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
@@ -662,6 +667,7 @@ static b32 ui_drag_let_go(struct ui_drag address_to drag, positive now)
                 drag->speed = 0;
         drag->flying = drag->speed >= UI_DRAG_THROW || drag->speed <= -UI_DRAG_THROW;
         drag->owed = 0;
+        drag->rate = (b64)drag->speed * UI_ONE;
         drag->at = now;
         return drag->flying;
 }
@@ -669,21 +675,24 @@ static b32 ui_drag_let_go(struct ui_drag address_to drag, positive now)
 static int ui_drag_step(struct ui_drag address_to drag, positive now)
 {
         long gap = now > drag->at ? (long)(now - drag->at) : 0, whole;
+        b64 e, moved;
 
         if (!drag->flying)
                 return 0;
         gap = gap > 100000000l ? 100000000l : gap;
-        drag->owed += drag->speed * gap;
-        whole = drag->owed / 1000000000l;
-        drag->owed -= whole * 1000000000l;
-        // Slower by its share of the time, and by a pixel a second at least, so a slow throw ends too.
-        {
-                long slow = drag->speed * gap / UI_DRAG_SLOW_NS;
-
-                drag->speed -= slow ? slow : drag->speed > 0 ? 1 : -1;
-        }
+        // The speed falls by e in UI_DRAG_SLOW_NS, from where it is, as the wheel glide's speed does: the move is the speed's
+        // integral over the gap and the speed after is its fall's end. So a step of any length moves the same distance, and
+        // a throw stepped at 60 Hz covers what it covers at 120 Hz (a floor per step made the faster steps slow down less).
+        e = ui_exp_neg((b64)gap * UI_ONE / UI_DRAG_SLOW_NS);
+        moved = ui_qmul(ui_qmul(drag->rate, UI_DRAG_SLOW_NS * UI_ONE / 1000000000ll), UI_ONE - e);
+        drag->owed += moved;
+        whole = (long)(drag->owed / UI_ONE);
+        drag->owed -= (b64)whole * UI_ONE;
+        drag->rate = ui_qmul(drag->rate, e);
+        drag->speed = (long)(drag->rate / UI_ONE);
         drag->at = now;
-        if (drag->speed < UI_DRAG_STILL && drag->speed > -UI_DRAG_STILL)
+        // It stops when it is slower than a pixel's share a second: the stop is the speed, not a round-down in the steps.
+        if (drag->rate < UI_DRAG_STILL * UI_ONE && drag->rate > -UI_DRAG_STILL * UI_ONE)
                 drag->flying = false;
         return (int)whole;
 }
@@ -693,6 +702,7 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
         drag->flying = false;
         drag->speed = 0;
         drag->owed = 0;
+        drag->rate = 0;
 }
 
 
@@ -728,8 +738,6 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
                         ease-out cubic, snapped to the step, then the landing
                         squish (60 ms up, 220 back)
 */
-#define UI_Q 30
-#define UI_ONE (1ll << UI_Q)
 #define UI_HALF (1ll << (UI_Q - 1))
 #define UI_LN2 744261118ll                 // ln 2
 #define UI_INV_LN2 1549082005ll            // 1 / ln 2

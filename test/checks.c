@@ -118767,6 +118767,25 @@ static void check_ui_press(void)
         while (drag.flying && steps < 1000)
                 total += ui_drag_step(&drag, now += UI_DRAG_FRAME_NS), steps++;
         check("ui press: and it goes on the way it went, slowing, and stops", total > 200 && total < 450 && steps < 200);
+        // The same throw stepped at 60 Hz and at 120 Hz covers the same distance: the speed falls by its share of the time,
+        // not by a floor per step, which made the faster steps slow down less.
+        {
+                struct ui_drag throw_at[2];
+                int covered[2] = {0, 0};
+
+                for (int which = 0; which < 2; which++)
+                {
+                        positive frame = which ? 8333333ul : 16666667ul, at = 0;
+
+                        memory_zero(&throw_at[which], sizeof(throw_at[which]));
+                        throw_at[which].speed = 600;
+                        ui_drag_let_go(&throw_at[which], at);
+                        while (throw_at[which].flying && at < 5000000000ul)
+                                covered[which] += ui_drag_step(&throw_at[which], at += frame);
+                }
+                check("ui press: a throw of 600 pixels a second covers the same distance at 60 Hz steps and at 120 Hz",
+                      covered[0] > 150 && covered[0] < 250 && (covered[0] > covered[1] ? covered[0] - covered[1] : covered[1] - covered[0]) <= 1);
+        }
         ui_drag_start(&drag, 0, now);
         ui_drag_follow(&drag, 30, now += 10000000ull);
         check("ui press: a finger that stopped before it lifted throws nothing",
