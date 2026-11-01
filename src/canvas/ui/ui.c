@@ -3008,12 +3008,15 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
 
                 if (c->variant & UI_SLIDER_STEPS)
                 {
-                        // Snapped to the steps, as the hover ratio is.
-                        b64 steps = c->step > 0 ? ui_qdiv(c->high - c->low, c->step) : UI_ONE;
+                        // Snapped to the steps the value takes (ui_slider_snap): the nearest, never past the last.
+                        b64 span = c->step > 0 ? ui_qdiv(c->high - c->low, c->step) : UI_ONE;
                         b64 z = ui_qdiv(ui_q(hx - rx - ui_q8(ui, thumb) / 2), ui_q(rw - ui_q8(ui, thumb)));
+                        b64 n;
 
                         z = z < 0 ? 0 : z > UI_ONE ? UI_ONE : z;
-                        z = ui_qdiv(((ui_qmul(z, steps) + UI_HALF) >> UI_Q) << UI_Q, steps);
+                        n = (ui_qmul(z, span) + UI_HALF) >> UI_Q;
+                        n = n > span >> UI_Q ? span >> UI_Q : n;
+                        z = ui_qdiv(n << UI_Q, span);
                         hx = rx + (b32)ui_qmul(z, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
                         left = stop < hx - rx ? rx + stop : hx;
                         right = stop < hx - rx ? hx : rx + stop;
@@ -3035,12 +3038,15 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         // A stepped slider's dots: a faint ink one on the rest, a paper knockout on the fill, none where the value is.
         if (c->variant & UI_SLIDER_STEPS && c->step > 0)
         {
-                int steps = (int)((ui_qdiv(c->high - c->low, c->step) + UI_HALF) >> UI_Q), here = (int)((ui_qmul(ratio, ui_q(steps)) + UI_HALF) >> UI_Q);
+                // The range in steps, not rounded: the steps are the whole ones it holds, each at its own place along the track.
+                b64 span = ui_qdiv(c->high - c->low, c->step);
+                int steps = (int)(span >> UI_Q), here = (int)((ui_qmul(ratio, span) + UI_HALF) >> UI_Q);
 
                 for (int k = 0; k <= steps && steps > 0; k++)
                 {
-                        b32 dx = rx + (b32)((b64)(rw - ui_q8(ui, thumb)) * k / steps) + ui_q8(ui, thumb) / 2;
-                        b32 filled = (b64)k * UI_ONE / steps <= ratio + 107374;
+                        b64 along = ui_qdiv(ui_q(k), span);
+                        b32 dx = rx + (b32)ui_qmul(along, rw - ui_q8(ui, thumb)) + ui_q8(ui, thumb) / 2;
+                        b32 filled = along <= ratio + 107374;
                         struct ui_box dot;
 
                         if (line)

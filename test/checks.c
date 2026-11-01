@@ -126685,6 +126685,32 @@ static fn check_kit_controls(void)
                       landed == ui_q(80));
         }
 
+        // A stepped slider's dots sit at its steps: 0, 40 and 80 of 0 to 110, so a point a third of the way along has no dot
+        // (the dot at 131 is 40 of 110; the one at 122 would be a third).
+        {
+                struct ui_control plain, dotted;
+                unsigned int paper = 0xff111113u, plain_mid, dotted_mid, plain_third, dotted_third;
+
+                memory_zero(&plain, sizeof(plain));
+                plain.kind = UI_SLIDER, plain.x = 20, plain.y = 100, plain.w = 300, plain.h = 88, plain.label = "Steps";
+                plain.low = ui_q(0), plain.high = ui_q(110), plain.step = ui_q(40), plain.value = ui_q(0);
+                dotted = plain;
+                dotted.variant = UI_SLIDER_STEPS;
+                ui_control_start(&plain);
+                ui_control_start(&dotted);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_fill(&ui, 0, 90, 340, 80, paper);
+                ui_control_draw(&ui, &plain);
+                plain_mid = pixels[156 * 600 + 131], plain_third = pixels[156 * 600 + 122];
+                ui_fill(&ui, 0, 90, 340, 80, paper);
+                ui_control_draw(&ui, &dotted);
+                dotted_mid = pixels[156 * 600 + 131], dotted_third = pixels[156 * 600 + 122];
+                check("kit slider: a stepped slider's dot sits at its step (40 of 110), where the dot is drawn",
+                      dotted_mid != plain_mid);
+                check("kit slider: a stepped slider has no dot a third of the way along, which is no step of 0 to 110 by 40",
+                      dotted_third == plain_third);
+        }
+
         // A determinate bar's fill stops at the track's end, however far past its whole the value is.
         {
                 struct ui_control bar;
