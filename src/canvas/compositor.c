@@ -2194,6 +2194,8 @@ struct compositor_touch
         int left_x, left_y;      // and what the wheel has not yet turned, in 120ths times the pixels of a notch
         int two_moved;
         int hidden;
+        int hold_row;            // the window a long press (COMPOSITOR_TOUCH_HOLD_NS) landed on, which its lift is told, or COMPOSITOR_NONE
+        int holding;             // the long press's right button is being sent: its events carry WINDOW_KEY_HOLD
 };
 
 #define COMPOSITOR_EV_KEY 1u
@@ -2255,9 +2257,11 @@ struct compositor_poll
         COMPOSITOR_TOUCH_CORNER along either edge from it, a tab reaches COMPOSITOR_TOUCH_TAB further toward the middle of
         its screen and to half the gap either side, and the close button is the finger's within COMPOSITOR_TOUCH_CLOSE
         of its middle. It moves nothing until it is COMPOSITOR_TOUCH_SLOP from where it went down, so a tap is a click
-        where it landed and not a drag. Held COMPOSITOR_TOUCH_HOLD_NS without moving it is the right button, and two
-        fingers lifted within COMPOSITOR_TOUCH_TAP_NS of the second landing, neither moved, are the right button too;
-        two that move are the wheel, a notch to COMPOSITOR_TOUCH_WHEEL, what is under them following them.
+        where it landed and not a drag. Held COMPOSITOR_TOUCH_HOLD_NS without moving it is a long press: the right button,
+        flagged WINDOW_KEY_HOLD, and then the finger may move on, the pointer following it, until it lifts, which ends the
+        press with a release (CANCEL and HOLD) in the window it landed on. Two fingers lifted within COMPOSITOR_TOUCH_TAP_NS
+        of the second landing, neither moved, are the right button too; two that move are the wheel, a notch to
+        COMPOSITOR_TOUCH_WHEEL, what is under them following them.
 */
 #define COMPOSITOR_TOUCH_GRIP 16
 #define COMPOSITOR_TOUCH_GRIP_IN 8
@@ -2265,7 +2269,7 @@ struct compositor_poll
 #define COMPOSITOR_TOUCH_TAB 20
 #define COMPOSITOR_TOUCH_CLOSE 22
 #define COMPOSITOR_TOUCH_SLOP 8
-#define COMPOSITOR_TOUCH_HOLD_NS 500000000ull
+#define COMPOSITOR_TOUCH_HOLD_NS 400000000ull
 #define COMPOSITOR_TOUCH_TAP_NS 400000000ull
 #define COMPOSITOR_TOUCH_WHEEL 48
 // How long a finger's mark fades once it is up.
@@ -6629,6 +6633,9 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         // What a finger did says so: a program may scroll what a finger drags where a mouse would select.
         if (compositor.touching && type != WINDOW_EVENT_KEY)
                 flags |= WINDOW_KEY_TOUCH;
+        // The right button of a long press says so, which a program may take as its own (WINDOW_KEY_HOLD).
+        if (compositor.touch.holding && type == WINDOW_EVENT_BUTTON)
+                flags |= WINDOW_KEY_HOLD;
         head = table->event_head[row];
         used = head - __atomic_load_n(&table->event_tail[row], __ATOMIC_ACQUIRE);
         last = (head - 1) % WINDOWS_EVENTS;
@@ -9500,6 +9507,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                 touch->mode = COMPOSITOR_TOUCH_ONE;
                 touch->moved = touch->two_moved = 0;
                 touch->closing = COMPOSITOR_NONE;
+                touch->hold_row = COMPOSITOR_NONE;
                 touch->start_ns = now;
                 compositor_touch_point(at, other, &touch->start_x, &touch->start_y);
                 touch->hidden = 1;
@@ -9603,7 +9611,24 @@ static void compositor_touch_report(unsigned int at, positive now)
                         touch->count = count;
         }
         else if (touch->mode == COMPOSITOR_TOUCH_HELD && !count)
+        {
+                // Lifted after a long press: the release that ends it, in the window it landed on (a terminal copies its selection).
+                if (touch->hold_row >= 0)
+                        compositor_post(touch->hold_row, WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD,
+                                        COMPOSITOR_BTN_LEFT, 0);
+                touch->hold_row = COMPOSITOR_NONE;
                 touch->mode = COMPOSITOR_TOUCH_NONE;
+        }
+        else if (touch->mode == COMPOSITOR_TOUCH_HELD && count == 1 && screen->id[touch->first] >= 0)
+        {
+                // Held, then moved on: the pointer follows the finger as it does before a hold, so what it drags (a selection)
+                // follows it too. Nothing is pressed; the press was taken back when the hold came.
+                compositor_touch_point(at, touch->first, &x, &y);
+                if (!touch->moved && compositor_past_slop(touch->start_x, touch->start_y, x, y, COMPOSITOR_TOUCH_SLOP * compositor.scale))
+                        touch->moved = 1;
+                if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
+                        compositor_touch_motion(x, y);
+        }
 
         memory_copy(screen->was, screen->id, sizeof(screen->was));
 }
@@ -9624,11 +9649,16 @@ static positive compositor_touch_due(void)
 static void compositor_touch_tick(positive now)
 {
         positive due = compositor_touch_due();
+        int tab;
 
         if (!due || now < due)
                 return;
+        // The left press taken back and the right button sent are both the long press's: the cancel carries WINDOW_KEY_HOLD too.
+        compositor.touch.holding = 1;
         compositor_touch_cancel();
+        compositor.touch.hold_row = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         compositor_touch_right();
+        compositor.touch.holding = 0;
         compositor.touch.mode = COMPOSITOR_TOUCH_HELD;
 }
 

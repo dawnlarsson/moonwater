@@ -202,6 +202,9 @@ static struct
         unsigned int select_press_line, select_press_column;
         int select_kind;
         b32 selecting, select_dragging, select_box;
+        // A finger's long press selected it (terminal_hold): its ends are drawn as handles, and the press is still held
+        // (touch_select) or was (touch_held, until the lift that ends it).
+        b32 select_touch, touch_select, touch_held;
         positive click_at;
         unsigned int click_row, click_column;
         int clicks;
@@ -697,6 +700,15 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
         if (cell->flags & WINDOW_CELL_BAR)
                 terminal_fill(pixels, x, y, terminal.cell_w / 8 ? terminal.cell_w / 8 : 1,
                               terminal.cell_h, ink);
+
+        // A touch selection's end: a flat handle, a quarter cell wide, down the outer edge of its cell in the selection's colour.
+        if (cell->flags & (WINDOW_CELL_HANDLE_START | WINDOW_CELL_HANDLE_END))
+        {
+                unsigned int handle = terminal.cell_w / 4 ? terminal.cell_w / 4 : 1;
+
+                terminal_fill(pixels, cell->flags & WINDOW_CELL_HANDLE_START ? x : x + (int)(width - handle), y, handle,
+                              terminal.cell_h, ui_role(UI_SELECTION) & 0xffffffu);
+        }
 }
 
 /*
@@ -789,7 +801,8 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 unsigned int cells = pair ? 2 : 1;
                 b32 glyph = cell->character > ' ' && !(cell->flags & WINDOW_CELL_HIDDEN) &&
                             !(cell->flags & (WINDOW_CELL_WIDE | WINDOW_CELL_WIDE_RIGHT) && !pair);
-                b32 decor = (cell->flags & (WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR)) != 0;
+                b32 decor = (cell->flags & (WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR | WINDOW_CELL_HANDLE_START |
+                                            WINDOW_CELL_HANDLE_END)) != 0;
 
                 // The same as the buffer has, and so are the halves it pairs with: a half whose other half changed
                 // is drawn again, whole or blank as it now is.
@@ -1980,6 +1993,15 @@ static void terminal_select_mark(struct window_cell address_to out, unsigned int
         }
         for (unsigned int column = start > from ? start - from : 0; column < COLUMNS && from + column < stop; column++)
                 out[column].flags |= WINDOW_CELL_SELECTED;
+
+        // A touch selection's ends are drawn with handles: the first and the last cell of a span that is not empty.
+        if (terminal.select_touch && !terminal.select_box && (first_line != last_line || first_column != last_column))
+        {
+                if (line == first_line && first_column >= from && first_column - from < COLUMNS)
+                        out[first_column - from].flags |= WINDOW_CELL_HANDLE_START;
+                if (line == last_line && last_column > from && last_column - from <= COLUMNS)
+                        out[last_column - 1 - from].flags |= WINDOW_CELL_HANDLE_END;
+        }
 }
 
 // The selected text, a line end between lines and each line's trailing blanks left off, into a buffer the caller frees.
@@ -2176,6 +2198,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                         terminal.selecting = terminal.select_kind != TERMINAL_SELECT_CHARS;
                 }
                 terminal.select_dragging = true;
+                terminal.select_touch = false;
                 address_to dirty = true;
                 return true;
         }
@@ -2232,7 +2255,7 @@ static b32 terminal_select_key(const struct window_event address_to event, b32 a
         }
         if ((flags & WINDOW_KEY_DOWN) && terminal.selecting && !terminal_modifier_key(event->a))
         {
-                terminal.selecting = false;
+                terminal.selecting = false, terminal.select_touch = false;
                 address_to dirty = true;
         }
         return false;
@@ -2262,6 +2285,85 @@ static b32 terminal_clip_event(b32 master, const struct window_event address_to 
 }
 
 /*
+        A long press on a terminal no program asked the pointer of: a finger held still (WINDOW_KEY_HOLD on the right button)
+        selects the word under it, and the moves after it extend the selection by cells (terminal_select_event); its lift,
+        the left release that ends the press (CANCEL and HOLD), copies it as a mouse's release does. The left press's cancel
+        that came with the hold is no lift, and a grab of the bar that finger landed on goes on through it. Answers whether
+        the event was the long press's, and so is taken here; a program that asked for the pointer has the right button.
+*/
+static b32 terminal_hold(const struct window_event address_to event, b32 address_to dirty)
+{
+        unsigned int row, column, line, at;
+        b32 moved = false;
+
+        if (event->type != WINDOW_EVENT_BUTTON || !(event->flags & WINDOW_KEY_TOUCH))
+                return false;
+        if (event->a == 0x110 && (event->flags & WINDOW_KEY_DOWN))
+        {
+                terminal.touch_held = false;
+                return false;
+        }
+        if (event->a == 0x110 && (event->flags & WINDOW_KEY_HOLD) && !(event->flags & WINDOW_KEY_DOWN))
+        {
+                // The hold's cancel comes before its right button, and it is no lift: the lift comes after the right button.
+                if (!terminal.touch_held)
+                        return terminal.bar.held;
+                terminal.touch_held = false;
+                if (terminal.bar.held)
+                {
+                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, terminal.pointer_x + (int)terminal.pad,
+                                             terminal.pointer_y + (int)terminal.pad_y, false, true, &moved);
+                        address_to dirty = address_to dirty || moved;
+                }
+                if (terminal.touch_select)
+                {
+                        terminal.touch_select = terminal.select_dragging = false;
+                        if (terminal.selecting && (terminal.select_anchor_line != terminal.select_active_line ||
+                                                   terminal.select_anchor_column != terminal.select_active_column))
+                                terminal_copy(WINDOWS_CLIP_PRIMARY);
+                        else
+                                terminal.selecting = false;
+                        address_to dirty = true;
+                }
+                return true;
+        }
+        if (event->a != 0x111 || !(event->flags & WINDOW_KEY_HOLD))
+                return false;
+        if (!(event->flags & WINDOW_KEY_DOWN))
+                return !mouse_mode;
+
+        // The right button's press: a program that asked for the pointer has it as a right button, and a bar's grab or the
+        // gutter is the bar's. Anywhere else the word under the finger is selected, and the drag after it extends it.
+        terminal.touch_held = true;
+        if (mouse_mode)
+                return false;
+        if (terminal.bar.held || terminal_bar_takes(1))
+                return true;
+        if (terminal.pointer_x < 0 || terminal.pointer_y < 0)
+                return true;
+        row = (unsigned int)terminal.pointer_y / terminal.cell_h;
+        column = (unsigned int)terminal.pointer_x / terminal.cell_w;
+        if (row >= ROWS || column >= COLUMNS)
+                return true;
+        terminal_place_at(row, column, &line, &at);
+        terminal.select_box = false;
+        terminal.select_kind = TERMINAL_SELECT_WORDS;
+        terminal.select_press_line = terminal.select_active_line = line;
+        terminal.select_press_column = terminal.select_active_column = at;
+        terminal_select_snap();
+        // The word is the selection; from here a drag moves its far end by cells, from the word's first cell.
+        terminal.select_press_line = terminal.select_anchor_line;
+        terminal.select_press_column = terminal.select_anchor_column;
+        terminal.select_kind = TERMINAL_SELECT_CHARS;
+        terminal.selecting = true;
+        terminal.select_dragging = true;
+        terminal.touch_select = true;
+        terminal.select_touch = true;
+        address_to dirty = true;
+        return true;
+}
+
+/*
         One event from the compositor. Answers whether the pty will still take
         what the shell is owed; dirty is set when what is drawn has to be made
         again, whether or not the cells changed.
@@ -2276,6 +2378,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 terminal.pointer_x = event->a - (int)terminal.pad;
                 terminal.pointer_y = event->b - (int)terminal.pad_y;
         }
+        if (event->type == WINDOW_EVENT_BUTTON && terminal_hold(event, dirty))
+                return true;
         if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
         {
                 b32 handled, sent = terminal_finger(master, event, dirty, &handled);

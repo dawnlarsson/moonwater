@@ -115748,6 +115748,58 @@ static fn check_pointer(void)
                 terminal_view_live();
         }
 
+        /*
+                A long press selects the word under the finger: the right button held (WINDOW_KEY_HOLD) after a finger's
+                press that its cancel took back; the drag after it extends the selection by cells, from the word's first cell;
+                the lift copies it. A short touch selects nothing.
+        */
+        {
+                struct window_event at = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+                struct window_event down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+                struct window_event held = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, 0x110, 0};
+                struct window_event right_down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD, 0x111, 0};
+                struct window_event right_up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD, 0x111, 0};
+                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, 0x110, 0};
+                struct window_event up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0};
+                p8 address_to text;
+                positive room, length;
+
+                terminal.selecting = terminal.select_dragging = terminal.touch_select = terminal.select_touch = false;
+                terminal_view_live();
+                term_bytes("\x1b[H\x1b[2Jalpha bravo charlie\r\n", 28);
+                terminal_view_live();
+                at.a = (int)(terminal.pad + 8 * terminal.cell_w + terminal.cell_w / 2), at.b = (int)(terminal.pad_y + terminal.cell_h / 2);
+                terminal_receive(-1, &at, &dirty);
+                terminal_receive(-1, &down, &dirty);
+                terminal_receive(-1, &held, &dirty);
+                terminal_receive(-1, &right_down, &dirty);
+                terminal_receive(-1, &right_up, &dirty);
+                length = terminal_select_text(&text, &room);
+                check("touch: a long press selects the word under the finger, and no menu opens",
+                      terminal.touch_select && terminal.selecting && length == 5 && !memory_compare(text, "bravo", 5) &&
+                          !terminal_menu.open && to_shell_length == 0);
+                array_store_release(text, room, length);
+
+                at.a = (int)(terminal.pad + 14 * terminal.cell_w + 1);
+                terminal_receive(-1, &at, &dirty);
+                length = terminal_select_text(&text, &room);
+                check("touch: a drag after the long press extends the selection by cells, from the word's first cell",
+                      length == 8 && !memory_compare(text, "bravo ch", 8));
+                array_store_release(text, room, length);
+
+                terminal_receive(-1, &lift, &dirty);
+                check("touch: the lift ends the press and copies the selection, which stays marked",
+                      !terminal.touch_select && !terminal.select_dragging && terminal.selecting && to_shell_length == 0);
+
+                terminal.selecting = terminal.select_touch = false;
+                at.a = (int)(terminal.pad + 8 * terminal.cell_w + terminal.cell_w / 2);
+                terminal_receive(-1, &at, &dirty);
+                terminal_receive(-1, &down, &dirty);
+                terminal_receive(-1, &up, &dirty);
+                check("touch: a short touch with no movement selects nothing", !terminal.selecting && !terminal.touch_select &&
+                      to_shell_length == 0);
+                to_shell_length = 0;
+        }
 #endif
 }
 
@@ -117993,15 +118045,34 @@ static void check_compositor_touch(void)
         check("touch: two fingers tapped together are a click of the right button", touch_buttons(1, head1) == 0x1101110211111110ul);
     }
 
-    /* Held still for half a second, a finger is the right button there; its left press is taken back first. */
+    /*
+        Held still for a long press (COMPOSITOR_TOUCH_HOLD_NS), a finger is the right button there, flagged as a long press;
+        its left press is taken back first. The finger may move on from there, the pointer following it, and its lift is
+        the release that ends the press (cancelled, touch and held), told to the window it landed on.
+    */
     head1 = table->event_head[1];
     touch_one(100, 80, false);
     compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS - 1000000);
     unchanged = touch_buttons(1, head1) == 0x1101;
     compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
-    touch_one(100, 80, true);
-    check("touch: held still half a second, a finger is the right button, its left press taken back and its lift nothing",
+    check("touch: held still a long press's time, a finger is the right button, its left press taken back first",
           unchanged && touch_buttons(1, head1) == 0x1101110211111110ul);
+    flags = 0;
+    touch_seen(1, head1, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_RIGHT, &flags);
+    check("touch: the long press's right button says so (WINDOW_KEY_HOLD) and that a finger made it",
+          (flags & WINDOW_KEY_HOLD) && (flags & WINDOW_KEY_TOUCH));
+    head2 = table->event_head[1];
+    touch_one(120, 80, false);
+    check("touch: a finger held for a long press and moved on has the pointer follow it",
+          touch_seen(1, head2, WINDOW_EVENT_MOTION, -1, null) > 0);
+    head2 = table->event_head[1];
+    touch_one(120, 80, true);
+    flags = 0;
+    check("touch: its lift is the one release that ends the press: a left release, cancelled, touch and held",
+          touch_seen(1, head2, WINDOW_EVENT_BUTTON, COMPOSITOR_BTN_LEFT, &flags) == 1 &&
+              touch_seen(1, head2, WINDOW_EVENT_BUTTON, -1, null) == 1 &&
+              (flags & (WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD)) ==
+                  (WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD));
 
     /* Its mark, `moonwater canvas touch on`: a disc and a ring round the finger over the windows, gone a second after. */
     compositor.spots_on = 0;

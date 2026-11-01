@@ -105,6 +105,12 @@
 */
 #define WINDOW_KEY_TOUCH 512u
 #define WINDOW_KEY_CANCEL 1024u
+/*
+        A finger held still for the right button (a long press): the right button's press and release, and the left
+        release that ends such a press (CANCEL, TOUCH and HOLD together, once the finger lifts). A program may take the
+        long press as its own, as a terminal selects the word under it, where a click would open a menu.
+*/
+#define WINDOW_KEY_HOLD 2048u
 
 struct window_key
 {
@@ -313,6 +319,10 @@ static inline unsigned int window_cell_colour(unsigned int index)
 /* A cell the hand has selected: drawn on the theme's selection colour. Only a frame's copy of the cells has it;
    the ring never does. */
 #define WINDOW_CELL_SELECTED 1024u
+
+/* The first and the last cell of a touch selection, a frame's copy only: each is drawn with a flat handle on its outer edge. */
+#define WINDOW_CELL_HANDLE_START 2048u
+#define WINDOW_CELL_HANDLE_END 4096u
 
 /* The program writes this; the compositor reads it. A terminal that has
    asked for mouse tracking sets WINDOW_WANT_POINTER so clicks, drags and
