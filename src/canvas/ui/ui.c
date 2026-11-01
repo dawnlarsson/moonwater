@@ -1484,27 +1484,16 @@ static fn ui_box_radii(const struct ui_box address_to box, b32 address_to rx, b3
 
 /*
         A corner's half-width at a line, as the unit circle's: the root of 2^32 less u squared (u below 65536, the
-        line's height in the corner over its radius, 16.16). The same shapes are drawn frame after frame, so each root
-        is kept where its u falls in a small table and the bit loop runs once for it.
+        line's height in the corner over its radius, 16.16). The hardware takes it every time: a table of roots by u
+        missed half the settings frame's lookups (1904 distinct places a frame, and no 2-way or doubled table held them
+        all), and a miss is a root anyway, so the table cost more than it saved.
 */
-static struct
-{
-        unsigned int u, root; // u + 1 (0 is a slot never filled)
-} ui_arcs[1024];
-
 static p64 ui_arc(p64 u)
 {
-        unsigned int slot = (unsigned int)(u * 2654435761u) >> 22 & 1023u;
-
-        // A root missed is the hardware's: 2^32 less u squared is at most 2^32, well inside a double's 53 bits, and a
-        // root just short of a whole number k is short of it by 1/2k at least (k at most 65536), far past a double's
-        // last place, so the root truncated is ui_isqrt's for every u -- one instruction for its bit loop's 33 turns.
-        if (ui_arcs[slot].u != u + 1)
-        {
-                ui_arcs[slot].u = (unsigned int)u + 1;
-                ui_arcs[slot].root = (unsigned int)__builtin_sqrt((f64)((1ull << 32) - u * u));
-        }
-        return ui_arcs[slot].root;
+        // 2^32 less u squared is at most 2^32, well inside a double's 53 bits, and a root just short of a whole number k
+        // is short of it by 1/2k at least (k at most 65536), far past a double's last place, so the root truncated is
+        // ui_isqrt's for every u -- one instruction for its bit loop's 33 turns.
+        return (unsigned int)__builtin_sqrt((f64)((1ull << 32) - u * u));
 }
 
 // One line's span of a box, at y (256ths): false when the line misses it.

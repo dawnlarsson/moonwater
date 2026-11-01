@@ -126393,17 +126393,16 @@ static fn check_kit_theme(void)
 }
 
 /*
-        A corner's root (ui_arc) is the bit loop's for every place in a corner, taken by the hardware where its table
-        misses and from the table where it holds the place: 65536 places, each asked twice.
+        A corner's root (ui_arc) is the bit loop's for every place in a corner: 65536 places, each the hardware's root
+        against the bit loop's. A corner's lines are places too (u = dy over ry, 16.16), so every one is asked.
 */
 static fn check_kit_arc(void)
 {
         positive wrong = 0;
 
-        for (int pass = 0; pass < 2; pass++)
-                for (p64 u = 0; u < 65536; u++)
-                        wrong += ui_arc(u) != ui_isqrt((1ull << 32) - u * u);
-        check("kit: a corner's root is the integer root at every place in the corner, missed or kept", !wrong);
+        for (p64 u = 0; u < 65536; u++)
+                wrong += ui_arc(u) != ui_isqrt((1ull << 32) - u * u);
+        check("kit: a corner's root is the integer root at every place in the corner", !wrong);
 }
 
 /*
