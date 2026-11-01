@@ -3575,6 +3575,11 @@ static b32 settings_frame(void)
                 spoiled_bottom = spoiled_y + spoiled_height;
         }
         whole = settings_paint(windows_buffer(table, row, (unsigned int)slot), slot, spoiled_top, spoiled_bottom, &top, &bottom);
+        settings.dirty = false;
+        // Nothing drawn (what moves was nowhere in the picture): the buffer is the one shown, and showing it again is a
+        // knock, a take and a present for no pixel. It is drawn into again next time, lacking nothing.
+        if (!whole && bottom <= top && settings.shown >= 0)
+                return true;
         table->width[row] = (unsigned int)settings.width;
         table->height[row] = (unsigned int)settings.height;
         if (whole)
@@ -3588,7 +3593,6 @@ static b32 settings_frame(void)
         }
         windows_show(&settings.own, (unsigned int)slot);
         settings.shown = slot;
-        settings.dirty = false;
         return true;
 }
 
