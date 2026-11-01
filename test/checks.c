@@ -117126,6 +117126,53 @@ static int wheel_unread(int row, unsigned int address_to events, int address_to 
         return sum;
 }
 
+/*
+        The chrome at the default theme, drawn the way it was before the kit's roles drew it: the line of the window
+        with the keys and of one without, the desktop and each window's close button, all in one scene, which is
+        pinned by a hash of the whole output so that a changed default pixel is seen. The tabs' inks the band takes for
+        a tab drawn without a font are pinned too.
+*/
+#define CHROME_SCENE_HASH 0x665cfe0fu
+static void check_compositor_chrome(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    unsigned int hash = 2166136261u;
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("chrome: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    table->x[2] = 180, table->y[2] = 110, table->width[2] = 60, table->height[2] = 60;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    glass_paint(2, 0, 0, 60, 60, 0x404040u, true);
+    compositor.focus = 1;
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    check("chrome: the window with the keys has its line at 4d4d4d, and the one without a black line",
+          glass_at(49, 70) == 0x4d4d4du && glass_at(179, 140) == 0u && glass_at(100, 29) == 0x4d4d4du);
+    for (unsigned int at = 0; at < GLASS_SIDE * GLASS_SIDE; at++)
+        hash = (hash ^ (screen[at] & 0xffffffu)) * 16777619u;
+    string_format(log, "  chrome: the default scene hashes to %p\n", (positive)hash);
+    check("chrome: the default scene, desktop, lines and close buttons, is drawn as it was", hash == CHROME_SCENE_HASH);
+#if MOONWATER_UI_TASKBAR
+    check("chrome: a tab drawn without a font is black, the panel's ink when away and 38383c when lit",
+          taskbar_tab_ink(-1, 0) == 0u && taskbar_tab_ink(0, 0) == 0u && taskbar_tab_ink(0, COMPOSITOR_TAB_AWAY) == 0x141416u &&
+              taskbar_tab_ink(0, COMPOSITOR_TAB_LIT) == 0x38383cu);
+#endif
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -128456,6 +128503,7 @@ b32 main()
         check_compositor_cycle();
         check_compositor_hover();
         check_compositor_lit();
+        check_compositor_chrome();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();
