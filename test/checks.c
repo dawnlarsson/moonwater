@@ -120460,6 +120460,265 @@ static fn check_settings_keys(void)
         settings_refilter();
 }
 
+/*
+        The settings window's picture as its loop makes it, frame by frame:
+        a frame draws only the rows that changed into the buffer the
+        compositor is not reading, and the kit asks for the rows of what is
+        still moving at the next. Switches thrown down a group with Space
+        and Down as fast as a held key repeats, the verbs' answers coming
+        between the frames: the buffer shown after every frame is the whole
+        picture drawn at that frame's time, and so is the other buffer once
+        it is drawn again with nothing new.
+*/
+#define SETTINGS_FRAMES_W SETTINGS_WIDTH
+#define SETTINGS_FRAMES_H SETTINGS_HEIGHT
+#define SETTINGS_FRAMES_PERIOD 16666667ull
+#define SETTINGS_FRAMES_MS 1000000ull
+
+static unsigned int settings_frames_whole[SETTINGS_FRAMES_W * SETTINGS_FRAMES_H];
+static p8 settings_frames_kept[sizeof(settings)], settings_frames_kit[sizeof(ui_kit)];
+static struct ui_control settings_frames_controls[2 * SETTINGS_ALL];
+
+static struct
+{
+        struct windows address_to table;
+        positive now, frames;
+        b32 wrong;
+        string_address scenario;
+} settings_frames;
+
+// The buffer in slot against the whole picture at the kit's time, everything the drawing moves put back after it.
+static b32 settings_frames_same(int slot, string_address when)
+{
+        const unsigned int address_to shown = windows_buffer(settings_frames.table, settings.own.row, (unsigned int)slot);
+
+        memory_copy(settings_frames_kept, &settings, sizeof(settings));
+        memory_copy(settings_frames_kit, &ui_kit, sizeof(ui_kit));
+        memory_copy(settings_frames_controls, settings.list.controls, sizeof(settings_frames_controls));
+        settings_draw_rows(settings_frames_whole, 0, 0);
+        memory_copy(&settings, settings_frames_kept, sizeof(settings));
+        memory_copy(&ui_kit, settings_frames_kit, sizeof(ui_kit));
+        memory_copy(settings.list.controls, settings_frames_controls, sizeof(settings_frames_controls));
+        for (int y = 0; y < SETTINGS_FRAMES_H; y++)
+                for (int x = 0; x < SETTINGS_FRAMES_W; x++)
+                        if (shown[y * SETTINGS_FRAMES_W + x] != settings_frames_whole[y * SETTINGS_FRAMES_W + x])
+                        {
+                                int at = ui_list_hit(&settings.ui, &settings.list, settings.list.x + 1, y);
+                                int group = ui_page_column_hit(&settings.ui, &settings.page, ui_dev(&settings.ui, UI_PAD) + 1, y);
+                                b32 in_column = x < settings.list.x && group >= 0;
+
+                                string_format(log, "  settings frames (%s): %s, frame %p, buffer %p: pixel %b,%b is %p, the whole draw %p (%s %s)\n",
+                                              settings_frames.scenario, when, settings_frames.frames, (positive)slot, (bipolar)x, (bipolar)y,
+                                              (positive)shown[y * SETTINGS_FRAMES_W + x], (positive)settings_frames_whole[y * SETTINGS_FRAMES_W + x],
+                                              (string_address)(in_column ? "the column's group" : "row"),
+                                              (string_address)(in_column ? settings_group_name(group) : at >= 0 ? settings_label(at) : "none"));
+                                return false;
+                        }
+        return true;
+}
+
+// One pass of the kit's loop (ui_app_run) at now: a frame when the picture is due and a display period has gone since the last.
+static fn settings_frames_pass(void)
+{
+        positive now = settings_frames.now;
+
+        if (!settings.dirty || (ui_kit.busy && now < (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD))
+                return;
+        ui_kit.now = (b64)now;
+        ui_kit.busy = 0;
+        ui_kit.damage_top = ui_kit.damage_bottom = 0;
+        ui_kit_turn();
+        if (!settings_frame())
+                return;
+        ui_kit.drawn = (b64)now;
+        if (ui_kit.busy)
+        {
+                settings.dirty = true;
+                settings_moving(ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
+        }
+        // The compositor takes the picture at once, and what it shows is the buffer named.
+        settings_frames.table->shown[settings.own.row] = settings_frames.table->frame[settings.own.row];
+        settings_frames.frames++;
+        if (!settings_frames.wrong)
+                settings_frames.wrong = !settings_frames_same(settings.shown, (string_address) "shown");
+}
+
+// The loop until a time: a pass now, then a frame each display period while anything moves.
+static fn settings_frames_until(positive until)
+{
+        settings_frames_pass();
+        while (settings.dirty && ui_kit.busy && (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD <= until)
+        {
+                settings_frames.now = (positive)ui_kit.drawn + SETTINGS_FRAMES_PERIOD;
+                settings_frames_pass();
+        }
+        settings_frames.now = until > settings_frames.now ? until : settings_frames.now;
+}
+
+/*
+        A scenario: from the row named (in the rows, or in the column of groups when column is set), first and then second
+        every gap ms, keys times (second 0 for none); each change answered by its verb answer ms after the key that asked
+        for it (the value it set read back, as settings_finished takes a reading that changed). Then the loop until
+        nothing moves, the buffer shown and the other compared, the other drawn again with nothing new.
+*/
+#define SETTINGS_FRAMES_KEYS 24
+
+static fn settings_frames_scenario(string_address name, b32 switches_only, b32 column, const char address_to from, int first,
+                                   int second, int keys, positive gap, positive answer)
+{
+        positive start = settings_frames.now, presses[SETTINGS_FRAMES_KEYS * 2], answers[SETTINGS_FRAMES_KEYS];
+        int pressed = 0, answered = 0, count = 0;
+
+        settings_frames.scenario = name;
+        settings_frames.wrong = false;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.menu.owner = -1, settings.view = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].kind == SETTINGS_SWITCH)
+                        settings.state[at] = SETTINGS_READ,
+                        string_copy_bounded((string_address)settings.value[at], (string_address)(at % 3 ? "off" : "on"), SETTINGS_VALUE);
+        settings.group = settings_group_of(settings_row_named(from));
+        settings_refilter();
+        if (switches_only)
+        {
+                for (positive at = 0; at < SETTINGS_ROWS; at++)
+                        if (settings_rows[at].kind == SETTINGS_SWITCH && settings.state[at] == SETTINGS_READ)
+                                settings.list.id[count++] = (unsigned short)at;
+                settings.list.count = count;
+                settings.list.scroll.scroll = 0;
+                ui_list_layout(&settings.ui, &settings.list);
+                settings_dirty();
+        }
+        settings.list.focus = settings_row_named(from);
+        settings_reveal();
+        settings.pane = !column;
+        settings_dirty();
+        settings_frames_until(start + 1000 * SETTINGS_FRAMES_MS);
+        start = settings_frames.now;
+
+        keys = keys > SETTINGS_FRAMES_KEYS ? SETTINGS_FRAMES_KEYS : keys;
+        for (int k = 0; k < keys; k++)
+        {
+                presses[2 * k] = start + (positive)k * gap * SETTINGS_FRAMES_MS;
+                presses[2 * k + 1] = presses[2 * k] + gap * SETTINGS_FRAMES_MS / 2;
+                answers[k] = presses[2 * k] + answer * SETTINGS_FRAMES_MS;
+        }
+        // The keys and the answers in the order of their times.
+        while (pressed < 2 * keys || answered < keys)
+                if (pressed < 2 * keys && (answered >= pressed / 2 + (pressed % 2) || presses[pressed] <= answers[answered]))
+                {
+                        settings_frames_until(presses[pressed]);
+                        if (pressed % 2 == 0 || second)
+                                settings_press(pressed % 2 ? second : first);
+                        pressed++;
+                        settings_frames_pass();
+                }
+                else
+                {
+                        settings_frames_until(answers[answered]);
+                        answered++;
+                        if (settings.queued)
+                        {
+                                int row = settings.queue[0].row;
+
+                                string_copy_bounded((string_address)settings.value[row], (string_address)settings.queue[0].value, SETTINGS_VALUE);
+                                settings.queued--;
+                                memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
+                                settings_say((string_address) "done");
+                                settings_dirty();
+                        }
+                        settings_frames_pass();
+                }
+        settings_frames_until(settings_frames.now + 2000 * SETTINGS_FRAMES_MS);
+        check("settings frames: the loop comes to rest", !settings.dirty);
+        // The buffer not shown, drawn again with nothing new, then the first again: each is the whole picture then.
+        for (int again = 0; again < 2 && !settings_frames.wrong; again++)
+        {
+                settings.dirty = true;
+                settings_frames_until(settings_frames.now + SETTINGS_FRAMES_PERIOD);
+                settings_frames.wrong = !settings_frames_same(settings.shown, (string_address)(again ? "at rest, the first again" : "at rest, the other"));
+        }
+        check("settings frames: every buffer shown is the whole picture drawn at its time", !settings_frames.wrong);
+        settings.child = 0;
+        settings.queued = 0;
+}
+
+static fn check_settings_frames(string_address regular, string_address bold)
+{
+        static font_face faces[2];
+        static p8 atlas[1024 * 1024];
+        positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0, bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        positive buffer = (positive)SETTINGS_FRAMES_W * SETTINGS_FRAMES_H * 4;
+        long table = compositor_call(syscall(mmap), 0, WINDOWS_HEADER + 2 * buffer, 3, 0x22, (positive)-1, 0);
+        struct settings_frames_saved
+        {
+                struct ui ui;
+                struct window_row own;
+                int width, height, shown, group;
+                struct ui_control address_to controls;
+        } saved = {settings.ui, settings.own, settings.width, settings.height, settings.shown, settings.group, settings.list.controls};
+
+        if (!bytes || (engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
+            font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("settings frames: the face, the engine and the window load", false);
+                return;
+        }
+        settings_frames.table = (struct windows address_to)table;
+        settings_frames.table->stride = SETTINGS_FRAMES_W;
+        settings_frames.table->buffer = buffer;
+        settings_frames.table->output_width = 4096;
+        settings_frames.table->output_height = 4096;
+        settings.own = (struct window_row){settings_frames.table, 0, -1, -1, WINDOWS_HEADER + 2 * buffer, buffer, SETTINGS_FRAMES_W, 4096, 4096};
+        memory_zero(&settings.ui, sizeof(settings.ui));
+        settings.ui.engine = (font_engine address_to)engine;
+        font_start(settings.ui.engine, atlas, 1024, 1024);
+        settings.ui.regular = &faces[0];
+        settings.ui.bold = bold_bytes && font_load(&faces[1], (const p8 address_to)bold_bytes, bold_size, 0) == 0 ? &faces[1] : null;
+        settings.ui.scale = 1;
+        settings.ui.opaque = 1;
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0); // full motion, the theme put at once
+        ui_inks(&settings.ui, 0x101012u);
+        ui_kit_inks(&settings.ui);
+        ui_kit_settle();
+        settings.shown = -1;
+        settings.focused = 1;
+        settings.change_all = settings.stale_all[0] = settings.stale_all[1] = true;
+        settings_frames.now = 5000000000ull;
+        ui_kit.drawn = 0;
+        ui_kit.busy = 0;
+        settings_size(SETTINGS_FRAMES_W, SETTINGS_FRAMES_H);
+        settings_refilter();
+        settings_frames_pass();
+
+        settings_frames_scenario((string_address) "Canvas, Space and Down every 33 ms, answered at 25", false, false,
+                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 6, 33, 25);
+        settings_frames_scenario((string_address) "switches, Space and Down every 33 ms, answered at 25", true, false,
+                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 33, 25);
+        settings_frames_scenario((string_address) "switches, Space and Down every 33 ms, answered at 140", true, false,
+                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 33, 140);
+        settings_frames_scenario((string_address) "switches, Space and Down every 120 ms, answered at 60", true, false,
+                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 120, 60);
+        settings_frames_scenario((string_address) "switches, Space and Down every 50 ms, answered at 500", true, false,
+                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 50, 500);
+        // The column of groups: Down a group at a time, slowly and as fast as a held key repeats, and back up.
+        settings_frames_scenario((string_address) "the column, Down every 500 ms", false, true, "Name", SETTINGS_KEY_DOWN, 0, 8, 500, 0);
+        settings_frames_scenario((string_address) "the column, Down every 33 ms", false, true, "Name", SETTINGS_KEY_DOWN, 0, 8, 33, 0);
+        settings_frames_scenario((string_address) "the column, Up every 50 ms from the last group", false, true, "Mount kept disks",
+                                 SETTINGS_KEY_UP, 0, 8, 50, 0);
+        string_format(log, "  settings frames: %p frames drawn and compared\n", settings_frames.frames);
+
+        settings.ui = saved.ui;
+        settings.own = saved.own;
+        settings.width = saved.width, settings.height = saved.height, settings.shown = saved.shown, settings.group = saved.group;
+        settings.list.controls = saved.controls;
+        settings_layout();
+        compositor_call(syscall(munmap), (positive)table, WINDOWS_HEADER + 2 * buffer, 0, 0, 0, 0);
+        compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);
+}
+
 // A fresh directory for a fake power supply tree, under /tmp.
 static b32 battery_fresh(p8 address_to root)
 {
@@ -126348,6 +126607,8 @@ b32 main()
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
         check_settings_keys();
+        check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
+                              program_argument_count() > 4 ? program_argument(4) : null);
         check_battery();
 #endif
 

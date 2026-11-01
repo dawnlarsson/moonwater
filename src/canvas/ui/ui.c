@@ -1572,7 +1572,24 @@ static struct ui_kit
         b32 made;
         int damage_top, damage_bottom;     // the rows (device pixels) the moving controls drew this frame
         b64 epoch;                         // counted up when every control is to be placed again (ui_kit_settle)
+        // The control being drawn said which of its rows move (logical pixels, none when bottom <= top), and they
+        // are all that is marked of it: tabs on end, whose box is one item of a column.
+        b32 reached;
+        int reach_top, reach_bottom;
 } ui_kit;
+
+// Rows top to bottom (logical pixels) of the control being drawn move this frame.
+static fn ui_kit_reach(int top, int bottom)
+{
+        ui_kit.reached = 1;
+        if (ui_kit.reach_bottom <= ui_kit.reach_top)
+                ui_kit.reach_top = top, ui_kit.reach_bottom = bottom;
+        else
+        {
+                ui_kit.reach_top = top < ui_kit.reach_top ? top : ui_kit.reach_top;
+                ui_kit.reach_bottom = bottom > ui_kit.reach_bottom ? bottom : ui_kit.reach_bottom;
+        }
+}
 
 /*
         Everything is placed again, not moved: the window was resized, the
@@ -3109,11 +3126,22 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 */
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
-        b32 live = 0;
+        b32 busy = ui_kit.busy;
         b64 pip_y;
 
+        // What moves is said item by item: the column is count items, and its box (c->h) is one of them. The pip's
+        // way is from where it set out to where it goes, which holds where it was drawn the frame before.
+        ui_kit.reached = 1;
+        ui_kit.busy = 0;
         ui_kit_number_to(&c->pip_y, ui_q(c->at * c->h), 350, &ui_ease);
         pip_y = ui_q(c->y) + ui_kit_tween(&c->pip_y);
+        if (ui_kit.busy)
+        {
+                b64 from = c->pip_y.from < c->pip_y.to ? c->pip_y.from : c->pip_y.to, to = c->pip_y.from < c->pip_y.to ? c->pip_y.to : c->pip_y.from;
+
+                ui_kit_reach(c->y + (int)(from >> UI_Q), c->y + (int)((to + UI_ONE - 1) >> UI_Q) + c->h);
+        }
+        busy |= ui_kit.busy;
         {
                 struct ui_box pip = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
 
@@ -3132,12 +3160,15 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
         for (int item = 0; item < c->count; item++)
         {
                 int y = c->y + item * c->h;
+                b32 live = 0;
                 b64 dom = ui_stretch_at(&c->item_dom[item], ui_kit.now, &live);
                 b32 by = ui_q8(ui, y), bh = ui_q8(ui, c->h), anchor = c->dom_origin > 0 ? by : by + bh;
                 struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(y), ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
                 unsigned int ink;
                 b32 middle;
 
+                busy |= live;
+                ui_kit.busy = live;
                 if (y + c->h + 8 < ui->top / ui->scale || y - 8 > ui->bottom / ui->scale)
                         continue;
                 ui_kit_colour_to(&c->item_ink[item], item == c->at && !c->disabled ? ui_role(UI_ON_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT), 200, &ui_ease);
@@ -3158,8 +3189,12 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 middle = anchor + (b32)ui_qmul(by + bh / 2 - anchor, dom);
                 ui_kit_text(ui, ui_dev(ui, c->x + 12), ui_kit_baseline(ui, middle / 256 - ui_dev(ui, 10), UI_LABEL_LARGE),
                             (string_address)c->items[item], item == c->at ? UI_LABEL_LARGE : UI_BODY_MEDIUM, ink, 0);
+                // Its stretch, its colour, its state layer or its ripple moving: the item's rows.
+                if (ui_kit.busy)
+                        ui_kit_reach(y, y + c->h);
+                busy |= ui_kit.busy;
         }
-        ui_kit.busy |= live;
+        ui_kit.busy = busy;
 }
 
 // The vertical cascade: each item whose middle the pip passes stretches as it does (130 ms of flight).
@@ -3639,11 +3674,18 @@ static fn ui_rise_at(struct ui_rise address_to r, b64 now, b64 address_to opacit
                 ui_kit.busy = 1;
 }
 
-// The rows a control that moved this frame reaches, with room for its ripple, its shadow and its stretch.
+// The rows a control that moved this frame reaches, with room for its ripple, its shadow and its stretch: those it
+// said move, with room for a stretch and a ring, when it said (tabs on end), else its box and room round it.
 static fn ui_kit_mark(const struct ui address_to ui, const struct ui_control address_to c)
 {
         int top = c->y - 40, bottom = c->y + (c->kind == UI_RADIOS ? c->count * UI_RADIO_PITCH : c->h) + 40;
 
+        if (ui_kit.reached)
+        {
+                if (ui_kit.reach_bottom <= ui_kit.reach_top)
+                        return;
+                top = ui_kit.reach_top - 8, bottom = ui_kit.reach_bottom + 8;
+        }
         top = ui_dev(ui, top < 0 ? 0 : top);
         bottom = ui_dev(ui, bottom);
         if (ui_kit.damage_bottom <= ui_kit.damage_top)
@@ -3663,6 +3705,8 @@ static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to 
         b32 was = ui_kit.busy;
 
         ui_kit.busy = 0;
+        ui_kit.reached = 0;
+        ui_kit.reach_top = ui_kit.reach_bottom = 0;
         ui_control_draw_one(ui, c);
         if (ui_kit.busy)
                 ui_kit_mark(ui, c);
