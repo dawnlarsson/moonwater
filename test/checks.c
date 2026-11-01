@@ -125842,6 +125842,156 @@ static fn check_kit_arc(void)
 }
 
 /*
+        The kit's fills and rings (ui.c's ui_kit_fill and ui_kit_ring, with their fast paths: a straight row's spans, a run
+        laid as one, the glass over a run) against the cover each pixel has from its own lines. A line is the span
+        ui_box_span gives it (a corner's by its place), sixteen to a pixel, and a pixel's cover is what the lines cover of
+        it summed; a ring is the outer box's cover less the inner's. Random boxes with corners, clips and rings, an opaque
+        tone and a glass one, over a picture whose pitch is wider than it, with the pixels outside every shape held to
+        what they were.
+*/
+#define KIT_PAGE_WIDTH 53
+#define KIT_PAGE_HEIGHT 37
+#define KIT_PAGE_PITCH 60
+static p64 kit_page_state = 0x9e3779b97f4a7c15ull;
+static unsigned int kit_page_before[KIT_PAGE_PITCH * KIT_PAGE_HEIGHT], kit_page_after[KIT_PAGE_PITCH * KIT_PAGE_HEIGHT];
+static unsigned int kit_page_want[KIT_PAGE_PITCH * KIT_PAGE_HEIGHT], kit_page_guard[KIT_PAGE_PITCH * (KIT_PAGE_HEIGHT + 8)];
+
+static p64 kit_page_next(void)
+{
+        XORSHIFT64(kit_page_state);
+        return kit_page_state;
+}
+
+// A box in 256ths of a pixel, its corners sometimes square and sometimes past half its sides.
+static struct ui_box kit_page_box(void)
+{
+        struct ui_box box;
+        b32 w = (b32)(kit_page_next() % (60 * 256)), h = (b32)(kit_page_next() % (50 * 256));
+
+        box.x0 = (b32)(kit_page_next() % (64 * 256)) - 8 * 256;
+        box.y0 = (b32)(kit_page_next() % (48 * 256)) - 6 * 256;
+        box.x1 = box.x0 + w;
+        box.y1 = box.y0 + h;
+        box.rx = kit_page_next() % 5 ? (b32)(kit_page_next() % (w / 2 + 2 * 256 + 1)) : 0;
+        box.ry = kit_page_next() % 5 ? (b32)(kit_page_next() % (h / 2 + 2 * 256 + 1)) : 0;
+        return box;
+}
+
+// The cover of a pixel from its sixteen lines: each the part of the pixel's 256ths that the line's span covers, summed.
+static unsigned int kit_page_cover(const struct ui_box address_to box, int x, int y)
+{
+        unsigned int cover = 0;
+
+        for (int sub = 0; sub < UI_SUB; sub++)
+        {
+                b32 left = 0, right = 0, from, to;
+
+                if (!ui_box_span(box, y * 256 + sub * (256 / UI_SUB) + 256 / UI_SUB / 2, &left, &right))
+                        continue;
+                from = left > x * 256 ? left : x * 256;
+                to = right < x * 256 + 256 ? right : x * 256 + 256;
+                if (to > from)
+                        cover += (unsigned int)(to - from);
+        }
+        return cover;
+}
+
+// The picture a shape leaves: each pixel of it laid over once with its cover (less the hole's, clipped to the clip's).
+static void kit_page_lay(unsigned int address_to page, const struct ui_box address_to outer, const struct ui_box address_to hole,
+                         const struct ui_box address_to clip, unsigned int argb)
+{
+        for (int y = 0; y < KIT_PAGE_HEIGHT; y++)
+                for (int x = 0; x < KIT_PAGE_WIDTH; x++)
+                {
+                        int cover = (int)kit_page_cover(outer, x, y);
+                        unsigned int at = (unsigned int)(y * KIT_PAGE_PITCH + x);
+
+                        if (hole)
+                                cover -= (int)kit_page_cover(hole, x, y);
+                        if (clip)
+                                cover = cover * (int)kit_page_cover(clip, x, y) / UI_FULL;
+                        if (cover > 0)
+                                page[at] = ui_over(ui_premultiplied(argb, cover > UI_FULL ? UI_FULL : (unsigned int)cover), page[at]);
+                }
+}
+
+static unsigned int kit_page_background(int x, int y)
+{
+        return 0xff000000u | ((unsigned int)(x * 37 + y * 91) * 2654435761u >> 8 & 0xffffffu);
+}
+
+static fn check_kit_fills(void)
+{
+        struct ui ui;
+        positive wrong = 0, drawn = 0;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pitch = KIT_PAGE_PITCH, ui.width = KIT_PAGE_WIDTH, ui.height = KIT_PAGE_HEIGHT, ui.top = 0, ui.bottom = KIT_PAGE_HEIGHT;
+        ui.scale = 1;
+        ui.pixels = kit_page_after;
+        for (int trial = 0; trial < 1500; trial++)
+        {
+                const unsigned int tones[4] = {0xff336699u, 0x99aa5533u, 0x30ff8800u, 0xffe4e4e7u};
+                unsigned int argb = tones[trial % 4];
+                struct ui_box box = kit_page_box(), clip = kit_page_box(), outer = kit_page_box(), inner;
+                b32 thickness = (b32)(kit_page_next() % (12 * 256));
+                b32 clipped = trial % 3 == 0;
+
+                for (int y = 0; y < KIT_PAGE_HEIGHT; y++)
+                        for (int x = 0; x < KIT_PAGE_PITCH; x++)
+                                kit_page_after[y * KIT_PAGE_PITCH + x] = kit_page_want[y * KIT_PAGE_PITCH + x] = kit_page_background(x, y);
+
+                // A fill, clipped sometimes.
+                kit_page_lay(kit_page_want, &box, null, clipped ? &clip : null, argb);
+                ui_kit_fill(&ui, &box, argb, clipped ? &clip : null);
+                for (int at = 0; at < KIT_PAGE_PITCH * KIT_PAGE_HEIGHT; at++)
+                        wrong += kit_page_after[at] != kit_page_want[at], drawn += kit_page_want[at] != kit_page_background(at % KIT_PAGE_PITCH, at / KIT_PAGE_PITCH);
+
+                // A ring: the outer box less the inner, the inner's corners as the ring's own.
+                for (int y = 0; y < KIT_PAGE_HEIGHT; y++)
+                        for (int x = 0; x < KIT_PAGE_PITCH; x++)
+                                kit_page_after[y * KIT_PAGE_PITCH + x] = kit_page_want[y * KIT_PAGE_PITCH + x] = kit_page_background(x, y);
+                inner = outer;
+                inner.x0 += thickness, inner.y0 += thickness, inner.x1 -= thickness, inner.y1 -= thickness;
+                inner.rx = inner.rx > thickness ? inner.rx - thickness : 0;
+                inner.ry = inner.ry > thickness ? inner.ry - thickness : 0;
+                kit_page_lay(kit_page_want, &outer, &inner, null, argb);
+                ui_kit_ring(&ui, &outer, thickness, argb);
+                for (int at = 0; at < KIT_PAGE_PITCH * KIT_PAGE_HEIGHT; at++)
+                        wrong += kit_page_after[at] != kit_page_want[at];
+        }
+        check("kit fills: every fill and ring is its lines' cover, pixel for pixel, with corners, clips and glass", !wrong && drawn > 0);
+
+        // A fill's rows are its picture's: a clip row above the picture's top or below its height writes nothing there.
+        {
+                b32 held = true;
+                const unsigned int beef = 0xdeadbeefu;
+
+                for (int run = 0; run < 4; run++)
+                {
+                        unsigned int tone = run % 2 ? 0x80204060u : 0xff204060u;
+                        int top = run < 2 ? -2 : 0, bottom = KIT_PAGE_HEIGHT + 4;
+
+                        for (int at = 0; at < KIT_PAGE_PITCH * (KIT_PAGE_HEIGHT + 8); at++)
+                                kit_page_guard[at] = beef;
+                        ui.pixels = kit_page_guard + 4 * KIT_PAGE_PITCH;
+                        ui.top = top, ui.bottom = bottom;
+                        ui_fill(&ui, 0, top, KIT_PAGE_WIDTH, bottom - top + 2, tone);
+                        for (int at = 0; at < KIT_PAGE_PITCH * (KIT_PAGE_HEIGHT + 8); at++)
+                        {
+                                int row = at / KIT_PAGE_PITCH - 4;
+
+                                if ((row < 0 || row >= KIT_PAGE_HEIGHT) && kit_page_guard[at] != beef)
+                                        held = false;
+                        }
+                }
+                ui.pixels = kit_page_after;
+                ui.top = 0, ui.bottom = KIT_PAGE_HEIGHT;
+                check("kit fill: a fill is cut to the picture's rows, above its top and below its height", held);
+        }
+}
+
+/*
         A control appears settled: a switch made off and then given its value on (as a settings row is, when the verb
         answers), tabs and radios given their chosen item, are drawn there at their first frame with nothing moving;
         one forgotten (its page shown again) and changed while unseen is placed again; a change after its first frame
@@ -127889,6 +128039,7 @@ b32 main()
         check_kit_motion();
         check_kit_theme();
         check_kit_arc();
+        check_kit_fills();
         check_kit_place();
         check_kit_controls();
 #endif

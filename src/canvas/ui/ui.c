@@ -182,11 +182,14 @@ static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, 
         y = y < ui->top ? ui->top : y;
         x2 = x2 > ui->width ? ui->width : x2;
         y2 = y2 > ui->bottom ? ui->bottom : y2;
+        y2 = y2 > ui->height ? ui->height : y2;
         if (ui->band_bottom > ui->band_top)
         {
                 y = y < ui->band_top ? ui->band_top : y;
                 y2 = y2 > ui->band_bottom ? ui->band_bottom : y2;
         }
+        // The rows are the picture's: a clip row or a band above the picture's first row is cut to it.
+        y = y < 0 ? 0 : y;
         // An opaque tone over a pixel is that tone: the rectangle is one fill.
         if (tone >> 24 == 255)
         {
