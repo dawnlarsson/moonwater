@@ -1048,7 +1048,7 @@ static fn settings_layout(void)
         settings.card.x = settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
         settings.card.y = settings.page.top, settings.card.height = settings.card.view = settings.page.bottom - settings.page.top;
         settings.card.content = ui_lines_height(ui, settings.card_lines);
-        ui_scroll_set(&settings.card, settings.card.scroll);
+        ui_scroll_clamp(&settings.card);
 }
 
 // The list or the card scrolled, and drawn again.
@@ -3252,8 +3252,10 @@ static fn settings_gallery_place(void);
 // The page drawn into the rows of the band: the paper, then every control, the scroll taken off their places.
 static fn settings_gallery_draw(struct ui address_to ui)
 {
-        int right = 0, row_y = -1, scroll = settings_gallery.scroll.scroll / ui->scale;
+        int right = 0, row_y = -1, scroll;
 
+        ui_scroll_glide(ui, &settings_gallery.scroll);
+        scroll = settings_gallery.scroll.scroll / ui->scale;
         ui->top = 0;
         ui->bottom = ui->height;
         ui_fill(ui, 0, 0, ui->width, ui->height, ui_role(UI_SURFACE) | 0xff000000u);
@@ -3288,7 +3290,7 @@ static fn settings_gallery_place(void)
 
         s->x = settings.width - ui_px(&settings.ui, UI_SCROLL_WIDTH), s->y = 0, s->height = s->view = settings.height;
         s->content = ui_px(&settings.ui, SETTINGS_GALLERY_H);
-        ui_scroll_set(s, s->scroll);
+        ui_scroll_clamp(s);
 }
 
 // The pointer, the wheel and the keys on the page: the kit's controls take the pointer, in page pixels; the region the rest.
@@ -3835,16 +3837,6 @@ static long settings_tick(long timeout, long address_to other)
                         settings_changed(t->well_top, t->well_bottom);
                 if (due && (timeout < 0 || (long)(due - now) < timeout))
                         timeout = (long)(due - now);
-        }
-        // A region thrown by a finger moves a frame at a time until it is still.
-        {
-                b32 moved;
-                long thrown = ui_finger_throw(&settings.finger, &moved);
-
-                if (moved)
-                        ui_page_moved(&settings.ui, &settings.page, settings.finger.region);
-                if (thrown >= 0 && (timeout < 0 || thrown < timeout))
-                        timeout = thrown;
         }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {
