@@ -462,14 +462,13 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                         {
                                 unsigned int value, cover, bit;
 
-                                // Paper no glyph touched (most of the run's rows) is no cover: passed a word at a time.
+                                // Paper no glyph touched (most of the run's rows) is no cover: passed a vector at a time.
                                 // A stroke reaches into it from a neighbour, and reads every pixel.
                                 if (!stroke && coverage[column] == paper)
                                 {
                                         int from = column;
 
-                                        while (++column < last && coverage[column] == paper)
-                                                ;
+                                        column += (int)memory_first_differs_u32(coverage + column, (positive)(last - column), paper);
                                         picture += column - from;
                                         if (column >= last)
                                                 break;
