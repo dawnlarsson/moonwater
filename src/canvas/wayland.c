@@ -1282,6 +1282,7 @@ struct wayland_client
 {
         unsigned char in[WAYLAND_IN_MAX];
         long in_length;
+        long dead;
         unsigned char out[WAYLAND_OUT_MAX];
         long out_length;
         long out_keymap;
@@ -1606,6 +1607,7 @@ static void wire_object_remove(struct wayland_client *c, long index)
 static void wire_reset(struct wayland_client *c)
 {
         c->in_length = 0;
+        c->dead = 0;
         c->out_length = 0;
         c->out_keymap = 0;
         c->fd_count = 0;
@@ -2589,11 +2591,13 @@ static int wire_dispatch(long client, struct wayland_client *c, const unsigned c
         Bytes from a client. A call may hold any part of a message: the bytes
         of an unfinished one are kept until the rest arrives. A header whose
         size is below eight, above WAYLAND_MSG_MAX, or not a multiple of four
-        is refused, and so is a message that fails in its dispatch. The
-        descriptors are queued first, so a message that needs one finds it.
-        Messages that completed earlier in the same call are not undone by a
-        later refusal: the caller disconnects the client, which is what a
-        refusal means.
+        is a framing error: the stream has no message boundary left to find,
+        so the client is dead, and every later call is refused (EINVAL) until
+        it disconnects. A message that fails in its dispatch is refused and
+        its bytes are consumed. The descriptors are queued first, so a
+        message that needs one finds it. Messages that completed earlier in
+        the same call are not undone by a later refusal: the caller disconnects
+        the client, which is what a refusal means.
 */
 int wayland_feed(long client, const unsigned char *bytes, long length, const long *fds, long count)
 {
@@ -2608,6 +2612,8 @@ int wayland_feed(long client, const unsigned char *bytes, long length, const lon
                 if (fds[i] < 0 || fds[i] >= SHELL_FD_MAX)
                         return SHELL_EINVAL;
         c = &wayland.clients[client];
+        if (c->dead)
+                return SHELL_EINVAL;
         if (c->fd_count + count > WAYLAND_FDS)
                 return SHELL_ENOSPC;
         for (long i = 0; i < count; i++)
@@ -2629,7 +2635,11 @@ int wayland_feed(long client, const unsigned char *bytes, long length, const lon
                 {
                         size = (long)(wire_get(c->in + 4) >> 16);
                         if (size < WAYLAND_HEADER || size > WAYLAND_MSG_MAX || (size & 3))
+                        {
+                                c->dead = 1;
+                                c->in_length = 0;
                                 return wire_fail(c, wire_get(c->in), WAYLAND_ERR_METHOD, "message size");
+                        }
                 }
                 if (c->in_length >= WAYLAND_HEADER && c->in_length == (long)(wire_get(c->in + 4) >> 16))
                 {

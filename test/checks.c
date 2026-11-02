@@ -142875,6 +142875,7 @@ int main(void)
 #error "CHECK_wayland_wire builds wayland.c: define CONFIG_MOONWATER_WAYLAND"
 #endif
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../src/canvas/wayland.c"
 
@@ -143246,6 +143247,30 @@ static void wire_refusal_checks(void)
         bytes[0] = 1; bytes[1] = 0; bytes[2] = 0; bytes[3] = 0;
         wire_put(bytes + 4, (6UL << 16) | 1UL);
         wire_refused(client, "size six", 8, bytes);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* a bad header latches the client: the bytes after it are refused and nothing is read
+           past them. Each buffer is exactly its message, so a read before it is a sanitizer report. */
+        client = wayland_client_connect();
+        {
+                unsigned char *bad = malloc(8);
+                unsigned char *next = malloc(8);
+                long status;
+
+                wire_put(bad, WAYLAND_DISPLAY);
+                wire_put(bad + 4, 6UL << 16);
+                wire_put(next, WAYLAND_DISPLAY);
+                wire_put(next + 4, 8UL << 16);
+                WIRE_CHECK(wayland_feed(client, bad, 8, 0, 0) < 0);
+                wire_take(client, (unsigned long[8]){0}, (unsigned long[8]){0}, 8);
+                wire_snap(client);
+                status = wayland_feed(client, next, 8, 0, 0);
+                WIRE_CHECK(status == SHELL_EINVAL);
+                WIRE_CHECK(wire_same(client));
+                WIRE_CHECK(wire_take(client, (unsigned long[8]){0}, (unsigned long[8]){0}, 8) == 0);
+                free(bad);
+                free(next);
+        }
         WIRE_CHECK(wayland_client_disconnect(client) == 0);
 
         /* a size past WAYLAND_MSG_MAX, and one that is not a multiple of four. */
