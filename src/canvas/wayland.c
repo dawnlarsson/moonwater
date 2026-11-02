@@ -645,6 +645,7 @@ static inline struct shell_surface *shell_window(struct shell_side *side, long c
         return side->running && record && record->role == SHELL_ROLE_TOPLEVEL && record->row >= 0 ? record : 0;
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
 /*
         Whether a window is closing: a close was accepted and the window takes
         no more pictures, titles or window requests. Its client still hears
@@ -656,6 +657,7 @@ static inline int shell_window_closing(struct shell_side *side, long client, lon
 
         return window && (window->state & SHELL_STATE_CLOSING) != 0;
 }
+#endif /* CONFIG_MOONWATER_WAYLAND */
 
 static inline void shell_bit(long *state, long bit, long on)
 {
@@ -1039,6 +1041,7 @@ static inline int shell_window_close(struct shell_side *side, long client, long 
         return status;
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
 /*
         A toplevel its client destroyed. A window that is not closing yet is
         closed through the sink, once; a window Canvas already closed is not
@@ -1062,6 +1065,7 @@ static inline int shell_window_destroy(struct shell_side *side, long client, lon
         shell_surface_clear(window);
         return SHELL_OK;
 }
+#endif /* CONFIG_MOONWATER_WAYLAND */
 
 static inline int shell_window_title(struct shell_side *side, long client, long surface, const char *text, long length)
 {
