@@ -7604,6 +7604,7 @@ struct ui_text
         b32 holding;                            // a finger's long press holds the selection (ui_text_hold) until its lift
         struct ui_press tap;                    // a finger's press on the selection: its lift with no drag asks for the menu
         b32 choices;                            // the menu asked for is a touch selection's (Cut, Copy, Paste, Select All)
+        b32 handles;                            // a touch selection: its two ends show handles a finger drags (ui_text_draw_handles)
         int drag_kind;                          // 1 characters, 2 words, 3 lines
         p64 drag_start, drag_end;
         p64 box_line, box_column;
@@ -8342,6 +8343,81 @@ static b32 ui_text_span(struct ui address_to ui, struct ui_text address_to t, in
         return true;
 }
 
+#define UI_TEXT_HANDLE 6 // a handle's knob, its radius in logical pixels; the stem under the line is two wide
+
+// Where a selection end's handle is drawn, in device pixels: x, the top of its row (the stem's top) and the row's bottom (the
+// knob hangs below it). False when that row is not wholly in the box, or its line's x is not (a wrapped widget has none: a
+// wrapped row's place is not the layout's).
+static b32 ui_text_handle_at(struct ui address_to ui, struct ui_text address_to t, p64 offset, int *x, int *top, int *bottom)
+{
+        static struct ui_text_layout l;
+        p64 line = doc_line_of(&t->doc, offset), first = t->mode == UI_TEXT_FIELD ? 0 : t->top_line;
+        int row;
+
+        if (t->wrap || line < first)
+                return false;
+        row = t->top + (int)(line - first) * t->line_height;
+        if (row < t->top || row + t->line_height > t->bottom)
+                return false;
+        ui_text_layout_line(ui, t, line, &l);
+        *x = t->left - (int)t->scroll_x + ui_text_x_of(&l, offset);
+        if (*x < t->left || *x > t->right)
+                return false;
+        *top = row;
+        *bottom = row + t->line_height;
+        return true;
+}
+
+// The handles of a touch selection, drawn over its two ends in the accent: a flat stem under each end's line, and a knob hung
+// below it. Only the one selection of a widget has them, and only while the widget says so (handles).
+static fn ui_text_draw_handles(struct ui address_to ui, struct ui_text address_to t)
+{
+        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+        unsigned int tone = ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, 255);
+        int radius = UI_TEXT_HANDLE * ui->scale, width = 2 * ui->scale;
+
+        if (!t->handles || t->doc.selection_count != 1 || doc_sel_start(s) >= doc_sel_end(s))
+                return;
+        for (int side = 0; side < 2; side++)
+        {
+                int x, top, bottom;
+
+                if (!ui_text_handle_at(ui, t, side ? doc_sel_end(s) : doc_sel_start(s), &x, &top, &bottom))
+                        continue;
+                ui_fill(ui, x - width / 2, top, width, bottom - top, tone);
+                ui_round(ui, x - radius, bottom, 2 * radius, 2 * radius, radius, tone);
+        }
+}
+
+// A finger's press on a handle moves that end: the other end stays where it is, and the drag after it is by characters. The
+// press is on a handle when it is within a finger's reach across the knob (UI_TARGET), from the lower quarter of the end's row
+// down past the knob: the text of the row is still the selection's, so a tap there is its menu. False when it is on neither.
+static b32 ui_text_handle_grab(struct ui address_to ui, struct ui_text address_to t, int x, int y)
+{
+        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+        int radius = UI_TEXT_HANDLE * ui->scale, reach = UI_TARGET * ui->scale / 2;
+
+        if (!t->handles || t->doc.selection_count != 1 || doc_sel_start(s) >= doc_sel_end(s))
+                return false;
+        for (int side = 0; side < 2; side++)
+        {
+                p64 at = side ? doc_sel_end(s) : doc_sel_start(s), fixed = side ? doc_sel_start(s) : doc_sel_end(s);
+                int hx, top, bottom;
+
+                if (!ui_text_handle_at(ui, t, at, &hx, &top, &bottom))
+                        continue;
+                if (x < hx - reach || x >= hx + reach || y < bottom - t->line_height / 4 || y >= bottom + 3 * radius)
+                        continue;
+                ui_drag_stop(&t->kinetic);
+                t->touch = t->holding = t->tap.down = false;
+                t->dragging = true, t->drag_box = false;
+                t->drag_kind = 1, t->drag_start = t->drag_end = fixed;
+                ui_text_wake(t);
+                return true;
+        }
+        return false;
+}
+
 // A finger's long press (the compositor's right button, WINDOW_KEY_HOLD): the word under it is selected, and the drag after it
 // is by words from there (drag_kind 2) until the lift. A masked field has no words, so its whole text is taken, as a double
 // click takes it.
@@ -8356,7 +8432,7 @@ static p32 ui_text_hold(struct ui address_to ui, struct ui_text address_to t, in
         ui_drag_stop(&t->kinetic);
         doc_select_set(&t->doc, start, finish);
         t->touch = false, t->holding = true, t->dragging = true, t->drag_box = false;
-        t->tap.down = false;
+        t->tap.down = false, t->handles = true;
         t->drag_kind = 2, t->drag_start = start, t->drag_end = finish;
         ui_text_reveal(ui, t);
         ui_text_wake(t);
@@ -8458,11 +8534,13 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         p64 at = ui_text_hit(ui, t, x, y);
                         b32 on = doc_any_selected(&t->doc) && ui_text_selected(t, at);
 
+                        if (ui_text_handle_grab(ui, t, x, y))
+                                return UI_TEXT_MOVED;
                         ui_drag_start(&t->kinetic, y, now);
                         if (on)
                                 ui_press_begin(&t->tap, x, y, 0, true);
                         else
-                                doc_select_set(&t->doc, at, at), t->tap.down = false;
+                                doc_select_set(&t->doc, at, at), t->tap.down = false, t->handles = false;
                         t->dragging = true;
                         ui_text_wake(t);
                         return UI_TEXT_MOVED;
@@ -8471,6 +8549,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         b32 again = now - t->click_at < UI_TEXT_CLICKS_NS && (t->click_x - x) * (t->click_x - x) + (t->click_y - y) * (t->click_y - y) <= 16 * ui->scale * ui->scale;
                         p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
 
+                        t->handles = false;
                         t->clicks = again ? t->clicks % 3 + 1 : 1;
                         t->click_at = now, t->click_x = x, t->click_y = y;
                         t->drag_box = false;
@@ -8668,6 +8747,8 @@ static p32 ui_text_menu_do(struct ui address_to ui, struct ui_text address_to t,
 
         if (!t || id <= 0 || id > UI_TEXT_MENU_ALL)
                 return 0;
+        if (id == UI_TEXT_MENU_ALL)
+                t->handles = true;
         return ui_text_command(ui, t, commands[id]);
 }
 
@@ -9116,6 +9197,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                         } while (from < l.count && row_y + t->line_height <= t->bottom);
                 }
         }
+        ui_text_draw_handles(ui, t);
 }
 
 /*

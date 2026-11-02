@@ -133809,6 +133809,22 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
         asks = field_button(wui, t, 0x110, false, beta + 1, y, cancel);
         check("touch: a cancelled press on the selection asks for no menu and keeps the selection",
               !(asks & UI_TEXT_MENU) && field_selected(t, 6, 10));
+
+        // Each end of a touch selection has a handle: a stem under its line and a knob hung below it, in the accent. A finger on
+        // a knob moves that end by characters, and the other end stays where it was.
+        ui_text_draw(wui, t, 20, 20, 300, 60, 0);
+        y = t->top + t->line_height / 2;
+        {
+                int bottom = t->top + t->line_height, radius = 6 * wui->scale, knob = field_x(wui, t, 10);
+
+                check("touch: a selection's end has a handle, a knob in the accent under its line",
+                      (wui->pixels[(positive)(bottom + radius) * wui->pitch + (positive)knob] & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu));
+                field_button(wui, t, 0x110, true, knob, bottom + radius, touch);
+                field_motion(wui, t, field_x(wui, t, 13) + 1, y);
+                asks = field_button(wui, t, 0x110, false, field_x(wui, t, 13) + 1, y, touch);
+                check("touch: a finger on a handle moves that end by characters, and the other end stays",
+                      (asks & UI_TEXT_MOVED) && field_selected(t, 6, 13));
+        }
 }
 
 static fn field_check(struct ui address_to wui)
