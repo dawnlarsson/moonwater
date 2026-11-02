@@ -122117,6 +122117,169 @@ static void check_compositor_preview_fade(void)
 }
 
 /*
+        The snap trigger reads the window's rectangle against its screen's, never the hand. An edge touches its screen's
+        edge at 0 px, and the preview is the target at full tint from that first frame. Once touched it holds until the
+        edge is 8 px inside (a dead zone, so a jitter does not cancel it); a corner whose two edges are within 16 px of
+        the screen's corner wins over the edge that touches it. The pointer on an edge with the window away from it is no
+        trigger, and a let go with no preview leaves the window where it is. A window is on the screen it is mostly on,
+        and a seam between two screens is never an edge.
+*/
+static void snap_fresh(void)
+{
+    layout_setup(256, 1);
+    compositor.table->motion = 0;
+    layout_show(1, 60, 60, 100, 80);
+}
+
+// A hand holding row by grab_x, grab_y in its rectangle, which is box_x, box_y before any clamp: the button down on the first.
+static void snap_hand(int row, int box_x, int box_y, int grab_x, int grab_y)
+{
+    if (compositor.drag != row)
+    {
+        compositor.drag = row;
+        compositor.drag_moved = 0;
+        compositor.drag_x = grab_x, compositor.drag_y = grab_y;
+        compositor.button_down = 1;
+        compositor.button_row[0] = row;
+    }
+    screens_hand(box_x + grab_x, box_y + grab_y, 0);
+}
+
+static void snap_let_go(int box_x, int box_y, int grab_x, int grab_y)
+{
+    screens_hand(box_x + grab_x, box_y + grab_y, -1);
+}
+
+static int snap_rect_is(const int *rect)
+{
+    return compositor.preview_row == 1 && compositor.preview[0] == rect[0] && compositor.preview[1] == rect[1] &&
+           compositor.preview[2] == rect[2] && compositor.preview[3] == rect[3];
+}
+
+static void check_compositor_snap_trigger(void)
+{
+    static const struct { int x, y; int rect[4]; } contact[4] = {
+        {0, 60, {0, 0, 128, 256}},     /* left, touched at 0 px */
+        {156, 60, {128, 0, 128, 256}}, /* right */
+        {60, 0, {0, 0, 256, 256}},     /* top: maximized */
+        {60, 176, {0, 128, 256, 128}}, /* bottom */
+    };
+    int every = 1, rect[4];
+
+    if (!layout_table_map(256))
+    {
+        check("snap trigger: the table is mapped", false);
+        return;
+    }
+    for (int each = 0; each < 4; each++)
+    {
+        snap_fresh();
+        snap_hand(1, contact[each].x, contact[each].y, 50, 40);
+        every = every && snap_rect_is(contact[each].rect) && compositor_preview_alpha() == 100;
+    }
+    check("snap contact: each edge touched at 0 px shows its target at the first frame, exactly, at full tint", every);
+
+    snap_fresh();
+    snap_hand(1, 5, 60, 50, 40);
+    check("snap contact: 5 px short of the left edge is no contact, no preview", compositor.preview[2] == 0);
+    snap_fresh();
+    snap_hand(1, 60, 171, 50, 40);
+    check("snap contact: 5 px short of the bottom edge is no contact, no preview", compositor.preview[2] == 0);
+
+    snap_fresh();
+    snap_hand(1, 0, 60, 50, 40);
+    snap_hand(1, 5, 60, 50, 40);
+    check("snap contact: touched, then 5 px inside, the target holds (the dead zone)",
+          compositor.preview[2] == 128 && compositor.preview_row == 1);
+    snap_hand(1, 8, 60, 50, 40);
+    check("snap contact: 8 px inside the edge the contact is lost, and the preview clears at once",
+          compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE);
+
+    /* A corner: its two edges within 16 px of the screen's corner, one of them touching, is the quarter. */
+    snap_fresh();
+    snap_hand(1, 10, 0, 50, 40);
+    rect[0] = 0, rect[1] = 0, rect[2] = 128, rect[3] = 128;
+    check("snap corner: the top touching with the left 10 px short of the corner, the quarter wins over the top",
+          snap_rect_is(rect) && compositor.preview_row == 1);
+    snap_fresh();
+    snap_hand(1, 146, 176, 50, 40);
+    rect[0] = 128, rect[1] = 128, rect[2] = 128, rect[3] = 128;
+    check("snap corner: the bottom touching with the right 10 px short of the corner, the bottom right quarter wins",
+          snap_rect_is(rect));
+    snap_fresh();
+    snap_hand(1, 0, 0, 50, 40);
+    rect[0] = 0, rect[1] = 0, rect[2] = 128, rect[3] = 128;
+    check("snap corner: both edges touching, the corner's quarter", snap_rect_is(rect));
+    snap_fresh();
+    snap_hand(1, 20, 0, 50, 40);
+    rect[0] = 0, rect[1] = 0, rect[2] = 256, rect[3] = 256;
+    check("snap corner: the left 20 px short is outside the corner dead zone, and the top alone maximizes",
+          snap_rect_is(rect));
+
+    /* The pointer alone is no trigger: the window is elsewhere, and the hand is on the edge. */
+    snap_fresh();
+    snap_hand(1, 120, 60, -120, 40);
+    check("snap cursor: the pointer on the left edge with the window in the middle is no trigger", compositor.preview[2] == 0);
+    snap_fresh();
+    snap_hand(1, 60, 110, 40, -110);
+    check("snap cursor: the pointer on the top edge with the window in the middle is no trigger", compositor.preview[2] == 0);
+
+    /* A let go: it takes the target it shows, which clears at once, and takes none where the window is away. */
+    snap_fresh();
+    snap_hand(1, 0, 60, 50, 40);
+    snap_let_go(0, 60, 50, 40);
+    check("snap release: let go on the target the window takes it, and the preview is gone at once",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.x[1] == 0 && compositor.y[1] == 0 &&
+              compositor.table->want_width[1] == 128 && compositor.table->want_height[1] == 256 && compositor.preview[2] == 0);
+    snap_fresh();
+    snap_hand(1, 120, 60, -120, 40);
+    snap_let_go(120, 60, -120, 40);
+    check("snap release: let go with only the pointer on the edge, the window stays where it is",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 120 && compositor.y[1] == 60);
+    snap_fresh();
+    snap_hand(1, 0, 60, 50, 40);
+    snap_hand(1, 20, 60, 50, 40);
+    check("snap release: dragged 20 px away from the edge before the let go, the preview is gone", compositor.preview[2] == 0);
+    snap_let_go(20, 60, 50, 40);
+    check("snap release: and the let go takes no target", compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 20);
+
+    /* Two screens side by side, A and B, the space 512 by 256. A window is on the screen it is mostly on. */
+    snap_fresh();
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
+    compositor.width = 512;
+    snap_hand(1, 200, 0, 80, 40);
+    rect[0] = 0, rect[1] = 0, rect[2] = 256, rect[3] = 256;
+    check("snap screen: a window across two screens, mostly on A, maximizes on A and not on the B under its pointer",
+          snap_rect_is(rect) && compositor.preview[0] == 0);
+    snap_fresh();
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
+    compositor.width = 512;
+    snap_hand(1, 156, 60, 50, 40);
+    check("snap screen: A's right edge against B is a seam, never an edge: no preview", compositor.preview[2] == 0);
+    snap_fresh();
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
+    compositor.width = 512;
+    snap_hand(1, 256, 60, 50, 40);
+    check("snap screen: B's left edge against A is a seam, never an edge: no preview", compositor.preview[2] == 0);
+    snap_fresh();
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
+    compositor.width = 512;
+    snap_hand(1, 412, 60, 50, 40);
+    rect[0] = 384, rect[1] = 0, rect[2] = 128, rect[3] = 256;
+    check("snap screen: B's free right edge touched shows B's right half", snap_rect_is(rect));
+    snap_let_go(412, 60, 50, 40);
+    check("snap screen: and the let go takes B's right half", compositor.arranged[1] == COMPOSITOR_RIGHT && compositor.x[1] == 384);
+}
+
+/*
         A window dragged under the grid is over it: the grid's tints are the wallpaper's, and the window being moved is not
         tinted where the grid's row lies across it.
 */
@@ -139038,6 +139201,7 @@ b32 main()
         check_compositor_snap_closing();
         check_compositor_glide();
         check_compositor_preview_fade();
+        check_compositor_snap_trigger();
         check_compositor_overlay_fade();
         check_compositor_grid_drag();
         check_compositor_wheel();
