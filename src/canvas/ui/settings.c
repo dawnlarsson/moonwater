@@ -746,9 +746,8 @@ static struct
         int card_lines;
         char card_title[SETTINGS_STATUS];
 
-        // The command that asked for a second Enter: its row (one more than it, none is 0) and what was typed.
-        int confirm;
-        char confirm_args[SETTINGS_TYPED];
+        // The press again to confirm (the kit's): a command that asks for a second Enter (its row, and what was typed), a forget.
+        struct ui_confirm confirm;
 
         // The verb being run: its process, the read end of its output, what it said, when it began, for which row.
         bipolar child;
@@ -2837,24 +2836,15 @@ static b32 settings_run(int row, const char address_to args)
                 settings_say((string_address) "type a command: its verb, then what follows it");
                 return false;
         }
-        if (settings_asks_for(words + 1, count - 1) &&
-            (settings.confirm != row + 1 || !string_equals((string_address)settings.confirm_args, (string_address)args)))
+        if (settings_asks_for(words + 1, count - 1) && !ui_confirm_ask(&settings.confirm, row + 1, args))
         {
-                char line[SETTINGS_STATUS];
+                char line[SETTINGS_STATUS], text[SETTINGS_STATUS];
 
-                settings.confirm = row + 1;
-                string_copy_bounded((string_address)settings.confirm_args, (string_address)args, sizeof(settings.confirm_args));
-                string_copy_bounded((string_address)line, (string_address) "press Enter again to run: ", sizeof(line));
-                {
-                        char text[SETTINGS_STATUS];
-
-                        settings_join(words, count, text, sizeof(text));
-                        string_append_bounded((string_address)line, (string_address)text, sizeof(line));
-                }
+                settings_join(words, count, text, sizeof(text));
+                ui_confirm_line(line, sizeof(line), text);
                 settings_say((string_address)line);
                 return false;
         }
-        settings.confirm = 0;
         settings_change(row, args);
         return true;
 }
@@ -3262,6 +3252,9 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
         string_copy_bounded((string_address)settings.edit_from, (string_address)text, sizeof(settings.edit_from));
         ui_field_open(t, &settings.own, settings.edit_from);
         t->masked = masked;
+        // The field has the keys from its first character, and a passphrase or a network's, device's or command's is a command:
+        // a press outside it cancels (the kit's rule), where a plain value is kept.
+        t->focused = true, t->command = settings_item(row) != null;
         t->most =row >= (int)SETTINGS_LIST ? SETTINGS_ITEM_LABEL - 1
                   : row >= SETTINGS_ANY || (settings_rows[row].flags & SETTINGS_SPLIT) ? SETTINGS_TYPED - 1
                                                                                         : SETTINGS_VALUE - 1;
@@ -3326,19 +3319,19 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
 static fn settings_forget(void)
 {
         const struct settings_item address_to item = settings_item(settings.list.focus);
-        char line[SETTINGS_STATUS];
+        char line[SETTINGS_STATUS], text[SETTINGS_STATUS];
 
         if (!item || !(item->flags & SETTINGS_ITEM_SAVED) || (item->kind != SETTINGS_NETWORK && item->kind != SETTINGS_DEVICE))
                 return;
-        if (!string_equals((string_address)settings.forget, (string_address)item->label))
+        // A forget is armed by its kind (a number no row has, below zero) and the label it is for.
+        if (!ui_confirm_ask(&settings.confirm, -1 - (int)item->kind, item->label))
         {
-                string_copy_bounded((string_address)settings.forget, (string_address)item->label, sizeof(settings.forget));
-                string_copy_bounded((string_address)line, (string_address) "press Delete again to forget ", sizeof(line));
-                string_append_bounded((string_address)line, (string_address)item->label, sizeof(line));
+                string_copy_bounded((string_address)text, (string_address)"forget ", sizeof(text));
+                string_append_bounded((string_address)text, (string_address)item->label, sizeof(text));
+                ui_confirm_line(line, sizeof(line), text);
                 settings_say((string_address)line);
                 return;
         }
-        settings.forget[0] = 0;
         settings_act(item->kind == SETTINGS_NETWORK ? 'f' : 'd', item->label, null);
 }
 
@@ -3421,7 +3414,7 @@ static fn settings_group_choose(int group)
         settings.feed_due = 0;
         settings_filter_clear();
         settings.list.scroll.scroll = 0;
-        settings.confirm = 0;
+        ui_confirm_drop(&settings.confirm);
         settings_refilter();
         if (settings.list.count)
                 settings.list.focus = settings.list.id[0];
@@ -3491,7 +3484,7 @@ static fn settings_edit_asked(p32 asks)
 {
         if (asks & UI_TEXT_REFUSED)
                 settings_say((string_address)settings.edit.refused);
-        if (asks & UI_TEXT_SUBMIT)
+        if (asks & (UI_TEXT_SUBMIT | UI_TEXT_COMMIT))
                 settings_edit_commit();
         else if (asks & UI_TEXT_CANCEL)
                 settings_edit_end();
@@ -3499,28 +3492,11 @@ static fn settings_edit_asked(p32 asks)
                 settings_dirty();
 }
 
-/*
-        A press outside the field a row is typed in ends the typing. A plain value is set, as Enter sets it: a click is
-        the way out of a value's field, and what was typed is not thrown away by it. A passphrase, a name to join or add
-        and a command are left as Escape leaves them, because a click is no Enter for them (a click must not join a
-        network or run a command).
-*/
-static fn settings_edit_outside(void)
-{
-        const struct settings_item address_to item = settings.editing >= 0 ? settings_item(settings.editing) : null;
-        b32 plain = settings.editing >= 0 && settings.editing < SETTINGS_ANY && !item && !settings.edit.masked;
-
-        if (plain)
-                settings_edit_commit();
-        else
-                settings_edit_end();
-}
-
 // A key in a field being typed in: the field's (a key between a command's two Enters asks again).
 static fn settings_type(const struct window_event address_to event)
 {
         if (event->a != SETTINGS_KEY_ENTER && event->a != SETTINGS_KEY_ENTER_PAD)
-                settings.confirm = 0;
+                ui_confirm_drop(&settings.confirm);
         settings.edit.focused = true;
         settings_edit_asked(ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, 0, 0));
 }
@@ -3781,10 +3757,10 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_card_key(event);
                 return true;
         }
-        if (event->a != SETTINGS_KEY_ENTER && event->a != SETTINGS_KEY_ENTER_PAD && event->a != SETTINGS_KEY_SPACE)
-                settings.confirm = 0;
-        if (event->a != SETTINGS_KEY_DELETE)
-                settings.forget[0] = 0;
+        // A key between a confirm and its next press drops it: Enter or Space fires a command's, Delete a forget's.
+        if (settings.confirm.what < 0 ? event->a != SETTINGS_KEY_DELETE
+                                      : event->a != SETTINGS_KEY_ENTER && event->a != SETTINGS_KEY_ENTER_PAD && event->a != SETTINGS_KEY_SPACE)
+                ui_confirm_drop(&settings.confirm);
         /*
                 The search field has the keys while no row is typed in, and gets each key first: with something in it,
                 every key (the caret's moves and selections, Backspace and Delete, a blank, the clipboard, undo; Enter
@@ -4054,7 +4030,7 @@ static fn settings_gallery_build(void)
         // The fields are the kit's, typed in as any is: the node's name takes what a machine's name takes and says so.
         for (int k = 0; k < 2; k++)
         {
-                struct ui_control address_to field = settings_gallery_put(UI_INPUT, 0, 48, k ? 203 : 117, 284, 78, k ? "Region" : "Node name");
+                struct ui_control address_to field = settings_gallery_put(UI_INPUT, 0, UI_FIELD_H, k ? 203 : 117, 284, 78, k ? "Region" : "Node name");
 
                 if (!settings_gallery.field[k].doc.selections)
                         ui_field_open(&settings_gallery.field[k], &settings.own, "");
@@ -4212,6 +4188,9 @@ static b32 settings_gallery_event(const struct window_event address_to event)
                                ? ui_field_event(&settings.ui, t, &settings.popup, event, settings.page.pointer_x, settings.page.pointer_y)
                                : 0;
 
+                // A press outside a gallery field is the page's: the field's answer to it (commit or cancel) changes nothing here.
+                if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
+                        asks = 0;
                 if (asks & (UI_TEXT_CANCEL | UI_TEXT_SUBMIT))
                         t->focused = false;
                 if (asks)
@@ -4282,33 +4261,32 @@ static int settings_press_target(int x, int y)
 static fn settings_press_at(void);
 
 /*
-        A mouse's press on a row is begun here and done on its release, where it went down, as a finger's is: the row shows
-        pressed while the pointer is on it, a slide off it shows none, and a release off it runs nothing. True when the press
-        was a row's and is held; any other press is done at once, as it always was.
+        A mouse's press on a row, a group or the card is begun here and done on its release,
+        where it went down, as a finger's is: what it is on shows pressed (a row's state layer, a group's ripple), a slide
+        off it shows none, and a release off it runs nothing. True when the press was on something and is held; a press on
+        nothing is done at once (it closes the menu), as it always was.
 */
 static b32 settings_press_begin(void)
 {
         int x = settings.page.pointer_x, y = settings.page.pointer_y, target = settings_press_target(x, y);
 
-        if (target < 0 || target >= SETTINGS_PRESS_GROUP)
+        if (target < 0)
                 return false;
         ui_press_begin(&settings.press, x, y, target, false);
-        settings.list.down = target;
+        if (target < SETTINGS_PRESS_GROUP)
+                settings.list.down = target;
+        else if (target < SETTINGS_PRESS_CARD)
+                ui_page_column_press(&settings.ui, &settings.page, target - SETTINGS_PRESS_GROUP, x, y);
         settings_dirty();
         return true;
 }
 
-// The pointer moved with a mouse's press held: the row is shown pressed while it is on the row the press went down on.
+// The pointer moved with a mouse's press held: a row is shown pressed while it is on the row the press went down on.
 static fn settings_press_slide(int x, int y)
 {
-        b32 on = settings_press_target(x, y) == settings.press.target;
-
-        if (on == (settings.list.down == settings.press.target))
-                return;
-        ui_list_let_go(&settings.ui, &settings.list);
-        if (on)
-                settings.list.down = settings.press.target;
-        settings_dirty();
+        // A row's press is shown pressed while the pointer is on it (the kit's rule); a group, a choice or the card has no such state.
+        if (settings.press.target < SETTINGS_PRESS_GROUP && ui_list_press_slide(&settings.ui, &settings.list, &settings.press, settings_press_target(x, y)))
+                settings_dirty();
 }
 
 // A mouse's release with a row's press held: done where it went down, if the release is on that row too.
@@ -4356,9 +4334,11 @@ static fn settings_finger(const struct window_event address_to event)
                 int target = settings_press_target(x, y);
 
                 ui_finger_down(&settings.finger, x, y, target, ui_page_region(&settings.ui, &settings.page, x, y));
-                // What it is on shows pressed at once: a row.
+                // What it is on shows pressed at once: a row, or a group's ripple (a choice of the popup is the kit's own).
                 if (target >= 0 && target < SETTINGS_PRESS_GROUP)
                         settings.list.down = target;
+                else if (target >= SETTINGS_PRESS_GROUP && target < SETTINGS_PRESS_CARD)
+                        ui_page_column_press(&settings.ui, &settings.page, target - SETTINGS_PRESS_GROUP, x, y);
                 settings_dirty();
                 return;
         }
@@ -4494,35 +4474,32 @@ static b32 settings_event(const struct window_event address_to event)
                 int x = settings.page.pointer_x, y = settings.page.pointer_y;
                 p32 asks;
 
-                if (settings.editing >= 0 && (settings_edit_shown() || event->type == WINDOW_EVENT_CLIP || settings.edit.dragging) &&
+                /*
+                        A press outside the field a row is typed in ends the typing, by the kit's one rule (ui_field_event answers
+                        UI_TEXT_COMMIT for a plain value, UI_TEXT_CANCEL for a command): the press then goes on to the row it is on,
+                        unless that is the row typed in, whose label a press only leaves.
+                */
+                if (settings.editing >= 0 && (settings_edit_shown() || event->type != WINDOW_EVENT_MOTION || settings.edit.dragging) &&
                     (asks = ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, x, y)))
                 {
+                        b32 outside = event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL);
+                        b32 own = outside && settings_press_target(x, y) == settings.editing;
+
                         settings_edit_asked(asks);
-                        return true;
+                        if (!outside || own)
+                        {
+                                settings_dirty();
+                                return true;
+                        }
                 }
                 if (settings.filter_open && (asks = ui_field_event(&settings.ui, &settings.filter_edit, &settings.popup, event, x, y)))
                 {
-                        if (event->type == WINDOW_EVENT_BUTTON && settings.editing >= 0)
-                                settings_edit_outside();
-                        settings_filter_asked(asks);
-                        settings_dirty();
-                        return true;
-                }
-        }
-        /*
-                A press that the field a row is typed in did not take is outside it: the typing ends (settings_edit_outside),
-                and the press goes on to the row it is on, unless that is the row typed in, whose label a press only leaves.
-        */
-        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings.editing >= 0 &&
-            settings.choice < 0 && !settings.view)
-        {
-                b32 own = settings_press_target(settings.page.pointer_x, settings.page.pointer_y) == settings.editing;
-
-                settings_edit_outside();
-                if (own)
-                {
-                        settings_dirty();
-                        return true;
+                        if (event->type != WINDOW_EVENT_BUTTON || (asks != UI_TEXT_COMMIT && asks != UI_TEXT_CANCEL))
+                        {
+                                settings_filter_asked(asks);
+                                settings_dirty();
+                                return true;
+                        }
                 }
         }
         switch (event->type)
@@ -4595,7 +4572,6 @@ static fn settings_press_at(void)
         row = ui_page_column_hit(&settings.ui, &settings.page, x, y);
         if (row >= 0)
         {
-                ui_page_column_press(&settings.ui, &settings.page, row, x, y);
                 settings_edit_end();
                 settings.pane = 0;
                 settings_group_choose(row);
@@ -4610,7 +4586,7 @@ static fn settings_press_at(void)
                 return;
         if (row != before)
         {
-                settings.confirm = 0;
+                ui_confirm_drop(&settings.confirm);
                 settings_said_of(before);
         }
         settings.pane = 1;
