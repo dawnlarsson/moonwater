@@ -253,7 +253,15 @@ static fn editor_reload(void)
                 system_call_2(syscall(munmap), (positive)tab->bytes, tab->mapped);
         editor.count--;
         memory_copy(&editor.tabs[editor.tab], &editor.tabs[editor.tab + 1], (positive)(editor.count - editor.tab) * sizeof(editor.tabs[0]));
-        editor_open((string_address)path);
+        if (!editor_open((string_address)path))
+        {
+                // What is there now is no file a tab can show (a directory, a FIFO; the status says so): the tab is gone, and
+                // the window keeps one it can point at, with the tab it was on or the last one.
+                if (!editor.count)
+                        editor_open(null);
+                editor.tab = at < editor.count ? at : editor.count - 1;
+                return;
+        }
         // The file read again goes back to its place among the tabs, and is the one shown: it is not moved to the end.
         if (editor.count == count && at + 1 < count)
         {
