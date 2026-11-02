@@ -119314,6 +119314,67 @@ static void check_compositor_popup_press(b32 touch)
 }
 
 /*
+        A glass menu is composed as glass (compositor_glass_pass): where its picture is clear it shows what is under it, tinted
+        and blurred, and where it is drawn it is its own colour. A menu's edge has no line: the window beneath is what is
+        outside it.
+*/
+static void check_compositor_glass_popup(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("glass popup: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->state[1] = table->state[3] = 0;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = 0;
+    glass_paint(1, 0, 0, 120, 80, 0xff2060c0u, true);
+    compositor_present();
+    compositor_focus(1);
+
+    // A glass menu of row 1, 10 pixels in from its top left: on the screen 60 to 120 by 40 to 80, clear but for a square.
+    table->popup_parent[3] = 2;
+    table->popup_x[3] = 10;
+    table->popup_y[3] = 10;
+    table->popup_w[3] = 0;
+    table->popup_h[3] = 0;
+    table->popup_flags[3] = WINDOW_POPUP_POINT;
+    table->width[3] = 60;
+    table->height[3] = 40;
+    table->glass[3] = WINDOW_NO_CLOSE | WINDOW_GLASS;
+    glass_paint(3, 0, 0, 60, 40, 0, true);
+    glass_paint(3, 10, 10, 20, 20, 0xff00ff00u, false);
+    compositor_present();
+    {
+        unsigned int clear = glass_at(65, 45), drawn = glass_at(80, 60), outside = glass_at(59, 45);
+
+        check("glass menu: where its picture is clear it is glass over what is under it, tinted, not the window's colour nor black",
+              clear != 0x2060c0u && clear != 0);
+        check("glass menu: where it is drawn it is its own colour", drawn == 0x00ff00u);
+        check("glass menu: it has no line at its edge, the window beneath is what is outside it", outside == 0x2060c0u);
+    }
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+}
+
+/*
         The tray (the clock and the battery) pressed twice quickly opens the settings: a window named settings that is
         up is brought up and given the keys, and with none the script is asked to start it. One press, a press of the
         middle button, and two too far apart do nothing.
@@ -131782,15 +131843,51 @@ b32 main()
                 launcher.dirs[0] = "/usr/bin", launcher.dir_count = 1;
                 table.output_width = 1920, table.output_height = 1080, table.stride = SETTINGS_GALLERY_W;
                 launcher.own.table = &table;
+                // The launcher is glass (WINDOW_GLASS): its pieces are drawn in the inks of the glass the dark theme gives it,
+                // and its picture is laid over that glass to be seen, as the settings window's is.
                 launcher.ui = settings.ui;
-                launcher.ui.opaque = 1;
+                launcher.ui.opaque = 0, launcher.ui.glass = 1;
+                ui_inks(&launcher.ui, 0x2b2b2eu);
                 launcher.width = LAUNCHER_WIDTH;
                 launcher_type_text("ls");
                 launcher_layout();
                 launcher.list.hover = 2;
                 ui_kit.now += 1000000000ll;
                 launcher_draw(frames_pixels);
+                for (positive left = (positive)launcher.width * (positive)launcher.height; left > 0; left--)
+                {
+                        positive at = left - 1, y = at / (positive)launcher.width, x = at % (positive)launcher.width;
+                        unsigned int pixel = frames_pixels[y * SETTINGS_GALLERY_W + x];
+
+                        frames_pixels[y * SETTINGS_GALLERY_W + x] = ui_over(pixel, 0xff000000u | 0x2b2b2eu);
+                }
                 frames_write((string_address) "launcher", 0, 0, 0, launcher.width, launcher.height);
+                // A dropdown is glass too (ui_popup_look): its menu over the same glass, no face and no outline, its hot choice lit.
+                {
+                        static struct ui_popmenu menu;
+                        struct ui menu_ui = launcher.ui;
+
+                        memory_zero(&menu, sizeof(menu));
+                        ui_popmenu_add(&menu, "Copy", "Ctrl+C", 0, 1);
+                        ui_popmenu_add(&menu, "Paste", "Ctrl+V", 0, 2);
+                        ui_popmenu_add(&menu, "", null, UI_MENU_SEPARATOR, 0);
+                        ui_popmenu_add(&menu, "Select all", "Ctrl+A", 0, 3);
+                        ui_popmenu_add(&menu, "Undo", null, UI_MENU_DISABLED, 4);
+                        menu.hot = 1;
+                        menu_ui.opaque = 0, menu_ui.glass = 1;
+                        ui_inks(&menu_ui, 0x2b2b2eu);
+                        ui_popmenu_size(&menu_ui, &menu, 0);
+                        ui_begin(&menu_ui, frames_pixels, SETTINGS_GALLERY_W, menu.width, menu.height);
+                        ui_popmenu_draw(&menu_ui, &menu);
+                        for (positive left = (positive)menu.width * (positive)menu.height; left > 0; left--)
+                        {
+                                positive at = left - 1, y = at / (positive)menu.width, x = at % (positive)menu.width;
+                                unsigned int pixel = frames_pixels[y * SETTINGS_GALLERY_W + x];
+
+                                frames_pixels[y * SETTINGS_GALLERY_W + x] = ui_over(pixel, 0xff000000u | 0x2b2b2eu);
+                        }
+                        frames_write((string_address) "menu", 0, 0, 0, menu.width, menu.height);
+                }
         }
         string_format(log, "  kit frames: %p frames drawn\n", frames_count);
         return test_report(null);
@@ -132682,6 +132779,132 @@ static fn field_check(struct ui address_to wui)
 {
         (void)wui;
         check("field: the kit has a field every input is (ui_field_event: rules, masked, its menu, the keys it leaves)", false);
+}
+#endif
+
+/*
+        Glass: a temporary overlay is glass, what is under it shows through, and its pieces are drawn in the inks of its
+        ground (ui_text_colour, ui_well), flat: no shadow, ring or outline past an edge. The launcher and its menus are glass
+        (WINDOW_GLASS, the menus through ui_popup_look); the settings window, the editor and the terminal are the kit's
+        surface and not glass. A glass window has no line (compositor_line).
+*/
+#if MOONWATER_UI_LAUNCHER
+static fn check_glass_pieces(string_address regular)
+{
+        static font_face face;
+        static p8 atlas[512 * 512];
+        static unsigned int scratch[800 * UI_SCRATCH_ROWS], picture[800 * 240], menu_picture[800 * 240];
+        static struct windows table;
+        static char names[1][LAUNCHER_NAME];
+        static unsigned char from[1];
+        static unsigned short hashed[LAUNCHER_HASH];
+        static struct ui_popmenu menu;
+        positive size = 0, bytes = compositor_map_file(regular, &size);
+        long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
+        struct ui ui, menu_ui, parent;
+        struct ui_popup popup;
+        int pad, row, kit_ok;
+
+        if (!bytes || (engine < 0 && engine > -4096) || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("glass: the face loads", false);
+                return;
+        }
+        memory_zero(&ui, sizeof(ui));
+        ui.engine = (font_engine address_to)engine;
+        font_start(ui.engine, atlas, 512, 512);
+        ui.regular = ui.bold = &face;
+        ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 800;
+        ui.opaque = 0, ui.glass = 1;
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+        ui_inks(&ui, 0x2b2b2eu);
+
+        // The flags: the launcher is glass, the windows that stay are the kit's surface. (The terminal's app is not named
+        // here: reading its table would pull in its callbacks, which need the shell's klog.)
+        kit_ok = (launcher_app.glass & WINDOW_GLASS) != 0;
+#if MOONWATER_UI_SETTINGS
+        kit_ok = kit_ok && !(settings_app.glass & WINDOW_GLASS);
+#endif
+#if MOONWATER_UI_EDITOR
+        kit_ok = kit_ok && !(editor_app.glass & WINDOW_GLASS);
+#endif
+        check("glass: the launcher is glass, and the settings window and the editor are the kit's surface", kit_ok);
+
+        // The text's ink stands out from a dark glass (7 to 1 or more, the kit's own contrast); the quiet ink is another.
+        check("glass: a glass window's text is the ink that stands out from its ground (7 to 1 on a dark glass)",
+              ui_contrast(ui_text_colour(&ui, UI_ON_SURFACE) & 0xffffffu, 0x2b2b2eu) >= 700 &&
+              (ui_text_colour(&ui, UI_ON_SURFACE_VARIANT) & 0xffffffu) != (ui_text_colour(&ui, UI_ON_SURFACE) & 0xffffffu));
+
+        // The launcher drawn: its field is flat and the glass shows through where nothing is drawn.
+        memory_zero(&launcher, sizeof(launcher));
+        string_copy((string_address)names[0], (string_address) "lsof");
+        launcher.names = (char address_to)names, launcher.count = 1, launcher.from = from, launcher.hashed = hashed;
+        launcher.dirs[0] = "/bin", launcher.dir_count = 1;
+        table.stride = 800, table.output_width = 1920, table.output_height = 1080;
+        launcher.own.table = &table;
+        launcher.ui = ui;
+        launcher.width = LAUNCHER_WIDTH, launcher.height = 240;
+        launcher.focused = launcher.had_focus = true;
+        launcher_type_text("ls");
+        launcher_layout();
+        launcher_draw((unsigned int address_to)picture);
+        pad = ui_px(&launcher.ui, UI_PAD);
+#define GLASS_AT(x, y) (picture[(y) * 800 + (x)] >> 24)
+        check("glass: a launcher's ground is clear where no piece is drawn: the glass shows through",
+              GLASS_AT(2, 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 2, 2) == 0);
+        check("glass: the launcher's field is flat, with no shadow or ring past its edge (above it and left of it)",
+              GLASS_AT(LAUNCHER_WIDTH / 2, pad - 1) == 0 && GLASS_AT(pad - 1, pad + UI_TARGET / 2) == 0);
+        check("glass: the launcher's field is a lit well over the glass, not clear", GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET / 2) > 0);
+#undef GLASS_AT
+
+        // A menu: glass with no face and no outline, its hot choice lit and the others not.
+        ui_popmenu_add(&menu, "Copy", "Ctrl+C", 0, 1);
+        ui_popmenu_add(&menu, "Paste", "Ctrl+V", 0, 2);
+        ui_popmenu_add(&menu, "", null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(&menu, "Select all", null, 0, 3);
+        menu.hot = 1;
+        menu_ui = ui;
+        menu_ui.opaque = 0, menu_ui.glass = 1;
+        ui_popmenu_size(&menu_ui, &menu, 0);
+        ui_begin(&menu_ui, (unsigned int address_to)menu_picture, 800, menu.width, menu.height);
+        ui_popmenu_draw(&menu_ui, &menu);
+        row = ui_popmenu_row(&menu_ui, &menu);
+#define MENU_AT(x, y) (menu_picture[(y) * 800 + (x)] >> 24)
+        check("glass: a menu has no face and no outline: its top, left, right and bottom edges are clear",
+              MENU_AT(menu.width / 2, 0) == 0 && MENU_AT(0, menu.height / 2) == 0 && MENU_AT(menu.width - 1, menu.height / 2) == 0 &&
+              MENU_AT(menu.width / 2, menu.height - 1) == 0);
+        check("glass: a menu's hot choice is lit over the glass, and the choice above it is not",
+              MENU_AT(UI_MENU_PAD + 4, UI_MENU_PAD + row + row / 2) > 0 && MENU_AT(UI_MENU_PAD + 4, UI_MENU_PAD + row / 2) == 0);
+#undef MENU_AT
+
+        // A popup's look: glass, its inks the ground the compositor gave its row, else the parent's ground.
+        parent = ui;
+        parent.opaque = 1, parent.glass = 0;
+        ui_inks(&parent, 0xe0e0e0u);
+        memory_zero(&popup, sizeof(popup));
+        popup.own.table = &table, popup.own.row = 2;
+        table.ground[2] = 0x112233u;
+        ui_popup_look(&popup, &table, &parent);
+        check("glass: a menu is glass: its row is glass with no close button, and its inks are the row's ground",
+              popup.ui.glass && !popup.ui.opaque && table.glass[2] == UI_POPUP_GLASS && popup.ui.ground == 0x112233u);
+        table.ground[2] = 0;
+        ui_popup_look(&popup, &table, &parent);
+        check("glass: a menu opened before the compositor gave its ground is inked by the parent's", popup.ui.ground == 0xe0e0e0u);
+
+        // A glass window has no line; a floating window that is not glass has its one.
+        {
+                unsigned int was = compositor.arranged[4];
+                b32 glassy = compositor.glassy[4];
+
+                compositor.scale = 1;
+                compositor.arranged[4] = COMPOSITOR_FLOATING;
+                compositor.glassy[4] = 0;
+                kit_ok = compositor_line(4) == COMPOSITOR_LINE;
+                compositor.glassy[4] = 1;
+                check("glass: a glass window has no line, and a floating window that is not glass has its one", kit_ok && compositor_line(4) == 0);
+                compositor.arranged[4] = was, compositor.glassy[4] = glassy;
+        }
 }
 #endif
 
@@ -134455,6 +134678,7 @@ b32 main()
         check_compositor_popup();
         check_compositor_popup_press(0);
         check_compositor_popup_press(1);
+        check_compositor_glass_popup();
         check_compositor_tray();
         check_compositor_place();
         check_compositor_remember();
@@ -134495,6 +134719,10 @@ b32 main()
 #if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER
         if (program_argument_count() > 3)
                 check_field_hands(program_argument(3));
+#endif
+#if MOONWATER_UI_LAUNCHER
+        if (program_argument_count() > 3)
+                check_glass_pieces(program_argument(3));
 #endif
         check_no_hand_typing();
 
