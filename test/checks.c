@@ -114929,6 +114929,28 @@ static p32 saturate_reference(p32 pixel)
         return (p32)(r << 16 | g << 8 | b);
 }
 
+#if defined(__aarch64__)
+/* d8 and x19 are callee-saved on arm64 (AAPCS64: the low half of v8-v15, and x19-x28). The probe sets them, calls the
+   body, and answers zero when both come back as they went. A body that spends d8 on a constant answers wrong here. */
+#if defined(__APPLE__)
+#define SATURATE_CALL "_memory_saturate_u32"
+#define SATURATE_PROBE "_saturate_callee_probe"
+#else
+#define SATURATE_CALL "memory_saturate_u32"
+#define SATURATE_PROBE "saturate_callee_probe"
+#endif
+unsigned long long saturate_callee_probe(unsigned int *into, const unsigned int *from, unsigned long count);
+__asm__(
+    ".text\n"
+    ".globl " SATURATE_PROBE "\n"
+    SATURATE_PROBE ":\n"
+    "   stp x29, x30, [sp, #-16]!\n   mov x29, sp\n"
+    "   fmov d8, #2.0\n   mov x19, #0x1234\n"
+    "   bl " SATURATE_CALL "\n"
+    "   fmov x0, d8\n   eor x0, x0, #0x4000000000000000\n   mov x1, #0x1234\n   eor x1, x19, x1\n   orr x0, x0, x1\n"
+    "   ldp x29, x30, [sp], #16\n   ret\n");
+#endif
+
 /*
         memory_saturate_u32 against saturate_reference: every width to 300 at every alignment of its source and its
         destination to a 64-byte line, on each tier the machine has (AVX-512, AVX2 and the word body on x86-64; the
@@ -114998,6 +115020,9 @@ static fn check_saturate(void)
         check("saturate: every width to 300 at every alignment of source and destination, on each tier, is the boost of each pixel", same);
         check("saturate: words past the count are not touched", untouched);
         check("saturate: every colour of the 24-bit space, the top byte ignored and zero on the way out", whole);
+#if defined(__aarch64__)
+        check("saturate: d8 and x19 come back across the call, as AAPCS64 requires", saturate_callee_probe(small_made, small, 17) == 0);
+#endif
 }
 
 // The tint compositor_glass_tone made, with the cap and floor as parameters: window_mix toward the colour, then the

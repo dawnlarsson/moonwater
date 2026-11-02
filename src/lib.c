@@ -23888,39 +23888,39 @@ __asm__(
     //       memory_saturate_u32: x0 into, x1 from, x2 count: the integer steps
     //       of the x86_64 block (the contract is there), four pixels a turn
     //       in q registers: the channels by ushr and and, grey by mul, two
-    //       mla and a shift, each channel's difference by sshr and added back,
-    //       clamped by smax and smin, packed by shl and orr. A pixel at a time
-    //       under four, on csel. Kernel builds have neither.
+    //       mla and a shift, each channel's difference by shsub (halved, rounded
+    //       down) and added back, clamped by smax and smin, packed by two sli.
+    //       The constants sit in v6, v7, v16, v17 and v18: v8 to v15 are the
+    //       callee-saved half of the vector file (AAPCS64), and a body that
+    //       spends them corrupts its caller's doubles. A pixel at a time under
+    //       four, on csel. Kernel builds have neither.
     //
     ASM_FUNC(memory_saturate_u32)
-    "cbz x2, 9f\n   movi v6.4s, #255\n   movi v7.4s, #77\n   movi v8.4s, #150\n   movi v9.4s, #29\n   movi v10.4s, #0\n"
+    "cbz x2, 9f\n   movi v6.4s, #255\n   movi v7.4s, #77\n   movi v16.4s, #150\n   movi v17.4s, #29\n   movi v18.4s, #0\n"
     "cmp x2, #4\n   b.lo 2f\n"
     "4:  ldr q0, [x1], #16\n"
     "ushr v1.4s, v0.4s, #16\n   and v1.16b, v1.16b, v6.16b\n"
     "ushr v2.4s, v0.4s, #8\n   and v2.16b, v2.16b, v6.16b\n"
     "and v3.16b, v0.16b, v6.16b\n"
-    "mul v4.4s, v1.4s, v7.4s\n   mla v4.4s, v2.4s, v8.4s\n   mla v4.4s, v3.4s, v9.4s\n"
+    "mul v4.4s, v1.4s, v7.4s\n   mla v4.4s, v2.4s, v16.4s\n   mla v4.4s, v3.4s, v17.4s\n"
     "ushr v4.4s, v4.4s, #8\n"
-    "sub v5.4s, v1.4s, v4.4s\n   sshr v5.4s, v5.4s, #1\n   add v1.4s, v1.4s, v5.4s\n"
-    "sub v5.4s, v2.4s, v4.4s\n   sshr v5.4s, v5.4s, #1\n   add v2.4s, v2.4s, v5.4s\n"
-    "sub v5.4s, v3.4s, v4.4s\n   sshr v5.4s, v5.4s, #1\n   add v3.4s, v3.4s, v5.4s\n"
-    "smax v1.4s, v1.4s, v10.4s\n   smin v1.4s, v1.4s, v6.4s\n"
-    "smax v2.4s, v2.4s, v10.4s\n   smin v2.4s, v2.4s, v6.4s\n"
-    "smax v3.4s, v3.4s, v10.4s\n   smin v3.4s, v3.4s, v6.4s\n"
-    "shl v1.4s, v1.4s, #16\n   shl v2.4s, v2.4s, #8\n   orr v1.16b, v1.16b, v2.16b\n   orr v1.16b, v1.16b, v3.16b\n"
-    "str q1, [x0], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 4b\n"
-    "2:  cbz x2, 9f\n"
-    "ldr w3, [x1], #4\n"
+    "shsub v5.4s, v1.4s, v4.4s\n   add v1.4s, v1.4s, v5.4s\n"
+    "shsub v5.4s, v2.4s, v4.4s\n   add v2.4s, v2.4s, v5.4s\n"
+    "shsub v5.4s, v3.4s, v4.4s\n   add v3.4s, v3.4s, v5.4s\n"
+    "smax v1.4s, v1.4s, v18.4s\n   smin v1.4s, v1.4s, v6.4s\n"
+    "smax v2.4s, v2.4s, v18.4s\n   smin v2.4s, v2.4s, v6.4s\n"
+    "smax v3.4s, v3.4s, v18.4s\n   smin v3.4s, v3.4s, v6.4s\n"
+    "sli v3.4s, v2.4s, #8\n   sli v3.4s, v1.4s, #16\n"
+    "str q3, [x0], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 4b\n"
+    "2:  cbz x2, 9f\n   mov w10, #255\n   mov w11, #77\n   mov w12, #150\n   mov w13, #29\n"
+    "8:  ldr w3, [x1], #4\n"
     "ubfx w4, w3, #16, #8\n   ubfx w5, w3, #8, #8\n   and w6, w3, #255\n"
-    "mov w7, #77\n   mul w8, w4, w7\n   mov w7, #150\n   madd w8, w5, w7, w8\n   mov w7, #29\n   madd w8, w6, w7, w8\n"
+    "mul w8, w4, w11\n   madd w8, w5, w12, w8\n   madd w8, w6, w13, w8\n"
     "lsr w8, w8, #8\n"
-    "sub w9, w4, w8\n   asr w9, w9, #1\n   add w9, w9, w4\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n"
-    "mov w10, #255\n   cmp w9, w10\n   csel w4, w10, w9, gt\n"
-    "sub w9, w5, w8\n   asr w9, w9, #1\n   add w9, w9, w5\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n"
-    "mov w10, #255\n   cmp w9, w10\n   csel w5, w10, w9, gt\n"
-    "sub w9, w6, w8\n   asr w9, w9, #1\n   add w9, w9, w6\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n"
-    "mov w10, #255\n   cmp w9, w10\n   csel w6, w10, w9, gt\n"
-    "lsl w4, w4, #16\n   orr w4, w4, w5, lsl #8\n   orr w4, w4, w6\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 2b\n"
+    "sub w9, w4, w8\n   asr w9, w9, #1\n   add w9, w9, w4\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n   cmp w9, w10\n   csel w4, w10, w9, gt\n"
+    "sub w9, w5, w8\n   asr w9, w9, #1\n   add w9, w9, w5\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n   cmp w9, w10\n   csel w5, w10, w9, gt\n"
+    "sub w9, w6, w8\n   asr w9, w9, #1\n   add w9, w9, w6\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n   cmp w9, w10\n   csel w6, w10, w9, gt\n"
+    "lsl w4, w4, #16\n   orr w4, w4, w5, lsl #8\n   orr w4, w4, w6\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 8b\n"
     "9:  " ASM_RET
     ASM_END(memory_saturate_u32)
 #endif
