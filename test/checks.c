@@ -125041,7 +125041,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_press(SETTINGS_KEY_ENTER);
                 check("settings: a command that ends what a person has is not run by the first Enter, which says what would run",
                       settings.queued == 0 && settings.editing == wipe &&
-                          string_equals((string_address)settings.status, (string_address) "press Enter again to run: moonwater wipe yes"));
+                          string_equals((string_address)settings.status, (string_address) "press again to confirm: moonwater wipe yes"));
                 settings_type_code('x');
                 settings_press(SETTINGS_KEY_BACKSPACE);
                 settings_press(SETTINGS_KEY_ENTER);
@@ -125881,7 +125881,7 @@ static fn check_settings(string_address regular, string_address bold)
                         // Delete forgets, when pressed twice on the same name.
                         settings.list.focus = (int)SETTINGS_LIST + 2;
                         settings_press(SETTINGS_KEY_DELETE);
-                        check("settings: Delete on a saved network asks to be pressed again", settings.queued == 0 && settings.forget[0]);
+                        check("settings: Delete on a saved network asks to be pressed again", settings.queued == 0 && settings.confirm.armed);
                         settings_press(SETTINGS_KEY_DELETE);
                         check("settings: and the second Delete forgets it", settings.queued == 1 &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "f\nOld Cafe"));
@@ -135809,7 +135809,8 @@ static fn field_check(struct ui address_to wui)
                 ui_text_draw(wui, &t, 20, 20, 300, 30, 0);
                 y = t.top + t.line_height / 2;
                 beta = field_x(wui, &t, 6), gamma = field_x(wui, &t, 11);
-                check("field: a press off its well is not the field's", !field_button(wui, &t, 0x110, true, 10, y, 0) && !field_button(wui, &t, 0x110, false, 10, y, 0));
+                check("field: a press off its well commits a plain field, the kit's rule, and its release is not the field's",
+                      field_button(wui, &t, 0x110, true, 10, y, 0) == UI_TEXT_COMMIT && !field_button(wui, &t, 0x110, false, 10, y, 0));
                 field_button(wui, &t, 0x110, true, beta + 1, y, 0);
                 field_button(wui, &t, 0x110, false, beta + 1, y, 0);
                 check("field: a click puts the caret where it is", field_selected(&t, 6, 6));
@@ -135819,15 +135820,15 @@ static fn field_check(struct ui address_to wui)
                 field_button(wui, &t, 0x110, true, beta + 1, y, 0);
                 field_button(wui, &t, 0x110, false, beta + 1, y, 0);
                 check("field: a triple click takes the line", field_selected(&t, 0, 16));
-                t.click_at = 0;
+                t.click.at = 0;
                 field_button(wui, &t, 0x110, true, field_x(wui, &t, 0) + 1, y, 0);
                 field_motion(wui, &t, gamma - 1, y + 40);
                 check("field: a drag selects, even off the well", (field_button(wui, &t, 0x110, false, gamma - 1, y + 40, 0) & UI_TEXT_MOVED) &&
                                                                       field_selected(&t, 0, 11));
-                t.click_at = 0;
+                t.click.at = 0;
                 field_button(wui, &t, 0x110, true, beta + 1, y, 0);
                 field_button(wui, &t, 0x110, false, beta + 1, y, 0);
-                t.click_at = 0;
+                t.click.at = 0;
                 field_button(wui, &t, 0x110, true, field_x(wui, &t, 16) - 1, y, WINDOW_KEY_SHIFT);
                 field_button(wui, &t, 0x110, false, field_x(wui, &t, 16) - 1, y, WINDOW_KEY_SHIFT);
                 check("field: Shift with a click extends from the caret", field_selected(&t, 6, 16));
@@ -136079,6 +136080,30 @@ static b32 kit_defaults_scan(const char *file, const char *phrase)
         return found != 0;
 }
 
+// The ripple's pixels outside the hover layer's footprint: a pixel the ripple changed with bare background under it and
+// all round it, so an antialiased edge pixel of the layer is not one (a ripple cut square past a rounded corner is).
+static positive ripple_outside_layer(const unsigned int address_to with, const unsigned int address_to without, unsigned int background,
+                                     positive address_to differing)
+{
+        positive outside = 0;
+
+        *differing = 0;
+        for (int y = 0; y < 300; y++)
+                for (int x = 0; x < 600; x++)
+                {
+                        b32 deep = x > 0 && y > 0 && x < 599 && y < 299;
+
+                        if (with[y * 600 + x] == without[y * 600 + x])
+                                continue;
+                        (*differing)++;
+                        for (int dy = -1; deep && dy <= 1; dy++)
+                                for (int dx = -1; dx <= 1; dx++)
+                                        deep &= without[(y + dy) * 600 + x + dx] == background;
+                        outside += deep;
+                }
+        return outside;
+}
+
 // The fraction of a ripple's pixels that fall outside a box's rounded corners (radius r, device pixels), with a pixel's
 // edge given a pixel of slack: a ripple cut square at a corner lies outside the arc by up to 0.41 r.
 static positive ripple_outside_rounded(const unsigned int address_to with, const unsigned int address_to without, int x0, int y0, int x1, int y1, int r,
@@ -136145,7 +136170,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                              {UI_BUTTON, UI_BUTTON_OUTLINED, 20, 80, 160, 44, 1, 0, 22},
                              {UI_TABS, UI_TABS_SEGMENTED, 20, 140, 180, 32, 3, 0, 16},
                              {UI_TABS, UI_TABS_VERTICAL, 240, 20, 150, 34, 12, 5, 8},
-                             {UI_SWITCH, 0, 20, 200, 200, 44, 1, 0, 0}};
+                             {UI_SWITCH, 0, 20, 200, 200, 44, 1, 0, 0}, {UI_RADIOS, 0, 300, 20, 240, 40, 3, 1, 0}};
 
                 for (positive s = 0; s < sizeof(specs) / sizeof(specs[0]); s++)
                 {
@@ -136168,6 +136193,8 @@ static fn check_kit_defaults(struct ui address_to wui)
                                 bx = ui_tab_left(&ui, &c, specs[s].item), bw = ui_tab_width(&ui, &c, specs[s].item);
                         if (vertical)
                                 by = c.y + specs[s].item * c.h;
+                        if (c.kind == UI_RADIOS)
+                                by = ui_radio_row_y(&c, specs[s].item);
                         if (c.kind == UI_SWITCH)
                                 ui_control_row(&c, &bx, &by, &bw, &bh);
                         press_x = bx + bw / 2, press_y = by + bh / 2;
@@ -136175,7 +136202,10 @@ static fn check_kit_defaults(struct ui address_to wui)
                         for (int frame = 0; frame < 14; frame++)
                                 ui_kit.now += 16666667, ui_kit.busy = 0, ui_control_draw(&ui, &c);
                         check_ripple_frame(&ui, &c, with, without, 0xff202020u);
-                        outside = ripple_outside_rounded(with, without, bx, by, bx + bw, by + bh, specs[s].radius, &differing);
+                        if (c.kind == UI_RADIOS)
+                                outside = ripple_outside_rounded(with, without, bx, by, bx + bw, by + bh, 0, &differing);
+                        else
+                                outside = ripple_outside_layer(with, without, 0xff202020u, &differing);
                         if (differing < 200 || outside)
                                 ripples_held = false;
                         string_format(log, "  ripple control %p: %p pixels, %p outside the hover rect\n", (p64)s, (p64)differing, (p64)outside);
@@ -137036,7 +137066,7 @@ static b32 inputs_f_primary_paste(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click_at = 0;
+        inputs_target(in)->click.at = 0;
         before = inputs_windows->clip_ask_serial[0];
         inputs_click(in, 0x112, inputs_x(in, 0), inputs_y(in), 0);
         asked = inputs_windows->clip_ask_serial[0] != before && inputs_windows->clip_ask_which[0] == WINDOWS_CLIP_PRIMARY;
@@ -137048,7 +137078,7 @@ static b32 inputs_f_click_caret(const struct inputs_input address_to in)
 {
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click_at = 0;
+        inputs_target(in)->click.at = 0;
         inputs_click(in, 0x110, inputs_x(in, 2), inputs_y(in), 0);
         return inputs_caret(in) == 2 && inputs_target(in)->doc.selection_count == 1;
 }
@@ -137063,7 +137093,7 @@ static b32 inputs_f_drag_select(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click_at = 0;
+        inputs_target(in)->click.at = 0;
         y = inputs_y(in);
         before = inputs_windows->clip_offer_serial[0];
         inputs_button(in, 0x110, true, inputs_x(in, 0), y, 0);
@@ -137084,7 +137114,7 @@ static b32 inputs_f_double_click(const struct inputs_input address_to in)
                 return true;
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click_at = 0;
+        inputs_target(in)->click.at = 0;
         x = inputs_x(in, in->masked ? 2 : 5);
         inputs_click(in, 0x110, x, inputs_y(in), 0);
         inputs_click(in, 0x110, x, inputs_y(in), 0);
@@ -137097,7 +137127,7 @@ static b32 inputs_f_triple_click(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click_at = 0;
+        inputs_target(in)->click.at = 0;
         for (int k = 0; k < 3; k++)
                 inputs_click(in, 0x110, inputs_x(in, 2), inputs_y(in), 0);
         return inputs_sel(in, 0, n);
@@ -137113,7 +137143,7 @@ static b32 inputs_f_right_menu(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click_at = 0;
+        inputs_target(in)->click.at = 0;
         p->field = null;
         p->menu.count = 0;
         inputs_click(in, 0x111, inputs_x(in, 2), inputs_y(in), 0);
@@ -137201,7 +137231,7 @@ static b32 inputs_f_masked_no_copy(const struct inputs_input address_to in)
                 return true;
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click_at = 0;
+        inputs_target(in)->click.at = 0;
         before = inputs_windows->clip_offer_serial[0];
         inputs_button(in, 0x110, true, inputs_x(in, 0), inputs_y(in), 0);
         inputs_move(in, inputs_x(in, n), inputs_y(in));
