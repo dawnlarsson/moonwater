@@ -76,6 +76,8 @@ moonwater canvas motion [full|reduced]  reduced: the windows Canvas draws change
 moonwater canvas cursor [size [N|auto]|look [light|dark|auto]]  the pointer: size 1 to 4, colours [auto]
 moonwater canvas cursor shake [on|off]  a shake of the hand makes the pointer large for a moment [on]
 moonwater canvas cursor shake delay [MS|default]  how long it stays large after the last shake, 100 to 10000 ms [1200]
+moonwater canvas predict mouse [on|off]  the pointer is drawn a frame ahead where the hand is going; its clicks are where it is [on]
+moonwater canvas predict touch [on|off]  a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [on]
 moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]

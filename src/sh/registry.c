@@ -93,6 +93,8 @@
 #define SETTING_TASKBAR_TEXT_PATH "/root/taskbar.text"
 #define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
+#define SETTING_PREDICT_MOUSE_PATH "/root/canvas.predict.mouse"
+#define SETTING_PREDICT_TOUCH_PATH "/root/canvas.predict.touch"
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
 #define SETTING_CLIPBOARD_LIMIT_PATH "/root/canvas.clipboard.limit"
@@ -220,6 +222,16 @@ static const struct settings_row settings_rows[] = {
                       .standard = "1200", .unit = "ms", .low = 100, .high = 10000, .need = "how Canvas draws",
                       .usage = "canvas cursor shake delay [MS|default]",
                       .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
+    //  The prediction a frame ahead (compositor.c's predict): the mouse pointer is drawn where the hand is going, and its
+    //  clicks are where it is; a finger or a pen is delivered where it will be. Each is its own row, on by default.
+    SETTING_PLAIN_ROW(null, "Predict the mouse pointer", SETTINGS_SWITCH, 0, ("canvas", "predict", "mouse"), "mouse ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_PREDICT_MOUSE_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas predict mouse [on|off]",
+                      .help = "the pointer is drawn a frame ahead where the hand is going; its clicks are where it is [on]"),
+    SETTING_PLAIN_ROW(null, "Predict touch and pen", SETTINGS_SWITCH, 0, ("canvas", "predict", "touch"), "touch ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_PREDICT_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas predict touch [on|off]",
+                      .help = "a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]"),
     //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
     SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
                       .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on", .need = "how Canvas draws",
