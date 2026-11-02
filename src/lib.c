@@ -53681,15 +53681,6 @@ __asm__(
     "inc %rdi\n   inc %rsi\n"
     ASM_USERSPACE_WIDE(
     //
-    //      The wide tiers. AVX-512BW takes sixty four bytes a turn and AVX2
-    //      thirty two; each is entered from the dispatch below with the first
-    //      byte already compared, and each answers at the lowest byte that
-    //      differs once folded or that ends a string, as the sixteen byte
-    //      loop does. Where a read would cross a page the tier hands sixteen
-    //      bytes to the scalar pass and asks again from the top.
-    //
-    ".Lcf_top:\n   cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcf_zmm\n   cmpb $0, cpu_has_avx2(%rip)\n   jne .Lcf_ymm\n"
-    //
     //      0x3f moves 'A' through 'Z' to 0x80 through 0x99 and nothing else
     //      into that block, so one signed compare against 0x9a is the range
     //      test for sixteen bytes. SSE2 and no feature byte: every x86-64
@@ -53703,6 +53694,19 @@ __asm__(
     //      sixteen bytes still fit, which is string_compare's argument at
     //      0xff8 with sixteen in place of eight.
     //
+    //
+    //      The first sixteen bytes, as the loop below takes them, and then one
+    //      question the loop does not ask: an AVX machine leaves the loop for
+    //      the wide tiers. A pair that differs in its first sixteen bytes costs
+    //      what it always did, and only a pair still equal after them pays the
+    //      one feature test.
+    //
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 1f\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 1f\n"
+    "movdqu (%rdi), %xmm0\n   movdqu (%rsi), %xmm1\n   movdqa %xmm0, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm0\n   movdqa %xmm1, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm1\n"
+    "pcmpeqb %xmm0, %xmm1\n   pcmpeqb %xmm4, %xmm0\n   pandn %xmm1, %xmm0\n   pmovmskb %xmm0, %ecx\n   cmp $0xffff, %ecx\n   jne 11f\n"
+    "add $16, %rdi\n   add $16, %rsi\n   cmpb $0, cpu_has_avx2(%rip)\n   jne .Lcf_top\n"
     "10:  mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 1f\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 1f\n"
     "movdqu (%rdi), %xmm0\n   movdqu (%rsi), %xmm1\n   movdqa %xmm0, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
     "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm0\n   movdqa %xmm1, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
@@ -53734,6 +53738,11 @@ __asm__(
     ASM_USERSPACE_WIDE("   jmp 10b\n")
     "jmp 1b  # a kernel build has no wide body to go back to\n"
     ASM_USERSPACE_WIDE(
+    //
+    //      Reached from the first sixteen bytes on an AVX machine. The
+    //      dispatch is the same two tests the wide tiers always made.
+    //
+    ".Lcf_top:\n   cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcf_zmm\n   jmp .Lcf_ymm\n"
     //
     //      Thirty two bytes of each a turn with AVX2. The fold is the sixteen
     //      byte one widened: add 0x3f, one signed compare against 0x9a, and
