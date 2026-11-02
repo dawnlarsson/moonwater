@@ -1646,10 +1646,71 @@ struct ui_spans
         b32 left[UI_SUB] __attribute__((aligned(16))), right[UI_SUB] __attribute__((aligned(16)));
 };
 
+/*
+        The insets of a corner's lines: for each line's dy (0 to ry, its place over the radius), the box's inset from its side,
+        rx times the corner's half-width there, (rx * floor(sqrt(2^32 - u^2))) >> 16 with u = (dy << 16) / ry. dy is 0 for a
+        line in the straight middle, whose inset is rx, and dy = ry gives u = 65536 and an inset of 0, so every line is this
+        one formula. On x86-64 two lines go through SSE2 at a time: every step is exact in doubles (dy << 16 and rx are below
+        2^37, so the quotient's floor and the root's are the convert instructions' truncations). Elsewhere a line is ui_arc.
+*/
+#if defined(__x86_64__) && defined(__SSE2__)
+#define UI_INSETS_X64 1
+static void ui_insets_x64(const int address_to dy, int rx, int ry, int address_to inset)
+{
+        double rxd = (double)rx, ryd = (double)ry, scale = 65536.0, full = 4294967296.0, back = 1.0 / 65536.0;
+        long i = 0;
+
+        __asm__ volatile(
+                "movsd %[rxd], %%xmm14\n\tunpcklpd %%xmm14, %%xmm14\n\t"
+                "movsd %[ryd], %%xmm15\n\tunpcklpd %%xmm15, %%xmm15\n\t"
+                "movsd %[scale], %%xmm13\n\tunpcklpd %%xmm13, %%xmm13\n\t"
+                "movsd %[full], %%xmm12\n\tunpcklpd %%xmm12, %%xmm12\n\t"
+                "movsd %[back], %%xmm11\n\tunpcklpd %%xmm11, %%xmm11\n\t"
+                "1:\n\t"
+                "movq (%[dy],%[i],4), %%xmm0\n\t"
+                "cvtdq2pd %%xmm0, %%xmm0\n\t"
+                "mulpd %%xmm13, %%xmm0\n\t"
+                "divpd %%xmm15, %%xmm0\n\t"
+                "cvttpd2dq %%xmm0, %%xmm1\n\t"
+                "cvtdq2pd %%xmm1, %%xmm1\n\t"
+                "mulpd %%xmm1, %%xmm1\n\t"
+                "movapd %%xmm12, %%xmm2\n\t"
+                "subpd %%xmm1, %%xmm2\n\t"
+                "sqrtpd %%xmm2, %%xmm2\n\t"
+                "cvttpd2dq %%xmm2, %%xmm2\n\t"
+                "cvtdq2pd %%xmm2, %%xmm2\n\t"
+                "mulpd %%xmm14, %%xmm2\n\t"
+                "mulpd %%xmm11, %%xmm2\n\t"
+                "cvttpd2dq %%xmm2, %%xmm2\n\t"
+                "movq %%xmm2, (%[inset],%[i],4)\n\t"
+                "add $2, %[i]\n\t"
+                "cmp $16, %[i]\n\t"
+                "jb 1b\n\t"
+                : [i] "+r"(i)
+                : [dy] "r"(dy), [inset] "r"(inset), [rxd] "m"(rxd), [ryd] "m"(ryd), [scale] "m"(scale), [full] "m"(full), [back] "m"(back)
+                : "xmm0", "xmm1", "xmm2", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+}
+#endif
+
+static void ui_insets(const int address_to dy, int rx, int ry, int address_to inset)
+{
+#ifdef UI_INSETS_X64
+        ui_insets_x64(dy, rx, ry, inset);
+#else
+        for (b32 sub = 0; sub < UI_SUB; sub++)
+        {
+                p64 u = ((p64)dy[sub] << 16) / (p64)ry;
+
+                inset[sub] = u >= 65536 ? 0 : (b32)(((p64)rx * ui_arc(u)) >> 16);
+        }
+#endif
+}
+
 static b32 ui_box_spans_radii(const struct ui_box address_to box, b32 rx, b32 ry, b32 y, b32 first, b32 width, struct ui_spans address_to s)
 {
         b32 top = y * 256, bottom = top + 256, low = 0, high = 0, inner_low = 0, inner_high = 0, base = first * 256, reach = width * 256;
-        b32 straight, corner;
+        b32 straight, corner, outside = 0;
+        int dys[UI_SUB] __attribute__((aligned(16))), inset[UI_SUB] __attribute__((aligned(16)));
 
         s->count = 0;
         if (bottom <= box->y0 || top >= box->y1 || box->x1 <= box->x0)
@@ -1657,30 +1718,36 @@ static b32 ui_box_spans_radii(const struct ui_box address_to box, b32 rx, b32 ry
         // A row in the straight middle, all of it inside, is every line the box's own span.
         straight = top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1;
         corner = !straight && ry > 0 && rx > 0;
+        // Each line's dy over the radius (ui_box_span's), and the lines outside the box, which take no part.
         for (b32 sub = 0; sub < UI_SUB; sub++)
         {
-                b32 left = box->x0, right = box->x1, at = top + sub * (256 / UI_SUB) + 256 / UI_SUB / 2, dy = 0;
+                b32 at = top + sub * (256 / UI_SUB) + 256 / UI_SUB / 2, dy = 0;
 
                 if (!straight)
                 {
-                        // ui_box_span's line: its place over the radius, (dy << 16) / ry, taken directly (the same quotient).
                         if (at < box->y0 || at >= box->y1)
-                                continue;
-                        if (at < box->y0 + ry)
+                                outside |= 1u << sub;
+                        else if (at < box->y0 + ry)
                                 dy = box->y0 + ry - at;
                         else if (at >= box->y1 - ry)
                                 dy = at - (box->y1 - ry) + 1;
-                        if (dy > 0 && corner)
-                        {
-                                p64 u = ((p64)dy << 16) / (p64)ry;
-                                b32 dx = u >= 65536 ? 0 : (b32)(((p64)rx * ui_arc(u)) >> 16);
-
-                                left = box->x0 + rx - dx;
-                                right = box->x1 - rx + dx;
-                                if (right <= left)
-                                        continue;
-                        }
                 }
+                dys[sub] = dy;
+        }
+        if (corner)
+                ui_insets(dys, rx, ry, inset);
+        else
+                for (b32 sub = 0; sub < UI_SUB; sub++)
+                        inset[sub] = rx;
+        for (b32 sub = 0; sub < UI_SUB; sub++)
+        {
+                b32 left, right;
+
+                if (outside >> sub & 1)
+                        continue;
+                left = box->x0 + rx - inset[sub], right = box->x1 - rx + inset[sub];
+                if (right <= left)
+                        continue;
                 left -= base, right -= base;
                 left = left < 0 ? 0 : left;
                 right = right > reach ? reach : right;
