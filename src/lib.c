@@ -20893,11 +20893,34 @@ __asm__(
 
     // Same 32-bit-span contract and small-run bias as the x86_64 body.
     ASM_FUNC(memory_fill_u32)
+#ifdef KERNEL_MODE
     "mov w2, w2\n   orr x3, x2, x2, lsl #32\n   cmp x1, #4\n   b.lo 2f\n"
     "1:  stp x3, x3, [x0], #16\n   sub x1, x1, #4\n   cmp x1, #4\n   b.hs 1b\n"
     "2:  tbz x1, #1, 3f\n   str x3, [x0], #8\n"
     "3:  tbz x1, #0, 4f\n   str w2, [x0]\n"
     "4:  " ASM_RET
+#else
+    //
+    //       Userspace only: the word sits in every lane of v0 and the spans
+    //       are stored as q registers. From sixteen words up, a turn writes
+    //       sixty four bytes as two store pairs, and the last sixty four bytes
+    //       are stored once more at the end, overlapping what the loop wrote.
+    //       Below sixteen, the stores overlap at both ends of the span so that
+    //       a count takes one or two stores with no branch per word. The
+    //       kernel build keeps the integer form above: it may not touch the
+    //       vector state outside a kernel_neon_begin.
+    //
+    "dup v0.4s, w2\n   cmp x1, #16\n   b.hs 6f\n   add x3, x0, x1, lsl #2\n   cmp x1, #8\n   b.hi 8f\n   cmp x1, #4\n   b.lo 4f\n"
+    "str q0, [x0]\n   stur q0, [x3, #-16]\n" ASM_RET
+    "4:  cbz x1, 5f\n   cmp x1, #2\n   b.lo 7f\n   str d0, [x0]\n   stur s0, [x3, #-4]\n"
+    "5:  " ASM_RET
+    "7:  str s0, [x0]\n" ASM_RET
+    "8:  add x3, x0, x1, lsl #2\n   cmp x1, #16\n   b.lo 9f\n   mov x4, x0\n"
+    "1:  stp q0, q0, [x4], #32\n   stp q0, q0, [x4], #32\n   sub x1, x1, #16\n   cmp x1, #16\n   b.hs 1b\n"
+    "stp q0, q0, [x3, #-64]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "9:  stp q0, q0, [x0]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "6:  add x3, x0, x1, lsl #2\n   b 8b\n"
+#endif
     ASM_END(memory_fill_u32)
 
     ASM_FUNC(memory_fill_u64_aligned)

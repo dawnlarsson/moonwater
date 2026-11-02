@@ -25052,6 +25052,71 @@ fn check_library_names()
 }
 
 /*
+        The four word fills at every width from zero to 300 and every
+        destination offset in sixteen elements, each against a plain loop.
+        The bodies change with width class and with machine, so this is the
+        place every machine's answer is held to one reference. Each case
+        compares a window that starts before the destination and runs past
+        the end, so a store that lands one element early or late shows.
+*/
+fn check_fill_widths()
+{
+        p8 address_to got = memory(8192);
+        p8 address_to want = memory(8192);
+        positive bad_u32 = 0;
+        positive bad_32 = 0;
+        positive bad_u64 = 0;
+        positive bad_64 = 0;
+
+        if (!((bipolar)(positive)got > 0) || !((bipolar)(positive)want > 0))
+        {
+                same("fill widths", "mapping", 0, 1);
+                return;
+        }
+        for (positive width = 0; width <= 300; width++)
+                for (positive at = 0; at < 16; at++)
+                {
+                        positive value = width * 2654435761ull + at;
+                        p32 address_to w32 = (p32 address_to)(got + 64) + at;
+                        p32 address_to r32 = (p32 address_to)(want + 64) + at;
+                        p64 address_to w64 = (p64 address_to)(got + 64) + at;
+                        p64 address_to r64 = (p64 address_to)(want + 64) + at;
+
+                        for (positive i = 0; i < 4096; i++)
+                                got[i] = want[i] = 0x5a;
+                        for (positive i = 0; i < width; i++)
+                                r32[i] = (p32)value;
+                        memory_fill_u32(w32, width, (p32)value);
+                        for (positive i = 0; i < 4096; i++)
+                                bad_u32 += got[i] != want[i];
+
+                        for (positive i = 0; i < 4096; i++)
+                                got[i] = 0x5a;
+                        bad_32 += (positive)memory_fill_32(w32, (p32)value, width) != (positive)w32;
+                        for (positive i = 0; i < 4096; i++)
+                                bad_32 += got[i] != want[i];
+
+                        for (positive i = 0; i < 4096; i++)
+                                got[i] = want[i] = 0x5a;
+                        for (positive i = 0; i < width; i++)
+                                r64[i] = value;
+                        memory_fill_u64_aligned(w64, width, value);
+                        for (positive i = 0; i < 4096; i++)
+                                bad_u64 += got[i] != want[i];
+
+                        for (positive i = 0; i < 4096; i++)
+                                got[i] = 0x5a;
+                        bad_64 += (positive)memory_fill_64(w64, value, width) != (positive)w64;
+                        for (positive i = 0; i < 4096; i++)
+                                bad_64 += got[i] != want[i];
+                }
+        same("memory_fill_u32", "widths 0-300 at sixteen offsets", bad_u32, 0);
+        same("memory_fill_32", "widths 0-300 at sixteen offsets", bad_32, 0);
+        same("memory_fill_u64_aligned", "widths 0-300 at sixteen offsets", bad_u64, 0);
+        same("memory_fill_64", "widths 0-300 at sixteen offsets", bad_64, 0);
+}
+
+/*
         Nothing asked of nothing: a null pointer and a size of zero, which
         the routines whose headers say a zero size touches neither pointer
         must take, and answer as they would for a real one. The pointers come
@@ -29645,6 +29710,7 @@ b32 main()
         check_copy_returns();
         check_libc_names();
         check_library_names();
+        check_fill_widths();
         check_null_zero();
         check_huge_bounds();
         check_huge_sizes();
