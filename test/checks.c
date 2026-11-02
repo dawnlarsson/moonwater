@@ -115580,6 +115580,80 @@ static fn check_sum_swap(void)
         check("sum swap: a row of 65536 words, twice, sums and words as the loop makes them", big);
 }
 
+// The complement the frost made of a row, word by word, as compositor_frost did it.
+static fn check_invert(void)
+{
+        static p32 source[300 + 32], made[300 + 32], shared[300 + 32], big_source[1 << 16], big_made[1 << 16];
+        p64 state = 0x6a09e667f3bcc908ull;
+        bool same = true, untouched = true, inplace = true, big = true;
+#if RISCV64
+        /* the vector body and the scalar one, each run: the first call asks the machine for V, as the body does */
+        p8 vector_asked;
+
+        memory_invert_u32(made, source, 4);
+        vector_asked = cpu_has_vector;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                if (tier == 0 && vector_asked != 2)
+                        continue;
+                cpu_has_vector = tier == 0 ? vector_asked : 1;
+#endif
+
+        // Every width to 300 at every alignment of source and of the destination, apart from it and in place, with the
+        // words outside the count left as they were.
+        for (positive width = 0; width <= 300; width++)
+                for (positive a = 0; a < 16; a++)
+                        for (positive b = 0; b < 16; b += 5)
+                        {
+                                for (positive i = 0; i < 300 + 32; i++)
+                                {
+                                        XORSHIFT64(state);
+                                        source[i] = (p32)(state >> 11);
+                                        shared[i] = (p32)(state >> 5);
+                                        made[i] = 0x5a5a5a5au;
+                                }
+                                memory_invert_u32(made + b, source + a, width);
+                                for (positive i = 0; i < width; i++)
+                                        same = same && made[b + i] == ~source[a + i];
+                                for (positive i = 0; i < b; i++)
+                                        untouched = untouched && made[i] == 0x5a5a5a5au;
+                                for (positive i = b + width; i < b + width + 8 && i < 300 + 32; i++)
+                                        untouched = untouched && made[i] == 0x5a5a5a5au;
+
+                                memory_copy(made, shared, sizeof(shared));
+                                memory_invert_u32(shared + a, shared + a, width);
+                                for (positive i = 0; i < width; i++)
+                                        inplace = inplace && shared[a + i] == ~made[a + i];
+                                for (positive i = 0; i < 300 + 32; i++)
+                                        if (i < a || i >= a + width)
+                                                inplace = inplace && shared[i] == made[i];
+                        }
+        // A row of 65536 words, apart and in place, twice.
+        for (positive round = 0; round < 2; round++)
+        {
+                for (positive i = 0; i < (1 << 16); i++)
+                {
+                        XORSHIFT64(state);
+                        big_source[i] = (p32)(state >> 9);
+                }
+                memory_fill(big_made, 0x5a, sizeof(big_made));
+                memory_invert_u32(big_made, big_source, 1 << 16);
+                for (positive i = 0; i < (1 << 16); i++)
+                        big = big && big_made[i] == ~big_source[i];
+                memory_invert_u32(big_source, big_source, 1 << 16);
+                for (positive i = 0; i < (1 << 16); i++)
+                        big = big && big_source[i] == big_made[i];
+        }
+#if RISCV64
+        }
+        cpu_has_vector = vector_asked;
+#endif
+        check("invert: every width to 300 at every alignment of source and destination, apart, is the complement word by word", same);
+        check("invert: words outside the count are not touched", untouched);
+        check("invert: in place, every width and alignment, is the complement too, and the words around it are not touched", inplace);
+        check("invert: a row of 65536 words, apart and in place, twice", big);
+}
+
 // The tint compositor_glass_tone made, with the cap and floor as parameters: window_mix toward the colour, then the
 // brightest channel capped (scaled by cap over it) or else the dimmest raised to floor, with the divisions C makes.
 static p32 tint_reference(p32 pixel, p32 toward, p32 amount, p32 cap, p32 floor_)
@@ -116868,6 +116942,7 @@ b32 main()
         check_glass_tiers();
         check_saturate();
         check_sum_swap();
+        check_invert();
         check_tint();
         check_mix();
         check_fill_rect();
@@ -150075,6 +150150,67 @@ b32 main()
         return 0;
 }
 #endif /* BENCH_sum_swap */
+
+#ifdef BENCH_invert
+/* memory_invert_u32 against the word loop compositor_frost ran (the complement of a row, word by word), runs of one,
+   three, twelve, sixty and three hundred words, each run a call of its own, as the frost makes them. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define WORDS 4096
+
+static p32 source_row[WORDS], into_row[WORDS];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static void former_invert(p32 address_to into, const p32 address_to from, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                into[at] = ~from[at];
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+{
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                const p32 address_to from = source_row + round % 8;
+                p32 address_to into = into_row + round % 8;
+
+                if (assembly)
+                        memory_invert_u32(into, from, length);
+                else
+                        former_invert(into, from, length);
+        }
+        sink = into_row[0];
+        return get_cpu_time() - start;
+}
+
+b32 main()
+{
+        static const positive lengths[] = {1, 3, 12, 60, 300};
+        static const string_address names[] = {"one word", "three words", "twelve words", "sixty words", "three hundred words"};
+
+        for (positive at = 0; at < WORDS; at++)
+                source_row[at] = (p32)at * 2654435761u;
+        for (positive at = 0; at < sizeof(lengths) / sizeof(lengths[0]); at++)
+        {
+                positive ratios[TRIES];
+                positive rounds = 4000000 / (lengths[at] + 8) + 1;
+
+                BENCH_PAIRED_RUNS(ratios, former, assembly, lengths[at], rounds);
+                string_format(log, "memory_invert_u32 %s: paired median ASM/C %p.", names[at], ratios[TRIES / 2] / 100);
+                positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                log("%\n", 2);
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_invert */
 
 #ifdef BENCH_tint
 /* memory_tint_u32 against the C the compositor's glass tone was: a row of boosted pixels tinted toward the light side

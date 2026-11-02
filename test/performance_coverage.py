@@ -345,6 +345,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_saturate', 'memory_saturate_u32',
 cover('direct_benchmark', 'test/checks.c#BENCH_sum_swap', 'memory_sum_swap_u32',
       'paired timing against the word loop compositor_glass_pass ran over the glass sums of a row of blocks, over runs '
       'of one, three, twelve, sixty and three hundred blocks, with SSE2, NEON, and V and the scalar body on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_invert', 'memory_invert_u32',
+      'paired timing against the word loop compositor_frost ran for the complement of a row, over runs of one, three, '
+      'twelve, sixty and three hundred words, with SSE2, NEON, and V and the scalar body on riscv64')
 cover('direct_benchmark', 'test/checks.c#BENCH_tint', 'memory_tint_u32',
       'paired timing against the C the glass tone was, over runs of one to three hundred boosted pixels toward the '
       'light side with the glass cap and floor, on each tier the machine has')

@@ -3917,8 +3917,7 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         for (int round = 0; round < 2; round++)
         {
                 if (round)
-                        for (unsigned long at = 0; at < (unsigned long)tw * th; at++)
-                                small[at] = ~small[at];
+                        memory_invert_u32(small, small, (positive)tw * (positive)th);
                 for (int step = 1; step <= 2; step *= 2)
                         memory_average_ahead((p8 address_to)small, bytes - (unsigned long)step * 4, (positive)step * 4);
                 for (int step = 1; step <= 2; step *= 2)
@@ -3931,8 +3930,12 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
                 unsigned int *line = into + (unsigned long)row * pitch;
                 const unsigned int *from = small + (long)row * tw;
 
-                for (int column = 0; column < sw; column++)
-                        line[column] = ~from[column];
+                // Rows of three or fewer blocks keep the loop: the routine's dispatch costs more than their words.
+                if (sw >= 4)
+                        memory_invert_u32(line, from, (positive)sw);
+                else
+                        for (int column = 0; column < sw; column++)
+                                line[column] = ~from[column];
         }
         return 1;
 }

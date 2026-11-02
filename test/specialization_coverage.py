@@ -399,6 +399,9 @@ cover('folds_already', 'count', 'memory_saturate_u32',
 cover('folds_already', 'count', 'memory_sum_swap_u32',
       'compositor_glass_pass hands it the changed blocks of one row of a glass window, a span whose length the damage '
       'sets at run time; no reachable call site passes a literal')
+cover('folds_already', 'count', 'memory_invert_u32',
+      'compositor_frost hands it the rows of its blurred small picture, whose lengths the glass sets at run time; no '
+      'reachable call site passes a literal')
 cover('folds_already', 'count', 'memory_mix_u32_row',
       'the round corners hand it a row of their cover, whose length the frame sets at run time (the corner width, '
       'or the part of it inside the contents); no reachable call site passes a literal')

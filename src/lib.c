@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        433 routines (409 public, 24 local), 423 of them on all three and 10 local to one.
+        434 routines (410 public, 24 local), 424 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -264,6 +264,7 @@
           memory_into_hex                public  yes     yes     yes
           memory_into_hex_case           public  yes     yes     yes
           memory_into_spelled            public  yes     yes     yes
+          memory_invert_u32              public  yes     yes     yes
           memory_last_of                 public  yes     yes     yes
           memory_last_of_either          public  yes     yes     yes
           memory_mix_u32_rect            public  yes     yes     yes
@@ -13715,6 +13716,32 @@ __asm__(
     ASM_END(memory_sum_swap_u32)
 
     //
+    //       memory_invert_u32 -- rdi into, rsi from, rdx count: each word of
+    //       into is the complement of the word of from (into may be from).
+    //       Under four words, a word at a time from the entry, which falls
+    //       through to it. From four, SSE2: sixteen words a turn of the loop,
+    //       then four a turn. Every load of a turn is before its store, so the
+    //       two may be one buffer.
+    //
+    ASM_FUNC(memory_invert_u32)
+    "test %rdx, %rdx\n   jz 9f\n   cmp $4, %rdx\n   jae 10f\n"
+    "xor %eax, %eax\n"
+    "5:  mov (%rsi, %rax, 4), %r8d\n   not %r8d\n   mov %r8d, (%rdi, %rax, 4)\n   inc %rax\n   cmp %rax, %rdx\n   jne 5b\n"
+    "9:  " ASM_RET
+    "10: pcmpeqd %xmm7, %xmm7\n"
+    "cmp $16, %rdx\n   jb 2f\n"
+    "1:  movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   movdqu 32(%rsi), %xmm2\n   movdqu 48(%rsi), %xmm3\n"
+    "pxor %xmm7, %xmm0\n   pxor %xmm7, %xmm1\n   pxor %xmm7, %xmm2\n   pxor %xmm7, %xmm3\n"
+    "movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   movdqu %xmm2, 32(%rdi)\n   movdqu %xmm3, 48(%rdi)\n"
+    "add $64, %rsi\n   add $64, %rdi\n   sub $16, %rdx\n   cmp $16, %rdx\n   jae 1b\n"
+    "2:  cmp $4, %rdx\n   jb 4f\n"
+    "3:  movdqu (%rsi), %xmm0\n   pxor %xmm7, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "add $16, %rsi\n   add $16, %rdi\n   sub $4, %rdx\n   cmp $4, %rdx\n   jae 3b\n"
+    "4:  test %rdx, %rdx\n   jz 9b\n"
+    "xor %eax, %eax\n   jmp 5b\n"
+    ASM_END(memory_invert_u32)
+
+    //
     //       memory_tint_u32 -- rdi into, rsi from, rdx count, rcx toward (a
     //       colour's three bytes), r8 amount, r9 cap, and floor on the stack:
     //       each pixel of from is mixed toward toward by amount of 256 (the
@@ -24539,6 +24566,32 @@ __asm__(
     ASM_END(memory_sum_swap_u32)
 
     //
+    //       memory_invert_u32: x0 into, x1 from, x2 count: the complement of
+    //       each word, as on x86-64 (into may be from). A word at a time under
+    //       four, the entry falls through to it; then thirty-two words a turn
+    //       in v0 to v7, eight in v0 and v1, four in v0, each load before its
+    //       store. The vector registers used are caller-saved.
+    //
+    ASM_FUNC(memory_invert_u32)
+    "cbz x2, 9f\n   cmp x2, #4\n   b.hs 10f\n"
+    "7:  ldr w3, [x1], #4\n   mvn w3, w3\n   str w3, [x0], #4\n   subs x2, x2, #1\n   b.ne 7b\n"
+    "9:  " ASM_RET
+    "10: cmp x2, #32\n   b.hs 1f\n"
+    "2:  cmp x2, #8\n   b.lo 4f\n"
+    "8:  ld1 {v0.4s, v1.4s}, [x1], #32\n   mvn v0.16b, v0.16b\n   mvn v1.16b, v1.16b\n"
+    "st1 {v0.4s, v1.4s}, [x0], #32\n   sub x2, x2, #8\n   cmp x2, #8\n   b.hs 8b\n"
+    "4:  tbz x2, #2, 5f\n"
+    "ld1 {v0.4s}, [x1], #16\n   mvn v0.16b, v0.16b\n   st1 {v0.4s}, [x0], #16\n   sub x2, x2, #4\n"
+    "5:  cbz x2, 9b\n   b 7b\n"
+    "1:  ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x1], #64\n   ld1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x1], #64\n"
+    "mvn v0.16b, v0.16b\n   mvn v1.16b, v1.16b\n   mvn v2.16b, v2.16b\n   mvn v3.16b, v3.16b\n"
+    "mvn v4.16b, v4.16b\n   mvn v5.16b, v5.16b\n   mvn v6.16b, v6.16b\n   mvn v7.16b, v7.16b\n"
+    "st1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x0], #64\n   st1 {v4.4s, v5.4s, v6.4s, v7.4s}, [x0], #64\n"
+    "sub x2, x2, #32\n   cmp x2, #32\n   b.hs 1b\n"
+    "b 2b\n"
+    ASM_END(memory_invert_u32)
+
+    //
     //       memory_tint_u32: x0 into, x1 from, x2 count, x3 toward, x4 amount,
     //       x5 cap, x6 floor: the x86_64 block's steps (the contract is there)
     //       four pixels a turn in v registers, the constants splat once, and
@@ -33881,6 +33934,32 @@ __asm__(
     "addi a1, a1, 4\n   addi a2, a2, 4\n   addi a3, a3, -1\n   j 1b\n"
     "2:  sd a4, 0(a0)\n   sd a5, 8(a0)\n   sd a6, 16(a0)\n" ASM_RET
     ASM_END(memory_sum_swap_u32)
+
+    //
+    //       memory_invert_u32: a0 into, a1 from, a2 count: the complement of
+    //       each word, as on x86-64 (into may be from). With V, strips of up to
+    //       eight registers of words, each strip loaded before it is stored;
+    //       without V, or under four words, a word at a time (xori -1).
+    //
+    ASM_FUNC(memory_invert_u32)
+    "li t4, 4\n   bltu a2, t4, 1f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    //  V is asked lazily, as the other riscv bodies ask it: 0 unasked, 1 absent, 2 present. The detect keeps a0-a4.
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 6f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n"
+#endif
+    "6:  lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   bne t3, t4, 1f\n"
+    ".option push\n   .option arch, +v\n"
+    "5:  vsetvli t0, a2, e32, m8, ta, ma\n   vle32.v v8, (a1)\n   vxor.vi v8, v8, -1\n   vse32.v v8, (a0)\n"
+    "slli t1, t0, 2\n   add a0, a0, t1\n   add a1, a1, t1\n   sub a2, a2, t0\n   bnez a2, 5b\n"
+    ".option pop\n" ASM_RET
+    "1:  andi t5, a2, 1\n   beqz t5, 2f\n"
+    "lwu t0, 0(a1)\n   xori t0, t0, -1\n   sw t0, 0(a0)\n   addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n"
+    "2:  beqz a2, 9f\n"
+    "3:  lwu t0, 0(a1)\n   lwu t1, 4(a1)\n   xori t0, t0, -1\n   xori t1, t1, -1\n   sw t0, 0(a0)\n   sw t1, 4(a0)\n"
+    "addi a0, a0, 8\n   addi a1, a1, 8\n   addi a2, a2, -2\n   bnez a2, 3b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_invert_u32)
 
     //
     //       memory_tint_u32: a0 into, a1 from, a2 count, a3 toward, a4
@@ -46483,6 +46562,9 @@ fn memory_saturate_u32(p32 address_to into, const p32 address_to from, positive 
 // count pixels of now: each channel of now is added to the matching 64-bit sum (red, green, blue, the sums wrapping
 // at 2^64) and the same channel of old taken off, and old takes now. The compositor's glass sums, kept as the blocks change.
 fn memory_sum_swap_u32(p64 address_to sums, p32 address_to old, const p32 address_to now, positive count);
+// count words: each into word is the complement of the word of from (into and from the same, or apart, never partly
+// over each other). The compositor's frosted backdrop is complemented in place and copied out complemented.
+fn memory_invert_u32(p32 address_to into, const p32 address_to from, positive count);
 // count pixels of from, each mixed toward toward (0 or 0xffffff, per channel) by amount of 256, then with its brightest
 // channel capped at cap (every channel scaled down by cap over it) or else its dimmest raised to floor (every channel
 // taken toward 255 by the same proportion); the window's tint. Integer only; exact for every pixel and every cap and
