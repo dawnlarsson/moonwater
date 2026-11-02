@@ -24926,7 +24926,7 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
 }
 
 /*
-        moonwater canvas identify: each screen's number, large, in the middle of that screen for three seconds (the window
+        moonwater canvas identify: each screen's number, as a black-on-white badge in that screen's top left corner for three seconds (the window
         is src/canvas/ui/identify.c). The numbers are windows_screen_numbers' (window.c), the ones the settings' Display map
         shows. One window is started per screen, with that screen's index, each in a session of its own as the settings
         window is (host_detach), and this returns at once. The desktop must be up, as `moonwater settings` needs: the

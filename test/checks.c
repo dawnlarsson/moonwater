@@ -135726,16 +135726,20 @@ static fn check_screen_arrangements(void)
         table.outputs = 0;
 }
 
-// The bounding box of the pixels that are ink (alpha 128 and over) in a width by height picture: box is left, top, right
-// and bottom, and the answer is whether there was any ink.
-static b32 identify_ink_box(const unsigned int address_to pixels, int stride, int width, int height, int box[4])
+// The bounding box of the pixels in a width by height picture: box is left, top, right and bottom, and the answer is
+// whether there was any. want 0 is ink (alpha 128 and over, the badge over the clear glass); any other value is the one
+// pixel it names exactly.
+static b32 identify_ink_box(const unsigned int address_to pixels, int stride, int width, int height, unsigned int want, int box[4])
 {
         b32 any = false;
 
         box[0] = width, box[1] = height, box[2] = -1, box[3] = -1;
         for (int y = 0; y < height; y++)
                 for (int x = 0; x < width; x++)
-                        if (pixels[y * stride + x] >> 24 >= 128)
+                {
+                        unsigned int pixel = pixels[y * stride + x];
+
+                        if (want ? pixel == want : pixel >> 24 >= 128)
                         {
                                 any = true;
                                 box[0] = x < box[0] ? x : box[0];
@@ -135743,22 +135747,21 @@ static b32 identify_ink_box(const unsigned int address_to pixels, int stride, in
                                 box[2] = x > box[2] ? x : box[2];
                                 box[3] = y > box[3] ? y : box[3];
                         }
+                }
         return any;
 }
 
 /*
-        The identify picture (identify_paint, through identify_size and the scratch the size gives) as the overlay draws it:
-        the digit in the middle of its screen at the screen's scale, in the ink for the glass, nothing outside the screen,
-        and a screen narrower than the digit still gets all of it, centred. A run is cut to the scratch's width, which was
-        only the screen's width and so cut a digit on a narrow screen.
+        The identify badge (identify_paint through identify_size): a white square in the screen's top left corner with the
+        number in black, a third of an em from each edge, whole inside the screen, growing with the screen's scale, and
+        smaller only on a screen too small for it. Black on white is 21:1, read as the paper and the ink's exact pixels.
 */
 static fn check_identify_picture(void)
 {
         static struct windows screens;
         static unsigned int pixels[800 * 600];
-        int box[4], small[4], large[4], narrow[4];
-        b32 inked, inside = true, stands_out = true;
-        unsigned int ground = 0x202020u;
+        int badge[4], digit[4], large[4], large_digit[4], narrow[4];
+        b32 inked, inside = true;
 
         memory_zero(&screens, sizeof(screens));
         screens.output_width = 1000, screens.output_height = 800;
@@ -135768,48 +135771,43 @@ static fn check_identify_picture(void)
         identify.ui.regular = identify.ui.bold = terminal.plain[0];
         identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
         identify.ui.glass = true, identify.ui.opaque = false;
-        identify.ui.ink = window_contrast(ground);
 
         identify.ui.scale = 1;
         identify_size(400, 300);
         memory_zero(pixels, sizeof(pixels));
         identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        inked = identify_ink_box(pixels, 800, 400, 300, box);
-        check("identify picture: the digit is drawn at scale 1, in ink", inked && box[2] - box[0] > 20 && box[3] - box[1] > 20);
-        check("identify picture: the digit is centred on a 400 by 300 screen",
-              inked && (box[0] + box[2] - 399 <= 6 && 399 - box[0] - box[2] <= 6) &&
-                  (box[1] + box[3] - 299 <= 8 && 299 - box[1] - box[3] <= 8));
-        {
-                unsigned int found = 0;
-
-                for (int at = 0; at < 800 * 300; at++)
-                        found |= (pixels[at] >> 24 == 255) && (pixels[at] & 0xffffffu) == identify.ui.ink;
-                check("identify picture: the digit's pixels are the glass's ink, not the ground", found != 0);
-        }
+        inked = identify_ink_box(pixels, 800, 400, 300, 0, badge);
+        check("identify badge: a white square in the top left corner, a third of its em (16 px) from each edge",
+              inked && badge[0] == 16 && badge[1] == 16 && badge[2] < 200 && badge[3] < 150);
+        check("identify badge: the paper is white and the number black, exactly, which is 21:1",
+              pixels[badge[1] * 800 + badge[0]] == 0xffffffffu && IDENTIFY_INK == 0x000000u && IDENTIFY_PAPER == 0xffffffffu);
+        inked = identify_ink_box(pixels, 800, 400, 300, 0xff000000u, digit);
+        check("identify badge: the number is black, inside the badge and off its edges",
+              inked && digit[0] > badge[0] && digit[1] > badge[1] && digit[2] < badge[2] && digit[3] < badge[3]);
 
         identify.ui.scale = 2;
         identify_size(800, 600);
         memory_zero(pixels, sizeof(pixels));
         identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        inked = identify_ink_box(pixels, 800, 800, 600, large);
-        identify.ui.scale = 1;
-        identify_size(400, 300);
-        memory_zero(pixels, sizeof(pixels));
-        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        identify_ink_box(pixels, 800, 400, 300, small);
-        check("identify picture: the digit is twice as large at scale 2 as at scale 1, and centred on the screen",
-              inked && large[3] - large[1] >= 2 * (small[3] - small[1]) - 3 && large[3] - large[1] <= 2 * (small[3] - small[1]) + 3 &&
-                  large[2] - large[0] >= 2 * (small[2] - small[0]) - 3 && large[2] - large[0] <= 2 * (small[2] - small[0]) + 3 &&
-                  large[0] + large[2] - 799 <= 12 && 799 - large[0] - large[2] <= 12);
+        inked = identify_ink_box(pixels, 800, 800, 600, 0, large);
+        identify_ink_box(pixels, 800, 800, 600, 0xff000000u, large_digit);
+        check("identify badge: at scale 2 it is twice as large, and still a third of its em (32 px) from the corner",
+              inked && large[0] == 32 && large[1] == 32 &&
+                  large[2] - large[0] >= 2 * (badge[2] - badge[0]) - 4 && large[2] - large[0] <= 2 * (badge[2] - badge[0]) + 4 &&
+                  large[3] - large[1] >= 2 * (badge[3] - badge[1]) - 4 && large[3] - large[1] <= 2 * (badge[3] - badge[1]) + 4);
+        check("identify badge: the number is twice as tall at scale 2, so it reads at every scale",
+              large_digit[3] - large_digit[1] >= 2 * (digit[3] - digit[1]) - 3 &&
+                  large_digit[3] - large_digit[1] <= 2 * (digit[3] - digit[1]) + 3);
 
         /* A fresh scratch: the overlay on a narrow screen maps its first one at that width, and the scratch only grows. */
+        identify.ui.scale = 1;
         identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
         identify_size(20, 300);
         memory_zero(pixels, sizeof(pixels));
         identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        inked = identify_ink_box(pixels, 800, 20, 300, narrow);
-        check("identify picture: a screen 20 px wide shows the whole digit, from its left edge to its right, centred",
-              inked && narrow[0] <= 1 && narrow[2] >= 18 && narrow[0] + narrow[2] - 19 <= 2 && 19 - narrow[0] - narrow[2] <= 2);
+        inked = identify_ink_box(pixels, 800, 20, 300, 0, narrow);
+        check("identify badge: a screen 20 px wide gets a smaller badge that is whole inside it, not cut by its right edge",
+              inked && narrow[0] >= 2 && narrow[2] <= 17 && narrow[2] - narrow[0] >= 8 && narrow[3] < 300);
 
         identify_size(40, 40);
         memory_zero(pixels, sizeof(pixels));
@@ -135818,19 +135816,7 @@ static fn check_identify_picture(void)
                 for (int x = 0; x < 800; x++)
                         if ((x >= 40 || y >= 40) && pixels[y * 800 + x] >> 24)
                                 inside = false;
-        check("identify picture: nothing is drawn outside its screen", inside);
-
-        for (unsigned int grey = 0; grey < 256; grey++)
-        {
-                int ink, distance;
-
-                if (grey > 0x5c && grey < 0xb4)
-                        continue;
-                ink = (int)(window_contrast(grey * 0x010101u) & 255);
-                distance = ink > (int)grey ? ink - (int)grey : (int)grey - ink;
-                stands_out &= distance >= 128;
-        }
-        check("identify picture: the ink stands out from every ground the glass can take, dark or light", stands_out);
+        check("identify badge: nothing is drawn outside its screen", inside);
 
         identify.own.table = null;
 }
