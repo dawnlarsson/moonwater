@@ -514,6 +514,7 @@ static inline int window_key(struct window *window, struct window_key *key)
 // The screens one desktop spans, at most, and a screen's connector name with its null.
 #define WINDOWS_OUTPUTS 8
 #define WINDOWS_OUTPUT_NAME 16
+#define WINDOWS_OUTPUT_MODEL 16 // the monitor's name from its EDID, the descriptor's 13 bytes and a null
 #define WINDOWS_OUTPUT_HZ 8 // the refresh rates one screen lists at its size, at most
 // The input devices the compositor reads, the room of the name it keeps of each, and what it found each to be.
 #define WINDOWS_INPUTS 32
@@ -678,6 +679,7 @@ struct windows
         int output_x[WINDOWS_OUTPUTS], output_y[WINDOWS_OUTPUTS];
         unsigned int output_w[WINDOWS_OUTPUTS], output_h[WINDOWS_OUTPUTS];
         char output_name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+        char output_model[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_MODEL]; // the monitor's name from its EDID, "" when it has none
 
         /*
                 What each screen can be driven at, for the Displays field: output_rates of its refresh rates in Hz,

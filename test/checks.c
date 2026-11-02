@@ -125288,6 +125288,28 @@ static fn check_display_section(void)
                 check("display section: with one screen the caption says so, though the keys are on the map", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
         }
 
+        // A screen's monitor name, from its EDID: the descriptor tagged FC, its text ended by a newline, its blanks at the end
+        // dropped; a block with no EDID header, no such descriptor, or too short for one names nothing, and a room cuts the name.
+        {
+                unsigned char edid[128];
+                char named[WINDOWS_OUTPUT_MODEL];
+                static const char dell[] = "DELL U2720Q\n   ";
+
+                memory_zero(edid, sizeof(edid));
+                edid[1] = edid[2] = edid[3] = edid[4] = edid[5] = edid[6] = 0xff;
+                memory_copy(edid + 77, dell, sizeof(dell) - 1);
+                edid[72 + 3] = 0xfc;
+                check("display section: a screen's monitor name is the text of its EDID's FC descriptor, blanks dropped",
+                      compositor_edid_name(edid, 128, named, sizeof(named)) == 11 && string_equals((string_address)named, (string_address) "DELL U2720Q"));
+                check("display section: a monitor name cut by the room it has keeps what fits, and a null after it",
+                      compositor_edid_name(edid, 128, named, 4) == 3 && string_equals((string_address)named, (string_address) "DEL"));
+                edid[0] = 1;
+                check("display section: a block with no EDID header names nothing", compositor_edid_name(edid, 128, named, sizeof(named)) == 0 && !named[0]);
+                edid[0] = 0, edid[72 + 3] = 0xfe;
+                check("display section: an EDID with no FC descriptor names nothing", compositor_edid_name(edid, 128, named, sizeof(named)) == 0 && !named[0]);
+                check("display section: a block shorter than an EDID names nothing", compositor_edid_name(edid, 64, named, sizeof(named)) == 0);
+        }
+
         settings.pane = 0, settings.map.keys = false, settings.map.nudged = false;
         settings.own.table = saved;
         settings.map.display = -1;

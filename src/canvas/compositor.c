@@ -2776,7 +2776,7 @@ struct compositor_output
 {
         unsigned int crtc, crtc_index, connector;
         struct compositor_mode mode;
-        char name[WINDOWS_OUTPUT_NAME];
+        char name[WINDOWS_OUTPUT_NAME], model[WINDOWS_OUTPUT_MODEL];
         unsigned int shows;
         int cursor_x, cursor_y;
         // The framebuffer its crtc shows: on one screen the scanout's own, and on more a framebuffer of the same buffer
@@ -5939,7 +5939,7 @@ struct compositor_connected
         unsigned int connector[WINDOWS_OUTPUTS], crtc[WINDOWS_OUTPUTS], possible[WINDOWS_OUTPUTS];
         int current[WINDOWS_OUTPUTS];
         struct compositor_mode mode[WINDOWS_OUTPUTS];
-        char name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+        char name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME], model[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_MODEL];
         int size[WINDOWS_OUTPUTS][2];
         unsigned int hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ], hz_count[WINDOWS_OUTPUTS];
 };
@@ -5955,6 +5955,90 @@ static void compositor_rate_add(unsigned int *hz, unsigned int *count, const str
                 if (hz[at] == mode->vrefresh)
                         return;
         hz[(*count)++] = mode->vrefresh;
+}
+
+#define COMPOSITOR_OBJECT_CONNECTOR 0xc0c0c0c0u // DRM_MODE_OBJECT_CONNECTOR
+#define COMPOSITOR_GETPROPBLOB COMPOSITOR_DRM(0xacu, 16u)
+#define COMPOSITOR_EDID_SIZE 256
+
+/*
+        The monitor's name from an EDID block of length bytes: the descriptor (18 bytes, at 54, 72, 90 or 108) tagged 0xFC,
+        its text of up to 13 bytes ended by a newline and its blanks at the end dropped. A byte that is not a printable
+        character is a '?'. Answers the length written into name (room bytes, with a null after it); 0, and the empty name,
+        when the block is not an EDID or has no such descriptor.
+*/
+static unsigned int compositor_edid_name(const unsigned char *edid, unsigned int length, char *name, unsigned int room)
+{
+        static const unsigned char header[8] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0};
+        unsigned int count = 0;
+
+        if (room)
+                name[0] = 0;
+        if (length < 128 || !room || memory_compare(edid, header, sizeof(header)))
+                return 0;
+        for (unsigned int at = 54; at <= 108; at += 18)
+        {
+                if (edid[at] || edid[at + 1] || edid[at + 2] || edid[at + 3] != 0xfc)
+                        continue;
+                for (unsigned int each = 0; each < 13 && count + 1 < room; each++)
+                {
+                        unsigned char c = edid[at + 5 + each];
+
+                        if (c == 0x0a)
+                                break;
+                        name[count++] = c >= 0x20 && c < 0x7f ? (char)c : '?';
+                }
+                while (count && name[count - 1] == ' ')
+                        count--;
+                name[count] = 0;
+                return count;
+        }
+        return 0;
+}
+
+// The monitor's name, from the EDID blob the connector's EDID property names: the connector's properties are listed and the one
+// called EDID is read. Empty when the connector has no EDID (a virtual screen may have none), or the card will not say.
+static void compositor_connector_model(unsigned int connector, char *name, unsigned int room)
+{
+        unsigned int ids[64];
+        unsigned long values[64];
+        struct
+        {
+                unsigned long props, values;
+                unsigned int count, object, type;
+        } got = {(unsigned long)ids, (unsigned long)values, 64, connector, COMPOSITOR_OBJECT_CONNECTOR};
+        unsigned char edid[COMPOSITOR_EDID_SIZE];
+
+        if (room)
+                name[0] = 0;
+        if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+                return;
+        for (unsigned int at = 0; at < got.count; at++)
+        {
+                struct
+                {
+                        unsigned long values, enums;
+                        unsigned int id, flags;
+                        char name[32];
+                        unsigned int count_values, count_enums;
+                } property = {0, 0, ids[at], 0, {0}, 0, 0};
+                struct
+                {
+                        unsigned int blob_id, length;
+                        unsigned long data;
+                } blob;
+
+                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0 ||
+                    !string_equals((string_address)property.name, (string_address) "EDID"))
+                        continue;
+                if (!values[at])
+                        return;
+                memory_zero(edid, sizeof(edid));
+                blob.blob_id = (unsigned int)values[at], blob.length = sizeof(edid), blob.data = (unsigned long)edid;
+                if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) == 0)
+                        compositor_edid_name(edid, blob.length < sizeof(edid) ? blob.length : sizeof(edid), name, room);
+                return;
+        }
 }
 
 static b32 compositor_connected_read(struct compositor_connected *found)
@@ -5999,6 +6083,7 @@ static b32 compositor_connected_read(struct compositor_connected *found)
 
                 found->connector[n] = connectors[at];
                 compositor_connector_name(probe.connector_type, probe.connector_type_id, found->name[n]);
+                compositor_connector_model(connectors[at], found->model[n], WINDOWS_OUTPUT_MODEL);
                 // The mode the kernel's command line names (video=, which the kernel marks the person's) before the
                 // first listed, which is the one the screen prefers; Canvas takes them in that order too.
                 for (unsigned int each = 0; listed && each < probe.mode_count && !found->mode[n].clock; each++)
@@ -6079,6 +6164,7 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                         found->possible[kept] = found->possible[n], found->current[kept] = found->current[n];
                         found->mode[kept] = found->mode[n];
                         memory_copy(found->name[kept], found->name[n], WINDOWS_OUTPUT_NAME);
+                        memory_copy(found->model[kept], found->model[n], WINDOWS_OUTPUT_MODEL);
                         found->size[kept][0] = found->size[n][0], found->size[kept][1] = found->size[n][1];
                         memory_copy(found->hz[kept], found->hz[n], sizeof(found->hz[n]));
                         found->hz_count[kept] = found->hz_count[n];
@@ -6448,6 +6534,7 @@ static b32 compositor_space_take(int first)
                         memory_copy(compositor.output[at].hz, found.hz[n], sizeof(found.hz[n]));
                         compositor.output[at].hz_count = found.hz_count[n];
                         memory_copy(compositor.output[at].name, found.name[n], WINDOWS_OUTPUT_NAME);
+                        memory_copy(compositor.output[at].model, found.model[n], WINDOWS_OUTPUT_MODEL);
                         for (unsigned int index = 0; index < found.crtc_count; index++)
                                 if (found.crtcs[index] == found.crtc[n])
                                         compositor.output[at].crtc_index = index;
@@ -11332,6 +11419,7 @@ static void compositor_table_outputs(void)
                 while (name[length] && length < WINDOWS_OUTPUT_NAME - 1)
                         table->output_name[at][length] = name[length], length++;
                 memory_zero(table->output_name[at] + length, WINDOWS_OUTPUT_NAME - length);
+                memory_copy(table->output_model[at], compositor.output[at].model, WINDOWS_OUTPUT_MODEL);
                 table->output_now[at] = compositor.output[at].mode.vrefresh;
                 table->output_rates[at] = compositor.output[at].hz_count;
                 memory_copy(table->output_hz[at], compositor.output[at].hz, sizeof(table->output_hz[at]));
