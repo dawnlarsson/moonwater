@@ -14678,11 +14678,13 @@ __asm__(
     "vmovdqu64 %zmm1, 64(%rdi)\n   vmovdqu64 %zmm2, 128(%rdi)\n   vmovdqu64 %zmm3, 192(%rdi)\n   vmovdqu64 %zmm4, -256(%rdi,%rdx)\n"
     "vmovdqu64 %zmm5, -192(%rdi,%rdx)\n   vmovdqu64 %zmm6, -128(%rdi,%rdx)\n   vmovdqu64 %zmm7, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
     "0:  lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu64 -256(%r11), %zmm4\n   vmovdqu64 -192(%r11), %zmm5\n"
-    "vmovdqu64 -128(%r11), %zmm6\n   vmovdqu64 -64(%r11), %zmm7\n   vmovdqu64 (%rsi), %zmm8\n   mov %rdi, %r9\n   add $64, %rdi\n   and $-64, %rdi\n   sub %r9, %rdi\n   add %rdi, %rsi\n"
-    "add %r9, %rdi\n   lea -256(%r8), %r10\n   .balign 16\n"
-    "1:  vmovdqu64 (%rsi), %zmm0\n   vmovdqu64 64(%rsi), %zmm1\n   vmovdqu64 128(%rsi), %zmm2\n   vmovdqu64 192(%rsi), %zmm3\n"
-    "vmovdqa64 %zmm0, (%rdi)\n   vmovdqa64 %zmm1, 64(%rdi)\n   vmovdqa64 %zmm2, 128(%rdi)\n   vmovdqa64 %zmm3, 192(%rdi)\n"
-    "add $256, %rsi\n   add $256, %rdi\n   cmp %r10, %rdi\n   jbe 1b\n"
+    "vmovdqu64 -128(%r11), %zmm6\n   vmovdqu64 -64(%r11), %zmm7\n   vmovdqu64 (%rsi), %zmm8\n"
+    "mov %rdi, %r9\n   lea 64(%rdi), %r10\n   and $-64, %r10\n   sub %r9, %r10\n   add %r10, %rsi\n   lea (%rdi,%r10), %rdi\n"
+    "lea -256(%r8), %rcx\n   sub %rdi, %rcx\n   and $-256, %rcx\n   add $256, %rcx\n"
+    "add %rcx, %rsi\n   add %rcx, %rdi\n   neg %rcx\n   .balign 16\n"
+    "1:  vmovdqu64 (%rsi,%rcx), %zmm0\n   vmovdqu64 64(%rsi,%rcx), %zmm1\n   vmovdqu64 128(%rsi,%rcx), %zmm2\n   vmovdqu64 192(%rsi,%rcx), %zmm3\n"
+    "vmovdqa64 %zmm0, (%rdi,%rcx)\n   vmovdqa64 %zmm1, 64(%rdi,%rcx)\n   vmovdqa64 %zmm2, 128(%rdi,%rcx)\n   vmovdqa64 %zmm3, 192(%rdi,%rcx)\n"
+    "add $256, %rcx\n   jnz 1b\n"
     "vmovdqu64 %zmm4, -256(%r8)\n   vmovdqu64 %zmm5, -192(%r8)\n   vmovdqu64 %zmm6, -128(%r8)\n   vmovdqu64 %zmm7, -64(%r8)\n   vmovdqu64 %zmm8, (%rax)\n   vzeroupper\n" ASM_RET
     //
     //       Without AVX2, from 33 bytes to 255: the same ladder in the sixteen SSE2 registers, the head and
