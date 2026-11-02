@@ -130301,6 +130301,66 @@ static fn editor_disk_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
 /*
+        ui_over, the blend every piece of the kit lays on a picture, is one body of assembly per architecture; the C it
+        replaced is the reference here, written out as it was. The body has to give its bytes for every pixel, every
+        under and every colour, the lanes at their edges included: every alpha of the pixel and of the under, and a
+        random colour in each, with the channels of a pixel that is not premultiplied too.
+*/
+static unsigned int ui_over_reference(unsigned int pixel, unsigned int under)
+{
+        unsigned int rest = 255 - (pixel >> 24), out = 0;
+
+        if (!(pixel >> 24))
+                return under;
+        if (!rest)
+                return pixel;
+        if (!under)
+                return pixel;
+        for (unsigned int shift = 0; shift < 32; shift += 8)
+        {
+                unsigned int x = (under >> shift & 255) * rest + 127;
+                unsigned int channel = (pixel >> shift & 255) + ((x + 1 + (x >> 8)) >> 8);
+
+                out |= (channel > 255 ? 255 : channel) << shift;
+        }
+        return out;
+}
+
+static fn ui_over_check(void)
+{
+        static unsigned int state = 0x2545F491u;
+        b32 same = true;
+        int drawn = 0;
+
+        for (unsigned int a = 0; a < 256; a++)
+                for (unsigned int b = 0; b < 256; b++)
+                        for (int k = 0; k < 8; k++)
+                        {
+                                unsigned int p = (XORSHIFT32(state) & 0x00ffffffu) | a << 24;
+                                unsigned int u = (XORSHIFT32(state) & 0x00ffffffu) | b << 24;
+
+                                if (k & 1)
+                                        p = XORSHIFT32(state);
+                                if (k & 2)
+                                        u = XORSHIFT32(state);
+                                same &= ui_over(p, u) == ui_over_reference(p, u);
+                                drawn++;
+                        }
+        for (unsigned int lane = 0; lane < 4; lane++)
+                for (unsigned int v = 0; v < 256; v++)
+                {
+                        unsigned int p = 0xffffffffu, u = v << (lane * 8);
+
+                        same &= ui_over(p, u) == ui_over_reference(p, u);
+                        p = 0xc0000000u | (v << (lane * 8));
+                        same &= ui_over(p, 0x80808080u) == ui_over_reference(p, 0x80808080u);
+                        drawn++;
+                }
+        check("ui_over: the body gives the C's bytes for every alpha pair and for lanes at their edges", same && drawn > 0);
+
+}
+
+/*
         The text menu's keys are the keymap's: the first key each command is bound to, written as the menu shows it, and
         none for a command with no key. A key rebound shows its new one, and a command whose keys are taken away shows none.
 */
@@ -130558,6 +130618,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_tabs_check(&wui);
         editor_disk_check(&wui);
         field_check(&wui);
+        ui_over_check();
 }
 
 /*

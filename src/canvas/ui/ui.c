@@ -119,6 +119,76 @@ static fn ui_inks(struct ui address_to ui, unsigned int ground)
         ui->ring = ui_tone(ui->ink, 190);
 }
 
+/*
+        One premultiplied pixel over another, the blend every piece of the kit lays on the picture. On x86-64 and arm64 it
+        is one out-of-line body of assembly, ui_over_body, which the callers reach through this inline wrapper. The C
+        below is the body on riscv64, which measured no fewer instructions in assembly (a whole settings frame came out
+        0.4% more), and it is the reference the check in test/checks.c compares the bodies with. The bodies are the same
+        arithmetic, branch free after the early outs: a lane that came past 255 is pinned to 255 by its high bit, which
+        is what the lane-by-lane clamp gives.
+*/
+#if (X64 || ARM64) && !defined(UI_OVER_C)
+#define UI_OVER_ASM 1
+#endif
+
+#ifdef UI_OVER_ASM
+extern unsigned int ui_over_body(unsigned int pixel, unsigned int under) __asm__("ui_over_body")
+        __attribute__((visibility("hidden")));
+
+static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
+{
+        return ui_over_body(pixel, under);
+}
+
+#if X64
+asm(".pushsection .text\n"
+    ".balign 16\n"
+    ".local ui_over_body\n"
+    ".type ui_over_body, " ASM_TYPE "\n"
+    "ui_over_body:\n" ASM_ENDBR
+    /*
+            edi pixel, esi under; the result in eax. A zero alpha is under. The four channels are 16-bit lanes in
+            xmm0 (under) and xmm1 (pixel): under times rest (255 - alpha) plus 128, then ((x) * 257) >> 16 is that
+            lane's share of 255: the same as the C's (x + 1 + (x >> 8)) >> 8 with x = under * rest + 127, for every x up
+            to 65152 (checked over the whole range). The pixel's channel is added, and packuswb pins the lane to 255.
+    */
+    "mov %edi, %ecx\n   shr $24, %ecx\n   jz 2f\n"
+    "mov $255, %eax\n   sub %ecx, %eax\n   movd %eax, %xmm3\n   pshuflw $0, %xmm3, %xmm3\n"
+    "movd %esi, %xmm0\n   movd %edi, %xmm1\n   pxor %xmm2, %xmm2\n"
+    "punpcklbw %xmm2, %xmm0\n   punpcklbw %xmm2, %xmm1\n"
+    "pmullw %xmm3, %xmm0\n   paddw ui_over_128(%rip), %xmm0\n   pmulhuw ui_over_257(%rip), %xmm0\n"
+    "paddw %xmm1, %xmm0\n   packuswb %xmm0, %xmm0\n   movd %xmm0, %eax\n"
+    ASM_RET
+    "2:  mov %esi, %eax\n   " ASM_RET
+    ".balign 16\n"
+    "ui_over_128: .short 128, 128, 128, 128, 128, 128, 128, 128\n"
+    "ui_over_257: .short 257, 257, 257, 257, 257, 257, 257, 257\n"
+    ".size ui_over_body, .-ui_over_body\n"
+    ".popsection\n");
+#elif ARM64
+asm(".pushsection .text\n"
+    ".balign 16\n"
+    ".local ui_over_body\n"
+    ".type ui_over_body, " ASM_TYPE "\n"
+    "ui_over_body:\n" ASM_ENDBR
+    /*
+            w0 pixel, w1 under; the result in w0. A zero alpha is under. The lanes are as on x86-64: under times rest in
+            16-bit lanes, + 128, then ((x) * 257) >> 16 is the lane's share of 255 (the C's, for every x up to 65152), the
+            pixel's channel is added, and sqxtun pins the lane to 255.
+    */
+    "lsr w2, w0, #24\n   cbz w2, 2f\n"
+    "mov w3, #255\n   sub w3, w3, w2\n"
+    "fmov s0, w1\n   uxtl v0.8h, v0.8b\n   dup v1.8h, w3\n   mul v0.8h, v0.8h, v1.8h\n"
+    "movi v2.8h, #128\n   add v0.8h, v0.8h, v2.8h\n"
+    "movz w4, #257\n   dup v3.4h, w4\n   umull v4.4s, v0.4h, v3.4h\n   shrn v4.4h, v4.4s, #16\n"
+    "fmov s5, w0\n   uxtl v5.8h, v5.8b\n   add v4.4h, v4.4h, v5.4h\n   sqxtun v4.8b, v4.8h\n"
+    "fmov w0, s4\n   " ASM_RET
+    "2:  mov w0, w1\n   " ASM_RET
+    ".size ui_over_body, .-ui_over_body\n"
+    ".popsection\n");
+#endif
+
+#else
 // One premultiplied pixel over another.
 static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
 {
@@ -153,6 +223,7 @@ static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
         }
         return out;
 }
+#endif
 
 // A tone at cover 255ths of itself.
 static unsigned int ui_cover(unsigned int tone, unsigned int cover)
