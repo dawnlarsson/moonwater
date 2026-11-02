@@ -514,6 +514,7 @@ static inline int window_key(struct window *window, struct window_key *key)
 // The screens one desktop spans, at most, and a screen's connector name with its null.
 #define WINDOWS_OUTPUTS 8
 #define WINDOWS_OUTPUT_NAME 16
+#define WINDOWS_OUTPUT_HZ 8 // the refresh rates one screen lists at its size, at most
 // The input devices the compositor reads, the room of the name it keeps of each, and what it found each to be.
 #define WINDOWS_INPUTS 32
 #define WINDOWS_INPUT_NAME 48
@@ -668,6 +669,16 @@ struct windows
         int output_x[WINDOWS_OUTPUTS], output_y[WINDOWS_OUTPUTS];
         unsigned int output_w[WINDOWS_OUTPUTS], output_h[WINDOWS_OUTPUTS];
         char output_name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+
+        /*
+                What each screen can be driven at, for the Displays field: output_rates of its refresh rates in Hz,
+                each once, in the order the screen lists them at its size (output_hz); output_now, the rate it is
+                at; and its turn in degrees (0, 90, 180 or 270), with output_software 1 when the turn is done by
+                Canvas and 0 when the card does it, or none is.
+        */
+        unsigned int output_rates[WINDOWS_OUTPUTS], output_now[WINDOWS_OUTPUTS];
+        unsigned int output_hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ];
+        unsigned int output_turn[WINDOWS_OUTPUTS], output_software[WINDOWS_OUTPUTS];
 
         /*
                 The compositor's, for moonwater debug: each input device it reads, by its slot, and what became

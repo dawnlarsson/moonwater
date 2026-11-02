@@ -2663,6 +2663,10 @@ struct compositor_output
         // for each, so a DIRTYFB of one screen's change commits that screen's crtc and waits on its vertical blank
         // and on no other's: one framebuffer every crtc showed held a 60 Hz screen to a 50 Hz one's pace.
         unsigned int fb;
+        // The refresh rates it lists at its size (hz_count of them), and its turn in degrees with whether Canvas does
+        // the turn (turn_software); the table says them to the Displays field (compositor_table_outputs).
+        unsigned int hz[WINDOWS_OUTPUT_HZ], hz_count;
+        unsigned int turn, turn_software;
 };
 
 static struct
@@ -5537,7 +5541,21 @@ struct compositor_connected
         struct compositor_mode mode[WINDOWS_OUTPUTS];
         char name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
         int size[WINDOWS_OUTPUTS][2];
+        unsigned int hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ], hz_count[WINDOWS_OUTPUTS];
 };
+
+// Adds a mode's refresh rate to a screen's list when the mode is the screen's size and the list has no such rate yet:
+// the rates a screen lists at its size, which the Displays field offers.
+static void compositor_rate_add(unsigned int *hz, unsigned int *count, const struct compositor_mode *mode, int width,
+                                int height)
+{
+        if (mode->hdisplay != width || mode->vdisplay != height || !mode->vrefresh || *count >= WINDOWS_OUTPUT_HZ)
+                return;
+        for (unsigned int at = 0; at < *count; at++)
+                if (hz[at] == mode->vrefresh)
+                        return;
+        hz[(*count)++] = mode->vrefresh;
+}
 
 static b32 compositor_connected_read(struct compositor_connected *found)
 {
@@ -5614,7 +5632,12 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                 found->size[n][0] = found->mode[n].hdisplay;
                 found->size[n][1] = found->mode[n].vdisplay;
                 if (found->size[n][0] && found->size[n][1])
+                {
+                        for (unsigned int each = 0; listed && each < probe.mode_count; each++)
+                                compositor_rate_add(found->hz[n], &found->hz_count[n], &modes[each], found->size[n][0],
+                                                    found->size[n][1]);
                         found->count++;
+                }
         }
 
         // A crtc is one screen's: those a crtc drives now keep it, and the rest take the first free one they can have.
@@ -5647,6 +5670,8 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                         found->mode[kept] = found->mode[n];
                         memory_copy(found->name[kept], found->name[n], WINDOWS_OUTPUT_NAME);
                         found->size[kept][0] = found->size[n][0], found->size[kept][1] = found->size[n][1];
+                        memory_copy(found->hz[kept], found->hz[n], sizeof(found->hz[n]));
+                        found->hz_count[kept] = found->hz_count[n];
                 }
                 kept++;
         }
@@ -5943,6 +5968,8 @@ static b32 compositor_space_take(int first)
                         compositor.output[at].crtc = found.crtc[n];
                         compositor.output[at].connector = found.connector[n];
                         compositor.output[at].mode = found.mode[n];
+                        memory_copy(compositor.output[at].hz, found.hz[n], sizeof(found.hz[n]));
+                        compositor.output[at].hz_count = found.hz_count[n];
                         memory_copy(compositor.output[at].name, found.name[n], WINDOWS_OUTPUT_NAME);
                         for (unsigned int index = 0; index < found.crtc_count; index++)
                                 if (found.crtcs[index] == found.crtc[n])
@@ -10742,6 +10769,11 @@ static void compositor_table_outputs(void)
                 while (name[length] && length < WINDOWS_OUTPUT_NAME - 1)
                         table->output_name[at][length] = name[length], length++;
                 memory_zero(table->output_name[at] + length, WINDOWS_OUTPUT_NAME - length);
+                table->output_now[at] = compositor.output[at].mode.vrefresh;
+                table->output_rates[at] = compositor.output[at].hz_count;
+                memory_copy(table->output_hz[at], compositor.output[at].hz, sizeof(table->output_hz[at]));
+                table->output_turn[at] = compositor.output[at].turn;
+                table->output_software[at] = compositor.output[at].turn_software;
         }
         // The largest a window may be follows the screens, inside the room its buffer has for the session.
         table->output_width = (unsigned int)compositor_most_width();
