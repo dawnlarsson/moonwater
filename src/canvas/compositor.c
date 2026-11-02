@@ -99,6 +99,11 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_SNAP_PERCENT_MOST 60
 #define COMPOSITOR_SNAP_READ 300
 #define COMPOSITOR_SNAP_FADE_NS (120 * UI_MS)
+// The grid's tiles: the gap between them, which a thumbnail keeps from its cell's edges too; a tile's tint, white at a quarter;
+// and the tint of a region a window fills, black at a half (it is shown taken, not hidden).
+#define COMPOSITOR_GRID_GAP 4
+#define COMPOSITOR_GRID_TINT 0x40ffffffu
+#define COMPOSITOR_GRID_TAKEN 0x80000000u
 // The top of a window that is a titlebar with nothing drawn -- a press there takes the window whatever is
 // under it -- and its close button, a disc that far in from the window's top right, in logical pixels.
 #define COMPOSITOR_GRAB 24
@@ -8742,7 +8747,7 @@ static unsigned int compositor_occupied(int row, int screen)
 */
 static void compositor_grid_tile(const int *screen, unsigned int at, int *tile)
 {
-        int gap = 4 * compositor.scale, width = screen[2] / 10, row = COMPOSITOR_GRID_TILES * width + (COMPOSITOR_GRID_TILES - 1) * gap;
+        int gap = COMPOSITOR_GRID_GAP * compositor.scale, width = screen[2] / 10, row = COMPOSITOR_GRID_TILES * width + (COMPOSITOR_GRID_TILES - 1) * gap;
 
         tile[0] = screen[0] + (screen[2] - row) / 2 + (int)at * (width + gap);
         tile[1] = screen[1];
@@ -8826,7 +8831,7 @@ static unsigned int compositor_zones(unsigned int free, unsigned int *zones)
 // window's picture as large as its cell takes, centred in it.
 static void compositor_assist_place(const int *zone, unsigned int at, unsigned int of, int w, int h, int *rect)
 {
-        int margin = COMPOSITOR_SNAP * compositor.scale, cols = 1, rows, cell_w, cell_h, fit_w, fit_h;
+        int margin = COMPOSITOR_GRID_GAP * compositor.scale, cols = 1, rows, cell_w, cell_h, fit_w, fit_h;
 
         while (cols * cols < (int)of)
                 cols++;
@@ -9049,7 +9054,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                 {
                         int box[4];
                         struct compositor_frame *tint = &frames[at + added], *border = &frames[at + added + 1];
-                        unsigned int ink = tile == compositor.grid_hover ? compositor_snap_ink() : 0x40ffffffu;
+                        unsigned int ink = tile == compositor.grid_hover ? compositor_snap_ink() : COMPOSITOR_GRID_TINT;
 
                         compositor_grid_tile(screen, tile, box);
                         memory_zero(tint, sizeof(*tint));
@@ -9076,7 +9081,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                         box[2] = part[2] * tile_box[2] / screen[2];
                         box[3] = part[3] * tile_box[3] / screen[3];
                         taken = (compositor_region_cells(how) & compositor_occupied(compositor.drag, compositor.grid_screen)) != 0;
-                        grid_ink = taken ? 0x80000000u : tile == compositor.grid_hover ? compositor_snap_ink() : 0x40ffffffu;
+                        grid_ink = taken ? COMPOSITOR_GRID_TAKEN : tile == compositor.grid_hover ? compositor_snap_ink() : COMPOSITOR_GRID_TINT;
                         memory_zero(&frames[at + added], sizeof(frames[0]));
                         frames[at + added].scale = compositor.scale;
                         memory_copy(frames[at + added].preview, box, sizeof(box));
