@@ -36769,12 +36769,26 @@ ASM_FUNC(positive_to_string)
     // arm64 keeps an index in this same routine, because it has indexed
     // addressing and the add this removes was never there to remove.
     //
-    // The pair stays, unlike string_span above: two ways out of every byte
-    // mean the byte test cannot also be the loop branch.
+    // Four bytes a turn while four are known to lie before the end, which is
+    // one end-pointer test for the four and not one per byte, then the last
+    // few a byte at a time with the test each. The end is never read past: a
+    // group runs only while its last byte is below the end. A bound that wraps
+    // became all ones above, so an unbounded run takes the four-byte turns and
+    // stops at the terminator as it did. Qemu-user counts, cycles unmeasured:
+    // 322 instructions a call against 433 at 64 bytes, and 52 against 62 at 7.
     ASM_FUNC(string_span_max)
     "mv a3, a0\n   add a1, a0, a1\n   bgeu a1, a0, 31f\n   li a1, -1  # never past the end of memory\n31:\n"
-    "1:  bgeu a0, a1, 9f\n   lbu t1, 0(a0)\n   add t2, a2, t1\n   lbu t3, 0(t2)\n   beqz t3, 9f\n   addi a0, a0, 1\n   bgeu a0, a1, 9f\n"
-    "lbu t1, 0(a0)\n   add t2, a2, t1\n   lbu t3, 0(t2)\n   beqz t3, 9f\n   addi a0, a0, 1\n   j 1b\n"
+    "addi t0, a0, 4\n   bltu a1, t0, 5f\n"
+    "1:  lbu t1, 0(a0)\n   add t2, a2, t1\n   lbu t3, 0(t2)\n   beqz t3, 10f\n"
+    "lbu t1, 1(a0)\n   add t2, a2, t1\n   lbu t3, 0(t2)\n   beqz t3, 11f\n"
+    "lbu t1, 2(a0)\n   add t2, a2, t1\n   lbu t3, 0(t2)\n   beqz t3, 12f\n"
+    "lbu t1, 3(a0)\n   add t2, a2, t1\n   lbu t3, 0(t2)\n   beqz t3, 13f\n"
+    "addi a0, a0, 4\n   addi t0, a0, 4\n   bgeu a1, t0, 1b\n"
+    "5:  bgeu a0, a1, 9f\n   lbu t1, 0(a0)\n   add t2, a2, t1\n   lbu t3, 0(t2)\n   beqz t3, 9f\n   addi a0, a0, 1\n   j 5b\n"
+    "13: addi a0, a0, 1\n"
+    "12: addi a0, a0, 1\n"
+    "11: addi a0, a0, 1\n"
+    "10: sub a0, a0, a3\n   ret\n"
     "9:  sub a0, a0, a3\n" ASM_RET
     ASM_END(string_span_max)
     //
