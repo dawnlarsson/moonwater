@@ -118622,11 +118622,11 @@ static int wheel_unread(int row, unsigned int address_to events, int address_to 
 
 /*
         The chrome at the default theme, drawn the way it was before the kit's roles drew it: the line of the window
-        with the keys and of one without, the desktop and each window's close button, all in one scene, which is
+        with the keys and of one without, the desktop and each window's close and minimise buttons, all in one scene, which is
         pinned by a hash of the whole output so that a changed default pixel is seen. The tabs' inks the band takes for
         a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0x665cfe0fu
+#define CHROME_SCENE_HASH 0x1bf5d55fu
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -118659,12 +118659,82 @@ static void check_compositor_chrome(void)
     for (unsigned int at = 0; at < GLASS_SIDE * GLASS_SIDE; at++)
         hash = (hash ^ (screen[at] & 0xffffffu)) * 16777619u;
     string_format(log, "  chrome: the default scene hashes to %p\n", (positive)hash);
-    check("chrome: the default scene, desktop, lines and close buttons, is drawn as it was", hash == CHROME_SCENE_HASH);
+    check("chrome: the default scene, desktop, lines, close and minimise buttons, is drawn as it was", hash == CHROME_SCENE_HASH);
 #if MOONWATER_UI_TASKBAR
     check("chrome: a tab drawn without a font is black, the panel's ink when away and 38383c when lit",
           taskbar_tab_ink(-1, 0) == 0u && taskbar_tab_ink(0, 0) == 0u && taskbar_tab_ink(0, COMPOSITOR_TAB_AWAY) == 0x141416u &&
               taskbar_tab_ink(0, COMPOSITOR_TAB_LIT) == 0x38383cu);
 #endif
+}
+
+/*
+        The minimise button: a dash in the close button's ink, to the left of the close disc of a window that has room
+        for both. A press on it puts the window away, and neither the press nor its release reaches the window or
+        starts a drag. A window too narrow for two discs, and one with no close button, has none: its press is its own.
+*/
+static void check_compositor_minimise(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    struct compositor_frame frame;
+    int bx, by, side;
+    unsigned int head;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("minimise: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    table->x[2] = 180, table->y[2] = 110, table->width[2] = 60, table->height[2] = 60;
+    table->x[3] = 20, table->y[3] = 150, table->width[3] = 120, table->height[3] = 60;
+    table->glass[3] = WINDOW_NO_CLOSE;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    glass_paint(2, 0, 0, 60, 60, 0x404040u, true);
+    glass_paint(3, 0, 0, 120, 60, 0x404040u, true);
+    compositor.focus = 1;
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+
+    // The close disc is where it was; the dash is 3 px in from each side of the disc to its left, two pixels thick.
+    compositor_frame_of(1, &frame);
+    check("minimise: the close disc of a window with room for both is where it was",
+          compositor_close_box(&frame, &bx, &by, &side) && bx == 151 && by == 35 && side == 14);
+    check("minimise: a dash in the close button's ink sits to the left of the close disc, two pixels thick",
+          glass_at(139, 41) == glass_at(139, 42) && glass_at(139, 42) != 0x404040u && glass_at(139, 40) == 0x404040u &&
+              glass_at(139, 43) == 0x404040u && glass_at(134, 42) == 0x404040u && glass_at(144, 42) == 0x404040u);
+
+    compositor.pointer_x = 139, compositor.pointer_y = 42;
+    head = table->event_head[1];
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
+    check("minimise: a press on the dash puts its window away",
+          (compositor.state[1] & WINDOW_MINIMIZED) && (table->state[1] & WINDOW_MINIMIZED));
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
+    check("minimise: the press and its release are no drag, no grab and no event to the window",
+          compositor.drag == COMPOSITOR_NONE && compositor.grab == COMPOSITOR_NONE && table->event_head[1] == head &&
+              (compositor.state[1] & WINDOW_MINIMIZED));
+
+    // Window 2 is too narrow for two discs: a press where its dash would be starts its drag, and nothing is put away.
+    compositor.pointer_x = 209, compositor.pointer_y = 122;
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
+    check("minimise: a window with no room for two discs has none, and its press is its own",
+          !(compositor.state[2] & WINDOW_MINIMIZED) && compositor.drag == 2);
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
+
+    // Window 3 has no close button, so no minimise button either.
+    compositor.pointer_x = 109, compositor.pointer_y = 162;
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
+    check("minimise: a window with no close button has no minimise button", !(compositor.state[3] & WINDOW_MINIMIZED));
 }
 
 static void check_compositor_wheel(void)
@@ -119936,7 +120006,7 @@ static fn check_glass(void)
                             (x - 40 < COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
                             (x - 40 >= 160 - COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
                             (x - 40 < COMPOSITOR_RADIUS && y - 40 >= 160 - COMPOSITOR_RADIUS) ||
-                            (x - 40 >= 160 - COMPOSITOR_RADIUS && y - 40 >= 160 - COMPOSITOR_RADIUS) || (x >= 180 && y < 60))
+                            (x - 40 >= 160 - COMPOSITOR_RADIUS && y - 40 >= 160 - COMPOSITOR_RADIUS) || (x >= 160 && y < 60))
                                 continue;
                         kept &= side ? (r >= COMPOSITOR_GLASS_LIGHTEST && g >= COMPOSITOR_GLASS_LIGHTEST && b >= COMPOSITOR_GLASS_LIGHTEST)
                                      : (r <= COMPOSITOR_GLASS_DARKEST + 3 && g <= COMPOSITOR_GLASS_DARKEST + 3 &&
@@ -131724,6 +131794,7 @@ b32 main()
         check_compositor_hover();
         check_compositor_lit();
         check_compositor_chrome();
+        check_compositor_minimise();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();

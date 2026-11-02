@@ -94,6 +94,8 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_GRAB 24
 #define COMPOSITOR_CLOSE 14
 #define COMPOSITOR_CLOSE_IN 5
+// The minimise button beside the close one: the same size, the same gap between them, and its dash this far in from each side.
+#define COMPOSITOR_MINIMIZE_IN 3
 #define COMPOSITOR_RADIUS_MOST 64
 
 #include "ui/theme.h"
@@ -247,6 +249,40 @@ static unsigned int compositor_picture_at(const struct compositor_frame *frame, 
                 sy = (2 * sy + 1) * (unsigned long)frame->source_h / (2 * (unsigned long)frame->height);
         }
         return frame->pixels[sy * frame->pitch + sx];
+}
+
+/*
+        The minimise button: a disc the close button's size beside it, to its left, with the same gap between them. None
+        where the close button is none, or where there is no room for both. A window with no close button (the
+        launcher's, WINDOW_NO_CLOSE) has none either: it is put away by dismissing it. The close button's place does not
+        change for any window, so a window that cannot minimise has its title bar as it was.
+*/
+static int compositor_minimize_box(const struct compositor_frame *frame, int *x, int *y, int *side)
+{
+        int bx, by, box, in = COMPOSITOR_CLOSE_IN * frame->scale;
+
+        if (!compositor_close_box(frame, &bx, &by, &box) || frame->width < 2 * box + 3 * in + 4 * box)
+                return 0;
+        *side = box;
+        *x = bx - in - box;
+        *y = by;
+        return 1;
+}
+
+/*
+        The minimise button over a window's pixels: a dash across its disc, COMPOSITOR_MINIMIZE_IN in from each side and
+        two device pixels thick, in the ink the close button's X takes for the same window (window_contrast of the mean
+        under it), so the two stand out alike. Flat: no halo and no cover. Drawn after the window's pixels, through the
+        target's clip, as the close button is.
+*/
+static void compositor_minimize_draw(const struct compositor_target *t, const struct compositor_frame *frame)
+{
+        int mx, my, side, in = COMPOSITOR_MINIMIZE_IN * frame->scale;
+
+        if (!compositor_minimize_box(frame, &mx, &my, &side))
+                return;
+        compositor_fill(t, mx + in, my + side / 2 - frame->scale, side - 2 * in, 2 * frame->scale,
+                        window_contrast(frame->close_mean));
 }
 
 // A title's length in characters, the bytes that begin one, to its end or the listing's.
@@ -597,6 +633,7 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
         {
                 compositor_contents(t, frame);
                 compositor_close_draw(t, frame);
+                compositor_minimize_draw(t, frame);
                 return;
         }
         part = compositor_clipped(t, x + ri, y, w - 2 * ri, h);
@@ -670,6 +707,7 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                         }
         }
         compositor_close_draw(t, frame);
+        compositor_minimize_draw(t, frame);
 }
 
 static void compositor_draw(const struct compositor_target *t, const struct compositor_frame *frame)
@@ -2949,15 +2987,19 @@ static void compositor_close_join(int *rectangle)
                 for (unsigned int at = 0; at < compositor.stacked; at++)
                 {
                         struct compositor_frame frame;
-                        int row = compositor.stack[at], box[4], bx, by, side, meet[4];
+                        int row = compositor.stack[at], box[4], bx, by, side, meet[4], mx, my, mside, right;
 
                         if (!compositor_visible(row))
                                 continue;
                         compositor_frame_of(row, &frame);
                         if (!compositor_close_box(&frame, &bx, &by, &side))
                                 continue;
+                        // The minimise button is left of the close one: its damage is the pair's, the close button's right edge kept.
+                        right = bx + side;
+                        if (compositor_minimize_box(&frame, &mx, &my, &mside))
+                                bx = mx;
                         box[0] = bx < 0 ? 0 : bx, box[1] = by < 0 ? 0 : by;
-                        box[2] = bx + side > compositor.width ? compositor.width : bx + side;
+                        box[2] = right > compositor.width ? compositor.width : right;
                         box[3] = by + side > compositor.height ? compositor.height : by + side;
                         memory_copy(meet, rectangle, sizeof(meet));
                         compositor_meet(meet, box);
@@ -8086,19 +8128,24 @@ static void compositor_focus_commit(void)
         compositor_reveal(compositor.focus);
 }
 
-// Alt-F9: the window with the keys is put away, and the keys go to the one under it.
-static void compositor_minimize_focused(void)
+// A window put away, by its minimise button or Alt-F9; its tab brings it back. The keys go to the one under it if it had them.
+static void compositor_minimize_row(int row)
 {
-        int row = compositor.focus;
-
         if (row < 0 || !compositor_visible(row))
                 return;
 
         compositor_damage_row(row);
         compositor.state[row] |= WINDOW_MINIMIZED;
         compositor.table->state[row] = compositor.state[row];
-        compositor_refocus();
+        if (row == compositor.focus)
+                compositor_refocus();
         compositor_tabs_changed();
+}
+
+// Alt-F9: the window with the keys is put away, and the keys go to the one under it.
+static void compositor_minimize_focused(void)
+{
+        compositor_minimize_row(compositor.focus);
 }
 
 // A window asked to go: by its close button, Alt-F4, or a middle press on its tab. What happens next is the program's.
@@ -9081,6 +9128,52 @@ static int compositor_on_close(int row, int x, int y)
                y < by + side / 2 + reach && x < compositor.x[row] + (int)compositor.w[row];
 }
 
+/*
+        The minimise button's press, and the release that is its: a press on the button puts its window away, and neither
+        the press nor its release is given to any window or starts a drag (compositor_press). The code of the press is
+        what its release must be, and a press of any button first lets go of what an earlier one held, so a release a
+        finger's cancel lost is not held over.
+*/
+static unsigned int compositor_minimize_code;
+
+static int compositor_on_minimize(int row, int x, int y)
+{
+        struct compositor_frame frame;
+        int bx, by, side;
+
+        compositor_frame_of(row, &frame);
+        if (!compositor_minimize_box(&frame, &bx, &by, &side))
+                return 0;
+        return x >= bx && x < bx + side && y >= by && y < by + side;
+}
+
+static int compositor_minimize_press(unsigned int code, int down)
+{
+        int under, tab = COMPOSITOR_NONE;
+
+        if (!down)
+        {
+                if (!code || code != compositor_minimize_code)
+                        return 0;
+                compositor_minimize_code = 0;
+                return 1;
+        }
+        compositor_minimize_code = 0;
+        if (code != COMPOSITOR_BTN_LEFT)
+                return 0;
+
+        compositor_pointer_clamp();
+        under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+        if (under < 0 || tab >= 0 || !compositor_visible(under) ||
+            !compositor_on_minimize(under, compositor.pointer_x, compositor.pointer_y))
+                return 0;
+
+        compositor_popups_close(-1, -1);
+        compositor_minimize_code = code;
+        compositor_minimize_row(under);
+        return 1;
+}
+
 static void compositor_button(unsigned int code, int down)
 {
         int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top;
@@ -9259,6 +9352,16 @@ static void compositor_button(unsigned int code, int down)
                 compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
                 compositor.button_row[code - COMPOSITOR_BTN_LEFT] = under;
         }
+}
+
+/*
+        Any press or release of a button, from the mouse or a finger: the minimise button's first, which takes its
+        press and release alone, and then the window's (compositor_button).
+*/
+static void compositor_press(unsigned int code, int down)
+{
+        if (!compositor_minimize_press(code, down))
+                compositor_button(code, down);
 }
 
 // Whether a key of a touchpad is one of its touch and tool keys, which say where fingers are and press nothing.
@@ -9659,7 +9762,7 @@ static void compositor_touch_event(unsigned int at, const struct compositor_inpu
 static void compositor_touch_button(unsigned int code, int down)
 {
         compositor.touching = 1;
-        compositor_button(code, down);
+        compositor_press(code, down);
         compositor.touching = 0;
 }
 
@@ -10060,7 +10163,7 @@ static void compositor_input_read(unsigned int at)
                                 moved |= compositor_report(now);
                                 if (moved)
                                         compositor_motion(), moved = 0;
-                                compositor_button(code, event->value != 0);
+                                compositor_press(code, event->value != 0);
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
                                 compositor_key(at, event->code, event->value, now);
