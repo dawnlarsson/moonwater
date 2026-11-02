@@ -4219,8 +4219,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                         memory_copy(made, place, sizeof(place));
                         // The blocks are new, so none of the old ones count: their boosted values and sums are zero,
                         // and the change below (every block, which the clip takes in whole) adds each one in.
-                        for (long cell = 0; cell < (long)blocks[2] * blocks[3]; cell++)
-                                compositor.boosted[row][cell] = 0;
+                        memory_zero(compositor.boosted[row], (positive)blocks[2] * (positive)blocks[3] * 4);
                         memory_zero(compositor.glass_sum[row], sizeof(compositor.glass_sum[row]));
                         // Every block.
                         stale[0] = blocks[0] * block, stale[1] = blocks[1] * block;
