@@ -1,10 +1,6 @@
 # Production-function inventory seal; not a proof of review coverage or correctness.
-<<<<<<< HEAD
-sha256 938aded6c8670de4f508ef0ab7259b0a21c3404d3f80f3579a5bdc25ed4435cd
-=======
-sha256 d43edb2affb098bd5f4aa5a1a930efb0c16a34fa61a21888b4e0d82b7e84c0c8
->>>>>>> d293b1ac (ui: a control's text is cut at its own box, not at the window's edge: a callout's line, a control's label, a switch's label before its bars and a heading's line stop where their box does. Red before: a callout's line ran to x 442 on a 160 box, a switch's label to x 435 under its pill, a 100 box's heading to x 435. Green after: all three stay in their boxes; a heading that fits its box (the gallery's, 221 exactly) is drawn as before. The terminal check passes 2773 of 2773.)
-c_functions 10813
+sha256 79b783e6af1a2072fa065bcf05e01229f9dfca4f8fdebf767094eddec69fb0e8
+c_functions 10814
 library_asm 434
 library_arch_bodies 1282
 library_aliases 98
