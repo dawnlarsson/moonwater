@@ -139659,6 +139659,99 @@ static unsigned int co_lay(const char *text,int (*rects)[4],unsigned char *order
     static const int sizes[3][2]={{2560,1080},{1920,1080},{1280,1024}};
     return windows_arrange_lay(text,names,sizes,2,rects,order);
 }
+static void dline(const char *text, struct windows_display *display) { windows_display_line(text, strlen(text), display); }
+/* The displays file (/root/canvas.displays): a line's fields and their defaults, a bad field named by its bit and
+   kept at its default, the first of a repeated name holding, a write that reads back the same, and the arrangement
+   with a display's place put in it through the same words. */
+static void check_compositor_displays(void) {
+    static const char names[2][WINDOWS_OUTPUT_NAME]={"Virtual-1","Virtual-2"};
+    static const int sizes[2][2]={{2560,1080},{1920,1080}};
+    struct windows_display d[WINDOWS_DISPLAYS], list[WINDOWS_DISPLAYS];
+    char text[1024], pinned[256];
+    int rects[WINDOWS_OUTPUTS][4];
+    unsigned char order[WINDOWS_OUTPUTS];
+    unsigned int n, made;
+    /* Defaults: a name alone is rotation 0, refresh preferred, no place, and nothing bad. */
+    dline("DP-1",&d[0]);
+    co_check(!strcmp(d[0].name,"DP-1")&&d[0].rotation==0&&d[0].refresh==0&&!d[0].placed&&d[0].bad==0);
+    /* Every field, in any order: rotation 90 at 60 Hz, placed at -1920,40. */
+    dline("HDMI-A-1 y=40 refresh=60 x=-1920 rotation=90",&d[0]);
+    co_check(!strcmp(d[0].name,"HDMI-A-1")&&d[0].rotation==90&&d[0].refresh==60&&d[0].placed&&d[0].x==-1920&&d[0].y==40&&d[0].bad==0);
+    dline("eDP-1 rotation=270 refresh=preferred",&d[0]);
+    co_check(!strcmp(d[0].name,"eDP-1")&&d[0].rotation==270&&d[0].refresh==0&&!d[0].placed&&d[0].bad==0);
+    /* Malformed fields keep their defaults and set their bits; x alone is missing its y. */
+    dline("Virtual-2 rotation=45 refresh=fast x=5",&d[0]);
+    co_check(d[0].rotation==0&&d[0].refresh==0&&!d[0].placed&&d[0].bad==(WINDOWS_DISPLAY_ROTATION|WINDOWS_DISPLAY_REFRESH|WINDOWS_DISPLAY_Y));
+    dline("Virtual-2 rotation=360",&d[0]);
+    co_check(d[0].rotation==0&&d[0].bad==WINDOWS_DISPLAY_ROTATION);
+    dline("Virtual-2 refresh=0",&d[0]);
+    co_check(d[0].refresh==0&&d[0].bad==WINDOWS_DISPLAY_REFRESH);
+    dline("Virtual-2 refresh=1001",&d[0]);
+    co_check(d[0].bad==WINDOWS_DISPLAY_REFRESH);
+    dline("Virtual-2 x=1 y=2x",&d[0]);
+    co_check(!d[0].placed&&d[0].bad==WINDOWS_DISPLAY_Y);
+    dline("Virtual-2 x=32769 y=0",&d[0]);
+    co_check(!d[0].placed&&d[0].bad==WINDOWS_DISPLAY_X);
+    /* A word that is no field, a word with no '=', a field given twice (the first holds): all bad with other. */
+    dline("Virtual-2 scale=2",&d[0]);
+    co_check(d[0].bad==WINDOWS_DISPLAY_OTHER);
+    dline("Virtual-2 rotation",&d[0]);
+    co_check(d[0].bad==WINDOWS_DISPLAY_OTHER);
+    dline("Virtual-2 rotation=90 rotation=0",&d[0]);
+    co_check(d[0].rotation==90&&d[0].bad==WINDOWS_DISPLAY_OTHER);
+    /* A name that is not a connector's: an '@', a space, too long, or none at all: the line says so and has none. */
+    dline("bad_name rotation=90",&d[0]);
+    co_check(d[0].name[0]==0&&d[0].bad==WINDOWS_DISPLAY_NAME);
+    dline("Virtual-2@1,2 rotation=90",&d[0]);
+    co_check(d[0].name[0]==0&&d[0].bad==WINDOWS_DISPLAY_NAME);
+    dline("ABCDEFGHIJKLMNOP",&d[0]);
+    co_check(d[0].name[0]==0&&d[0].bad==WINDOWS_DISPLAY_NAME);
+    dline("   ",&d[0]);
+    co_check(d[0].name[0]==0&&d[0].bad==WINDOWS_DISPLAY_NAME);
+    /* A file: blank lines are none, a bad name is kept as a line with none, and a repeated name is bad after the first. */
+    static const char file[]="HDMI-A-1 rotation=90 refresh=60\n\n  \nbad_name x=1 y=2\nVirtual-2 x=-10 y=20\nVirtual-2 x=0 y=0\n";
+    n=windows_displays_read(file,list,WINDOWS_DISPLAYS);
+    co_check(n==4&&!strcmp(list[0].name,"HDMI-A-1")&&list[1].name[0]==0&&list[1].bad==WINDOWS_DISPLAY_NAME);
+    co_check(!strcmp(list[2].name,"Virtual-2")&&list[2].placed&&list[2].x==-10&&list[2].y==20&&list[2].bad==0);
+    co_check(!strcmp(list[3].name,"Virtual-2")&&list[3].bad==WINDOWS_DISPLAY_OTHER&&list[3].placed);
+    co_check(windows_display_of(list,n,"Virtual-2",9)==&list[2]&&windows_display_of(list,n,"Virtual-1",9)==0);
+    /* A write gives the lines that have a setting; read back, they are the same settings. */
+    static const char lines[]="HDMI-A-1 rotation=90 refresh=60\nVirtual-2 x=-10 y=20 rotation=180\neDP-1 refresh=preferred\n";
+    n=windows_displays_read(lines,list,WINDOWS_DISPLAYS);
+    made=windows_displays_write(text,sizeof(text),list,n);
+    co_check(made&&!strcmp(text,"HDMI-A-1 rotation=90 refresh=60\nVirtual-2 rotation=180 refresh=preferred x=-10 y=20\n"));
+    { char small[8]; co_check(windows_displays_write(small,sizeof(small),list,n)==0); }
+    made=windows_displays_read(text,d,WINDOWS_DISPLAYS);
+    co_check(made==2&&d[0].rotation==90&&d[0].refresh==60&&!d[0].placed&&d[0].bad==0);
+    co_check(!strcmp(d[1].name,"Virtual-2")&&d[1].rotation==180&&d[1].refresh==0&&d[1].placed&&d[1].x==-10&&d[1].y==20&&d[1].bad==0);
+    /* The arrangement with the places put in: the words as they were, a placed screen's word takes its place, the
+       screens the arrangement does not name follow in the card's order, and a placed screen it does not name comes
+       last. A screen the arrangement holds dark stays dark. */
+    dline("Virtual-2 x=-1920 y=200",&list[0]);
+    n=1;
+    made=windows_arrange_pinned("",names,2,list,n,pinned,sizeof(pinned));
+    co_check(made&&!strcmp(pinned,"Virtual-1 Virtual-2@-1920,200"));
+    co_check(windows_arrange_lay(pinned,names,sizes,2,rects,order)==2&&co_rect(rects[0],1920,0,2560,1080)&&
+             co_rect(rects[1],0,200,1920,1080)&&order[0]==0);
+    made=windows_arrange_pinned("Virtual-2 Virtual-1",names,2,list,n,pinned,sizeof(pinned));
+    co_check(made&&!strcmp(pinned,"Virtual-2@-1920,200 Virtual-1"));
+    co_check(windows_arrange_lay(pinned,names,sizes,2,rects,order)==2&&order[0]==1);
+    dline("Virtual-1 x=0 y=0",&list[0]);
+    made=windows_arrange_pinned("Virtual-1@off",names,2,list,n,pinned,sizeof(pinned));
+    co_check(made&&!strcmp(pinned,"Virtual-1@off Virtual-2"));
+    co_check(windows_arrange_lay(pinned,names,sizes,2,rects,order)==1&&rects[0][2]==0&&co_rect(rects[1],0,0,1920,1080));
+    /* A screen not plugged in is no word; default is the card's order; an arrangement that is not one is none. */
+    dline("HDMI-A-1 x=5 y=5",&list[0]);
+    made=windows_arrange_pinned("default",names,2,list,1,pinned,sizeof(pinned));
+    co_check(made&&!strcmp(pinned,"Virtual-1 Virtual-2"));
+    made=windows_arrange_pinned("Virtual-2@x",names,2,list,1,pinned,sizeof(pinned));
+    co_check(made&&!strcmp(pinned,"Virtual-1 Virtual-2"));
+    dline("Virtual-1 x=0 y=0",&list[0]);
+    made=windows_arrange_pinned("Virtual-2@x",names,2,list,1,pinned,sizeof(pinned));
+    co_check(made&&!strcmp(pinned,"Virtual-2 Virtual-1@0,0"));
+    co_check(windows_arrange_pinned("Virtual-2 Virtual-1",names,2,list,1,pinned,4)==0);
+}
+
 static void check_compositor_outputs(void) {
     char name[WINDOWS_OUTPUT_NAME];
     int rects[WINDOWS_OUTPUTS][4];
@@ -140123,6 +140216,7 @@ int main(void) {
     check_compositor_keymap();
     check_compositor_pointer();
     check_compositor_outputs();
+    check_compositor_displays();
     check_compositor_scene();
     check_compositor_touch_backend();
     printf("  canvas-cells %u of %u\n",checks,checks);

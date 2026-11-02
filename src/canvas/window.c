@@ -988,6 +988,430 @@ static unsigned int windows_arrange_lay(const char *text, const char (*names)[WI
         return lit;
 }
 
+/*
+        The displays (/root/canvas.displays): one line a screen that has any
+        setting, NAME rotation=0|90|180|270 refresh=preferred|HZ x=X y=Y, the
+        fields in any order. rotation is 0 and refresh preferred unless given.
+        x and y give the screen's place in the arrangement (NAME@X,Y there) and
+        count only when both are given. A malformed field takes its default and
+        its bit is set in bad, so the compositor can name it; a line with no
+        valid name is kept with an empty name and bad NAME. A word that is no
+        field, a field given twice and a name given twice are bad too (the
+        first one holds). windows_displays_write gives back the lines a read
+        takes, so a write and a read agree.
+*/
+#define WINDOWS_DISPLAYS 32
+#define WINDOWS_DISPLAY_NAME 1u
+#define WINDOWS_DISPLAY_ROTATION 2u
+#define WINDOWS_DISPLAY_REFRESH 4u
+#define WINDOWS_DISPLAY_X 8u
+#define WINDOWS_DISPLAY_Y 16u
+#define WINDOWS_DISPLAY_OTHER 32u
+#define WINDOWS_DISPLAY_HZ 1000u
+
+struct windows_display
+{
+        char name[WINDOWS_OUTPUT_NAME];
+        unsigned int rotation; // degrees, 0 when not given
+        unsigned int refresh;  // a rate in Hz, or 0 for preferred
+        int x, y;              // the place, when placed
+        unsigned int placed;
+        unsigned int bad;      // WINDOWS_DISPLAY_* bits of what was malformed or missing
+};
+
+// Whether length bytes at word are a connector name, and copies them into name: letters, digits and dashes.
+static int windows_display_name(const char *word, unsigned int length, char *name)
+{
+        if (!length || length >= WINDOWS_OUTPUT_NAME)
+                return 0;
+        for (unsigned int at = 0; at < length; at++)
+                if (!((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') ||
+                      word[at] == '-'))
+                        return 0;
+        for (unsigned int at = 0; at < length; at++)
+                name[at] = word[at];
+        name[length] = 0;
+        return 1;
+}
+
+// Whether name (NUL-ended) is the length bytes at word.
+static int windows_name_is(const char *name, const char *word, unsigned int length)
+{
+        if (length >= WINDOWS_OUTPUT_NAME || name[length])
+                return 0;
+        for (unsigned int at = 0; at < length; at++)
+                if (name[at] != word[at])
+                        return 0;
+        return 1;
+}
+
+// Whether two NUL-ended connector names are the same.
+static int windows_display_same_name(const char *a, const char *b)
+{
+        unsigned int at = 0;
+
+        while (at < WINDOWS_OUTPUT_NAME - 1 && a[at] && a[at] == b[at])
+                at++;
+        return a[at] == b[at];
+}
+
+// Whether length bytes at word are the decimal number value, as at most digits digits (a minus first when signed).
+static int windows_display_number(const char *word, unsigned int length, int signed_number, unsigned int digits, int *into)
+{
+        unsigned int at = 0, count = 0;
+        int negative = 0;
+        long value = 0;
+
+        if (signed_number && at < length && word[at] == '-')
+                negative = 1, at++;
+        for (; at < length; at++, count++)
+        {
+                if (word[at] < '0' || word[at] > '9' || count == digits)
+                        return 0;
+                value = value * 10 + (word[at] - '0');
+        }
+        if (!count)
+                return 0;
+        *into = (int)(negative ? -value : value);
+        return 1;
+}
+
+// Reads one line of length bytes at line into display, and says in bad which of its fields were not right.
+static void windows_display_line(const char *line, unsigned int length, struct windows_display *display)
+{
+        unsigned int at = 0, start, seen = 0, have_x = 0, have_y = 0;
+        int x = 0, y = 0;
+
+        for (unsigned int each = 0; each < WINDOWS_OUTPUT_NAME; each++)
+                display->name[each] = 0;
+        display->rotation = display->refresh = display->placed = display->bad = 0;
+        display->x = display->y = 0;
+        while (at < length && (line[at] == ' ' || line[at] == '\t'))
+                at++;
+        start = at;
+        while (at < length && line[at] != ' ' && line[at] != '\t')
+                at++;
+        if (!windows_display_name(line + start, at - start, display->name))
+        {
+                display->bad = WINDOWS_DISPLAY_NAME;
+                return;
+        }
+        for (;;)
+        {
+                unsigned int word, equals, key, keys;
+                int value;
+
+                while (at < length && (line[at] == ' ' || line[at] == '\t'))
+                        at++;
+                if (at == length)
+                        break;
+                word = at;
+                while (at < length && line[at] != ' ' && line[at] != '\t')
+                        at++;
+                for (equals = word; equals < at && line[equals] != '='; equals++)
+                        ;
+                keys = equals - word;
+                if (equals == at || equals == word)
+                {
+                        display->bad |= WINDOWS_DISPLAY_OTHER;
+                        continue;
+                }
+                // Each field is the key's name and the value after its '=': the rest is the value.
+                key = 0;
+                if (keys == 8 && windows_name_is("rotation", line + word, 8))
+                        key = WINDOWS_DISPLAY_ROTATION;
+                else if (keys == 7 && windows_name_is("refresh", line + word, 7))
+                        key = WINDOWS_DISPLAY_REFRESH;
+                else if (keys == 1 && line[word] == 'x')
+                        key = WINDOWS_DISPLAY_X;
+                else if (keys == 1 && line[word] == 'y')
+                        key = WINDOWS_DISPLAY_Y;
+                if (!key || (seen & key))
+                {
+                        display->bad |= WINDOWS_DISPLAY_OTHER;
+                        continue;
+                }
+                seen |= key;
+                if (key == WINDOWS_DISPLAY_ROTATION)
+                {
+                        if (windows_display_number(line + equals + 1, at - equals - 1, 0, 3, &value) &&
+                            (value == 0 || value == 90 || value == 180 || value == 270))
+                                display->rotation = (unsigned int)value;
+                        else
+                                display->bad |= key;
+                }
+                else if (key == WINDOWS_DISPLAY_REFRESH)
+                {
+                        if (at - equals - 1 == 9 && windows_name_is("preferred", line + equals + 1, 9))
+                                display->refresh = 0;
+                        else if (windows_display_number(line + equals + 1, at - equals - 1, 0, 4, &value) &&
+                                 value >= 1 && value <= (int)WINDOWS_DISPLAY_HZ)
+                                display->refresh = (unsigned int)value;
+                        else
+                                display->bad |= key;
+                }
+                else if (windows_display_number(line + equals + 1, at - equals - 1, 1, 6, &value) &&
+                         value <= WINDOWS_PLACE_MOST && value >= -WINDOWS_PLACE_MOST)
+                {
+                        if (key == WINDOWS_DISPLAY_X)
+                                x = value, have_x = 1;
+                        else
+                                y = value, have_y = 1;
+                }
+                else
+                        display->bad |= key;
+        }
+        // x and y go together: one alone is malformed for the field it lacks.
+        if (have_x && have_y)
+                display->placed = 1, display->x = x, display->y = y;
+        else if (have_x)
+                display->bad |= WINDOWS_DISPLAY_Y;
+        else if (have_y)
+                display->bad |= WINDOWS_DISPLAY_X;
+}
+
+// Reads the lines of text into list, at most room of them, and answers how many were read; a blank line is none.
+static unsigned int windows_displays_read(const char *text, struct windows_display *list, unsigned int room)
+{
+        unsigned int count = 0, at = 0;
+
+        while (text[at] && count < room)
+        {
+                unsigned int start = at, blank = 1;
+
+                while (text[at] && text[at] != '\n')
+                        at++;
+                for (unsigned int each = start; each < at; each++)
+                        blank &= text[each] == ' ' || text[each] == '\t' || text[each] == '\r';
+                if (!blank)
+                {
+                        windows_display_line(text + start, at - start, &list[count]);
+                        for (unsigned int earlier = 0; earlier < count && list[count].name[0]; earlier++)
+                                if (list[earlier].name[0] && windows_display_same_name(list[earlier].name, list[count].name))
+                                        list[count].bad |= WINDOWS_DISPLAY_OTHER;
+                        count++;
+                }
+                if (text[at] == '\n')
+                        at++;
+        }
+        return count;
+}
+
+// The first display of the list named as the length bytes at word are: the one a line gives its place or setting.
+static const struct windows_display *windows_display_of(const struct windows_display *list, unsigned int count,
+                                                        const char *word, unsigned int length)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (list[at].name[0] && windows_name_is(list[at].name, word, length))
+                        return &list[at];
+        return 0;
+}
+
+// Appends text (length bytes) to into at *at, bounded by room with its NUL; 0 when it does not fit.
+static int windows_put(char *into, unsigned int room, unsigned int *at, const char *text, unsigned int length)
+{
+        if (room < *at || room - *at <= length)
+                return 0;
+        for (unsigned int each = 0; each < length; each++)
+                into[*at + each] = text[each];
+        *at += length;
+        into[*at] = 0;
+        return 1;
+}
+
+// Appends value in decimal (a minus first when negative) to into at *at.
+static int windows_put_number(char *into, unsigned int room, unsigned int *at, int value)
+{
+        char digits[12];
+        unsigned int count = 0;
+        unsigned long magnitude = value < 0 ? 0ul - (unsigned long)(long)value : (unsigned long)value;
+
+        do
+                digits[count++] = (char)('0' + magnitude % 10), magnitude /= 10;
+        while (magnitude);
+        if (value < 0 && !windows_put(into, room, at, "-", 1))
+                return 0;
+        while (count)
+                if (!windows_put(into, room, at, digits + --count, 1))
+                        return 0;
+        return 1;
+}
+
+// The displays a screen has a setting for, one line each, as windows_displays_read reads them; 0 when they do not fit.
+static unsigned int windows_displays_write(char *into, unsigned int room, const struct windows_display *list, unsigned int count)
+{
+        unsigned int at = 0;
+
+        if (!room)
+                return 0;
+        into[0] = 0;
+        for (unsigned int each = 0; each < count; each++)
+        {
+                const struct windows_display *display = &list[each];
+                unsigned int length = 0;
+
+                if (!display->name[0] || (!display->rotation && !display->refresh && !display->placed))
+                        continue;
+                while (display->name[length])
+                        length++;
+                if (!windows_put(into, room, &at, display->name, length) ||
+                    !windows_put(into, room, &at, " rotation=", 10) ||
+                    !windows_put_number(into, room, &at, (int)display->rotation) ||
+                    !windows_put(into, room, &at, " refresh=", 9))
+                        return 0;
+                if (!display->refresh ? !windows_put(into, room, &at, "preferred", 9) :
+                    !windows_put_number(into, room, &at, (int)display->refresh))
+                        return 0;
+                if (display->placed && (!windows_put(into, room, &at, " x=", 3) ||
+                                        !windows_put_number(into, room, &at, display->x) ||
+                                        !windows_put(into, room, &at, " y=", 3) ||
+                                        !windows_put_number(into, room, &at, display->y)))
+                        return 0;
+                if (!windows_put(into, room, &at, "\n", 1))
+                        return 0;
+        }
+        return at;
+}
+
+/*
+        The arrangement the compositor lays, with each display's place put in
+        it. The arrangement's words stay as they are, except that a placed
+        display's word (NAME@X,Y) takes the display's place where the
+        arrangement names it (a screen the arrangement holds dark stays dark).
+        Then the card screens the arrangement does not name follow in the
+        card's order, and last the displays it does not name but places, each
+        as NAME@X,Y: so a placed display that is not in the arrangement does not
+        become the primary. An arrangement that is not one is taken as none.
+        Answers the bytes written with the NUL, or 0 when they do not fit or
+        are not an arrangement after all; the compositor then lays the
+        arrangement it has.
+*/
+// The next word of text from *start, whose bounds come back in start and end; 0 when there is none.
+static int windows_word_next(const char *text, unsigned int *start, unsigned int *end)
+{
+        unsigned int at = *start;
+
+        while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                at++;
+        if (!text[at])
+                return 0;
+        *start = at;
+        while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
+                at++;
+        *end = at;
+        return 1;
+}
+
+// The length of a NUL-ended connector name.
+static unsigned int windows_name_length(const char *name)
+{
+        unsigned int at = 0;
+
+        while (at < WINDOWS_OUTPUT_NAME - 1 && name[at])
+                at++;
+        return at;
+}
+
+// Whether the card screen names are a screen the length bytes at word name: which one, plus one, or 0.
+static unsigned int windows_screen_of(const char (*names)[WINDOWS_OUTPUT_NAME], unsigned int count, const char *word,
+                                      unsigned int length)
+{
+        for (unsigned int screen = 0; screen < count; screen++)
+                if (windows_name_is(names[screen], word, length))
+                        return screen + 1;
+        return 0;
+}
+
+static unsigned int windows_arrange_pinned(const char *arrangement, const char (*names)[WINDOWS_OUTPUT_NAME],
+                                           unsigned int count, const struct windows_display *list, unsigned int listed,
+                                           char *into, unsigned int room)
+{
+        unsigned int at = 0, named[WINDOWS_OUTPUTS] = {0}, used[WINDOWS_DISPLAYS] = {0};
+        const char *base = windows_arrange_valid(arrangement) ? arrangement : "";
+        unsigned int start, end, name, screen;
+        int how, x, y;
+
+        if (!room || count > WINDOWS_OUTPUTS || listed > WINDOWS_DISPLAYS)
+                return 0;
+        into[0] = 0;
+        // What the arrangement names: its screens, and the first display of each of its names.
+        for (start = 0; windows_word_next(base, &start, &end); start = end)
+        {
+                const struct windows_display *display;
+
+                if (end - start == 7 && windows_name_is("default", base + start, 7))
+                        continue;
+                windows_arrange_word(base + start, end - start, &name, &how, &x, &y);
+                screen = windows_screen_of(names, count, base + start, name);
+                if (screen)
+                        named[screen - 1] = 1;
+                display = windows_display_of(list, listed, base + start, name);
+                if (display)
+                        used[display - list] = 1;
+        }
+        // The displays the arrangement does not name but places: the screens they are name the screens they are on.
+        for (unsigned int each = 0; each < listed; each++)
+        {
+                const struct windows_display *display = &list[each];
+                unsigned int length = windows_name_length(display->name);
+                unsigned int screen;
+
+                if (!display->placed || used[each] || !length || windows_display_of(list, listed, display->name, length) != display)
+                        continue;
+                screen = windows_screen_of(names, count, display->name, length);
+                if (screen)
+                        named[screen - 1] = 1;
+        }
+        // The arrangement's words, a placed display's own word in place of its word where it has one.
+        for (start = 0; windows_word_next(base, &start, &end); start = end)
+        {
+                const struct windows_display *display;
+
+                if (end - start == 7 && windows_name_is("default", base + start, 7))
+                        continue;
+                windows_arrange_word(base + start, end - start, &name, &how, &x, &y);
+                display = how == WINDOWS_PLACE_OFF ? 0 : windows_display_of(list, listed, base + start, name);
+                if (display && display->placed)
+                {
+                        if (!windows_put(into, room, &at, display->name, name) || !windows_put(into, room, &at, "@", 1) ||
+                            !windows_put_number(into, room, &at, display->x) || !windows_put(into, room, &at, ",", 1) ||
+                            !windows_put_number(into, room, &at, display->y) || !windows_put(into, room, &at, " ", 1))
+                                return 0;
+                }
+                else if (!windows_put(into, room, &at, base + start, end - start) || !windows_put(into, room, &at, " ", 1))
+                        return 0;
+        }
+        // The card screens the arrangement does not name, in the card's order.
+        for (unsigned int screen = 0; screen < count; screen++)
+        {
+                unsigned int length = windows_name_length(names[screen]);
+
+                if (named[screen])
+                        continue;
+                if (!windows_put(into, room, &at, names[screen], length) || !windows_put(into, room, &at, " ", 1))
+                        return 0;
+                named[screen] = 1;
+        }
+        // The displays it does not name but places, each on a screen that is there.
+        for (unsigned int each = 0; each < listed; each++)
+        {
+                const struct windows_display *display = &list[each];
+                unsigned int length = windows_name_length(display->name);
+
+                if (!display->placed || used[each] || !length || windows_display_of(list, listed, display->name, length) != display ||
+                    !windows_screen_of(names, count, display->name, length))
+                        continue;
+                if (!windows_put(into, room, &at, display->name, length) || !windows_put(into, room, &at, "@", 1) ||
+                    !windows_put_number(into, room, &at, display->x) || !windows_put(into, room, &at, ",", 1) ||
+                    !windows_put_number(into, room, &at, display->y) || !windows_put(into, room, &at, " ", 1))
+                        return 0;
+        }
+        // The space each word left at its end is dropped; an empty arrangement (no screens) is the card's order.
+        while (at && into[at - 1] == ' ')
+                into[--at] = 0;
+        return windows_arrange_valid(into) ? at + 1 : 0;
+}
+
 // Row row's buffer which, for a caller holding the table: the buffer's size is the header's, which the compositor
 // wrote and any mapper may write too, so the program's own copy (windows_pixels) is the one to draw through.
 #define windows_buffer(table, row, which)                                                              \
