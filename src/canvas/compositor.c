@@ -464,6 +464,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
         unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : compositor_ink_shadow();
         int half = frame->scale; // half the X's stroke
         int made = compositor_close_cover.side == side && compositor_close_cover.half == half;
+        const unsigned int *picture = compositor_scaled(frame) ? 0 : frame->pixels;
 
         for (int py = y1; py < y2; py++)
                 for (int px = x1; px < x2; px++)
@@ -478,7 +479,8 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
                         if (!halo)
                                 continue;
 
-                        unsigned int under = compositor_picture_at(frame, px - frame->x, py - frame->y);
+                        unsigned int under = picture ? picture[(unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(px - frame->x)]
+                                                     : compositor_picture_at(frame, px - frame->x, py - frame->y);
                         unsigned int pixel = compositor_mix(under, window_mix(under, tone, 140), halo * 255 / 16);
 
                         if (cross)
@@ -550,7 +552,7 @@ static int compositor_corner_lit(const struct compositor_frame *frame, int corne
 /*
         A frame drawn over a target whose radius is r, which is compositor_radius of the frame: a scene makes those once
         for all its frames, and compositor_draw makes this one. Nothing is written outside the frame's outline, so a
-        target the outline misses is left as it is,.
+        target the outline misses is left as it is, and that is the first thing asked.
 */
 static void compositor_draw_with(const struct compositor_target *t, const struct compositor_frame *frame, int r)
 {
@@ -559,6 +561,8 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
         struct compositor_target part;
 
         compositor_outline(frame, &ox, &oy, &ow, &oh);
+        if (ox + ow <= t->x1 || oy + oh <= t->y1 || ox >= t->x2 || oy >= t->y2)
+                return;
         b = x - ox;
         ri = r > b ? r - b : 0;
 
@@ -599,6 +603,8 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                                                                                 ? frame->marks[frame->slot]
                                                                                 : 0)
                                           : 0;
+        // A picture drawn at its own size is read straight from its pixels; a scaled one through its map.
+        const unsigned int *picture = compositor_scaled(frame) ? 0 : frame->pixels;
 
         for (int corner = 0; corner < 4; corner++)
         {
@@ -607,6 +613,9 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                 int x2 = cx + r < t->x2 ? cx + r : t->x2, y2 = cy + r < t->y2 ? cy + r : t->y2;
                 unsigned int edge = lit_corners >> corner & 1 ? frame->lit_ink : frame->edge;
 
+                // A corner the target does not hold has nothing of its own to write, square or round.
+                if (x2 <= x1 || y2 <= y1)
+                        continue;
                 if (frame->square & (1 << corner))
                 {
                         if (b)
@@ -635,6 +644,7 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                                 {
                                         unsigned int in = inner ? inner[(my - b) * ri + (mx - b)] : 0;
                                         unsigned int ink = frame->builtin ? tab
+                                                           : picture ? picture[(unsigned long)(py - y) * frame->pitch + (unsigned long)(px - x)]
                                                            : compositor_picture_at(frame, px - x, py - y);
 
                                         if (!b)
@@ -4070,15 +4080,22 @@ static void compositor_close_mean(struct compositor_frame *frame)
                         return;
         }
 
+        // A picture drawn at its own size is summed a row of the box at a time; a scaled one is read through its map.
+        const unsigned int *picture = compositor_scaled(frame) ? 0 : frame->pixels;
+
         for (int py = by; py < by + side; py++)
+        {
+                const unsigned int *row = picture ? picture + (unsigned long)(py - frame->y) * frame->pitch + (unsigned long)(bx - frame->x) : 0;
+
                 for (int px = bx; px < bx + side; px++)
                 {
-                        unsigned int under = compositor_picture_at(frame, px - frame->x, py - frame->y);
+                        unsigned int under = row ? row[px - bx] : compositor_picture_at(frame, px - frame->x, py - frame->y);
 
                         sum[0] += under >> 16 & 255;
                         sum[1] += under >> 8 & 255;
                         sum[2] += under & 255;
                 }
+        }
 
         unsigned long count = (unsigned long)side * (unsigned long)side;
         frame->close_mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
