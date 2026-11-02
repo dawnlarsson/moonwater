@@ -143790,6 +143790,53 @@ static void wire_teardown_checks(void)
         WIRE_CHECK(wire_seen.closed == closed + 1);
         WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
         WIRE_CHECK(objects[0] == 12 && ops[0] == 1);
+
+        /* a closing window takes no more pictures or titles. Its commit is accepted: the buffer is released
+           and the frame answered, with no picture; its title is accepted and does nothing. */
+        {
+                long fds[1];
+                long pictures = wire_seen.pictures;
+                unsigned int titled = wire_seen.titled;
+                long n;
+
+                fds[0] = fileno(tmpfile());
+                WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 5) == 0);
+                wire_take(client, objects, ops, 80);
+                wb_begin(&m, 5, 0);
+                wb_u(&m, 20);
+                wb_u(&m, 1024);
+                n = wb_end(&m);
+                WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
+                wb_begin(&m, 20, 0);
+                wb_u(&m, 21);
+                wb_u(&m, 0);
+                wb_u(&m, 16);
+                wb_u(&m, 16);
+                wb_u(&m, 64);
+                wb_u(&m, 0);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wb_begin(&m, 10, 1);
+                wb_u(&m, 21);
+                wb_u(&m, 0);
+                wb_u(&m, 0);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wb_begin(&m, 10, 3);
+                wb_u(&m, 22);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wire_take(client, objects, ops, 80);
+                wb_begin(&m, 10, 6);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                WIRE_CHECK(wire_take(client, objects, ops, 80) == 3);
+                WIRE_CHECK(objects[0] == 21 && ops[0] == 0);
+                WIRE_CHECK(objects[1] == 22 && ops[1] == 0);
+                WIRE_CHECK(objects[2] == WAYLAND_DISPLAY && ops[2] == 1);
+                WIRE_CHECK(wire_seen.pictures == pictures);
+                wb_begin(&m, 12, 2);
+                wb_s(&m, "after close");
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                WIRE_CHECK(wire_seen.titled == titled);
+                WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        }
         wb_begin(&m, 12, 0);
         WIRE_CHECK(wire_feed_build(client, &m) == 0);
         WIRE_CHECK(wire_seen.closed == closed + 1);

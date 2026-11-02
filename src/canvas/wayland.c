@@ -645,6 +645,18 @@ static inline struct shell_surface *shell_window(struct shell_side *side, long c
         return side->running && record && record->role == SHELL_ROLE_TOPLEVEL && record->row >= 0 ? record : 0;
 }
 
+/*
+        Whether a window is closing: a close was accepted and the window takes
+        no more pictures, titles or window requests. Its client still hears
+        every event the protocol gives it until it destroys the toplevel.
+*/
+static inline int shell_window_closing(struct shell_side *side, long client, long surface)
+{
+        struct shell_surface *window = shell_window(side, client, surface);
+
+        return window && (window->state & SHELL_STATE_CLOSING) != 0;
+}
+
 static inline void shell_bit(long *state, long bit, long on)
 {
         if (on)
@@ -2076,7 +2088,7 @@ static int surface_commit(long client, struct wayland_client *c, long index)
                 if (buffer < 0)
                         return wire_fail(c, surface->id, WAYLAND_ERR_IMPLEMENTATION, "attached buffer is gone");
         }
-        if (buffer >= 0 && surface->slot >= 0)
+        if (buffer >= 0 && surface->slot >= 0 && !shell_window_closing(&wayland.side, client, surface->slot))
         {
                 struct shell_rect rect;
 
@@ -2409,6 +2421,8 @@ static int toplevel_request(long client, struct wayland_client *c, long index, l
         if (surface < 0 || c->objects[surface].slot < 0)
                 return wire_fail(c, toplevel->id, WAYLAND_ERR_IMPLEMENTATION, "toplevel has no window");
         slot = c->objects[surface].slot;
+        if (opcode != 0 && shell_window_closing(&wayland.side, client, slot))
+                return SHELL_OK;
         switch (opcode)
         {
         case 0:
