@@ -19328,13 +19328,16 @@ ASM_FUNC(positive_to_string)
     ASM_FUNC(string_digits_max)
     "xor %eax, %eax  # the number so far\n"
     "xor %r8d, %r8d  # how many bytes it took\n"
-    "1:  cmp %rsi, %r8\n   jae 2f\n   movzbl (%rdi,%r8), %ecx\n   sub $48, %ecx\n"
+    "cmp %rsi, %r8\n   jae 2f\n   movzbl (%rdi,%r8), %ecx\n   sub $48, %ecx\n"
     //
     //       One compare for both ends: a byte under the zero wraps beneath a
-    //       thirty two bit subtract and lands well above nine.
+    //       thirty two bit subtract and lands well above nine. The next byte's
+    //       bound and test sit at the foot of the loop, nine instructions a
+    //       digit where the loop used to take ten.
     //
-    "cmp $9, %ecx\n   ja 2f\n   lea (%rax,%rax,4), %rax\n   lea (%rcx,%rax,2), %rax  # ten times it, plus the digit\n"
-    "inc %r8\n   jmp 1b\n"
+    "cmp $9, %ecx\n   ja 2f\n"
+    "1:  lea (%rax,%rax,4), %rax\n   lea (%rcx,%rax,2), %rax  # ten times it, plus the digit\n"
+    "inc %r8\n   cmp %rsi, %r8\n   jae 2f\n   movzbl (%rdi,%r8), %ecx\n   sub $48, %ecx\n   cmp $9, %ecx\n   jbe 1b\n"
     //
     //       The count is written through a pointer the caller may not have
     //       given. A test against zero predicts perfectly -- a call site either
