@@ -19234,14 +19234,29 @@ ASM_FUNC(positive_to_string)
     ASM_FUNC(byte_class_index)
     "cmp $5, %rsi\n   je 1f\n   cmp $6, %rsi\n   jne 9f\n   mov (%rdi), %ecx\n   movzwl 4(%rdi), %edx\n   shl $32, %rdx\n   or %rcx, %rdx\n"
     "mov $11, %eax\n   cmp .Lbyte_class_words+88(%rip), %rdx\n   je 8f\n   jmp 9f\n"
-    "1:  mov (%rdi), %ecx\n   movzbl 4(%rdi), %edx\n   shl $32, %rdx\n   or %rcx, %rdx\n   lea .Lbyte_class_words(%rip), %r8\n   xor %eax, %eax\n"
-    "2:  cmp (%r8,%rax,8), %rdx\n   je 8f\n   inc %eax\n   cmp $11, %eax\n   jb 2b\n"
+    //
+    //       A five byte name is one multiply and one load: the product's bits
+    //       four to seven, masked, pick one of sixteen slots, and the slot's
+    //       key must equal the name exactly or the answer is -1. The slot
+    //       table holds the class number, or -1 in an empty slot, so a
+    //       name that is not a class needs no second test. The loop this
+    //       replaces walked up to eleven keys, and a name that was not a
+    //       class walked all of them.
+    //
+    "1:  mov (%rdi), %ecx\n   movzbl 4(%rdi), %edx\n   shl $32, %rdx\n   or %rcx, %rdx\n"
+    "imul $1228393873, %rdx, %rax\n   shr $14, %rax\n   and $15, %eax\n   lea .Lbyte_class_slots(%rip), %r8\n"
+    "cmp (%r8,%rax,8), %rdx\n   jne 9f\n   movsbl 128(%r8,%rax), %eax\n   jmp 8f\n"
     "9:  mov $-1, %eax\n"
     "8:  " ASM_RET
     // Packed little-endian spellings, shared by the bounded comparisons above.
     ".pushsection .rodata\n   .balign 8\n"
     ".Lbyte_class_words:\n   .quad 0x6168706c61, 0x7469676964, 0x6d756e6c61\n   .quad 0x7265707075, 0x7265776f6c, 0x6563617073\n"
     ".quad 0x6b6e616c62, 0x746e697270, 0x6870617267\n   .quad 0x6c72746e63, 0x74636e7570, 0x746967696478\n"
+    // The five byte names by slot of the hash above: sixteen keys, then the
+    // class number of each, -1 where the slot is empty.
+    ".Lbyte_class_slots:\n   .quad 0x6d756e6c61, 0x7265707075, 0, 0x6c72746e63, 0, 0, 0x746e697270, 0x6563617073\n"
+    "   .quad 0x6168706c61, 0, 0, 0x6b6e616c62, 0x74636e7570, 0x6870617267, 0x7265776f6c, 0x7469676964\n"
+    "   .byte 2, 3, -1, 9, -1, -1, 7, 5, 0, -1, -1, 6, 10, 8, 4, 1\n"
     ".popsection\n"
     ASM_END(byte_class_index)
     // Whether one byte belongs to one of those classes, read from a table
