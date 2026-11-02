@@ -122447,7 +122447,7 @@ static fn check_settings(string_address regular, string_address bold)
 
                         settings.ui = ui;
                         settings.width = 300;
-                        settings.height = 200;
+                        settings.height = 160; // the card runs to the window's bottom, so this keeps its view at the 100 px it had
                         settings.view = false;
                         memory_copy(settings_large->said, said, sizeof(said) - 1);
                         settings.said_length = sizeof(said) - 1;
