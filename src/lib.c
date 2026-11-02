@@ -53456,6 +53456,15 @@ __asm__(
     "inc %rdi\n   inc %rsi\n"
     ASM_USERSPACE_WIDE(
     //
+    //      The wide tiers. AVX-512BW takes sixty four bytes a turn and AVX2
+    //      thirty two; each is entered from the dispatch below with the first
+    //      byte already compared, and each answers at the lowest byte that
+    //      differs once folded or that ends a string, as the sixteen byte
+    //      loop does. Where a read would cross a page the tier hands sixteen
+    //      bytes to the scalar pass and asks again from the top.
+    //
+    ".Lcf_top:\n   cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcf_zmm\n   cmpb $0, cpu_has_avx2(%rip)\n   jne .Lcf_ymm\n"
+    //
     //      0x3f moves 'A' through 'Z' to 0x80 through 0x99 and nothing else
     //      into that block, so one signed compare against 0x9a is the range
     //      test for sixteen bytes. SSE2 and no feature byte: every x86-64
@@ -53499,6 +53508,75 @@ __asm__(
     "inc %rdi\n   inc %rsi\n   dec %r10d\n   jnz 2b\n"
     ASM_USERSPACE_WIDE("   jmp 10b\n")
     "jmp 1b  # a kernel build has no wide body to go back to\n"
+    ASM_USERSPACE_WIDE(
+    //
+    //      Thirty two bytes of each a turn with AVX2. The fold is the sixteen
+    //      byte one widened: add 0x3f, one signed compare against 0x9a, and
+    //      the 0x20 where it lands. The mask answers what the byte loop
+    //      would, and a clear bit is the first byte to answer with.
+    //
+    ".Lcf_ymm:\n"
+    "mov $0x3f3f3f3f, %eax\n   vmovd %eax, %xmm5\n   vpbroadcastb %xmm5, %ymm5\n   mov $0x9a9a9a9a, %eax\n   vmovd %eax, %xmm6\n   vpbroadcastb %xmm6, %ymm6\n"
+    "mov $0x20202020, %eax\n   vmovd %eax, %xmm7\n   vpbroadcastb %xmm7, %ymm7\n   vpxor %xmm4, %xmm4, %xmm4\n"
+    ".Lcf_ymm_turn:\n"
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfe0, %ecx\n   ja .Lcf_page\n"
+    "mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfe0, %ecx\n   ja .Lcf_page\n"
+    "vmovdqu (%rdi), %ymm0\n   vmovdqu (%rsi), %ymm1\n"
+    "vpaddb %ymm5, %ymm0, %ymm2\n   vpcmpgtb %ymm2, %ymm6, %ymm3\n   vpand %ymm7, %ymm3, %ymm3\n   vpaddb %ymm3, %ymm0, %ymm0\n"
+    "vpaddb %ymm5, %ymm1, %ymm2\n   vpcmpgtb %ymm2, %ymm6, %ymm3\n   vpand %ymm7, %ymm3, %ymm3\n   vpaddb %ymm3, %ymm1, %ymm1\n"
+    "vpcmpeqb %ymm0, %ymm1, %ymm1\n   vpcmpeqb %ymm4, %ymm0, %ymm0\n   vpandn %ymm1, %ymm0, %ymm0\n"
+    "vpmovmskb %ymm0, %ecx\n   cmp $-1, %ecx\n   jne .Lcf_ymm_diff\n"
+    "add $32, %rdi\n   add $32, %rsi\n   jmp .Lcf_ymm_turn\n"
+    ".Lcf_ymm_diff:\n   vzeroupper\n   not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rdi\n   add %rcx, %rsi\n   jmp .Lcf_answer\n"
+    //
+    //      Sixty four bytes a turn with AVX-512BW, in mask registers: the
+    //      range test is one unsigned compare of (byte - 'A') against 25, and
+    //      the 0x20 is a merge-masked add. A zero mask bit is either a byte
+    //      that differs or a terminator, so the lowest set bit answers.
+    //
+    ".Lcf_zmm:\n"
+    "mov $0x41414141, %eax\n   vpbroadcastb %eax, %zmm8\n   mov $25, %eax\n   vpbroadcastb %eax, %zmm9\n   mov $0x20202020, %eax\n   vpbroadcastb %eax, %zmm10\n"
+    ".Lcf_zmm_turn:\n"
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfc0, %ecx\n   ja .Lcf_page\n"
+    "mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfc0, %ecx\n   ja .Lcf_page\n"
+    "vmovdqu8 (%rdi), %zmm0\n   vmovdqu8 (%rsi), %zmm1\n"
+    "vpsubb %zmm8, %zmm0, %zmm2\n   vpcmpleub %zmm9, %zmm2, %k1\n   vpaddb %zmm10, %zmm0, %zmm0{%k1}\n"
+    "vpsubb %zmm8, %zmm1, %zmm2\n   vpcmpleub %zmm9, %zmm2, %k1\n   vpaddb %zmm10, %zmm1, %zmm1{%k1}\n"
+    "vpcmpneqb %zmm1, %zmm0, %k2\n   vptestnmb %zmm0, %zmm0, %k3\n   korq %k3, %k2, %k2\n   kmovq %k2, %rcx\n"
+    "test %rcx, %rcx\n   jnz .Lcf_zmm_diff\n"
+    "add $64, %rdi\n   add $64, %rsi\n   jmp .Lcf_zmm_turn\n"
+    ".Lcf_zmm_diff:\n   vzeroupper\n   tzcnt %rcx, %rcx\n   add %rcx, %rdi\n   add %rcx, %rsi\n   jmp .Lcf_answer\n"
+    //
+    //      The decisive byte is at the pointers. Its two folded bytes differ,
+    //      or the first one is the terminator, and either way the difference
+    //      is the answer the byte loop would give.
+    //
+    ".Lcf_answer:\n   movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n"
+    "lea -'A'(%rax), %r8d\n   lea 32(%rax), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %eax\n"
+    "lea -'A'(%rcx), %r8d\n   lea 32(%rcx), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %ecx\n   sub %ecx, %eax\n   jmp 9f\n"
+    //
+    //      A page boundary is near. Within the last sixteen bytes that a
+    //      sixteen byte read still fits in, one SSE2 step, then back to the
+    //      dispatch; past that, sixteen bytes the slow way. Either way the wide
+    //      tier resumes at once, and the scalar bytes are at most fifteen a
+    //      page rather than the sixty four a 64-byte window would leave.
+    //
+    ".Lcf_page:\n   vzeroupper\n"
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   mov %esi, %edx\n   and $0xfff, %edx\n   cmp %edx, %ecx\n   cmovb %edx, %ecx\n   cmp $0xff0, %ecx\n   ja .Lcf_page_byte\n"
+    "mov $0x3f3f3f3f, %eax\n   movd %eax, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0x9a9a9a9a, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "mov $0x20202020, %eax\n   movd %eax, %xmm7\n   pshufd $0, %xmm7, %xmm7\n   pxor %xmm4, %xmm4\n"
+    "movdqu (%rdi), %xmm0\n   movdqu (%rsi), %xmm1\n   movdqa %xmm0, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm0\n   movdqa %xmm1, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm1\n"
+    "pcmpeqb %xmm0, %xmm1\n   pcmpeqb %xmm4, %xmm0\n   pandn %xmm1, %xmm0\n   pmovmskb %xmm0, %ecx\n   cmp $0xffff, %ecx\n   jne .Lcf_page_diff\n"
+    "add $16, %rdi\n   add $16, %rsi\n   jmp .Lcf_top\n"
+    ".Lcf_page_diff:\n   not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rdi\n   add %rcx, %rsi\n   jmp .Lcf_answer\n"
+    ".Lcf_page_byte:\n   mov $16, %r10d\n"
+    ".Lcf_page_step:\n   movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n"
+    "lea -'A'(%rax), %r8d\n   lea 32(%rax), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %eax\n"
+    "lea -'A'(%rcx), %r8d\n   lea 32(%rcx), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %ecx\n   sub %ecx, %eax\n   jnz 9f\n"
+    "test %ecx, %ecx\n   jz 9f\n   inc %rdi\n   inc %rsi\n   dec %r10d\n   jnz .Lcf_page_step\n   jmp .Lcf_top\n"
+    )
     "9:  #\n" ASM_RET
     ASM_END(string_compare_folded)
     //

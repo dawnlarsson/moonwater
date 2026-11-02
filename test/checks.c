@@ -10772,6 +10772,77 @@ test(string_compare_folded_direction)
         return true;
 }
 
+/* The wide tiers of string_compare_folded against the byte reference: every
+   width from 0 to 300, both strings laid across the page edge at every offset
+   in the last seventy bytes of a page (and one at the start of one), and each
+   byte of the second string set to the values that sit on the fold's edges,
+   so the first difference lands in every position of every tier. */
+static p8 fold_tier_one[8192] __attribute__((aligned(4096)));
+static p8 fold_tier_two[8192] __attribute__((aligned(4096)));
+
+static bool folded_tier_pass(void)
+{
+        static const p8 edges[4] = { 0, 'Z', 'a', 0x80 };
+        static const p8 letters[8] = { 'a', 'B', 'c', 'Z', 'A', 'z', 'm', 'N' };
+
+        for (positive which = 0; which < 70; which += 5)
+        for (positive second = 0; second < 2; second++)
+        for (positive length = 0; length <= 300; length++)
+        {
+                positive left_at = 4096 - 70 + which;
+                positive right_at = second ? (which * 17) % 64 : 4096 - 70 + (which * 29) % 70;
+                string_address one = fold_tier_one + left_at;
+                string_address two = fold_tier_two + right_at;
+
+                for (positive at = 0; at < length + 64; at++) {
+                        p8 value = letters[(at * 5 + length) & 7];
+                        one[at] = value;
+                        two[at] = (p8)(value >= 'A' && value <= 'Z' ? value + 32 : value - 32);
+                }
+                one[length] = 0;
+                two[length] = 0;
+
+                fail(string_compare_folded(one, two) == folded_reference(one, two));
+                fail(string_compare_folded(two, one) == folded_reference(two, one));
+
+                for (positive at = 0; at <= length; at++) {
+                        p8 keep = two[at];
+
+                        for (positive value = 0; value < 4; value++) {
+                                two[at] = edges[value];
+                                fail(string_compare_folded(one, two)
+                                     == folded_reference(one, two));
+                                fail(string_compare_folded(two, one)
+                                     == folded_reference(two, one));
+                        }
+
+                        two[at] = keep;
+                }
+        }
+
+        return true;
+}
+
+test(string_compare_folded_tiers)
+{
+        bool fine = true;
+#if X64
+        p8 avx2 = cpu_has_avx2, avx512 = cpu_has_avx512;
+
+        for (positive tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx2 = tier < 2 ? avx2 : 0;
+                cpu_has_avx512 = tier < 1 ? avx512 : 0;
+                fine &= folded_tier_pass();
+        }
+        cpu_has_avx2 = avx2;
+        cpu_has_avx512 = avx512;
+#else
+        fine = folded_tier_pass();
+#endif
+        return fine;
+}
+
 test(string_compare_folded_shapes)
 {
         positive left_at, right_at, length, at, value, cut;
@@ -13555,6 +13626,7 @@ test_case test_cases[] = {
         case(string_compare_folded_direction),
         case(string_compare_folded_shapes),
         case(string_compare_folded_every_byte),
+        case(string_compare_folded_tiers),
         case(string_compare_folded_page_edge),
         case(string_compare_folded_max_bound),
         case(memory_copy_until),
