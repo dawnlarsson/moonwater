@@ -119521,6 +119521,139 @@ static void check_compositor_popup_press(b32 touch)
 }
 
 /*
+        A menu opened, shown, closed and opened again on the row a program took (ui_popup_shows, with the row taken the way
+        windows_take takes it): every open's picture is the menu drawn whole, and is the one the compositor places as a popup
+        of its window, at the size the menu is. Every other open moves the hot item before the compositor has taken the first
+        picture, which the present must wait for and then show again: a move the compositor was not ready for is shown.
+*/
+static void check_popup_reopen(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static unsigned int expect[GLASS_SIDE * GLASS_SIDE];
+    static struct ui_popup popup;
+    struct window_row parent_row;
+    struct ui parent_ui = terminal.ui;
+    struct windows address_to table;
+    int blank = 0, partial = 0, missing = 0, stale = 0, opens = 200;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("popup reopen: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+
+    parent_ui.scale = 1;
+    parent_ui.regular = parent_ui.bold = terminal.plain[0];
+    parent_ui.scratch = null, parent_ui.scratch_width = 0, parent_ui.scratch_scale = 0;
+    memory_zero(&parent_row, sizeof(parent_row));
+    parent_row.table = table;
+    parent_row.row = 1;
+    for (int open = 0; open < opens; open++)
+    {
+        struct ui picture_ui;
+        const unsigned int *front;
+        int hot = open % 2 ? 1 : -1, differ = 0, drawn = 0;
+
+        // The row as windows_take leaves it: reset, and its program's pid.
+        windows_reset_row(table, 3);
+        __atomic_store_n(&table->pid[3], 1u, __ATOMIC_RELEASE);
+        memory_zero(&popup.menu, sizeof(popup.menu));
+        ui_popmenu_add(&popup.menu, "Copy", "Ctrl+C", 0, 1);
+        ui_popmenu_add(&popup.menu, "Paste", "Ctrl+V", 0, 2);
+        ui_popmenu_add(&popup.menu, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(&popup.menu, "Select all", "Ctrl+A", 0, 3);
+        popup.own.table = table;
+        popup.own.row = 3;
+        popup.own.door = -1;
+        popup.own.wake = -1;
+        popup.own.buffer = compositor.buffer;
+        popup.own.stride = GLASS_SIDE;
+        popup.own.output_width = popup.own.output_height = GLASS_SIDE;
+        if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
+        {
+            missing++;
+            continue;
+        }
+        if (hot >= 0)
+        {
+            popup.menu.hot = hot;
+            ui_popup_present(&popup);
+        }
+        // Each knock of the compositor's takes wakes the app, which pumps the menu, and a picture it was not ready for is
+        // presented then. The ground the compositor gives is kept out of it (a re-ink presents the menu whole, which would
+        // hide a move that was dropped): this is the pending picture alone.
+        for (int round = 0; round < 2; round++)
+        {
+            compositor_take(3);
+            compositor_present();
+            popup.own.table->ground[3] = 0;
+            ui_popup_pump(&popup);
+        }
+        compositor_take(3);
+        compositor_present();
+
+        if (!compositor.showing[3] || compositor_popup_parent[3] != 1)
+        {
+            missing++;
+        }
+        else if (compositor.w[3] != (unsigned int)popup.menu.width || compositor.h[3] != (unsigned int)popup.menu.height)
+        {
+            partial++;
+        }
+        else
+        {
+            picture_ui = popup.ui;
+            popup.menu.hot = hot;
+            ui_begin(&picture_ui, expect, GLASS_SIDE, popup.menu.width, popup.menu.height);
+            ui_popmenu_draw(&picture_ui, &popup.menu);
+            front = windows_pixels(&popup.own, (unsigned int)popup.shown);
+            for (int y = 0; y < popup.menu.height; y++)
+                for (int x = 0; x < popup.menu.width; x++)
+                {
+                    drawn += expect[y * GLASS_SIDE + x] != 0;
+                    differ += front[y * GLASS_SIDE + x] != expect[y * GLASS_SIDE + x];
+                }
+            if (differ && !drawn)
+                blank++;
+            else if (differ)
+                stale += hot >= 0;
+        }
+
+        // The program's door closes and the compositor lets the row go, as compositor_door does.
+        popup.open = false;
+        compositor_popup_leave(3);
+        compositor_leave(3);
+    }
+    string_format(log, "  popup reopen: %p opens, %p missing, %p partial, %p blank, %p with a move not shown\n", (positive)opens,
+                  (positive)missing, (positive)partial, (positive)blank, (positive)stale);
+    check("popup reopen: every menu opened is on the screen, whole and as a popup of its window (blank, partial or missing: none)",
+          !missing && !partial && !blank);
+    check("popup reopen: a move of the hot item is shown when the compositor was not ready for the present it made",
+          stale == 0);
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+}
+
+/*
         A menu is not resized. Just outside its left edge, where a window's grip is (a pointer's, and a finger's wider one), the
         menu's edge is no grip and no resize: the edge answers no resize and shows no indicator, and a press there asks the
         menu to go and goes no further, to the window beneath, which takes neither the press nor the focus.
@@ -136194,6 +136327,7 @@ b32 main()
         check_compositor_popup();
         check_compositor_popup_press(0);
         check_compositor_popup_press(1);
+        check_popup_reopen();
         check_compositor_popup_grip(0);
         check_compositor_popup_grip(1);
         check_compositor_glass_popup();

@@ -5750,11 +5750,16 @@ struct ui_popup
         struct window_row own;
         struct ui ui;
         struct ui_popmenu menu;
-        b32 open;
+        b32 open, pending;
         int shown, x, y;
         struct ui_text address_to field; // the text widget its menu was opened for (ui_text_menu_open), or none
 };
 
+/*
+        A picture of the menu, into the buffer the compositor is not reading. While the compositor has not taken the last one
+        there is no buffer free: the picture is kept as pending, and ui_popup_pump presents it once the compositor's knock says
+        it has taken it. A change made in between (a hot item moved by a key) is drawn then, not lost.
+*/
 static fn ui_popup_present(struct ui_popup address_to p)
 {
         struct windows address_to table = p->own.table;
@@ -5762,7 +5767,11 @@ static fn ui_popup_present(struct ui_popup address_to p)
         int slot = p->shown < 0 ? 0 : 1 - p->shown;
 
         if (p->shown >= 0 && !windows_ready(&p->own))
+        {
+                p->pending = true;
                 return;
+        }
+        p->pending = false;
         ui_begin(&p->ui, windows_pixels(&p->own, (unsigned int)slot), p->own.stride, p->menu.width, p->menu.height);
         ui_popmenu_draw(&p->ui, &p->menu);
         table->width[row] = (unsigned int)p->menu.width;
@@ -5789,18 +5798,17 @@ static void ui_popup_look(struct ui_popup address_to p, struct windows address_t
         table->glass[p->own.row] = UI_POPUP_GLASS;
 }
 
-static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
-                         int x, int y, int width, int height, unsigned int flags, b32 touch)
+/*
+        The menu on its row, which ui_popup_open has taken: its look, its place and its first picture. Split from the take so a
+        check can put a menu on a row of its own table (checks.c's popup reopen).
+*/
+static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
+                          int x, int y, int width, int height, unsigned int flags, b32 touch)
 {
-        struct windows address_to table;
+        struct windows address_to table = p->own.table;
         int screen_x, screen_y, screen_w, screen_h;
 
-        if (p->open)
-                windows_leave(&p->own);
-        p->open = false;
-        if (windows_take(&p->own) < 0)
-                return false;
-        table = p->own.table;
+        // A popup opens in the theme
         // A popup opens in the theme as it is now. One changed while its window slept is taken here (the window's
         // own loop still turns to it after, as ever), and a turn under way is taken to its end: the terminal's menu
         // opened in the old theme, its loop reading the new one only after the press that opened it.
@@ -5809,6 +5817,7 @@ static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row a
         ui_kit.shown = ui_kit.to;
         ui_popup_look(p, table, parent_ui);
         p->shown = -1;
+        p->pending = false;
         p->menu.touch = touch;
         p->menu.hot = -1;
         p->menu.top = 0;
@@ -5822,6 +5831,17 @@ static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row a
         p->open = true;
         ui_popup_present(p);
         return true;
+}
+
+static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
+                         int x, int y, int width, int height, unsigned int flags, b32 touch)
+{
+        if (p->open)
+                windows_leave(&p->own);
+        p->open = false;
+        if (windows_take(&p->own) < 0)
+                return false;
+        return ui_popup_shows(p, parent, parent_ui, x, y, width, height, flags, touch);
 }
 
 static fn ui_popup_close(struct ui_popup address_to p)
@@ -5839,6 +5859,9 @@ static int ui_popup_pump(struct ui_popup address_to p)
 
         if (!p->open)
                 return UI_MENU_NOTHING;
+        // A picture the compositor was not ready for goes now, when it has taken the one before (its knock wakes the app).
+        if (p->pending && windows_ready(&p->own))
+                ui_popup_present(p);
         // The compositor's ground for the menu as it came: its inks follow, and the menu is drawn again in them.
         if ((p->own.table->ground[p->own.row] & 0xffffffu) && (p->own.table->ground[p->own.row] & 0xffffffu) != p->ui.ground)
         {
