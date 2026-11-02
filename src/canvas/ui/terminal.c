@@ -98,7 +98,6 @@ static const unsigned int terminal_steps[TERMINAL_STEPS] = {8, 10, 12, 14, 16, 1
 // Three lines a wheel step, as the kernel's window scrolled.
 #define TERMINAL_WHEEL_LINES 3
 #define TERMINAL_LIVE ((unsigned int)-1)
-#define TERMINAL_KEY_BACKSPACE 14
 // A held synchronized frame is let go of after this long.
 #define TERMINAL_SYNC_NANOSECONDS 200000000ll
 // How long a frame waits when output has just ended a line, for what comes next on it: a prompt.
@@ -1844,7 +1843,7 @@ static void terminal_key(const struct window_event address_to event, struct wind
         // The key labelled Backspace sends DEL, which is what the kernel's window sent for it
         // and what a shell's line discipline erases on; the compositor's name for it is a
         // backspace character.
-        key->character = event->a == TERMINAL_KEY_BACKSPACE ? 127 : character;
+        key->character = event->a == UI_KEY_BACKSPACE ? 127 : character;
         key->reserved = 0;
 }
 
@@ -1951,7 +1950,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 return terminal_finger_scroll(master, ui_drag_follow(&terminal.fling, terminal.pointer_y, clock_monotonic_nanoseconds()),
                                               dirty, &moved);
         }
-        if (event->type != WINDOW_EVENT_BUTTON || event->a != 0x110)
+        if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
                 return true;
         // The bar's track is the bar's, for a finger as for the mouse.
         if ((event->flags & WINDOW_KEY_DOWN) && terminal_bar_takes(1))
@@ -2261,19 +2260,19 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                 terminal.select_dragging = false;
                 return false;
         }
-        if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x112 && (event->flags & WINDOW_KEY_DOWN))
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_MIDDLE && (event->flags & WINDOW_KEY_DOWN))
         {
                 windows_clip_ask(&terminal.own, WINDOWS_CLIP_PRIMARY);
                 return true;
         }
-        if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x111)
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
                         terminal_menu_open(terminal.pointer_x + (int)terminal.pad, terminal.pointer_y + (int)terminal.pad_y,
                                            (event->flags & WINDOW_KEY_TOUCH) != 0);
                 return true;
         }
-        if (event->type == WINDOW_EVENT_BUTTON && event->a == 0x110)
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
         {
                 if (!(event->flags & WINDOW_KEY_DOWN))
                 {
@@ -2411,12 +2410,12 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
 
         if (event->type != WINDOW_EVENT_BUTTON || !(event->flags & WINDOW_KEY_TOUCH))
                 return false;
-        if (event->a == 0x110 && (event->flags & WINDOW_KEY_DOWN))
+        if (event->a == UI_POINTER_LEFT && (event->flags & WINDOW_KEY_DOWN))
         {
                 terminal.touch_held = false;
                 return false;
         }
-        if (event->a == 0x110 && (event->flags & WINDOW_KEY_HOLD) && !(event->flags & WINDOW_KEY_DOWN))
+        if (event->a == UI_POINTER_LEFT && (event->flags & WINDOW_KEY_HOLD) && !(event->flags & WINDOW_KEY_DOWN))
         {
                 // The hold's cancel comes before its right button, and it is no lift: the lift comes after the right button.
                 if (!terminal.touch_held)
@@ -2440,7 +2439,7 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
                 }
                 return true;
         }
-        if (event->a != 0x111 || !(event->flags & WINDOW_KEY_HOLD))
+        if (event->a != UI_POINTER_RIGHT || !(event->flags & WINDOW_KEY_HOLD))
                 return false;
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return !mouse_mode;
@@ -2550,15 +2549,15 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
         case WINDOW_EVENT_BUTTON:
         {
-                unsigned int button = event->a == 0x111 ? 2 : event->a == 0x112 ? 1 : 0;
+                unsigned int button = event->a == UI_POINTER_RIGHT ? 2 : event->a == UI_POINTER_MIDDLE ? 1 : 0;
                 b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
 
-                if (event->a != 0x110 && event->a != 0x111 && event->a != 0x112)
+                if (event->a != UI_POINTER_LEFT && event->a != UI_POINTER_RIGHT && event->a != UI_POINTER_MIDDLE)
                         return true;
 
                 // The bar's track is the bar's, not the program's, where there is a bar: its press, and the release of a held
                 // thumb, go to the kit's pointer.
-                if (event->a == 0x110 && (terminal.bar.held || (down && terminal_bar_takes((event->flags & WINDOW_KEY_TOUCH) != 0))))
+                if (event->a == UI_POINTER_LEFT && (terminal.bar.held || (down && terminal_bar_takes((event->flags & WINDOW_KEY_TOUCH) != 0))))
                 {
                         b32 moved = false;
 
@@ -2572,7 +2571,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 // A left press on the paper right of the grid, and its release when the press was not the program's, is
                 // not the program's whether or not there is anything to scroll: a report there would be clamped onto the grid's last column.
-                if (event->a == 0x110 && (down || !terminal.pressed) && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
+                if (event->a == UI_POINTER_LEFT && (down || !terminal.pressed) && terminal.pointer_x >= (int)(COLUMNS * terminal.cell_w))
                         return true;
                 if (terminal_select_event(event, dirty))
                         return true;

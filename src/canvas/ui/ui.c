@@ -6296,6 +6296,17 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_KEY_DOWN 108
 #define UI_KEY_PAGE_DOWN 109
 #define UI_KEY_ENTER_PAD 96
+#define UI_KEY_BACKSPACE 14
+#define UI_KEY_TAB 15
+#define UI_KEY_P 25
+#define UI_KEY_N 49
+#define UI_KEY_LEFT 105
+#define UI_KEY_RIGHT 106
+#define UI_KEY_DELETE 111
+// The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle).
+#define UI_POINTER_LEFT 0x110
+#define UI_POINTER_RIGHT 0x111
+#define UI_POINTER_MIDDLE 0x112
 
 /*
         A text cut to room at a role: the longest start, ending before a whole

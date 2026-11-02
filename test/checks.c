@@ -124085,22 +124085,22 @@ static fn check_launcher(void)
               launcher_holds(" ls") && string_equals((string_address)launcher.text, (string_address) "ls") &&
                   launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,"));
         launcher_type_text("ls");
-        launcher_pressed(LAUNCHER_KEY_DOWN, 0);
+        launcher_pressed(UI_KEY_DOWN, 0);
         check("launcher: Down moves to the next row", launcher.list.focus == 1);
-        launcher_pressed(LAUNCHER_KEY_UP, 0);
-        launcher_pressed(LAUNCHER_KEY_UP, 0);
+        launcher_pressed(UI_KEY_UP, 0);
+        launcher_pressed(UI_KEY_UP, 0);
         check("launcher: Up from the first row goes round to the last", launcher.list.focus == (int)launcher.entries - 1);
-        launcher_pressed(LAUNCHER_KEY_N, WINDOW_KEY_CONTROL);
+        launcher_pressed(UI_KEY_N, WINDOW_KEY_CONTROL);
         check("launcher: Control-N is Down", launcher.list.focus == 0);
-        launcher_pressed(LAUNCHER_KEY_DOWN, 0);
+        launcher_pressed(UI_KEY_DOWN, 0);
         launcher_typed('x');
         check("launcher: a key typed starts the list again from its top", launcher.list.focus == 0 && string_equals((string_address)launcher.text, (string_address) "lsx"));
         launcher_pressed(FIELD_KEY_BACKSPACE, 0);
         check("launcher: Backspace takes a character back", string_equals((string_address)launcher.text, (string_address) "ls") && launcher.entries == 7);
-        launcher_pressed(LAUNCHER_KEY_TAB, 0);
+        launcher_pressed(UI_KEY_TAB, 0);
         check("launcher: Tab takes the highlighted name into the field", string_equals((string_address)launcher.text, (string_address) "ls"));
-        launcher_pressed(LAUNCHER_KEY_DOWN, 0);
-        launcher_pressed(LAUNCHER_KEY_TAB, 0);
+        launcher_pressed(UI_KEY_DOWN, 0);
+        launcher_pressed(UI_KEY_TAB, 0);
         check("launcher: and the name of the row it is on", string_equals((string_address)launcher.text, (string_address) "lsof"));
         launcher_type_text("ls -l -a");
         launcher_pressed(FIELD_KEY_BACKSPACE, WINDOW_KEY_CONTROL);
@@ -124182,8 +124182,8 @@ static fn check_launcher(void)
                 struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, LAUNCHER_WIDTH * launcher.ui.scale / 2, row_y};
 
                 launcher.width = LAUNCHER_WIDTH * launcher.ui.scale;
-                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, LAUNCHER_BUTTON_LEFT, 0};
-                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, LAUNCHER_BUTTON_LEFT, 0};
+                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
                 b32 pressed;
 
                 launcher_event(&finger);
@@ -125040,15 +125040,15 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_type_code('y');
                 settings_type_code('e');
                 settings_type_code('s');
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: a command that ends what a person has is not run by the first Enter, which says what would run",
                       settings.queued == 0 && settings.editing == wipe &&
                           string_equals((string_address)settings.status, (string_address) "press again to confirm: moonwater wipe yes"));
                 settings_type_code('x');
-                settings_press(SETTINGS_KEY_BACKSPACE);
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_BACKSPACE);
+                settings_press(UI_KEY_ENTER);
                 check("settings: a key between the two Enters asks again", settings.queued == 0 && settings.editing == wipe);
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: and the second Enter runs it, words and all",
                       settings.queued == 1 && settings.queue[0].row == wipe && string_equals((string_address)settings.queue[0].value, (string_address) "yes") &&
                           settings.editing < 0);
@@ -125067,12 +125067,12 @@ static fn check_settings(string_address regular, string_address bold)
                 // The any row: the verb is in what is typed, and nothing typed is no command.
                 settings_activate(any, 1);
                 check("settings: the any row opens a field", settings.editing == any);
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: and nothing typed in it runs nothing and says so", settings.queued == 0 && settings.editing == any &&
                           string_equals((string_address)settings.status, (string_address) "type a command: its verb, then what follows it"));
                 for (const char address_to letter = "name lane-any"; *letter; letter++)
                         settings_type_code((unsigned int)*letter);
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: a command typed in it runs", settings.queued == 1 && settings.queue[0].row == any &&
                           string_equals((string_address)settings.queue[0].value, (string_address) "name lane-any") && settings.editing < 0);
                 settings.queued = 0;
@@ -125113,16 +125113,16 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: the rows that show are those that mention it, the switch and the commands both", structured && generic && each);
                 }
                 check("settings: the focus goes to the first row that shows", settings.list.focus == settings.list.id[0]);
-                settings_press(SETTINGS_KEY_BACKSPACE);
+                settings_press(UI_KEY_BACKSPACE);
                 check("settings: Backspace takes a letter off it", string_equals((string_address)settings.filter, (string_address) "wif"));
-                check("settings: Escape clears it and keeps the window", settings_press(SETTINGS_KEY_ESCAPE) && !settings.filter_length &&
+                check("settings: Escape clears it and keeps the window", settings_press(UI_KEY_ESCAPE) && !settings.filter_length &&
                                                                               settings.list.count < settings_rows_count() &&
                                                                               settings_group_of(settings.list.id[0]) == settings.group);
-                check("settings: and Escape with none typed closes it", !settings_press(SETTINGS_KEY_ESCAPE));
+                check("settings: and Escape with none typed closes it", !settings_press(UI_KEY_ESCAPE));
                 for (const char address_to letter = "zzzzqq"; *letter; letter++)
                         settings_type_code((unsigned int)*letter);
                 check("settings: a filter nothing matches shows no row", settings.list.count == 0);
-                settings_press(SETTINGS_KEY_ESCAPE);
+                settings_press(UI_KEY_ESCAPE);
                 settings_type_code(' ');
                 check("settings: a blank is no letter of it", !settings.filter_length);
 
@@ -125142,52 +125142,52 @@ static fn check_settings(string_address regular, string_address bold)
 
                         check("settings: the first group is the first section, and its first row has the keys",
                               settings.group == 0 && first == SETTINGS_NAME_ROW);
-                        settings_press(SETTINGS_KEY_TAB);
+                        settings_press(UI_KEY_TAB);
                         check("settings: Tab goes to the column of groups", settings.pane == 0 && settings.group == 0);
-                        settings_press(SETTINGS_KEY_DOWN);
+                        settings_press(UI_KEY_DOWN);
                         check("settings: Down in the column chooses the next group, and its rows are at the right at once",
                               settings.group == canvas_group && settings.list.id[0] == scale && settings.list.focus == scale &&
                                   settings.pane == 0 && string_equals((string_address)settings_group_name(settings.group), (string_address) "Canvas"));
-                        settings_press(SETTINGS_KEY_END);
+                        settings_press(UI_KEY_END);
                         check("settings: End in the column chooses All commands, whose rows are the commands",
                               settings.group == all && settings.list.id[0] == SETTINGS_ANY);
-                        settings_press(SETTINGS_KEY_DOWN);
+                        settings_press(UI_KEY_DOWN);
                         check("settings: and Down at the last group stays", settings.group == all);
-                        settings_press(SETTINGS_KEY_HOME);
-                        settings_press(SETTINGS_KEY_UP);
+                        settings_press(UI_KEY_HOME);
+                        settings_press(UI_KEY_UP);
                         check("settings: Home and Up at the first group stay at it", settings.group == 0);
-                        settings_press(SETTINGS_KEY_PAGE_DOWN);
+                        settings_press(UI_KEY_PAGE_DOWN);
                         check("settings: Page Down moves three groups", settings.group == 3);
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter in the column goes to the rows, on the first", settings.pane == 1 && settings.list.focus == settings.list.id[0] &&
                                   settings_group_of(settings.list.focus) == 3);
-                        settings_press(SETTINGS_KEY_DOWN);
+                        settings_press(UI_KEY_DOWN);
                         check("settings: Down in the rows moves among the rows of the group only",
                               settings.group == 3 && settings.list.focus == settings.list.id[1]);
                         settings.list.focus = settings_row_named("Name servers (auto for the network)");
-                        settings_press(SETTINGS_KEY_LEFT);
+                        settings_press(UI_KEY_LEFT);
                         check("settings: Left on a row with no Left of its own goes back to the column", settings.pane == 0 && settings.group == 3);
-                        settings_press(SETTINGS_KEY_RIGHT);
+                        settings_press(UI_KEY_RIGHT);
                         check("settings: and Right in the column goes to the rows again", settings.pane == 1);
-                        settings_press(SETTINGS_KEY_TAB);
-                        settings_press(SETTINGS_KEY_TAB);
+                        settings_press(UI_KEY_TAB);
+                        settings_press(UI_KEY_TAB);
                         check("settings: Tab twice is a way back to where it was", settings.pane == 1 && settings.group == 3);
-                        settings_press(SETTINGS_KEY_TAB);
+                        settings_press(UI_KEY_TAB);
                         settings_type_code('a');
                         check("settings: a letter typed in the column is the filter, and the keys are in the rows",
                               settings.pane == 1 && settings.filter_length == 1 && settings.list.count > settings_rows_count() / 4);
-                        settings_press(SETTINGS_KEY_TAB);
-                        settings_press(SETTINGS_KEY_UP);
+                        settings_press(UI_KEY_TAB);
+                        settings_press(UI_KEY_UP);
                         check("settings: moving in the column clears the filter and shows the group chosen",
                               !settings.filter_length && settings.group == 2 && settings_group_of(settings.list.id[0]) == 2);
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         {
                                 int clock_row = settings_row_named("Set the clock from the network");
 
                                 settings.list.focus = clock_row;
                                 settings.state[clock_row] = SETTINGS_READ;
                                 string_copy_bounded((string_address)settings.value[clock_row], (string_address) "on", SETTINGS_VALUE);
-                                settings_press(SETTINGS_KEY_LEFT);
+                                settings_press(UI_KEY_LEFT);
                                 check("settings: Left on a switch goes back to the column and throws nothing",
                                       settings.pane == 0 && settings.queued == 0);
                         }
@@ -125253,7 +125253,7 @@ static fn check_settings(string_address regular, string_address bold)
                 // The name field, typed in as the verbs take a name, and the timezone field, which takes any text.
                 settings_hold(name, "");
                 settings.status[0] = 0;
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: Enter on an empty name says so and keeps the old one",
                       settings.editing < 0 && string_equals((string_address)settings.status, (string_address) "nothing typed: the value is kept"));
                 settings_hold(name, "");
@@ -125298,7 +125298,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_hold(zone, "");
                 settings_type_code(0xe9);
                 settings_type_code(0xfc);
-                settings_press(SETTINGS_KEY_BACKSPACE);
+                settings_press(UI_KEY_BACKSPACE);
                 check("settings: backspace takes a whole character of several bytes", settings_holds("\xc3\xa9"));
                 settings_type_code(0xfc);
                 settings_press(FIELD_KEY_LEFT);
@@ -125310,13 +125310,13 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.state[zone] = SETTINGS_READ;
                 string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Stockholm", SETTINGS_VALUE);
                 settings_hold(zone, "Europe/Stockholm");
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: a field typed to what it is sends nothing", settings.queued == 0 && settings.editing < 0);
                 // Opened on what the value is (nothing to start from), then typed to Berlin: that is what the field holds.
                 settings_hold(zone, "");
                 for (const char address_to letter = "Europe/Berlin"; *letter; letter++)
                         settings_type_code((unsigned int)*letter);
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: and a field typed to another is a change to it", settings.queued == 1 && settings.queue[0].row == zone &&
                           string_equals((string_address)settings.queue[0].value, (string_address) "Europe/Berlin"));
                 settings.queued = 0;
@@ -125325,7 +125325,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_type_code(' ');
                 settings_press(FIELD_KEY_HOME);
                 settings_type_code(' ');
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 check("settings: blanks typed at either end of a value are typed, and are no part of the value it is set to",
                       settings.queued == 0 && settings.editing < 0);
                 settings.child = 0;
@@ -125427,17 +125427,17 @@ static fn check_settings(string_address regular, string_address bold)
                                 within &= settings_card_width(settings_large->card_at[at], settings_large->card_at[at] + settings_large->card_size[at]) <= room;
                         check("settings: a line wider than the window is cut into more, each within it", settings.card_lines >= 3 && within);
                         settings_card_open("moonwater status");
-                        settings_press(SETTINGS_KEY_DOWN);
+                        settings_press(UI_KEY_DOWN);
                         check("settings: a card is scrolled by the keys", settings.view && settings.card.scroll > 0);
                         check("settings: Escape on it goes back to the list, and keeps the window",
-                              settings_press(SETTINGS_KEY_ESCAPE) && !settings.view);
+                              settings_press(UI_KEY_ESCAPE) && !settings.view);
                         settings.card.scroll = 0;
                 }
 
                 // A choice opens a list of all its choices, and the list has every key.
                 {
                         int kb = settings_row_named("Keyboard"), shown;
-                        struct window_event over = {WINDOW_EVENT_MOTION, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0};
+                        struct window_event over = {WINDOW_EVENT_MOTION, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                         struct window_event wheel = {WINDOW_EVENT_WHEEL, 0, 120, 0};
 
                         settings.width = SETTINGS_WIDTH;
@@ -125455,30 +125455,30 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.state[kb] = SETTINGS_READ;
                         string_copy_bounded((string_address)settings.value[kb], (string_address) "uk", SETTINGS_VALUE);
 
-                        settings_press(SETTINGS_KEY_LEFT);
+                        settings_press(UI_KEY_LEFT);
                         check("settings: Left on a closed choice goes back to the groups and does not move it",
                               settings.pane == 0 && settings.queued == 0 && settings.choice < 0);
                         settings.pane = 1;
-                        settings_press(SETTINGS_KEY_RIGHT);
+                        settings_press(UI_KEY_RIGHT);
                         check("settings: and Right on it does nothing", settings.pane == 1 && settings.queued == 0 && settings.choice < 0);
 
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter on a choice opens a list of every choice, the one it has now the one the keys are on",
                               settings.choice == kb && settings.popup.menu.count == 10 && settings.popup.menu.hot == 1 && settings.popup.menu.top == 0 &&
                                   settings.popup.menu.width >= ui_px(&settings.ui, UI_MENU_LEAST) && settings.popup.menu.height > 0);
-                        settings_menu_press(SETTINGS_KEY_DOWN);
+                        settings_menu_press(UI_KEY_DOWN);
                         check("settings: Down in the list goes to the next choice", settings.popup.menu.hot == 2);
-                        settings_menu_press(SETTINGS_KEY_END);
+                        settings_menu_press(UI_KEY_END);
                         check("settings: End goes to the last choice", settings.popup.menu.hot == 9);
-                        settings_menu_press(SETTINGS_KEY_DOWN);
+                        settings_menu_press(UI_KEY_DOWN);
                         check("settings: Down past the last goes round to the first, as every menu's keys do", settings.popup.menu.hot == 0);
-                        settings_menu_press(SETTINGS_KEY_UP);
+                        settings_menu_press(UI_KEY_UP);
                         check("settings: Up from the first goes round to the last", settings.popup.menu.hot == 9);
-                        settings_menu_press(SETTINGS_KEY_HOME);
+                        settings_menu_press(UI_KEY_HOME);
                         check("settings: Home goes to the first, and Up past it wraps", settings.popup.menu.hot == 0);
-                        settings_menu_press(SETTINGS_KEY_PAGE_DOWN);
+                        settings_menu_press(UI_KEY_PAGE_DOWN);
                         check("settings: Page Down goes a list's height on, to the last when it all shows", settings.popup.menu.hot == 9);
-                        settings_menu_press(SETTINGS_KEY_PAGE_UP);
+                        settings_menu_press(UI_KEY_PAGE_UP);
                         check("settings: and Page Up back to the first", settings.popup.menu.hot == 0);
                         settings_menu_type('d');
                         check("settings: a letter goes to the first choice that starts with it (de)", settings.popup.menu.hot == 2);
@@ -125486,29 +125486,29 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: letters typed in a moment go on together (de), and a letter nothing starts with leaves the keys", settings.popup.menu.hot == 2);
                         settings_menu_type('q');
                         check("settings: a letter nothing starts with leaves the keys where they are", settings.popup.menu.hot == 2);
-                        settings_press(SETTINGS_KEY_TAB);
-                        settings_menu_press(SETTINGS_KEY_TAB);
+                        settings_press(UI_KEY_TAB);
+                        settings_menu_press(UI_KEY_TAB);
                         check("settings: the list takes every key: no group is chosen, no row moved, nothing is typed as a filter",
                               settings.choice == kb && settings.pane == 1 && settings.group == 0 && !settings.filter_length && settings.queued == 0);
                         check("settings: Escape closes it and leaves the row as it was, and keeps the window",
-                              settings_menu_press(SETTINGS_KEY_ESCAPE) && settings.choice < 0 && settings.queued == 0 &&
+                              settings_menu_press(UI_KEY_ESCAPE) && settings.choice < 0 && settings.queued == 0 &&
                                   string_equals((string_address)settings.value[kb], (string_address) "uk"));
 
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         settings_menu_type('i');
-                        settings_menu_press(SETTINGS_KEY_ENTER);
+                        settings_menu_press(UI_KEY_ENTER);
                         check("settings: Enter on a choice sets it, as the verb is told, and closes the list",
                               settings.choice < 0 && settings.queued == 1 && settings.queue[0].row == kb &&
                                   settings.queue[0].value[0] == 'i');
                         settings.queued = 0;
-                        settings_press(SETTINGS_KEY_SPACE);
-                        settings_menu_press(SETTINGS_KEY_SPACE);
+                        settings_press(UI_KEY_SPACE);
+                        settings_menu_press(UI_KEY_SPACE);
                         check("settings: Space is Enter in the list, and the choice a row has already sends nothing",
                               settings.choice < 0 && settings.queued == 0);
 
                         // The mouse: a press and its release on a choice set it (the release is where it went down), a press
                         // released elsewhere sets nothing, and a press outside the menu asks it to go (the compositor's).
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         {
                                 struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0}, lift = {WINDOW_EVENT_BUTTON, 0, 0x110, 0},
                                       move = {WINDOW_EVENT_MOTION, 0, 0, 0};
@@ -125526,7 +125526,7 @@ static fn check_settings(string_address regular, string_address bold)
                                           string_equals((string_address)settings.queue[0].value, (string_address) "se"));
                         }
                         settings.queued = 0;
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         settings_menu_gone();
                         check("settings: a press outside the list asks it to go: no change, no group chosen, nothing activated",
                               settings.choice < 0 && settings.queued == 0 && settings.group == 0 && settings.pane == 1 && settings.editing < 0);
@@ -125537,8 +125537,8 @@ static fn check_settings(string_address regular, string_address bold)
                                 choice sets it.
                         */
                         {
-                                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0};
-                                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0};
+                                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+                                struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
                                 struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
                                 int pos = settings_pos(kb), row;
 
@@ -125592,26 +125592,26 @@ static fn check_settings(string_address regular, string_address bold)
                         // A list taller than the room is cut, and its bar shows what is cut: the keys' choice and the first in view go together.
                         settings.height = 220;
                         settings_refilter();
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: a list with less room than it needs shows what fits, within the window",
                               settings.popup.menu.rows_shown >= 1 && settings.popup.menu.rows_shown < 10 && settings.popup.menu.height <= settings.height);
-                        settings_menu_press(SETTINGS_KEY_END);
+                        settings_menu_press(UI_KEY_END);
                         check("settings: End on it scrolls to the last, which then shows",
                               settings.popup.menu.hot == 9 && settings.popup.menu.top == 10 - settings.popup.menu.rows_shown);
-                        settings_menu_press(SETTINGS_KEY_HOME);
+                        settings_menu_press(UI_KEY_HOME);
                         check("settings: Home scrolls back to the first", settings.popup.menu.hot == 0 && settings.popup.menu.top == 0);
                         settings_menu_gone();
 
                         // Only a choice with a state to read opens, and a value that is none of its words starts the keys on the first.
                         settings.height = SETTINGS_HEIGHT;
                         settings.state[kb] = SETTINGS_ABSENT;
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: a choice the machine has none of opens no list", settings.choice < 0);
                         settings.state[kb] = SETTINGS_READ;
                         string_copy_bounded((string_address)settings.value[kb], (string_address) "xx", SETTINGS_VALUE);
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: a value that is none of the choices starts the keys on the first", settings.choice == kb && settings.popup.menu.hot == 0);
-                        settings_menu_press(SETTINGS_KEY_ESCAPE);
+                        settings_menu_press(UI_KEY_ESCAPE);
 
                         // The desktop's colour: a list of named inks, with the one in force the keys' and a letter going by name,
                         // a field that keeps what is typed as it is, and the pointer's rows found by what they are called.
@@ -125625,11 +125625,11 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.list.focus = ink;
                                 settings.state[ink] = SETTINGS_READ;
                                 string_copy_bounded((string_address)settings.value[ink], (string_address) "forest", SETTINGS_VALUE);
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 check("settings: the inks open as a list, the one in force the keys'",
                                       settings.choice == ink && settings.popup.menu.count == 9 && settings.popup.menu.hot == 5);
                                 settings_menu_type('p');
-                                settings_menu_press(SETTINGS_KEY_ENTER);
+                                settings_menu_press(UI_KEY_ENTER);
                                 check("settings: an ink chosen goes to the verb by its name, set as its colour there",
                                       settings.choice < 0 && settings.queued == 1 && settings.queue[0].row == ink &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "plum"));
@@ -125638,17 +125638,17 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.list.focus = colour;
                                 settings.state[colour] = SETTINGS_READ;
                                 string_copy_bounded((string_address)settings.value[colour], (string_address) "#1e1e1e", SETTINGS_VALUE);
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 check("settings: Enter on the colour field opens it on the colour as the verb says it",
                                       settings.editing == colour && settings_holds("#1e1e1e"));
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 check("settings: and Enter on what it already is sends nothing", settings.editing < 0 && settings.queued == 0);
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 for (positive at = 0; at < 7; at++)
-                                        settings_press(SETTINGS_KEY_BACKSPACE);
+                                        settings_press(UI_KEY_BACKSPACE);
                                 for (const char address_to c = "20ff00"; address_to c; c++)
                                         settings_type_code((unsigned char)address_to c);
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 check("settings: a colour typed is kept on Enter, as typed, for the verb to refuse or take",
                                       settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == colour &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "20ff00"));
@@ -125657,9 +125657,9 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.list.focus = size;
                                 settings.state[size] = SETTINGS_READ;
                                 string_copy_bounded((string_address)settings.value[size], (string_address) "auto", SETTINGS_VALUE);
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 settings_type_code('3');
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 check("settings: the pointer's size is chosen from auto and 1 to 4",
                                       settings.queued == 1 && settings.queue[0].row == size &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "3"));
@@ -125667,9 +125667,9 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.list.focus = look;
                                 settings.state[look] = SETTINGS_READ;
                                 string_copy_bounded((string_address)settings.value[look], (string_address) "auto", SETTINGS_VALUE);
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 settings_type_code('d');
-                                settings_press(SETTINGS_KEY_ENTER);
+                                settings_press(UI_KEY_ENTER);
                                 check("settings: and its look from auto, light and dark",
                                       settings.queued == 1 && settings.queue[0].row == look &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "dark"));
@@ -125679,12 +125679,12 @@ static fn check_settings(string_address regular, string_address bold)
                                         settings_type_code((unsigned char)address_to c);
                                 check("settings: typing cursor lists the pointer's rows, from whatever group is shown, and not the ink's",
                                       settings_pos(size) >= 0 && settings_pos(look) >= 0 && settings_pos(ink) < 0);
-                                settings_press(SETTINGS_KEY_ESCAPE);
+                                settings_press(UI_KEY_ESCAPE);
                                 for (const char address_to c = "background"; address_to c; c++)
                                         settings_type_code((unsigned char)address_to c);
                                 check("settings: and typing background lists the colour's, both rows",
                                       settings_pos(ink) >= 0 && settings_pos(colour) >= 0 && settings_pos(size) < 0);
-                                settings_press(SETTINGS_KEY_ESCAPE);
+                                settings_press(UI_KEY_ESCAPE);
                                 settings.group = 0;
                                 settings_refilter();
                         }
@@ -125815,34 +125815,34 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.said_length = sizeof(air) - 1;
                         settings_feed_read(false, false);
                         settings.list.focus = (int)SETTINGS_LIST + 1; // Guest, open
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter on an open network joins it, by the verb's own words and no passphrase",
                               settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "j\nGuest") && settings.editing < 0);
                         settings.queued = 0;
                         settings.list.focus = (int)SETTINGS_LIST; // HomeNet, joined
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter on the one joined sends nothing and says so", settings.queued == 0 && settings.status[0]);
                         settings.list.focus = (int)SETTINGS_LIST + 3; // Corp, 802.1X
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter on a network moonwater cannot join sends nothing and says so", settings.queued == 0 && settings.editing < 0 &&
                                   string_length((string_address)settings.status) > 10);
                         settings.list.focus = (int)SETTINGS_LIST + 2; // Old Cafe, WPA2/3, saved
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter on a network that asks for a passphrase opens a field for it", settings.editing == (int)SETTINGS_LIST + 2 &&
                                   settings.queued == 0 && string_equals((string_address)settings.joining, (string_address) "Old Cafe"));
                         for (const char address_to letter = "hunter22"; *letter; letter++)
                                 settings_type_code((unsigned int)*letter);
-                        settings_press(SETTINGS_KEY_ESCAPE);
+                        settings_press(UI_KEY_ESCAPE);
                         {
                                 b32 wiped = settings_kept_nothing();
 
                                 check("settings: Escape leaves it: nothing is sent and nothing typed is kept", settings.editing < 0 && settings.queued == 0 && wiped);
                         }
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         for (const char address_to letter = "hunter22"; *letter; letter++)
                                 settings_type_code((unsigned int)*letter);
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         {
                                 b32 wiped = settings_kept_nothing();
 
@@ -125882,19 +125882,19 @@ static fn check_settings(string_address regular, string_address bold)
 
                         // Delete forgets, when pressed twice on the same name.
                         settings.list.focus = (int)SETTINGS_LIST + 2;
-                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
                         check("settings: Delete on a saved network asks to be pressed again", settings.queued == 0 && settings.confirm.armed);
-                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
                         check("settings: and the second Delete forgets it", settings.queued == 1 &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "f\nOld Cafe"));
                         settings.queued = 0;
-                        settings_press(SETTINGS_KEY_DELETE);
-                        settings_press(SETTINGS_KEY_DOWN);
-                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
+                        settings_press(UI_KEY_DOWN);
+                        settings_press(UI_KEY_DELETE);
                         check("settings: a key between two Deletes, or another network, starts it over", settings.queued == 0);
                         settings.list.focus = (int)SETTINGS_LIST + 1; // Guest, not saved
-                        settings_press(SETTINGS_KEY_DELETE);
-                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
                         check("settings: Delete on a network that is not saved does nothing", settings.queued == 0);
 
                         // Devices: the names kept, and a row that keeps another.
@@ -125909,16 +125909,16 @@ static fn check_settings(string_address regular, string_address bold)
                                   devices[0].kind == SETTINGS_DEVICE && devices[2].kind == SETTINGS_ADD &&
                                   string_equals((string_address)settings.value[bt], (string_address) "on"));
                         settings.list.focus = (int)SETTINGS_LIST + SETTINGS_LIST_ROWS + 2;
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         for (const char address_to letter = "Pen"; *letter; letter++)
                                 settings_type_code((unsigned int)*letter);
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter on it opens a field, and the name typed is kept by bluetooth add", settings.queued == 1 &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "a\nPen") && settings.editing < 0);
                         settings.queued = 0;
                         settings.list.focus = (int)SETTINGS_LIST + SETTINGS_LIST_ROWS + 1;
-                        settings_press(SETTINGS_KEY_DELETE);
-                        settings_press(SETTINGS_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
+                        settings_press(UI_KEY_DELETE);
                         check("settings: and Delete twice on a device forgets it", settings.queued == 1 &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "d\nMouse"));
                         settings.queued = 0;
@@ -126061,7 +126061,7 @@ static fn check_settings_edges(void)
         settings_activate(zone, 1);
         check("settings edge: Enter on a plain value opens its field", settings.editing == zone);
         string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Paris", SETTINGS_VALUE);
-        settings_press(SETTINGS_KEY_ENTER);
+        settings_press(UI_KEY_ENTER);
         check("settings edge: Enter in a field nothing was typed in sends nothing, and the value that changed under it stays",
               settings.queued == 0 && settings.editing < 0 && string_equals((string_address)settings.value[zone], (string_address) "Europe/Paris"));
         settings.queued = 0;
@@ -126069,7 +126069,7 @@ static fn check_settings_edges(void)
         settings_hold(zone, "");
         for (positive at = 0; at < SETTINGS_VALUE + 40; at++)
                 settings_type_code('a' + (unsigned int)(at % 26));
-        settings_press(SETTINGS_KEY_ENTER);
+        settings_press(UI_KEY_ENTER);
         check("settings edge: a value typed past its length is kept at its length, sent whole",
               settings.queued == 1 && settings.queue[0].row == zone && string_length((string_address)settings.queue[0].value) == SETTINGS_VALUE - 1);
         settings.queued = 0;
@@ -126081,11 +126081,11 @@ static fn check_settings_edges(void)
                 settings_type_code('q');
         check("settings edge: a filter that matches no row lists none", settings.list.count == 0);
         check("settings edge: a focus on a row that filtered out is not kept", settings.list.count == 0 || settings_pos(settings.list.focus) >= 0);
-        settings_press(SETTINGS_KEY_ENTER);
-        settings_press(SETTINGS_KEY_SPACE);
+        settings_press(UI_KEY_ENTER);
+        settings_press(UI_KEY_SPACE);
         check("settings edge: Enter and Space in an empty list change no row, shown or not",
               settings.queued == 0 && string_equals((string_address)settings.value[wired], (string_address) "off"));
-        settings_press(SETTINGS_KEY_ESCAPE);
+        settings_press(UI_KEY_ESCAPE);
 
         settings.editing = -1;
         settings.queued = 0;
@@ -126127,27 +126127,27 @@ static fn check_settings_keys(void)
         string_copy_bounded((string_address)settings.value[wired], (string_address)"off", SETTINGS_VALUE);
         check("settings keys: the Wired switch has a row below it in its group", below != wired);
 
-        settings_press(SETTINGS_KEY_DOWN);
+        settings_press(UI_KEY_DOWN);
         check("settings keys: Down moves the focus to the row below and turns nothing",
               settings.list.focus == below && !settings.queued && string_equals((string_address)settings.value[wired], (string_address)"off"));
-        settings_press(SETTINGS_KEY_UP);
+        settings_press(UI_KEY_UP);
         check("settings keys: Up moves the focus back to the switch and turns nothing",
               settings.list.focus == wired && !settings.queued && string_equals((string_address)settings.value[wired], (string_address)"off"));
-        settings_press(SETTINGS_KEY_RIGHT);
+        settings_press(UI_KEY_RIGHT);
         check("settings keys: Right on the switch turns nothing and keeps the focus and the rows",
               settings.list.focus == wired && settings.pane == 1 && !settings.queued &&
                   string_equals((string_address)settings.value[wired], (string_address)"off"));
-        settings_press(SETTINGS_KEY_LEFT);
+        settings_press(UI_KEY_LEFT);
         check("settings keys: Left on the switch goes back to the column and turns nothing",
               settings.pane == 0 && settings.list.focus == wired && !settings.queued &&
                   string_equals((string_address)settings.value[wired], (string_address)"off"));
-        settings_press(SETTINGS_KEY_RIGHT);
+        settings_press(UI_KEY_RIGHT);
         check("settings keys: Right in the column goes to the rows, on the switch", settings.pane == 1 && settings.list.focus == wired && !settings.queued);
-        settings_press(SETTINGS_KEY_SPACE);
+        settings_press(UI_KEY_SPACE);
         check("settings keys: Space turns the switch on and keeps the focus", settings_turned(wired, "on") && settings.list.focus == wired);
-        settings_press(SETTINGS_KEY_ENTER);
+        settings_press(UI_KEY_ENTER);
         check("settings keys: Enter turns the switch off again and keeps the focus", settings_turned(wired, "off") && settings.list.focus == wired);
-        settings_press(SETTINGS_KEY_DOWN);
+        settings_press(UI_KEY_DOWN);
         check("settings keys: and Down leaves the switch after all of them", settings.list.focus == below && !settings.queued);
 
         //      The Battery row's words are the battery's: a charge limit the battery has none of does not take the row away.
@@ -126443,8 +126443,8 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                                               settings.page.top + s->a * ui_dev(&settings.ui, UI_ROW) + ui_dev(&settings.ui, UI_ROW) / 2 -
                                                   settings.page.column_scroll.scroll);
                         break;
-                case SF_DOWN: settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0); break;
-                case SF_UP: settings_frames_event(WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0); break;
+                case SF_DOWN: settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0); break;
+                case SF_UP: settings_frames_event(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0); break;
                 case SF_WHEEL: settings_frames_event(WINDOW_EVENT_WHEEL, 0, s->a, 0); break;
                 case SF_ANSWER:
                         if (settings.queued)
@@ -126519,7 +126519,7 @@ static fn settings_frames_gallery(void)
                 settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
                 settings_frames_pass();
                 settings_frames_until(settings_frames.now + 20 * SETTINGS_FRAMES_MS);
-                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0);
+                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
                 settings_frames_pass();
                 if (kind == UI_SLIDER)
                         for (int step = 1; step <= 6; step++)
@@ -126529,7 +126529,7 @@ static fn settings_frames_gallery(void)
                                 settings_frames_pass();
                         }
                 settings_frames_until(settings_frames.now + 90 * SETTINGS_FRAMES_MS);
-                settings_frames_event(WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0);
+                settings_frames_event(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
                 settings_frames_pass();
                 // Every third, the page scrolled a notch while what was let go still moves, and back.
                 if (pressed % 3 == 2)
@@ -126665,8 +126665,8 @@ static fn settings_end_check(void)
                 for (int k = 0; k < 100; k++)
                 {
                         settings_frames_event(WINDOW_EVENT_MOTION, 0, bar_x, bar_y);
-                        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0);
-                        settings_frames_event(WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0);
+                        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0);
+                        settings_frames_event(WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0);
                         settings_frames_until(settings_frames.now + 500 * SETTINGS_FRAMES_MS);
                 }
                 settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
@@ -126676,14 +126676,14 @@ static fn settings_end_check(void)
                 settings_scroll_to(0);
                 settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
-                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
                 for (int k = 0; k < 60; k++)
                 {
                         y -= 40 * scale;
                         settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
                         settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
                 }
-                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
                 settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
                 finger_ok = finger_ok && settings.list.scroll.scroll == expected && !settings.list.scroll.back.live;
                 string_format(log, "  settings end (scale %p): rows %p, view %p, maximum %p, wheel and bar at %p\n", (positive)scale,
@@ -126764,7 +126764,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         settings_frames_until(settings_frames.now + 100 * SETTINGS_FRAMES_MS);
         x = (settings.page.left + settings.page.right) / 2, y = (settings.page.top + settings.page.bottom) / 2;
         settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
-        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
         settings_frames_pass();
         for (int k = 0; k < steps; k++)
         {
@@ -126776,7 +126776,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         // Let go: from here the list may only move toward the end it is going to, and must rest there. The drag's own give past
         // the end (a finger holding it there) is the pull's, and is not counted.
         p.returned = p.reached = 0;
-        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
         for (positive t = 0; t < 3000 * SETTINGS_FRAMES_MS; t += 16 * SETTINGS_FRAMES_MS)
         {
                 int before = settings.list.scroll.scroll;
@@ -126992,7 +126992,7 @@ static fn check_display_section(void)
                 settings.map.display = settings.map.drag = -1, settings.list.down = -1, settings.touching = false;
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
                 settings_event(&touch);
-                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0};
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 taken = settings_event(&touch);
                 check("display section: a finger's press on a screen of the map is the map's: it chooses the screen and starts its drag",
                       taken && settings.map.display == 1 && settings.map.drag == 1);
@@ -127010,7 +127010,7 @@ static fn check_display_section(void)
                 touch = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
                 settings_event(&touch);
                 child_before = settings.child;
-                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0};
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 taken = settings_event(&touch);
                 check("display section: a mouse's press on a screen of the map chooses it and starts its drag, and runs no verb",
                       taken && settings.map.display == 2 && settings.map.drag == 2 && settings.child == child_before);
@@ -127060,25 +127060,25 @@ static fn check_display_section(void)
                 settings.map.display = 0, settings.map.keys = false, settings.map.nudged = false, settings.map.drag = -1;
                 settings.pane = 1, settings.list.focus = screen_row, settings.editing = -1, settings.view = false;
                 settings.filter_length = 0, settings.choice = -1;
-                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_UP, 0};
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_UP, 0};
                 settings_key(&key);
                 check("display section: Up from the Screen row goes up to the map, which then has the keys", settings.map.keys && settings.list.focus == screen_row);
                 check("display section: the map's caption says what its keys do while it has them",
                       string_equals((string_address)settings_map_hint(4), (string_address) "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves."));
-                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_LEFT, 0};
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_LEFT, 0};
                 settings_key(&key);
                 check("display section: Left chooses the screen before it by number (number 4 to 3)", settings.map.keys && settings.map.display == 1);
                 settings_key(&key);
                 settings_key(&key);
                 settings_key(&key);
                 check("display section: Left stops at Screen 1 (the top left screen, index 3)", settings.map.keys && settings.map.display == 3);
-                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_RIGHT, 0};
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_RIGHT, 0};
                 settings_key(&key);
                 check("display section: Right chooses the screen after it by number (number 1 to 2)", settings.map.keys && settings.map.display == 2);
-                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_DOWN, 0};
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_DOWN, 0};
                 settings_key(&key);
                 check("display section: Down leaves the map for the rows, the Screen row keeping the focus", !settings.map.keys && settings.pane == 1 && settings.list.focus == screen_row);
-                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_TAB, 0};
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_TAB, 0};
                 settings_key(&key);
                 check("display section: Tab from the rows goes on to the column, as it does elsewhere", settings.pane == 0 && !settings.map.keys);
                 settings.pane = 1;
@@ -127188,20 +127188,20 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_frames_pass();
 
         settings_frames_scenario((string_address) "Canvas, Space and Down every 33 ms, answered at 25", false, false,
-                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 6, 33, 25);
+                                 "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 6, 33, 25);
         settings_frames_scenario((string_address) "switches, Space and Down every 33 ms, answered at 25", true, false,
-                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 33, 25);
+                                 "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 12, 33, 25);
         settings_frames_scenario((string_address) "switches, Space and Down every 33 ms, answered at 140", true, false,
-                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 33, 140);
+                                 "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 12, 33, 140);
         settings_frames_scenario((string_address) "switches, Space and Down every 120 ms, answered at 60", true, false,
-                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 120, 60);
+                                 "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 12, 120, 60);
         settings_frames_scenario((string_address) "switches, Space and Down every 50 ms, answered at 500", true, false,
-                                 "Shake the pointer to find it", SETTINGS_KEY_SPACE, SETTINGS_KEY_DOWN, 12, 50, 500);
+                                 "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 12, 50, 500);
         // The column of groups: Down a group at a time, slowly and as fast as a held key repeats, and back up.
-        settings_frames_scenario((string_address) "the column, Down every 500 ms", false, true, "Name", SETTINGS_KEY_DOWN, 0, 8, 500, 0);
-        settings_frames_scenario((string_address) "the column, Down every 33 ms", false, true, "Name", SETTINGS_KEY_DOWN, 0, 8, 33, 0);
+        settings_frames_scenario((string_address) "the column, Down every 500 ms", false, true, "Name", UI_KEY_DOWN, 0, 8, 500, 0);
+        settings_frames_scenario((string_address) "the column, Down every 33 ms", false, true, "Name", UI_KEY_DOWN, 0, 8, 33, 0);
         settings_frames_scenario((string_address) "the column, Up every 50 ms from the last group", false, true, "Mount kept disks",
-                                 SETTINGS_KEY_UP, 0, 8, 50, 0);
+                                 UI_KEY_UP, 0, 8, 50, 0);
 
         // The pointer, the wheel, the theme and the size, with the rows read as a machine says them.
         for (positive at = 0; at < SETTINGS_ROWS; at++)
@@ -127223,7 +127223,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {90, SF_ROW, "Theme", 300, 0}, {120, SF_ROW, "Accent", 300, 0}, {150, SF_ROW, "Motion", 300, 0},
                     {180, SF_ROW, "Cursor size", 450, 0}, {400, SF_ROW, "Cursor look", 450, 0}, {420, SF_ROW, "Scale", 450, 0}};
                 static const struct settings_frames_step press[] = {
-                    {0, SF_KEY, null, SETTINGS_KEY_END, 0},
+                    {0, SF_KEY, null, UI_KEY_END, 0},
                     {5, SF_ROW, "Shake the pointer to find it", 200, 0}, {20, SF_DOWN, null, 0, 0}, {140, SF_UP, null, 0, 0},
                     {200, SF_ANSWER, null, 0, 0}, {260, SF_ROW, "Show touch area", 600, 0}, {280, SF_DOWN, null, 0, 0},
                     {300, SF_UP, null, 0, 0}, {320, SF_ROW, "Clipboard", 400, 0}, {330, SF_DOWN, null, 0, 0}, {340, SF_UP, null, 0, 0},
@@ -127235,34 +127235,34 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {260, SF_PART, "Motion", 1, 0}, {270, SF_DOWN, null, 0, 0}, {280, SF_UP, null, 0, 0}, {300, SF_ANSWER, null, 0, 0},
                     {320, SF_PART, "Motion", 0, 0}, {330, SF_DOWN, null, 0, 0}, {340, SF_UP, null, 0, 0}, {350, SF_ANSWER, null, 0, 0}};
                 static const struct settings_frames_step wheel[] = {
-                    {0, SF_ROW, "Theme", 450, 0}, {10, SF_KEY, null, SETTINGS_KEY_END, 0}, {12, SF_KEY, null, SETTINGS_KEY_UP, 0},
-                    {14, SF_KEY, null, SETTINGS_KEY_UP, 0}, {20, SF_KEY, null, SETTINGS_KEY_SPACE, 0},
+                    {0, SF_ROW, "Theme", 450, 0}, {10, SF_KEY, null, UI_KEY_END, 0}, {12, SF_KEY, null, UI_KEY_UP, 0},
+                    {14, SF_KEY, null, UI_KEY_UP, 0}, {20, SF_KEY, null, UI_KEY_SPACE, 0},
                     {40, SF_ANSWER, null, 0, 0}, {60, SF_WHEEL, null, 120, 0}, {80, SF_WHEEL, null, 120, 0}, {100, SF_DOWN, null, 0, 0},
                     {130, SF_WHEEL, null, -120, 0}, {150, SF_UP, null, 0, 0}, {170, SF_WHEEL, null, 360, 0}, {190, SF_WHEEL, null, -720, 0}};
                 static const struct settings_frames_step turns[] = {
                     {0, SF_ROW, "Theme", 450, 0}, {10, SF_WHEEL, null, -120, 0}, {20, SF_WHEEL, null, -120, 0},
                     {30, SF_WHEEL, null, -120, 0}, {40, SF_WHEEL, null, -120, 0}, {200, SF_WHEEL, null, -360, 0},
-                    {230, SF_WHEEL, null, 120, 0}, {600, SF_WHEEL, null, 720, 0}, {900, SF_KEY, null, SETTINGS_KEY_END, 0},
-                    {1000, SF_KEY, null, SETTINGS_KEY_HOME, 0}, {1400, SF_KEY, null, SETTINGS_KEY_DOWN, 0},
-                    {1420, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {1440, SF_WHEEL, null, -240, 0}};
+                    {230, SF_WHEEL, null, 120, 0}, {600, SF_WHEEL, null, 720, 0}, {900, SF_KEY, null, UI_KEY_END, 0},
+                    {1000, SF_KEY, null, UI_KEY_HOME, 0}, {1400, SF_KEY, null, UI_KEY_DOWN, 0},
+                    {1420, SF_KEY, null, UI_KEY_DOWN, 0}, {1440, SF_WHEEL, null, -240, 0}};
                 static const struct settings_frames_step column[] = {
                     {0, SF_GROUP, null, 3, 0}, {40, SF_GROUP, null, 4, 0}, {80, SF_DOWN, null, 0, 0}, {200, SF_UP, null, 0, 0},
                     {230, SF_GROUP, null, 6, 0}, {240, SF_DOWN, null, 0, 0}, {250, SF_UP, null, 0, 0}, {260, SF_GROUP, null, 1, 0},
                     {270, SF_DOWN, null, 0, 0}, {300, SF_UP, null, 0, 0}, {500, SF_GROUP, null, 0, 0}};
                 static const struct settings_frames_step theme[] = {
-                    {0, SF_ROW, "Scale", 450, 0}, {20, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {40, SF_THEME, null, UI_THEME_LIGHT, 0},
+                    {0, SF_ROW, "Scale", 450, 0}, {20, SF_KEY, null, UI_KEY_DOWN, 0}, {40, SF_THEME, null, UI_THEME_LIGHT, 0},
                     {60, SF_ROW, "Background", 450, 0}, {100, SF_DOWN, null, 0, 0}, {120, SF_UP, null, 0, 0},
                     {300, SF_THEME, null, UI_THEME_DARK, 0}, {320, SF_THEME, null, UI_THEME_DARK, 0x40c0ff}, {340, SF_GROUP, null, 2, 0},
                     {350, SF_DOWN, null, 0, 0}, {360, SF_UP, null, 0, 0}, {700, SF_THEME, null, UI_THEME_DARK, 0}};
                 static const struct settings_frames_step size[] = {
-                    {0, SF_KEY, null, SETTINGS_KEY_END, 0},
+                    {0, SF_KEY, null, UI_KEY_END, 0},
                     {5, SF_ROW, "Shake the pointer to find it", 600, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
                     {40, SF_ANSWER, null, 0, 0}, {60, SF_SIZE, null, 640, 470}, {90, SF_GROUP, null, 5, 0}, {100, SF_DOWN, null, 0, 0},
                     {120, SF_SIZE, null, 690, 515}, {130, SF_UP, null, 0, 0}, {300, SF_SIZE, null, SETTINGS_WIDTH, SETTINGS_HEIGHT}};
                 static const struct settings_frames_step menu[] = {
                     {0, SF_ROW, "Cursor size", 450, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
-                    {60, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {80, SF_KEY, null, SETTINGS_KEY_DOWN, 0}, {200, SF_KEY, null, SETTINGS_KEY_ENTER, 0},
-                    {220, SF_ANSWER, null, 0, 0}, {300, SF_KEY, null, SETTINGS_KEY_ENTER, 0}, {320, SF_KEY, null, SETTINGS_KEY_ESCAPE, 0}};
+                    {60, SF_KEY, null, UI_KEY_DOWN, 0}, {80, SF_KEY, null, UI_KEY_DOWN, 0}, {200, SF_KEY, null, UI_KEY_ENTER, 0},
+                    {220, SF_ANSWER, null, 0, 0}, {300, SF_KEY, null, UI_KEY_ENTER, 0}, {320, SF_KEY, null, UI_KEY_ESCAPE, 0}};
 
                 settings_frames_play((string_address) "the pointer down the rows", canvas, hover, sizeof(hover) / sizeof(hover[0]));
                 settings_frames_play((string_address) "switches pressed and let go", canvas, press, sizeof(press) / sizeof(press[0]));
@@ -134508,7 +134508,7 @@ b32 main()
                                                 settings_reading_changed(wired);
                                         }
                                         if (frame % 30 == 0 && what[9] == 'c')
-                                                settings_press(frame % 60 ? SETTINGS_KEY_UP : SETTINGS_KEY_DOWN);
+                                                settings_press(frame % 60 ? UI_KEY_UP : UI_KEY_DOWN);
                                         ui_kit.damage_top = ui_kit.damage_bottom = 0;
                                         ui_kit_turn();
                                         settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
@@ -134539,7 +134539,7 @@ b32 main()
                                         continue;
                                 }
                                 if (string_equals(what, (string_address) "settings-keys"))
-                                        settings_press(frame % 2 ? SETTINGS_KEY_UP : SETTINGS_KEY_DOWN);
+                                        settings_press(frame % 2 ? UI_KEY_UP : UI_KEY_DOWN);
                                 else
                                 {
                                         struct window_event over = {WINDOW_EVENT_MOTION, 0, 450, 100 + (int)(frame % 9) * 40};
@@ -136096,6 +136096,55 @@ static fn check_no_hand_typing(void)
 }
 
 /*
+        No input code by hand: a key and a pointer button are the kit's names (UI_KEY_*, UI_POINTER_*, in ui.c), so no
+        window of Canvas defines its own key or button numbers or writes a button's evdev code as a literal. The scan
+        reads the sources of the windows, as check_no_hand_typing does; the kit is where the codes are named.
+*/
+static fn check_no_input_codes(void)
+{
+        static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
+                                                      "src/canvas/ui/identify.c"};
+        static const char address_to const codes[] = {"#define UI_KEY_", "#define UI_KEY_", "#define TERMINAL_KEY_",
+                                                      "#define SETTINGS_BUTTON_", "#define LAUNCHER_BUTTON_", "0x110", "0x111", "0x112"};
+        positive found = 0, read = 0;
+
+        for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size);
+                const char address_to text = (const char address_to)bytes;
+
+                if (!bytes)
+                        continue;
+                read++;
+                for (positive i = 0; i < sizeof(codes) / sizeof(codes[0]); i++)
+                {
+                        positive length = string_length((string_address)codes[i]);
+
+                        for (positive at = 0; at + length <= size;)
+                        {
+                                const char address_to hit = (const char address_to)memory_search((address_any)(text + at), size - at,
+                                                                                                  (address_any)codes[i], length);
+
+                                if (!hit)
+                                        break;
+                                found++;
+                                string_format(log, "  input code by hand in %s: %s\n", (string_address)files[f], (string_address)codes[i]);
+                                at = (positive)(hit - text) + length;
+                        }
+                }
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: no input code by hand, the sources are not here\n");
+                return;
+        }
+        check("keys and buttons: no window of Canvas names a key or a pointer button by hand, the kit's UI_KEY_ and UI_POINTER_ codes do",
+              read == sizeof(files) / sizeof(files[0]) && !found);
+}
+
+/*
         The kit's defaults, which every window takes and none keeps a copy of. A press again to confirm is the kit's
         (ui_confirm: the first press arms it, the next with nothing between fires it, another press or key drops it, and
         the same line says so in every app). A field is UI_FIELD_H high, the kit's touch target. A press outside a field
@@ -136414,8 +136463,8 @@ static fn check_field_hands(string_address regular)
                 static unsigned short hashed[LAUNCHER_HASH];
                 const font_face address_to faces[2] = {&face, &face};
                 int left = (UI_PAD + 14), y = UI_PAD + UI_TARGET / 2, ls = ui_run_in(&ui, faces, 0, 0, (string_address) "ls", 15, 0, 0, 0, 800, 0);
-                struct window_event move = {WINDOW_EVENT_MOTION, 0, left + ls, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, LAUNCHER_BUTTON_LEFT, 0},
-                                    release = {WINDOW_EVENT_BUTTON, 0, LAUNCHER_BUTTON_LEFT, 0};
+                struct window_event move = {WINDOW_EVENT_MOTION, 0, left + ls, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                                    release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
                 string_copy((string_address)names[0], (string_address) "lsof");
                 memory_zero(&launcher, sizeof(launcher));
@@ -136492,7 +136541,7 @@ static fn check_field_hands(string_address regular)
                         settings_type_code((unsigned int)*letter);
                 settings_press(FIELD_KEY_LEFT);
                 settings_press(FIELD_KEY_LEFT);
-                settings_chord(SETTINGS_KEY_SPACE, ' ', 0);
+                settings_chord(UI_KEY_SPACE, ' ', 0);
                 {
                         b32 listed = false, each = settings.list.count > 0;
 
@@ -136511,7 +136560,7 @@ static fn check_field_hands(string_address regular)
                 settings.state[name] = SETTINGS_READ;
                 string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
                 settings.list.focus = name;
-                settings_press(SETTINGS_KEY_ENTER);
+                settings_press(UI_KEY_ENTER);
                 settings_draw_rows((unsigned int address_to)pixels, 0, 0);
                 {
 #ifdef UI_TEXT_REFUSED
@@ -136519,8 +136568,8 @@ static fn check_field_hands(string_address regular)
 #else
                         int x = 600, y = 100;
 #endif
-                        struct window_event move = {WINDOW_EVENT_MOTION, 0, x, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0},
-                                            release = {WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0};
+                        struct window_event move = {WINDOW_EVENT_MOTION, 0, x, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                                            release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
                         check("settings: Enter on the name opens its field on the name", settings.editing == name && settings_holds("patient-cricket"));
                         settings_event(&move);
@@ -136530,7 +136579,7 @@ static fn check_field_hands(string_address regular)
                         settings_type_code('x');
                         check("settings: a click in the name's field puts the caret there, and a key types there",
                               settings.editing == name && settings_holds("patient-x-cricket") && settings_caret() == 9);
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         check("settings: Enter sets the name to what the field holds",
                               settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
                                   string_equals((string_address)settings.queue[0].value, (string_address) "patient-x-cricket"));
@@ -136539,14 +136588,14 @@ static fn check_field_hands(string_address regular)
                 // do, Escape keeps the value, and a click outside sets what the field holds.
                 {
                         // The pointer's place below the rows, where no row is: a click there is outside every row.
-                        struct window_event move = {WINDOW_EVENT_MOTION, 0, 400, 480}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0},
-                                            release = {WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0};
+                        struct window_event move = {WINDOW_EVENT_MOTION, 0, 400, 480}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                                            release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
                         settings.queued = 0;
                         settings.state[name] = SETTINGS_READ;
                         string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
                         settings.list.focus = name;
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         settings_draw_rows((unsigned int address_to)pixels, 0, 0);
                         check("settings: a value typed in is a field on the row, with no band behind it", settings.editing == name && !settings.list.lit);
                         check("settings: a value typed in says what Enter, Escape and a click outside do",
@@ -136554,7 +136603,7 @@ static fn check_field_hands(string_address regular)
                         settings_type_code('y');
                         settings_press(FIELD_KEY_ESCAPE);
                         check("settings: Escape keeps the value as it was", settings.editing < 0 && settings.queued == 0);
-                        settings_press(SETTINGS_KEY_ENTER);
+                        settings_press(UI_KEY_ENTER);
                         settings_type_code('y');
                         settings_event(&move);
                         settings_event(&press);
@@ -136568,8 +136617,8 @@ static fn check_field_hands(string_address regular)
                 {
                         int y = ui_list_row_y(&settings.list, settings_pos(name)) + ui_px(&settings.ui, UI_ROW) / 2;
                         struct window_event on = {WINDOW_EVENT_MOTION, 0, 400, y}, off = {WINDOW_EVENT_MOTION, 0, 400, 480},
-                                            press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0},
-                                            release = {WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0};
+                                            press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                                            release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
                         settings.queued = 0;
                         settings_edit_end();
@@ -138917,6 +138966,7 @@ b32 main()
                 check_glass_pieces(program_argument(3));
 #endif
         check_no_hand_typing();
+        check_no_input_codes();
 #if MOONWATER_UI_ANY
         check_kit_defaults(&terminal.ui);
 #endif

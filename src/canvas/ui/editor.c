@@ -540,7 +540,7 @@ static b32 editor_tabs_event(const struct window_event address_to event)
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && editor.pointer_y >= 0 && editor.pointer_y < ui_px(&editor.ui, EDITOR_TAB_STRIP);
         int x = event->type == WINDOW_EVENT_MOTION ? event->a : editor.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? event->b : editor.pointer_y;
 
-        if (event->type == WINDOW_EVENT_BUTTON && event->a != 0x110)
+        if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
                 return false;
         if (event->type == WINDOW_EVENT_BUTTON && (down ? !band : !strip->down))
                 return false;

@@ -77,12 +77,6 @@
 #define LAUNCHER_PROGRAM 2u // a program of PATH: in a terminal
 #define LAUNCHER_COMMAND 3u // the text: the shell's, in a terminal
 
-#define LAUNCHER_KEY_TAB 15
-#define LAUNCHER_KEY_P 25
-#define LAUNCHER_KEY_N 49
-#define LAUNCHER_KEY_UP 103
-#define LAUNCHER_KEY_DOWN 108
-#define LAUNCHER_BUTTON_LEFT 0x110
 
 struct launcher_program
 {
@@ -634,10 +628,10 @@ static b32 launcher_key(const struct window_event address_to event)
                 return true;
         if ((asks = ui_field_event(&launcher.ui, launcher_field(), &launcher.menu, event, 0, 0)))
                 return launcher_asked(asks);
-        if (event->a == LAUNCHER_KEY_UP || event->a == LAUNCHER_KEY_DOWN ||
-            ((event->flags & WINDOW_KEY_CONTROL) && (event->a == LAUNCHER_KEY_P || event->a == LAUNCHER_KEY_N)))
-                launcher_move(event->a == LAUNCHER_KEY_UP || event->a == LAUNCHER_KEY_P ? -1 : 1);
-        else if (event->a == LAUNCHER_KEY_TAB && launcher.entries)
+        if (event->a == UI_KEY_UP || event->a == UI_KEY_DOWN ||
+            ((event->flags & WINDOW_KEY_CONTROL) && (event->a == UI_KEY_P || event->a == UI_KEY_N)))
+                launcher_move(event->a == UI_KEY_UP || event->a == UI_KEY_P ? -1 : 1);
+        else if (event->a == UI_KEY_TAB && launcher.entries)
         {
                 // The highlighted name into the field, where it is a name.
                 const struct launcher_entry address_to entry = &launcher.entry[launcher.list.focus];
@@ -745,7 +739,7 @@ static b32 launcher_event(const struct window_event address_to event)
                         launcher.dirty = true;
                 break;
         case WINDOW_EVENT_BUTTON:
-                if (event->a != LAUNCHER_BUTTON_LEFT)
+                if (event->a != UI_POINTER_LEFT)
                         break;
                 row = ui_list_hit(&launcher.ui, &launcher.list, launcher.pointer_x, launcher.pointer_y);
                 // A press is done where it went down, on its release: a finger's and a mouse's alike. The row it lands on is

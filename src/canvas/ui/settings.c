@@ -165,22 +165,6 @@
 #define SETTINGS_NAME_ROW 0 // the machine's name, the first row: a name is letters, digits and hyphens, under 32
 #define SETTINGS_NAME_MOST 31
 
-#define SETTINGS_KEY_ESCAPE 1
-#define SETTINGS_KEY_BACKSPACE 14
-#define SETTINGS_KEY_TAB 15
-#define SETTINGS_KEY_ENTER 28
-#define SETTINGS_KEY_SPACE 57
-#define SETTINGS_KEY_HOME 102
-#define SETTINGS_KEY_UP 103
-#define SETTINGS_KEY_DELETE 111
-#define SETTINGS_KEY_PAGE_UP 104
-#define SETTINGS_KEY_LEFT 105
-#define SETTINGS_KEY_RIGHT 106
-#define SETTINGS_KEY_END 107
-#define SETTINGS_KEY_DOWN 108
-#define SETTINGS_KEY_PAGE_DOWN 109
-#define SETTINGS_KEY_ENTER_PAD 96
-#define SETTINGS_BUTTON_LEFT 0x110
 
 #define SETTINGS_JOB_HELP -2 // the job that asks moonwater help, which is no row's
 
@@ -3492,7 +3476,7 @@ static fn settings_edit_asked(p32 asks)
 // A key in a field being typed in: the field's (a key between a command's two Enters asks again).
 static fn settings_type(const struct window_event address_to event)
 {
-        if (event->a != SETTINGS_KEY_ENTER && event->a != SETTINGS_KEY_ENTER_PAD)
+        if (event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD)
                 ui_confirm_drop(&settings.confirm);
         settings.edit.focused = true;
         settings_edit_asked(ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, 0, 0));
@@ -3593,9 +3577,9 @@ static b32 settings_filter_starts(const struct window_event address_to event)
 {
         switch (event->a)
         {
-        case SETTINGS_KEY_ESCAPE: case SETTINGS_KEY_TAB: case SETTINGS_KEY_ENTER: case SETTINGS_KEY_ENTER_PAD: case SETTINGS_KEY_SPACE:
-        case SETTINGS_KEY_HOME: case SETTINGS_KEY_UP: case SETTINGS_KEY_PAGE_UP: case SETTINGS_KEY_LEFT: case SETTINGS_KEY_RIGHT:
-        case SETTINGS_KEY_END: case SETTINGS_KEY_DOWN: case SETTINGS_KEY_PAGE_DOWN: case SETTINGS_KEY_DELETE: case SETTINGS_KEY_BACKSPACE:
+        case UI_KEY_ESCAPE: case UI_KEY_TAB: case UI_KEY_ENTER: case UI_KEY_ENTER_PAD: case UI_KEY_SPACE:
+        case UI_KEY_HOME: case UI_KEY_UP: case UI_KEY_PAGE_UP: case UI_KEY_LEFT: case UI_KEY_RIGHT:
+        case UI_KEY_END: case UI_KEY_DOWN: case UI_KEY_PAGE_DOWN: case UI_KEY_DELETE: case UI_KEY_BACKSPACE:
                 return false;
         }
         return event->b != ' ';
@@ -3620,11 +3604,11 @@ static fn settings_card_key(const struct window_event address_to event)
         }
         switch (event->a)
         {
-        case SETTINGS_KEY_ESCAPE:
-        case SETTINGS_KEY_ENTER:
-        case SETTINGS_KEY_ENTER_PAD:
-        case SETTINGS_KEY_SPACE:
-        case SETTINGS_KEY_BACKSPACE:
+        case UI_KEY_ESCAPE:
+        case UI_KEY_ENTER:
+        case UI_KEY_ENTER_PAD:
+        case UI_KEY_SPACE:
+        case UI_KEY_BACKSPACE:
                 settings_card_leave();
                 break;
         }
@@ -3690,20 +3674,20 @@ static b32 settings_map_key(const struct window_event address_to event)
 
         switch (event->a)
         {
-        case SETTINGS_KEY_LEFT:
+        case UI_KEY_LEFT:
                 dx = -1;
                 break;
-        case SETTINGS_KEY_RIGHT:
+        case UI_KEY_RIGHT:
                 dx = 1;
                 break;
-        case SETTINGS_KEY_UP:
+        case UI_KEY_UP:
                 dy = -1;
                 break;
-        case SETTINGS_KEY_DOWN:
+        case UI_KEY_DOWN:
                 dy = 1;
                 break;
-        case SETTINGS_KEY_ENTER:
-        case SETTINGS_KEY_ENTER_PAD:
+        case UI_KEY_ENTER:
+        case UI_KEY_ENTER_PAD:
                 settings_change(SETTINGS_JOB_IDENTIFY, "");
                 return true;
         default:
@@ -3717,7 +3701,7 @@ static b32 settings_map_key(const struct window_event address_to event)
                 settings_dirty();
                 return true;
         }
-        if (event->a == SETTINGS_KEY_DOWN)
+        if (event->a == UI_KEY_DOWN)
         {
                 settings.map.keys = false;
                 settings_dirty();
@@ -3725,7 +3709,7 @@ static b32 settings_map_key(const struct window_event address_to event)
         }
         if (count && at >= 0 && at < (int)count)
         {
-                wanted = (int)number[at] + (event->a == SETTINGS_KEY_LEFT || event->a == SETTINGS_KEY_UP ? -1 : 1);
+                wanted = (int)number[at] + (event->a == UI_KEY_LEFT || event->a == UI_KEY_UP ? -1 : 1);
                 wanted = wanted < 1 ? 1 : wanted > (int)count ? (int)count : wanted;
                 if (settings_map_numbered(number, count, (unsigned int)wanted) >= 0)
                         settings.map.display = settings_map_numbered(number, count, (unsigned int)wanted);
@@ -3755,8 +3739,8 @@ static b32 settings_key(const struct window_event address_to event)
                 return true;
         }
         // A key between a confirm and its next press drops it: Enter or Space fires a command's, Delete a forget's.
-        if (settings.confirm.what < 0 ? event->a != SETTINGS_KEY_DELETE
-                                      : event->a != SETTINGS_KEY_ENTER && event->a != SETTINGS_KEY_ENTER_PAD && event->a != SETTINGS_KEY_SPACE)
+        if (settings.confirm.what < 0 ? event->a != UI_KEY_DELETE
+                                      : event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD && event->a != UI_KEY_SPACE)
                 ui_confirm_drop(&settings.confirm);
         /*
                 The search field has the keys while no row is typed in, and gets each key first: with something in it,
@@ -3793,23 +3777,23 @@ static b32 settings_key(const struct window_event address_to event)
         }
         switch (event->a)
         {
-        case SETTINGS_KEY_ESCAPE:
+        case UI_KEY_ESCAPE:
                 return settings_stop();
-        case SETTINGS_KEY_TAB:
+        case UI_KEY_TAB:
                 // Between the column of groups and the rows, whichever row or group is there.
                 settings.pane = !settings.pane;
                 if (settings.pane)
                         settings_rows_enter();
                 settings_dirty();
                 break;
-        case SETTINGS_KEY_UP:
-        case SETTINGS_KEY_DOWN:
-        case SETTINGS_KEY_HOME:
-        case SETTINGS_KEY_END:
-        case SETTINGS_KEY_PAGE_UP:
-        case SETTINGS_KEY_PAGE_DOWN:
+        case UI_KEY_UP:
+        case UI_KEY_DOWN:
+        case UI_KEY_HOME:
+        case UI_KEY_END:
+        case UI_KEY_PAGE_UP:
+        case UI_KEY_PAGE_DOWN:
                 // Up from the first row of the Display group goes up to the map above it, which has the keys then.
-                if (settings.pane && event->a == SETTINGS_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
+                if (settings.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
                     settings_map_count())
                 {
                         settings.map.keys = true;
@@ -3829,20 +3813,20 @@ static b32 settings_key(const struct window_event address_to event)
                 else
                         settings_group_choose(ui_page_column_key(&settings.page, (int)event->a, settings.group));
                 break;
-        case SETTINGS_KEY_SPACE:
+        case UI_KEY_SPACE:
                 // With something in the filter a blank was typed in it, above; with nothing, Space works the row as Enter does.
-        case SETTINGS_KEY_ENTER:
-        case SETTINGS_KEY_ENTER_PAD:
+        case UI_KEY_ENTER:
+        case UI_KEY_ENTER_PAD:
                 if (!settings.pane)
                         settings_rows_enter();
                 else if (settings_pos(settings.list.focus) >= 0)
                         settings_activate(settings.list.focus, 1);
                 break;
-        case SETTINGS_KEY_DELETE:
+        case UI_KEY_DELETE:
                 if (settings.pane)
                         settings_forget();
                 break;
-        case SETTINGS_KEY_LEFT:
+        case UI_KEY_LEFT:
                 // A step moves; on a switch and on any other row Left goes back to the column.
                 if (settings.pane && settings_steps(settings.list.focus))
                         settings_activate(settings.list.focus, -1);
@@ -3852,7 +3836,7 @@ static b32 settings_key(const struct window_event address_to event)
                         settings_dirty();
                 }
                 break;
-        case SETTINGS_KEY_RIGHT:
+        case UI_KEY_RIGHT:
                 if (!settings.pane)
                         settings_rows_enter();
                 else if (settings_steps(settings.list.focus))
@@ -4201,10 +4185,10 @@ static b32 settings_gallery_event(const struct window_event address_to event)
         }
         if (event->type == WINDOW_EVENT_KEY)
         {
-                if ((event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_KEY_ESCAPE)
+                if ((event->flags & WINDOW_KEY_DOWN) && event->a == UI_KEY_ESCAPE)
                         return false;
-                if ((event->flags & WINDOW_KEY_DOWN) && (event->a == SETTINGS_KEY_DOWN || event->a == SETTINGS_KEY_UP))
-                        moved = ui_scroll_set(s, s->scroll + (event->a == SETTINGS_KEY_DOWN ? 1 : -1) * ui_px(&settings.ui, UI_ROW));
+                if ((event->flags & WINDOW_KEY_DOWN) && (event->a == UI_KEY_DOWN || event->a == UI_KEY_UP))
+                        moved = ui_scroll_set(s, s->scroll + (event->a == UI_KEY_DOWN ? 1 : -1) * ui_px(&settings.ui, UI_ROW));
         }
         else if (event->type == WINDOW_EVENT_WHEEL)
                 moved = !event->b && ui_scroll_wheel(&settings.ui, s, event->a);
@@ -4212,7 +4196,7 @@ static b32 settings_gallery_event(const struct window_event address_to event)
         {
                 int x = settings.page.pointer_x, y = settings.page.pointer_y, bar;
 
-                if (event->type == WINDOW_EVENT_BUTTON && event->a != SETTINGS_BUTTON_LEFT)
+                if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
                         return true;
                 bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0, 0);
                 if (bar >= 0)
@@ -4324,7 +4308,7 @@ static fn settings_finger(const struct window_event address_to event)
                 }
                 return;
         }
-        if (event->a != SETTINGS_BUTTON_LEFT)
+        if (event->a != UI_POINTER_LEFT)
                 return;
         if (event->flags & WINDOW_KEY_DOWN)
         {
@@ -4441,7 +4425,7 @@ static b32 settings_event(const struct window_event address_to event)
                         settings_map_drag_to(settings.page.pointer_x, settings.page.pointer_y);
                         return true;
                 }
-                if (event->type == WINDOW_EVENT_BUTTON && event->a == SETTINGS_BUTTON_LEFT)
+                if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
                 {
                         if ((event->flags & WINDOW_KEY_DOWN) && settings_map_press(settings.page.pointer_x, settings.page.pointer_y))
                                 return true;
@@ -4457,7 +4441,7 @@ static b32 settings_event(const struct window_event address_to event)
                 settings.map.keys = false;
         // The scrollbars take a mouse's motion, press and release on them (a finger drags the region itself).
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH) &&
-            (event->type != WINDOW_EVENT_BUTTON || event->a == SETTINGS_BUTTON_LEFT) &&
+            (event->type != WINDOW_EVENT_BUTTON || event->a == UI_POINTER_LEFT) &&
             ui_page_bars(&settings.ui, &settings.page, (int)event->type, (event->flags & WINDOW_KEY_DOWN) != 0))
                 return true;
         /*
@@ -4521,7 +4505,7 @@ static b32 settings_event(const struct window_event address_to event)
                 }
                 break;
         case WINDOW_EVENT_BUTTON:
-                if (event->a != SETTINGS_BUTTON_LEFT)
+                if (event->a != UI_POINTER_LEFT)
                         break;
                 // The release: the column's ripple and the row's go out (a finger's as a mouse's).
                 if (!(event->flags & WINDOW_KEY_DOWN))
