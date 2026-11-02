@@ -12721,6 +12721,7 @@ static void compositor_table_refusals(struct windows *table, unsigned int at, co
 
         table->output_asked_hz[at] = display ? display->refresh : 0;
         table->output_asked_turn[at] = display ? display->rotation : 0;
+        table->output_asked_scale[at] = display ? display->scale : WINDOWS_SCALE_DEFAULT;
         if (display && display->refresh && compositor.output[at].mode.vrefresh != display->refresh)
                 refused |= WINDOWS_REFUSED_RATE;
         if (display && display->rotation && !compositor.output[at].turned)

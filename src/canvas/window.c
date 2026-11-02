@@ -704,6 +704,7 @@ struct windows
                 output_refused the WINDOWS_REFUSED_* bits. The settings window says the refusals on the screen's row.
         */
         unsigned int output_asked_hz[WINDOWS_OUTPUTS], output_asked_turn[WINDOWS_OUTPUTS], output_refused[WINDOWS_OUTPUTS];
+        unsigned int output_asked_scale[WINDOWS_OUTPUTS]; // the scale its displays line asks, in percent (100 when none)
 
         /*
                 The compositor's, for moonwater debug: each input device it reads, by its slot, and what became
@@ -1035,13 +1036,27 @@ static unsigned int windows_arrange_lay(const char *text, const char (*names)[WI
 #define WINDOWS_DISPLAY_X 8u
 #define WINDOWS_DISPLAY_Y 16u
 #define WINDOWS_DISPLAY_OTHER 32u
+#define WINDOWS_DISPLAY_SCALE 64u
 #define WINDOWS_DISPLAY_HZ 1000u
+// The scale a screen is drawn at, in percent: the six presets the settings offer, 100 the default.
+#define WINDOWS_SCALE_DEFAULT 100u
+static const unsigned int windows_scale_presets[] = {50, 75, 100, 125, 150, 200};
+
+// Whether a percent is one of the scale presets.
+static int windows_scale_ok(int percent)
+{
+        for (unsigned int at = 0; at < sizeof(windows_scale_presets) / sizeof(windows_scale_presets[0]); at++)
+                if (percent == (int)windows_scale_presets[at])
+                        return 1;
+        return 0;
+}
 
 struct windows_display
 {
         char name[WINDOWS_OUTPUT_NAME];
         unsigned int rotation; // degrees, 0 when not given
         unsigned int refresh;  // a rate in Hz, or 0 for preferred
+        unsigned int scale;    // the scale in percent, WINDOWS_SCALE_DEFAULT when not given
         int x, y;              // the place, when placed
         unsigned int placed;
         unsigned int bad;      // WINDOWS_DISPLAY_* bits of what was malformed or missing
@@ -1113,6 +1128,7 @@ static void windows_display_line(const char *line, unsigned int length, struct w
         for (unsigned int each = 0; each < WINDOWS_OUTPUT_NAME; each++)
                 display->name[each] = 0;
         display->rotation = display->refresh = display->placed = display->bad = 0;
+        display->scale = WINDOWS_SCALE_DEFAULT;
         display->x = display->y = 0;
         while (at < length && (line[at] == ' ' || line[at] == '\t'))
                 at++;
@@ -1150,6 +1166,8 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         key = WINDOWS_DISPLAY_ROTATION;
                 else if (keys == 7 && windows_name_is("refresh", line + word, 7))
                         key = WINDOWS_DISPLAY_REFRESH;
+                else if (keys == 5 && windows_name_is("scale", line + word, 5))
+                        key = WINDOWS_DISPLAY_SCALE;
                 else if (keys == 1 && line[word] == 'x')
                         key = WINDOWS_DISPLAY_X;
                 else if (keys == 1 && line[word] == 'y')
@@ -1165,6 +1183,13 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         if (windows_display_number(line + equals + 1, at - equals - 1, 0, 3, &value) &&
                             (value == 0 || value == 90 || value == 180 || value == 270))
                                 display->rotation = (unsigned int)value;
+                        else
+                                display->bad |= key;
+                }
+                else if (key == WINDOWS_DISPLAY_SCALE)
+                {
+                        if (windows_display_number(line + equals + 1, at - equals - 1, 0, 3, &value) && windows_scale_ok(value))
+                                display->scale = (unsigned int)value;
                         else
                                 display->bad |= key;
                 }
@@ -1391,7 +1416,8 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
                 const struct windows_display *display = &list[each];
                 unsigned int length = 0;
 
-                if (!display->name[0] || (!display->rotation && !display->refresh && !display->placed))
+                if (!display->name[0] || (!display->rotation && !display->refresh && !display->placed &&
+                                          display->scale == WINDOWS_SCALE_DEFAULT))
                         continue;
                 while (display->name[length])
                         length++;
@@ -1402,6 +1428,9 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
                         return 0;
                 if (!display->refresh ? !windows_put(into, room, &at, "preferred", 9) :
                     !windows_put_number(into, room, &at, (int)display->refresh))
+                        return 0;
+                if (display->scale != WINDOWS_SCALE_DEFAULT &&
+                    (!windows_put(into, room, &at, " scale=", 7) || !windows_put_number(into, room, &at, (int)display->scale)))
                         return 0;
                 if (display->placed && (!windows_put(into, room, &at, " x=", 3) ||
                                         !windows_put_number(into, room, &at, display->x) ||
@@ -1432,6 +1461,11 @@ static int windows_display_value(unsigned int field, const char *word, unsigned 
         {
                 if (!windows_display_number(word, length, 0, 3, &value) ||
                     (value != 0 && value != 90 && value != 180 && value != 270))
+                        return 0;
+        }
+        else if (field == WINDOWS_DISPLAY_SCALE)
+        {
+                if (!windows_display_number(word, length, 0, 3, &value) || !windows_scale_ok(value))
                         return 0;
         }
         else if (field == WINDOWS_DISPLAY_REFRESH)
@@ -1468,6 +1502,7 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
                 return -1;
         into[0] = 0;
         screen = (struct windows_display){0};
+        screen.scale = WINDOWS_SCALE_DEFAULT;
         while (name_length < WINDOWS_OUTPUT_NAME && name[name_length])
                 name_length++;
         if (!windows_display_name(name, name_length, screen.name))
@@ -1483,6 +1518,8 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
                 screen.rotation = change->rotation;
         if (field & WINDOWS_DISPLAY_REFRESH)
                 screen.refresh = change->refresh;
+        if (field & WINDOWS_DISPLAY_SCALE)
+                screen.scale = change->scale;
         if (field & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y))
                 screen.placed = 1, screen.x = change->x, screen.y = change->y;
         made = windows_displays_write(line, sizeof(line), &screen, 1);

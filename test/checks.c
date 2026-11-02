@@ -127435,7 +127435,7 @@ static fn check_display_section(void)
 
                 memory_zero(compositor_display, sizeof(compositor_display));
                 memory_copy(compositor_display[0].name, "DP-1", 5);
-                compositor_display[0].refresh = 144, compositor_display[0].rotation = 90;
+                compositor_display[0].refresh = 144, compositor_display[0].rotation = 90, compositor_display[0].scale = 150;
                 compositor_displays = 1;
                 compositor.output[0].mode.vrefresh = 75, compositor.output[0].turned = 0, compositor.output[0].degrees = 90;
                 compositor_table_refusals(&made, 0, "DP-1");
@@ -127451,6 +127451,10 @@ static fn check_display_section(void)
                 check("display section: a place whose y the file does not read is refused as a place", made.output_refused[0] == WINDOWS_REFUSED_PLACE);
                 compositor_table_refusals(&made, 0, "HDMI-A-1");
                 check("display section: a screen with no line asks for nothing and is refused nothing", made.output_refused[0] == 0 && made.output_asked_hz[0] == 0);
+                check("display section: the table says the scale a screen's line asks, 100 when it has none", made.output_asked_scale[0] == 100);
+                compositor_displays = 1;
+                compositor_table_refusals(&made, 0, "DP-1");
+                check("display section: the table says the scale a screen's line asks, in percent", made.output_asked_scale[0] == 150);
                 compositor_displays = 0;
                 memory_zero(compositor_display, sizeof(compositor_display));
         }
@@ -127627,6 +127631,55 @@ static fn check_display_section(void)
                 check("display section: a step that moves nothing is no move", !settings_map_stepped(0, 0, &x, &y));
                 settings.map.keys = false;
                 check("display section: with one screen the caption says so, though the keys are on the map", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
+        }
+
+        // A screen's scale, in the displays file: one of the six presets in percent, 100 the default (not written), judged the
+        // same by the file's reader, the verb's word and the setter; a malformed one is bad and kept at 100.
+        {
+                static const char *const presets[6] = {"50", "75", "100", "125", "150", "200"};
+                static const unsigned int percent[6] = {50, 75, 100, 125, 150, 200};
+                static const char file[] = "HDMI-A-1 scale=75\nVirtual-2 rotation=90 scale=200 x=1 y=2\neDP-1 scale=100\nVirtual-1 scale=60\n";
+                struct windows_display line, scaled[WINDOWS_DISPLAYS], back[WINDOWS_DISPLAYS];
+                char text[256], set_text[256], word[32];
+                unsigned int count, written, length, each;
+                int value, set_made;
+
+                for (each = 0; each < 6; each++)
+                {
+                        length = 16;
+                        memory_copy(word, "Virtual-2 scale=", 16);
+                        while (presets[each][length - 16])
+                                word[length] = presets[each][length - 16], length++;
+                        windows_display_line(word, length, &line);
+                        check("display section: each scale preset reads as a screen's scale, and the verb's word judges the same value",
+                              line.bad == 0 && line.scale == percent[each] &&
+                                  windows_display_value(WINDOWS_DISPLAY_SCALE, presets[each], (unsigned int)strlen(presets[each]), &value) &&
+                                  value == (int)percent[each]);
+                }
+                windows_display_line("Virtual-2 scale=60", (unsigned int)strlen("Virtual-2 scale=60"), &line);
+                check("display section: a scale that is no preset is bad, is kept at 100, and the verb refuses it",
+                      line.scale == 100 && line.bad == WINDOWS_DISPLAY_SCALE && !windows_display_value(WINDOWS_DISPLAY_SCALE, "60", 2, &value));
+                check("display section: the verb takes no percent sign and no decimal point as a scale",
+                      !windows_display_value(WINDOWS_DISPLAY_SCALE, "100%", 4, &value) && !windows_display_value(WINDOWS_DISPLAY_SCALE, "1.5", 3, &value));
+                count = windows_displays_read(file, scaled, WINDOWS_DISPLAYS);
+                check("display section: a file's scales are read per screen: 75 and 200 as set, 100 for a line without one or with a bad one",
+                      count == 4 && scaled[0].scale == 75 && scaled[1].scale == 200 && scaled[2].scale == 100 && scaled[3].scale == 100 &&
+                          scaled[3].bad == WINDOWS_DISPLAY_SCALE);
+                written = windows_displays_write(text, sizeof(text), scaled, count);
+                check("display section: a write puts scale= after refresh, and writes no line for a screen at 100 with nothing else",
+                      written && !strcmp(text, "HDMI-A-1 rotation=0 refresh=preferred scale=75\nVirtual-2 rotation=90 refresh=preferred scale=200 x=1 y=2\n"));
+                count = windows_displays_read(text, back, WINDOWS_DISPLAYS);
+                check("display section: the file round-trips: read back, the scales are the same settings",
+                      count == 2 && back[0].scale == 75 && back[1].scale == 200 && back[1].rotation == 90 && back[1].placed);
+                memset(&line, 0, sizeof(line));
+                line.scale = 150;
+                set_made = windows_displays_set(set_text, sizeof(set_text), "HDMI-A-1 rotation=90\n", "HDMI-A-1", WINDOWS_DISPLAY_SCALE, &line);
+                check("display section: setting a scale keeps the screen's other fields",
+                      set_made > 0 && strstr(set_text, "rotation=90") && strstr(set_text, "scale=150"));
+                line.scale = 100;
+                set_made = windows_displays_set(set_text, sizeof(set_text), "HDMI-A-1 rotation=90 scale=150\n", "HDMI-A-1", WINDOWS_DISPLAY_SCALE, &line);
+                check("display section: setting 100 writes the line back without a scale",
+                      set_made > 0 && strstr(set_text, "rotation=90") && !strstr(set_text, "scale="));
         }
 
         // A screen's monitor name, from its EDID: the descriptor tagged FC, its text ended by a newline, its blanks at the end
@@ -145540,7 +145593,7 @@ static void check_compositor_displays(void) {
     co_check(!d[0].placed&&d[0].bad==WINDOWS_DISPLAY_X);
     /* A word that is no field, a word with no '=', a field given twice (the first holds): all bad with other. */
     dline("Virtual-2 scale=2",&d[0]);
-    co_check(d[0].bad==WINDOWS_DISPLAY_OTHER);
+    co_check(d[0].scale==100&&d[0].bad==WINDOWS_DISPLAY_SCALE);
     dline("Virtual-2 rotation",&d[0]);
     co_check(d[0].bad==WINDOWS_DISPLAY_OTHER);
     dline("Virtual-2 rotation=90 rotation=0",&d[0]);
@@ -145554,6 +145607,34 @@ static void check_compositor_displays(void) {
     co_check(d[0].name[0]==0&&d[0].bad==WINDOWS_DISPLAY_NAME);
     dline("   ",&d[0]);
     co_check(d[0].name[0]==0&&d[0].bad==WINDOWS_DISPLAY_NAME);
+    /* The scale: one of the six presets in percent, 100 when none is given; any other value is bad and kept at 100, and so is a
+       scale given twice (the first holds). */
+    { static const char *const presets[6]={"Virtual-2 scale=50","Virtual-2 scale=75","Virtual-2 scale=100","Virtual-2 scale=125",
+                                           "Virtual-2 scale=150","Virtual-2 scale=200"};
+      static const unsigned int percent[6]={50,75,100,125,150,200};
+      for (unsigned int each = 0; each < 6; each++) {
+          dline(presets[each],&d[0]);
+          co_check(d[0].scale==percent[each]&&d[0].bad==0); }
+      dline("eDP-1 rotation=90",&d[0]);
+      co_check(d[0].scale==100&&d[0].bad==0);
+      dline("Virtual-2 scale=60",&d[0]);
+      co_check(d[0].scale==100&&d[0].bad==WINDOWS_DISPLAY_SCALE);
+      dline("Virtual-2 scale=0",&d[0]);
+      co_check(d[0].scale==100&&d[0].bad==WINDOWS_DISPLAY_SCALE);
+      dline("Virtual-2 scale=1000",&d[0]);
+      co_check(d[0].scale==100&&d[0].bad==WINDOWS_DISPLAY_SCALE);
+      dline("Virtual-2 scale=150%",&d[0]);
+      co_check(d[0].scale==100&&d[0].bad==WINDOWS_DISPLAY_SCALE);
+      dline("Virtual-2 scale=150 scale=50",&d[0]);
+      co_check(d[0].scale==150&&d[0].bad==WINDOWS_DISPLAY_OTHER);
+      /* Written with a scale other than 100 only, and read back to the same scale; a 100 is the default and is not written. */
+      static const char scales[]="HDMI-A-1 scale=75\nVirtual-2 rotation=90 scale=200 x=1 y=2\neDP-1 scale=100\n";
+      n=windows_displays_read(scales,list,WINDOWS_DISPLAYS);
+      made=windows_displays_write(text,sizeof(text),list,n);
+      co_check(made&&!strcmp(text,"HDMI-A-1 rotation=0 refresh=preferred scale=75\nVirtual-2 rotation=90 refresh=preferred scale=200 x=1 y=2\n"));
+      made=windows_displays_read(text,d,WINDOWS_DISPLAYS);
+      co_check(made==2&&d[0].scale==75&&d[1].scale==200&&d[1].rotation==90&&d[1].placed&&d[1].bad==0); }
+
     /* A file: blank lines are none, a bad name is kept as a line with none, and a repeated name is bad after the first. */
     static const char file[]="HDMI-A-1 rotation=90 refresh=60\n\n  \nbad_name x=1 y=2\nVirtual-2 x=-10 y=20\nVirtual-2 x=0 y=0\n";
     n=windows_displays_read(file,list,WINDOWS_DISPLAYS);
@@ -145660,12 +145741,29 @@ static void check_compositor_display_verb(void) {
     co_check(!windows_display_value(WINDOWS_DISPLAY_X,"32769",5,&value));
     co_check(!windows_display_value(WINDOWS_DISPLAY_Y,"4x",2,&value));
     co_check(!windows_display_value(WINDOWS_DISPLAY_Y,"",0,&value));
+    /* The scale: the six presets in percent, and no other number (a percent sign or a blank is not one). */
+    co_check(windows_display_value(WINDOWS_DISPLAY_SCALE,"50",2,&value)&&value==50);
+    co_check(windows_display_value(WINDOWS_DISPLAY_SCALE,"125",3,&value)&&value==125);
+    co_check(windows_display_value(WINDOWS_DISPLAY_SCALE,"200",3,&value)&&value==200);
+    co_check(!windows_display_value(WINDOWS_DISPLAY_SCALE,"60",2,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_SCALE,"100%",4,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_SCALE,"",0,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_SCALE,"1.5",3,&value));
 
     /* Virtual-1, which the file does not have, is turned to 270: its line comes last, every other line is as it was. */
     memset(&change,0,sizeof(change));
     change.rotation=270;
     made=windows_displays_set(file,sizeof(file),start,"Virtual-1",WINDOWS_DISPLAY_ROTATION,&change);
     co_check(made>0&&made==(int)strlen(file)&&!strcmp(file,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 x=-10 y=20 rotation=180\nbad_name x=1 y=2\nVirtual-1 rotation=270 refresh=preferred\n"));
+
+    /* A screen's scale is set the same way: its line keeps its other fields, and 100, the default, is not written back. */
+    memset(&change,0,sizeof(change));
+    change.scale=150;
+    made=windows_displays_set(file,sizeof(file),start,"Virtual-2",WINDOWS_DISPLAY_SCALE,&change);
+    co_check(made>0&&made==(int)strlen(file)&&!strcmp(file,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 rotation=180 refresh=preferred scale=150 x=-10 y=20\nbad_name x=1 y=2\n"));
+    change.scale=100;
+    made=windows_displays_set(next,sizeof(next),file,"Virtual-2",WINDOWS_DISPLAY_SCALE,&change);
+    co_check(made>0&&made==(int)strlen(next)&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 rotation=180 refresh=preferred x=-10 y=20\nbad_name x=1 y=2\n"));
 
     /* HDMI-A-1 goes to its preferred rate: its rotation stays, and its line stays where it was. */
     memset(&change,0,sizeof(change));

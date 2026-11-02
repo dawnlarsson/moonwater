@@ -21221,11 +21221,11 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         return locale_canvas_arrange_status();
 }
 
-#define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred or NAME place X Y\n"
+#define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred, NAME scale PERCENT or NAME place X Y\n"
 #define LOCALE_CANVAS_DISPLAYS SETTING_CANVAS_DISPLAYS_PATH
 
 /*
-        moonwater canvas display NAME rotation DEGREES, NAME refresh HZ|preferred or NAME place X Y: one screen's setting
+        moonwater canvas display NAME rotation DEGREES, NAME refresh HZ|preferred, NAME scale PERCENT or NAME place X Y: one screen's setting
         in /root/canvas.displays, which the compositor watches and applies as the file is written. DEGREES is 0, 90, 180
         or 270; HZ is a whole number from 1 to 1000, or preferred for the screen's own rate; X and Y are whole numbers of
         pixels, as canvas arrange's places are. NAME is the connector's (Virtual-1, HDMI-A-1, eDP-1). Only that field of
@@ -21238,7 +21238,7 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         char name[WINDOWS_OUTPUT_NAME], out[4096];
         p8 text[4096];
         unsigned int field;
-        bool rotation, refresh, place;
+        bool rotation, refresh, scale, place;
         int value = 0, x = 0, y = 0, made;
         bipolar got, failed;
 
@@ -21246,8 +21246,9 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
                 return host_refuse(LOCALE_CANVAS_DISPLAY_USAGE);
         rotation = count == 6 && string_equals(arguments[4], "rotation");
         refresh = count == 6 && string_equals(arguments[4], "refresh");
+        scale = count == 6 && string_equals(arguments[4], "scale");
         place = count == 7 && string_equals(arguments[4], "place");
-        if (!rotation && !refresh && !place)
+        if (!rotation && !refresh && !scale && !place)
                 return host_refuse(LOCALE_CANVAS_DISPLAY_USAGE);
         if (!windows_display_name((const char *)arguments[3], string_length(arguments[3]), name))
                 return host_refuse("\"%s\" is not a screen's name: letters, digits and dashes, 1 to %p bytes "
@@ -21270,6 +21271,14 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
                                            "from 1 to 1000, not %s\n", arguments[5]);
                 change.refresh = (unsigned int)value;
                 field = WINDOWS_DISPLAY_REFRESH;
+        }
+        else if (scale)
+        {
+                if (!windows_display_value(WINDOWS_DISPLAY_SCALE, (const char *)arguments[5],
+                                           string_length(arguments[5]), &value))
+                        return host_refuse("scale is 50, 75, 100, 125, 150 or 200 percent, not %s\n", arguments[5]);
+                change.scale = (unsigned int)value;
+                field = WINDOWS_DISPLAY_SCALE;
         }
         else
         {
@@ -21334,6 +21343,9 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         else if (refresh)
                 host_say(log, host_label "%s refreshes at its preferred rate, saved to " LOCALE_CANVAS_DISPLAYS "\n",
                          (string_address)name);
+        else if (scale)
+                host_say(log, host_label "%s is drawn at %p percent, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                         (string_address)name, (positive)change.scale);
         else
                 host_say(log, host_label "%s is placed at %b,%b, saved to " LOCALE_CANVAS_DISPLAYS "\n",
                          (string_address)name, (bipolar)x, (bipolar)y);
