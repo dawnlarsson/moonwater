@@ -2835,9 +2835,9 @@ struct compositor_poll
 #define COMPOSITOR_TOUCH_TAP_NS 400000000ull
 #define COMPOSITOR_TOUCH_WHEEL 48
 /*
-        The prediction a frame ahead, per class: the mouse, a touch screen's fingers, and a tablet or pen. The pointer is its
-        real place (compositor.real_x, real_y) led by the class's lead over one frame, no further than the cap, and held on a
-        screen. The pointer is where every consumer of motion reads it (the cursor, the windows told a motion, drags, hovers,
+        The prediction a frame ahead, for a touch screen's fingers and a tablet or pen. The mouse is not predicted: its lead is
+        always zero and it is never sampled, so its pointer is its real place. The pointer is a finger's or a pen's real place
+        (compositor.real_x, real_y) led by the class's lead over one frame, no further than the cap, and held on a screen. The pointer is where every consumer of motion reads it (the cursor, the windows told a motion, drags, hovers,
         snaps), so the lead lives at the root of input; a press or a release is handled at the real place (compositor.at_real),
         so a click lands where the hand was. A class with no new place for a frame is back on its real place, so a stop is not
         carried past the cap.
@@ -11785,13 +11785,13 @@ static void compositor_predict_sample(unsigned int cls, long long x, long long y
                 compositor_predict_lead(track);
 }
 
-// The mouse moved: its real place is sampled with the fraction its acceleration left, on the time its report had, and the
-// pointer is drawn and told where it will be (compositor_pointer_shown).
+// The mouse moved. The mouse is not predicted (the owner's call): its real place is the pointer, with no lead and no sample, so
+// the pointer is drawn and told where the hand is. Its times are not used.
 static void compositor_predict_mouse(positive when, positive now)
 {
+        (void)when;
+        (void)now;
         compositor.owner = COMPOSITOR_PREDICT_MOUSE;
-        compositor_predict_sample(COMPOSITOR_PREDICT_MOUSE, (long long)compositor.real_x * COMPOSITOR_PREDICT_FX + compositor.accel_x,
-                                  (long long)compositor.real_y * COMPOSITOR_PREDICT_FX + compositor.accel_y, when, now);
         compositor_pointer_shown();
 }
 
