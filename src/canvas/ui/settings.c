@@ -4209,8 +4209,12 @@ static b32 settings_event(const struct window_event address_to event)
                 return settings_gallery_event(event);
         if (event->type == WINDOW_EVENT_MOTION)
                 settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
-        // The map of the screens (above the Display rows): a press in its panel, the drag of a screen it took, and its release.
-        if (settings_map_on() && settings.menu.owner < 0 && !(event->flags & WINDOW_KEY_TOUCH))
+        /*
+                The map of the screens (above the Display rows): a press in its panel, the drag of a screen it took, and its
+                release. A finger does the same on the map, a tap choosing a screen and a drag moving it, and a drag that starts
+                on the map never scrolls the page under it; a pen is a pointer, and is a mouse here.
+        */
+        if (settings_map_on() && settings.menu.owner < 0)
         {
                 if (event->type == WINDOW_EVENT_MOTION && settings.map.drag >= 0)
                 {

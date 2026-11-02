@@ -125132,6 +125132,19 @@ static fn check_display_section(void)
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
                 settings_gallery.on = 0, settings.menu.owner = -1, settings.editing = -1, settings.view = false, settings.filter_length = 0;
+                settings.map.display = settings.map.drag = -1, settings.list.down = -1, settings.touching = false;
+                touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
+                settings_event(&touch);
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0};
+                taken = settings_event(&touch);
+                check("display section: a finger's press on a screen of the map is the map's: it chooses the screen and starts its drag",
+                      taken && settings.map.display == 1 && settings.map.drag == 1);
+                check("display section: a finger's press on the map starts no press of the page, so a drag there never scrolls",
+                      settings.list.down < 0 && !settings.touching);
+                touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2 + 200, ty + th / 2};
+                settings_event(&touch);
+                check("display section: a finger dragged on the map moves the screen it took, to the place it is over",
+                      settings.map.drag == 1 && settings.map.target_x != grid[1].x && settings.list.down < 0);
                 settings.map.display = settings.map.drag = -1;
 
                 // A mouse on the top right screen (table index 2): the same press chooses and takes it, and a press on a screen
