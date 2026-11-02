@@ -57462,7 +57462,7 @@ PURE address_any memory_last_of_either(address_any block, b8 first, b8 second,
     "lea (%r8,%r11,2), %rbx\n   mov %r11, %r8\n   shr $63, %r8\n"              \
     "xor %rbx, %r11\n   jz " tag "_next\n"                                    \
     "mov %r10, %rcx\n   sub %rax, %rcx\n   cmp $64, %rcx\n"                    \
-    "jb " tag "_careful\n"                                                    \
+    "jae " tag "_fast\n   jmp " tag "_careful\n"                              \
     ".balign 16\n" tag "_fast:\n"                                             \
     SCAN " %r11, %rbx\n   add %r9, %rbx\n   mov %ebx, (%rdi,%rax,4)\n"        \
     "inc %rax\n" CLEAR "jnz " tag "_fast\n   jmp " tag "_next\n"              \
@@ -57471,6 +57471,43 @@ PURE address_any memory_last_of_either(address_any block, b8 first, b8 second,
     "inc %rax\n   cmp %r10, %rax\n   je " full "\n"                           \
     CLEAR "jnz " tag "_careful\n"                                             \
     tag "_next:\n   add $64, %r9\n   cmp %rdx, %r9\n   jb " loop "\n"
+
+//      The table form on AVX2 without VBMI: the nibble classes of NIBBLE_CLASSIFY, built once a call as in_set builds
+//      them, but in xmm only so that no ymm is left dirty and this body makes no vzeroupper. Sixteen bytes a turn, four
+//      a block; a set bit is a field byte, which is the class as NIBBLE_CLASSIFY leaves it. FIELDS_XSETUP leaves xmm8 to
+//      xmm13 as FIELDS_XCLASS wants them and spends rbx and xmm14; FIELDS_XBLOCK turns the 64 bytes at r12 into r11.
+#define FIELDS_XCLASS                                                         \
+    "vpsrlw $4, %xmm0, %xmm2\n   vpand %xmm8, %xmm2, %xmm2\n   vpand %xmm8, %xmm0, %xmm0\n" \
+    "vpshufb %xmm0, %xmm9, %xmm3\n   vpshufb %xmm0, %xmm10, %xmm4\n   vpshufb %xmm2, %xmm11, %xmm5\n" \
+    "vpcmpgtb %xmm13, %xmm2, %xmm2\n   vpblendvb %xmm2, %xmm4, %xmm3, %xmm3\n   vpand %xmm5, %xmm3, %xmm3\n" \
+    "vpcmpeqb %xmm12, %xmm3, %xmm3\n"
+#define FIELDS_XBLOCK                                                         \
+    "vmovdqu (%r12), %xmm0\n" FIELDS_XCLASS "vpmovmskb %xmm3, %r11d\n"        \
+    "vmovdqu 16(%r12), %xmm0\n" FIELDS_XCLASS "vpmovmskb %xmm3, %ebx\n   shl $16, %rbx\n   or %rbx, %r11\n" \
+    "vmovdqu 32(%r12), %xmm0\n" FIELDS_XCLASS "vpmovmskb %xmm3, %ebx\n   shl $32, %rbx\n   or %rbx, %r11\n" \
+    "vmovdqu 48(%r12), %xmm0\n" FIELDS_XCLASS "vpmovmskb %xmm3, %ebx\n   shl $48, %rbx\n   or %rbx, %r11\n"
+#define FIELDS_XSETUP(T)                                                      \
+    "vpxor %xmm12, %xmm12, %xmm12\n   vpxor %xmm9, %xmm9, %xmm9\n   vpxor %xmm10, %xmm10, %xmm10\n" \
+    "mov $0x01010101, %ebx\n   vmovd %ebx, %xmm14\n   vpbroadcastd %xmm14, %xmm14\n"               \
+    NIBBLE_ROW(T, "0", "", "%xmm9")                                                                 \
+    NIBBLE_ROW(T, "16", "vpsllw $1, %xmm4, %xmm4\n   ", "%xmm9")                                   \
+    NIBBLE_ROW(T, "32", "vpsllw $2, %xmm4, %xmm4\n   ", "%xmm9")                                   \
+    NIBBLE_ROW(T, "48", "vpsllw $3, %xmm4, %xmm4\n   ", "%xmm9")                                   \
+    NIBBLE_ROW(T, "64", "vpsllw $4, %xmm4, %xmm4\n   ", "%xmm9")                                   \
+    NIBBLE_ROW(T, "80", "vpsllw $5, %xmm4, %xmm4\n   ", "%xmm9")                                   \
+    NIBBLE_ROW(T, "96", "vpsllw $6, %xmm4, %xmm4\n   ", "%xmm9")                                   \
+    NIBBLE_ROW(T, "112", "vpsllw $7, %xmm4, %xmm4\n   ", "%xmm9")                                  \
+    NIBBLE_ROW(T, "128", "", "%xmm10")                                                              \
+    NIBBLE_ROW(T, "144", "vpsllw $1, %xmm4, %xmm4\n   ", "%xmm10")                                 \
+    NIBBLE_ROW(T, "160", "vpsllw $2, %xmm4, %xmm4\n   ", "%xmm10")                                 \
+    NIBBLE_ROW(T, "176", "vpsllw $3, %xmm4, %xmm4\n   ", "%xmm10")                                 \
+    NIBBLE_ROW(T, "192", "vpsllw $4, %xmm4, %xmm4\n   ", "%xmm10")                                 \
+    NIBBLE_ROW(T, "208", "vpsllw $5, %xmm4, %xmm4\n   ", "%xmm10")                                 \
+    NIBBLE_ROW(T, "224", "vpsllw $6, %xmm4, %xmm4\n   ", "%xmm10")                                 \
+    NIBBLE_ROW(T, "240", "vpsllw $7, %xmm4, %xmm4\n   ", "%xmm10")                                 \
+    "mov $0x0f0f0f0f, %ebx\n   vmovd %ebx, %xmm8\n   vpbroadcastd %xmm8, %xmm8\n"                  \
+    "mov $0x07070707, %ebx\n   vmovd %ebx, %xmm13\n   vpbroadcastd %xmm13, %xmm13\n"               \
+    "movabs $0x8040201008040201, %rbx\n   vmovq %rbx, %xmm11\n   vpunpcklqdq %xmm11, %xmm11, %xmm11\n"
 
 __asm__(
     ASM_SECTION
@@ -57512,13 +57549,20 @@ __asm__(
     "movabs $0x0909090909090909, %rbx\n   movq %rbx, %xmm2\n   punpcklqdq %xmm2, %xmm2\n   movzbl %r13b, %ebx\n   movabs $0x0101010101010101, %rcx\n   imul %rcx, %rbx\n"
     "movq %rbx, %xmm3\n   punpcklqdq %xmm3, %xmm3\n"
     ".balign 16\n.Lfields_x64_s:\n"
-    "mov %rdx, %rcx\n   sub %r9, %rcx\n   test %r14, %r14\n   jnz .Lfields_x64_s_table\n   cmp $64, %rcx\n   jb .Lfields_x64_s_part\n   lea (%rsi,%r9), %r12\n"
+    "mov %rdx, %rcx\n   sub %r9, %rcx\n   test %r14, %r14\n   jnz .Lfields_x64_s_table_sel\n   cmp $64, %rcx\n   jb .Lfields_x64_s_part\n   lea (%rsi,%r9), %r12\n"
     RECORD_SSE_WINDOW(RECORD_SSE_EQ3, "%r12", "%r11", "%rbx")
     "not %r11\n   jmp .Lfields_x64_s_mask\n"
     // The last part of the block, and so the last use of extra's register.
     ".Lfields_x64_s_part:\n   mov %rcx, %r13\n   lea (%rsi,%r9), %r12\n"
     RECORD_SSE_PART(RECORD_SSE_EQ3, "%r12", "%r13", "%r11", "%r15", "%rbx")
     "not %r11\n   and %r15, %r11\n   jmp .Lfields_x64_s_mask\n"
+    // A table set with a block of sixty four to classify on AVX2 goes to the nibble classes, built once a call (r14 is 2
+    // after the build, nonzero as the table flag is); a shorter tail or a machine without AVX2 is the byte loop below.
+    ".Lfields_x64_s_table_sel:\n   cmp $64, %rcx\n   jb .Lfields_x64_s_table\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lfields_x64_s_table\n"
+    "cmp $2, %r14\n   jne .Lfields_x64_s_setup\n"
+    ".Lfields_x64_s_setup_back:\n   mov $2, %r14d\n"
+    ".Lfields_x64_s_block:\n   lea (%rsi,%r9), %r12\n"
+    FIELDS_XBLOCK "   jmp .Lfields_x64_s_mask\n"
     ".Lfields_x64_s_table:  mov $64, %ebx\n   cmp %rbx, %rcx\n   cmova %rbx, %rcx\n   xor %r11d, %r11d\n   lea (%rsi,%r9), %r12\n"
     "1:  movzbl -1(%r12,%rcx), %ebx\n   cmpb $0, (%r13,%rbx)\n   sete %bl\n   movzbl %bl, %ebx\n   lea (%rbx,%r11,2), %r11\n   dec %rcx\n   jnz 1b\n"
     ".Lfields_x64_s_mask:\n"
@@ -57530,6 +57574,7 @@ __asm__(
     ".Lfields_x64_full:\n   mov %r10, %rax\n   shr $1, %rax\n"
     ".Lfields_x64_leave:  pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
     ".Lfields_x64_none:\n" ASM_RET
+    ".Lfields_x64_s_setup:\n" FIELDS_XSETUP("%r13") "   jmp .Lfields_x64_s_setup_back\n"
     ASM_LOCAL_END(memory_offsets_fields_x64)
 
     ASM_FUNC(memory_nth_of)

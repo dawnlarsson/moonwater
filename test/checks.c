@@ -17647,8 +17647,9 @@ fn check_record_guards()
         for (positive i = 0; i < 256; i++)
                 table[i] = i == ' ' || i == '\t';
 #if X64
-        p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi;
-        positive tiers = 3;
+        p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi, avx2 = cpu_has_avx2;
+        // AVX-512 with VBMI, AVX-512 without it, AVX2 without AVX-512 (the table form's nibble classes), and SSE2.
+        positive tiers = 4;
 #else
         positive tiers = 1;
 #endif
@@ -17660,6 +17661,7 @@ fn check_record_guards()
 #if X64
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi = tier == 0 ? vbmi : 0;
+                cpu_has_avx2 = tier == 3 ? 0 : avx2;
 #endif
                 for (positive size = 0; size <= 200; size++)
                         for (positive edge = 0; edge < 2; edge++)
@@ -17679,6 +17681,7 @@ fn check_record_guards()
 #if X64
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi = vbmi;
+        cpu_has_avx2 = avx2;
 #endif
         // Reached: nothing faulted.
         same("record scans", "reads stay inside the block", sink >= 0, 1);
@@ -17694,8 +17697,9 @@ fn check_record_scans()
         static const p8 extras[] = {' ', '\n', 0, 0xff, 'a'};
         static const positive limits[] = {1, 2, 3, 7, 31, 32, 33, 64, 65, 5000};
 #if X64
-        p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi;
-        positive tiers = 3;
+        p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi, avx2 = cpu_has_avx2;
+        // AVX-512 with VBMI, AVX-512 without it, AVX2 without AVX-512 (the table form's nibble classes), and SSE2.
+        positive tiers = 4;
 #else
         positive tiers = 1;
 #endif
@@ -17704,6 +17708,7 @@ fn check_record_scans()
 #if X64
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi = tier == 0 ? vbmi : 0;
+                cpu_has_avx2 = tier == 3 ? 0 : avx2;
 #endif
                 for (positive turn = 0; turn < 12; turn++)
                 {
@@ -17873,6 +17878,7 @@ fn check_record_scans()
 #if X64
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi = vbmi;
+        cpu_has_avx2 = avx2;
 #endif
 }
 
