@@ -3720,6 +3720,216 @@ static fn ui_field_shadows(int state, b64 address_to into)
         }
 }
 
+/*
+        One row of a field's top edge: the light the face makes a pixel below its own top, inside it. Both rows hold first
+        differences (ui_line_add), so their running sums are the covers, the face's less the low's; where that is positive
+        the highlight is laid over the picture at its column, for the columns lo to hi that are on the picture, and every
+        column of both rows is cleared. On x86-64 and arm64 this is ui_edge_row_body: the running sums in 16-bit lanes eight
+        columns a step, the zero-cover columns skipped with one test, and a column the light reaches blended by e->put (the
+        ui_edge_put below, the C it replaced). The C in ui_edge_row_c is the body on riscv64, and the reference the check in
+        test/checks.c compares the body with.
+*/
+struct ui_edge_row
+{
+        unsigned short address_to face, address_to low;
+        unsigned int address_to at; // the picture's pixel at column lo
+        b32 width, lo, hi;
+        unsigned int highlight;
+        void (*put)(unsigned int address_to at, unsigned int highlight, unsigned int cover); // ui_edge_put, called through the struct
+};
+
+// The blend of one column the light reaches: the rare case, which the body calls through e->put.
+static __attribute__((noinline)) void ui_edge_put(unsigned int address_to at, unsigned int highlight, unsigned int cover)
+{
+        *at = ui_over(ui_premultiplied(highlight, cover), *at);
+}
+
+#if (X64 || ARM64) && !defined(UI_EDGE_C)
+#define UI_EDGE_ASM 1
+extern void ui_edge_row_body(struct ui_edge_row address_to e) __asm__("ui_edge_row_body") __attribute__((visibility("hidden")));
+#endif
+
+#if UI_EDGE_ASM && X64
+asm(".pushsection .text\n"
+    ".balign 16\n"
+    ".local ui_edge_row_body\n"
+    ".type ui_edge_row_body, " ASM_TYPE "\n"
+    "ui_edge_row_body:\n" ASM_ENDBR
+    /*
+            rdi the struct (its layout is struct ui_edge_row's: face 0, low 8, at 16, width 24, lo 28, hi 32, highlight 36, put 40).
+            rbx the struct, r12 and r13 the face and low rows, r14 the picture's pixel at lo, r15d the width, ebp the column.
+            xmm0 and xmm1 carry each row's running sum in every 16-bit lane into the next eight columns; xmm7 is zero.
+            A block of eight whose light reaches nothing is cleared and skipped; one that does is walked column by column
+            from its saved sums (the calls clobber the vector registers, so the carries are saved round them).
+    */
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $72, %rsp\n"
+    "mov %rdi, %rbx\n"
+    "mov (%rbx), %r12\n   mov 8(%rbx), %r13\n   mov 16(%rbx), %r14\n   mov 24(%rbx), %r15d\n"
+    "xor %ebp, %ebp\n"
+    "pxor %xmm0, %xmm0\n   pxor %xmm1, %xmm1\n   pxor %xmm7, %xmm7\n"
+    ".Ler_vec:\n"
+    "lea 8(%rbp), %eax\n   cmp %r15d, %eax\n   jg .Ler_tail\n"
+    "movdqu (%r12,%rbp,2), %xmm2\n   movdqu (%r13,%rbp,2), %xmm3\n"
+    "movdqa %xmm2, %xmm4\n   pslldq $2, %xmm4\n   paddw %xmm4, %xmm2\n"
+    "movdqa %xmm2, %xmm4\n   pslldq $4, %xmm4\n   paddw %xmm4, %xmm2\n"
+    "movdqa %xmm2, %xmm4\n   pslldq $8, %xmm4\n   paddw %xmm4, %xmm2\n"
+    "paddw %xmm0, %xmm2\n"
+    "pshufhw $0xff, %xmm2, %xmm0\n   pshufd $0xff, %xmm0, %xmm0\n"
+    "movdqa %xmm3, %xmm4\n   pslldq $2, %xmm4\n   paddw %xmm4, %xmm3\n"
+    "movdqa %xmm3, %xmm4\n   pslldq $4, %xmm4\n   paddw %xmm4, %xmm3\n"
+    "movdqa %xmm3, %xmm4\n   pslldq $8, %xmm4\n   paddw %xmm4, %xmm3\n"
+    "paddw %xmm1, %xmm3\n"
+    "pshufhw $0xff, %xmm3, %xmm1\n   pshufd $0xff, %xmm1, %xmm1\n"
+    // A lane is a cover where the face's sum is above the low's: the saturating difference is not zero there.
+    "movdqa %xmm2, %xmm4\n   psubusw %xmm3, %xmm4\n   pcmpeqw %xmm7, %xmm4\n   pmovmskb %xmm4, %eax\n"
+    "cmp $0xffff, %eax\n   je .Ler_zero\n"
+    ".Ler_hit:\n"
+    "movdqu %xmm2, (%rsp)\n   movdqu %xmm3, 16(%rsp)\n   movdqu %xmm0, 32(%rsp)\n   movdqu %xmm1, 48(%rsp)\n"
+    "movl $0, 64(%rsp)\n"
+    ".Ler_k:\n"
+    "movl 64(%rsp), %eax\n   cmp $8, %eax\n   jge .Ler_k_done\n"
+    "movzwl (%rsp,%rax,2), %ecx\n   movzwl 16(%rsp,%rax,2), %edx\n   sub %edx, %ecx\n"
+    "jle .Ler_k_next\n"
+    "lea (%rbp,%rax), %r8\n"
+    "cmp 28(%rbx), %r8d\n   jl .Ler_k_next\n   cmp 32(%rbx), %r8d\n   jge .Ler_k_next\n"
+    "mov %r8d, %esi\n   sub 28(%rbx), %esi\n   movslq %esi, %rsi\n   lea (%r14,%rsi,4), %rdi\n"
+    "mov 36(%rbx), %esi\n   mov %ecx, %edx\n"
+    "call *40(%rbx)\n"
+    ".Ler_k_next:\n"
+    "incl 64(%rsp)\n   jmp .Ler_k\n"
+    ".Ler_k_done:\n"
+    "movdqu 32(%rsp), %xmm0\n   movdqu 48(%rsp), %xmm1\n   pxor %xmm7, %xmm7\n"
+    ".Ler_zero:\n"
+    "movdqu %xmm7, (%r12,%rbp,2)\n   movdqu %xmm7, (%r13,%rbp,2)\n"
+    "add $8, %ebp\n   jmp .Ler_vec\n"
+    // The last columns, fewer than eight: the same running sums in scalar, from the carries' low lanes.
+    ".Ler_tail:\n"
+    "movd %xmm0, %r8d\n   movzwl %r8w, %r8d\n   movd %xmm1, %r9d\n   movzwl %r9w, %r9d\n"
+    ".Ler_t:\n"
+    "cmp %r15d, %ebp\n   jge .Ler_done\n"
+    "movzwl (%r12,%rbp,2), %eax\n   add %eax, %r8d\n   movzwl %r8w, %r8d\n"
+    "movzwl (%r13,%rbp,2), %ecx\n   add %ecx, %r9d\n   movzwl %r9w, %r9d\n"
+    "movw $0, (%r12,%rbp,2)\n   movw $0, (%r13,%rbp,2)\n"
+    "mov %r8d, %eax\n   sub %r9d, %eax\n"
+    "jle .Ler_t_next\n"
+    "cmp 28(%rbx), %ebp\n   jl .Ler_t_next\n   cmp 32(%rbx), %ebp\n   jge .Ler_t_next\n"
+    "mov %r8, (%rsp)\n   mov %r9, 8(%rsp)\n"
+    "mov %eax, %edx\n"
+    "mov %ebp, %esi\n   sub 28(%rbx), %esi\n   movslq %esi, %rsi\n   lea (%r14,%rsi,4), %rdi\n"
+    "mov 36(%rbx), %esi\n"
+    "call *40(%rbx)\n"
+    "mov (%rsp), %r8\n   mov 8(%rsp), %r9\n"
+    ".Ler_t_next:\n"
+    "inc %ebp\n   jmp .Ler_t\n"
+    ".Ler_done:\n"
+    "add $72, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    ASM_RET
+    ".size ui_edge_row_body, .-ui_edge_row_body\n"
+    ".popsection\n");
+#elif UI_EDGE_ASM && ARM64
+/*
+        ui_edge_row_body on arm64: x0 the struct, x19 it, x20 and x21 the face and low rows, x22 the picture's pixel at lo,
+        w23 the width, x24 the column; x26 and x27 the scalar sums of the last columns. v0 and v1 carry each row's running sum
+        in every 16-bit lane, v7 is zero. The running sum of eight is three ext-and-adds (the zero enters at the low lane), then
+        the carry; a block whose light reaches nothing (uqsub of the two sums, none above zero) is cleared and passed. A block
+        that reaches is walked column by column from its saved sums, and a column the light reaches calls e->put.
+*/
+asm(".pushsection .text\n"
+    ".balign 16\n"
+    ".local ui_edge_row_body\n"
+    ".type ui_edge_row_body, " ASM_TYPE "\n"
+    "ui_edge_row_body:\n" ASM_ENDBR
+    "stp x29, x30, [sp, #-160]!\n   mov x29, sp\n"
+    "stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n"
+    "stp x27, x28, [sp, #144]\n"
+    "mov x19, x0\n"
+    "ldr x20, [x19]\n   ldr x21, [x19, #8]\n   ldr x22, [x19, #16]\n   ldr w23, [x19, #24]\n"
+    "movi v7.2d, #0\n   movi v0.2d, #0\n   movi v1.2d, #0\n"
+    "mov x24, #0\n"
+    ".Lev_vec:\n"
+    "add w9, w24, #8\n   cmp w9, w23\n   b.gt .Lev_tail\n"
+    "add x9, x20, x24, lsl #1\n   ld1 {v2.8h}, [x9]\n"
+    "add x10, x21, x24, lsl #1\n   ld1 {v3.8h}, [x10]\n"
+    "ext v4.16b, v7.16b, v2.16b, #14\n   add v2.8h, v2.8h, v4.8h\n"
+    "ext v4.16b, v7.16b, v2.16b, #12\n   add v2.8h, v2.8h, v4.8h\n"
+    "ext v4.16b, v7.16b, v2.16b, #8\n    add v2.8h, v2.8h, v4.8h\n"
+    "add v2.8h, v2.8h, v0.8h\n   dup v0.8h, v2.h[7]\n"
+    "ext v4.16b, v7.16b, v3.16b, #14\n   add v3.8h, v3.8h, v4.8h\n"
+    "ext v4.16b, v7.16b, v3.16b, #12\n   add v3.8h, v3.8h, v4.8h\n"
+    "ext v4.16b, v7.16b, v3.16b, #8\n    add v3.8h, v3.8h, v4.8h\n"
+    "add v3.8h, v3.8h, v1.8h\n   dup v1.8h, v3.h[7]\n"
+    "uqsub v4.8h, v2.8h, v3.8h\n   umaxv h5, v4.8h\n   umov w11, v5.h[0]\n"
+    "cbz w11, .Lev_zero\n"
+    "add x12, sp, #80\n   st1 {v2.8h}, [x12]\n"
+    "add x12, sp, #96\n   st1 {v3.8h}, [x12]\n"
+    "add x12, sp, #112\n  st1 {v0.8h}, [x12]\n"
+    "add x12, sp, #128\n  st1 {v1.8h}, [x12]\n"
+    "mov x25, #0\n"
+    ".Lev_k:\n"
+    "cmp x25, #8\n   b.ge .Lev_k_done\n"
+    "add x12, sp, #80\n   ldrh w13, [x12, x25, lsl #1]\n"
+    "add x14, sp, #96\n   ldrh w15, [x14, x25, lsl #1]\n"
+    "subs w13, w13, w15\n   b.le .Lev_k_next\n"
+    "add w16, w24, w25\n"
+    "ldr w17, [x19, #28]\n   cmp w16, w17\n   b.lt .Lev_k_next\n"
+    "ldr w17, [x19, #32]\n   cmp w16, w17\n   b.ge .Lev_k_next\n"
+    "ldr w17, [x19, #28]\n   sub w17, w16, w17\n   add x0, x22, w17, sxtw #2\n"
+    "ldr w1, [x19, #36]\n   mov w2, w13\n   ldr x9, [x19, #40]\n   blr x9\n"
+    ".Lev_k_next:\n"
+    "add x25, x25, #1\n   b .Lev_k\n"
+    ".Lev_k_done:\n"
+    "ldr q0, [sp, #112]\n   ldr q1, [sp, #128]\n   movi v7.2d, #0\n"
+    ".Lev_zero:\n"
+    "add x9, x20, x24, lsl #1\n   st1 {v7.8h}, [x9]\n"
+    "add x10, x21, x24, lsl #1\n  st1 {v7.8h}, [x10]\n"
+    "add w24, w24, #8\n   b .Lev_vec\n"
+    ".Lev_tail:\n"
+    "umov w26, v0.h[0]\n   umov w27, v1.h[0]\n"
+    ".Lev_t:\n"
+    "cmp w24, w23\n   b.ge .Lev_done\n"
+    "add x9, x20, x24, lsl #1\n   ldrh w10, [x9]\n   add w26, w26, w10\n   and w26, w26, #0xffff\n   strh wzr, [x9]\n"
+    "add x9, x21, x24, lsl #1\n   ldrh w10, [x9]\n   add w27, w27, w10\n   and w27, w27, #0xffff\n   strh wzr, [x9]\n"
+    "subs w11, w26, w27\n   b.le .Lev_t_next\n"
+    "ldr w12, [x19, #28]\n   cmp w24, w12\n   b.lt .Lev_t_next\n"
+    "ldr w13, [x19, #32]\n   cmp w24, w13\n   b.ge .Lev_t_next\n"
+    "sub w13, w24, w12\n   add x0, x22, w13, sxtw #2\n"
+    "ldr w1, [x19, #36]\n   mov w2, w11\n   ldr x9, [x19, #40]\n   blr x9\n"
+    ".Lev_t_next:\n"
+    "add x24, x24, #1\n   b .Lev_t\n"
+    ".Lev_done:\n"
+    "ldp x27, x28, [sp, #144]\n   ldp x25, x26, [sp, #64]\n   ldp x23, x24, [sp, #48]\n"
+    "ldp x21, x22, [sp, #32]\n   ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #160\n"
+    ASM_RET
+    ".size ui_edge_row_body, .-ui_edge_row_body\n"
+    ".popsection\n");
+#endif
+
+#ifndef UI_EDGE_ASM
+static void ui_edge_row_c(struct ui_edge_row address_to e)
+{
+        for (b32 x = 0, face_run = 0, low_run = 0; x < e->width; x++)
+        {
+                int cover;
+
+                face_run = (unsigned short)(face_run + e->face[x]);
+                low_run = (unsigned short)(low_run + e->low[x]);
+                cover = (int)face_run - (int)low_run;
+                e->face[x] = e->low[x] = 0;
+                if (cover > 0 && x >= e->lo && x < e->hi)
+                        e->put(e->at + (x - e->lo), e->highlight, (unsigned int)cover);
+        }
+}
+#endif
+
+static inline void ui_edge_row(struct ui_edge_row address_to e)
+{
+#ifdef UI_EDGE_ASM
+        ui_edge_row_body(e);
+#else
+        ui_edge_row_c(e);
+#endif
+}
+
 struct ui_text;
 static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_to c, int left, int right, int top, int bottom);
 
@@ -3793,21 +4003,17 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                                 continue;
                         ui_box_row(&face, y, ui_kit_line, first, width);
                         ui_box_row(&low, y, ui_kit_clip, first, width);
-                        for (b32 x = 0, face_run = 0, low_run = 0; x < width; x++)
                         {
-                                int cover;
+                                // The columns on the picture are first + x for x from lo to hi; none when the row is off it.
+                                struct ui_edge_row edge = {ui_kit_line, ui_kit_clip, null, width, 0, 0, highlight, ui_edge_put};
+                                b32 lo = first < 0 ? -first : 0, hi = ui->width - first < width ? ui->width - first : width;
 
-                                // Both rows hold first differences (ui_line_add): the running sums are the covers.
-                                face_run = (unsigned short)(face_run + ui_kit_line[x]);
-                                low_run = (unsigned short)(low_run + ui_kit_clip[x]);
-                                cover = (int)face_run - (int)low_run;
-                                ui_kit_line[x] = ui_kit_clip[x] = 0;
-                                if (cover > 0 && first + x >= 0 && first + x < ui->width)
+                                if (lo < hi)
                                 {
-                                        unsigned int address_to at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(first + x);
-
-                                        *at = ui_over(ui_premultiplied(highlight, (unsigned int)cover), *at);
+                                        edge.lo = lo, edge.hi = hi;
+                                        edge.at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(first + lo);
                                 }
+                                ui_edge_row(&edge);
                         }
                 }
         }

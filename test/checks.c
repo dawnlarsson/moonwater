@@ -131277,6 +131277,78 @@ static fn ui_over_check(void)
 }
 
 /*
+        ui_edge_row, the field's top-edge light for one row, against the C it replaced (the loop as it was, with the picture's
+        row and the first column passed in). The body has to give the same pixels, and clear the same rows, for every width
+        from nothing to the widest a shape is drawn, every first column on or off the picture (both ends), and running sums
+        that are sparse, dense or wrap a 16-bit lane.
+*/
+static void ui_edge_row_reference(unsigned short *line, unsigned short *clip, b32 width, b32 first, unsigned int *row, b32 picture,
+                                  unsigned int highlight)
+{
+        for (b32 x = 0, face_run = 0, low_run = 0; x < width; x++)
+        {
+                int cover;
+
+                face_run = (unsigned short)(face_run + line[x]);
+                low_run = (unsigned short)(low_run + clip[x]);
+                cover = (int)face_run - (int)low_run;
+                line[x] = clip[x] = 0;
+                if (cover > 0 && first + x >= 0 && first + x < picture)
+                {
+                        unsigned int *at = row + (first + x);
+
+                        *at = ui_over(ui_premultiplied(highlight, (unsigned int)cover), *at);
+                }
+        }
+}
+
+static fn ui_edge_row_check(void)
+{
+        static unsigned short line[UI_KIT_LINE], clip[UI_KIT_LINE], line_asm[UI_KIT_LINE], clip_asm[UI_KIT_LINE];
+        static unsigned int row_ref[512], row_asm[512];
+        static unsigned int state = 0x2f6b1d3bu;
+        b32 same = true;
+        int drawn = 0;
+
+        for (int trial = 0; trial < 8000; trial++)
+        {
+                b32 width = trial % 9 == 0 ? (b32)(XORSHIFT32(state) % (UI_KIT_LINE + 1)) : (b32)(XORSHIFT32(state) % 320);
+                b32 picture = 1 + (b32)(XORSHIFT32(state) % 480), first = (b32)(XORSHIFT32(state) % (picture + 60)) - 30;
+                unsigned int mask = (unsigned int[]){0x3u, 0xffu, 0xffffu, 0xffffffffu}[XORSHIFT32(state) % 4];
+                unsigned int highlight = XORSHIFT32(state), percent = XORSHIFT32(state) % 101;
+                struct ui_edge_row edge = {line_asm, clip_asm, null, width, 0, 0, highlight, ui_edge_put};
+                b32 lo = first < 0 ? -first : 0, hi = picture - first < width ? picture - first : width;
+
+                for (b32 x = 0; x < width; x++)
+                {
+                        unsigned int a = XORSHIFT32(state), b = XORSHIFT32(state);
+
+                        line[x] = XORSHIFT32(state) % 101 < percent ? (unsigned short)(a & mask) : 0;
+                        clip[x] = XORSHIFT32(state) % 101 < percent ? (unsigned short)(b & mask) : 0;
+                        if (trial % 5 == 0 && x == width / 2)
+                                line[x] = 0xffff, clip[x] = 0x8000;
+                }
+                memory_copy(line_asm, line, (positive)sizeof(unsigned short) * (positive)width);
+                memory_copy(clip_asm, clip, (positive)sizeof(unsigned short) * (positive)width);
+                for (b32 k = 0; k < 512; k++)
+                        row_ref[k] = row_asm[k] = XORSHIFT32(state);
+
+                ui_edge_row_reference(line, clip, width, first, row_ref, picture, highlight);
+                if (lo < hi)
+                {
+                        edge.lo = lo, edge.hi = hi;
+                        edge.at = row_asm + (first + lo);
+                }
+                ui_edge_row(&edge);
+                for (b32 x = 0; x < width; x++)
+                        same &= line[x] == 0 && clip[x] == 0 && line_asm[x] == 0 && clip_asm[x] == 0;
+                same &= memory_compare(row_ref, row_asm, sizeof(row_ref)) == 0;
+                drawn++;
+        }
+        check("ui_edge_row: the body gives the C's pixels and clears its rows, for every width, column and sum", same && drawn > 0);
+}
+
+/*
         The text menu's keys are the keymap's: the first key each command is bound to, written as the menu shows it, and
         none for a command with no key. A key rebound shows its new one, and a command whose keys are taken away shows none.
 */
@@ -131535,6 +131607,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_disk_check(&wui);
         field_check(&wui);
         ui_over_check();
+        ui_edge_row_check();
 }
 
 /*
