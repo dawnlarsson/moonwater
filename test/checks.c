@@ -119769,6 +119769,123 @@ static void check_popup_ground_steady(void)
     compositor_leave(3);
 }
 
+/*
+        A dropdown's labels, on every open: the open popup's picture carries each label, read back from the picture. The popup
+        takes the ui of the page it opens from, and the page last painted a band of its rows (settings' partial paint): so
+        every open here comes from a ui with a band of its own, none, the top rows or the middle rows, and the picture must
+        still hold each item's label (ink in its column at its row).
+*/
+static void check_dropdown_labels(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static struct ui_popup popup;
+    struct window_row parent_row;
+    struct ui parent_ui = terminal.ui;
+    struct windows address_to table;
+    int missing = 0, labels_missing = 0, opens = 0;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("dropdown labels: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+    parent_ui.scale = 100;
+    parent_ui.regular = parent_ui.bold = terminal.plain[0];
+    parent_ui.scratch = null, parent_ui.scratch_width = 0, parent_ui.scratch_scale = 0;
+    memory_zero(&parent_row, sizeof(parent_row));
+    parent_row.table = table;
+    parent_row.row = 1;
+    for (int open = 0; open < 12; open++)
+    {
+        int band = open % 3, pad = UI_MENU_PAD, inset = UI_MENU_INSET, row_h;
+        static const unsigned int bands[3][2] = {{0, 0}, {0, 20}, {60, 80}};
+
+        // The page's last paint: a band of its rows (none is the whole, which is no band).
+        parent_ui.band_top = (int)bands[band][0], parent_ui.band_bottom = (int)bands[band][1];
+        windows_reset_row(table, 3);
+        __atomic_store_n(&table->pid[3], 1u, __ATOMIC_RELEASE);
+        memory_zero(&popup, sizeof(popup));
+        ui_popmenu_add(&popup.menu, "Copy", null, 0, 1);
+        ui_popmenu_add(&popup.menu, "Paste", null, 0, 2);
+        ui_popmenu_add(&popup.menu, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(&popup.menu, "Select all", null, 0, 3);
+        popup.own.table = table;
+        popup.own.row = 3;
+        popup.own.door = -1;
+        popup.own.wake = -1;
+        popup.own.buffer = compositor.buffer;
+        popup.own.stride = GLASS_SIDE;
+        popup.own.output_width = popup.own.output_height = GLASS_SIDE;
+        // Both of the popup's pictures start blank, so a label read back is one this open drew (a picture left from an
+        // earlier open holds its labels, and a check that read it would pass whatever this open drew).
+        for (int slot = 0; slot < 2; slot++)
+            memory_zero((void address_to)windows_pixels(&popup.own, (unsigned int)slot), sizeof(unsigned int) * GLASS_SIDE * GLASS_SIDE);
+        opens++;
+        if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
+        {
+            missing++;
+            continue;
+        }
+        compositor_take(3);
+        compositor_present();
+        ui_popup_pump(&popup);
+        compositor_take(3);
+        compositor_present();
+        ui_popup_pump(&popup);
+        if (!compositor.showing[3] || compositor_popup_parent[3] != 1)
+        {
+            missing++;
+        }
+        else
+        {
+            const unsigned int address_to front = windows_pixels(&popup.own, (unsigned int)popup.shown);
+            int y = pad;
+
+            row_h = ui_popmenu_row(&popup.ui, &popup.menu);
+            for (int at = 0; at < popup.menu.count; at++)
+            {
+                int ink = 0;
+
+                if (popup.menu.items[at].flags & UI_MENU_SEPARATOR)
+                {
+                    y += ui_popmenu_tall(&popup.ui, &popup.menu, at);
+                    continue;
+                }
+                for (int yy = y + row_h / 4; yy < y + 3 * row_h / 4; yy++)
+                    for (int xx = pad + inset; xx < pad + inset + 40; xx++)
+                        ink += (front[yy * GLASS_SIDE + xx] >> 24) != 0;
+                labels_missing += ink == 0;
+                y += row_h;
+            }
+        }
+        popup.open = false;
+        compositor_popup_leave(3);
+        compositor_leave(3);
+    }
+    check("dropdown labels: every open draws its popup on the screen, whole (none missing)", missing == 0 && opens == 12);
+    check("dropdown labels: every label of every open is drawn in its row, read back from the picture (none missing)",
+          labels_missing == 0);
+}
+
 static void check_popup_reopen(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -137417,7 +137534,7 @@ static fn check_glass_pieces(string_address regular)
         row = ui_popmenu_row(&menu_ui, &menu);
 #define MENU_AT(x, y) (menu_picture[(y) * 800 + (x)] >> 24)
         check("glass: a menu has no face and no outline: its top, left, right and bottom edges are clear",
-              MENU_AT(menu.width / 2, 0) == 0 && MENU_AT(0, menu.height / 2) == 0 && MENU_AT(menu.width - 1, menu.height / 2) == 0 &&
+              MENU_AT(menu.width / 2, 0) == 0 && MENU_AT(0, UI_MENU_PAD + row / 2) == 0 && MENU_AT(menu.width - 1, UI_MENU_PAD + row / 2) == 0 &&
               MENU_AT(menu.width / 2, menu.height - 1) == 0);
         check("glass: a menu's hot choice is lit over the glass, and the choice above it is not",
               MENU_AT(UI_MENU_PAD + 4, UI_MENU_PAD + row + row / 2) > 0 && MENU_AT(UI_MENU_PAD + 4, UI_MENU_PAD + row / 2) == 0);
@@ -139286,6 +139403,45 @@ static fn menu_defaults_check(struct ui address_to wui)
                 check("menu: a popup is glass, its row has the glass flags and no close button", popup.ui.glass && !popup.ui.opaque &&
                       glass_table.glass[1] == UI_POPUP_GLASS);
         }
+        /*
+                A click on an item: the item's rect is the one element it has, the whole width of the menu and square, lit in the
+                selection's layer, with its press ripple drawn inside it. Nothing is lit beside it, above or below.
+        */
+        {
+                struct ui glass = *wui;
+                struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+                int row, pad = UI_MENU_PAD * wui->scale / 100, top, mid;
+                unsigned int address_to picture2 = picture;
+
+                glass.glass = 1, glass.opaque = false;
+                ui_inks(&glass, UI_GLASS_GROUND);
+                menu_defaults_items(wui, &m);
+                row = ui_popmenu_row(wui, &m);
+                top = pad + row, mid = top + row / 2;
+                ui_popmenu_event(wui, &m, &press, m.width / 2, mid);
+                ui_kit.now = 1000000000ll;
+                memory_zero((void address_to)pixels, 600 * 900 * 4);
+                ui_begin(&glass, picture2, 600, m.width, m.height);
+                ui_popmenu_draw(&glass, &m);
+                ui_kit.now += 100000000ll;
+                memory_zero((void address_to)pixels, 600 * 900 * 4);
+                ui_begin(&glass, picture2, 600, m.width, m.height);
+                ui_popmenu_draw(&glass, &m);
+#define CLICK_LIT(x, y) ((picture2[(y) * 600 + (x)] >> 24) > 0)
+                check("menu item: a click's rect is the whole width of the menu and square (its corners are lit, its ends too)",
+                      CLICK_LIT(0, top + 1) && CLICK_LIT(m.width - 1, top + 1) && CLICK_LIT(0, top + row - 2) &&
+                          CLICK_LIT(m.width - 1, top + row - 2) && CLICK_LIT(0, mid) && CLICK_LIT(m.width - 1, mid));
+                check("menu item: nothing else is lit by a click: the rows above and below the item draw no rect",
+                      !CLICK_LIT(m.width / 2, top - 2) && !CLICK_LIT(m.width / 2, top + row + 1) && !CLICK_LIT(0, top - 2));
+#ifdef UI_MENU_RIPPLE
+                check("menu item: the press's ripple is live in the item, and the menu is moving until it ends",
+                      m.ripple.live && m.ripple_at == 1 && m.moving);
+#else
+                check("menu item: the press's ripple is live in the item, and the menu is moving until it ends", false);
+#endif
+#undef CLICK_LIT
+        }
+
 #ifdef UI_MENU_DEFAULTS
         {
                 struct ui_menu_sizes sizes = ui_menu_sizes(wui, false), finger = ui_menu_sizes(wui, true);
@@ -140763,6 +140919,7 @@ b32 main()
         check_compositor_popup_press(1);
         check_popup_reopen();
         check_popup_ground_steady();
+        check_dropdown_labels();
         check_compositor_popup_grip(0);
         check_compositor_popup_grip(1);
         check_compositor_popup_holds();

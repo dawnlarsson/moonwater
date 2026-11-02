@@ -324,6 +324,8 @@ static fn ui_clear(struct ui address_to ui)
 }
 
 // The picture of a whole window, width by height, its rows pitch pixels apart, cleared to the glass.
+// A picture begins whole: the band a repaint left on the ui (settings' last partial paint) is not the next picture's, and a
+// menu opened from that ui would draw only the band's rows (no labels elsewhere).
 static fn ui_begin(struct ui address_to ui, unsigned int address_to pixels, unsigned long pitch, int width, int height)
 {
         ui->pixels = pixels;
@@ -332,6 +334,7 @@ static fn ui_begin(struct ui address_to ui, unsigned int address_to pixels, unsi
         ui->height = height;
         ui->top = 0;
         ui->bottom = height;
+        ui->band_top = ui->band_bottom = 0;
         ui_clear(ui);
 }
 
@@ -5814,6 +5817,7 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 #define UI_MENU_MARGIN 8
 #define UI_MENU_RADIUS 6
 #define UI_MENU_DEFAULTS 1 // the kit has these menus' one set of defaults (test/checks.c's menu_defaults_check)
+#define UI_MENU_RIPPLE 1   // an item's press ripple is drawn in its own full-width rect (checks.c's click check)
 
 struct ui_menu_sizes
 {
@@ -5842,6 +5846,9 @@ struct ui_popmenu
         int count, hot, top, rows_shown;
         b32 touch;
         struct ui_press press;       // a press on an item: its target is the item it went down on, -1 none
+        struct ui_ripple ripple;     // the press's ripple, drawn in the item's own rect (ripple_at), and whether it is moving
+        int ripple_at;
+        b32 moving;
         int width, height;
         struct ui_scroll scroll;     // the kit's bar: its track down the right, its scroll the top item's offset (in pixels)
         char typed[16];
@@ -5961,14 +5968,32 @@ static fn ui_popmenu_sync(const struct ui address_to ui, struct ui_popmenu addre
                 m->top = at;
 }
 
-// A highlight of a row: the kit's layer, rounded at the menu's corner, in the colour given.
-static fn ui_popmenu_lit(struct ui address_to ui, const struct ui_popmenu address_to m, int y, unsigned int colour)
+/*
+        An item's rect: the whole width of the menu, its row, square. It is the one element an item has: its hover (the hot item,
+        a press's too) is that rect in the selection's layer, and its press ripple is drawn inside it.
+*/
+static void ui_popmenu_rect(const struct ui address_to ui, const struct ui_popmenu address_to m, int y, struct ui_box address_to rect)
 {
-        struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
-        struct ui_box lit = ui_box_of(ui, ui_q(UI_MENU_PAD), ui_q(y * 100 / ui->scale), ui_q((m->width - 2 * UI_MENU_PAD * ui->scale / 100) * 100 / ui->scale),
-                                      ui_q(sizes.row * 100 / ui->scale), ui_q(sizes.radius * 100 / ui->scale));
+        int row = ui_popmenu_row(ui, m);
 
-        ui_kit_fill(ui, &lit, colour, null);
+        rect->x0 = 0, rect->y0 = y * 256, rect->x1 = m->width * 256, rect->y1 = (y + row) * 256;
+        rect->rx = rect->ry = 0;
+}
+
+// The press's ripple inside the item's rect (its clock is the kit's): the kit's ripple, drawn as the controls' are, cut to the rect.
+static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_to m, int y)
+{
+        struct ui_box rect, dot;
+        b64 cx, cy, radius, opacity;
+
+        ui_popmenu_rect(ui, m, y, &rect);
+        if (!ui_ripple_at(&m->ripple, ui_kit.now, &cx, &cy, &radius, &opacity))
+                return;
+        m->moving = 1;
+        dot.x0 = (b32)(((cx - radius) * ui->scale / 100) >> 22), dot.x1 = (b32)(((cx + radius) * ui->scale / 100) >> 22);
+        dot.y0 = y * 256 + (b32)(((cy - radius) * ui->scale / 100) >> 22), dot.y1 = y * 256 + (b32)(((cy + radius) * ui->scale / 100) >> 22);
+        dot.rx = dot.ry = (b32)((radius * ui->scale / 100) >> 22);
+        ui_kit_fill(ui, &dot, ui_mix(ui_role(UI_ON_SURFACE), (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), &rect);
 }
 
 static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
@@ -5977,6 +6002,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
         int y = sizes.pad;
 
         m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
+        m->moving = 0;
         for (int at = m->top; at < m->count && y < m->height - sizes.pad; at++)
         {
                 const struct ui_menu_item address_to item = &m->items[at];
@@ -5993,10 +6019,12 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         y += ui_popmenu_tall(ui, m, at);
                         continue;
                 }
-                if (ui_popmenu_choosable(m, at) && ui_pressed(&m->press, at))
-                        ui_popmenu_lit(ui, m, y, ui_mix(ui_role(UI_ON_SURFACE), 10, 0));
+                // The press's ripple first, cut to the rect (a clip writes what it does not cover, so the rect is laid over it after);
+                // then the hover rect, the one element the item has.
+                if (at == m->ripple_at)
+                        ui_popmenu_ripple(ui, m, y);
                 if (ui_popmenu_choosable(m, at) && at == m->hot)
-                        ui_popmenu_lit(ui, m, y, ui_well(ui, UI_SELECTION, 40));
+                        ui_fill(ui, 0, y, m->width, ui_popmenu_row(ui, m), ui_well(ui, UI_SELECTION, 40));
                 ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
                 if (item->flags & UI_MENU_HEADER)
                         ui_kit_text(ui, (UI_MENU_PAD + 12) * ui->scale / 100, baseline, shown, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
@@ -6167,12 +6195,21 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                                 return UI_MENU_NOTHING;
                         ui_press_begin(&m->press, x, y, at, m->touch);
                         m->hot = at;
+                        if (ui_popmenu_choosable(m, at))
+                        {
+                                int top = ui_menu_sizes(ui, m->touch).pad + ui_popmenu_offset(ui, m, at);
+
+                                ui_ripple_go(&m->ripple, ui_qdiv(ui_q(x), ui_q(ui->scale) / 100), ui_qdiv(ui_q(y - top), ui_q(ui->scale) / 100),
+                                             ui_qdiv(ui_q(m->width), ui_q(ui->scale) / 100), ui_qdiv(ui_q(ui_popmenu_row(ui, m)), ui_q(ui->scale) / 100), 0);
+                                m->ripple_at = at;
+                        }
                         return UI_MENU_NOTHING;
                 }
                 if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, false))
                         return UI_MENU_NOTHING;
                 // The release chooses an item only where its press went down (the kit's press: a cancel, or no press, is none).
                 clicked = ui_press_end(&m->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                ui_ripple_exit(&m->ripple, ui_kit.now);
                 if (clicked < 0 || at != clicked || !ui_popmenu_choosable(m, at))
                         return UI_MENU_NOTHING;
                 return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
@@ -6280,6 +6317,7 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         p->menu.touch = touch;
         p->menu.hot = -1;
         memory_zero(&p->menu.press, sizeof(p->menu.press));
+        p->menu.ripple.live = 0, p->menu.ripple_at = -1, p->menu.moving = 0;
         p->menu.top = 0;
         windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
         ui_popmenu_size(&p->ui, &p->menu, screen_h);
@@ -6340,6 +6378,8 @@ static int ui_popup_pump(struct ui_popup address_to p)
                 if (p->menu.hot != hot)
                         ui_popup_present(p);
         }
+        if (p->menu.moving && answer == UI_MENU_NOTHING)
+                ui_popup_present(p);
         if (p->own.table->state[p->own.row] & WINDOW_CLOSING)
                 answer = UI_MENU_GONE;
         if (answer != UI_MENU_NOTHING)
@@ -7672,6 +7712,9 @@ static int ui_app_run(struct ui_app address_to app)
 
                         if (chosen != UI_MENU_NOTHING && app->chose)
                                 app->chose(chosen);
+                        // A menu's ripple is moving: its next picture is due a display period on.
+                        if (app->popup->open && app->popup->menu.moving)
+                                timeout = 16666667;
                 }
 
                 if (table->state[row] & WINDOW_CLOSING)
