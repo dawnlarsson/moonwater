@@ -89,6 +89,16 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 // radius in device pixels, which is what the corners' scratch is made for. (The panel's height is in taskbar.h.)
 #define COMPOSITOR_RADIUS 8
 #define COMPOSITOR_LINE 1
+/*
+        The snap's look, in one place. A snap preview is the selection's colour at COMPOSITOR_SNAP_PERCENT (more on a light
+        wallpaper, up to COMPOSITOR_SNAP_PERCENT_MOST), its colour deepened till its edge reads COMPOSITOR_SNAP_READ
+        (compositor_snap_ink; ui_contrast's hundredths, so 300 is 3 to 1). A tile, a thumbnail and a grid tile have the
+        window's line and corners, and their fades run COMPOSITOR_SNAP_FADE_NS, the same time both ways.
+*/
+#define COMPOSITOR_SNAP_PERCENT 40
+#define COMPOSITOR_SNAP_PERCENT_MOST 60
+#define COMPOSITOR_SNAP_READ 300
+#define COMPOSITOR_SNAP_FADE_NS (120 * UI_MS)
 // The top of a window that is a titlebar with nothing drawn -- a press there takes the window whatever is
 // under it -- and its close button, a disc that far in from the window's top right, in logical pixels.
 #define COMPOSITOR_GRAB 24
@@ -106,6 +116,7 @@ static struct taskbar_view compositor_taskbar_view(void);
 static unsigned int compositor_line_lit(void); // the lit line of the window with the keys, the theme's (compositor_theme_read)
 static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: a line without the keys, the close button, a tab unlit
 static unsigned int compositor_ink_selection(void); // the chrome's selection, 0xaarrggbb: the snap preview's tint
+static unsigned int compositor_snap_ink(void); // the snap's tint, 0xaarrggbb: the selection at COMPOSITOR_SNAP_ALPHA, read on the wallpaper
 static void compositor_preview(int row); // the snap preview of the drag of row (none clears it), from the pointer
 static unsigned int compositor_tab_target(b32 lit); // what a tab's glass is tinted toward, the theme's
 
@@ -3588,7 +3599,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         {
                 frame->preview[0] = compositor.preview[0], frame->preview[1] = compositor.preview[1];
                 frame->preview[2] = compositor.preview[2], frame->preview[3] = compositor.preview[3];
-                frame->preview_ink = compositor_ink_selection();
+                frame->preview_ink = compositor_snap_ink();
         }
         if (row == compositor.mark_row && compositor.mark[2] > 0)
         {
@@ -7351,10 +7362,45 @@ static unsigned int compositor_ink_shadow(void)
         return compositor_chrome_now()->roles.role[UI_SHADOW] & 0xffffffu;
 }
 
-// The kit's selection is the bright accent at 28%, so its alpha is the snap preview's tint as the kit draws it.
+// The kit's selection is the bright accent at 28%: its colour is the snap's, its alpha is not (compositor_snap_ink).
 static unsigned int compositor_ink_selection(void)
 {
         return compositor_chrome_now()->roles.role[UI_SELECTION];
+}
+
+/*
+        The snap's tint, read on the wallpaper it is over. The selection's colour at COMPOSITOR_SNAP_PERCENT is kept while its
+        edge reads COMPOSITOR_SNAP_READ against the wallpaper (the dark wallpaper: white at 40 percent is 3.8 to 1). Where it
+        does not, the colour is mixed a step at a time toward black or white, whichever stands out more from the wallpaper,
+        and if no colour reads at that percent the tint is made more opaque, 10 percent at a time to
+        COMPOSITOR_SNAP_PERCENT_MOST (a light wallpaper: the light theme's grey at 40 percent is 2.0 to 1 at best; at 50 it
+        is 3.0 in the colour 262628). Made once for each wallpaper and selection.
+*/
+static unsigned int compositor_snap_ink(void)
+{
+        static unsigned int made_ground, made_selection, made_ink;
+        unsigned int ground = compositor_ground | 0xff000000u, selection = compositor_ink_selection() | 0xff000000u;
+        unsigned int pole, ink = 0;
+
+        if (made_ink && made_ground == ground && made_selection == selection)
+                return made_ink;
+        pole = ui_contrast(0xff000000u, ground) >= ui_contrast(0xffffffffu, ground) ? 0xff000000u : 0xffffffffu;
+        for (unsigned int percent = COMPOSITOR_SNAP_PERCENT; percent <= COMPOSITOR_SNAP_PERCENT_MOST && !ink; percent += 10)
+        {
+                unsigned int at = selection;
+
+                for (int step = 0; step <= 48 && !ink; step++)
+                {
+                        if (ui_contrast(ui_mix(at, percent, ground), ground) >= COMPOSITOR_SNAP_READ)
+                                ink = (at & 0xffffffu) | (percent * 255 + 50) / 100 << 24;
+                        else
+                                at = ui_mix(at, 95, pole);
+                }
+        }
+        if (!ink)
+                ink = (selection & 0xffffffu) | COMPOSITOR_SNAP_PERCENT_MOST * 255 / 100 << 24;
+        made_ground = ground, made_selection = selection, made_ink = ink;
+        return ink;
 }
 
 // The colour a tab's glass is tinted toward: the theme's surface, or its primary for the tab of the window with the keys.
@@ -8745,7 +8791,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                 tint->scale = compositor.scale;
                 tint->preview[0] = rect[0] - (int)ring, tint->preview[1] = rect[1] - (int)ring;
                 tint->preview[2] = rect[2] + 2 * (int)ring, tint->preview[3] = rect[3] + 2 * (int)ring;
-                tint->preview_ink = compositor_ink_selection();
+                tint->preview_ink = compositor_snap_ink();
                 compositor_frame_of(row, picture);
                 picture->x = rect[0], picture->y = rect[1];
                 picture->width = rect[2], picture->height = rect[3];
@@ -8783,7 +8829,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                         box[2] = part[2] * tile_box[2] / screen[2];
                         box[3] = part[3] * tile_box[3] / screen[3];
                         taken = (compositor_region_cells(how) & compositor_occupied(compositor.drag, compositor.grid_screen)) != 0;
-                        grid_ink = taken ? 0x80000000u : tile == compositor.grid_hover ? compositor_ink_selection() : 0x40ffffffu;
+                        grid_ink = taken ? 0x80000000u : tile == compositor.grid_hover ? compositor_snap_ink() : 0x40ffffffu;
                         memory_zero(&frames[at + added], sizeof(frames[0]));
                         frames[at + added].scale = compositor.scale;
                         memory_copy(frames[at + added].preview, box, sizeof(box));

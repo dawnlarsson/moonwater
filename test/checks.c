@@ -118280,6 +118280,49 @@ static void check_compositor_preview(void)
 }
 
 /*
+        The snap's tint reads on the wallpaper it is over, on both themes: its edge, the tint composed over the wallpaper,
+        against the wallpaper itself is COMPOSITOR_SNAP_READ or more, on the dark wallpaper the default desktop has and on
+        two light ones, with the dark theme and the light one (the standard white accent on each).
+*/
+static unsigned int address_to layout_table_map(int side);
+
+static void check_compositor_snap_tint(void)
+{
+    static const unsigned int grounds[3] = {0x1e1e1eu, 0xf7f7f8u, 0xe4e4e7u};
+    unsigned int ground_was = compositor_ground, least = ~0u;
+    int every = 1;
+
+    if (!layout_table_map(256))
+    {
+        check("snap tint: the table is mapped", false);
+        return;
+    }
+    for (int theme = 0; theme < 2; theme++)
+    {
+        compositor.table->themed = 1, compositor.table->theme = theme ? UI_THEME_DARK : UI_THEME_LIGHT;
+        compositor.table->accent = UI_ACCENT_STANDARD;
+        for (int at = 0; at < 3; at++)
+        {
+            unsigned int ground = grounds[at], ink, edge, read;
+
+            compositor_ground = ground;
+            ink = compositor_snap_ink();
+            edge = compositor_mix(ground, ink & 0xffffffu, ink >> 24) | 0xff000000u;
+            read = ui_contrast(edge, ground | 0xff000000u);
+            string_format(log, "  snap tint: %s theme, wallpaper %p: tint %p at %p percent, edge %p hundredths\n",
+                          theme ? "dark" : "light", (positive)ground, (positive)(ink & 0xffffffu),
+                          (positive)((ink >> 24) * 100 / 255), (positive)read);
+            if (read < least)
+                least = read;
+            every = every && read >= COMPOSITOR_SNAP_READ;
+        }
+    }
+    compositor_ground = ground_was;
+    check("snap tint: its edge reads COMPOSITOR_SNAP_READ or more on both themes, on the dark wallpaper and on two light ones",
+          every && least >= COMPOSITOR_SNAP_READ);
+}
+
+/*
         A snap preview held over its target costs what the drag costs. Over the window dragged the tint is made only where
         the window does not cover it: its contents are copied over the tint, so those pixels are not tinted at all, and the
         rest are the pixels the whole tint and redraw made (checked against that reference, over a rounded window with a
@@ -137452,6 +137495,7 @@ b32 main()
         check_compositor_held();
         check_compositor_screens();
         check_compositor_preview();
+        check_compositor_snap_tint();
         check_compositor_preview_held();
         check_compositor_shared();
         check_compositor_cycle();
