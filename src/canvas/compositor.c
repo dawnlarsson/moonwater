@@ -4105,11 +4105,11 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 /*
         Glass windows: a window whose program asked for it (WINDOW_GLASS) is
         what is under it, frosted as the tabs' glass is, made more vivid,
-        and tinted toward one side of lightness for the whole window -- the
-        side its mean is on, held until the mean is well over on the other,
-        so a backdrop near the middle does not flicker -- and every pixel
-        kept on that side, so an ink that stands out from the ground the
-        program is told stands out everywhere. The program's picture,
+        and lifted from what is behind it toward mid grey (COMPOSITOR_GLASS_LIFT):
+        lighter over a dark backdrop, darker over a bright one, so the glass
+        always separates from it. Every pixel is then kept on the theme's side
+        of lightness (the caps below), so an ink that stands out from the
+        ground the program is told stands out everywhere. The program's picture,
         premultiplied ARGB, lies over that, and the grain under it.
 
         What is kept is the small picture: the blurred blocks under the
@@ -4122,25 +4122,26 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
         glass window over another sees it as it is now, and before the tabs'
         glass, which sees them both.
 */
-#define COMPOSITOR_GLASS_TINT 96      // how far toward its side a glass window's tint goes, in 256ths
+#define COMPOSITOR_GLASS_LIFT 96        // how far toward mid grey a glass window lifts what is behind it, in 256ths: lighter over dark, darker over light
+#define COMPOSITOR_GLASS_PIVOT 0x808080u // the grey the lift is toward, so a dark backdrop comes up and a bright one comes down
 #define COMPOSITOR_GLASS_DARKEST 0x5c // dark glass: no colour of a pixel brighter
 #define COMPOSITOR_GLASS_LIGHTEST 0xb4 // light glass: none dimmer
 #define COMPOSITOR_GLASS_UNSIDED 2u
 #define COMPOSITOR_GLASS_MARGIN 3 // the blocks kept round a window: what the rise reads past its edge
 
 // The tint of a pixel already made more vivid (compositor_vivid), so a caller holding that value does not boost it again.
-// The tint of count boosted pixels into into, for a window of the side given: memory_tint_u32 with the glass's mix
-// toward the side's colour, and the brightest capped (dark glass) or the dimmest raised (light glass).
+// The tint of count boosted pixels into into, for a window of the side given: memory_tint_u32 with the glass's lift
+// toward mid grey, and the brightest capped (dark glass) or the dimmest raised (light glass).
 static void compositor_glass_tone_span(unsigned int *into, const unsigned int *from, positive count, unsigned int side)
 {
-        memory_tint_u32(into, from, count, side ? 0xffffffu : 0, COMPOSITOR_GLASS_TINT, side ? 255 : COMPOSITOR_GLASS_DARKEST,
+        memory_tint_u32(into, from, count, COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT, side ? 255 : COMPOSITOR_GLASS_DARKEST,
                         side ? COMPOSITOR_GLASS_LIGHTEST : 0);
 }
 
 // One pixel stays in C, as compositor_vivid does: the library call is the loss at this length (see there).
 static unsigned int compositor_glass_tone(unsigned int boosted, unsigned int side)
 {
-        unsigned int pixel = window_mix(boosted, side ? 0xffffffu : 0, COMPOSITOR_GLASS_TINT);
+        unsigned int pixel = window_mix(boosted, COMPOSITOR_GLASS_PIVOT, COMPOSITOR_GLASS_LIFT);
         unsigned int r = pixel >> 16 & 255, g = pixel >> 8 & 255, b = pixel & 255;
         unsigned int most = r > g ? r : g, least = r < g ? r : g;
 
