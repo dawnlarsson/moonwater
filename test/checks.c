@@ -118433,11 +118433,12 @@ static void check_compositor_preview_held(void)
         check("preview held: the window dragged off every target shows none, and the pointer's stop is idle",
               compositor.preview[2] == 0 && compositor.damages == 0);
 
-        // The pointer moves onto the top-left quarter: that quarter is damaged, and nothing else is.
-        compositor.pointer_x = 2, compositor.pointer_y = 2;
-        compositor.drag_x = 2 - 60, compositor.drag_y = 2 - 50;
+        // The pointer moves onto the left half: that half is damaged, and nothing else is. (A target on the top edge
+        // brings the grid up, which is damaged with it; that is checked with the grid.)
+        compositor.pointer_x = 2, compositor.pointer_y = 200;
+        compositor.drag_x = 2 - 60, compositor.drag_y = 200 - 50;
         compositor_preview(2);
-        target[0] = 0, target[1] = 0, target[2] = HELD_OUT_W / 2, target[3] = HELD_OUT_H / 2;
+        target[0] = 0, target[1] = 0, target[2] = HELD_OUT_W / 2, target[3] = HELD_OUT_H;
         check("preview held: a target entered is damaged as its own rectangle, and no other",
               compositor.damages == 1 && compositor.damage[0][0] == target[0] && compositor.damage[0][1] == target[1] &&
                   compositor.damage[0][2] == target[0] + target[2] && compositor.damage[0][3] == target[1] + target[3] &&
@@ -121425,7 +121426,7 @@ static void check_compositor_seam(void)
         }
 
         seam_reset(start_x, start_y);
-        seam_drop(start_x, start_y, layout ? 100 : 500, 3);
+        seam_drop(start_x, start_y, layout ? 40 : 360, 3);
         compositor_screen_part(compositor.screen[1], COMPOSITOR_MAXIMIZED, part);
         check("seam: onto the far top edge of the second display it is maximized there",
               compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor_screen_of(1) == 1 && compositor.x[1] == part[0] && compositor.y[1] == part[1]);
@@ -121453,6 +121454,139 @@ static void check_compositor_seam(void)
         seam_drop(start_x, start_y, layout ? 258 : SCREENS_A_W - 2, 100);
         check("seam: a drop on the edge where the displays meet arranges nothing", compositor.arranged[1] == COMPOSITOR_FLOATING);
     }
+}
+
+/*
+        The snap assist: a drop on a snap target leaves the windows floating on its screen as thumbnails in the space it leaves,
+        inside that space and not over the window that took the region; a click on one places that window in the tile it is
+        over, and a click elsewhere or Escape takes them away. While a drag is over a target they show before the drop.
+        The top edge's grid: its tiles are along the top band, the grid stays up while the pointer is in its row, a drop on a
+        region takes it, and a region a window already fills is taken and is no target.
+*/
+static void assist_fresh(void)
+{
+    layout_setup(256, 1);
+    layout_show(1, 60, 60, 120, 80);
+    layout_show(2, 150, 150, 60, 60);
+    layout_show(3, 10, 10, 50, 50);
+    compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stack[2] = 3, compositor.stacked = 3;
+}
+
+static int assist_row_at(int row)
+{
+    for (int at = 0; at < compositor.assist_count; at++)
+        if (compositor.assist_rows[at] == (unsigned int)row)
+            return at;
+    return -1;
+}
+
+static void check_compositor_assist(void)
+{
+    int at, inside = 1;
+
+    if (!layout_table_map(256))
+    {
+        check("assist: the table is mapped", false);
+        return;
+    }
+
+    /* A drop on the left edge leaves the right half to the two floating windows, as thumbnails in it. */
+    assist_fresh();
+    layout_drop(1, 20, 4, 0, 100);
+    for (at = 0; at < compositor.assist_count; at++)
+    {
+        const int *r = compositor.assist_rect[at];
+
+        inside = inside && r[0] >= 128 && r[0] + r[2] <= 256 && r[1] >= 0 && r[1] + r[3] <= 256 && r[2] > 0 && r[3] > 0;
+    }
+    check("assist: a drop on the left edge arms the assist with the other two floating windows as thumbnails",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.assist_armed && compositor.assist_on && compositor.assist_count == 2 &&
+              assist_row_at(3) == 0 && assist_row_at(2) == 1);
+    check("assist: each thumbnail is inside the space the drop left, and not over the window that took the left half", inside);
+
+    /* Presented, a thumbnail has its tint ring on the desktop round it: the pixel just outside its picture is not the ground. */
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    at = assist_row_at(2);
+    check("assist: presented, a thumbnail has its tint ring on the desktop round it",
+          compositor.assist_count == 2 &&
+              (layout_pixels[(compositor.assist_rect[at][1] - 1) * 256 + compositor.assist_rect[at][0] - 1] & 0xffffffu) !=
+                  (compositor_ground & 0xffffffu));
+
+    /* A click on a thumbnail places its window in the space over it; the assist is gone. */
+    at = assist_row_at(2);
+    screens_hand(compositor.assist_rect[at][0] + 2, compositor.assist_rect[at][1] + 2, 0);
+    compositor_press(COMPOSITOR_BTN_LEFT, 1);
+    check("assist: a click on a thumbnail places that window in the space it is over, the right half",
+          compositor.arranged[2] == COMPOSITOR_RIGHT && compositor.x[2] == 128 && compositor.y[2] == 0 &&
+              compositor.table->want_width[2] == 128 && !compositor.assist_armed && !compositor.assist_on);
+    compositor_press(COMPOSITOR_BTN_LEFT, 0);
+
+    /* Over the target while the drag is held, the assist shows before the drop, and a drop elsewhere arranges nothing. */
+    assist_fresh();
+    screens_hand(80, 64, 1);
+    screens_hand(0, 100, 0);
+    check("assist: a drag held over the left edge shows the thumbnails before the drop, not yet armed",
+          compositor.assist_on && !compositor.assist_armed && compositor.assist_count == 2 && compositor.preview[2] == 128);
+    screens_hand(0, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+
+    /* A click elsewhere takes the assist away, and the press is still the window's own. */
+    assist_fresh();
+    layout_drop(1, 20, 4, 0, 100);
+    compositor_press(COMPOSITOR_BTN_LEFT, 1);
+    check("assist: a click elsewhere takes the thumbnails away and places nothing",
+          !compositor.assist_armed && !compositor.assist_on && compositor.assist_count == 0 && compositor.arranged[2] == COMPOSITOR_FLOATING);
+    compositor_press(COMPOSITOR_BTN_LEFT, 0);
+
+    /* Escape takes it away. */
+    assist_fresh();
+    layout_drop(1, 20, 4, 0, 100);
+    compositor_key(0, CK_KEY_ESC, 1, 0);
+    check("assist: Escape takes the thumbnails away and places nothing",
+          !compositor.assist_armed && !compositor.assist_on && compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.arranged[3] == COMPOSITOR_FLOATING);
+
+    /* A drop with nothing else floating leaves no assist. */
+    assist_fresh();
+    compositor_float(2), compositor_float(3);
+    compositor.showing[2] = compositor.showing[3] = 0;
+    layout_drop(1, 20, 4, 0, 100);
+    check("assist: a drop with no other window floating arms nothing", !compositor.assist_armed && compositor.assist_count == 0);
+
+    /* The grid: the top band brings it up, and the pointer in its row keeps it. */
+    assist_fresh();
+    screens_hand(80, 64, 1);
+    screens_hand(127, 4, 0);
+    check("grid: the pointer at the top edge brings the grid up on that screen, hovering the top left quarter",
+          compositor.grid_on && compositor.grid_screen == 0 && compositor.grid_hover == 3);
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    check("grid: presented, the top left tile's mini screen is tinted where the quarter is",
+          (layout_pixels[5 * 256 + 117] & 0xffffffu) != (compositor_ground & 0xffffffu));
+    screens_hand(127, 15, 0);
+    check("grid: the pointer moved down into the row of tiles keeps it up", compositor.grid_on && compositor.grid_hover == 3);
+    screens_hand(127, 60, 0);
+    check("grid: the pointer moved down out of the row takes it away", !compositor.grid_on);
+    screens_hand(127, 4, 0);
+    screens_hand(127, 4, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("grid: a drop on the top left tile takes the top left quarter",
+          compositor.arranged[1] == COMPOSITOR_TOP_LEFT && compositor.x[1] == 0 && compositor.y[1] == 0 &&
+              compositor.table->want_width[1] == 128 && compositor.table->want_height[1] == 128 && !compositor.grid_on);
+
+    /* A region a window fills is taken: the top band's full tile is no target while the top left is filled, and the right
+       half is still one. */
+    assist_fresh();
+    layout_drop(1, 20, 4, 0, 0);
+    compositor.grid_on = 1, compositor.grid_screen = 0;
+    {
+        int box[4] = {0, 0, 50, 50}, screen;
+
+        check("grid: a region a window already fills is taken and is no target, and a free one is",
+              compositor_target(2, 40, 4, box, &screen) == COMPOSITOR_FLOATING &&
+                  compositor_target(2, 98, 4, box, &screen) == COMPOSITOR_RIGHT);
+    }
+    compositor.grid_on = 0;
 }
 
 static void check_compositor_wheel(void)
@@ -137188,6 +137322,7 @@ b32 main()
         check_compositor_layout();
         check_compositor_push();
         check_compositor_seam();
+        check_compositor_assist();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();

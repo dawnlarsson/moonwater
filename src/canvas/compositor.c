@@ -843,7 +843,11 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_BOTTOM_LEFT 8
 #define COMPOSITOR_BOTTOM_RIGHT 9
 // The windows, and a tab for each window and a tray for each band (`taskbar display all` is one on every screen).
-#define COMPOSITOR_FRAMES (2 * WINDOWS + 1 + WINDOWS_OUTPUTS)
+#define COMPOSITOR_ASSIST_MAX 8
+#define COMPOSITOR_GRID_TILES 7
+#define COMPOSITOR_CELLS 15u // the four quarters of a screen, a bit each (compositor_tile_cells)
+#define COMPOSITOR_OVERLAYS 32 // the snap assist's thumbnails and rings, and the grid's tints (compositor_overlays)
+#define COMPOSITOR_FRAMES (2 * WINDOWS + 1 + WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS)
 
 /*
         The scene: inside the target's damage, each window where nothing
@@ -1428,6 +1432,7 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
 #define CK_KEY_LEFT 105
 #define CK_KEY_RIGHT 106
 #define CK_KEY_DOWN 108
+#define CK_KEY_ESC 1
 #define CK_ACUTE 0xB4u
 #define CK_GRAVE '`'
 #define CK_DIAERESIS 0xA8u
@@ -3000,6 +3005,14 @@ static struct
         unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)
         int drag_x, drag_y;
         int drag_moved; // the window being moved has moved: only then is where it is let go an arrangement
+        // The snap assist (compositor_assist_refresh): up over a drag's target, or armed after its drop until a click or Escape;
+        // the row snapped, the region it took and its screen; the thumbnails, each its row, its tile and its rectangle.
+        int assist_on, assist_armed, assist_row, assist_screen, assist_count;
+        unsigned int assist_how, assist_rows[COMPOSITOR_ASSIST_MAX], assist_zone[COMPOSITOR_ASSIST_MAX];
+        int assist_rect[COMPOSITOR_ASSIST_MAX][4];
+        // The top edge's grid (compositor_grid_at): up on a screen, and the tile the pointer is over.
+        int grid_on, grid_screen;
+        unsigned int grid_hover;
         // The window being resized, how large it was and where the hand took hold.
         int resize_w, resize_h, press_x, press_y;
         // A shared edge's resize (compositor_shared_begin): the window on its other side (COMPOSITOR_NONE for a resize of
@@ -3322,6 +3335,10 @@ static void compositor_glass_touch(const int *rectangle)
 
 static int compositor_visible(int row);
 static void compositor_frame_of(int row, struct compositor_frame *frame);
+static unsigned int compositor_snap(int x, int y, const int *box, int *screen);
+static void compositor_assist_refresh(void);
+static int compositor_overlays_up(void);
+static unsigned int compositor_overlays(struct compositor_frame *frames, unsigned int at);
 
 /*
         A change that touches a window's close button touches all of it: the X
@@ -5722,6 +5739,19 @@ static void compositor_present(void)
                         count += compositor_panel_tabs(&band, &frames[count]);
                 }
                 compositor.band_at = 0;
+        }
+
+        // The snap assist and the grid, over the windows and the tabs: a thumbnail's picture is drawn again each present.
+        if (compositor_overlays_up())
+        {
+                if (compositor.assist_armed)
+                {
+                        compositor_assist_refresh();
+                        for (int thumb = 0; thumb < compositor.assist_count; thumb++)
+                                compositor_damage(compositor.assist_rect[thumb][0], compositor.assist_rect[thumb][1],
+                                                  compositor.assist_rect[thumb][2], compositor.assist_rect[thumb][3]);
+                }
+                count += compositor_overlays(frames, count);
         }
 
         // The close buttons' means, now the glass and the band are made: where a change reaches a box.
@@ -8459,6 +8489,352 @@ static void compositor_tile_others(int row, unsigned int how, int screen)
         }
 }
 
+/*
+        The snap assist and the top edge's grid. A drag over a snap target shows the windows floating on its screen as
+        thumbnails in the space the target leaves (compositor_assist_refresh). A drop there keeps them up, armed, until a
+        click on one of them places that window in the tile it is over (compositor_assist_at), or a click elsewhere, or Escape,
+        takes them away. A drag at the top edge of a screen shows the grid of regions along it (compositor_grid_at): a drop on a
+        region takes it, and a region a window already fills is shown taken and is no target (compositor_target).
+*/
+
+// The grid's regions, in the order of its tiles, left to right.
+static const unsigned int compositor_grid_regions[COMPOSITOR_GRID_TILES] = {COMPOSITOR_MAXIMIZED, COMPOSITOR_LEFT, COMPOSITOR_RIGHT,
+                                                                            COMPOSITOR_TOP_LEFT, COMPOSITOR_TOP_RIGHT,
+                                                                            COMPOSITOR_BOTTOM_LEFT, COMPOSITOR_BOTTOM_RIGHT};
+
+// The cells a region fills: a tile's, or all four for the whole screen.
+static unsigned int compositor_region_cells(unsigned int how)
+{
+        return how == COMPOSITOR_MAXIMIZED ? COMPOSITOR_CELLS : compositor_tile_cells(how);
+}
+
+// The cells the tiles of the other windows on a screen fill, row's own left out.
+static unsigned int compositor_occupied(int row, int screen)
+{
+        unsigned int cells = 0;
+
+        for (int other = 0; other < WINDOWS; other++)
+                if (other != row && compositor.showing[other] && compositor_screen_of(other) == screen)
+                        cells |= compositor_tile_cells(compositor.arranged[other]);
+        return cells;
+}
+
+/*
+        The grid's tiles on a screen: seven mini screens in a row along its top edge, each a tenth of the screen's width and
+        as tall as the screen, with a gap between them, the row centred. Tile at is the region compositor_grid_regions gives it.
+*/
+static void compositor_grid_tile(const int *screen, unsigned int at, int *tile)
+{
+        int gap = 4 * compositor.scale, width = screen[2] / 10, row = COMPOSITOR_GRID_TILES * width + (COMPOSITOR_GRID_TILES - 1) * gap;
+
+        tile[0] = screen[0] + (screen[2] - row) / 2 + (int)at * (width + gap);
+        tile[1] = screen[1];
+        tile[2] = width;
+        tile[3] = width > 0 ? screen[3] * width / screen[2] : 0;
+}
+
+// Whether a pointer at x, y on screen is in the top band that brings the grid up.
+static int compositor_grid_band(const int *screen, int x, int y)
+{
+        return x >= screen[0] && x < screen[0] + screen[2] && y >= screen[1] && y - screen[1] < COMPOSITOR_SNAP * compositor.scale;
+}
+
+// Whether a pointer at x, y on screen is in the row of the grid's tiles, which stays up once it is (compositor_overlays_drag).
+static int compositor_grid_panel(const int *screen, int x, int y)
+{
+        int first[4], last[4];
+
+        compositor_grid_tile(screen, 0, first);
+        compositor_grid_tile(screen, COMPOSITOR_GRID_TILES - 1, last);
+        return x >= first[0] && x < last[0] + last[2] && y >= screen[1] && y - screen[1] < first[3];
+}
+
+// The tile of the grid under x, y on screen, or COMPOSITOR_GRID_TILES for none.
+static unsigned int compositor_grid_under(const int *screen, int x, int y)
+{
+        int tile[4];
+
+        for (unsigned int at = 0; at < COMPOSITOR_GRID_TILES; at++)
+        {
+                compositor_grid_tile(screen, at, tile);
+                if (x >= tile[0] && x < tile[0] + tile[2] && y >= tile[1] && y < tile[1] + tile[3])
+                        return at;
+        }
+        return COMPOSITOR_GRID_TILES;
+}
+
+// Where a drop of the window row at x, y arranges it: the grid's region under the pointer, which is no target when a window
+// already fills it, or else the snap target of the pointer and the window's edges (compositor_snap).
+static unsigned int compositor_target(int row, int x, int y, const int *box, int *screen)
+{
+        unsigned int count, tile;
+        const int (*screens)[4] = compositor_screens(&count);
+        int at = compositor_screen_at(screens, count, x, y);
+
+        if (at >= 0 && compositor.grid_on && compositor.grid_screen == at && compositor_grid_panel(screens[at], x, y))
+        {
+                tile = compositor_grid_under(screens[at], x, y);
+                if (tile < COMPOSITOR_GRID_TILES)
+                {
+                        unsigned int how = compositor_grid_regions[tile];
+
+                        *screen = at;
+                        return compositor_region_cells(how) & compositor_occupied(row, at) ? COMPOSITOR_FLOATING : how;
+                }
+        }
+        return compositor_snap(x, y, box, screen);
+}
+
+// The tiles a set of free cells is cut into, the larger first: a half where it holds one, then quarters.
+static unsigned int compositor_zones(unsigned int free, unsigned int *zones)
+{
+        static const unsigned int order[] = {COMPOSITOR_LEFT, COMPOSITOR_RIGHT, COMPOSITOR_BOTTOM, COMPOSITOR_TOP_LEFT,
+                                             COMPOSITOR_TOP_RIGHT, COMPOSITOR_BOTTOM_LEFT, COMPOSITOR_BOTTOM_RIGHT};
+        unsigned int count = 0;
+
+        for (unsigned int at = 0; at < array_count(order); at++)
+        {
+                unsigned int cells = compositor_tile_cells(order[at]);
+
+                if ((free & cells) == cells)
+                {
+                        zones[count++] = order[at];
+                        free &= ~cells;
+                }
+        }
+        return count;
+}
+
+// The rectangle of a thumbnail of a w by h window, at place of of in zone: a grid of the cells that many need, each the
+// window's picture as large as its cell takes, centred in it.
+static void compositor_assist_place(const int *zone, unsigned int at, unsigned int of, int w, int h, int *rect)
+{
+        int margin = COMPOSITOR_SNAP * compositor.scale, cols = 1, rows, cell_w, cell_h, fit_w, fit_h;
+
+        while (cols * cols < (int)of)
+                cols++;
+        rows = ((int)of + cols - 1) / cols;
+        cell_w = (zone[2] - 2 * margin) / cols;
+        cell_h = (zone[3] - 2 * margin) / rows;
+        if (cell_w < 1)
+                cell_w = 1;
+        if (cell_h < 1)
+                cell_h = 1;
+        if ((long)w * cell_h > (long)h * cell_w)
+                fit_w = cell_w, fit_h = (int)((long)h * cell_w / w);
+        else
+                fit_h = cell_h, fit_w = (int)((long)w * cell_h / h);
+        rect[0] = zone[0] + margin + (int)(at % (unsigned int)cols) * cell_w + (cell_w - fit_w) / 2;
+        rect[1] = zone[1] + margin + (int)(at / (unsigned int)cols) * cell_h + (cell_h - fit_h) / 2;
+        rect[2] = fit_w;
+        rect[3] = fit_h;
+}
+
+// The snap assist's thumbnails, for the window assist_row arranged as assist_how on assist_screen: the visible windows
+// floating there, most recent first, each in the tile the space the region leaves is cut into, round-robin over the tiles.
+static void compositor_assist_refresh(void)
+{
+        unsigned int count, zones[4], zones_count, free, candidates[COMPOSITOR_ASSIST_MAX], taken[4] = {0, 0, 0, 0};
+        unsigned int found = 0;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        compositor.assist_count = 0;
+        if (!compositor.assist_on || compositor.assist_screen < 0 || (unsigned int)compositor.assist_screen >= count)
+                return;
+        free = COMPOSITOR_CELLS & ~(compositor_region_cells(compositor.assist_how) |
+                                    compositor_occupied(compositor.assist_row, compositor.assist_screen));
+        zones_count = compositor_zones(free, zones);
+        if (!zones_count)
+                return;
+        for (int at = compositor.stacked - 1; at >= 0 && found < COMPOSITOR_ASSIST_MAX; at--)
+        {
+                int row = compositor.stack[at];
+
+                if (row == compositor.assist_row || !compositor_visible(row) || compositor.arranged[row] != COMPOSITOR_FLOATING ||
+                    compositor_screen_of(row) != compositor.assist_screen || !compositor.w[row] || !compositor.h[row])
+                        continue;
+                candidates[found++] = (unsigned int)row;
+        }
+        for (unsigned int at = 0; at < found; at++)
+                taken[at % zones_count]++;
+        for (unsigned int at = 0; at < found; at++)
+        {
+                unsigned int zone = at % zones_count, place = at / zones_count;
+                int part[4];
+                int row = (int)candidates[at];
+
+                compositor_screen_part(screens[compositor.assist_screen], zones[zone], part);
+                compositor_assist_place(part, place, taken[zone], (int)compositor.w[row], (int)compositor.h[row],
+                                        compositor.assist_rect[at]);
+                compositor.assist_rows[at] = candidates[at];
+                compositor.assist_zone[at] = zones[zone];
+        }
+        compositor.assist_count = (int)found;
+}
+
+// The thumbnail under x, y, or -1 for none.
+static int compositor_assist_at(int x, int y)
+{
+        for (int at = 0; at < compositor.assist_count; at++)
+        {
+                const int *rect = compositor.assist_rect[at];
+
+                if (x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3])
+                        return at;
+        }
+        return -1;
+}
+
+// The rectangles the overlays are drawn in now: each thumbnail with its ring, and the grid's row while it is up.
+static int compositor_overlay_boxes(int boxes[COMPOSITOR_ASSIST_MAX + 1][4])
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int n = 0, first[4], last[4], ring = 3 * compositor.scale;
+
+        for (int thumb = 0; compositor.assist_on && thumb < compositor.assist_count; thumb++)
+        {
+                const int *rect = compositor.assist_rect[thumb];
+
+                boxes[n][0] = rect[0] - ring, boxes[n][1] = rect[1] - ring;
+                boxes[n][2] = rect[2] + 2 * ring, boxes[n][3] = rect[3] + 2 * ring;
+                n++;
+        }
+        if (compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
+        {
+                const int *screen = screens[compositor.grid_screen];
+
+                compositor_grid_tile(screen, 0, first);
+                compositor_grid_tile(screen, COMPOSITOR_GRID_TILES - 1, last);
+                boxes[n][0] = first[0], boxes[n][1] = screen[1];
+                boxes[n][2] = last[0] + last[2] - first[0], boxes[n][3] = first[3];
+                n++;
+        }
+        return n;
+}
+
+static void compositor_overlays_damage(void)
+{
+        int boxes[COMPOSITOR_ASSIST_MAX + 1][4];
+        int n = compositor_overlay_boxes(boxes);
+
+        for (int at = 0; at < n; at++)
+                compositor_damage(boxes[at][0], boxes[at][1], boxes[at][2], boxes[at][3]);
+}
+
+// Whether the snap assist or the grid is up: what the frames of a present add (compositor_overlays).
+static int compositor_overlays_up(void)
+{
+        return compositor.assist_on || compositor.grid_on;
+}
+
+// The overlays of a present, from at in the frame list: each thumbnail, its window's picture scaled into its rectangle over a
+// tint ring, then the grid, each tile tinted and each region in it, the taken ones dark. Answers the frames added.
+static unsigned int compositor_overlays(struct compositor_frame *frames, unsigned int at)
+{
+        unsigned int count, added = 0, ring = (unsigned int)(3 * compositor.scale), grid_ink, taken;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        for (int thumb = 0; compositor.assist_on && thumb < compositor.assist_count; thumb++)
+        {
+                const int *rect = compositor.assist_rect[thumb];
+                int row = (int)compositor.assist_rows[thumb];
+                struct compositor_frame *tint = &frames[at + added], *picture = &frames[at + added + 1];
+
+                memory_zero(tint, sizeof(*tint));
+                tint->scale = compositor.scale;
+                tint->preview[0] = rect[0] - (int)ring, tint->preview[1] = rect[1] - (int)ring;
+                tint->preview[2] = rect[2] + 2 * (int)ring, tint->preview[3] = rect[3] + 2 * (int)ring;
+                tint->preview_ink = compositor_ink_selection();
+                compositor_frame_of(row, picture);
+                picture->x = rect[0], picture->y = rect[1];
+                picture->width = rect[2], picture->height = rect[3];
+                picture->source_w = (int)compositor.w[row], picture->source_h = (int)compositor.h[row];
+                picture->radius = picture->line = picture->close = 0;
+                picture->lit = 0;
+                memory_zero(picture->preview, sizeof(picture->preview));
+                memory_zero(picture->mark, sizeof(picture->mark));
+                added += 2;
+        }
+        if (compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
+        {
+                const int *screen = screens[compositor.grid_screen];
+
+                for (unsigned int tile = 0; tile < COMPOSITOR_GRID_TILES; tile++)
+                {
+                        int box[4];
+
+                        compositor_grid_tile(screen, tile, box);
+                        memory_zero(&frames[at + added], sizeof(frames[0]));
+                        frames[at + added].scale = compositor.scale;
+                        memory_copy(frames[at + added].preview, box, sizeof(box));
+                        frames[at + added].preview_ink = 0x28000000u;
+                        added++;
+                }
+                for (unsigned int tile = 0; tile < COMPOSITOR_GRID_TILES; tile++)
+                {
+                        int part[4], tile_box[4], box[4];
+                        unsigned int how = compositor_grid_regions[tile];
+
+                        compositor_grid_tile(screen, tile, tile_box);
+                        compositor_screen_part(screen, how, part);
+                        box[0] = tile_box[0] + (part[0] - screen[0]) * tile_box[2] / screen[2];
+                        box[1] = tile_box[1] + (part[1] - screen[1]) * tile_box[3] / screen[3];
+                        box[2] = part[2] * tile_box[2] / screen[2];
+                        box[3] = part[3] * tile_box[3] / screen[3];
+                        taken = (compositor_region_cells(how) & compositor_occupied(compositor.drag, compositor.grid_screen)) != 0;
+                        grid_ink = taken ? 0x80000000u : tile == compositor.grid_hover ? compositor_ink_selection() : 0x40ffffffu;
+                        memory_zero(&frames[at + added], sizeof(frames[0]));
+                        frames[at + added].scale = compositor.scale;
+                        memory_copy(frames[at + added].preview, box, sizeof(box));
+                        frames[at + added].preview_ink = grid_ink;
+                        added++;
+                }
+        }
+        return added;
+}
+
+// The snap assist and the grid as a drag's pointer is at x, y with its target: the grid is up on the screen the pointer is
+// on at the top edge, and the assist shows over a target (how, on screen), or stays armed (compositor_preview).
+static void compositor_overlays_drag(int row, int x, int y, unsigned int how, int screen)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int at = compositor_screen_at(screens, count, x, y);
+
+        compositor_overlays_damage();
+
+        // Up by the top band, and kept up while the pointer is in its row of tiles, so a drop there can take a region.
+        if (at >= 0 && (compositor_grid_band(screens[at], x, y) ||
+                        (compositor.grid_on && compositor.grid_screen == at && compositor_grid_panel(screens[at], x, y))))
+        {
+                compositor.grid_on = 1;
+                compositor.grid_screen = at;
+                compositor.grid_hover = compositor_grid_under(screens[at], x, y);
+        }
+        else
+                compositor.grid_on = 0;
+        if (how != COMPOSITOR_FLOATING)
+        {
+                compositor.assist_on = 1;
+                compositor.assist_row = row;
+                compositor.assist_how = how;
+                compositor.assist_screen = screen;
+        }
+        else if (!compositor.assist_armed)
+                compositor.assist_on = 0;
+        compositor_assist_refresh();
+        compositor_overlays_damage();
+}
+
+// The snap assist taken away: a click elsewhere, Escape, or a window placed from it.
+static void compositor_assist_close(void)
+{
+        compositor_overlays_damage();
+        compositor.assist_on = compositor.assist_armed = 0;
+        compositor.assist_count = 0;
+}
+
 // All of a screen or half of it (compositor_screen_part): the screen named, or with none (-1) the window's own
 // (compositor_screen_of). A tile leaves the others on the screen their share (compositor_tile_others).
 static void compositor_arrange_on(int row, unsigned int how, int on)
@@ -10076,6 +10452,12 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
         int count, target;
 
+        if (compositor.assist_armed && value && code == CK_KEY_ESC)
+        {
+                compositor_assist_close();
+                return;
+        }
+
         if (bit)
         {
                 if (value)
@@ -10329,9 +10711,15 @@ static void compositor_preview(int row)
         if (row >= 0 && row == compositor.drag && compositor.drag_moved)
         {
                 compositor_box_of(row, box);
-                how = compositor_snap(compositor.pointer_x, compositor.pointer_y, box, &screen);
+                how = compositor_target(row, compositor.pointer_x, compositor.pointer_y, box, &screen);
                 if (how != COMPOSITOR_FLOATING)
                         compositor_screen_part(screens[screen], how, rect);
+                compositor_overlays_drag(row, compositor.pointer_x, compositor.pointer_y, how, screen);
+        }
+        else if (row < 0 && compositor.grid_on)
+        {
+                compositor_overlays_damage();
+                compositor.grid_on = 0;
         }
         if (how == COMPOSITOR_FLOATING)
                 row = COMPOSITOR_NONE;
@@ -10353,8 +10741,15 @@ static void compositor_lit(int row, unsigned int edges, unsigned int held);
 static void compositor_release_as(unsigned int code, int snap, unsigned int flags)
 {
         int grab = compositor.grab, dragged = compositor.drag, to = grab, resized = compositor.resize;
-        unsigned int index = code - COMPOSITOR_BTN_LEFT;
+        unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING;
+        int drop_screen = 0, drop_box[4];
 
+        // Where the window lands is read before the preview and the grid are taken away: the grid's region, or the snap.
+        if (dragged >= 0 && snap && compositor.drag_moved)
+        {
+                compositor_box_of(dragged, drop_box);
+                drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen);
+        }
         // The preview goes with the drag; where the window lands is arranged below from the pointer, as before.
         compositor_preview(COMPOSITOR_NONE);
         compositor.drag = COMPOSITOR_NONE;
@@ -10389,14 +10784,26 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
         if (dragged >= 0 && snap && compositor.drag_moved)
         {
-                int screen, box[4];
-                unsigned int how;
-
-                compositor_box_of(dragged, box);
-                how = compositor_snap(compositor.pointer_x, compositor.pointer_y, box, &screen);
+                unsigned int how = drop_how;
+                int screen = drop_screen;
 
                 if (how != COMPOSITOR_FLOATING)
+                {
                         compositor_arrange_on(dragged, how, screen);
+                        // The others of the screen are offered the space the drop left, until a click or Escape.
+                        compositor.assist_on = compositor.assist_armed = 1;
+                        compositor.assist_row = dragged;
+                        compositor.assist_how = (unsigned int)compositor.arranged[dragged];
+                        compositor.assist_screen = screen;
+                        compositor_assist_refresh();
+                        if (!compositor.assist_count)
+                                compositor_assist_close();
+                }
+        }
+        if (compositor.grid_on)
+        {
+                compositor_overlays_damage();
+                compositor.grid_on = 0;
         }
         // Where the hand put a window is where a window of its name opens next (compositor_remember).
         if (snap && (resized >= 0 || (dragged >= 0 && compositor.drag_moved)))
@@ -10690,6 +11097,22 @@ static void compositor_button(unsigned int code, int down)
 */
 static void compositor_press(unsigned int code, int down)
 {
+        if (down && code == COMPOSITOR_BTN_LEFT && compositor.assist_armed)
+        {
+                int at = compositor_assist_at(compositor.pointer_x, compositor.pointer_y);
+
+                if (at >= 0)
+                {
+                        int row = (int)compositor.assist_rows[at];
+                        unsigned int how = compositor.assist_zone[at];
+                        int screen = compositor.assist_screen;
+
+                        compositor_assist_close();
+                        compositor_arrange_on(row, how, screen);
+                        return;
+                }
+                compositor_assist_close();
+        }
         if (!compositor_minimize_press(code, down))
                 compositor_button(code, down);
 }
