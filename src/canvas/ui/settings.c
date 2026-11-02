@@ -1549,6 +1549,8 @@ static fn settings_layout(void)
         settings.card.x = settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
         settings.card.y = settings.page.top, settings.card.height = settings.card.view = settings.page.bottom - settings.page.top;
         settings.card.content = ui_lines_height(ui, settings.card_lines);
+        // A card that scrolls stretches at its ends like a list (ui_scroll_span), and at its top when it fits.
+        settings.card.bounds = 1, settings.card.scale = ui->scale;
         ui_scroll_clamp(&settings.card);
 }
 

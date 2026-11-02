@@ -6502,24 +6502,30 @@ static int ui_list_row_y(const struct ui_list address_to l, int at)
 }
 
 /*
-        Where a row is drawn, in device pixels: its top and its height. At rest that is its place and a row's height. A pull past
-        an end of the list stretches it in the scroll axis from the edge it is pulled past (ui_scroll_stretched): the rows keep
-        their places from that edge, their tops and bottoms scaled about it by the stretch, and the row's text is set in the
-        middle of the stretched row (the kit's stretch of a label).
+        Where an item of a region is drawn, in device pixels: its top and its height. At rest that is its place and its height.
+        A pull past an end of the region stretches it in the scroll axis from the edge it is pulled past (ui_scroll_stretched):
+        the items keep their places from that edge, their tops and bottoms scaled about it by the stretch, and the item's text
+        is set in the middle of the stretched item (the kit's stretch of a label). Every region that scrolls takes it the same.
 */
-static void ui_list_row_span(const struct ui address_to ui, const struct ui_list address_to l, int at, int address_to top, int address_to height)
+static void ui_scroll_span(const struct ui_scroll address_to s, int y, int row, int address_to top, int address_to height)
 {
-        int row = ui_dev(ui, UI_ROW), y = ui_list_row_y(l, at), edge = 0, pivot, drawn_end;
-        b64 scale = UI_ONE + ui_scroll_stretched(&l->scroll, &edge);
+        int edge = 0, pivot, drawn_end;
+        b64 scale = UI_ONE + ui_scroll_stretched(s, &edge);
 
         *top = y, *height = row;
         if (!edge)
                 return;
-        // The edge pulled past: the list's top, or where its drawn rows end (the view's bottom once it scrolls).
-        drawn_end = l->scroll.content - l->scroll.scroll;
-        pivot = edge < 0 ? l->y : l->y + (drawn_end < l->scroll.view ? drawn_end : l->scroll.view);
+        // The edge pulled past: the region's top, or where its drawn items end (the view's bottom once it scrolls).
+        drawn_end = s->content - s->scroll;
+        pivot = edge < 0 ? s->y : s->y + (drawn_end < s->view ? drawn_end : s->view);
         *top = pivot + (int)ui_qmul(y - pivot, scale);
         *height = (pivot + (int)ui_qmul(y + row - pivot, scale)) - *top;
+}
+
+// A row of a list, where it is drawn (ui_scroll_span).
+static void ui_list_row_span(const struct ui address_to ui, const struct ui_list address_to l, int at, int address_to top, int address_to height)
+{
+        ui_scroll_span(&l->scroll, ui_list_row_y(l, at), ui_dev(ui, UI_ROW), top, height);
 }
 
 static fn ui_list_damage(const struct ui address_to ui, const struct ui_list address_to l, int id)
@@ -7483,11 +7489,14 @@ static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, 
         ui->bottom = s->y + s->view;
         for (int at = 0; at < count; at++)
         {
-                int y = top + at * height;
+                int y = top + at * height, drawn, span, shift;
 
-                if (y + height <= ui->top || y >= ui->bottom)
+                // A line stretched by a pull is drawn in its stretched box, its text at the middle of that box.
+                ui_scroll_span(s, y, height, &drawn, &span);
+                if (drawn + span <= ui->top || drawn >= ui->bottom)
                         continue;
-                ui_kit_text(ui, left + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y, UI_BODY_MEDIUM), (string_address)line(at, text, sizeof(text)),
+                shift = drawn + span / 2 - (y + height / 2);
+                ui_kit_text(ui, left + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y + shift, UI_BODY_MEDIUM), (string_address)line(at, text, sizeof(text)),
                             UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0);
         }
         ui_scroll_draw(ui, s);

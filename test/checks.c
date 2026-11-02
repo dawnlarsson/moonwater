@@ -132386,6 +132386,61 @@ static fn check_kit_place(void)
                 check("kit wheel: a fast spin's glide is held to 60 rows a second, and it settles on its aim without passing it", capped);
         }
 
+        // A card (a page of text, bounded like a list): a pull past its end squashes its lines from that edge, as a list's rows do,
+        // and a card that fits squashes at its top too; released, the squash springs back to scale 1 without overshoot. Each line is
+        // placed by ui_scroll_span, the card's own drawing (ui_lines_draw) takes the same spans.
+        {
+                static struct ui_scroll card, fits;
+                int drawn = 0, span = 0, most, frame, edge = 0;
+                b32 squashed = false, fits_squashed = false, eased = true, kept = true;
+                b64 stretch = 0, last = 0, lowest = 0;
+
+                ui_kit.now = 9500000000ll, ui_kit.busy = 0;
+                memory_zero(&card, sizeof(card));
+                card.x = 100, card.y = 10, card.height = card.view = 200, card.content = 1000, card.bounds = 1, card.scale = 1;
+                memory_zero(&fits, sizeof(fits));
+                fits.x = 100, fits.y = 10, fits.height = fits.view = 200, fits.content = 120, fits.bounds = 1, fits.scale = 1;
+                most = ui_scroll_most(&card);
+                ui_scroll_set(&card, most);
+                ui_scroll_drag(&card, 150);
+#ifdef UI_LIST_STRETCH
+                ui_scroll_span(&card, card.y + 180, 20, &drawn, &span);
+                squashed = ui_scroll_stretched(&card, &edge) > 0 && edge > 0 && span > 20 && card.scroll == most;
+#endif
+                ui_scroll_drag(&fits, -150);
+#ifdef UI_LIST_STRETCH
+                ui_scroll_span(&fits, fits.y, 20, &drawn, &span);
+                fits_squashed = ui_scroll_stretched(&fits, &edge) > 0 && edge < 0 && span > 20 && fits.scroll == 0;
+#endif
+                ui_scroll_let_go(&card, 0, 0);
+                ui_scroll_let_go(&fits, 0, 0);
+#ifdef UI_LIST_STRETCH
+                last = ui_scroll_stretched(&card, &edge);
+#endif
+                for (frame = 0; frame < 240 && (card.gliding || card.back.live || fits.gliding || fits.back.live); frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &card);
+                        ui_scroll_glide(&ui, &fits);
+#ifdef UI_LIST_STRETCH
+                        stretch = ui_scroll_stretched(&card, &edge);
+                        eased = eased && stretch <= last;
+                        lowest = stretch < lowest ? stretch : lowest;
+                        last = stretch;
+#endif
+                        kept = kept && card.scroll == most && fits.scroll == 0;
+                }
+#ifdef UI_LIST_STRETCH
+                eased = eased && ui_scroll_stretched(&card, &edge) == 0 && ui_scroll_stretched(&fits, &edge) == 0;
+#else
+                eased = false;
+#endif
+                check("kit card: a pull past the end of a card that scrolls squashes its lines from that edge, and the card keeps its end",
+                      squashed && kept);
+                check("kit card: a card that fits squashes at its top when pulled, and released it springs back to scale 1 without overshoot",
+                      fits_squashed && eased && lowest >= 0);
+        }
+
         // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
         // leaves its rows and its scroll where they are, and a finger's pull leaves its scroll at 0 and its first row put (the
         // pull stretches it from the edge it is pulled past, under UI_LIST_STRETCH). A list that scrolls keeps its scroll at its
