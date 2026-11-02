@@ -6382,6 +6382,9 @@ esac
 #       compiles to defines no hook symbol: nm reads that object. With both
 #       switches off wayland.c refuses to build, which is what keeps the
 #       Makefile honest.
+#       CHECK_wayland_wire runs the Wayland objects on a stub sink; on Linux,
+#       test/wayland_client.c, a client that speaks the wire with no libwayland,
+#       runs against the shim end to end (CHECK_wayland_client).
 #       checks.c has a stray /* at line 19527 that predates these hooks, so
 #       the checks.c compiles here drop -Wcomment and keep everything else.
 lane_hooks()
@@ -6422,6 +6425,9 @@ lane_hooks()
                 hooks_row "shell-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
                         -DCHECK_shell -DCONFIG_MOONWATER_WAYLAND -DCONFIG_MOONWATER_X11 \
                         test/checks.c -o '$work/shell-$hooks_cc' && '$work/shell-$hooks_cc'"
+                hooks_row "wire-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
+                        -DCHECK_wayland_wire -DCONFIG_MOONWATER_WAYLAND \
+                        test/checks.c -o '$work/wire-$hooks_cc' && '$work/wire-$hooks_cc'"
                 hooks_row "off-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
                         -DCHECK_hooks_off test/checks.c -o '$work/off-$hooks_cc' && '$work/off-$hooks_cc'"
                 hooks_row "off-object-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \

@@ -20,7 +20,7 @@
 
         Data flows one way on the client side and one way on the Canvas side:
 
-            client bytes -> protocol parser (not built) -> hooks (this file)
+            client bytes -> wayland_feed, the Wayland wire below -> hooks (this file)
                          -> sink (Canvas's own functions, handed in at start)
 
         The parser calls a hook with numbers and strings it has already decoded
@@ -1117,118 +1117,787 @@ static inline int shell_xwayland_stop(struct shell_side *side)
 
 /*
         THE WAYLAND HOOKS
+        The wire, the objects and the hooks Canvas calls. Nothing outside this
+        switch is built for a Wayland client.
 */
 #ifdef CONFIG_MOONWATER_WAYLAND
 
 /*
-        The one state the Wayland side has. Every Wayland hook is a call into the
-        engine above with it. The X11 side has its own, below, and nothing is shared.
+        The wire's caps. A message is at most WAYLAND_MSG_MAX bytes, header
+        included; a client may hold WAYLAND_OBJECTS objects (the display is
+        one of them) and WAYLAND_FDS descriptors it has sent and not yet used.
+        WAYLAND_EVENT_MAX is the most one event can take, and WAYLAND_REPLY is
+        the room a request reserves in the output queue before it changes
+        anything, so a request that answers cannot be half done.
 */
-static struct shell_side wayland;
+#define WAYLAND_HEADER 8L
+#define WAYLAND_MSG_MAX 4096L
+#define WAYLAND_IN_MAX WAYLAND_MSG_MAX
+#define WAYLAND_EVENT_MAX 512L
+#define WAYLAND_REPLY 2048L
+#define WAYLAND_OUT_MAX 8192L
+#define WAYLAND_OBJECTS 64
+#define WAYLAND_FDS 8
+#define WAYLAND_ARGS 6
+#define WAYLAND_ID_MAX 0xfeffffffUL
+#define WAYLAND_DISPLAY 1UL
 
+/*
+        wl_display.error codes: the object does not exist, the request does
+        not exist or its arguments do not match, the server is out of room,
+        and the implementation refuses for its own reason.
+*/
+#define WAYLAND_ERR_OBJECT 0L
+#define WAYLAND_ERR_METHOD 1L
+#define WAYLAND_ERR_NOMEM 2L
+#define WAYLAND_ERR_IMPLEMENTATION 3L
+
+/*
+        What an object is. A client's object id names a record of one of these
+        types; a request on an id whose type has no such request is refused.
+*/
+enum wayland_type
+{
+        W_NONE,
+        W_DISPLAY,
+        W_REGISTRY,
+        W_CALLBACK,
+        W_COMPOSITOR,
+        W_SURFACE,
+        W_SHM,
+        W_SHM_POOL,
+        W_BUFFER,
+        W_XDG_WM_BASE,
+        W_XDG_SURFACE,
+        W_XDG_TOPLEVEL,
+        W_OUTPUT,
+        W_SEAT,
+        W_POINTER,
+        W_KEYBOARD
+};
+
+/*
+        The globals the registry advertises, in name order: name n is element
+        n - 1. Each is one interface at its highest version. A bind must name
+        the interface exactly and a version from one to the highest.
+*/
+struct wayland_global
+{
+        const char *interface;
+        long version;
+        long type;
+};
+
+static const struct wayland_global wayland_globals[] = {
+        {"wl_compositor", 4, W_COMPOSITOR},
+        {"wl_shm", 1, W_SHM},
+        {"wl_output", 3, W_OUTPUT},
+        {"wl_seat", 5, W_SEAT},
+        {"xdg_wm_base", 1, W_XDG_WM_BASE},
+};
+#define WAYLAND_GLOBALS ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
+
+struct wayland_object
+{
+        unsigned long id;
+        long type;
+};
+
+struct wayland_client
+{
+        unsigned char in[WAYLAND_IN_MAX];
+        long in_length;
+        unsigned char out[WAYLAND_OUT_MAX];
+        long out_length;
+        long fds[WAYLAND_FDS];
+        long fd_count;
+        unsigned long serial;
+        struct wayland_object objects[WAYLAND_OBJECTS];
+};
+
+/*
+        The one state this file has: the shell engine's side, and one record
+        per client. Every hook below is a call into shell.h's engine with the
+        side, so the engine's rules hold for this struct and no other.
+*/
+struct wayland_state
+{
+        struct shell_side side;
+        struct wayland_client clients[SHELL_CLIENTS];
+};
+
+static struct wayland_state wayland;
+
+/*
+        Words. A word is four little-endian bytes; a reader and a writer are
+        the two ends of one message being built or taken apart.
+*/
+static unsigned long wire_get(const unsigned char *at)
+{
+        return (unsigned long)at[0] | (unsigned long)at[1] << 8 | (unsigned long)at[2] << 16 |
+               (unsigned long)at[3] << 24;
+}
+
+static void wire_put(unsigned char *at, unsigned long value)
+{
+        at[0] = (unsigned char)value;
+        at[1] = (unsigned char)(value >> 8);
+        at[2] = (unsigned char)(value >> 16);
+        at[3] = (unsigned char)(value >> 24);
+}
+
+struct wire_reader
+{
+        const unsigned char *at;
+        long left;
+};
+
+static int wire_read_word(struct wire_reader *r, unsigned long *value)
+{
+        if (r->left < 4)
+                return 0;
+        *value = wire_get(r->at);
+        r->at += 4;
+        r->left -= 4;
+        return 1;
+}
+
+/*
+        A string: a length that counts its NUL, the bytes and the NUL, padded
+        to four. The length must be at least one, the NUL must be the last
+        byte, and the padding must be inside the message.
+*/
+static int wire_read_text(struct wire_reader *r, const unsigned char **text, long *length)
+{
+        unsigned long count, padded;
+
+        if (!wire_read_word(r, &count))
+                return 0;
+        if (count == 0 || count > (unsigned long)r->left)
+                return 0;
+        padded = (count + 3) & ~3UL;
+        if (padded > (unsigned long)r->left || r->at[count - 1] != 0)
+                return 0;
+        *text = r->at;
+        *length = (long)count - 1;
+        r->at += padded;
+        r->left -= (long)padded;
+        return 1;
+}
+
+/*
+        An array: a length in bytes, the bytes, padded to four. Zero is an
+        empty array and is allowed.
+*/
+static int wire_read_array(struct wire_reader *r, const unsigned char **bytes, long *length)
+{
+        unsigned long count, padded;
+
+        if (!wire_read_word(r, &count))
+                return 0;
+        if (count > (unsigned long)r->left)
+                return 0;
+        padded = (count + 3) & ~3UL;
+        if (padded > (unsigned long)r->left)
+                return 0;
+        *bytes = r->at;
+        *length = (long)count;
+        r->at += padded;
+        r->left -= (long)padded;
+        return 1;
+}
+
+/*
+        One argument of a request, read by its signature letter: u an unsigned
+        word, i a signed word (f is a fixed-point word, read as its integer
+        part by the handlers that take one), o an object id, n a new id, s a
+        string, a an array, and h a descriptor, which is the next one the
+        client sent and is taken only when the request succeeds.
+*/
+struct wire_arg
+{
+        unsigned long id;
+        long number;
+        const unsigned char *text;
+        long length;
+        long fd;
+};
+
+static int wire_args(struct wayland_client *c, const char *signature, struct wire_reader *r,
+                     struct wire_arg *args, long *count, long *needed)
+{
+        long n = 0;
+        long taken = 0;
+
+        for (const char *s = signature; *s; s++)
+        {
+                struct wire_arg *arg;
+                unsigned long word;
+
+                if (n >= WAYLAND_ARGS)
+                        return 0;
+                arg = &args[n];
+                arg->id = 0;
+                arg->number = 0;
+                arg->text = 0;
+                arg->length = 0;
+                arg->fd = -1;
+                switch (*s)
+                {
+                case 'u':
+                case 'o':
+                case 'n':
+                        if (!wire_read_word(r, &word))
+                                return 0;
+                        arg->id = word;
+                        arg->number = (long)word;
+                        break;
+                case 'i':
+                case 'f':
+                        if (!wire_read_word(r, &word))
+                                return 0;
+                        arg->number = (long)(int)word;
+                        arg->id = word;
+                        break;
+                case 's':
+                        if (!wire_read_text(r, &arg->text, &arg->length))
+                                return 0;
+                        break;
+                case 'a':
+                        if (!wire_read_array(r, &arg->text, &arg->length))
+                                return 0;
+                        break;
+                case 'h':
+                        if (taken >= c->fd_count)
+                                return 0;
+                        arg->fd = c->fds[taken];
+                        taken++;
+                        break;
+                default:
+                        return 0;
+                }
+                n++;
+        }
+        if (r->left != 0)
+                return 0;
+        *count = n;
+        *needed = taken;
+        return 1;
+}
+
+/*
+        Events. An event is written into a local buffer and copied to the
+        client's output queue only when it is whole, so a failed write never
+        leaves half an event behind.
+*/
+struct wire_out
+{
+        unsigned char b[WAYLAND_EVENT_MAX];
+        unsigned long object;
+        long opcode;
+        long n;
+        int ok;
+};
+
+static void event_begin(struct wire_out *w, unsigned long object, long opcode)
+{
+        w->object = object;
+        w->opcode = opcode;
+        w->n = WAYLAND_HEADER;
+        w->ok = 1;
+}
+
+static void event_word(struct wire_out *w, unsigned long value)
+{
+        if (w->n + 4 > WAYLAND_EVENT_MAX)
+        {
+                w->ok = 0;
+                return;
+        }
+        wire_put(w->b + w->n, value);
+        w->n += 4;
+}
+
+static void event_text(struct wire_out *w, const char *text)
+{
+        unsigned long count = 1;
+        long padded;
+
+        while (text[count - 1])
+                count++;
+        padded = (long)((count + 3) & ~3UL);
+        if (w->n + 4 + padded > WAYLAND_EVENT_MAX)
+        {
+                w->ok = 0;
+                return;
+        }
+        event_word(w, count);
+        for (long i = 0; i < padded; i++)
+                w->b[w->n + i] = (unsigned long)i < count ? (unsigned char)text[i] : 0;
+        w->n += padded;
+}
+
+static int event_send(struct wayland_client *c, struct wire_out *w)
+{
+        if (!w->ok || c->out_length + w->n > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        wire_put(w->b, w->object);
+        wire_put(w->b + 4, ((unsigned long)w->n << 16) | (unsigned long)w->opcode);
+        for (long i = 0; i < w->n; i++)
+                c->out[c->out_length + i] = w->b[i];
+        c->out_length += w->n;
+        return SHELL_OK;
+}
+
+/*
+        A protocol error: wl_display.error on the display, naming the object
+        the client got wrong. The request is refused with EINVAL and nothing
+        else changes; the error is the only thing the client is sent.
+*/
+static int wire_fail(struct wayland_client *c, unsigned long object, unsigned long code, const char *text)
+{
+        struct wire_out w;
+
+        event_begin(&w, WAYLAND_DISPLAY, 0);
+        event_word(&w, object);
+        event_word(&w, code);
+        event_text(&w, text);
+        event_send(c, &w);
+        return SHELL_EINVAL;
+}
+
+/*
+        The object table. An id is a client's number: it is from one to
+        WAYLAND_ID_MAX and not already in use. A table with no free record is
+        out of room, which is a refusal, not a crash.
+*/
+static long wire_object_index(const struct wayland_client *c, unsigned long id)
+{
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type != W_NONE && c->objects[i].id == id)
+                        return i;
+        return -1;
+}
+
+static int wire_id_free(const struct wayland_client *c, unsigned long id)
+{
+        return id >= 1 && id <= WAYLAND_ID_MAX && wire_object_index(c, id) < 0;
+}
+
+static long wire_object_new(struct wayland_client *c, unsigned long id, long type)
+{
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_NONE)
+                {
+                        c->objects[i].id = id;
+                        c->objects[i].type = type;
+                        return i;
+                }
+        return -1;
+}
+
+static void wire_reset(struct wayland_client *c)
+{
+        c->in_length = 0;
+        c->out_length = 0;
+        c->fd_count = 0;
+        c->serial = 0;
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                c->objects[i].type = W_NONE;
+}
+
+static void wire_drop_fds(struct wayland_client *c, long count)
+{
+        for (long i = 0; i + count < c->fd_count; i++)
+                c->fds[i] = c->fds[i + count];
+        c->fd_count -= count;
+}
+
+static int wire_name_is(const unsigned char *text, long length, const char *name)
+{
+        long i = 0;
+
+        for (; i < length; i++)
+                if (!name[i] || text[i] != (unsigned char)name[i])
+                        return 0;
+        return name[i] == 0;
+}
+
+/*
+        The signature of each request, by the type of its object and its
+        opcode. A request with no entry here is refused. Requests are added
+        with their handlers below.
+*/
+static const char *wire_signature(long type, long opcode)
+{
+        switch (type)
+        {
+        case W_DISPLAY:
+                if (opcode == 0 || opcode == 1)
+                        return "n";
+                return 0;
+        case W_REGISTRY:
+                if (opcode == 0)
+                        return "usun";
+                return 0;
+        default:
+                return 0;
+        }
+}
+
+/*
+        wl_registry.global, one per advertised global, sent when the client
+        asks for the registry.
+*/
+static void registry_global(struct wayland_client *c, unsigned long registry, long name)
+{
+        struct wire_out w;
+        const struct wayland_global *global = &wayland_globals[name];
+
+        event_begin(&w, registry, 0);
+        event_word(&w, (unsigned long)name + 1);
+        event_text(&w, global->interface);
+        event_word(&w, (unsigned long)global->version);
+        event_send(c, &w);
+}
+
+/*
+        The display's requests. sync answers at once with the callback's done
+        event and a delete_id for it, so the callback never becomes an object.
+        get_registry makes the registry and advertises every global.
+*/
+static int display_request(struct wayland_client *c, long opcode, struct wire_arg *args)
+{
+        struct wire_out w;
+
+        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        if (!wire_id_free(c, args[0].id))
+                return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+        if (opcode == 0)
+        {
+                unsigned long serial = ++c->serial;
+
+                event_begin(&w, args[0].id, 0);
+                event_word(&w, serial);
+                event_send(c, &w);
+                event_begin(&w, WAYLAND_DISPLAY, 1);
+                event_word(&w, args[0].id);
+                event_send(c, &w);
+                return SHELL_OK;
+        }
+        if (wire_object_new(c, args[0].id, W_REGISTRY) < 0)
+                return SHELL_ENOSPC;
+        for (long name = 0; name < WAYLAND_GLOBALS; name++)
+                registry_global(c, args[0].id, name);
+        return SHELL_OK;
+}
+
+/*
+        wl_registry.bind: a global named by its number, the interface named
+        exactly, a version from one to the highest, and a new id. The object
+        it makes has the global's type. The arguments are all checked before
+        the object is made.
+*/
+static int registry_request(struct wayland_client *c, long opcode, struct wire_arg *args)
+{
+        const struct wayland_global *global;
+        long name;
+
+        if (opcode != 0)
+                return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_METHOD, "no such request");
+        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        name = args[0].number;
+        if (name < 1 || name > WAYLAND_GLOBALS)
+                return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_IMPLEMENTATION, "no such global");
+        global = &wayland_globals[name - 1];
+        if (!wire_name_is(args[1].text, args[1].length, global->interface))
+                return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_IMPLEMENTATION, "global is another interface");
+        if (args[2].number < 1 || args[2].number > global->version)
+                return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_IMPLEMENTATION, "no such version");
+        if (!wire_id_free(c, args[3].id))
+                return wire_fail(c, args[3].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+        if (wire_object_new(c, args[3].id, global->type) < 0)
+                return SHELL_ENOSPC;
+        return SHELL_OK;
+}
+
+/*
+        One request, from the object it names to the handler. The size and the
+        object were checked by the caller; this reads the arguments, checks
+        them against the signature and runs the handler. The descriptors a
+        successful request used are taken off the queue only then.
+*/
+static int wire_request(struct wayland_client *c, long index, long opcode, struct wire_reader *r)
+{
+        const char *signature = wire_signature(c->objects[index].type, opcode);
+        struct wire_arg args[WAYLAND_ARGS];
+        long count = 0;
+        long needed = 0;
+        int status;
+
+        if (!signature)
+                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "no such request");
+        if (!wire_args(c, signature, r, args, &count, &needed))
+                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "arguments do not match");
+        switch (c->objects[index].type)
+        {
+        case W_DISPLAY:
+                status = display_request(c, opcode, args);
+                break;
+        case W_REGISTRY:
+                status = registry_request(c, opcode, args);
+                break;
+        default:
+                status = wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "no such request");
+                break;
+        }
+        if (status >= 0 && needed)
+                wire_drop_fds(c, needed);
+        return status;
+}
+
+/*
+        One whole message: its object, its opcode and its size were checked
+        when its header was read. An object that is not in the table is a
+        protocol error.
+*/
+static int wire_dispatch(struct wayland_client *c, const unsigned char *message, long size)
+{
+        unsigned long object = wire_get(message);
+        long opcode = (long)(wire_get(message + 4) & 0xffffUL);
+        struct wire_reader reader;
+        long index = wire_object_index(c, object);
+
+        if (index < 0)
+                return wire_fail(c, object, WAYLAND_ERR_OBJECT, "no such object");
+        reader.at = message + WAYLAND_HEADER;
+        reader.left = size - WAYLAND_HEADER;
+        return wire_request(c, index, opcode, &reader);
+}
+
+/*
+        Bytes from a client. A call may hold any part of a message: the bytes
+        of an unfinished one are kept until the rest arrives. A header whose
+        size is below eight, above WAYLAND_MSG_MAX, or not a multiple of four
+        is refused, and so is a message that fails in its dispatch. The
+        descriptors are queued first, so a message that needs one finds it.
+        Messages that completed earlier in the same call are not undone by a
+        later refusal: the caller disconnects the client, which is what a
+        refusal means.
+*/
+int wayland_feed(long client, const unsigned char *bytes, long length, const long *fds, long count)
+{
+        struct wayland_client *c;
+        long taken = 0;
+
+        if (!wayland.side.running || !shell_client_live(&wayland.side, client))
+                return SHELL_EINVAL;
+        if (length < 0 || count < 0 || (length && !bytes) || (count && !fds))
+                return SHELL_EINVAL;
+        for (long i = 0; i < count; i++)
+                if (fds[i] < 0 || fds[i] >= SHELL_FD_MAX)
+                        return SHELL_EINVAL;
+        c = &wayland.clients[client];
+        if (c->fd_count + count > WAYLAND_FDS)
+                return SHELL_ENOSPC;
+        for (long i = 0; i < count; i++)
+                c->fds[c->fd_count++] = fds[i];
+        while (taken < length)
+        {
+                long want = WAYLAND_HEADER;
+                long step;
+                long size;
+
+                if (c->in_length >= WAYLAND_HEADER)
+                        want = (long)(wire_get(c->in + 4) >> 16);
+                step = want - c->in_length < length - taken ? want - c->in_length : length - taken;
+                for (long i = 0; i < step; i++)
+                        c->in[c->in_length + i] = bytes[taken + i];
+                c->in_length += step;
+                taken += step;
+                if (c->in_length == WAYLAND_HEADER)
+                {
+                        size = (long)(wire_get(c->in + 4) >> 16);
+                        if (size < WAYLAND_HEADER || size > WAYLAND_MSG_MAX || (size & 3))
+                                return wire_fail(c, wire_get(c->in), WAYLAND_ERR_METHOD, "message size");
+                }
+                if (c->in_length >= WAYLAND_HEADER && c->in_length == (long)(wire_get(c->in + 4) >> 16))
+                {
+                        int status = wire_dispatch(c, c->in, c->in_length);
+
+                        c->in_length = 0;
+                        if (status < 0)
+                                return status;
+                }
+        }
+        return SHELL_OK;
+}
+
+/*
+        The bytes queued for a client, copied out whole into the caller's
+        buffer, with the keymap flag that says the descriptor for the keymap
+        goes with them. The room must hold everything queued; the caller
+        passes WAYLAND_OUT_MAX.
+*/
+int wayland_take_output(long client, unsigned char *into, long room, long *keymap)
+{
+        struct wayland_client *c;
+
+        if (!wayland.side.running || !shell_client_live(&wayland.side, client))
+                return SHELL_EINVAL;
+        if (!into || !keymap || room < 0)
+                return SHELL_EINVAL;
+        c = &wayland.clients[client];
+        if (room < c->out_length)
+                return SHELL_ENOSPC;
+        for (long i = 0; i < c->out_length; i++)
+                into[i] = c->out[i];
+        *keymap = 0;
+        room = c->out_length;
+        c->out_length = 0;
+        return (int)room;
+}
+
+/*
+        Lifecycle. start takes a complete sink and resets the tables; stop
+        closes every window the clients still have, through the sink, and then
+        clears everything. Neither can run twice in a row.
+*/
 int wayland_start(const struct shell_sink *sink)
 {
-        return shell_start(&wayland, sink);
+        int status = shell_start(&wayland.side, sink);
+
+        if (status < 0)
+                return status;
+        for (long i = 0; i < SHELL_CLIENTS; i++)
+                wire_reset(&wayland.clients[i]);
+        return status;
 }
 
 int wayland_stop(void)
 {
-        return shell_stop(&wayland);
+        int status = shell_stop(&wayland.side);
+
+        if (status < 0)
+                return status;
+        for (long i = 0; i < SHELL_CLIENTS; i++)
+                wire_reset(&wayland.clients[i]);
+        return status;
 }
 
+/*
+        A client connects: the engine gives it a number, and its object table
+        starts with the display, object one, which is the only object a client
+        has before it asks for anything.
+*/
 int wayland_client_connect(void)
 {
-        return shell_client_connect(&wayland);
+        int client = shell_client_connect(&wayland.side);
+        struct wayland_client *c;
+
+        if (client < 0)
+                return client;
+        c = &wayland.clients[client];
+        wire_reset(c);
+        wire_object_new(c, WAYLAND_DISPLAY, W_DISPLAY);
+        return client;
 }
 
 int wayland_client_disconnect(long client)
 {
-        return shell_client_disconnect(&wayland, client);
+        int status = shell_client_disconnect(&wayland.side, client);
+
+        if (status < 0)
+                return status;
+        wire_reset(&wayland.clients[client]);
+        return status;
 }
 
 int wayland_role(long client, long surface, long role)
 {
-        return shell_role(&wayland, client, surface, role);
+        return shell_role(&wayland.side, client, surface, role);
 }
 
 int wayland_buffer_offer(long client, const struct shell_buffer *buffer)
 {
-        return shell_buffer_offer(&wayland, client, buffer);
+        return shell_buffer_offer(&wayland.side, client, buffer);
 }
 
 int wayland_damage(long client, long surface, long buffer, const struct shell_rect *rect)
 {
-        return shell_damage(&wayland, client, surface, buffer, rect);
+        return shell_damage(&wayland.side, client, surface, buffer, rect);
 }
 
 int wayland_input_key(long client, long code, long pressed)
 {
-        return shell_input_key(&wayland, client, code, pressed);
+        return shell_input_key(&wayland.side, client, code, pressed);
 }
 
 int wayland_input_pointer(long client, long x, long y, long buttons)
 {
-        return shell_input_pointer(&wayland, client, x, y, buttons);
+        return shell_input_pointer(&wayland.side, client, x, y, buttons);
 }
 
 int wayland_window_place(long client, long surface, long x, long y, long screen)
 {
-        return shell_window_place(&wayland, client, surface, x, y, screen);
+        return shell_window_place(&wayland.side, client, surface, x, y, screen);
 }
 
 int wayland_window_size(long client, long surface, long width, long height)
 {
-        return shell_window_size(&wayland, client, surface, width, height);
+        return shell_window_size(&wayland.side, client, surface, width, height);
 }
 
 int wayland_window_minimize(long client, long surface, long on)
 {
-        return shell_window_minimize(&wayland, client, surface, on);
+        return shell_window_minimize(&wayland.side, client, surface, on);
 }
 
 int wayland_window_maximize(long client, long surface, long on)
 {
-        return shell_window_maximize(&wayland, client, surface, on);
+        return shell_window_maximize(&wayland.side, client, surface, on);
 }
 
 int wayland_window_fullscreen(long client, long surface, long on)
 {
-        return shell_window_fullscreen(&wayland, client, surface, on);
+        return shell_window_fullscreen(&wayland.side, client, surface, on);
 }
 
 int wayland_window_stack(long client, long surface, long layer)
 {
-        return shell_window_stack(&wayland, client, surface, layer);
+        return shell_window_stack(&wayland.side, client, surface, layer);
 }
 
 int wayland_window_activate(long client, long surface)
 {
-        return shell_window_activate(&wayland, client, surface);
+        return shell_window_activate(&wayland.side, client, surface);
 }
 
 int wayland_window_close(long client, long surface)
 {
-        return shell_window_close(&wayland, client, surface);
+        return shell_window_close(&wayland.side, client, surface);
 }
 
 int wayland_window_title(long client, long surface, const char *text, long length)
 {
-        return shell_window_title(&wayland, client, surface, text, length);
+        return shell_window_title(&wayland.side, client, surface, text, length);
 }
 
 int wayland_window_app_id(long client, long surface, const char *text, long length)
 {
-        return shell_window_app_id(&wayland, client, surface, text, length);
+        return shell_window_app_id(&wayland.side, client, surface, text, length);
 }
 
 int wayland_window_query(long client, long surface, struct shell_facts *facts)
 {
-        return shell_window_query(&wayland, client, surface, facts);
+        return shell_window_query(&wayland.side, client, surface, facts);
 }
 
 int wayland_layer_surface(long client, long surface, const struct shell_layer *layer)
 {
-        return shell_layer_surface(&wayland, client, surface, layer);
+        return shell_layer_surface(&wayland.side, client, surface, layer);
 }
 
 #endif /* CONFIG_MOONWATER_WAYLAND */

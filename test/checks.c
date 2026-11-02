@@ -141972,7 +141972,7 @@ struct hook_side
 };
 
 static const struct hook_side hook_wayland = {
-        &wayland, wayland_start, wayland_stop, wayland_client_connect, wayland_client_disconnect,
+        &wayland.side, wayland_start, wayland_stop, wayland_client_connect, wayland_client_disconnect,
         wayland_role, wayland_buffer_offer, wayland_damage, wayland_input_key, wayland_input_pointer,
         wayland_window_place, wayland_window_size, wayland_window_minimize, wayland_window_maximize,
         wayland_window_fullscreen, wayland_window_stack, wayland_window_activate, wayland_window_close,
@@ -142258,7 +142258,7 @@ static void wayland_layer_battery(void)
 {
         struct shell_layer good = {SHELL_LAYER_TOP, SHELL_ANCHOR_TOP, SHELL_KEYBOARD_NONE, 30, 0, 30, {0, 0, 0, 0}};
         struct shell_layer bad;
-        struct shell_side *state = &wayland;
+        struct shell_side *state = &wayland.side;
         int status;
 
         HOOK_REFUSED(state, wayland_layer_surface(0, 1, &good));
@@ -142368,10 +142368,526 @@ int main(void)
 }
 #endif /* CHECK_shell */
 
+#ifdef CHECK_wayland_wire
+/*
+        The Wayland wire, with the switch on and no client but the test's own
+        bytes. Each message is built here as a client would send it, fed to
+        wayland_feed, and the events it causes are read back with the
+        display's own framing. A malformed, oversized, unknown or misfit
+        message must be refused (negative), leave the objects, the serial, the
+        descriptor queue and the shell side exactly as they were, and queue
+        only the wl_display.error the refusal names. A good message must do
+        what the protocol says: the globals on get_registry, the callback on
+        sync, the object a bind makes, the split and the batched messages.
+
+            gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_wayland_wire -DCONFIG_MOONWATER_WAYLAND test/checks.c
+*/
+#if !defined(CONFIG_MOONWATER_WAYLAND)
+#error "CHECK_wayland_wire builds wayland.c: define CONFIG_MOONWATER_WAYLAND"
+#endif
+#include <stdio.h>
+#include <string.h>
+#include "../src/canvas/wayland.c"
+
+struct wire_build
+{
+        unsigned char b[WAYLAND_MSG_MAX + 64];
+        long n;
+        unsigned long object;
+        unsigned long op;
+};
+
+static void wb_begin(struct wire_build *m, unsigned long object, unsigned long op)
+{
+        m->object = object;
+        m->op = op;
+        m->n = WAYLAND_HEADER;
+}
+
+static void wb_u(struct wire_build *m, unsigned long v)
+{
+        wire_put(m->b + m->n, v);
+        m->n += 4;
+}
+
+static void wb_s(struct wire_build *m, const char *text)
+{
+        unsigned long count = (unsigned long)strlen(text) + 1;
+        long padded = (long)((count + 3) & ~3UL);
+
+        wb_u(m, count);
+        for (long i = 0; i < padded; i++)
+                m->b[m->n + i] = (unsigned long)i < count ? (unsigned char)text[i] : 0;
+        m->n += padded;
+}
+
+static long wb_end(struct wire_build *m)
+{
+        wire_put(m->b, m->object);
+        wire_put(m->b + 4, ((unsigned long)m->n << 16) | m->op);
+        return m->n;
+}
+
+static unsigned int wire_checks_run, wire_failures;
+
+#define WIRE_CHECK(condition) \
+        do { \
+                wire_checks_run++; \
+                if (!(condition)) \
+                { \
+                        wire_failures++; \
+                        printf("  FAIL line %d: %s\n", __LINE__, #condition); \
+                } \
+        } while (0)
+
+static int wire_open(void *context, long client, long role)
+{
+        static int next_row = 3;
+
+        (void)context;
+        (void)client;
+        (void)role;
+        return next_row++;
+}
+
+/*
+        Each sink callback has its own stub, so the table is complete and
+        shell_start accepts it. The stubs answer zero: these tests check what
+        the protocol does, not what Canvas does with it.
+*/
+static int wire_key(void *context, long client, long code, long pressed)
+{
+        (void)context; (void)client; (void)code; (void)pressed;
+        return 0;
+}
+
+static int wire_pointer(void *context, long client, long x, long y, long buttons)
+{
+        (void)context; (void)client; (void)x; (void)y; (void)buttons;
+        return 0;
+}
+static int wire_damage(void *context, int row, const struct shell_rect *rect)
+{
+        (void)context; (void)row; (void)rect;
+        return 0;
+}
+static int wire_place(void *context, int row, long x, long y, long screen)
+{
+        (void)context; (void)row; (void)x; (void)y; (void)screen;
+        return 0;
+}
+static int wire_size(void *context, int row, long width, long height)
+{
+        (void)context; (void)row; (void)width; (void)height;
+        return 0;
+}
+static int wire_flag(void *context, int row, long on)
+{
+        (void)context; (void)row; (void)on;
+        return 0;
+}
+static int wire_stack(void *context, int row, long layer)
+{
+        (void)context; (void)row; (void)layer;
+        return 0;
+}
+static int wire_activate(void *context, int row)
+{
+        (void)context; (void)row;
+        return 0;
+}
+static int wire_close(void *context, int row)
+{
+        (void)context; (void)row;
+        return 0;
+}
+static int wire_title(void *context, int row, const char *text, long length)
+{
+        (void)context; (void)row; (void)text; (void)length;
+        return 0;
+}
+static int wire_layer(void *context, int row, const struct shell_layer *layer)
+{
+        (void)context; (void)row; (void)layer;
+        return 0;
+}
+static int wire_query(void *context, int row, struct shell_facts *facts)
+{
+        (void)context; (void)row; (void)facts;
+        return 0;
+}
+
+static const struct shell_sink wire_sink_full = {
+        .context = 0,
+        .open = wire_open,
+        .key = wire_key,
+        .pointer = wire_pointer,
+        .damage = wire_damage,
+        .place = wire_place,
+        .size = wire_size,
+        .minimize = wire_flag,
+        .maximize = wire_flag,
+        .fullscreen = wire_flag,
+        .stack = wire_stack,
+        .activate = wire_activate,
+        .close = wire_close,
+        .title = wire_title,
+        .layer = wire_layer,
+        .query = wire_query,
+};
+
+/*
+        Read back the events a client has queued: each header's object and
+        opcode, and its size, which must lie inside what was queued.
+*/
+static long wire_events_of(const unsigned char *b, long n, unsigned long *objects, unsigned long *ops, long room)
+{
+        long count = 0;
+        long at = 0;
+
+        while (at + WAYLAND_HEADER <= n && count < room)
+        {
+                long size = (long)(wire_get(b + at + 4) >> 16);
+
+                if (size < WAYLAND_HEADER || at + size > n)
+                        return -1;
+                objects[count] = wire_get(b + at);
+                ops[count] = wire_get(b + at + 4) & 0xffffUL;
+                count++;
+                at += size;
+        }
+        return at == n ? count : -1;
+}
+
+static unsigned char wire_out[WAYLAND_OUT_MAX];
+
+/*
+        Take the queued output of a client and read it back: how many events,
+        and their objects and opcodes. The out buffer is cleared by the take.
+*/
+static long wire_take(long client, unsigned long *objects, unsigned long *ops, long room)
+{
+        long keymap = 0;
+        int n = wayland_take_output(client, wire_out, WAYLAND_OUT_MAX, &keymap);
+
+        if (n < 0)
+                return -1;
+        return wire_events_of(wire_out, n, objects, ops, room);
+}
+
+static long wire_feed_build(long client, struct wire_build *m)
+{
+        long n = wb_end(m);
+
+        return wayland_feed(client, m->b, n, 0, 0);
+}
+
+/*
+        A snapshot of what a refused message must not change: the whole shell
+        side, the objects of the client, its descriptor queue and its serial.
+*/
+struct wire_snapshot
+{
+        struct shell_side side;
+        struct wayland_object objects[WAYLAND_OBJECTS];
+        long fd_count;
+        unsigned long serial;
+};
+
+static struct wire_snapshot wire_before;
+
+static void wire_snap(long client)
+{
+        memcpy(&wire_before.side, &wayland.side, sizeof wayland.side);
+        memcpy(wire_before.objects, wayland.clients[client].objects, sizeof wire_before.objects);
+        wire_before.fd_count = wayland.clients[client].fd_count;
+        wire_before.serial = wayland.clients[client].serial;
+}
+
+static int wire_same(long client)
+{
+        return memcmp(&wire_before.side, &wayland.side, sizeof wayland.side) == 0 &&
+               memcmp(wire_before.objects, wayland.clients[client].objects, sizeof wire_before.objects) == 0 &&
+               wire_before.fd_count == wayland.clients[client].fd_count &&
+               wire_before.serial == wayland.clients[client].serial;
+}
+
+/*
+        One refusal: the feed answers negative, nothing the message would have
+        done is done, and the only event queued is the wl_display.error.
+*/
+static void wire_refused(long client, const char *what, long bytes_n, const unsigned char *bytes)
+{
+        unsigned long objects[8], ops[8];
+        long events;
+        int status;
+
+        wire_take(client, objects, ops, 8);
+        wire_snap(client);
+        status = wayland_feed(client, bytes, bytes_n, 0, 0);
+        if (status >= 0)
+                printf("  ACCEPTED, want refused: %s\n", what);
+        WIRE_CHECK(status < 0);
+        WIRE_CHECK(wire_same(client));
+        events = wire_take(client, objects, ops, 8);
+        WIRE_CHECK(events == 1);
+        WIRE_CHECK(events == 1 && objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
+}
+
+static void wire_good_objects_check(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+        long events;
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+
+        /* get_registry (display op 1, new id 2): five globals, names one to five. */
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == WAYLAND_GLOBALS);
+        for (long i = 0; i < events && i < WAYLAND_GLOBALS; i++)
+                WIRE_CHECK(objects[i] == 2 && ops[i] == 0);
+
+        /* sync (display op 0, new id 3): the done event, then delete_id for the callback. */
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_u(&m, 3);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2);
+        WIRE_CHECK(events == 2 && objects[0] == 3 && ops[0] == 0);
+        WIRE_CHECK(events == 2 && objects[1] == WAYLAND_DISPLAY && ops[1] == 1);
+        WIRE_CHECK(wayland.clients[client].serial == 1);
+
+        /* bind wl_compositor version 4 as id 4: the object exists with its type. */
+        wb_begin(&m, 2, 0);
+        wb_u(&m, 1);
+        wb_s(&m, "wl_compositor");
+        wb_u(&m, 4);
+        wb_u(&m, 4);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_object_index(&wayland.clients[client], 4) >= 0);
+        WIRE_CHECK(wayland.clients[client].objects[wire_object_index(&wayland.clients[client], 4)].type == W_COMPOSITOR);
+
+        /* the same message in two pieces, then two messages in one call. */
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_u(&m, 5);
+        {
+                long n = wb_end(&m);
+                WIRE_CHECK(wayland_feed(client, m.b, 3, 0, 0) == 0);
+                WIRE_CHECK(wayland_feed(client, m.b + 3, 5, 0, 0) == 0);
+                WIRE_CHECK(wayland_feed(client, m.b + 8, n - 8, 0, 0) == 0);
+        }
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2 && objects[0] == 5 && ops[0] == 0);
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_u(&m, 6);
+        {
+                unsigned char both[128];
+                long first = wb_end(&m);
+                long at = first;
+
+                memcpy(both, m.b, (size_t)first);
+                wb_begin(&m, WAYLAND_DISPLAY, 0);
+                wb_u(&m, 7);
+                wb_end(&m);
+                memcpy(both + at, m.b, (size_t)m.n);
+                WIRE_CHECK(wayland_feed(client, both, first + m.n, 0, 0) == 0);
+        }
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 4);
+
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+        WIRE_CHECK(wayland_feed(client, m.b, 8, 0, 0) == SHELL_EINVAL);
+}
+
+static void wire_refusal_checks(void)
+{
+        unsigned char bytes[WAYLAND_MSG_MAX + 64];
+        struct wire_build m;
+        long client, objects_ok = 0;
+
+        /* a header whose size is six: below the eight of a bare header. */
+        client = wayland_client_connect();
+        WIRE_CHECK(client >= 0);
+        bytes[0] = 1; bytes[1] = 0; bytes[2] = 0; bytes[3] = 0;
+        wire_put(bytes + 4, (6UL << 16) | 1UL);
+        wire_refused(client, "size six", 8, bytes);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* a size past WAYLAND_MSG_MAX, and one that is not a multiple of four. */
+        client = wayland_client_connect();
+        wire_put(bytes + 4, ((unsigned long)(WAYLAND_MSG_MAX + 4) << 16) | 1UL);
+        wire_refused(client, "oversized", 8, bytes);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+        client = wayland_client_connect();
+        wire_put(bytes + 4, (10UL << 16) | 1UL);
+        wire_refused(client, "size not a multiple of four", 10, bytes);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* a request on an object the client never made. */
+        client = wayland_client_connect();
+        wb_begin(&m, 99, 0);
+        wb_u(&m, 3);
+        wb_end(&m);
+        wire_refused(client, "unknown object", m.n, m.b);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* a request the display does not have, and one with the wrong arguments. */
+        client = wayland_client_connect();
+        wb_begin(&m, WAYLAND_DISPLAY, 5);
+        wb_u(&m, 3);
+        wb_end(&m);
+        wire_refused(client, "no such display request", m.n, m.b);
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_end(&m);
+        wire_refused(client, "sync without its new id", m.n, m.b);
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_u(&m, 3);
+        wb_u(&m, 4);
+        wb_end(&m);
+        wire_refused(client, "sync with a spare word", m.n, m.b);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* a bind with each of its checks failing: no such global, another interface,
+           a version too high, a version of zero, an id already in use. */
+        client = wayland_client_connect();
+        wb_begin(&m, 2, 0);
+        wb_u(&m, 1);
+        wb_s(&m, "wl_compositor");
+        wb_u(&m, 1);
+        wb_u(&m, 2);
+        wb_end(&m);
+        wire_refused(client, "registry is not ours yet", m.n, m.b);
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        wb_end(&m);
+        WIRE_CHECK(wayland_feed(client, m.b, m.n, 0, 0) == 0);
+        wire_take(client, (unsigned long[80]){0}, (unsigned long[80]){0}, 80);
+        wb_begin(&m, 2, 0);
+        wb_u(&m, 9);
+        wb_s(&m, "wl_compositor");
+        wb_u(&m, 4);
+        wb_u(&m, 3);
+        wb_end(&m);
+        wire_refused(client, "no such global", m.n, m.b);
+        wb_begin(&m, 2, 0);
+        wb_u(&m, 2);
+        wb_s(&m, "wl_compositor");
+        wb_u(&m, 1);
+        wb_u(&m, 3);
+        wb_end(&m);
+        wire_refused(client, "global is another interface", m.n, m.b);
+        wb_begin(&m, 2, 0);
+        wb_u(&m, 2);
+        wb_s(&m, "wl_shm");
+        wb_u(&m, 2);
+        wb_u(&m, 3);
+        wb_end(&m);
+        wire_refused(client, "version past the highest", m.n, m.b);
+        wb_begin(&m, 2, 0);
+        wb_u(&m, 2);
+        wb_s(&m, "wl_shm");
+        wb_u(&m, 0);
+        wb_u(&m, 3);
+        wb_end(&m);
+        wire_refused(client, "version zero", m.n, m.b);
+        wb_begin(&m, 2, 0);
+        wb_u(&m, 2);
+        wb_s(&m, "wl_shm");
+        wb_u(&m, 1);
+        wb_u(&m, 2);
+        wb_end(&m);
+        wire_refused(client, "id already in use", m.n, m.b);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* the object table: 64 objects in all, the display counted, so the 65th is out of room. */
+        client = wayland_client_connect();
+        for (unsigned long id = 2; id <= WAYLAND_OBJECTS; id++)
+        {
+                unsigned long objects[80], ops[80];
+
+                wb_begin(&m, WAYLAND_DISPLAY, 1);
+                wb_u(&m, id);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                WIRE_CHECK(wire_take(client, objects, ops, 80) == WAYLAND_GLOBALS);
+                objects_ok++;
+        }
+        WIRE_CHECK(objects_ok == WAYLAND_OBJECTS - 1);
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, WAYLAND_OBJECTS + 1);
+        {
+                unsigned long objects[80], ops[80];
+                long n = wb_end(&m);
+                long took = wire_take(client, objects, ops, 80);
+                (void)took;
+                wire_snap(client);
+                WIRE_CHECK(wayland_feed(client, m.b, n, 0, 0) == SHELL_ENOSPC);
+                WIRE_CHECK(wire_same(client));
+        }
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* a message split in four, one byte at a time, lands exactly once. */
+        client = wayland_client_connect();
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_u(&m, 2);
+        {
+                long n = wb_end(&m);
+                unsigned long objects[8], ops[8];
+
+                for (long i = 0; i < n; i++)
+                        WIRE_CHECK(wayland_feed(client, m.b + i, 1, 0, 0) == 0);
+                WIRE_CHECK(wire_take(client, objects, ops, 8) == 2);
+        }
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+}
+
+static void wire_lifecycle_checks(void)
+{
+        long client;
+        long keymap = 0;
+        unsigned char one[8] = {1, 0, 0, 0, 1, 0, 8, 0};
+        static unsigned char out[WAYLAND_OUT_MAX];
+
+        WIRE_CHECK(wayland_stop() == 0);
+        WIRE_CHECK(wayland_feed(0, one, 8, 0, 0) == SHELL_EINVAL);
+        WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
+        WIRE_CHECK(wayland_start(&wire_sink_full) == SHELL_EBUSY);
+        client = wayland_client_connect();
+        WIRE_CHECK(client >= 0);
+        {
+                struct wire_build m;
+
+                wb_begin(&m, WAYLAND_DISPLAY, 0);
+                wb_u(&m, 2);
+                wire_feed_build(client, &m);
+        }
+        WIRE_CHECK(wayland_take_output(client, out, 4, &keymap) == SHELL_ENOSPC);
+        WIRE_CHECK(wayland_take_output(client, out, WAYLAND_OUT_MAX, &keymap) > 0);
+        WIRE_CHECK(wayland_take_output(client, out, WAYLAND_OUT_MAX, &keymap) == 0);
+        WIRE_CHECK(wayland_stop() == 0);
+}
+
+int main(void)
+{
+        WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
+        wire_good_objects_check();
+        wire_refusal_checks();
+        wire_lifecycle_checks();
+        printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
+        return wire_failures != 0;
+}
+#endif /* CHECK_wayland_wire */
+
 #ifdef CHECK_hooks_off
 /*
         With both switches off every hook is an inline no-op that answers
-        SHELL_EOPNOTSUPP. This program calls all 44 and must see that answer
+        SHELL_EOPNOTSUPP. This program calls all 46 and must see that answer
         from each one. The object it compiles to defines no hook symbol, and
         test/run's hooks lane proves that with nm on that object: the program
         is built with -c, and no wayland_, x11_ or xwayland_ name is defined.
@@ -142420,7 +142936,9 @@ struct shell_layer;
         H(int, wayland_window_title, (long client, long surface, const char *text, long length), ((void)client, (void)surface, (void)text, (void)length)) \
         H(int, wayland_window_app_id, (long client, long surface, const char *text, long length), ((void)client, (void)surface, (void)text, (void)length)) \
         H(int, wayland_window_query, (long client, long surface, struct shell_facts *facts), ((void)client, (void)surface, (void)facts)) \
-        H(int, wayland_layer_surface, (long client, long surface, const struct shell_layer *layer), ((void)client, (void)surface, (void)layer))
+        H(int, wayland_layer_surface, (long client, long surface, const struct shell_layer *layer), ((void)client, (void)surface, (void)layer)) \
+        H(int, wayland_feed, (long client, const unsigned char *bytes, long length, const long *fds, long count), ((void)client, (void)bytes, (void)length, (void)fds, (void)count)) \
+        H(int, wayland_take_output, (long client, unsigned char *into, long room, long *keymap), ((void)client, (void)into, (void)room, (void)keymap))
 
 #define OFF_X11_HOOKS(H) \
         H(int, x11_start, (const struct shell_sink *sink), ((void)sink)) \
@@ -142484,6 +143002,8 @@ int main(void)
         HOOK_OFF(wayland_window_app_id(0, 0, "a", 1));
         HOOK_OFF(wayland_window_query(0, 0, 0));
         HOOK_OFF(wayland_layer_surface(0, 0, 0));
+        HOOK_OFF(wayland_feed(0, 0, 0, 0, 0));
+        HOOK_OFF(wayland_take_output(0, 0, 0, 0));
         HOOK_OFF(x11_start(0));
         HOOK_OFF(x11_stop());
         HOOK_OFF(x11_client_connect());
@@ -142509,7 +143029,7 @@ int main(void)
         HOOK_OFF(xwayland_stop());
 #undef HOOK_OFF
         printf("CHECK_hooks_off: %u of %u hooks answer SHELL_EOPNOTSUPP\n", refused, total);
-        return refused == total && total == 44 ? 0 : 1;
+        return refused == total && total == 46 ? 0 : 1;
 }
 #endif /* CHECK_hooks_off */
 
