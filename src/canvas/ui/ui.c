@@ -4579,6 +4579,14 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         ui_kit_number_to(&c->spot, 0, 300, &ui_ease);
                         ui_squish_release(&c->squish); // pressSpring(B, 0, vy, 0, vyT): the drag's vertical press only
                 }
+                // The release is where the pointer is: a press dragged off the control and let go there is not hovered
+                // (the held motions above never moved hover, and no motion comes after a release to move it).
+                {
+                        int hit = ui_control_live(c) ? ui_control_hit(ui, c, x, y) : -1;
+
+                        c->hover = hit >= 0;
+                        c->item = hit;
+                }
                 return changed;
         }
 }
