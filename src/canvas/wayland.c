@@ -162,3 +162,120 @@
           they are not window properties, and each one is its own protocol
           surface.
 */
+#ifndef CONFIG_MOONWATER_WAYLAND
+#error "wayland.c is built only with CONFIG_MOONWATER_WAYLAND; with the switch off the Makefile does not build it"
+#endif
+
+#include "wayland.h"
+
+/*
+        The one state this file has. Every hook below is a call into shell.h's
+        engine with it, so a second static variable here would be a review
+        failure: the engine's rules hold for this struct and no other.
+*/
+static struct shell_side wayland;
+
+int wayland_start(const struct shell_sink *sink)
+{
+        return shell_start(&wayland, sink);
+}
+
+int wayland_stop(void)
+{
+        return shell_stop(&wayland);
+}
+
+int wayland_client_connect(void)
+{
+        return shell_client_connect(&wayland);
+}
+
+int wayland_client_disconnect(long client)
+{
+        return shell_client_disconnect(&wayland, client);
+}
+
+int wayland_role(long client, long surface, long role)
+{
+        return shell_role(&wayland, client, surface, role);
+}
+
+int wayland_buffer_offer(long client, const struct shell_buffer *buffer)
+{
+        return shell_buffer_offer(&wayland, client, buffer);
+}
+
+int wayland_damage(long client, long surface, long buffer, const struct shell_rect *rect)
+{
+        return shell_damage(&wayland, client, surface, buffer, rect);
+}
+
+int wayland_input_key(long client, long code, long pressed)
+{
+        return shell_input_key(&wayland, client, code, pressed);
+}
+
+int wayland_input_pointer(long client, long x, long y, long buttons)
+{
+        return shell_input_pointer(&wayland, client, x, y, buttons);
+}
+
+int wayland_window_place(long client, long surface, long x, long y, long screen)
+{
+        return shell_window_place(&wayland, client, surface, x, y, screen);
+}
+
+int wayland_window_size(long client, long surface, long width, long height)
+{
+        return shell_window_size(&wayland, client, surface, width, height);
+}
+
+int wayland_window_minimize(long client, long surface, long on)
+{
+        return shell_window_minimize(&wayland, client, surface, on);
+}
+
+int wayland_window_maximize(long client, long surface, long on)
+{
+        return shell_window_maximize(&wayland, client, surface, on);
+}
+
+int wayland_window_fullscreen(long client, long surface, long on)
+{
+        return shell_window_fullscreen(&wayland, client, surface, on);
+}
+
+int wayland_window_stack(long client, long surface, long layer)
+{
+        return shell_window_stack(&wayland, client, surface, layer);
+}
+
+int wayland_window_activate(long client, long surface)
+{
+        return shell_window_activate(&wayland, client, surface);
+}
+
+int wayland_window_close(long client, long surface)
+{
+        return shell_window_close(&wayland, client, surface);
+}
+
+int wayland_window_title(long client, long surface, const char *text, long length)
+{
+        return shell_window_title(&wayland, client, surface, text, length);
+}
+
+int wayland_window_app_id(long client, long surface, const char *text, long length)
+{
+        return shell_window_app_id(&wayland, client, surface, text, length);
+}
+
+int wayland_window_query(long client, long surface, struct shell_facts *facts)
+{
+        return shell_window_query(&wayland, client, surface, facts);
+}
+
+int wayland_layer_surface(long client, long surface, const struct shell_layer *layer)
+{
+        return shell_layer_surface(&wayland, client, surface, layer);
+}
