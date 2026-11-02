@@ -2162,7 +2162,6 @@ static struct ui_popup terminal_menu;
 static fn terminal_menu_open(int x, int y, b32 touch)
 {
         struct ui_popmenu address_to m = &terminal_menu.menu;
-        struct ui menu_ui = terminal.ui;
 
         m->count = 0;
         ui_popmenu_add(m, "&Copy", "Ctrl+Shift+C", terminal.selecting ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_COPY);
@@ -2172,21 +2171,7 @@ static fn terminal_menu_open(int x, int y, b32 touch)
         ui_popmenu_add(m, "Zoom &In", "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
         ui_popmenu_add(m, "Zoom &Out", "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
         ui_popmenu_add(m, "&Reset Zoom", "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET);
-        // The menu's text in the kit's face, as every menu's, mapped the first time a menu opens (the terminal's own
-        // face when it is not there), and the kit's scratch line it is drawn through, which the terminal's own painter
-        // never needed: without one every label was measured and none drawn.
-        static font_face menu_face;
-        static int menu_face_state;
-
-        if (!menu_ui.regular)
-        {
-                if (!menu_face_state)
-                        menu_face_state = ui_face_load(&menu_face, (string_address)UI_FONT_REGULAR) ? 1 : -1;
-                menu_ui.regular = menu_ui.bold = menu_face_state > 0 ? &menu_face : terminal.plain[0];
-        }
-        ui_scratch_fit(&terminal.ui, 640u * (unsigned int)terminal_scale());
-        menu_ui.scratch = terminal.ui.scratch, menu_ui.scratch_width = terminal.ui.scratch_width;
-        ui_popup_open(&terminal_menu, &terminal.own, &menu_ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
+        ui_popup_open(&terminal_menu, &terminal.own, &terminal.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
 static fn terminal_chose(int id)
