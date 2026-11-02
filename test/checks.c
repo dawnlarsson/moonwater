@@ -119725,7 +119725,8 @@ static int life_drawn(void)
         {
                 int x, y, top = COMPOSITOR_NONE, beside = 0;
 
-                if (!compositor_visible(row))
+                // A window under 48 pixels a side has its close button and minimise button over its middle: its colour is not there to find.
+                if (!compositor_visible(row) || compositor.w[row] < 48 || compositor.h[row] < 48)
                         continue;
                 compositor_frame_of(row, &frame);
                 x = frame.x + frame.width / 2;
@@ -120017,6 +120018,17 @@ static void check_compositor_lifecycle_seam(void)
     life_step("move the wide window across the seam", compositor.showing[3] != 0);
     check("lifecycle seam: a wide window moved across the seam is on the screens", life_on(3));
 
+    table->x[4] = 40, table->y[4] = 30;
+    life_paint(4, SCREENS_B_W, SCREENS_H, SCREENS_H);
+    life_step("open a window the size of B", compositor.showing[4] != 0);
+    check("lifecycle seam: a window the size of B is kept on the screens, whole",
+          life_on(4) && compositor.w[4] == SCREENS_B_W && compositor.h[4] == SCREENS_H);
+    compositor_place(4, SCREENS_A_W, 0);
+    life_step("move it to B", compositor.showing[4] != 0);
+    check("lifecycle seam: and moved to B's corner it stays on the screens, whole", life_on(4) && compositor.w[4] == SCREENS_B_W);
+    life_close(4);
+    life_step("close the window the size of B", !compositor.showing[4]);
+
     compositor_focus(1);
     life_step("give the keys to the window on A", compositor.focus == 1);
     compositor_frame_of(1, &was);
@@ -120030,6 +120042,199 @@ static void check_compositor_lifecycle_seam(void)
     life_close(2);
     life_step("close the window on B", !compositor.showing[2]);
     check("lifecycle seam: and the one on B leaves none of its colour either", life_ghost(2, &was) == 0);
+}
+
+/*
+        The rest of the lifecycle, on one screen: a window maximised by Alt-Up and restored by Alt-Down to where it was; one
+        closed while it lands, and the next in its row landing again; one lifted back by its program out of a put away; one
+        closed under an Alt-Tab, which ends the cycle; a window the size of its screen moved, which keeps its corner; and
+        rows opened, moved, put away, shown and closed in no order at all, every step held as in the sweep above.
+*/
+static void check_compositor_lifecycle_more(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    struct compositor_frame was;
+    unsigned int seed = 0x2545f491u;
+    int x, y, width, height, under;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("lifecycle more: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->motion = 0;
+    table->focus = WINDOWS;
+
+    // Maximised by Alt-Up, and restored by Alt-Down to the rectangle it had.
+    table->x[1] = 40, table->y[1] = 30;
+    life_paint(1, 100, 80, GLASS_SIDE);
+    compositor_focus(1);
+    life_step("give the keys to a window", compositor.focus == 1);
+    x = compositor.x[1], y = compositor.y[1], width = (int)compositor.w[1], height = (int)compositor.h[1];
+    compositor_tile_chord(CK_KEY_UP);
+    life_step("maximise with Alt-Up", compositor.arranged[1] == COMPOSITOR_MAXIMIZED);
+    check("lifecycle more: a maximised window fills the screen",
+          life_on(1) && compositor.w[1] == GLASS_SIDE && compositor.h[1] == GLASS_SIDE && compositor.x[1] == 0 && compositor.y[1] == 0);
+    compositor_tile_chord(CK_KEY_DOWN);
+    life_step("restore with Alt-Down", compositor.arranged[1] == COMPOSITOR_FLOATING);
+    check("lifecycle more: restored, it is where it was and as large as it was",
+          compositor.x[1] == x && compositor.y[1] == y && (int)compositor.w[1] == width && (int)compositor.h[1] == height &&
+              table->x[1] == x && table->y[1] == y);
+
+    // Closed while maximised: the next window in its row is not maximised, nor sized by the one that went.
+    compositor_tile_chord(CK_KEY_UP);
+    life_step("maximise it again", compositor.arranged[1] == COMPOSITOR_MAXIMIZED);
+    life_close(1);
+    life_step("close it maximised", !compositor.showing[1]);
+    life_paint(1, 100, 80, GLASS_SIDE);
+    life_step("open the next window in the row", compositor.showing[1] != 0);
+    check("lifecycle more: the next window in the row is floating, at its own size",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.w[1] == 100 && compositor.h[1] == 80);
+    life_close(1);
+    life_step("close it again", !compositor.showing[1]);
+
+    // Closed while it lands: the landing ends with it, and the next window in the row lands again.
+    table->x[2] = 60, table->y[2] = 60;
+    life_paint(2, 60, 60, GLASS_SIDE);
+    check("lifecycle more: a window opened lands", compositor.landing[2] != 0);
+    life_close(2);
+    life_step("close it while it lands", !compositor.showing[2]);
+    check("lifecycle more: the landing ends with the window", compositor.landing[2] == 0);
+    life_paint(2, 60, 60, GLASS_SIDE);
+    life_step("the next window in the row opens", compositor.showing[2] != 0);
+    check("lifecycle more: the next window in the row lands again", compositor.landing[2] != 0);
+    life_close(2);
+    life_step("close it again", !compositor.showing[2]);
+
+    // Put away, then lifted by its program: it comes back, on top and with the keys.
+    table->x[3] = 80, table->y[3] = 20;
+    life_paint(3, 90, 70, GLASS_SIDE);
+    compositor_focus(3);
+    compositor_minimize_row(3);
+    life_step("put the window away", (compositor.state[3] & WINDOW_MINIMIZED) != 0);
+    table->lift[3] = 1;
+    life_paint(3, 90, 70, GLASS_SIDE);
+    life_step("the program lifts it", compositor_visible(3) != 0);
+    check("lifecycle more: a lifted window comes back on top, with the keys",
+          compositor.focus == 3 && compositor.stack[compositor.stacked - 1] == 3 && table->state[3] == 0);
+    life_close(3);
+    life_step("close the lifted window", !compositor.showing[3]);
+
+    // Closed under an Alt-Tab: the cycle ends with it, and the keys go to a window shown.
+    for (int row = 10; row < 13; row++)
+    {
+        table->x[row] = 20 * row - 150, table->y[row] = 20 * row - 150;
+        life_paint(row, 80, 60, GLASS_SIDE);
+    }
+    compositor_focus(12);
+    compositor_focus_step();
+    life_step("step Alt-Tab", compositor.cycle != 0);
+    under = compositor.focus;
+    life_close(under);
+    life_step("close the window Alt-Tab stopped on", !compositor.showing[under]);
+    check("lifecycle more: closing it ends the cycle, and the keys are with a window shown or with none",
+          compositor.cycle == 0 && (compositor.focus < 0 || compositor_visible(compositor.focus)));
+    for (int row = 10; row < 13; row++)
+        if (compositor.showing[row])
+        {
+            life_close(row);
+            life_step("close the rest of the Alt-Tab rows", !compositor.showing[row]);
+        }
+
+    // A window the size of its screen is kept in its corner when it is moved to the middle of it.
+    table->x[13] = 0, table->y[13] = 0;
+    life_paint(13, GLASS_SIDE, GLASS_SIDE, GLASS_SIDE);
+    life_step("open a window the size of the screen", compositor.showing[13] != 0);
+    compositor_place(13, 50, 50);
+    life_step("move it into the middle", compositor.showing[13] != 0);
+    check("lifecycle more: a window the size of the screen keeps its corner on the screen",
+          compositor.x[13] == 0 && compositor.y[13] == 0 && compositor.w[13] == GLASS_SIDE && compositor.h[13] == GLASS_SIDE);
+    life_close(13);
+    life_step("close the screen-sized window", !compositor.showing[13]);
+
+    // Rows opened, moved, put away, shown and closed in no order, a few hundred times over.
+    for (int step = 0; step < 400; step++)
+    {
+        int row, action;
+
+        seed = seed * 1103515245u + 12345u;
+        row = (int)((seed >> 8) % 20);
+        action = (int)((seed >> 20) % 5);
+        if (!compositor.showing[row])
+        {
+            table->x[row] = (int)((seed >> 3) % 300) - 40;
+            table->y[row] = (int)((seed >> 11) % 300) - 40;
+            life_paint(row, 20 + (int)((seed >> 5) % 60), 20 + (int)((seed >> 13) % 50), GLASS_SIDE);
+            life_step("churn: open a row", compositor.showing[row] != 0);
+        }
+        else if (action == 0)
+        {
+            life_close(row);
+            life_step("churn: close a row", !compositor.showing[row]);
+        }
+        else if (action == 1)
+        {
+            compositor_minimize_row(row);
+            life_step("churn: put a row away", 1);
+        }
+        else if (action == 2)
+        {
+            compositor_reveal(row);
+            life_step("churn: reveal a row", compositor_visible(row) != 0);
+        }
+        else if (action == 3 && compositor_visible(row))
+        {
+            compositor_focus(row);
+            life_step("churn: give a row the keys", compositor.focus == row);
+        }
+        else
+        {
+            compositor_place(row, (int)((seed >> 4) % 5000) - 2500, (int)((seed >> 9) % 5000) - 2500);
+            life_step("churn: move a row", !compositor_visible(row) || life_on(row));
+        }
+    }
+    for (int row = 0; row < WINDOWS; row++)
+        if (compositor.showing[row])
+        {
+            compositor_frame_of(row, &was);
+            life_close(row);
+            life_step("churn: close the rows left", !compositor.showing[row]);
+        }
+    check("lifecycle more: after the churn nothing is shown, stacked or focused",
+          compositor.stacked == 0 && compositor.focus == COMPOSITOR_NONE && table->focus == WINDOWS);
+
+    // A row whose buffer the card refused to show straight is pinned for the attempt (its program may not give its pages
+    // back then), and that pin is no one's once the window is gone: the next program in the row discards as any does.
+    // /dev/null stands in for udmabuf: its ioctl fails, which is the refusal the card would have given.
+    {
+        int devnull = (int)system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+
+        if (devnull < 0)
+        {
+            check("lifecycle more: /dev/null opens to stand in for udmabuf", false);
+            return;
+        }
+        table->x[5] = 40, table->y[5] = 40;
+        life_paint(5, 60, 60, GLASS_SIDE);
+        compositor.table_memfd = devnull + 1;
+        compositor.udmabuf = devnull + 1;
+        check("lifecycle more: a buffer the card refuses is pinned for the attempt", compositor_window_fb(5, 0) == 0 && table->pinned[5] == 1);
+        life_close(5);
+        life_step("close a row the card refused", !compositor.showing[5]);
+        check("lifecycle more: a closed row is not pinned, so its next program discards its pages as any does", table->pinned[5] == 0);
+        system_close(devnull);
+    }
 }
 
 /*
@@ -134236,6 +134441,7 @@ b32 main()
         check_compositor_minimise();
         check_compositor_lifecycle();
         check_compositor_lifecycle_seam();
+        check_compositor_lifecycle_more();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_wheel();

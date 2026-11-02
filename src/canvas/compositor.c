@@ -9039,6 +9039,9 @@ static void compositor_leave(int row)
                 compositor.dropping |= 1u << row;
         else if (compositor.scan_fb[row][0] || compositor.scan_fb[row][1])
                 compositor_window_fb_drop(row);
+        // Pinned for a framebuffer the card refused, which was never made: no drop above would let go of it.
+        else
+                __atomic_store_n(&table->pinned[row], 0u, __ATOMIC_RELEASE);
         table->spoiled_height[row][0] = table->spoiled_height[row][1] = 0;
         table->ground[row] = 0;
         table->hover_off[row] = 0;
