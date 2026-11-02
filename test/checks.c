@@ -125072,6 +125072,10 @@ static fn check_display_section(void)
                   string_equals((string_address)text, (string_address) "144 Hz (recommended)") && settings_choice(&settings_rows[refresh_row], 1, text, sizeof(text)) &&
                   string_equals((string_address)text, (string_address) "75 Hz") && !settings_choice(&settings_rows[refresh_row], 3, text, sizeof(text)));
         check("display section: the refresh dropdown shows the rate the screen is at", string_equals((string_address)settings_shown_value(refresh_row), (string_address) "75 Hz"));
+        memory_copy(table.output_model[1], "Dell U2720Q", 12);
+        check("display section: a screen whose EDID names it shows the name, its connector in brackets after it",
+              string_equals((string_address)settings_shown_value(screen_row), (string_address) "Screen 1: Dell U2720Q [DP-1]"));
+        memory_zero(table.output_model[1], sizeof(table.output_model[1]));
 
         // What the compositor did not do is said on the row it was asked of: a rate the screen does not offer, a turn it could
         // not do, and a place the file does not read (the Screen row). Nothing refused reads plain.

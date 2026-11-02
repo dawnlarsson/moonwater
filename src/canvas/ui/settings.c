@@ -1322,14 +1322,21 @@ static const char address_to settings_turn_label(unsigned int turn)
         return settings_turns[0].label;
 }
 
-// A screen's name as the Screen dropdown and the rows show it: Screen 1: DP-1.
-static positive settings_screen_label(unsigned int number, const char address_to name, char address_to into, positive room)
+// A screen's name as the Screen dropdown and the rows show it: its number and its monitor's name from its EDID with its
+// connector's name in brackets (Screen 1: Dell U2720Q [DP-1]), or the connector's name alone when the EDID names none.
+static positive settings_screen_label(unsigned int number, const char address_to name, const char address_to model, char address_to into,
+                                      positive room)
 {
         positive at = settings_map_add(into, room, 0, "Screen ");
 
         at = settings_map_number(into, room, at, (long)number);
         at = settings_map_add(into, room, at, ": ");
-        return settings_map_add(into, room, at, name);
+        if (!model[0])
+                return settings_map_add(into, room, at, name);
+        at = settings_map_add(into, room, at, model);
+        at = settings_map_add(into, room, at, " [");
+        at = settings_map_add(into, room, at, name);
+        return settings_map_add(into, room, at, "]");
 }
 
 // A rate in Hz, with the screen's first rate, the one it recommends, marked.
@@ -1371,7 +1378,8 @@ static const char address_to settings_output_text(int row, int chosen)
                 return settings_shown_rate;
         }
         windows_screen_numbers(table, number);
-        settings_screen_label(number[chosen], table->output_name[chosen], settings_shown_screen, sizeof(settings_shown_screen));
+        settings_screen_label(number[chosen], table->output_name[chosen], table->output_model[chosen], settings_shown_screen,
+                              sizeof(settings_shown_screen));
         return settings_shown_screen;
 }
 
@@ -2934,7 +2942,7 @@ static b32 settings_output_choice(const struct settings_row address_to which, po
                 at = settings_map_numbered(number, count, (unsigned int)index + 1);
                 if (at < 0)
                         return false;
-                settings_screen_label((unsigned int)index + 1, table->output_name[at], into, room);
+                settings_screen_label((unsigned int)index + 1, table->output_name[at], table->output_model[at], into, room);
                 return true;
         }
         if (which->output == SETTINGS_OUT_TURN)
