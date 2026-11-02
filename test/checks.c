@@ -118256,6 +118256,24 @@ static void check_compositor_preview_held(void)
 */
 #define SHARED_W 640
 #define SHARED_H 400
+// The program of row answers the size it was asked with a picture of exactly that size, as a window does once it has drawn.
+static void shared_answer(int row)
+{
+    struct windows address_to table = compositor.table;
+    unsigned int address_to pixels = windows_buffer(table, row, 0);
+    unsigned int width = table->want_width[row], height = table->want_height[row];
+
+    for (unsigned int line = 0; line < height; line++)
+        for (unsigned int column = 0; column < width; column++)
+            pixels[line * SHARED_W + column] = 0xff202020u + (unsigned int)row;
+    table->width[row] = width;
+    table->height[row] = height;
+    table->buffer_index[row] = 0;
+    table->damage_width[row] = 0;
+    table->damage_height[row] = height;
+    table->frame[row]++;
+    compositor_take(row);
+}
 static void check_compositor_shared(void)
 {
     static unsigned int scanout[SHARED_W * SHARED_H], plain[SHARED_W * SHARED_H], marked[SHARED_W * SHARED_H];
@@ -118382,6 +118400,41 @@ static void check_compositor_shared(void)
     check("shared: dragged 30 px down, the upper is 230 high and the lower starts at 230 and is 170 high",
           compositor.h[2] == SHARED_H / 2 + 30 && compositor.y[3] == SHARED_H / 2 + 30 && compositor.h[3] == SHARED_H / 2 - 30);
     screens_hand(SHARED_W / 4, SHARED_H / 2 + 31, -1);
+
+    /* The programs answer. Pressed on the left window's edge, the left one is the hand's and the right one is the other:
+       its picture of the size asked must not take its edge away, or the two stop meeting. Each drag is answered, as a
+       window answers the motion it was asked for. */
+    compositor_arrange(2, COMPOSITOR_LEFT);
+    compositor_arrange(3, COMPOSITOR_RIGHT);
+    compositor.stack[0] = 3, compositor.stack[1] = 2;
+    shared_answer(2), shared_answer(3);
+    screens_hand(SHARED_W / 2 - 1, SHARED_H / 2, 0);
+    screens_hand(SHARED_W / 2 - 1, SHARED_H / 2, 1);
+    check("shared answered: a press on the left window's edge takes both, the left one the hand's and the right one the other",
+          compositor.resize == 2 && compositor.shared_row == 3 && compositor.shared_lo == 2 && compositor.shared_hi == 3 &&
+              compositor.edges[2] == COMPOSITOR_EDGE_RIGHT && compositor.edges[3] == COMPOSITOR_EDGE_LEFT);
+    screens_hand(SHARED_W / 2 + 19, SHARED_H / 2, 0);
+    shared_answer(2), shared_answer(3);
+    check("shared answered: dragged 20 px and both answered, they still meet, and the indicator is on the new edge",
+          compositor.w[2] == SHARED_W / 2 + 20 && compositor.x[3] == SHARED_W / 2 + 20 && compositor.w[3] == SHARED_W / 2 - 20 &&
+              compositor.x[2] + (int)compositor.w[2] == compositor.x[3] && compositor.x[3] + (int)compositor.w[3] == SHARED_W &&
+              compositor.mark[0] == compositor.x[3] - 2 && compositor.mark[2] == 4);
+    screens_hand(SHARED_W / 2 + 49, SHARED_H / 2, 0);
+    shared_answer(2), shared_answer(3);
+    check("shared answered: dragged 50 px and answered again, the two still meet and fill the width",
+          compositor.w[2] == SHARED_W / 2 + 50 && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
+              compositor.x[3] + (int)compositor.w[3] == SHARED_W);
+    screens_hand(4, SHARED_H / 2, 0);
+    shared_answer(2), shared_answer(3);
+    check("shared answered: dragged to the least, the left stops at the least and the right keeps its far edge",
+          compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
+              compositor.x[3] + (int)compositor.w[3] == SHARED_W);
+    screens_hand(4, SHARED_H / 2, -1);
+    shared_answer(2), shared_answer(3);
+    check("shared answered: let go and answered, both keep the sizes they were let go at and still meet",
+          compositor.resize == COMPOSITOR_NONE && compositor.shared_row == COMPOSITOR_NONE &&
+              compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
+              compositor.x[3] + (int)compositor.w[3] == SHARED_W);
 }
 
 /*
