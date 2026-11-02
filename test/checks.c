@@ -17650,6 +17650,10 @@ fn check_record_guards()
         p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi, avx2 = cpu_has_avx2;
         // AVX-512 with VBMI, AVX-512 without it, AVX2 without AVX-512 (the table form's nibble classes), and SSE2.
         positive tiers = 4;
+#elif RISCV64
+        // With V, then the word body without it, which is what a machine without V runs.
+        p8 vector = cpu_has_vector;
+        positive tiers = 2;
 #else
         positive tiers = 1;
 #endif
@@ -17662,6 +17666,8 @@ fn check_record_guards()
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi = tier == 0 ? vbmi : 0;
                 cpu_has_avx2 = tier == 3 ? 0 : avx2;
+#elif RISCV64
+                cpu_has_vector = tier == 0 ? vector : 1;
 #endif
                 for (positive size = 0; size <= 200; size++)
                         for (positive edge = 0; edge < 2; edge++)
@@ -17670,7 +17676,9 @@ fn check_record_guards()
 
                                 for (positive i = 0; i < size; i++)
                                         at[i] = (p8)(next() & 3 ? 'a' + i % 7 : next() & 1 ? ' ' : '\t');
+                                VECTOR_FIRST_CALL(tier == 0);
                                 sink += (memory_offsets_fields)(got, at, size, table, 256);
+                                VECTOR_FIRST_CALL(tier == 0);
                                 sink += (memory_offsets_fields_blank)(got, at, size, '\n', 256);
                                 sink += (memory_offsets_fields_blank)(got, at, size, 'a', 3);
                                 sink += (memory_nth_of)(at, ' ', size, 1 + size % 5).x;
@@ -17682,6 +17690,8 @@ fn check_record_guards()
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi = vbmi;
         cpu_has_avx2 = avx2;
+#elif RISCV64
+        cpu_has_vector = vector;
 #endif
         // Reached: nothing faulted.
         same("record scans", "reads stay inside the block", sink >= 0, 1);
@@ -17700,6 +17710,10 @@ fn check_record_scans()
         p8 avx512 = cpu_has_avx512, vbmi = cpu_has_avx512_vbmi, avx2 = cpu_has_avx2;
         // AVX-512 with VBMI, AVX-512 without it, AVX2 without AVX-512 (the table form's nibble classes), and SSE2.
         positive tiers = 4;
+#elif RISCV64
+        // With V, then the word body without it, which is what a machine without V runs.
+        p8 vector = cpu_has_vector;
+        positive tiers = 2;
 #else
         positive tiers = 1;
 #endif
@@ -17709,6 +17723,8 @@ fn check_record_scans()
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi = tier == 0 ? vbmi : 0;
                 cpu_has_avx2 = tier == 3 ? 0 : avx2;
+#elif RISCV64
+                cpu_has_vector = tier == 0 ? vector : 1;
 #endif
                 for (positive turn = 0; turn < 12; turn++)
                 {
@@ -17754,6 +17770,7 @@ fn check_record_scans()
 
                                                 for (;;)
                                                 {
+                                                        VECTOR_FIRST_CALL(tier == 0);
                                                         positive answer = form
                                                             ? (memory_offsets_fields)(got, at + from, size - from, table, limit)
                                                             : (memory_offsets_fields_blank)(got, at + from, size - from, extra, limit);
@@ -17879,6 +17896,8 @@ fn check_record_scans()
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi = vbmi;
         cpu_has_avx2 = avx2;
+#elif RISCV64
+        cpu_has_vector = vector;
 #endif
 }
 

@@ -57870,6 +57870,15 @@ __asm__(
 #undef RECORD_A64_BITS
 #undef RECORD_A64_PART
 #elif RISCV64
+//      The V body of memory_offsets_fields_rv: a strip's field bytes as a mask in v0, widened to one byte a lane (v16),
+//      compared with the lane before (v18, the one before the strip's first is the carry in a7), and the lanes that
+//      change are the offsets, stored by the same vcompress and vse32 as RV_OFFSETS_V_STORE but from a5, the positions,
+//      against the room in a4. a7 is the last lane's field bit for the next strip (v20 holds it for vmv.x.s).
+#define RV_FIELDS_V_STORE(NEXT, DONE)                                                                      \
+    "vcpop.m t5, v0\n   beqz t5, " NEXT "\n   sub t4, a4, t0\n   bltu t4, t5, 5f\n   mv t4, t5\n"              \
+    "5:  vsetvli zero, t3, e32, m8, ta, ma\n   vid.v v16\n   vadd.vx v16, v16, t1\n   vcompress.vm v24, v16, v0\n" \
+    "vsetvli zero, t4, e32, m8, ta, ma\n   slli t2, t0, 2\n   add t2, a5, t2\n   vse32.v v24, (t2)\n   add t0, t0, t4\n" \
+    "bltu t4, t5, " DONE "\n"
 __asm__(
     ASM_SECTION
     // memory_offsets_fields and _blank: a byte at a time, its offset stored
@@ -57884,6 +57893,26 @@ __asm__(
     ASM_END(memory_offsets_fields)
     ASM_LOCAL_FUNC(memory_offsets_fields_rv)
     // a0 positions, a1 block, a2 size, a3 table or extra, a4 limit, t6 table?
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    // The detect keeps a0-a4 and t6 and comes back here, where the limit is still the caller's.
+    ".option push\n   .option arch, +v\n"
+    ".Lfields_rv_entry:\n   lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   j .Lfields_rv_entry\n"
+    "1:  li t4, 2\n   bne t3, t4, .Lfields_rv_scalar\n"
+    "mv a5, a0\n   li a0, 0\n   beqz a4, 9f\n   beqz a2, 9f\n   li t0, 1\n   slli t0, t0, 32\n   bleu a4, t0, 2f\n   mv a4, t0\n"
+    "2:  slli a4, a4, 1\n   li t0, 0\n   li t1, 0\n   li a7, 0\n"
+    ".Lfields_rv_v:  bgeu t1, a2, .Lfields_rv_v_end\n   bgeu t0, a4, .Lfields_rv_v_full\n   sub t2, a2, t1\n   vsetvli t3, t2, e8, m2, ta, ma\n"
+    "add t4, a1, t1\n   vle8.v v8, (t4)\n   bnez t6, 3f\n"
+    "li t5, 32\n   vmseq.vx v0, v8, t5\n   li t4, 9\n   vmseq.vx v1, v8, t4\n   vmor.mm v0, v0, v1\n   vmseq.vx v1, v8, a3\n   vmor.mm v0, v0, v1\n   vmnot.m v0, v0\n   j 4f\n"
+    "3:  vluxei8.v v12, (a3), v8\n   vmseq.vi v0, v12, 0\n"
+    "4:  vmv.v.i v16, 0\n   vmerge.vim v16, v16, 1, v0\n   vslide1up.vx v18, v16, a7\n   vmsne.vv v0, v16, v18\n"
+    "addi t5, t3, -1\n   vslidedown.vx v20, v16, t5\n   vmv.x.s a7, v20\n"
+    RV_FIELDS_V_STORE(".Lfields_rv_v_next", ".Lfields_rv_v_full")
+    ".Lfields_rv_v_next:  add t1, t1, t3\n   j .Lfields_rv_v\n"
+    ".Lfields_rv_v_end:  beqz a7, .Lfields_rv_v_full\n   bgeu t0, a4, .Lfields_rv_v_full\n   slli t5, t0, 2\n   add t5, a5, t5\n   sw a2, 0(t5)\n   addi t0, t0, 1\n"
+    ".Lfields_rv_v_full:  srli a0, t0, 1\n   .option pop\n" ASM_RET
+    ".Lfields_rv_scalar:\n"
+#endif
     "mv a5, a0\n   li a0, 0\n   beqz a4, 9f\n   beqz a2, 9f\n   li t0, 1\n   slli t0, t0, 32\n   bleu a4, t0, 1f\n   mv a4, t0\n"
     "1:  slli a4, a4, 1\n   bnez t6, 2f\n   andi a3, a3, 255\n"
     "2:  li t0, 0\n   li t1, 0\n   li t2, 0\n   li a6, 32\n   li a7, 9\n"
