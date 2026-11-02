@@ -5861,13 +5861,22 @@ static fn ui_popmenu_step(struct ui_popmenu address_to m, int step)
                 m->top = m->hot - m->rows_shown + 1;
 }
 
-// A page of the keys: the hot item moves by the rows that show, to the first or last that can be chosen when it runs out.
+// A page of the keys: the hot item moves by the rows that show, and stops at the first or last item (it does not wrap), on
+// the nearest that can be chosen, and the view follows it as a step's does.
 static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
 {
-        int by = m->rows_shown > 0 ? m->rows_shown : 1;
+        int by = m->rows_shown > 0 ? m->rows_shown : 1, at = m->hot < 0 ? (step > 0 ? 0 : m->count - 1) : m->hot;
 
-        for (int k = 0; k < by; k++)
-                ui_popmenu_step(m, step);
+        at += step * by;
+        at = at < 0 ? 0 : at >= m->count ? m->count - 1 : at;
+        while (at > 0 && at < m->count - 1 && !ui_popmenu_choosable(m, at))
+                at -= step > 0 ? 1 : -1;
+        if (ui_popmenu_choosable(m, at))
+                m->hot = at;
+        if (m->hot < m->top)
+                m->top = m->hot;
+        if (m->rows_shown > 0 && m->hot >= m->top + m->rows_shown)
+                m->top = m->hot - m->rows_shown + 1;
 }
 
 /*
