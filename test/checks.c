@@ -115516,6 +115516,100 @@ static fn check_tint(void)
 }
 
 /*
+        memory_mix_u32_row against mix_reference, which is the compositor's mix written out: a cover of 0 keeps the pixel,
+        255 takes the ink whole, and between each channel is (g (255 - c) + i c + 127) / 255 rounded down, the top byte
+        zero. Every width to 300 at every alignment of pixels, ink and cover, the covers cycling through zero, 255 and
+        values between; the words and bytes outside the run untouched. Then every channel value against every ink
+        channel at every cover from 1 to 254, the other channels held.
+*/
+static p32 mix_reference(p32 pixel, p32 ink, p32 cover)
+{
+        p32 out = 0;
+
+        if (cover == 0)
+                return pixel;
+        if (cover == 255)
+                return ink;
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+                out |= ((pixel >> shift & 255) * (255 - cover) + (ink >> shift & 255) * cover + 127) / 255 << shift;
+        return out;
+}
+
+static fn check_mix(void)
+{
+        static p32 ink[512], made[512], want[512], row[256], ground[256];
+        static p8 cover[512], cover_row[256];
+        p64 state = 0x2545f4914f6cdd1dull;
+        bool same = true, untouched = true, whole = true;
+
+#if RISCV64
+        p8 vector = cpu_has_vector;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+#endif
+        for (positive width = 0; width <= 300; width++)
+                for (positive a = 0; a < 4; a++)
+                        for (positive b = 0; b < 8; b++)
+                                for (positive c = 0; c < 4; c++)
+                                {
+                                        for (positive i = 0; i < 512; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                ink[i] = (p32)(state >> 11);
+                                                XORSHIFT64(state);
+                                                cover[i] = (p8)(state >> 7);
+                                                if ((state >> 20) % 4 == 0)
+                                                        cover[i] = (state >> 22) & 1 ? 0 : 255;
+                                        }
+                                        memory_fill(made, 0x5a, sizeof(made));
+                                        for (positive i = 0; i < width; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                made[b + i] = (p32)(state >> 9);
+                                                want[b + i] = mix_reference(made[b + i], ink[a + i], cover[c + i]);
+                                        }
+                                        memory_mix_u32_row(made + b, ink + a, cover + c, width);
+                                        for (positive i = 0; i < width; i++)
+                                                same = same && made[b + i] == want[b + i];
+                                        for (positive i = 0; i < b; i++)
+                                                untouched = untouched && made[i] == 0x5a5a5a5au;
+                                        for (positive i = b + width; i < b + width + 16 && i < 512; i++)
+                                                untouched = untouched && made[i] == 0x5a5a5a5au;
+                                }
+
+        for (p32 channel = 0; channel < 3; channel++)
+                for (p32 c = 1; c < 255; c++)
+                {
+                        p32 shift = 8 * channel;
+
+                        for (p32 i = 0; i < 256; i++)
+                        {
+                                row[i] = (0x3cc3a55au & ~(255u << shift)) | i << shift;
+                                cover_row[i] = (p8)c;
+                        }
+                        for (p32 g = 0; g < 256; g++)
+                        {
+                                for (p32 i = 0; i < 256; i++)
+                                {
+                                        ground[i] = (0x5ac3a500u & ~(255u << shift)) | g << shift;
+                                        made[i] = ground[i];
+                                }
+                                memory_mix_u32_row(made, row, cover_row, 256);
+                                for (p32 i = 0; i < 256; i++)
+                                        whole = whole && made[i] == mix_reference(ground[i], row[i], c);
+                        }
+                }
+#if RISCV64
+        }
+        cpu_has_vector = vector;
+#endif
+        check("mix: every width to 300 at every alignment of pixels, ink and cover, is the compositor's mix, with cover 0 and 255 whole", same);
+        check("mix: words and bytes outside the run are not touched", untouched);
+        check("mix: every red, green and blue against every other at every cover from 1 to 254 is the compositor's mix", whole);
+}
+
+/*
         memory_fill_u32_rect: every width to 80 and rows of 127 to 300,
         heights to 6, two strides, the last row against a page that faults,
         the words between rows and before the first held to a canary; with
@@ -116384,6 +116478,7 @@ b32 main()
         check_glass_tiers();
         check_saturate();
         check_tint();
+        check_mix();
         check_fill_rect();
         check_copy_rect();
         check_copy_changed();
@@ -145804,6 +145899,124 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_tint */
+
+#ifdef BENCH_mix
+/* memory_mix_u32_row against the pixel loop the round corners had: compositor_mix of each pixel whose cover is between
+   0 and 255, the ink whole at 255 and the pixel kept at 0, over runs of one, eight, twelve, sixty-four and three hundred
+   pixels with covers of zero, 255 and between. On x86_64 (SSE2), riscv64 with V and without, and arm64 NEON. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define WORDS 4096
+
+static p32 mixed[WORDS], inks[WORDS];
+static p8 covers[WORDS];
+static volatile positive sink;
+
+/* compositor_mix, as src/canvas/compositor.c has it: the pixel loop's per-pixel mix. */
+__attribute__((noinline, noclone)) static unsigned int compositor_mix(unsigned int ground, unsigned int ink, unsigned int cover)
+{
+        const unsigned long long low = 0xff00ff00ffull, one = 0x100010001ull;
+        unsigned long long g, i, x;
+
+        if (cover == 0)
+                return ground & 0xffffffu;
+        if (cover >= 255)
+                return ink & 0xffffffu;
+        g = (ground & 0xffu) | (unsigned long long)(ground & 0xff00u) << 8 | (unsigned long long)(ground & 0xff0000u) << 16;
+        i = (ink & 0xffu) | (unsigned long long)(ink & 0xff00u) << 8 | (unsigned long long)(ink & 0xff0000u) << 16;
+        x = g * (255 - cover) + i * cover + 127 * one;
+        x += one + ((x >> 8) & low);
+        x = (x >> 8) & low;
+        return (unsigned int)((x & 0xff) | (x >> 8 & 0xff00) | (x >> 16 & 0xff0000));
+}
+
+__attribute__((noinline, noclone)) static void former_mix(p32 address_to into, const p32 address_to ink,
+                                                          const p8 address_to cover, positive length)
+{
+        for (positive at = 0; at < length; at++)
+                if (cover[at])
+                        into[at] = cover[at] == 255 ? ink[at] : compositor_mix(into[at], ink[at], cover[at]);
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+{
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                positive offset = (round * 7) % 2048;
+
+                if (assembly)
+                        memory_mix_u32_row(mixed + offset, inks + offset, covers + offset, length);
+                else
+                        former_mix(mixed + offset, inks + offset, covers + offset, length);
+        }
+        sink = mixed[length - 1];
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive lengths[] = {1, 8, 12, 64, 300};
+        static const string_address names[] = {"one pixel", "eight pixels", "twelve pixels", "sixty-four pixels",
+                                               "three hundred pixels"};
+        p32 seed = 12345;
+
+        for (positive at = 0; at < WORDS; at++)
+        {
+                seed = seed * 1103515245u + 12345u;
+                mixed[at] = seed >> 3;
+                seed = seed * 1103515245u + 12345u;
+                inks[at] = seed >> 3;
+                seed = seed * 1103515245u + 12345u;
+                covers[at] = (p8)(seed >> 16);
+                if ((seed >> 8) % 4 == 0)
+                        covers[at] = 0;
+                else if ((seed >> 8) % 4 == 1)
+                        covers[at] = 255;
+        }
+#if RISCV64
+        p8 vector = cpu_has_vector;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+#else
+        for (positive tier = 0; tier < 1; tier++)
+        {
+#endif
+                for (positive at = 0; at < sizeof(lengths) / sizeof(lengths[0]); at++)
+                {
+                        positive ratios[TRIES];
+                        positive rounds = 4000000 / (lengths[at] + 8) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, lengths[at], rounds);
+                        string_format(log, "memory_mix_u32_row %s, %s: paired median ASM/C %p.", names[at],
+#if X64
+                                      (string_address) "sse2",
+#elif RISCV64
+                                      cpu_has_vector == 2 ? (string_address) "vector" : (string_address) "scalar",
+#else
+                                      (string_address) "neon",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+        }
+#if RISCV64
+        cpu_has_vector = vector;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_mix */
 
 #ifdef BENCH_copy_rect
 /* memory_copy_rect_u32 against the row loop compositor_blit had: a rectangle copied a row at a time with memory_copy.

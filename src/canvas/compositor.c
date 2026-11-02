@@ -320,7 +320,8 @@ static void compositor_panel_tab(const struct compositor_target *t, int slot, un
 */
 // Every radius's mask in one block, radius r at the sum of the squares below it: the masks of every radius up to
 // COMPOSITOR_MASK_MOST, 299536 bytes, of which only the pages of the radii drawn are ever written (a window's radius
-// is eight to its scale, four times at most, and a finger's mark is COMPOSITOR_SPOT to its scale).
+// is eight to its scale, four times at most, and a finger's mark is COMPOSITOR_SPOT to its scale). The mirrored masks of
+// every radius are a second block of the same size, COMPOSITOR_MASKS_BYTES after the first (compositor_corner_mirror).
 #define COMPOSITOR_MASK_MOST 96
 #define COMPOSITOR_MASKS_BYTES (COMPOSITOR_MASK_MOST * (COMPOSITOR_MASK_MOST + 1) * (2 * COMPOSITOR_MASK_MOST + 1) / 6)
 // Mapped when the first is wanted, not kept in the image: the address space of every program that links this is
@@ -336,7 +337,7 @@ static const unsigned char *compositor_corner_mask(int radius)
 
         if (!compositor_corner_masks)
         {
-                compositor_corner_masks = compositor_map_zeroed(COMPOSITOR_MASKS_BYTES);
+                compositor_corner_masks = compositor_map_zeroed(2 * COMPOSITOR_MASKS_BYTES);
                 if (!compositor_corner_masks)
                         return compositor_corner_none;
         }
@@ -360,9 +361,23 @@ static const unsigned char *compositor_corner_mask(int radius)
                                         }
                                 mask[y * radius + x] = (unsigned char)((inside * 255 + 8) / 16);
                         }
+                // The same quarter read backwards along each row, where the corner is on the right: made with it,
+                // so the parallel bands only ever read the masks.
+                for (int y = 0; y < radius; y++)
+                        for (int x = 0; x < radius; x++)
+                                mask[COMPOSITOR_MASKS_BYTES + y * radius + x] = mask[y * radius + radius - 1 - x];
                 compositor_corner_made[radius] = 1;
         }
         return mask;
+}
+
+// The mirrored mask of a radius: mirror[y * radius + x] is the mask's own [y * radius + radius - 1 - x], so a corner on
+// the right reads its row forward as a corner on the left does.
+static const unsigned char *compositor_corner_mirror(int radius)
+{
+        const unsigned char *mask = compositor_corner_mask(radius);
+
+        return mask == compositor_corner_none ? compositor_corner_none : mask + COMPOSITOR_MASKS_BYTES;
 }
 
 // The rectangle a frame covers: its contents and the line round them.
@@ -607,6 +622,65 @@ static int compositor_corner_lit(const struct compositor_frame *frame, int corne
 }
 
 /*
+        One round corner's square, a row at a time, for a frame whose contents are its picture at its own size or a tab's
+        ink (a scaled picture keeps the pixel loop in compositor_draw_with). Each row is two calls of memory_mix_u32_row,
+        the same two mixes the pixel loop makes in the same order: the line's outside over the target by the outer
+        mask, over the edge, then, where the row is inside the contents, the contents over that by the inner mask (or
+        the outer where there is no line). A corner on the right reads the mirrored masks forward, so every call's
+        covers and inks are plain runs. The ink rows are made here, on the stack, so bands drawn at once share nothing.
+*/
+static void compositor_corner_rows(const struct compositor_target *t, const struct compositor_frame *frame, int corner,
+                                   int r, int b, unsigned int edge, unsigned int tab)
+{
+        int x = frame->x, y = frame->y, w = frame->width, h = frame->height, ox, oy, ow, oh;
+        int ri = r > b ? r - b : 0, right = corner & 1, down = (corner & 2) != 0;
+        const unsigned char *outer = right ? compositor_corner_mirror(r) : compositor_corner_mask(r);
+        const unsigned char *inner = ri ? (right ? compositor_corner_mirror(ri) : compositor_corner_mask(ri)) : 0;
+        unsigned int edge_row[COMPOSITOR_RADIUS_MOST], tab_row[COMPOSITOR_RADIUS_MOST];
+        int cx, cy, x1, y1, x2, y2, sx1, sx2;
+
+        compositor_outline(frame, &ox, &oy, &ow, &oh);
+        cx = right ? ox + ow - r : ox;
+        cy = down ? oy + oh - r : oy;
+        x1 = cx > t->x1 ? cx : t->x1;
+        y1 = cy > t->y1 ? cy : t->y1;
+        x2 = cx + r < t->x2 ? cx + r : t->x2;
+        y2 = cy + r < t->y2 ? cy + r : t->y2;
+        // Every row has the same columns, so the inks that are not a picture are made once.
+        sx1 = x1 > x ? x1 : x;
+        sx2 = x2 < x + w ? x2 : x + w;
+        if (b && x2 > x1)
+                memory_fill_u32(edge_row, (positive)(x2 - x1), edge & 0xffffffu);
+        if (frame->builtin && sx2 > sx1)
+                memory_fill_u32(tab_row, (positive)(sx2 - sx1), tab);
+        for (int py = y1; py < y2; py++)
+        {
+                int my = down ? cy + r - 1 - py : py - cy;
+                unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+
+                if (b)
+                        memory_mix_u32_row(at, edge_row, outer + (unsigned long)my * r + (x1 - cx), (positive)(x2 - x1));
+                if (py >= y && py < y + h && ri && sx2 > sx1)
+                {
+                        int kx = sx1 - cx;
+                        const unsigned char *cover;
+                        const unsigned int *row;
+
+                        if (!b)
+                                cover = outer + (unsigned long)my * r + kx;
+                        else if (right)
+                                cover = inner + (unsigned long)(my - b) * ri + kx;
+                        else
+                                cover = inner + (unsigned long)(my - b) * ri + (kx - b);
+                        row = frame->builtin ? tab_row
+                                             : frame->pixels + (unsigned long)(py - y) * frame->pitch + (unsigned long)(sx1 - x);
+                        memory_mix_u32_row(t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(sx1 - t->ox),
+                                           row, cover, (positive)(sx2 - sx1));
+                }
+        }
+}
+
+/*
         A frame drawn over a target whose radius is r, which is compositor_radius of the frame: a scene makes those once
         for all its frames, and compositor_draw makes this one. Nothing is written outside the frame's outline, so a
         target the outline misses is left as it is, and that is the first thing asked.
@@ -683,6 +757,11 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
                         }
                         part = compositor_clipped(t, cx, cy, r, r);
                         compositor_contents(&part, frame);
+                        continue;
+                }
+                if (frame->builtin || !compositor_scaled(frame))
+                {
+                        compositor_corner_rows(t, frame, corner, r, b, edge, tab);
                         continue;
                 }
 

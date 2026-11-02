@@ -385,6 +385,9 @@ cover('folds_already', 'count', 'memory_first_differs_u32',
 cover('folds_already', 'count', 'memory_saturate_u32',
       'the compositor hands it a span of the changed backdrop cells of a row, whose length the damage sets at run '
       'time; no reachable call site passes a literal, and a one-pixel call is the taskbar\'s per-column loop')
+cover('folds_already', 'count', 'memory_mix_u32_row',
+      'the round corners hand it a row of their cover, whose length the frame sets at run time (the corner width, '
+      'or the part of it inside the contents); no reachable call site passes a literal')
 cover('folds_already', 'count', 'memory_tint_u32',
       'the compositor tints the same spans, and whole blocks when the side turns; the length is run time, and the '
       'side the glass takes is the window\'s, so toward, cap and floor are run time too')

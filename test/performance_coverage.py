@@ -336,6 +336,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_saturate', 'memory_saturate_u32',
 cover('direct_benchmark', 'test/checks.c#BENCH_tint', 'memory_tint_u32',
       'paired timing against the C the glass tone was, over runs of one to three hundred boosted pixels toward the '
       'light side with the glass cap and floor, on each tier the machine has')
+cover('direct_benchmark', 'test/checks.c#BENCH_mix', 'memory_mix_u32_row',
+      'paired timing against the per-pixel compositor_mix loop the round corners had, over runs of one to three '
+      'hundred pixels with covers of zero, 255 and between, with SSE2, both riscv64 tiers and NEON')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        428 routines (404 public, 24 local), 418 of them on all three and 10 local to one.
+        429 routines (405 public, 24 local), 419 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -266,6 +266,7 @@
           memory_into_spelled            public  yes     yes     yes
           memory_last_of                 public  yes     yes     yes
           memory_last_of_either          public  yes     yes     yes
+          memory_mix_u32_row             public  yes     yes     yes
           memory_nth_last_of             public  yes     yes     yes
           memory_nth_of                  public  yes     yes     yes
           memory_offsets_between         public  yes     yes     yes
@@ -13509,6 +13510,69 @@ __asm__(
     "vpackuswb %zmm0, %zmm4, %zmm0\n   vpaddusb %zmm1, %zmm0, %zmm0\n   vmovdqu64 %zmm0, (%rdi)\n"
     "add $64, %rdi\n   add $64, %rsi\n   add $64, %rdx\n   add $16, %r9\n   sub $16, %rcx\n   jmp 12b\n"
     ASM_END(memory_glass_over_u32)
+
+    //       memory_mix_u32_row -- rdi into, rsi ink, rdx cover, rcx count:
+    //       a pixel with cover 0 is left, one with 255 takes its ink whole,
+    //       and between each colour is the lane mix of the pixel's and the
+    //       ink's: g (255 - c) + i c + 127 in sixteen-bit lanes (at most
+    //       65152, so no lane carries), then x + (x >> 8) + 1 and >> 8, which
+    //       is floor (x / 255) for every such x, the top byte zero. The
+    //       alpha bytes are cleared before the mix, so the mix's own zero
+    //       alpha falls out of it. Four pixels a turn; a pixel at a time for
+    //       the rest, its cover and colours loaded by movd so nothing past
+    //       the count is read. Cover 0 and 255 are chosen by mask, not by
+    //       branch, in the four-pixel turn.
+    //
+    ASM_FUNC(memory_mix_u32_row)
+    "test %rcx, %rcx\n   jz 90f\n"
+    "pxor %xmm7, %xmm7\n"
+    ".pushsection .rodata\n   .p2align 4\n"
+    ".Lmix_words255: .long 0x00ff00ff, 0x00ff00ff, 0x00ff00ff, 0x00ff00ff\n"
+    ".Lmix_words127: .long 0x007f007f, 0x007f007f, 0x007f007f, 0x007f007f\n"
+    ".Lmix_words1: .long 0x00010001, 0x00010001, 0x00010001, 0x00010001\n"
+    ".Lmix_alpha: .long 0x00ffffff, 0x00ffffff, 0x00ffffff, 0x00ffffff\n"
+    ".Lmix_dword255: .long 255, 255, 255, 255\n.popsection\n"
+    "movdqa .Lmix_words255(%rip), %xmm6\n   movdqa .Lmix_words127(%rip), %xmm5\n   movdqa .Lmix_words1(%rip), %xmm4\n"
+    "movdqa .Lmix_alpha(%rip), %xmm8\n   movdqa .Lmix_dword255(%rip), %xmm11\n"
+    "cmp $4, %rcx\n   jb 80f\n"
+    "40: movdqu (%rdi), %xmm0\n   movdqu (%rsi), %xmm1\n   movd (%rdx), %xmm2\n"
+    "pand %xmm8, %xmm0\n   pand %xmm8, %xmm1\n"
+    "movdqa %xmm2, %xmm12\n   punpcklbw %xmm7, %xmm12\n"
+    "movdqa %xmm12, %xmm3\n   punpcklwd %xmm7, %xmm3\n"
+    "movdqa %xmm3, %xmm9\n   pcmpeqd %xmm7, %xmm9\n"
+    "movdqa %xmm3, %xmm10\n   pcmpeqd %xmm11, %xmm10\n"
+    "movdqa %xmm12, %xmm15\n   punpcklwd %xmm15, %xmm15\n"
+    "movdqa %xmm15, %xmm12\n   punpckldq %xmm12, %xmm12\n"
+    "punpckhdq %xmm15, %xmm15\n"
+    "movdqa %xmm6, %xmm2\n   psubw %xmm12, %xmm2\n"
+    "movdqa %xmm6, %xmm3\n   psubw %xmm15, %xmm3\n"
+    "movdqa %xmm0, %xmm13\n   punpcklbw %xmm7, %xmm13\n   punpckhbw %xmm7, %xmm0\n"
+    "movdqa %xmm1, %xmm14\n   punpcklbw %xmm7, %xmm14\n   punpckhbw %xmm7, %xmm1\n"
+    "pmullw %xmm2, %xmm13\n   pmullw %xmm12, %xmm14\n   paddw %xmm14, %xmm13\n   paddw %xmm5, %xmm13\n"
+    "pmullw %xmm3, %xmm0\n   pmullw %xmm15, %xmm1\n   paddw %xmm1, %xmm0\n   paddw %xmm5, %xmm0\n"
+    "movdqa %xmm13, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm13\n   paddw %xmm4, %xmm13\n   psrlw $8, %xmm13\n"
+    "movdqa %xmm0, %xmm3\n   psrlw $8, %xmm3\n   paddw %xmm3, %xmm0\n   paddw %xmm4, %xmm0\n   psrlw $8, %xmm0\n"
+    "packuswb %xmm0, %xmm13\n"
+    "movdqa %xmm9, %xmm2\n   por %xmm10, %xmm2\n   pandn %xmm13, %xmm2\n"
+    "movdqu (%rsi), %xmm14\n   pand %xmm10, %xmm14\n   por %xmm14, %xmm2\n"
+    "movdqu (%rdi), %xmm0\n   pand %xmm9, %xmm0\n   por %xmm0, %xmm2\n"
+    "movdqu %xmm2, (%rdi)\n"
+    "add $16, %rdi\n   add $16, %rsi\n   add $4, %rdx\n   sub $4, %rcx\n   cmp $4, %rcx\n   jae 40b\n"
+    "80: test %rcx, %rcx\n   jz 90f\n"
+    "81: movzbl (%rdx), %eax\n   test %eax, %eax\n   jz 84f\n   cmp $255, %eax\n   je 82f\n"
+    "movd %eax, %xmm12\n   pshuflw $0, %xmm12, %xmm12\n"
+    "movd (%rdi), %xmm0\n   movd (%rsi), %xmm1\n   pand %xmm8, %xmm0\n   pand %xmm8, %xmm1\n"
+    "movdqa %xmm6, %xmm2\n   psubw %xmm12, %xmm2\n"
+    "movdqa %xmm0, %xmm13\n   punpcklbw %xmm7, %xmm13\n"
+    "movdqa %xmm1, %xmm14\n   punpcklbw %xmm7, %xmm14\n"
+    "pmullw %xmm2, %xmm13\n   pmullw %xmm12, %xmm14\n   paddw %xmm14, %xmm13\n   paddw %xmm5, %xmm13\n"
+    "movdqa %xmm13, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm13\n   paddw %xmm4, %xmm13\n   psrlw $8, %xmm13\n"
+    "packuswb %xmm7, %xmm13\n   movd %xmm13, (%rdi)\n"
+    "jmp 84f\n"
+    "82: movl (%rsi), %eax\n   movl %eax, (%rdi)\n"
+    "84: add $4, %rdi\n   add $4, %rsi\n   add $1, %rdx\n   dec %rcx\n   jnz 81b\n"
+    "90: " ASM_RET
+    ASM_END(memory_mix_u32_row)
 #endif
 
 #ifndef KERNEL_MODE
@@ -24074,6 +24138,54 @@ __asm__(
     "rshrn v3.8b, v3.8h, #8\n   rshrn2 v3.16b, v4.8h, #8\n   uqadd v3.16b, v3.16b, v1.16b\n   str q3, [x0], #16\n"
     "add x5, x5, #16\n   sub x3, x3, #16\n   cmp x3, #16\n   b.hs 6b\n   b 2b\n"
     ASM_END(memory_glass_over_u32)
+
+    //       memory_mix_u32_row: the lane mix of the x86_64 block in NEON,
+    //       four pixels a turn: the cover of each pixel spread over its four
+    //       bytes by a tbl, the products by umull and umlal (each at most
+    //       65025, the sum at most 65025 too), 127 added, x + (x >> 8) + 1
+    //       and >> 8 on halves, narrowed back to bytes; cover 0 and 255 are
+    //       chosen by bit insert. The alpha bytes are cleared first, as the
+    //       x86_64 block does. A pixel at a time for the rest, loaded by lane
+    //       so nothing past the count is read. v8 to v15 are the callee's and
+    //       are not used.
+    ASM_FUNC(memory_mix_u32_row)
+    "cbz x3, 9f\n"
+    "movi v31.8h, #127\n   movi v30.8h, #1\n   movi v26.4s, #0xff, lsl #24\n   movi v25.16b, #255\n"
+    "mov x9, #0\n   movk x9, #0x0101, lsl #32\n   movk x9, #0x0101, lsl #48\n"
+    "mov x10, #0x0202\n   movk x10, #0x0202, lsl #16\n   movk x10, #0x0303, lsl #32\n   movk x10, #0x0303, lsl #48\n"
+    "ins v29.d[0], x9\n   ins v29.d[1], x10\n"
+    "2: cmp x3, #4\n   b.lo 3f\n"
+    "ld1 {v0.16b}, [x0]\n   ld1 {v1.16b}, [x1]\n   ld1 {v2.s}[0], [x2]\n"
+    "tbl v3.16b, {v2.16b}, v29.16b\n"
+    "bic v4.16b, v0.16b, v26.16b\n   bic v6.16b, v1.16b, v26.16b\n   mvn v5.16b, v3.16b\n"
+    "umull v16.8h, v4.8b, v5.8b\n   umlal v16.8h, v6.8b, v3.8b\n"
+    "umull2 v17.8h, v4.16b, v5.16b\n   umlal2 v17.8h, v6.16b, v3.16b\n"
+    "add v16.8h, v16.8h, v31.8h\n   add v17.8h, v17.8h, v31.8h\n"
+    "ushr v20.8h, v16.8h, #8\n   ushr v21.8h, v17.8h, #8\n"
+    "add v16.8h, v16.8h, v20.8h\n   add v17.8h, v17.8h, v21.8h\n"
+    "add v16.8h, v16.8h, v30.8h\n   add v17.8h, v17.8h, v30.8h\n"
+    "ushr v16.8h, v16.8h, #8\n   ushr v17.8h, v17.8h, #8\n"
+    "xtn v16.8b, v16.8h\n   xtn2 v16.16b, v17.8h\n"
+    "cmeq v18.16b, v3.16b, #0\n   cmeq v19.16b, v3.16b, v25.16b\n"
+    "bit v16.16b, v1.16b, v19.16b\n   bit v16.16b, v0.16b, v18.16b\n"
+    "st1 {v16.16b}, [x0], #16\n   add x1, x1, #16\n   add x2, x2, #4\n   sub x3, x3, #4\n   b 2b\n"
+    "3: cbz x3, 9f\n"
+    "ld1 {v0.s}[0], [x0]\n   ld1 {v1.s}[0], [x1]\n   ld1 {v2.b}[0], [x2]\n"
+    "tbl v3.16b, {v2.16b}, v29.16b\n"
+    "bic v4.16b, v0.16b, v26.16b\n   bic v6.16b, v1.16b, v26.16b\n   mvn v5.16b, v3.16b\n"
+    "umull v16.8h, v4.8b, v5.8b\n   umlal v16.8h, v6.8b, v3.8b\n"
+    "umull2 v17.8h, v4.16b, v5.16b\n   umlal2 v17.8h, v6.16b, v3.16b\n"
+    "add v16.8h, v16.8h, v31.8h\n   add v17.8h, v17.8h, v31.8h\n"
+    "ushr v20.8h, v16.8h, #8\n   ushr v21.8h, v17.8h, #8\n"
+    "add v16.8h, v16.8h, v20.8h\n   add v17.8h, v17.8h, v21.8h\n"
+    "add v16.8h, v16.8h, v30.8h\n   add v17.8h, v17.8h, v30.8h\n"
+    "ushr v16.8h, v16.8h, #8\n   ushr v17.8h, v17.8h, #8\n"
+    "xtn v16.8b, v16.8h\n   xtn2 v16.16b, v17.8h\n"
+    "cmeq v18.16b, v3.16b, #0\n   cmeq v19.16b, v3.16b, v25.16b\n"
+    "bit v16.16b, v1.16b, v19.16b\n   bit v16.16b, v0.16b, v18.16b\n"
+    "st1 {v16.s}[0], [x0], #4\n   add x1, x1, #4\n   add x2, x2, #1\n   sub x3, x3, #1\n   b 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_mix_u32_row)
 #endif
 
 #ifndef KERNEL_MODE
@@ -33181,6 +33293,71 @@ __asm__(
     "slli t3, t0, 2\n   add a0, a0, t3\n   add a1, a1, t3\n   add a2, a2, t3\n   add a5, a5, t0\n   sub a3, a3, t0\n   bnez a3, 7b\n" ASM_RET
 #endif
     ASM_END(memory_glass_over_u32)
+    ".option pop\n"
+#endif
+
+#ifndef KERNEL_MODE
+    //       memory_mix_u32_row: with V, thirty-two bit lanes, four pixels a
+    //       turn at VLEN 128 (as many as the machine takes): the lane mix of
+    //       the x86_64 block with the cover of each pixel zero-extended from
+    //       its byte (vzext.vf4), 255 - c by vrsub, the colour channels one
+    //       at a time (vsrl and vand, two vmul, vadd, 127, x + (x >> 8) + 1,
+    //       >> 8, then shifted back into place and or-ed), the alpha byte
+    //       cleared before the mix, and cover 0 and 255 chosen by vmerge
+    //       under masks. Without V, a pixel at a time in the same lane mix,
+    //       the colours in two words of two sixteen-bit lanes each: the
+    //       blue and red of a pixel in one word, the green in the other.
+    //       A vector body that does not have a vector unit is never run: the
+    //       dispatch is the glass body's (cpu_has_vector is 2 with V, 1 without).
+    ".option push\n   .option arch, +v\n"
+    ASM_FUNC(memory_mix_u32_row)
+    "beqz a3, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 30f\n   bnez t3, 1f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n"
+    "j memory_mix_u32_row\n"
+#endif
+    "1: li a4, 0x00ff00ff\n   li a5, 0x007f007f\n   li a6, 0x00010001\n   li a7, 255\n"
+    "2: lbu t0, 0(a2)\n   beqz t0, 4f\n   beq t0, a7, 5f\n   sub t1, a7, t0\n"
+    "lwu t2, 0(a0)\n   lwu t3, 0(a1)\n"
+    "and t4, t2, a4\n   srli t2, t2, 8\n   andi t2, t2, 255\n"
+    "and t5, t3, a4\n   srli t3, t3, 8\n   andi t3, t3, 255\n"
+    "mul t4, t4, t1\n   mul t5, t5, t0\n   add t4, t4, t5\n   add t4, t4, a5\n"
+    "mul t2, t2, t1\n   mul t3, t3, t0\n   add t2, t2, t3\n   add t2, t2, a5\n"
+    "srli t5, t4, 8\n   and t5, t5, a4\n   add t4, t4, t5\n   add t4, t4, a6\n   srli t4, t4, 8\n   and t4, t4, a4\n"
+    "srli t5, t2, 8\n   and t5, t5, a4\n   add t2, t2, t5\n   add t2, t2, a6\n   srli t2, t2, 8\n   and t2, t2, a4\n"
+    "slli t2, t2, 8\n   or t4, t4, t2\n   sw t4, 0(a0)\n   j 4f\n"
+    "5: lwu t3, 0(a1)\n   sw t3, 0(a0)\n"
+    "4: addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, 1\n   addi a3, a3, -1\n   bnez a3, 2b\n"
+    "j 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "30: li t5, 0x00ffffff\n   li t6, 255\n   li a5, 127\n"
+    "31: vsetvli t0, a3, e32, m1, ta, ma\n"
+    "vle32.v v13, (a0)\n   vle32.v v1, (a1)\n"
+    "vsetvli zero, t0, e8, m1, ta, ma\n   vle8.v v3, (a2)\n"
+    "vsetvli zero, t0, e32, m1, ta, ma\n   vzext.vf4 v2, v3\n"
+    "vmv.v.x v8, t5\n   vmv.v.x v11, t6\n   vmv.v.i v7, 0\n"
+    "vand.vv v4, v13, v8\n   vand.vv v5, v1, v8\n   vrsub.vx v6, v2, t6\n"
+    "vsrl.vi v10, v4, 0\n   vand.vv v10, v10, v11\n   vsrl.vi v12, v5, 0\n   vand.vv v12, v12, v11\n"
+    "vmul.vv v10, v10, v6\n   vmul.vv v12, v12, v2\n   vadd.vv v10, v10, v12\n   vadd.vx v10, v10, a5\n"
+    "vsrl.vi v12, v10, 8\n   vadd.vv v10, v10, v12\n   vadd.vi v10, v10, 1\n   vsrl.vi v10, v10, 8\n"
+    "vor.vv v7, v7, v10\n"
+    "vsrl.vi v10, v4, 8\n   vand.vv v10, v10, v11\n   vsrl.vi v12, v5, 8\n   vand.vv v12, v12, v11\n"
+    "vmul.vv v10, v10, v6\n   vmul.vv v12, v12, v2\n   vadd.vv v10, v10, v12\n   vadd.vx v10, v10, a5\n"
+    "vsrl.vi v12, v10, 8\n   vadd.vv v10, v10, v12\n   vadd.vi v10, v10, 1\n   vsrl.vi v10, v10, 8\n"
+    "vsll.vi v10, v10, 8\n   vor.vv v7, v7, v10\n"
+    "vsrl.vi v10, v4, 16\n   vand.vv v10, v10, v11\n   vsrl.vi v12, v5, 16\n   vand.vv v12, v12, v11\n"
+    "vmul.vv v10, v10, v6\n   vmul.vv v12, v12, v2\n   vadd.vv v10, v10, v12\n   vadd.vx v10, v10, a5\n"
+    "vsrl.vi v12, v10, 8\n   vadd.vv v10, v10, v12\n   vadd.vi v10, v10, 1\n   vsrl.vi v10, v10, 8\n"
+    "vsll.vi v10, v10, 16\n   vor.vv v7, v7, v10\n"
+    "vmseq.vx v0, v2, t6\n   vmerge.vvm v7, v7, v1, v0\n"
+    "vmseq.vi v0, v2, 0\n   vmerge.vvm v7, v7, v13, v0\n"
+    "vse32.v v7, (a0)\n"
+    "slli t1, t0, 2\n   add a0, a0, t1\n   add a1, a1, t1\n   add a2, a2, t0\n   sub a3, a3, t0\n   bnez a3, 31b\n"
+    "j 9f\n"
+#endif
+    "9: " ASM_RET
+    ASM_END(memory_mix_u32_row)
     ".option pop\n"
 #endif
 
@@ -45719,6 +45896,12 @@ fn memory_saturate_u32(p32 address_to into, const p32 address_to from, positive 
 // floor from 0 to 255, and the words past the count are not touched.
 fn memory_tint_u32(p32 address_to into, const p32 address_to from, positive count, unsigned int toward, unsigned int amount,
                    unsigned int cap, unsigned int floor);
+// count pixels of into, each mixed toward ink[i] by cover[i] (0 the pixel, 255 the ink): a cover of zero leaves the
+// pixel as it is, 255 takes ink[i] whole, and between, each colour is the pixel's and the ink's mixed as
+// (ground * (255 - cover) + ink * cover + 127) / 255 rounded down, the top byte of the result zero: the compositor's
+// mix, one pixel at a time. A round frame's corners are this a row at a time: the line's cover over the edge, then
+// the contents' over the picture. The words past the count are not touched.
+fn memory_mix_u32_row(p32 address_to into, const p32 address_to ink, const p8 address_to cover, positive count);
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);
