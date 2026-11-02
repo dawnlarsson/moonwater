@@ -119745,6 +119745,75 @@ static void check_compositor_popup_grip(b32 touch)
 }
 
 /*
+        A press outside a menu takes what the hand had in hand in the window that owns the menu: a drag of it, and a button held
+        in it, are let go, and the window hears the release as one that is no click (WINDOW_KEY_CANCEL). Not what a window that
+        owns no menu holds.
+*/
+static void check_compositor_popup_holds(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int at;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("popup holds: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+
+    table->popup_parent[3] = 2;
+    table->popup_x[3] = 10;
+    table->popup_y[3] = 10;
+    table->popup_w[3] = 0;
+    table->popup_h[3] = 0;
+    table->popup_flags[3] = WINDOW_POPUP_POINT;
+    table->width[3] = 60;
+    table->height[3] = 40;
+    table->glass[3] = WINDOW_NO_CLOSE;
+    glass_paint(3, 0, 0, 60, 40, 0x303030, true);
+    compositor_present();
+
+    // Window 1's left button is held in it and its drag is in the hand (the menu was opened over it by a press with the
+    // left held); a press outside the menu, on window 1 itself, is the one that dismisses it.
+    compositor.grab = 1;
+    compositor.button_down = 1;
+    compositor.button_row[0] = 1;
+    compositor.drag = 1;
+    compositor.drag_x = compositor.drag_y = 0;
+    compositor.pointer_x = 150;
+    compositor.pointer_y = 100;
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    at = (table->event_head[1] + WINDOWS_EVENTS - 1) % WINDOWS_EVENTS;
+    check("popup holds: a press outside the menu asks it to go", (table->state[3] & WINDOW_CLOSING) != 0);
+    check("popup holds: the drag the menu was over is let go", compositor.drag == COMPOSITOR_NONE && compositor.grab == COMPOSITOR_NONE);
+    check("popup holds: the button held in its window is let go", (compositor.button_down & 1) == 0);
+    check("popup holds: its window hears the release as one that is no click",
+          table->event_type[1][at] == WINDOW_EVENT_BUTTON && (table->event_flags[1][at] & WINDOW_KEY_CANCEL) != 0);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+}
+
+/*
         A glass menu is composed as glass (compositor_glass_pass): where its picture is clear it shows what is under it, tinted
         and blurred, and where it is drawn it is its own colour. A menu's edge has no line: the window beneath is what is
         outside it.
@@ -136724,6 +136793,7 @@ b32 main()
         check_popup_reopen();
         check_compositor_popup_grip(0);
         check_compositor_popup_grip(1);
+        check_compositor_popup_holds();
         check_compositor_glass_popup();
         check_compositor_tray();
         check_compositor_place();

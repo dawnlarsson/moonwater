@@ -10398,9 +10398,35 @@ static int compositor_minimize_press(unsigned int code, int down)
         return 1;
 }
 
+// The windows that own the menus open now (the root of each one's chain), as a bit each.
+static unsigned int compositor_menu_roots(void)
+{
+        unsigned int roots = 0;
+
+        for (int row = 0; row < WINDOWS; row++)
+                if (compositor_popup_parent[row] >= 0 && compositor.showing[row] && !(compositor.state[row] & WINDOW_CLOSING))
+                        roots |= 1u << compositor_popup_root(row);
+        return roots;
+}
+
+/*
+        A press that dismisses a menu takes what the hand had in hand in the window that owns it, as a press that is no click
+        does: a drag or a resize of that window is let go where it is, and a button held in it (a selection, a drag in its
+        contents) is released with WINDOW_KEY_CANCEL, so the window does not finish it as a click.
+*/
+static void compositor_cancel_holds(unsigned int roots)
+{
+        for (unsigned int index = 0; index < 8; index++)
+                if ((compositor.button_down >> index & 1) && compositor.button_row[index] >= 0 && roots >> compositor.button_row[index] & 1)
+                        compositor_release_as(COMPOSITOR_BTN_LEFT + index, 0, WINDOW_KEY_CANCEL);
+        if ((compositor.drag >= 0 && roots >> compositor.drag & 1) || (compositor.resize >= 0 && roots >> compositor.resize & 1))
+                compositor_release_as(COMPOSITOR_BTN_LEFT, 0, WINDOW_KEY_CANCEL);
+}
+
 static void compositor_button(unsigned int code, int down)
 {
         int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top;
+        unsigned int roots;
         positive now;
 
         compositor_pointer_clamp();
@@ -10427,8 +10453,12 @@ static void compositor_button(unsigned int code, int down)
         }
         // A press outside every popup that is open asks them to go, and is theirs: it goes no further, to the window
         // below, the desktop or a tab, with a finger the same as a mouse (compositor_touch_button is this path too).
+        roots = compositor_menu_roots();
         if (compositor_popups_close(-1, -1))
+        {
+                compositor_cancel_holds(roots);
                 return;
+        }
 
         // A window that asked to be put away by a press anywhere but on it (WINDOW_DISMISS) is asked to go by one on
         // the desktop, a tab, another window or the tray alike; the press then goes on as it would have.
