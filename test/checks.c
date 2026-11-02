@@ -121679,6 +121679,62 @@ static void check_compositor_tile_line(void)
     compositor_float(1);
 }
 
+/*
+        The snap's bugs, one check each: a maximized window covers the tiles on its screen wholly, and they float back as a
+        half that a half covers does; a tile that cannot hold its window's least size is no target, on a screen too narrow
+        for a half of one; and an armed assist lets go of a thumbnail whose window closes, and of its own window.
+*/
+static void check_compositor_snap_cover(void)
+{
+    if (!layout_table_map(256))
+    {
+        check("cover: the table is mapped", false);
+        return;
+    }
+
+    assist_fresh();
+    compositor.showing[3] = 0;
+    compositor_arrange(2, COMPOSITOR_LEFT);
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    check("cover: a maximized window floats back the tile it covers wholly, as a half that a half covers does",
+          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.arranged[1] == COMPOSITOR_MAXIMIZED);
+}
+
+static void check_compositor_snap_least(void)
+{
+    if (!layout_table_map(256))
+    {
+        check("least: the table is mapped", false);
+        return;
+    }
+
+    layout_setup(160, 1);
+    layout_show(1, 40, 40, 60, 60);
+    compositor.stack[0] = 1, compositor.stacked = 1;
+    layout_drop(1, 20, 4, 0, 100);
+    check("least: a half of a 160 px screen is 80 wide, under the window's least of 96, so it is no tile and nothing snaps there",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && !compositor.assist_armed);
+}
+
+static void check_compositor_snap_closing(void)
+{
+    if (!layout_table_map(256))
+    {
+        check("closing: the table is mapped", false);
+        return;
+    }
+
+    assist_fresh();
+    layout_drop(1, 20, 4, 0, 100);
+    compositor_leave(2);
+    check("assist: a window that closes while the assist is armed is no thumbnail any more", assist_row_at(2) < 0);
+    assist_fresh();
+    layout_drop(1, 20, 4, 0, 100);
+    compositor_leave(1);
+    check("assist: the window the assist is armed for closes, and the assist goes with it",
+          !compositor.assist_armed && !compositor.assist_on && compositor.assist_count == 0);
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -137561,6 +137617,9 @@ b32 main()
         check_compositor_seam();
         check_compositor_assist();
         check_compositor_tile_line();
+        check_compositor_snap_cover();
+        check_compositor_snap_least();
+        check_compositor_snap_closing();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();
