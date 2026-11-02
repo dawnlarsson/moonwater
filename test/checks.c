@@ -13277,6 +13277,36 @@ test(memory_span_byte) {
                                 }
                         }
 
+        /* Widths to 300 at every start residue, where the doubleword body
+           takes over at sixteen and the head and tail bytes meet it: three
+           values, and a mismatch at the edges of each word and at the middle. */
+        for (positive value = 0; value < 256; value += 90)
+                for (positive offset = 0; offset < 16; offset++)
+                        for (positive length = 0; length <= 300; length++)
+                        {
+                                positive positions[] = {0, 1, 7, 8, 9, 15, 16, length / 2, length - 1, length};
+
+                                for (positive pi = 0; pi < sizeof(positions) / sizeof(*positions); pi++)
+                                {
+                                        positive mismatch = positions[pi];
+
+                                        if (mismatch > length)
+                                                continue;
+                                        if (offset)
+                                                bytes[offset - 1] = 0xa5;
+                                        memory_fill(bytes + offset, (p8)value, length);
+                                        bytes[offset + length] = 0xa5;
+                                        if (mismatch < length)
+                                                bytes[offset + mismatch] = (p8)(value + 1);
+
+                                        fail(memory_span_byte(bytes + offset, (p8)value,
+                                                              length) == mismatch);
+                                        if (offset)
+                                                fail(bytes[offset - 1] == 0xa5);
+                                        fail(bytes[offset + length] == 0xa5);
+                                }
+                        }
+
         return true;
 }
 

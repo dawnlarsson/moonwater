@@ -32638,15 +32638,23 @@ __asm__(
     ASM_END(memory_utf8_span)
 
     ASM_FUNC(memory_span_byte)
-    "mv t0, a0\n   li t1, 0\n   li t6, 4\n   bltu a2, t6, .Lmemory_span_byte_rv_tail\n"
-    ".balign 16\n.Lmemory_span_byte_rv_four:\n"
+    "mv t0, a0\n   li t1, 16\n   bgeu a2, t1, .Lmemory_span_byte_rv_long\n"
+    "li t6, 4\n   bltu a2, t6, .Lmemory_span_byte_rv_bytes\n"
+    ".Lmemory_span_byte_rv_four:\n"
     "lbu t2, 0(t0)\n   lbu t3, 1(t0)\n   lbu t4, 2(t0)\n   lbu t5, 3(t0)\n   xor t2, t2, a1\n   xor t3, t3, a1\n   xor t4, t4, a1\n   xor t5, t5, a1\n"
-    "or t2, t2, t3\n   or t4, t4, t5\n   or t2, t2, t4\n   bnez t2, .Lmemory_span_byte_rv_tail\n   addi t0, t0, 4\n   addi t1, t1, 4\n   addi a2, a2, -4\n"
+    "or t2, t2, t3\n   or t4, t4, t5\n   or t2, t2, t4\n   bnez t2, .Lmemory_span_byte_rv_bytes\n   addi t0, t0, 4\n   addi a2, a2, -4\n"
     "bgeu a2, t6, .Lmemory_span_byte_rv_four\n"
-    ".Lmemory_span_byte_rv_tail:\n   beqz a2, .Lmemory_span_byte_rv_done\n"
-    ".Lmemory_span_byte_rv_one:\n   lbu t2, 0(t0)\n   bne t2, a1, .Lmemory_span_byte_rv_done\n   addi t0, t0, 1\n   addi t1, t1, 1\n   addi a2, a2, -1\n"
-    "bnez a2, .Lmemory_span_byte_rv_one\n"
-    ".Lmemory_span_byte_rv_done:\n   mv a0, t1\n" ASM_RET
+    ".Lmemory_span_byte_rv_bytes:\n   beqz a2, .Lmemory_span_byte_rv_end\n"
+    ".Lmemory_span_byte_rv_tail:\n   lbu t4, 0(t0)\n   bne t4, a1, .Lmemory_span_byte_rv_end\n   addi t0, t0, 1\n   addi a2, a2, -1\n   bnez a2, .Lmemory_span_byte_rv_tail\n"
+    ".Lmemory_span_byte_rv_end:\n   sub a0, t0, a0\n" ASM_RET
+    // Sixteen bytes or more: the byte pointer is aligned with one count, then
+    // doublewords are compared against the broadcast byte in t2 until one
+    // differs; the byte loop above then finds the exact position in that word.
+    ".Lmemory_span_byte_rv_long:\n   andi a1, a1, 255\n   li t1, 0x0101010101010101\n   mul t2, a1, t1\n   li t5, 8\n   andi t3, t0, 7\n   beqz t3, .Lmemory_span_byte_rv_words\n"
+    "li t4, 8\n   sub t3, t4, t3\n   sub a2, a2, t3\n"
+    ".Lmemory_span_byte_rv_head:\n   lbu t4, 0(t0)\n   bne t4, a1, .Lmemory_span_byte_rv_end\n   addi t0, t0, 1\n   addi t3, t3, -1\n   bnez t3, .Lmemory_span_byte_rv_head\n"
+    ".balign 16\n.Lmemory_span_byte_rv_words:\n   ld t4, 0(t0)\n   xor t4, t4, t2\n   bnez t4, .Lmemory_span_byte_rv_bytes\n   addi t0, t0, 8\n   addi a2, a2, -8\n   bgeu a2, t5, .Lmemory_span_byte_rv_words\n"
+    "j .Lmemory_span_byte_rv_bytes\n"
     ASM_END(memory_span_byte)
 
     ASM_FUNC(memory_span_byte_reverse)
