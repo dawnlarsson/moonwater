@@ -119596,6 +119596,101 @@ static void check_compositor_popup_press(b32 touch)
         of its window, at the size the menu is. Every other open moves the hot item before the compositor has taken the first
         picture, which the present must wait for and then show again: a move the compositor was not ready for is shown.
 */
+/*
+        A menu opened by a finger and dragged over its items: as the hot item moves (each move a picture the compositor takes),
+        the ground the compositor gives the menu's row and the inks the menu draws in stay where they were. The ground is the
+        scene under the menu, not the menu's own highlight, so a move of the highlight changes neither (a change would
+        redraw the text in a new ink each move: a flicker).
+*/
+static void check_popup_ground_steady(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static struct ui_popup popup;
+    struct window_row parent_row;
+    struct ui parent_ui = terminal.ui;
+    struct windows address_to table;
+    unsigned int first_ground = 0, first_ink = 0;
+    int moves = 0, ground_moves = 0, ink_moves = 0;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("popup ground: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+    parent_ui.scale = 1;
+    parent_ui.regular = parent_ui.bold = terminal.plain[0];
+    parent_ui.scratch = null, parent_ui.scratch_width = 0, parent_ui.scratch_scale = 0;
+    memory_zero(&parent_row, sizeof(parent_row));
+    parent_row.table = table;
+    parent_row.row = 1;
+
+    windows_reset_row(table, 3);
+    __atomic_store_n(&table->pid[3], 1u, __ATOMIC_RELEASE);
+    memory_zero(&popup, sizeof(popup));
+    ui_popmenu_add(&popup.menu, "Copy", "Ctrl+C", 0, 1);
+    ui_popmenu_add(&popup.menu, "Paste", "Ctrl+V", 0, 2);
+    ui_popmenu_add(&popup.menu, null, null, UI_MENU_SEPARATOR, 0);
+    ui_popmenu_add(&popup.menu, "Select all", "Ctrl+A", 0, 3);
+    popup.own.table = table;
+    popup.own.row = 3;
+    popup.own.door = -1;
+    popup.own.wake = -1;
+    popup.own.buffer = compositor.buffer;
+    popup.own.stride = GLASS_SIDE;
+    popup.own.output_width = popup.own.output_height = GLASS_SIDE;
+    if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 1))
+    {
+        check("popup ground: the menu opens", false);
+        return;
+    }
+    compositor_take(3);
+    compositor_present();
+    ui_popup_pump(&popup);
+    for (int hot = 0; hot < 4; hot++)
+    {
+        if (hot == 2)
+            continue;
+        popup.menu.hot = hot;
+        ui_popup_present(&popup);
+        compositor_take(3);
+        compositor_present();
+        ui_popup_pump(&popup);
+        compositor_take(3);
+        compositor_present();
+        ui_popup_pump(&popup);
+        if (!first_ground)
+            first_ground = table->ground[3] & 0xffffffu, first_ink = popup.ui.ground & 0xffffffu;
+        moves++;
+        ground_moves += (table->ground[3] & 0xffffffu) != first_ground;
+        ink_moves += (popup.ui.ground & 0xffffffu) != first_ink;
+    }
+    check("popup ground: a finger moving the hot item over the menu leaves the ground the compositor gives it where it was",
+          moves > 0 && ground_moves == 0);
+    check("popup ground: and the inks the menu draws in stay as they were", moves > 0 && ink_moves == 0);
+    popup.open = false;
+    compositor_popup_leave(3);
+    compositor_leave(3);
+}
+
 static void check_popup_reopen(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -126584,6 +126679,11 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
 #define SF_ANSWER 8
 #define SF_THEME 9
 #define SF_SIZE 10
+#define SF_FINGER_DOWN 11
+#define SF_FINGER_MOVE 12
+#define SF_FINGER_UP 13
+#define SF_CARD 14
+static int settings_frames_finger_y;     // where the finger went down, device pixels
 struct settings_frames_step
 {
         int ms, what;
@@ -126662,6 +126762,40 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                         ui_kit_settle();
                         settings_size((unsigned int)(s->a * settings.ui.scale), (unsigned int)(s->b * settings.ui.scale));
                         break;
+                // A finger: it lands on the named row (its touch moves first, so the page knows where it is), moves a
+                // logical pixels from where it landed (negative up), and lifts.
+                case SF_CARD:
+                {
+                        static const char card[] = "[Moonwater] wifi on\n[Moonwater] * home-net      -48 dBm ###. WPA2-PSK 5GHz 36\n"
+                                                   "[Moonwater]   cafe          -61 dBm ##.. open 2.4GHz 6\n"
+                                                   "[Moonwater] + neighbour     -77 dBm #... WPA3-SAE 2.4GHz 1\n[Moonwater]   office\n"
+                                                   "[Moonwater]   hall          -80 dBm #... open 2.4GHz 11\n[Moonwater]   garden      -84 dBm ...  WPA2 2.4GHz 3\n"
+                                                   "[Moonwater]   loft          -88 dBm ...  WPA2 5GHz 40\n[Moonwater]   shed          -90 dBm ...  open 2.4GHz 9\n"
+                                                   "[Moonwater]   annex         -91 dBm ...  WPA2 2.4GHz 2\n[Moonwater]   barn          -93 dBm ...  WPA2 2.4GHz 7\n"
+                                                   "[Moonwater]   tower         -95 dBm ...  WPA2 5GHz 44\n[Moonwater]   kiln         -96 dBm ...  open 2.4GHz 5\n"
+                                                   "[Moonwater]   mill          -97 dBm ...  WPA2 2.4GHz 8\n[Moonwater]   forge        -98 dBm ...  WPA2 5GHz 48\n";
+
+                        static const char entry[] = "[Moonwater]   network    -60 dBm ##.. open 2.4GHz 6\n";
+                        positive length = 0;
+
+                        memory_copy(settings_large->said, card, sizeof(card) - 1);
+                        length = sizeof(card) - 1;
+                        for (int at = 0; at < 40 && length + sizeof(entry) < sizeof(settings_large->said); at++)
+                                memory_copy(settings_large->said + length, entry, sizeof(entry) - 1), length += sizeof(entry) - 1;
+                        settings.said_length = length;
+                        settings_card_open("Scan");
+                        break;
+                }
+                case SF_FINGER_DOWN:
+                        settings_frames_finger_y = row >= 0 ? y : settings.page.top + ui_dev(&settings.ui, 60);
+                        settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, (settings.page.left + settings.page.right) / 2, y);
+                        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0);
+                        break;
+                case SF_FINGER_MOVE:
+                        settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, (settings.page.left + settings.page.right) / 2,
+                                              settings_frames_finger_y + s->a * settings.ui.scale);
+                        break;
+                case SF_FINGER_UP: settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0); break;
                 }
                 settings_frames_pass();
         }
@@ -127467,6 +127601,19 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {60, SF_ROW, "Background", 450, 0}, {100, SF_DOWN, null, 0, 0}, {120, SF_UP, null, 0, 0},
                     {300, SF_THEME, null, UI_THEME_DARK, 0}, {320, SF_THEME, null, UI_THEME_DARK, 0x40c0ff}, {340, SF_GROUP, null, 2, 0},
                     {350, SF_DOWN, null, 0, 0}, {360, SF_UP, null, 0, 0}, {700, SF_THEME, null, UI_THEME_DARK, 0}};
+                static const struct settings_frames_step pull[] = {
+                    {0, SF_FINGER_DOWN, "Scale", 0, 0}, {20, SF_FINGER_MOVE, null, 10, 0}, {40, SF_FINGER_MOVE, null, 25, 0},
+                    {60, SF_FINGER_MOVE, null, 45, 0}, {80, SF_FINGER_MOVE, null, 70, 0}, {100, SF_FINGER_MOVE, null, 95, 0},
+                    {140, SF_FINGER_MOVE, null, 100, 0}, {300, SF_FINGER_MOVE, null, 60, 0}, {360, SF_FINGER_MOVE, null, 20, 0},
+                    {420, SF_FINGER_UP, null, 0, 0}, {900, SF_FINGER_DOWN, "Time zone", 0, 0}, {920, SF_FINGER_MOVE, null, -20, 0},
+                    {940, SF_FINGER_MOVE, null, -60, 0}, {960, SF_FINGER_MOVE, null, -110, 0}, {1000, SF_FINGER_MOVE, null, -150, 0},
+                    {1200, SF_FINGER_MOVE, null, -90, 0}, {1260, SF_FINGER_UP, null, 0, 0}};
+                static const struct settings_frames_step card_pull[] = {
+                    {0, SF_CARD, null, 0, 0}, {40, SF_FINGER_DOWN, null, 0, 0}, {60, SF_FINGER_MOVE, null, 14, 0},
+                    {80, SF_FINGER_MOVE, null, 40, 0}, {100, SF_FINGER_MOVE, null, 75, 0}, {160, SF_FINGER_MOVE, null, 60, 0},
+                    {240, SF_FINGER_UP, null, 0, 0}, {600, SF_FINGER_DOWN, null, 0, 0}, {620, SF_FINGER_MOVE, null, -30, 0},
+                    {640, SF_FINGER_MOVE, null, -100, 0}, {660, SF_FINGER_MOVE, null, -160, 0}, {720, SF_FINGER_MOVE, null, -140, 0},
+                    {900, SF_FINGER_UP, null, 0, 0}};
                 static const struct settings_frames_step size[] = {
                     {0, SF_KEY, null, UI_KEY_END, 0},
                     {5, SF_ROW, "Shake the pointer to find it", 600, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
@@ -127485,6 +127632,8 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 settings_frames_play((string_address) "the column hovered and pressed", canvas, column, sizeof(column) / sizeof(column[0]));
                 settings_frames_play((string_address) "the theme turned while things move", canvas, theme, sizeof(theme) / sizeof(theme[0]));
                 settings_frames_play((string_address) "the window resized while things move", canvas, size, sizeof(size) / sizeof(size[0]));
+                settings_frames_play((string_address) "a finger pulls the rows past their ends and lets go", canvas, pull, sizeof(pull) / sizeof(pull[0]));
+                settings_frames_play((string_address) "a finger pulls the card past its ends and lets go", canvas, card_pull, sizeof(card_pull) / sizeof(card_pull[0]));
                 settings_frames_play((string_address) "a choice's menu", canvas, menu, sizeof(menu) / sizeof(menu[0]));
         }
         }
@@ -139334,6 +139483,7 @@ b32 main()
         check_compositor_popup_press(0);
         check_compositor_popup_press(1);
         check_popup_reopen();
+        check_popup_ground_steady();
         check_compositor_popup_grip(0);
         check_compositor_popup_grip(1);
         check_compositor_popup_holds();
