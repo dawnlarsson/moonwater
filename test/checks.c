@@ -22034,6 +22034,57 @@ static string_address digit_exacts[] = {
     "1234567890123456789",
 };
 
+// The digit loops, whose next-byte test sits at the foot of the loop: every run
+// up to three hundred digits from every start alignment to sixteen, followed by
+// nothing, a space or a letter, against the C reference, with the bounds that
+// matter around the run. The value wraps the way it always did.
+static p8 long_digit_subject[512 + 64];
+
+fn check_digits_long_runs()
+{
+        static const p8 breakers[3] = {0, ' ', 'x'};
+
+        for (positive offset = 0; offset < 16; offset++)
+                for (positive length = 0; length <= 300; length++)
+                        for (positive br = 0; br < 3; br++)
+                        {
+                                p8 address_to subject = long_digit_subject + offset;
+                                positive want_used = 0;
+                                positive got_used = 0;
+
+                                for (positive i = 0; i < length; i++)
+                                        subject[i] = (p8)('0' + next() % 10);
+
+                                subject[length] = breakers[br];
+
+                                same("string_digits", "long run value",
+                                     string_digits(subject, address_of got_used),
+                                     reference_digits(subject, (positive)-1,
+                                                      address_of want_used));
+                                same("string_digits", "long run bytes", got_used, want_used);
+
+                                same("string_digits_exact", "long run",
+                                     string_digits_exact(subject, null),
+                                     reference_digits_exact(subject, null));
+
+                                for (positive bound = 0; bound <= length + 2;
+                                     bound += (bound < 24 ? 1 : 9))
+                                {
+                                        positive got_max = 0;
+                                        positive want_max = 0;
+
+                                        got_max = string_digits_max(subject, bound,
+                                                                    address_of got_used);
+                                        want_max = reference_digits(subject, bound,
+                                                                    address_of want_used);
+                                        same("string_digits_max", "long run value",
+                                             got_max, want_max);
+                                        same("string_digits_max", "long run bytes",
+                                             got_used, want_used);
+                                }
+                        }
+}
+
 #define DIGIT_EXACT_COUNT (sizeof(digit_exacts) / sizeof(digit_exacts[0]))
 
 fn check_digits_exact()
@@ -29912,6 +29963,7 @@ b32 main()
         check_signed_digits_and_width();
         check_digits_base();
         check_digits_exact();
+        check_digits_long_runs();
         check_formatters();
         check_copy_max_end();
         check_bulk_alignments();

@@ -19425,8 +19425,15 @@ ASM_FUNC(positive_to_string)
     //       which are one digit to about ten.
     //
     ASM_FUNC(string_digits)
+    //
+    //       The test of the next byte sits at the foot of the loop, so a digit
+    //       costs seven instructions where it cost eight, and a call that finds
+    //       no digit at all runs the same four it always did.
+    //
     "xor %eax, %eax\n   xor %r8d, %r8d\n"
-    "1:  movzbl (%rdi,%r8), %ecx\n   sub $48, %ecx\n   cmp $9, %ecx\n   ja 2f\n   lea (%rax,%rax,4), %rax\n   lea (%rcx,%rax,2), %rax\n   inc %r8\n   jmp 1b\n"
+    "movzbl (%rdi,%r8), %ecx\n   sub $48, %ecx\n   cmp $9, %ecx\n   ja 2f\n"
+    "1:  lea (%rax,%rax,4), %rax\n   lea (%rcx,%rax,2), %rax\n   inc %r8\n"
+    "movzbl (%rdi,%r8), %ecx\n   sub $48, %ecx\n   cmp $9, %ecx\n   jbe 1b\n"
     "2:  test %rsi, %rsi\n   je 3f\n   mov %r8, (%rsi)\n"
     "3:\n" ASM_RET
     ASM_END(string_digits)
