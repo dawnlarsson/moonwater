@@ -392,38 +392,29 @@ static unsigned int taskbar_turn(unsigned int position)
         length), else its first character alone. Written to fitted; answers
         its length.
 */
+// What a band's text is measured with: its view's engine, and the face and em the text is drawn at.
+struct taskbar_cut
+{
+        const struct taskbar_view *view;
+        const font_face address_to const address_to faces;
+        p32 em;
+};
+
+static int taskbar_cut_width(address_any by, string_address text)
+{
+        const struct taskbar_cut address_to c = by;
+
+        return (int)(font_extent(c->view->engine, c->faces, 1, (const p8 address_to)text, string_length(text), c->em, 0) >> 16);
+}
+
 static positive taskbar_fit(const struct taskbar_view *view, const font_face address_to const address_to faces,
                             const char *text, p32 em, int room, char *fitted, positive capacity)
 {
-        positive length = string_length((string_address)text), low = 1, high, best = 0, one = 1;
+        struct taskbar_cut by = {view, faces, em};
+        positive length = string_length((string_address)text), cut = length;
+        unsigned char kind = ui_cut_by(taskbar_cut_width, &by, (string_address)text, length, room, fitted, capacity, &cut);
 
-        length = length + 4 > capacity ? capacity - 4 : length;
-        memory_copy(fitted, text, length);
-        if (length <= 1 || (int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16) <= room)
-                return length;
-        high = length - 1;
-        while (low <= high)
-        {
-                positive middle = (low + high) / 2, at = middle;
-
-                while (at && ((unsigned char)text[at] & 0xc0) == 0x80)
-                        at--;
-                memory_copy(fitted, text, at);
-                memory_copy(fitted + at, "...", 3);
-                if (at && (int)(font_extent(view->engine, faces, 1, (const p8 address_to)fitted, at + 3, em, 0) >> 16) <= room)
-                        best = at, low = middle + 1;
-                else
-                        high = middle - 1;
-        }
-        memory_copy(fitted, text, length);
-        if (best)
-        {
-                memory_copy(fitted + best, "...", 3);
-                return best + 3;
-        }
-        while (one < length && ((unsigned char)text[one] & 0xc0) == 0x80)
-                one++;
-        return one;
+        return ui_cut_write(fitted, (string_address)text, length, cut, kind, capacity);
 }
 
 /*

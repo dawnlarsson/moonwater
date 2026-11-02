@@ -6378,16 +6378,23 @@ struct ui_cut
 
 static struct ui_cut address_to ui_cuts;
 
-static unsigned char ui_cut_find(struct ui address_to ui, string_address text, positive length, int type, int room, char address_to fitted,
-                                 positive capacity, positive address_to cut)
-{
-        positive n = length < capacity ? length : capacity - 1, low = 1, high, best = 0;
+/*
+        The one cut of a text to room, for every label that is fitted (a kit role's, or a band's own face's): width measures a
+        text (a NUL-terminated string) with whatever it is asked with, by. Answers the kind: 1 whole, the text fits; 2 the
+        longest start that ends before a whole character and fits with three dots after it, found by halving (a start grows
+        with its length); 3 its first character alone, whole, with no dots. *cut is the bytes of text kept, and fitted (room
+        for capacity bytes) is the scratch the candidates are written in.
+*/
+typedef int (*ui_cut_width)(address_any by, string_address text);
 
-        if (ui_kit_measure(ui, text, type) <= room)
+static unsigned char ui_cut_by(ui_cut_width width, address_any by, string_address text, positive length, int room, char address_to fitted,
+                               positive capacity, positive address_to cut)
+{
+        positive n = length < capacity ? length : capacity - 1, low = 1, high, best = 0, first = 1;
+
+        if (width(by, text) <= room)
                 return *cut = length, 1;
-        if (n <= 1)
-                return *cut = n, 3;
-        high = n - 1;
+        high = n > 1 ? n - 1 : 0;
         while (low <= high)
         {
                 positive mid = (low + high) / 2, at = mid;
@@ -6397,14 +6404,43 @@ static unsigned char ui_cut_find(struct ui address_to ui, string_address text, p
                 memory_copy(fitted, text, at);
                 fitted[at] = 0;
                 string_append_bounded((string_address)fitted, (string_address) "...", capacity);
-                if (ui_kit_measure(ui, (string_address)fitted, type) <= room)
+                if (width(by, (string_address)fitted) <= room)
                         best = at, low = mid + 1;
                 else
                         high = mid - 1;
         }
         if (best)
                 return *cut = best, 2;
-        return *cut = 1, 3;
+        while (first < n && (((unsigned char)text[first]) & 0xc0) == 0x80)
+                first++;
+        return *cut = first < n ? first : n, 3;
+}
+
+// The text a cut of it is, written to fitted: its kept bytes, and the three dots after them for kind 2. Answers its length.
+static positive ui_cut_write(char address_to fitted, string_address text, positive length, positive cut, unsigned char kind, positive capacity)
+{
+        positive keep = kind == 1 ? length : cut;
+
+        keep = keep < capacity ? keep : capacity - 1;
+        memory_copy(fitted, text, keep);
+        fitted[keep] = 0;
+        if (kind == 2)
+                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
+        return string_length((string_address)fitted);
+}
+
+// The kit's width of a role's text, for a cut of it.
+struct ui_cut_role
+{
+        struct ui address_to ui;
+        int type;
+};
+
+static int ui_cut_kit(address_any by, string_address text)
+{
+        const struct ui_cut_role address_to role = by;
+
+        return ui_kit_measure(role->ui, text, role->type);
 }
 
 static string_address ui_fit(struct ui address_to ui, string_address text, int type, int room, char address_to fitted, positive capacity)
@@ -6433,7 +6469,9 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
         }
         if (!kind)
         {
-                kind = ui_cut_find(ui, text, length, type, room, fitted, capacity, &cut);
+                struct ui_cut_role role = {ui, type};
+
+                kind = ui_cut_by(ui_cut_kit, &role, text, length, room, fitted, capacity, &cut);
                 if (memo)
                 {
                         memory_copy(memo->text, text, length);
@@ -6443,10 +6481,7 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
         }
         if (kind == 1)
                 return text;
-        memory_copy(fitted, text, cut);
-        fitted[cut] = 0;
-        if (kind == 2)
-                string_append_bounded((string_address)fitted, (string_address) "...", capacity);
+        ui_cut_write(fitted, text, length, cut, kind, capacity);
         return (string_address)fitted;
 }
 

@@ -136955,6 +136955,50 @@ static fn check_one_blink(void)
 }
 
 /*
+        One cut for every fitted label: ui.c's ui_cut_by is the only search for the longest start that fits with dots, and the
+        kit's labels and a band's (taskbar.c) both ask it. No window writes its own dots after a cut (the three dots as a
+        literal after a copied start), and no window keeps its own search. Read from the tree the check runs in.
+*/
+static fn check_one_cut(void)
+{
+        static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
+                                                      "src/canvas/ui/identify.c"};
+        static const char address_to const dots[] = {"\"...\", 3)", "\"...\", capacity)", "ui_cut_find("};
+        positive read = 0, dots_found = 0, asks = 0;
+
+        for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size);
+
+                if (!bytes)
+                        continue;
+                read++;
+                for (positive i = 0; i < sizeof(dots) / sizeof(dots[0]); i++)
+                        dots_found += check_hits((const char address_to)bytes, size, dots[i]);
+                if (f == 4)
+                        asks += check_hits((const char address_to)bytes, size, "= ui_cut_by(");
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        {
+                positive size = 0, bytes = compositor_map_file((string_address) "src/canvas/ui/ui.c", &size);
+
+                if (bytes)
+                {
+                        asks += check_hits((const char address_to)bytes, size, "= ui_cut_by(");
+                        dots_found += check_hits((const char address_to)bytes, size, "static unsigned char ui_cut_find(");
+                        compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+                }
+        }
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: one cut for every label, the sources are not here\n");
+                return;
+        }
+        check("cut: every fitted label is ui.c's ui_cut_by (the kit's and the band's), and no window writes its own dots", read == sizeof(files) / sizeof(files[0]) && !dots_found && asks == 2);
+}
+
+/*
         No input code by hand: a key and a pointer button are the kit's names (UI_KEY_*, UI_POINTER_*, in ui.c), so no
         window of Canvas defines its own key or button numbers or writes a button's evdev code as a literal. The scan
         reads the sources of the windows, as check_no_hand_typing does; the kit is where the codes are named.
@@ -139985,6 +140029,7 @@ b32 main()
 #endif
         check_no_hand_typing();
         check_one_blink();
+        check_one_cut();
         check_no_input_codes();
         check_no_shapes_by_hand();
 #if MOONWATER_UI_ANY
