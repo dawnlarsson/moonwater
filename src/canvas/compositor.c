@@ -11119,10 +11119,16 @@ static unsigned int compositor_snap(const int *box, unsigned int *touch, int *sc
 
 // The rectangle a window dragged is where the hand has it, before placement keeps it on its screen (compositor_place
 // clamps it to the screen, so a window held at an edge by the clamp is not one pushed there): a snap reads its edges
-// from it (compositor_snap).
+// from it (compositor_snap). A finger or a pen is led, so its pointer is where it is going, and a frame with no new
+// place takes the lead away again (compositor_predict_clear). The snap reads the place the hand is at, which is the
+// same between places as at them; the pointer's lead would flip a target between the two, every report.
 static void compositor_box_of(int row, int *box)
 {
-        box[0] = compositor.pointer_x - compositor.drag_x, box[1] = compositor.pointer_y - compositor.drag_y;
+        int x = compositor.pointer_x, y = compositor.pointer_y;
+
+        if (compositor.owner != COMPOSITOR_PREDICT_MOUSE)
+                x = compositor.real_x, y = compositor.real_y;
+        box[0] = x - compositor.drag_x, box[1] = y - compositor.drag_y;
         box[2] = (int)compositor.w[row], box[3] = (int)compositor.h[row];
 }
 
