@@ -143852,6 +143852,72 @@ static void wire_teardown_checks(void)
         WIRE_CHECK(wire_seen.closed == closed);
 }
 
+/*
+        Input room. A focused window's client may hold pointers with a button
+        pressed on each. A delivery either reaches every one of them, with
+        its motion, button and frame events, or it is refused whole with
+        ENOSPC and nothing changes: no event, no button state. Fifty-six
+        pointers with all five buttons need more than the output queue holds,
+        so that delivery is refused; one button on the same pointers fits.
+*/
+static unsigned long wire_many_objects[1024], wire_many_ops[1024];
+
+static void wire_pointer_room_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        long events;
+        int row;
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 4) == 0);
+        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 5) == 0);
+        WIRE_CHECK(wire_bind(client, 4, "wl_seat", 5, 3) == 0);
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+        wb_begin(&m, 4, 0);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 5, 2);
+        wb_u(&m, 11);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 11, 1);
+        wb_u(&m, 12);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        row = wire_seen.row;
+        for (unsigned long id = 20; id < 20 + 56; id++)
+        {
+                wb_begin(&m, 3, 0);
+                wb_u(&m, id);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        }
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+        WIRE_CHECK(wayland_focus(row, 1) == 0);
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+
+        /* from every button up, five presses on 56 pointers are refused whole. */
+        wire_snap(client);
+        WIRE_CHECK(wayland_deliver_pointer(row, 30, 40, 0x1f, 2000) == SHELL_ENOSPC);
+        WIRE_CHECK(wire_same(client));
+        WIRE_CHECK(wire_take(client, wire_many_objects, wire_many_ops, 1024) == 0);
+
+        /* one press fits: motion, button and frame to each pointer; then a second press of the same
+           pointers, the state carried from the first. */
+        WIRE_CHECK(wayland_deliver_pointer(row, 10, 20, 1, 1000) == 0);
+        events = wire_take(client, wire_many_objects, wire_many_ops, 1024);
+        WIRE_CHECK(events == 56 * 3);
+        WIRE_CHECK(wayland_deliver_pointer(row, 50, 60, 0x03, 3000) == 0);
+        events = wire_take(client, wire_many_objects, wire_many_ops, 1024);
+        WIRE_CHECK(events == 56 * 3);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -143861,6 +143927,7 @@ int main(void)
         wire_object_checks();
         wire_refusal_checks();
         wire_teardown_checks();
+        wire_pointer_room_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;

@@ -2885,9 +2885,31 @@ int wayland_focus(long row, long on)
 */
 #define WAYLAND_BTN_LEFT 0x110UL
 
+/*
+        The bytes a delivery queues for one focused object: a pointer takes a
+        motion and a frame, and a button event for each bit that changes; a
+        keyboard takes a key, and a modifiers event when they change. A
+        delivery is all or nothing: its room is counted before any event is
+        queued or any state is written.
+*/
+static long wire_pointer_bytes(const struct wayland_object *o, long buttons)
+{
+        long changed = 0;
+
+        for (long bit = 0; bit < 5; bit++)
+                changed += ((o->state >> bit) & 1) != ((buttons >> bit) & 1);
+        return 20 + 8 + 24 * changed;
+}
+
+static long wire_key_bytes(const struct wayland_object *o, long mods)
+{
+        return 24 + (o->state != mods ? 28 : 0);
+}
+
 int wayland_deliver_pointer(long row, long x, long y, long buttons, long time)
 {
         struct wayland_client *c;
+        long need = 0;
 
         if (!wayland.side.running || !wayland.focused || wayland.focus_row != row)
                 return SHELL_EINVAL;
@@ -2896,7 +2918,10 @@ int wayland_deliver_pointer(long row, long x, long y, long buttons, long time)
         if (buttons < 0 || (buttons & ~SHELL_BUTTONS_MASK) || time < 0)
                 return SHELL_EINVAL;
         c = &wayland.clients[wayland.focus_client];
-        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_POINTER && c->objects[i].focus)
+                        need += wire_pointer_bytes(&c->objects[i], buttons);
+        if (c->out_length + need > WAYLAND_OUT_MAX)
                 return SHELL_ENOSPC;
         for (long i = 0; i < WAYLAND_OBJECTS; i++)
         {
@@ -2934,6 +2959,7 @@ int wayland_deliver_pointer(long row, long x, long y, long buttons, long time)
 int wayland_deliver_key(long row, long code, long pressed, long mods, long time)
 {
         struct wayland_client *c;
+        long need = 0;
 
         if (!wayland.side.running || !wayland.focused || wayland.focus_row != row)
                 return SHELL_EINVAL;
@@ -2942,7 +2968,10 @@ int wayland_deliver_key(long row, long code, long pressed, long mods, long time)
         if (mods < 0 || mods > 0xffffL || time < 0)
                 return SHELL_EINVAL;
         c = &wayland.clients[wayland.focus_client];
-        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_KEYBOARD && c->objects[i].focus)
+                        need += wire_key_bytes(&c->objects[i], mods);
+        if (c->out_length + need > WAYLAND_OUT_MAX)
                 return SHELL_ENOSPC;
         for (long i = 0; i < WAYLAND_OBJECTS; i++)
         {
