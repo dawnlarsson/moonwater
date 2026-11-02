@@ -8841,8 +8841,8 @@ static bool rev_pieces_emit(address_any context, positive index, p8 address_to l
         return took == length;
 }
 
-static bool rev_pieces_sink(address_any context, positive index, address_any data,
-                            positive length)
+static bool text_pieces_sink(address_any context, positive index, address_any data,
+                             positive length)
 {
         (void)context;
         (void)index;
@@ -8862,7 +8862,7 @@ static fn rev_pieces_run(bool utf8)
                 return;
 
         rev_pieces_utf8 = utf8;
-        parallel_lines_ordered(address_of pieces, rev_pieces_emit, rev_pieces_sink, null);
+        parallel_lines_ordered(address_of pieces, rev_pieces_emit, text_pieces_sink, null);
         text_lines_done(address_of pieces);
 }
 
@@ -21943,18 +21943,6 @@ static bool cut_pieces_emit(address_any context, positive index, p8 address_to l
         return took == length;
 }
 
-static bool cut_pieces_sink(address_any context, positive index, address_any data,
-                            positive length)
-{
-        (void)context;
-        (void)index;
-
-        if (length)
-                text_put(data, length);
-
-        return !text_out_failed;
-}
-
 // True when pieces answered some of the input; the descriptor is where they stopped.
 static bool cut_pieces_run(cut_pieces address_to run)
 {
@@ -21963,7 +21951,7 @@ static bool cut_pieces_run(cut_pieces address_to run)
         if (!text_lines_open(address_of pieces, text_delimiter))
                 return false;
 
-        parallel_lines_ordered(address_of pieces, cut_pieces_emit, cut_pieces_sink, run);
+        parallel_lines_ordered(address_of pieces, cut_pieces_emit, text_pieces_sink, run);
         text_lines_done(address_of pieces);
         return true;
 }
@@ -30255,18 +30243,6 @@ static bool grep_pieces_count(address_any context, positive index, p8 address_to
         return grep_pieces_search_one(context, index, lines, length, offset, null);
 }
 
-static bool grep_pieces_sink(address_any context, positive index, address_any data,
-                             positive length)
-{
-        (void)context;
-        (void)index;
-
-        if (length)
-                text_put(data, length);
-
-        return !text_out_failed;
-}
-
 // True when pieces answered some of the file; the task says how much.
 static bool grep_pieces_search(grep_pieces address_to task)
 {
@@ -30311,7 +30287,7 @@ static bool grep_pieces_search(grep_pieces address_to task)
 
         if (task->printing)
                 parallel_lines_ordered(address_of pieces, grep_pieces_search_one,
-                                       grep_pieces_sink, address_of run);
+                                       text_pieces_sink, address_of run);
         else
                 parallel_lines_for(address_of pieces, grep_pieces_count, address_of run);
 

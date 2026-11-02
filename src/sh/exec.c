@@ -8328,7 +8328,7 @@ bool exec_function_here_hashed(string_address name, positive2 named)
         return exec_function_find(name, named) != 0;
 }
 
-bool exec_function_readonly_set(string_address name)
+static bool exec_function_readonly_mark(string_address name, bool readonly)
 {
         positive2 named = string_hash_33_length(name);
         positive slot = exec_function_locate(name, named);
@@ -8336,8 +8336,13 @@ bool exec_function_readonly_set(string_address name)
         if (slot == positive_max)
                 return false;
 
-        exec_functions[slot].readonly = true;
+        exec_functions[slot].readonly = readonly;
         return true;
+}
+
+bool exec_function_readonly_set(string_address name)
+{
+        return exec_function_readonly_mark(name, true);
 }
 
 /*
@@ -8354,14 +8359,7 @@ bool exec_function_readonly_set(string_address name)
 */
 bool exec_function_readonly_clear(string_address name)
 {
-        positive2 named = string_hash_33_length(name);
-        positive slot = exec_function_locate(name, named);
-
-        if (slot == positive_max)
-                return false;
-
-        exec_functions[slot].readonly = false;
-        return true;
+        return exec_function_readonly_mark(name, false);
 }
 
 b32 exec_function_attributes_hashed(string_address name, positive2 named)

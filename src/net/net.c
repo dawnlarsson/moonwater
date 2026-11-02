@@ -3385,17 +3385,6 @@ typedef struct
         p8 round[176];
 } crypto_siv_key;
 
-static fn crypto_aes128_block(const p8 address_to round, const p8 address_to in,
-                              p8 address_to out)
-{
-        p8 counter[16];
-
-        memory_copy(counter, in, 16);
-        memory_fill(out, 0, 16);
-        aes128_ctr_blocks(round, counter, out, out, 1);
-        crypto_forget(counter, sizeof counter);
-}
-
 //      Multiplication by x in GF(2^128) (RFC 5297 2.3, RFC 4493 2.3).
 static fn crypto_siv_double(p8 address_to block)
 {
@@ -3413,7 +3402,7 @@ static fn crypto_cmac_prepare(crypto_cmac_key address_to key,
 
         memory_fill(zero, 0, 16);
         crypto_aes128_expand((p8 address_to)raw, key->round);
-        crypto_aes128_block(key->round, zero, key->first);
+        crypto_aes128_encrypt(key->round, zero, key->first);
         crypto_siv_double(key->first);
         memory_copy(key->second, key->first, 16);
         crypto_siv_double(key->second);
@@ -3458,7 +3447,7 @@ static fn crypto_cmac(const crypto_cmac_key address_to key,
                         for (positive in = 0; in < 16; in++)
                                 block[in] ^= subkey[in];
                 }
-                crypto_aes128_block(key->round, block, state);
+                crypto_aes128_encrypt(key->round, block, state);
         }
         memory_copy(out, state, 16);
         crypto_forget(state, sizeof state);

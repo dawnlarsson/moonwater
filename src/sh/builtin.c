@@ -22198,24 +22198,7 @@ static COLD p32 comp_chain(string_address name)
 
 static COLD fn comp_quoted(writer write, string_address text)
 {
-        write("'", 1);
-
-        while (string_get(text))
-        {
-                positive run = string_span_without_set(text, "'");
-
-                if (run)
-                        write(text, run);
-                text += run;
-
-                if (string_is(text, '\''))
-                {
-                        write("'\\''", 4);
-                        text++;
-                }
-        }
-
-        write("'", 1);
+        shell_single_quote_write(write, text, string_length(text));
 }
 
 static COLD fn comp_printed(writer write, comp_spec address_to spec)

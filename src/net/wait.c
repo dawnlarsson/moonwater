@@ -147,20 +147,24 @@ static bipolar network_wait_set(
         }
 }
 
+static bipolar network_wait_one_until(bipolar handle, b32 events,
+                                      const network_deadline address_to deadline)
+{
+        system_poll_descriptor waited = {(b32)handle, events, 0};
+
+        return network_wait_set(address_of waited, 1, deadline);
+}
+
 static bipolar network_wait_readable_until(
     bipolar handle, const network_deadline address_to deadline)
 {
-        system_poll_descriptor waited = {(b32)handle, SYSTEM_POLL_READ, 0};
-
-        return network_wait_set(address_of waited, 1, deadline);
+        return network_wait_one_until(handle, SYSTEM_POLL_READ, deadline);
 }
 
 static bipolar network_wait_writable_until(
     bipolar handle, const network_deadline address_to deadline)
 {
-        system_poll_descriptor waited = {(b32)handle, SYSTEM_POLL_WRITE, 0};
-
-        return network_wait_set(address_of waited, 1, deadline);
+        return network_wait_one_until(handle, SYSTEM_POLL_WRITE, deadline);
 }
 
 /* What network_receive_next answers when the deadline went by with nothing to
