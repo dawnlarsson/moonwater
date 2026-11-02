@@ -4415,6 +4415,17 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 return null;
         if (down)
         {
+                // A press whose release never came is let go first, as a cancel lets it go: it is up, and its ripple runs
+                // out. Left held, its ripple never exits and the frame never goes idle.
+                if (ui_kit_held)
+                {
+                        struct ui_control address_to lost = ui_kit_held;
+
+                        ui_kit_held = null;
+                        lost->down = lost->moved = 0;
+                        ui_kit_ripples_exit(lost);
+                        ui_squish_release(&lost->squish);
+                }
                 // A press takes the focus from wherever it was: a field's, and a button's (a click focuses a button in Chrome).
                 for (int k = 0; k < count; k++)
                         controls[k].focused = 0;
