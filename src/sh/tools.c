@@ -5529,7 +5529,13 @@ static seq_wide numfmt_wide_scale(seq_wide value, p64 base, positive address_to 
 }
 
 // (intmax_t) value: toward zero, and the x87's indefinite past the range.
-static bipolar numfmt_wide_integer(seq_wide value)
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__)
+/* GCC at -Os calls __ashlti3 and __lshrti3 for these 128-bit shifts, and a freestanding link has no libgcc */
+#define wide_shift_O2 __attribute__((optimize("O2")))
+#else
+#define wide_shift_O2
+#endif
+static wide_shift_O2 bipolar numfmt_wide_integer(seq_wide value)
 {
         if (value.kind == SEQ_WIDE_ZERO)
                 return 0;
@@ -7448,7 +7454,7 @@ static p128 factor_wide_word(const factor_wide address_to ring, p64 word)
         return factor_wide_multiply(ring, word, ring->square);
 }
 
-static bool factor_wide_prime(p128 number)
+static wide_shift_O2 bool factor_wide_prime(p128 number)
 {
         static const p8 bases[] = {
             2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41,
@@ -7500,7 +7506,7 @@ static bool factor_wide_prime(p128 number)
         return true;
 }
 
-static p128 factor_wide_gcd(p128 left, p128 right)
+static wide_shift_O2 p128 factor_wide_gcd(p128 left, p128 right)
 {
         if (!left)
                 return right;
@@ -7593,7 +7599,7 @@ static p128 factor_wide_rho(p128 number)
 }
 
 // number / divisor, bit by bit, for two words.
-static p128 factor_wide_divide(p128 number, p128 divisor)
+static wide_shift_O2 p128 factor_wide_divide(p128 number, p128 divisor)
 {
         p128 quotient = 0, rest = 0;
 
@@ -7631,7 +7637,7 @@ static bool factor_found_add(const p64 address_to limb, positive size)
 static bool factor_collect(positive number, positive address_to factors,
                            positive address_to count);
 
-static bool factor_big_collect(factor_big address_to number)
+static wide_shift_O2 bool factor_big_collect(factor_big address_to number)
 {
         if (number->size <= 1)
         {
