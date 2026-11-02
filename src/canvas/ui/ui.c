@@ -5617,6 +5617,7 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
         Escape close; a letter chooses a mnemonic, else goes to the first item the letters typed so far start.
 */
 #define UI_MENU_ITEMS 40
+#define UI_WORD 64           // a word a page keeps (a choice's name, a row's)
 #define UI_MENU_SEPARATOR 1u
 #define UI_MENU_DISABLED 2u
 #define UI_MENU_CHECK 4u   // a check mark when UI_MENU_ON
@@ -6907,242 +6908,6 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
         return id;
 }
 
-/* ---- a menu of a choice's words ---- */
-
-#define UI_MENU_MOST 32
-#define UI_MENU_WORD 64
-
-#define UI_MENU_KEPT 0   // a key moved in it, or did nothing
-#define UI_MENU_CHOSEN 1 // the choice at is the one
-#define UI_MENU_CLOSED 2 // closed with nothing chosen
-
-struct ui_menu
-{
-        int owner;                         // the row it opened from (the app's number), -1 when closed
-        char word[UI_MENU_MOST][UI_MENU_WORD];
-        int count, at, current;            // its words, the keys' one, the one the row has now (-1 none)
-        b32 touch;                         // a finger opened it: its choices are a finger's height
-        int widest;                        // the widest word, device pixels
-        int x, y, w, h, shown;             // where it is, device pixels, and how many choices show
-        int pressed;                       // the choice a finger is on, -1 none
-        struct ui_scroll scroll;           // in whole choices
-        struct ui_popmenu list;            // the kit's menu it is drawn as
-};
-
-static int ui_menu_item_height(const struct ui address_to ui, const struct ui_menu address_to m)
-{
-        return ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW);
-}
-
-static int ui_menu_top(const struct ui address_to ui, const struct ui_menu address_to m)
-{
-        return m->scroll.scroll / ui_menu_item_height(ui, m);
-}
-
-// A menu opened from a row, empty: the app adds its words, the one the row has now marked current.
-static fn ui_menu_open(struct ui_menu address_to m, int owner, b32 touch)
-{
-        m->owner = owner, m->touch = touch;
-        m->count = 0, m->at = 0, m->current = -1, m->widest = 0, m->pressed = -1;
-        m->scroll.scroll = m->scroll.wheel = m->scroll.left = 0;
-        m->scroll.held = m->scroll.hover = 0; // a thumb held when it closed (its release never came here) is not held now
-}
-
-static fn ui_menu_add(struct ui address_to ui, struct ui_menu address_to m, const char address_to word, b32 current)
-{
-        int wide;
-
-        if (m->count >= UI_MENU_MOST)
-                return;
-        {
-                positive out = 0;
-
-                for (positive at = 0; word[at] && out + 2 < UI_MENU_WORD; at++)
-                {
-                        m->word[m->count][out++] = word[at];
-                        if (word[at] == '&')
-                                m->word[m->count][out++] = '&';
-                }
-                m->word[m->count][out] = 0;
-        }
-        wide = ui_kit_measure(ui, (string_address)word, UI_BODY_MEDIUM);
-        m->widest = wide > m->widest ? wide : m->widest;
-        if (current)
-                m->current = m->at = m->count;
-        m->count++;
-}
-
-// A word of the menu as it was added (its && the & it was).
-static fn ui_menu_word(const struct ui_menu address_to m, int at, char address_to into, positive room)
-{
-        positive out = 0;
-
-        for (positive k = 0; at >= 0 && at < m->count && m->word[at][k] && out + 1 < room; k++)
-        {
-                into[out++] = m->word[at][k];
-                k += m->word[at][k] == '&' && m->word[at][k + 1] == '&';
-        }
-        into[out] = 0;
-}
-
-/*
-        Where the menu is, from its row's band in the window (top to bottom), the edge its right side is at, and the
-        window's size: under the row, or over it when there is more room there; with room on neither side for all of
-        it, slid up over the row where it fits the window so, and else cut to the larger side, and it scrolls.
-*/
-static fn ui_menu_place(const struct ui address_to ui, struct ui_menu address_to m, int row_top, int row_bottom, int right, int width,
-                        int height)
-{
-        int item = ui_menu_item_height(ui, m), pad = ui_dev(ui, UI_MENU_PAD), margin = ui_dev(ui, 8);
-        int below = height - margin - (row_bottom - ui_dev(ui, 4)), above = row_top + ui_dev(ui, 4) - margin, most;
-
-        most = (below >= above ? below : above) - 2 * pad;
-        most = most / item < 1 ? 1 : most / item;
-        if (m->count > most && m->count * item + 2 * pad <= height - 2 * margin)
-                most = m->count;
-        m->shown = m->count < most ? m->count : most;
-        m->h = m->shown * item + 2 * pad;
-        m->w = m->widest + 2 * ui_dev(ui, UI_MENU_PAD + 30);
-        m->w = m->w < ui_dev(ui, UI_MENU_LEAST) ? ui_dev(ui, UI_MENU_LEAST) : m->w;
-        m->w = m->w > width - 2 * margin ? width - 2 * margin : m->w;
-        m->x = right - m->w;
-        m->x = m->x < margin ? margin : m->x;
-        if (m->h <= below)
-                m->y = row_bottom - ui_dev(ui, 4);
-        else if (m->h <= above)
-                m->y = row_top + ui_dev(ui, 4) - m->h;
-        else
-        {
-                m->y = height - margin - m->h;
-                m->y = m->y < margin ? margin : m->y;
-        }
-        m->scroll.unit = item;
-        m->scroll.content = m->count * item;
-        m->scroll.view = m->shown * item;
-        m->scroll.x = m->x + m->w - ui_dev(ui, UI_SCROLL_WIDTH);
-        m->scroll.y = m->y + pad, m->scroll.height = m->h - 2 * pad;
-        ui_scroll_clamp(&m->scroll);
-        // The keys' choice stays in view.
-        if (m->at < ui_menu_top(ui, m))
-                m->at = ui_menu_top(ui, m);
-        else if (m->at >= ui_menu_top(ui, m) + m->shown)
-                m->at = ui_menu_top(ui, m) + m->shown - 1;
-}
-
-// The keys on a choice, kept in view.
-static fn ui_menu_go(const struct ui address_to ui, struct ui_menu address_to m, int at)
-{
-        int item = ui_menu_item_height(ui, m);
-
-        m->at = at < 0 ? 0 : at >= m->count ? m->count - 1 : at;
-        ui_scroll_reveal(&m->scroll, m->at * item, item);
-}
-
-// The choice under a point of the window, or -1.
-static int ui_menu_item(const struct ui address_to ui, const struct ui_menu address_to m, int x, int y)
-{
-        int pad = ui_dev(ui, UI_MENU_PAD), at;
-
-        if (m->owner < 0 || x < m->x || x >= m->x + m->w || y < m->y + pad || y >= m->y + m->h - pad)
-                return -1;
-        at = ui_menu_top(ui, m) + (y - m->y - pad) / ui_menu_item_height(ui, m);
-        return at < m->count ? at : -1;
-}
-
-/*
-        A key with the menu open (it has every key): Up, Down, Home, End, Page Up and Page Down move in it, a letter or a
-        digit goes to the next word that starts with it, Enter or Space chooses, Escape closes.
-*/
-static int ui_menu_key(const struct ui address_to ui, struct ui_menu address_to m, int key, unsigned int c, unsigned int flags)
-{
-        switch (key)
-        {
-        case UI_KEY_ESCAPE: return UI_MENU_CLOSED;
-        case UI_KEY_ENTER:
-        case UI_KEY_ENTER_PAD:
-        case UI_KEY_SPACE: return UI_MENU_CHOSEN;
-        case UI_KEY_UP: ui_menu_go(ui, m, m->at - 1); return UI_MENU_KEPT;
-        case UI_KEY_DOWN: ui_menu_go(ui, m, m->at + 1); return UI_MENU_KEPT;
-        case UI_KEY_HOME: ui_menu_go(ui, m, 0); return UI_MENU_KEPT;
-        case UI_KEY_END: ui_menu_go(ui, m, m->count - 1); return UI_MENU_KEPT;
-        case UI_KEY_PAGE_UP: ui_menu_go(ui, m, m->at - (m->shown > 0 ? m->shown : 1)); return UI_MENU_KEPT;
-        case UI_KEY_PAGE_DOWN: ui_menu_go(ui, m, m->at + (m->shown > 0 ? m->shown : 1)); return UI_MENU_KEPT;
-        }
-        if (c > ' ' && c < 0x7f && !(flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)))
-        {
-                c = c >= 'A' && c <= 'Z' ? c + 32 : c;
-                for (int step = 1; step <= m->count; step++)
-                {
-                        int at = (m->at + step) % m->count;
-                        unsigned char first = (unsigned char)m->word[at][0];
-
-                        if ((first >= 'A' && first <= 'Z' ? first + 32u : first) == c)
-                        {
-                                ui_menu_go(ui, m, at);
-                                break;
-                        }
-                }
-        }
-        return UI_MENU_KEPT;
-}
-
-/*
-        The menu over everything, as the kit's menus are drawn (ui_popmenu_draw, into the picture at the menu's place):
-        the surface container, 8 round with a hairline, the keys' choice in the selection's layer, the row's own one
-        dotted as a radio is; a finger's choice pressed, and the scrollbar when not all of it shows.
-
-        Which menus are glass is decided by where they are drawn. A popup (ui_popup_open: a context menu, a choice
-        dropdown that opens from a row as its own window) is a temporary overlay, so it is glass (UI_POPUP_GLASS) and has
-        no face and no outline. This menu, ui_menu, is drawn inside its window's own picture: the settings window's
-        choice dropdowns stay open in a window that stays, and that window is the kit's opaque surface. Making this menu
-        glass would make the settings picture transparent under it, so it keeps the surface's face and outline.
-*/
-// The menu's view moves a frame at a time. The choice the keys are on is kept in the view it is going to (a reveal
-// goes to the choice, so it stays; a wheel's turn goes past it, and the choice is put in the view it is turning to).
-static b32 ui_menu_glide(const struct ui address_to ui, struct ui_menu address_to m)
-{
-        b32 moved = ui_scroll_glide(ui, &m->scroll);
-
-        if (m->count > 0 && m->shown > 0)
-        {
-                int item = ui_menu_item_height(ui, m);
-                int top = (int)((m->scroll.gliding ? m->scroll.aim : (b64)m->scroll.scroll << 8) / UI_SCROLL_SCALE) / item;
-
-                m->at = m->at < top ? top : m->at >= top + m->shown ? top + m->shown - 1 : m->at;
-        }
-        return moved;
-}
-
-static fn ui_menu_draw(struct ui address_to ui, struct ui_menu address_to m)
-{
-        struct ui_popmenu address_to list = &m->list;
-        struct ui sub = *ui;
-        int item = ui_menu_item_height(ui, m), pad = ui_dev(ui, UI_MENU_PAD);
-
-        ui_menu_glide(ui, m);
-
-        if (m->owner < 0)
-                return;
-        ui->top = 0;
-        ui->bottom = ui->height;
-        list->count = 0;
-        for (int at = 0; at < m->count; at++)
-                ui_popmenu_add(list, m->word[at], null, UI_MENU_RADIO | (at == m->current ? UI_MENU_ON : 0), at);
-        list->hot = m->at, list->top = ui_menu_top(ui, m), list->rows_shown = m->shown, list->pressed = -1;
-        list->width = m->w, list->height = m->h, list->touch = m->touch;
-        sub.pixels = ui->pixels + (unsigned long)m->y * ui->pitch + (unsigned long)m->x;
-        sub.width = m->w, sub.height = m->h;
-        sub.top = 0, sub.bottom = m->h;
-        sub.band_top = ui->band_top - m->y, sub.band_bottom = ui->band_bottom - m->y;
-        ui_popmenu_draw(&sub, list);
-        if (m->pressed >= list->top && m->pressed < list->top + m->shown)
-                ui_kit_fill(ui, &(struct ui_box){(m->x + pad) * 256, (m->y + pad + (m->pressed - list->top) * item) * 256, (m->x + m->w - pad) * 256,
-                                                 (m->y + pad + (m->pressed - list->top + 1) * item) * 256, ui_q8(ui, 6), ui_q8(ui, 6)},
-                            ui_mix(ui_role(UI_ON_SURFACE), 10, 0), null);
-        if (m->count > m->shown)
-                ui_scroll_draw(ui, &m->scroll);
-}
-
 /* ---- a finger on a page ---- */
 
 /*
@@ -7218,12 +6983,11 @@ struct ui_page
         struct ui_control search;          // a bare field at the title's right, when the app gave it a placeholder
         struct ui_control column;          // the column: the kit's tabs on end
         struct ui_scroll column_scroll;
-        char names[UI_ITEMS][UI_MENU_WORD];
+        char names[UI_ITEMS][UI_WORD];
         int pointer_x, pointer_y;
-        // The app's: what scrolls in the body (its list's region, or a page of text's), the menu a row opened, and where
-        // a change is drawn again (rows of the window, device pixels).
+        // The app's: what scrolls in the body (its list's region, or a page of text's), and where a change is drawn again
+        // (rows of the window, device pixels).
         struct ui_scroll address_to body;
-        struct ui_menu address_to menu;
         fn (*damaged)(int top, int bottom);
 };
 
@@ -7329,16 +7093,11 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
 }
 
 /*
-        The page's regions: the open menu (which has the wheel, and nothing else does while it is open), the column at
-        the left of the gutter's middle, and the body. A region that moved is drawn again: the menu keeps the keys'
-        choice in view as it goes, and is drawn whole; the column and the body are the body's band.
+        The page's regions: the column at the left of the gutter's middle, and the body. A region that moved is drawn again;
+        the column and the body are the body's band. A choice's menu is a popup of its own, with the wheel and the keys.
 */
 static struct ui_scroll address_to ui_page_region(const struct ui address_to ui, struct ui_page address_to p, int x, int y)
 {
-        struct ui_menu address_to m = p->menu;
-
-        if (m && m->owner >= 0 && x >= m->x && x < m->x + m->w && y >= m->y && y < m->y + m->h)
-                return &m->scroll;
         if (p->column_on && x < p->left - ui_dev(ui, UI_COLUMN_GUTTER) / 2)
                 return &p->column_scroll;
         return p->body;
@@ -7346,40 +7105,27 @@ static struct ui_scroll address_to ui_page_region(const struct ui address_to ui,
 
 static fn ui_page_moved(const struct ui address_to ui, struct ui_page address_to p, const struct ui_scroll address_to region)
 {
-        struct ui_menu address_to m = p->menu;
-
         if (!p->damaged || !region)
                 return;
-        if (m && region == &m->scroll)
-        {
-                int top = ui_menu_top(ui, m);
-
-                m->at = m->at < top ? top : m->at >= top + m->shown ? top + m->shown - 1 : m->at;
-                p->damaged(0, p->height);
-        }
-        else
-                p->damaged(p->top - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
+        p->damaged(p->top - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
 }
 
 // The wheel on the page: it turns the region under the pointer.
 static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to p, int delta)
 {
-        struct ui_scroll address_to region = p->menu && p->menu->owner >= 0 ? &p->menu->scroll : ui_page_region(ui, p, p->pointer_x, p->pointer_y);
+        struct ui_scroll address_to region = ui_page_region(ui, p, p->pointer_x, p->pointer_y);
 
         if (region && ui_scroll_wheel(ui, region, delta))
                 ui_page_moved(ui, p, region);
 }
 
 /*
-        A mouse's motion, press or release on the page's scrollbars (the menu's while it is open, else the body's and
-        the column's): the thumb lights under the pointer, is dragged, and a press on the track pages. True when it
-        was a bar's.
+        A mouse's motion, press or release on the page's scrollbars (the body's and the column's): the thumb lights under the
+        pointer, is dragged, and a press on the track pages. True when it was a bar's.
 */
 static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to p, int type, b32 down)
 {
-        struct ui_scroll address_to bars[3] = {p->menu && p->menu->owner >= 0 ? &p->menu->scroll : null,
-                                               p->menu && p->menu->owner >= 0 ? null : p->body,
-                                               p->menu && p->menu->owner >= 0 || !p->column_on ? null : &p->column_scroll};
+        struct ui_scroll address_to bars[3] = {null, p->body, !p->column_on ? null : &p->column_scroll};
         b32 taken = false;
 
         for (int k = 0; k < 3; k++)

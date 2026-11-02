@@ -136989,7 +136989,7 @@ static fn kit_composites_check(struct ui address_to wui)
 {
         static struct ui_popmenu up_m, pad_m, empty_m, none_m;
         static struct ui_list keyed;
-        static struct ui_menu reopened;
+        static struct ui_popmenu reopened;
         int s = wui->scale, bottom;
         b32 tops_ok = true;
         struct window_event up = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 103, 0}, down = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 108, 0};
@@ -137050,12 +137050,12 @@ static fn kit_composites_check(struct ui address_to wui)
         }
 
         // A menu closed with its thumb held (the release never reached it), and opened again: nothing is held.
-        ui_menu_open(&reopened, 0, false);
+        memory_zero(&reopened, sizeof(reopened));
         for (int at = 0; at < 32; at++)
-                ui_menu_add(wui, &reopened, "Choice", at == 0);
-        ui_menu_place(wui, &reopened, 100 * s, 140 * s, 600 * s, 600 * s, 900 * s);
+                ui_popmenu_add(&reopened, "Choice", null, 0, at + 1);
+        ui_popmenu_size(wui, &reopened, 600 * s);
         reopened.scroll.held = 1;
-        ui_menu_open(&reopened, 0, false);
+        ui_popmenu_size(wui, &reopened, 600 * s);
         {
                 int x = reopened.scroll.x + s, y = reopened.scroll.y + reopened.scroll.height / 2;
 
