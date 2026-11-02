@@ -57474,9 +57474,30 @@ __asm__(
     "1:  xor %r8d, %r8d\n   xor %r9d, %r9d\n"
     ASM_NARROW("cpu_has_avx512", ".Lnth_x64_sse")
     "vpbroadcastb %esi, %zmm1\n"
+    //
+    //      Four zmm a turn while two hundred and fifty six bytes are left: the four counts added and the total
+    //      compared with what is still wanted. When the one wanted is in the four, the block loop below walks
+    //      them from the front, which is a few more compares on a hit and none on a miss. One block a turn was a
+    //      count, a mask move and a compare for every sixty four bytes.
+    //
+    //      The first block is the one a short span or an early match ends in, so it runs as it always did; the
+    //      quad is asked for after it.
+    //
     ".balign 16\n.Lnth_x64_z:\n"
     "mov %rdx, %r10\n   sub %r9, %r10\n   jbe .Lnth_x64_z_short\n   cmp $64, %r10\n   jb .Lnth_x64_z_part\n   vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
-    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_z_found\n   mov %rax, %r8\n   add $64, %r9\n   jmp .Lnth_x64_z\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_z_found\n   mov %rax, %r8\n   add $64, %r9\n   jmp .Lnth_x64_q\n"
+    ".balign 16\n.Lnth_x64_q:\n"
+    "mov %rdx, %r10\n   sub %r9, %r10\n   jbe .Lnth_x64_z_short\n   cmp $256, %r10\n   jb .Lnth_x64_zc\n"
+    "vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
+    "vpcmpeqb 64(%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %r10\n   add %r10, %rax\n"
+    "vpcmpeqb 128(%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %r10\n   add %r10, %rax\n"
+    "vpcmpeqb 192(%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %r10\n   add %r10, %rax\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_zg\n   mov %rax, %r8\n   add $256, %r9\n   jmp .Lnth_x64_q\n"
+    ".balign 16\n.Lnth_x64_zg:\n"
+    "mov %rdx, %r10\n   sub %r9, %r10\n"
+    ".Lnth_x64_zb:\n   jbe .Lnth_x64_z_short\n"
+    ".Lnth_x64_zc:\n   cmp $64, %r10\n   jb .Lnth_x64_z_part\n   vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_z_found\n   mov %rax, %r8\n   add $64, %r9\n   jmp .Lnth_x64_zg\n"
     ".Lnth_x64_z_part:\n   mov $-1, %r11\n   bzhi %r10, %r11, %r11\n   kmovq %r11, %k2\n   vmovdqu8 (%rdi,%r9), %zmm0{%k2}{z}\n   vpcmpeqb %zmm1, %zmm0, %k1{%k2}\n"
     "kmovq %k1, %r11\n   popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnth_x64_z_found\n   mov %rax, %r8\n"
     ".Lnth_x64_z_short:\n   vzeroupper\n   mov %rdx, %rax\n   mov %r8, %rdx\n" ASM_RET
@@ -57503,9 +57524,25 @@ __asm__(
     "1:  xor %r8d, %r8d\n   mov %rdx, %r9\n"
     ASM_NARROW("cpu_has_avx512", ".Lnthl_x64_sse")
     "vpbroadcastb %esi, %zmm1\n"
+    //
+    //      The same as memory_nth_of, from the end: the first block as it always ran, then four blocks a turn
+    //      while two hundred and fifty six bytes are left, and the single block loop for the rest. A quad that
+    //      holds the one wanted is walked from its top by the block loop.
+    //
     ".balign 16\n.Lnthl_x64_z:\n"
     "cmp $64, %r9\n   jb .Lnthl_x64_z_part\n   sub $64, %r9\n   vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
-    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnthl_x64_z_found\n   mov %rax, %r8\n   jmp .Lnthl_x64_z\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnthl_x64_z_found\n   mov %rax, %r8\n   jmp .Lnthl_x64_q\n"
+    ".balign 16\n.Lnthl_x64_q:\n"
+    "cmp $256, %r9\n   jb .Lnthl_x64_zg\n   sub $256, %r9\n"
+    "vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
+    "vpcmpeqb 64(%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %r10\n   add %r10, %rax\n"
+    "vpcmpeqb 128(%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %r10\n   add %r10, %rax\n"
+    "vpcmpeqb 192(%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %r10\n   add %r10, %rax\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnthl_x64_qf\n   mov %rax, %r8\n   jmp .Lnthl_x64_q\n"
+    ".Lnthl_x64_qf:\n   add $256, %r9\n   jmp .Lnthl_x64_zg\n"
+    ".balign 16\n.Lnthl_x64_zg:\n"
+    "cmp $64, %r9\n   jb .Lnthl_x64_z_part\n   sub $64, %r9\n   vpcmpeqb (%rdi,%r9), %zmm1, %k1\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n"
+    "add %r8, %rax\n   cmp %rcx, %rax\n   jae .Lnthl_x64_z_found\n   mov %rax, %r8\n   jmp .Lnthl_x64_zg\n"
     ".Lnthl_x64_z_part:\n   test %r9, %r9\n   jz .Lnthl_x64_z_none\n   mov $-1, %r11\n   bzhi %r9, %r11, %r11\n   kmovq %r11, %k2\n   xor %r9d, %r9d\n"
     "vmovdqu8 (%rdi), %zmm0{%k2}{z}\n   vpcmpeqb %zmm1, %zmm0, %k1{%k2}\n   kmovq %k1, %r11\n   popcnt %r11, %rax\n   add %r8, %rax\n   cmp %rcx, %rax\n"
     "jae .Lnthl_x64_z_found\n   mov %rax, %r8\n"

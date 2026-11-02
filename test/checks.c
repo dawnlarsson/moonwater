@@ -15302,6 +15302,45 @@ fn check_last_of_either_widths()
 }
 
 /*
+        memory_nth_of and memory_nth_last_of against the byte loop: every width to 300 at every alignment from 0
+        to 63, the byte absent, then present once at its first, middle and last place, asked for the first and
+        for the last. The four-zmm turns on x86-64 are asked for after the first block, so the cut is by where
+        the span starts as well as by its width.
+*/
+fn check_nth_widths()
+{
+        static p8 room[448];
+
+        for (positive size = 0; size <= 300; size++)
+                for (positive off = 0; off < 64; off++)
+                {
+                        for (positive i = 0; i < sizeof(room); i++)
+                                room[i] = 'a';
+
+                        positive2 front = (memory_nth_of)(room + off, 'z', size, 1);
+                        positive2 rear = (memory_nth_last_of)(room + off, 'z', size, 1);
+
+                        same("memory_nth_of", "every width and alignment, absent", front.x, size);
+                        same("memory_nth_of", "every width and alignment, absent count", front.y, 0);
+                        same("memory_nth_last_of", "every width and alignment, absent", rear.x, 0);
+                        same("memory_nth_last_of", "every width and alignment, absent count", rear.y, 0);
+                        for (positive pick = 0; pick < 3 && size; pick++)
+                        {
+                                positive at = pick == 0 ? 0 : pick == 1 ? size / 2 : size - 1;
+
+                                room[off + at] = 'z';
+                                front = (memory_nth_of)(room + off, 'z', size, 1);
+                                rear = (memory_nth_last_of)(room + off, 'z', size, 1);
+                                same("memory_nth_of", "every width and alignment, present", front.x, at + 1);
+                                same("memory_nth_of", "every width and alignment, present count", front.y, 1);
+                                same("memory_nth_last_of", "every width and alignment, present", rear.x, at);
+                                same("memory_nth_last_of", "every width and alignment, present count", rear.y, 1);
+                                room[off + at] = 'a';
+                        }
+                }
+}
+
+/*
         memory_squeeze_bytes against the byte loop tr used to run: every size
         across the vector edges, every residue, marks from none to nearly all,
         bytes drawn from a four-letter alphabet so that repeats are the rule,
@@ -30078,6 +30117,7 @@ b32 main()
         check_squeeze_bytes();
         check_last_of_bodies();
         check_last_of_either_widths();
+        check_nth_widths();
         check_offsets_of_either();
         check_span_byte();
         check_dirty_arguments();
