@@ -117866,6 +117866,142 @@ static void check_compositor_preview(void)
 }
 
 /*
+        A shared edge: two windows that meet edge to edge with the same extent take a press on the middle half of their
+        edge as one resize, one grown as the other shrinks and both still meeting. The indicator is a tint across that
+        middle half and nowhere else. An edge that does not meet exactly, a press off the middle, and a corner are the
+        window's own.
+*/
+#define SHARED_W 640
+#define SHARED_H 400
+static void check_compositor_shared(void)
+{
+    static unsigned int scanout[SHARED_W * SHARED_H], plain[SHARED_W * SHARED_H], marked[SHARED_W * SHARED_H];
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)SHARED_W * SHARED_H * 4 + 4095) & ~4095ul;
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    struct windows address_to table;
+    struct compositor_frame frames[2];
+    struct compositor_target t;
+    int mark[4], differs = 0, outside = 0;
+
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("shared: the table is mapped", false);
+        return;
+    }
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.preview_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = SHARED_W;
+    compositor.height = SHARED_H;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = scanout;
+    compositor.scanout_pitch = SHARED_W * 4;
+    compositor.outputs = 1;
+    compositor.screen[0][2] = SHARED_W, compositor.screen[0][3] = SHARED_H;
+    compositor.stride = compositor.most_w = SHARED_W;
+    compositor.room_h = compositor.most_h = SHARED_H;
+    table = compositor.table = (struct windows address_to)mapped;
+    table->motion = 1;
+    compositor.pixels = table->pixels = header;
+    compositor.buffer = table->buffer = buffer;
+    table->stride = SHARED_W;
+    table->output_width = SHARED_W;
+    table->output_height = SHARED_H;
+    compositor.mark_row = compositor.mark_with = compositor.shared_row = COMPOSITOR_NONE;
+
+    /* Two windows, shown, the left half and the right half: they meet on the middle edge, over its whole height. */
+    table->pid[2] = 2, table->pid[3] = 3;
+    compositor.showing[2] = compositor.showing[3] = 1;
+    compositor.stack[0] = 2, compositor.stack[1] = 3, compositor.stacked = 2;
+    compositor_arrange(2, COMPOSITOR_LEFT);
+    compositor_arrange(3, COMPOSITOR_RIGHT);
+    check("shared: two halves meet on the middle edge, the whole height of each",
+          compositor.x[2] + (int)compositor.w[2] == compositor.x[3] && compositor.y[2] == compositor.y[3] &&
+              compositor.h[2] == compositor.h[3] && compositor.w[2] == SHARED_W / 2);
+    check("shared: the window on the far side of an edge is the one that meets it, and an edge that meets nothing is none",
+          compositor_meets(3, COMPOSITOR_EDGE_LEFT) == 2 && compositor_meets(2, COMPOSITOR_EDGE_RIGHT) == 3 &&
+              compositor_meets(2, COMPOSITOR_EDGE_LEFT) == COMPOSITOR_NONE && compositor_meets(3, COMPOSITOR_EDGE_TOP) == COMPOSITOR_NONE);
+    compositor.h[3] = SHARED_H - 40;
+    check("shared: an edge that meets with a different extent is not shared", compositor_meets(3, COMPOSITOR_EDGE_LEFT) == COMPOSITOR_NONE);
+    compositor.h[3] = SHARED_H;
+
+    /* Hovering the middle half shows the indicator over the topmost of the two; off the middle it is gone. */
+    screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 0);
+    check("shared: over the middle half the indicator is the strip across the edge, over the topmost window",
+          compositor.mark_row == 3 && compositor.mark_with == 2 && compositor.mark[0] == SHARED_W / 2 - 2 &&
+              compositor.mark[1] == SHARED_H / 4 && compositor.mark[2] == 4 && compositor.mark[3] == SHARED_H / 2);
+    screens_hand(SHARED_W / 2 + 1, 20, 0);
+    check("shared: over the top quarter of the edge there is no indicator", compositor.mark[2] == 0 && compositor.mark_row == COMPOSITOR_NONE);
+
+    /* A press on the middle half takes both: the one pressed, and the window it is shared with. */
+    screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 0);
+    screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 1);
+    check("shared: a press on the middle half resizes both: the one pressed and the one it shares its edge with",
+          compositor.resize == 3 && compositor.shared_row == 2 && compositor.shared_lo == 2 && compositor.shared_hi == 3 &&
+              compositor.edges[2] == COMPOSITOR_EDGE_RIGHT && compositor.edges[3] == COMPOSITOR_EDGE_LEFT);
+    screens_hand(SHARED_W / 2 + 21, SHARED_H / 2, 0);
+    check("shared: dragged 20 px, one window grows 20 and the other shrinks 20 from its near edge, and they still meet",
+          compositor.w[2] == SHARED_W / 2 + 20 && compositor.x[3] == SHARED_W / 2 + 20 && compositor.w[3] == SHARED_W / 2 - 20 &&
+              compositor.x[2] + (int)compositor.w[2] == compositor.x[3] && compositor.x[3] + (int)compositor.w[3] == SHARED_W);
+    screens_hand(4, SHARED_H / 2, 0);
+    check("shared: dragged past the least a window is, the left one stops at it and the right keeps its far edge",
+          compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
+              compositor.x[3] + (int)compositor.w[3] == SHARED_W);
+    screens_hand(4, SHARED_H / 2, -1);
+    check("shared: let go, the resize ends and the indicator goes",
+          compositor.resize == COMPOSITOR_NONE && compositor.mark[2] == 0 && compositor.mark_row == COMPOSITOR_NONE);
+
+    /* The indicator is drawn on that edge's middle half and nowhere else: the scene with it and without it differ there only. */
+    compositor_arrange(2, COMPOSITOR_LEFT);
+    compositor_arrange(3, COMPOSITOR_RIGHT);
+    screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 0);
+    memory_copy(mark, compositor.mark, sizeof(mark));
+    compositor_frame_of(compositor.stack[0], &frames[0]);
+    compositor_frame_of(compositor.stack[1], &frames[1]);
+    t = (struct compositor_target){marked, SHARED_W, SHARED_W, SHARED_H, 0, 0, SHARED_W, SHARED_H, 0, 0, 0};
+    compositor_scene(&t, frames, 2);
+    compositor_mark_clear();
+    compositor_frame_of(compositor.stack[0], &frames[0]);
+    compositor_frame_of(compositor.stack[1], &frames[1]);
+    t.pixels = plain;
+    compositor_scene(&t, frames, 2);
+    for (int y = 0; y < SHARED_H; y++)
+        for (int x = 0; x < SHARED_W; x++)
+            if (marked[y * SHARED_W + x] != plain[y * SHARED_W + x])
+            {
+                differs++;
+                if (x < mark[0] || x >= mark[0] + mark[2] || y < mark[1] || y >= mark[1] + mark[3])
+                    outside++;
+            }
+    check("shared: the indicator changes pixels on the edge's middle half, and no pixel outside it",
+          differs > 0 && outside == 0 && differs <= mark[2] * mark[3]);
+
+    /* A press on the top quarter of the edge is the window's own resize: it moves one edge and takes none across. */
+    screens_hand(SHARED_W / 2 + 1, 20, 1);
+    check("shared: a press off the middle half is the window's own resize", compositor.resize == 3 && compositor.shared_row == COMPOSITOR_NONE);
+    screens_hand(SHARED_W / 2 + 1, 20, -1);
+
+    /* Two quarters, one above the other, meet on a horizontal edge: its middle half is shared the same way. */
+    compositor_arrange(2, COMPOSITOR_TOP_LEFT);
+    compositor_arrange(3, COMPOSITOR_BOTTOM_LEFT);
+    screens_hand(SHARED_W / 4, SHARED_H / 2 + 1, 0);
+    check("shared: two quarters one above the other share their horizontal edge, and its middle half shows the indicator",
+          compositor.mark_row == 3 && compositor.mark_with == 2 && compositor.mark[0] == SHARED_W / 8 &&
+              compositor.mark[1] == SHARED_H / 2 - 2 && compositor.mark[2] == SHARED_W / 4 && compositor.mark[3] == 4);
+    screens_hand(SHARED_W / 4, SHARED_H / 2 + 1, 1);
+    check("shared: a press on it takes both quarters, and dragged down the upper grows as the lower shrinks",
+          compositor.resize == 3 && compositor.shared_row == 2 && compositor.shared_lo == 2 && compositor.shared_vertical == 0 &&
+              compositor.edges[2] == COMPOSITOR_EDGE_BOTTOM && compositor.edges[3] == COMPOSITOR_EDGE_TOP);
+    screens_hand(SHARED_W / 4, SHARED_H / 2 + 31, 0);
+    check("shared: dragged 30 px down, the upper is 230 high and the lower starts at 230 and is 170 high",
+          compositor.h[2] == SHARED_H / 2 + 30 && compositor.y[3] == SHARED_H / 2 + 30 && compositor.h[3] == SHARED_H / 2 - 30);
+    screens_hand(SHARED_W / 4, SHARED_H / 2 + 31, -1);
+}
+
+/*
         Alt-Tab, ended by a window leaving. A window that goes while an Alt-Tab
         is under way ends it, since the stack is one shorter; the window it
         stopped on has the keys, and what letting go of Alt does to it (bring it
@@ -132062,6 +132198,7 @@ b32 main()
         check_compositor_held();
         check_compositor_screens();
         check_compositor_preview();
+        check_compositor_shared();
         check_compositor_cycle();
         check_compositor_hover();
         check_compositor_lit();
