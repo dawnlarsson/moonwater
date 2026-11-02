@@ -32658,10 +32658,11 @@ __asm__(
     ASM_END(memory_span_byte)
 
     ASM_FUNC(memory_span_byte_reverse)
-    "li t0, 0\n   andi a1, a1, 255\n"
-    ".Lmemory_span_byte_reverse_rv_one:\n   beqz a2, 1f\n   addi a2, a2, -1\n   add t1, a0, a2\n   lbu t1, 0(t1)\n   bne t1, a1, 1f\n   addi t0, t0, 1\n"
-    "j .Lmemory_span_byte_reverse_rv_one\n"
-    "1:  mv a0, t0\n" ASM_RET
+    "mv a3, a2\n   andi a1, a1, 255\n   beqz a2, 1f\n"
+    // The bytes still to look at are a2 long, so the count is a3 - a2 wherever
+    // the scan stops; the byte at a2 - 1 is read with an offset, not a pointer.
+    ".Lmemory_span_byte_reverse_rv_one:\n   add t1, a0, a2\n   lbu t1, -1(t1)\n   bne t1, a1, 1f\n   addi a2, a2, -1\n   bnez a2, .Lmemory_span_byte_reverse_rv_one\n"
+    "1:  sub a0, a3, a2\n" ASM_RET
     ASM_END(memory_span_byte_reverse)
 
     // cells_from_ascii: the x86_64 body carries the shared contract. RV64 may

@@ -13380,6 +13380,35 @@ test(memory_span_byte_reverse) {
                                 }
                         }
 
+        /* Widths to 300 at every start residue: three values, and a mismatch
+           at the ends of each word and at the middle, counted from the end. */
+        for (positive value = 0; value < 256; value += 90)
+                for (positive offset = 0; offset < 16; offset++)
+                        for (positive length = 0; length <= 300; length++)
+                        {
+                                positive suffixes[] = {0, 1, 7, 8, 9, 15, 16, length / 2, length - 1, length};
+
+                                for (positive si = 0; si < sizeof(suffixes) / sizeof(*suffixes); si++)
+                                {
+                                        positive suffix = suffixes[si];
+
+                                        if (suffix > length)
+                                                continue;
+                                        if (offset)
+                                                bytes[offset - 1] = 0xa5;
+                                        memory_fill(bytes + offset, (p8)value, length);
+                                        bytes[offset + length] = 0xa5;
+                                        if (suffix < length)
+                                                bytes[offset + length - 1 - suffix] = (p8)(value + 1);
+
+                                        fail((memory_span_byte_reverse)(
+                                                 bytes + offset, (p8)value, length) == suffix);
+                                        if (offset)
+                                                fail(bytes[offset - 1] == 0xa5);
+                                        fail(bytes[offset + length] == 0xa5);
+                                }
+                        }
+
         return true;
 }
 
