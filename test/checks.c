@@ -135159,7 +135159,7 @@ static fn check_identify_numbers(void)
 
 /*
         The screens of two arrangements check_screen_numbers does not have: a 2 by 2 grid listed in no order, and three
-        screens across a gap. The numbers run left to right, then top to bottom, and each screen's window shows the number
+        screens across a gap. The numbers run in reading order, the top row left to right and then the row below it, and each screen's window shows the number
         its rectangle carries on the Display map (windows_screen_numbers is the one function both read).
 */
 static fn check_screen_arrangements(void)
@@ -135176,8 +135176,8 @@ static fn check_screen_arrangements(void)
         table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
         table.output_x[3] = 0, table.output_y[3] = 1080, table.output_w[3] = 1920, table.output_h[3] = 1080;
         count = windows_screen_numbers(&table, number);
-        check("identify: a 2 by 2 grid is numbered by its left edges first: top left 1, bottom left 2, top right 3, bottom right 4, whatever the list order",
-              count == 4 && number[0] == 4 && number[1] == 1 && number[2] == 3 && number[3] == 2);
+        check("identify: a 2 by 2 grid is numbered in reading order, top edge then left edge: top left 1, top right 2, bottom left 3, bottom right 4, whatever the list order",
+              count == 4 && number[0] == 4 && number[1] == 1 && number[2] == 2 && number[3] == 3);
         for (unsigned int at = 0; at < count; at++)
         {
                 unsigned int shown = windows_output(&table, at, &x, &y, &width, &height);
