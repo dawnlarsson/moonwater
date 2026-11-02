@@ -125073,6 +125073,47 @@ static fn check_display_section(void)
                   string_equals((string_address)text, (string_address) "75 Hz") && !settings_choice(&settings_rows[refresh_row], 3, text, sizeof(text)));
         check("display section: the refresh dropdown shows the rate the screen is at", string_equals((string_address)settings_shown_value(refresh_row), (string_address) "75 Hz"));
 
+        // What the compositor did not do is said on the row it was asked of: a rate the screen does not offer, a turn it could
+        // not do, and a place the file does not read (the Screen row). Nothing refused reads plain.
+        check("display section: a row whose setting was not refused reads plain: the rate it is at", string_equals((string_address)settings_row_text(refresh_row, 1), (string_address) "75 Hz"));
+        table.output_refused[1] = WINDOWS_REFUSED_RATE, table.output_asked_hz[1] = 144;
+        check("display section: a refresh rate the screen does not offer is said on its row, with the rate it is kept at",
+              string_equals((string_address)settings_row_text(refresh_row, 1), (string_address) "75 Hz (144 Hz is not offered)"));
+        table.output_refused[1] = WINDOWS_REFUSED_TURN, table.output_asked_turn[1] = 90, table.output_turn[1] = 0;
+        check("display section: a turn the compositor could not do is said on the rotation row, with the turn it is at",
+              string_equals((string_address)settings_row_text(turn_row, 1), (string_address) "Normal (Turned right could not be done)"));
+        table.output_refused[1] = WINDOWS_REFUSED_PLACE;
+        check("display section: a place the file does not read is said on the Screen row",
+              string_equals((string_address)settings_row_text(screen_row, 1), (string_address) "Screen 1: DP-1 (its place in the file is not read)"));
+        table.output_refused[1] = 0, table.output_turn[1] = 90;
+
+        // The compositor's own answer for the table, from its state: a line asking 144 Hz and 90 degrees of a screen at 75 Hz, not
+        // turned, is refused both; the same screen at 144 Hz and turned by software is refused neither; a bad y is a place refused.
+        {
+                static struct windows made;
+
+                memory_zero(compositor_display, sizeof(compositor_display));
+                memory_copy(compositor_display[0].name, "DP-1", 5);
+                compositor_display[0].refresh = 144, compositor_display[0].rotation = 90;
+                compositor_displays = 1;
+                compositor.output[0].mode.vrefresh = 75, compositor.output[0].turned = 0, compositor.output[0].degrees = 90;
+                compositor_table_refusals(&made, 0, "DP-1");
+                check("display section: the compositor says a rate and a turn it did not do, with what each line asked",
+                      made.output_refused[0] == (WINDOWS_REFUSED_RATE | WINDOWS_REFUSED_TURN) && made.output_asked_hz[0] == 144 &&
+                          made.output_asked_turn[0] == 90);
+                compositor.output[0].mode.vrefresh = 144, compositor.output[0].turned = 2;
+                compositor_table_refusals(&made, 0, "DP-1");
+                check("display section: a rate it set and a turn it did in software are refused nothing",
+                      made.output_refused[0] == 0);
+                compositor_display[0].bad = WINDOWS_DISPLAY_Y;
+                compositor_table_refusals(&made, 0, "DP-1");
+                check("display section: a place whose y the file does not read is refused as a place", made.output_refused[0] == WINDOWS_REFUSED_PLACE);
+                compositor_table_refusals(&made, 0, "HDMI-A-1");
+                check("display section: a screen with no line asks for nothing and is refused nothing", made.output_refused[0] == 0 && made.output_asked_hz[0] == 0);
+                compositor_displays = 0;
+                memory_zero(compositor_display, sizeof(compositor_display));
+        }
+
         // The screen modes say plain words, and what they are read as is the verb's.
         check("display section: Screen modes says Biggest picture and Recommended, and the verb's words are kept",
               string_equals((string_address)settings_label_of(modes_row, "largest"), (string_address) "Biggest picture") &&

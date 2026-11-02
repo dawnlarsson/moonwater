@@ -629,6 +629,13 @@ struct window_place
 #define WINDOW_DISMISS 4u
 #define WINDOW_NO_TAB 8u
 
+// What the compositor did not do of a screen's displays line (struct windows' output_refused): a refresh rate the screen
+// does not offer at its size, which it keeps its mode for; a turn it cannot do, which it is left unturned for; and a place
+// the file does not read (a bad x or y), which it is put at its default for.
+#define WINDOWS_REFUSED_RATE 1u
+#define WINDOWS_REFUSED_TURN 2u
+#define WINDOWS_REFUSED_PLACE 4u
+
 struct windows
 {
         // The output: its pixels, how many of them one drawn pixel is, a frame in nanoseconds.
@@ -681,6 +688,13 @@ struct windows
         unsigned int output_rates[WINDOWS_OUTPUTS], output_now[WINDOWS_OUTPUTS];
         unsigned int output_hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ];
         unsigned int output_turn[WINDOWS_OUTPUTS], output_software[WINDOWS_OUTPUTS];
+
+        /*
+                What the displays file asks of each screen, and what the compositor did not do of it: output_asked_hz the
+                refresh rate it asks (0 for the screen's own), output_asked_turn the turn it asks in degrees, and
+                output_refused the WINDOWS_REFUSED_* bits. The settings window says the refusals on the screen's row.
+        */
+        unsigned int output_asked_hz[WINDOWS_OUTPUTS], output_asked_turn[WINDOWS_OUTPUTS], output_refused[WINDOWS_OUTPUTS];
 
         /*
                 The compositor's, for moonwater debug: each input device it reads, by its slot, and what became

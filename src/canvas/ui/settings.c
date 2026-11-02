@@ -1047,6 +1047,7 @@ struct settings_map_view
 #define SETTINGS_SHOWN 64 // bytes of a screen's label or a rate's, shown in a row
 
 static char settings_shown_screen[SETTINGS_SHOWN], settings_shown_rate[SETTINGS_SHOWN];
+static char settings_noted[2 * SETTINGS_SHOWN]; // a Display row's value with what was not done of it said after it
 
 // The Display row of an output kind (SETTINGS_OUT_*), or -1 when there is none.
 static int settings_output_row(unsigned char output)
@@ -1369,6 +1370,45 @@ static const char address_to settings_output_text(int row, int chosen)
         windows_screen_numbers(table, number);
         settings_screen_label(number[chosen], table->output_name[chosen], settings_shown_screen, sizeof(settings_shown_screen));
         return settings_shown_screen;
+}
+
+// A Display row's value as the row shows it: what settings_output_text says, and after it what the compositor did not do of
+// the screen's displays line (the table's output_refused), in plain words: a rate the screen does not offer, a turn it could
+// not do, or a place the file does not read. The row says so where the change was made, so nothing fails silently.
+static const char address_to settings_row_text(int row, int chosen)
+{
+        struct windows address_to table = settings.own.table;
+        const char address_to shown = settings_output_text(row, chosen);
+        unsigned char output = settings_rows[row].output;
+        unsigned int refused;
+        positive length;
+
+        if (chosen < 0)
+                return shown;
+        refused = table->output_refused[chosen];
+        if (output == SETTINGS_OUT_REFRESH && (refused & WINDOWS_REFUSED_RATE))
+        {
+                length = settings_map_add(settings_noted, sizeof(settings_noted), 0, shown);
+                length = settings_map_add(settings_noted, sizeof(settings_noted), length, " (");
+                length = settings_map_number(settings_noted, sizeof(settings_noted), length, (long)table->output_asked_hz[chosen]);
+                settings_map_add(settings_noted, sizeof(settings_noted), length, " Hz is not offered)");
+                return settings_noted;
+        }
+        if (output == SETTINGS_OUT_TURN && (refused & WINDOWS_REFUSED_TURN))
+        {
+                length = settings_map_add(settings_noted, sizeof(settings_noted), 0, shown);
+                length = settings_map_add(settings_noted, sizeof(settings_noted), length, " (");
+                length = settings_map_add(settings_noted, sizeof(settings_noted), length, settings_turn_label(table->output_asked_turn[chosen]));
+                settings_map_add(settings_noted, sizeof(settings_noted), length, " could not be done)");
+                return settings_noted;
+        }
+        if (output == SETTINGS_OUT_SCREEN && (refused & WINDOWS_REFUSED_PLACE))
+        {
+                length = settings_map_add(settings_noted, sizeof(settings_noted), 0, shown);
+                settings_map_add(settings_noted, sizeof(settings_noted), length, " (its place in the file is not read)");
+                return settings_noted;
+        }
+        return shown;
 }
 
 // The screen under (px, py) on the map, the one on top (the last drawn), or -1.
@@ -2936,7 +2976,7 @@ static void settings_describe_output(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "Not changeable";
                 return;
         }
-        row->value = settings_output_text(id, chosen);
+        row->value = settings_row_text(id, chosen);
 }
 
 // How many choices a row has.

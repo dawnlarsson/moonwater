@@ -11290,6 +11290,27 @@ static long compositor_table_memfd(unsigned long bytes)
         What the table says of the screens, at the start and whenever they change: the list, the primary first, each
         one's rectangle and connector name, and that it changed (layout).
 */
+/*
+        What a screen's displays line asks for, and what the compositor did not do of it, for the table (WINDOWS_REFUSED_*):
+        the rate asked, when the mode it is at is not that rate; the turn asked, when it is not turned; and a place whose x or
+        y the file does not read. A screen with no line asks for nothing and is refused nothing.
+*/
+static void compositor_table_refusals(struct windows *table, unsigned int at, const char *name)
+{
+        const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name, windows_name_length(name));
+        unsigned int refused = 0;
+
+        table->output_asked_hz[at] = display ? display->refresh : 0;
+        table->output_asked_turn[at] = display ? display->rotation : 0;
+        if (display && display->refresh && compositor.output[at].mode.vrefresh != display->refresh)
+                refused |= WINDOWS_REFUSED_RATE;
+        if (display && display->rotation && !compositor.output[at].turned)
+                refused |= WINDOWS_REFUSED_TURN;
+        if (display && (display->bad & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y)))
+                refused |= WINDOWS_REFUSED_PLACE;
+        table->output_refused[at] = refused;
+}
+
 static void compositor_table_outputs(void)
 {
         struct windows *table = compositor.table;
@@ -11316,6 +11337,7 @@ static void compositor_table_outputs(void)
                 memory_copy(table->output_hz[at], compositor.output[at].hz, sizeof(table->output_hz[at]));
                 table->output_turn[at] = compositor.output[at].turn;
                 table->output_software[at] = compositor.output[at].turn_software;
+                compositor_table_refusals(table, at, name);
         }
         // The largest a window may be follows the screens, inside the room its buffer has for the session.
         table->output_width = (unsigned int)compositor_most_width();
