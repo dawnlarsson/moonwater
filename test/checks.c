@@ -123748,7 +123748,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         {
                 int canvas = settings_group_of(settings_row_named("Scale"));
                 static const struct settings_frames_step hover[] = {
-                    {0, SF_ROW, "Scale", 450, 0}, {30, SF_ROW, "Screen modes", 450, 0}, {60, SF_ROW, "Background", 450, 0},
+                    {0, SF_ROW, "Scale", 450, 0}, {30, SF_ROW, "Background", 450, 0},
                     {90, SF_ROW, "Theme", 300, 0}, {120, SF_ROW, "Accent", 300, 0}, {150, SF_ROW, "Motion", 300, 0},
                     {180, SF_ROW, "Cursor size", 450, 0}, {400, SF_ROW, "Cursor look", 450, 0}, {420, SF_ROW, "Scale", 450, 0}};
                 static const struct settings_frames_step press[] = {

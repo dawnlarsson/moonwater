@@ -13,15 +13,16 @@
         src/sh/registry.c, in its order, and a setting added there is a row
         of this window. They are the switches and choices of the command that
         a person sets by hand: the machine's name, the keyboard and how its
-        keys repeat, the time zone, how Canvas is drawn (its scale and screen
-        modes, the desktop's colour, the size and look of the pointer and
+        keys repeat, the time zone, how Canvas is drawn (its scale, the
+        desktop's colour, the size and look of the pointer and
         whether a shake of the hand makes it large, and for how long), the
         mouse's sensitivity and acceleration, the clock and where the network sets it from, the
         wired link, the radios and airplane mode, which link the internet
         prefers, the servers names and time are asked of, the power profile,
-        the backlight, the processor and the battery, and what the machine
-        starts at boot. A row the machine has nothing for (no backlight, no
-        boost switch) says so and does nothing. Nothing in those rows ends
+        the processor and the battery, and what the machine starts at boot.
+        The Display group is the screens: their modes, where they are
+        arranged and the backlight. A row the machine has nothing for (no
+        backlight, no boost switch) says so and does nothing. Nothing in those rows ends
         the desktop, the session or the machine.
 
         The desktop's colour is two rows of the one verb (moonwater canvas
