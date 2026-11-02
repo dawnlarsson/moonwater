@@ -379,6 +379,12 @@ cover('folds_already', 'count', 'memory_first_differs_u32',
       'ui_run_in hands it the rest of a row of scratch paper from the column '
       'it has reached, a length the run sets at run time (its width less the '
       'column); no reachable call site passes a literal')
+cover('folds_already', 'count', 'memory_saturate_u32',
+      'the compositor hands it a span of the changed backdrop cells of a row, whose length the damage sets at run '
+      'time; no reachable call site passes a literal, and a one-pixel call is the taskbar\'s per-column loop')
+cover('folds_already', 'count', 'memory_tint_u32',
+      'the compositor tints the same spans, and whole blocks when the side turns; the length is run time, and the '
+      'side the glass takes is the window\'s, so toward, cap and floor are run time too')
 cover('folds_already', 'count', 'memory_copy_changed_u32',
       'the compositor hands it a row of the damage it composed; the width '
       'comes from the damage at run time, so no reachable call site passes '

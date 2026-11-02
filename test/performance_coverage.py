@@ -326,6 +326,12 @@ cover('direct_benchmark', 'test/checks.c#BENCH_first_differs', 'memory_first_dif
       'paired timing against the word loop ui_run_in had, over rows of paper '
       'ended by a difference after one, three, twelve, sixty and three hundred '
       'words, with AVX2 and SSE2, NEON, and V and scalar on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_saturate', 'memory_saturate_u32',
+      'paired timing against the C compositor_vivid made of each pixel, over runs of one, three, twelve, sixty and '
+      'three hundred pixels, with AVX-512, AVX2 and the word body on x86-64, NEON, and V and the word body on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_tint', 'memory_tint_u32',
+      'paired timing against the C the glass tone was, over runs of one to three hundred boosted pixels toward the '
+      'light side with the glass cap and floor, on each tier the machine has')
 cover('direct_benchmark', 'test/checks.c#BENCH_copy_changed', 'memory_copy_changed_u32',
       'paired timing against the chunks compared and copied in C and against a '
       'plain copy a row, over rows with no change, one chunk and every word, '

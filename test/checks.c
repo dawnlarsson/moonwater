@@ -114495,7 +114495,7 @@ static fn check_glass_tiers(void)
         p8 vector = cpu_has_vector;
         for (p32 tier = 0; tier < 2; tier++)
         {
-                cpu_has_vector = tier ? 1 : 2;
+                cpu_has_vector = tier ? 1 : vector;
 #endif
                 for (positive width = 0; width <= 300; width++)
                         for (positive a = 0; a < 16; a++)
@@ -114567,6 +114567,195 @@ static fn check_glass_tiers(void)
         check("glass tiers: halving is the mean of each two by two at every width to 300 and alignment, on each tier", halved);
         check("glass tiers: doubling is the rise at every width to 300 and alignment, on each tier", doubled);
         check("glass tiers: a picture over a ground at every width to 300 and grain start, on each tier", laid);
+}
+
+// The colour boost compositor_vivid made: each channel half as far again from the grey of the pixel, clamped.
+static p32 saturate_reference(p32 pixel)
+{
+        int r = (int)(pixel >> 16 & 255), g = (int)(pixel >> 8 & 255), b = (int)(pixel & 255);
+        int grey = (r * 77 + g * 150 + b * 29) >> 8;
+
+        r += (r - grey) >> 1;
+        g += (g - grey) >> 1;
+        b += (b - grey) >> 1;
+        r = r < 0 ? 0 : r > 255 ? 255 : r;
+        g = g < 0 ? 0 : g > 255 ? 255 : g;
+        b = b < 0 ? 0 : b > 255 ? 255 : b;
+        return (p32)(r << 16 | g << 8 | b);
+}
+
+/*
+        memory_saturate_u32 against saturate_reference: every width to 300 at every alignment of its source and its
+        destination to a 64-byte line, on each tier the machine has (AVX-512, AVX2 and the word body on x86-64; the
+        vector and word bodies on riscv64; the one body on arm64), with the words past the count untouched. Then every
+        pixel of the 24-bit colour space, 64 Ki at a time, and the top byte ignored.
+*/
+static fn check_saturate(void)
+{
+        static p32 source[1 << 16], made[1 << 16], want[1 << 16];
+        static p32 small[512], small_made[512];
+        p64 state = 0x6a09e667f3bcc909ull;
+        bool same = true, untouched = true, whole = true;
+
+#if X64
+        p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide256;
+#endif
+#if RISCV64
+        p8 vector = cpu_has_vector;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+#endif
+                // The count's words written and the words after them, which must not be: a source at offset a, a
+                // destination at offset b, in a buffer of 512 words the sentinel fills first.
+                for (positive width = 0; width <= 300; width++)
+                        for (positive a = 0; a < 16; a++)
+                                for (positive b = 0; b < 16; b += 5)
+                                {
+                                        p32 address_to from = small + a, address_to into = small_made + b;
+
+                                        for (positive i = 0; i < width; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                from[i] = (p32)(state >> 11);
+                                        }
+                                        memory_fill(small_made, 0x5a, sizeof(small_made));
+                                        memory_saturate_u32(into, from, width);
+                                        for (positive i = 0; i < width; i++)
+                                                same = same && into[i] == saturate_reference(from[i]);
+                                        for (positive i = b + width; i < b + width + 16 && i < 512; i++)
+                                                untouched = untouched && small_made[i] == 0x5a5a5a5au;
+                                }
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide256;
+#endif
+#if RISCV64
+        }
+        cpu_has_vector = vector;
+#endif
+        for (p32 chunk = 0; chunk < 256; chunk++)
+        {
+                for (p32 i = 0; i < (1 << 16); i++)
+                {
+                        source[i] = (chunk << 16 | i) | 0xa5000000u;
+                        want[i] = saturate_reference(source[i]);
+                }
+                memory_fill(made, 0x5a, sizeof(made));
+                memory_saturate_u32(made, source, 1 << 16);
+                whole = whole && !memory_compare(made, want, sizeof(want));
+        }
+        check("saturate: every width to 300 at every alignment of source and destination, on each tier, is the boost of each pixel", same);
+        check("saturate: words past the count are not touched", untouched);
+        check("saturate: every colour of the 24-bit space, the top byte ignored and zero on the way out", whole);
+}
+
+// The tint compositor_glass_tone made, with the cap and floor as parameters: window_mix toward the colour, then the
+// brightest channel capped (scaled by cap over it) or else the dimmest raised to floor, with the divisions C makes.
+static p32 tint_reference(p32 pixel, p32 toward, p32 amount, p32 cap, p32 floor_)
+{
+        int c[3], most, least;
+
+        for (int i = 0; i < 3; i++)
+        {
+                unsigned int shift = 16 - 8 * (unsigned int)i;
+                unsigned int from = pixel >> shift & 255, to = toward >> shift & 255;
+
+                c[i] = (int)((from * (256 - amount) + to * amount + 128) >> 8);
+        }
+        most = c[0] > c[1] ? c[0] : c[1];
+        most = most > c[2] ? most : c[2];
+        least = c[0] < c[1] ? c[0] : c[1];
+        least = least < c[2] ? least : c[2];
+        if (most > (int)cap)
+                for (int i = 0; i < 3; i++)
+                        c[i] = c[i] * (int)cap / most;
+        else if (least < (int)floor_)
+                for (int i = 0; i < 3; i++)
+                        c[i] = 255 - (255 - c[i]) * (255 - (int)floor_) / (255 - least);
+        return (p32)(c[0] << 16 | c[1] << 8 | c[2]);
+}
+
+/*
+        memory_tint_u32 against tint_reference: every width to 300 at every alignment of source and destination, on each
+        tier (AVX-512, AVX2 and the word body on x86-64; the vector and word bodies on riscv64; the one body on arm64),
+        with several amounts, caps and floors and both sides; the words past the count untouched. Then every colour of
+        the 24-bit space on each side of the glass, with the glass's own cap and floor.
+*/
+static fn check_tint(void)
+{
+        static p32 source[1 << 16], made[1 << 16], want[1 << 16];
+        static p32 small[512], small_made[512];
+        static const p32 amounts[4] = {96, 0, 255, 37}, caps[5] = {0x5c, 255, 0, 1, 200}, floors[4] = {0xb4, 0, 255, 77};
+        p64 state = 0x3c6ef372fe94f82bull;
+        bool same = true, untouched = true, whole = true;
+
+#if X64
+        p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide256;
+#endif
+#if RISCV64
+        p8 vector = cpu_has_vector;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+#endif
+                for (positive width = 0; width <= 300; width++)
+                        for (positive a = 0; a < 16; a++)
+                                for (positive b = 0; b < 16; b += 5)
+                                {
+                                        p32 address_to from = small + a, address_to into = small_made + b;
+                                        p32 toward = (width & 1) ? 0xffffffu : 0, amount = amounts[(width >> 1) & 3];
+                                        p32 cap = caps[(width / 3) % 5], floor_ = floors[(width / 7) & 3];
+
+                                        for (positive i = 0; i < width; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                from[i] = (p32)(state >> 11);
+                                        }
+                                        memory_fill(small_made, 0x5a, sizeof(small_made));
+                                        memory_tint_u32(into, from, width, toward, amount, cap, floor_);
+                                        for (positive i = 0; i < width; i++)
+                                                same = same && into[i] == tint_reference(from[i], toward, amount, cap, floor_);
+                                        for (positive i = b + width; i < b + width + 16 && i < 512; i++)
+                                                untouched = untouched && small_made[i] == 0x5a5a5a5au;
+                                }
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide256;
+#endif
+#if RISCV64
+        }
+        cpu_has_vector = vector;
+#endif
+        for (p32 side = 0; side < 2; side++)
+        {
+                p32 toward = side ? 0xffffffu : 0, cap = side ? 255 : 0x5c, floor_ = side ? 0xb4 : 0;
+
+                for (p32 chunk = 0; chunk < 256; chunk++)
+                {
+                        for (p32 i = 0; i < (1 << 16); i++)
+                        {
+                                source[i] = (chunk << 16 | i) | 0x5a000000u;
+                                want[i] = tint_reference(source[i], toward, 96, cap, floor_);
+                        }
+                        memory_fill(made, 0x5a, sizeof(made));
+                        memory_tint_u32(made, source, 1 << 16, toward, 96, cap, floor_);
+                        whole = whole && !memory_compare(made, want, sizeof(want));
+                }
+        }
+        check("tint: every width to 300 at every alignment of source and destination, several amounts, caps and floors, on each tier, is the window's tint", same);
+        check("tint: words past the count are not touched", untouched);
+        check("tint: every colour of the 24-bit space on each side of the glass, with the glass's cap and floor", whole);
 }
 
 /*
@@ -115345,6 +115534,8 @@ b32 main()
         check_average_ahead();
         check_glass_routines();
         check_glass_tiers();
+        check_saturate();
+        check_tint();
         check_fill_rect();
         check_copy_changed();
         check_first_differs();
@@ -144367,6 +144558,222 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_first_differs */
+
+#ifdef BENCH_saturate
+/* memory_saturate_u32 against the C compositor_vivid made of each pixel: a row of backdrop boosted into another, runs of
+   one, three, twelve, sixty and three hundred pixels, on each tier the machine has. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define WORDS 4096
+
+static p32 backdrop[WORDS], boosted[WORDS];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static p32 former_boost(p32 pixel)
+{
+        int r = (int)(pixel >> 16 & 255), g = (int)(pixel >> 8 & 255), b = (int)(pixel & 255);
+        int grey = (r * 77 + g * 150 + b * 29) >> 8;
+
+        r += (r - grey) >> 1;
+        g += (g - grey) >> 1;
+        b += (b - grey) >> 1;
+        r = r < 0 ? 0 : r > 255 ? 255 : r;
+        g = g < 0 ? 0 : g > 255 ? 255 : g;
+        b = b < 0 ? 0 : b > 255 ? 255 : b;
+        return (p32)(r << 16 | g << 8 | b);
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+{
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                const p32 address_to from = backdrop + round % 8;
+                p32 address_to into = boosted + round % 8;
+
+                if (assembly)
+                        memory_saturate_u32(into, from, length);
+                else
+                        for (positive at = 0; at < length; at++)
+                                into[at] = former_boost(from[at]);
+        }
+        sink = boosted[length - 1];
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive lengths[] = {1, 3, 12, 60, 300};
+        static const string_address names[] = {"one pixel", "three pixels", "twelve pixels", "sixty pixels", "three hundred pixels"};
+
+        for (positive at = 0; at < WORDS; at++)
+                backdrop[at] = (p32)at * 2654435761u;
+#if X64
+        p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
+        for (positive tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide256;
+                if ((tier == 0 && !wide512) || (tier == 1 && !wide256))
+                        continue;
+#elif RISCV64
+        p8 vector = cpu_has_vector;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+#else
+        for (positive tier = 0; tier < 1; tier++)
+        {
+#endif
+                for (positive at = 0; at < sizeof(lengths) / sizeof(lengths[0]); at++)
+                {
+                        positive ratios[TRIES];
+                        positive rounds = 4000000 / (lengths[at] + 8) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, lengths[at], rounds);
+                        string_format(log, "memory_saturate_u32 %s, %s: paired median ASM/C %p.", names[at],
+#if X64
+                                      cpu_has_avx512 ? (string_address) "avx512" : cpu_has_avx2 ? (string_address) "avx2" : (string_address) "scalar",
+#elif RISCV64
+                                      cpu_has_vector == 2 ? (string_address) "vector" : (string_address) "scalar",
+#else
+                                      (string_address) "neon",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+        }
+#if X64
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide256;
+#elif RISCV64
+        cpu_has_vector = vector;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_saturate */
+
+#ifdef BENCH_tint
+/* memory_tint_u32 against the C the compositor's glass tone was: a row of boosted pixels tinted toward the light side
+   with the glass's cap and floor, runs of one, three, twelve, sixty and three hundred pixels, on each tier. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define WORDS 4096
+
+static p32 boosted[WORDS], tinted[WORDS];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static p32 former_tone(p32 pixel)
+{
+        p32 mixed = 0;
+
+        for (p32 shift = 0; shift < 24; shift += 8)
+                mixed |= (((pixel >> shift & 255) * (256 - 96) + 255 * 96 + 128) >> 8) << shift;
+        {
+                p32 r = mixed >> 16 & 255, g = mixed >> 8 & 255, b = mixed & 255;
+                p32 most = r > g ? r : g, least = r < g ? r : g;
+
+                most = most > b ? most : b;
+                least = least < b ? least : b;
+                if (least < 0xb4)
+                {
+                        r = 255 - (255 - r) * (255 - 0xb4) / (255 - least);
+                        g = 255 - (255 - g) * (255 - 0xb4) / (255 - least);
+                        b = 255 - (255 - b) * (255 - 0xb4) / (255 - least);
+                }
+                return r << 16 | g << 8 | b;
+        }
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+{
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                const p32 address_to from = boosted + round % 8;
+                p32 address_to into = tinted + round % 8;
+
+                if (assembly)
+                        memory_tint_u32(into, from, length, 0xffffffu, 96, 255, 0xb4);
+                else
+                        for (positive at = 0; at < length; at++)
+                                into[at] = former_tone(from[at]);
+        }
+        sink = tinted[length - 1];
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive lengths[] = {1, 3, 12, 60, 300};
+        static const string_address names[] = {"one pixel", "three pixels", "twelve pixels", "sixty pixels", "three hundred pixels"};
+
+        for (positive at = 0; at < WORDS; at++)
+                boosted[at] = (p32)at * 2654435761u;
+#if X64
+        p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
+        for (positive tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide256;
+                if ((tier == 0 && !wide512) || (tier == 1 && !wide256))
+                        continue;
+#elif RISCV64
+        p8 vector = cpu_has_vector;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : vector;
+                if (tier == 0 && vector != 2)
+                        continue;
+#else
+        for (positive tier = 0; tier < 1; tier++)
+        {
+#endif
+                for (positive at = 0; at < sizeof(lengths) / sizeof(lengths[0]); at++)
+                {
+                        positive ratios[TRIES];
+                        positive rounds = 4000000 / (lengths[at] + 8) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, lengths[at], rounds);
+                        string_format(log, "memory_tint_u32 %s, %s: paired median ASM/C %p.", names[at],
+#if X64
+                                      cpu_has_avx512 ? (string_address) "avx512" : cpu_has_avx2 ? (string_address) "avx2" : (string_address) "scalar",
+#elif RISCV64
+                                      cpu_has_vector == 2 ? (string_address) "vector" : (string_address) "scalar",
+#else
+                                      (string_address) "neon",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+        }
+#if X64
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide256;
+#elif RISCV64
+        cpu_has_vector = vector;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_tint */
 
 #ifdef BENCH_ranged
 /* The call-site entries at the shapes their callers have, against what the

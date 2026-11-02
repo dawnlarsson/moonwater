@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        425 routines (401 public, 24 local), 415 of them on all three and 10 local to one.
+        427 routines (403 public, 24 local), 417 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -282,6 +282,7 @@
           memory_reserve                 public  yes     yes     yes
           memory_reverse                 public  yes     yes     yes
           memory_reverse_lines__room_64  public  yes     yes     yes
+          memory_saturate_u32            public  yes     yes     yes
           memory_search                  public  yes     yes     yes
           memory_search_ascii_case       public  yes     yes     yes
           memory_search_ascii_case_prepared public  yes     yes     yes
@@ -297,6 +298,7 @@
           memory_sweep_coverage          public  yes     yes     yes
           memory_take                    public  yes     yes     yes
           memory_text_span               public  yes     yes     yes
+          memory_tint_u32                public  yes     yes     yes
           memory_to_lower_ascii          public  yes     yes     yes
           memory_to_upper_ascii          public  yes     yes     yes
           memory_translate               public  yes     yes     yes
@@ -13428,6 +13430,256 @@ __asm__(
 
 #ifndef KERNEL_MODE
     //
+    //       memory_saturate_u32 -- rdi into, rsi from, rdx count: each pixel
+    //       of from, its red, green and blue (bits 23..16, 15..8 and 7..0;
+    //       the top byte is ignored and answers zero) pushed away from its
+    //       grey by half again: grey = (77 r + 150 g + 29 b) >> 8, and each
+    //       channel c becomes c + ((c - grey) >> 1), arithmetic, clamped to
+    //       0..255. Integer only, so every tier answers the same bits. With
+    //       AVX-512 sixteen pixels a turn in zmm, the tail under a mask; with
+    //       AVX2 eight a turn; the word at a time body has no vector at all.
+    //       The dword lanes hold every product: 255 * 150 + 255 * 77 + 255 *
+    //       29 is under 2^16, and a channel's difference is under 2^9.
+    //
+    ASM_FUNC(memory_saturate_u32)
+    "test %rdx, %rdx\n   jz 9f\n"
+    ASM_WIDER("cpu_has_avx512", "11f")
+    ASM_WIDER("cpu_has_avx2", "5f")
+    "2:  test %rdx, %rdx\n   jz 9f\n   mov (%rsi), %eax\n   mov %eax, %ecx\n   shr $16, %ecx\n   and $255, %ecx\n"
+    "mov %eax, %r8d\n   shr $8, %r8d\n   and $255, %r8d\n   movzbl %al, %r9d\n"
+    "imul $77, %ecx, %r10d\n   imul $150, %r8d, %r11d\n   add %r11d, %r10d\n"
+    "imul $29, %r9d, %r11d\n   add %r11d, %r10d\n   shr $8, %r10d\n"
+    "mov %ecx, %r11d\n   sub %r10d, %r11d\n   sar $1, %r11d\n   add %ecx, %r11d\n"
+    "xor %eax, %eax\n   test %r11d, %r11d\n   cmovs %eax, %r11d\n"
+    "mov $255, %eax\n   cmp %eax, %r11d\n   cmovg %eax, %r11d\n   mov %r11d, %ecx\n"
+    "mov %r8d, %r11d\n   sub %r10d, %r11d\n   sar $1, %r11d\n   add %r8d, %r11d\n"
+    "xor %eax, %eax\n   test %r11d, %r11d\n   cmovs %eax, %r11d\n"
+    "mov $255, %eax\n   cmp %eax, %r11d\n   cmovg %eax, %r11d\n   mov %r11d, %r8d\n"
+    "mov %r9d, %r11d\n   sub %r10d, %r11d\n   sar $1, %r11d\n   add %r9d, %r11d\n"
+    "xor %eax, %eax\n   test %r11d, %r11d\n   cmovs %eax, %r11d\n"
+    "mov $255, %eax\n   cmp %eax, %r11d\n   cmovg %eax, %r11d\n   mov %r11d, %r9d\n"
+    "shl $16, %ecx\n   shl $8, %r8d\n   or %r8d, %ecx\n   or %r9d, %ecx\n   mov %ecx, (%rdi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   dec %rdx\n   jnz 2b\n"
+    "9:  " ASM_RET
+    //  Eight pixels a turn with AVX2: the channels in dword lanes, grey by the three products and a shift, each channel's
+    //  difference shifted arithmetically and added back, then clamped by vpmaxsd and vpminsd.
+    "5:  cmp $8, %rdx\n   jb 2b\n"
+    "mov $255, %eax\n   vmovd %eax, %xmm6\n   vpbroadcastd %xmm6, %ymm6\n"
+    "mov $77, %eax\n   vmovd %eax, %xmm7\n   vpbroadcastd %xmm7, %ymm7\n"
+    "mov $150, %eax\n   vmovd %eax, %xmm8\n   vpbroadcastd %xmm8, %ymm8\n"
+    "mov $29, %eax\n   vmovd %eax, %xmm9\n   vpbroadcastd %xmm9, %ymm9\n"
+    "vpxor %xmm10, %xmm10, %xmm10\n"
+    "4:  cmp $8, %rdx\n   jb 6f\n   vmovdqu (%rsi), %ymm0\n"
+    "vpsrld $16, %ymm0, %ymm1\n   vpand %ymm6, %ymm1, %ymm1\n   vpsrld $8, %ymm0, %ymm2\n   vpand %ymm6, %ymm2, %ymm2\n"
+    "vpand %ymm6, %ymm0, %ymm3\n"
+    "vpmulld %ymm7, %ymm1, %ymm4\n   vpmulld %ymm8, %ymm2, %ymm5\n   vpaddd %ymm5, %ymm4, %ymm4\n"
+    "vpmulld %ymm9, %ymm3, %ymm5\n   vpaddd %ymm5, %ymm4, %ymm4\n   vpsrld $8, %ymm4, %ymm4\n"
+    "vpsubd %ymm4, %ymm1, %ymm5\n   vpsrad $1, %ymm5, %ymm5\n   vpaddd %ymm1, %ymm5, %ymm1\n"
+    "vpsubd %ymm4, %ymm2, %ymm5\n   vpsrad $1, %ymm5, %ymm5\n   vpaddd %ymm2, %ymm5, %ymm2\n"
+    "vpsubd %ymm4, %ymm3, %ymm5\n   vpsrad $1, %ymm5, %ymm5\n   vpaddd %ymm3, %ymm5, %ymm3\n"
+    "vpmaxsd %ymm10, %ymm1, %ymm1\n   vpminsd %ymm6, %ymm1, %ymm1\n"
+    "vpmaxsd %ymm10, %ymm2, %ymm2\n   vpminsd %ymm6, %ymm2, %ymm2\n"
+    "vpmaxsd %ymm10, %ymm3, %ymm3\n   vpminsd %ymm6, %ymm3, %ymm3\n"
+    "vpslld $16, %ymm1, %ymm1\n   vpslld $8, %ymm2, %ymm2\n   vpor %ymm2, %ymm1, %ymm1\n   vpor %ymm3, %ymm1, %ymm1\n"
+    "vmovdqu %ymm1, (%rdi)\n   add $32, %rdi\n   add $32, %rsi\n   sub $8, %rdx\n   jmp 4b\n"
+    "6:  vzeroupper\n   jmp 2b\n"
+    //  Sixteen pixels a turn with AVX-512, and the last under a mask (bzhi of the count), so no scalar tail is run.
+    "11: mov $255, %eax\n   vpbroadcastd %eax, %zmm6\n"
+    "mov $77, %eax\n   vpbroadcastd %eax, %zmm7\n   mov $150, %eax\n   vpbroadcastd %eax, %zmm8\n"
+    "mov $29, %eax\n   vpbroadcastd %eax, %zmm9\n   vpxord %zmm10, %zmm10, %zmm10\n"
+    "12: cmp $16, %rdx\n   jb 13f\n   vmovdqu32 (%rsi), %zmm0\n"
+    "vpsrld $16, %zmm0, %zmm1\n   vpandd %zmm6, %zmm1, %zmm1\n   vpsrld $8, %zmm0, %zmm2\n   vpandd %zmm6, %zmm2, %zmm2\n"
+    "vpandd %zmm6, %zmm0, %zmm3\n"
+    "vpmulld %zmm7, %zmm1, %zmm4\n   vpmulld %zmm8, %zmm2, %zmm5\n   vpaddd %zmm5, %zmm4, %zmm4\n"
+    "vpmulld %zmm9, %zmm3, %zmm5\n   vpaddd %zmm5, %zmm4, %zmm4\n   vpsrld $8, %zmm4, %zmm4\n"
+    "vpsubd %zmm4, %zmm1, %zmm5\n   vpsrad $1, %zmm5, %zmm5\n   vpaddd %zmm1, %zmm5, %zmm1\n"
+    "vpsubd %zmm4, %zmm2, %zmm5\n   vpsrad $1, %zmm5, %zmm5\n   vpaddd %zmm2, %zmm5, %zmm2\n"
+    "vpsubd %zmm4, %zmm3, %zmm5\n   vpsrad $1, %zmm5, %zmm5\n   vpaddd %zmm3, %zmm5, %zmm3\n"
+    "vpmaxsd %zmm10, %zmm1, %zmm1\n   vpminsd %zmm6, %zmm1, %zmm1\n"
+    "vpmaxsd %zmm10, %zmm2, %zmm2\n   vpminsd %zmm6, %zmm2, %zmm2\n"
+    "vpmaxsd %zmm10, %zmm3, %zmm3\n   vpminsd %zmm6, %zmm3, %zmm3\n"
+    "vpslld $16, %zmm1, %zmm1\n   vpslld $8, %zmm2, %zmm2\n   vpord %zmm2, %zmm1, %zmm1\n   vpord %zmm3, %zmm1, %zmm1\n"
+    "vmovdqu32 %zmm1, (%rdi)\n   add $64, %rdi\n   add $64, %rsi\n   sub $16, %rdx\n   jmp 12b\n"
+    "13: test %rdx, %rdx\n   jz 14f\n   mov $-1, %eax\n   bzhi %edx, %eax, %eax\n   kmovw %eax, %k1\n"
+    "vmovdqu32 (%rsi), %zmm0{%k1}{z}\n"
+    "vpsrld $16, %zmm0, %zmm1\n   vpandd %zmm6, %zmm1, %zmm1\n   vpsrld $8, %zmm0, %zmm2\n   vpandd %zmm6, %zmm2, %zmm2\n"
+    "vpandd %zmm6, %zmm0, %zmm3\n"
+    "vpmulld %zmm7, %zmm1, %zmm4\n   vpmulld %zmm8, %zmm2, %zmm5\n   vpaddd %zmm5, %zmm4, %zmm4\n"
+    "vpmulld %zmm9, %zmm3, %zmm5\n   vpaddd %zmm5, %zmm4, %zmm4\n   vpsrld $8, %zmm4, %zmm4\n"
+    "vpsubd %zmm4, %zmm1, %zmm5\n   vpsrad $1, %zmm5, %zmm5\n   vpaddd %zmm1, %zmm5, %zmm1\n"
+    "vpsubd %zmm4, %zmm2, %zmm5\n   vpsrad $1, %zmm5, %zmm5\n   vpaddd %zmm2, %zmm5, %zmm2\n"
+    "vpsubd %zmm4, %zmm3, %zmm5\n   vpsrad $1, %zmm5, %zmm5\n   vpaddd %zmm3, %zmm5, %zmm3\n"
+    "vpmaxsd %zmm10, %zmm1, %zmm1\n   vpminsd %zmm6, %zmm1, %zmm1\n"
+    "vpmaxsd %zmm10, %zmm2, %zmm2\n   vpminsd %zmm6, %zmm2, %zmm2\n"
+    "vpmaxsd %zmm10, %zmm3, %zmm3\n   vpminsd %zmm6, %zmm3, %zmm3\n"
+    "vpslld $16, %zmm1, %zmm1\n   vpslld $8, %zmm2, %zmm2\n   vpord %zmm2, %zmm1, %zmm1\n   vpord %zmm3, %zmm1, %zmm1\n"
+    "vmovdqu32 %zmm1, (%rdi){%k1}\n"
+    "14: vzeroupper\n" ASM_RET
+    ASM_END(memory_saturate_u32)
+#endif
+
+#ifndef KERNEL_MODE
+    //
+    //       memory_tint_u32 -- rdi into, rsi from, rdx count, rcx toward (a
+    //       colour's three bytes), r8 amount, r9 cap, and floor on the stack:
+    //       each pixel of from is mixed toward toward by amount of 256 (the
+    //       window's mix: (c (256 - amount) + t amount + 128) >> 8 per
+    //       channel), and then if its brightest channel M is over cap, every
+    //       channel becomes c cap / M, and otherwise if its dimmest L is under
+    //       floor, every channel becomes 255 - (255 - c)(255 - floor) / (255 - L).
+    //       The divisions are multiplies by a reciprocal, ceil(2^24 / d) in
+    //       .rodata: floor(x / d) = (x T) >> 24 whenever x < 2^16 and d < 256,
+    //       and x T < 2^32 for every x the two cases make, so it is exact.
+    //       The constants sit in a frame: their dwords at 0 to 28, and for
+    //       AVX2 a broadcast of each at 64 to 319. AVX-512 uses the dwords as
+    //       embedded broadcasts, eight pixels a turn with AVX2 and sixteen
+    //       with AVX-512, the rest a pixel at a time.
+    //
+    ASM_FUNC(memory_tint_u32)
+    "test %rdx, %rdx\n   jz 8f\n   mov 8(%rsp), %r10d\n"
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $320, %rsp\n"
+    "mov $256, %eax\n   sub %r8d, %eax\n   mov %eax, 0(%rsp)\n"
+    "mov %ecx, %eax\n   shr $16, %eax\n   and $255, %eax\n   imul %r8d, %eax\n   add $128, %eax\n   mov %eax, 4(%rsp)\n"
+    "mov %ecx, %eax\n   shr $8, %eax\n   and $255, %eax\n   imul %r8d, %eax\n   add $128, %eax\n   mov %eax, 8(%rsp)\n"
+    "mov %ecx, %eax\n   and $255, %eax\n   imul %r8d, %eax\n   add $128, %eax\n   mov %eax, 12(%rsp)\n"
+    "mov %r9d, 16(%rsp)\n   mov %r10d, 20(%rsp)\n"
+    "mov $255, %eax\n   sub %r10d, %eax\n   mov %eax, 24(%rsp)\n   movl $255, 28(%rsp)\n"
+    "lea .Ltint_u32_reciprocal(%rip), %rbx\n"
+    ASM_WIDER("cpu_has_avx512", "21f")
+    ASM_WIDER("cpu_has_avx2", "31f")
+    "2:  test %rdx, %rdx\n   jz 9f\n"
+    "mov (%rsi), %eax\n   mov %eax, %ecx\n   shr $16, %ecx\n   and $255, %ecx\n"
+    "mov %eax, %r8d\n   shr $8, %r8d\n   and $255, %r8d\n   movzbl %al, %r9d\n"
+    "imul 0(%rsp), %ecx\n   add 4(%rsp), %ecx\n   shr $8, %ecx\n"
+    "imul 0(%rsp), %r8d\n   add 8(%rsp), %r8d\n   shr $8, %r8d\n"
+    "imul 0(%rsp), %r9d\n   add 12(%rsp), %r9d\n   shr $8, %r9d\n"
+    "mov %ecx, %r10d\n   cmp %r10d, %r8d\n   cmova %r8d, %r10d\n   cmp %r10d, %r9d\n   cmova %r9d, %r10d\n"
+    "mov %ecx, %r11d\n   cmp %r11d, %r8d\n   cmovb %r8d, %r11d\n   cmp %r11d, %r9d\n   cmovb %r9d, %r11d\n"
+    "cmp 16(%rsp), %r10d\n   ja 3f\n   cmp 20(%rsp), %r11d\n   jb 4f\n   jmp 5f\n"
+    "3:  mov (%rbx,%r10,4), %eax\n"
+    "imul 16(%rsp), %ecx\n   imul %eax, %ecx\n   shr $24, %ecx\n"
+    "imul 16(%rsp), %r8d\n   imul %eax, %r8d\n   shr $24, %r8d\n"
+    "imul 16(%rsp), %r9d\n   imul %eax, %r9d\n   shr $24, %r9d\n"
+    "jmp 5f\n"
+    "4:  mov $255, %eax\n   sub %r11d, %eax\n   mov (%rbx,%rax,4), %eax\n"
+    "mov $255, %r12d\n   sub %ecx, %r12d\n   imul 24(%rsp), %r12d\n   imul %eax, %r12d\n   shr $24, %r12d\n"
+    "mov $255, %ecx\n   sub %r12d, %ecx\n"
+    "mov $255, %r13d\n   sub %r8d, %r13d\n   imul 24(%rsp), %r13d\n   imul %eax, %r13d\n   shr $24, %r13d\n"
+    "mov $255, %r8d\n   sub %r13d, %r8d\n"
+    "mov $255, %r14d\n   sub %r9d, %r14d\n   imul 24(%rsp), %r14d\n   imul %eax, %r14d\n   shr $24, %r14d\n"
+    "mov $255, %r9d\n   sub %r14d, %r9d\n"
+    "5:  shl $16, %ecx\n   shl $8, %r8d\n   or %r8d, %ecx\n   or %r9d, %ecx\n   mov %ecx, (%rdi)\n"
+    "add $4, %rdi\n   add $4, %rsi\n   dec %rdx\n   jmp 2b\n"
+    //  Eight a turn with AVX2: the constants' broadcasts, then the channels in dword lanes as the scalar body has them.
+    "31: cmp $8, %rdx\n   jb 6f\n   vpbroadcastd 0(%rsp), %ymm0\n   vmovdqu %ymm0, 64(%rsp)\n   vpbroadcastd 4(%rsp), %ymm0\n   vmovdqu %ymm0, 96(%rsp)\n"
+    "vpbroadcastd 8(%rsp), %ymm0\n   vmovdqu %ymm0, 128(%rsp)\n   vpbroadcastd 12(%rsp), %ymm0\n   vmovdqu %ymm0, 160(%rsp)\n"
+    "vpbroadcastd 16(%rsp), %ymm0\n   vmovdqu %ymm0, 192(%rsp)\n   vpbroadcastd 20(%rsp), %ymm0\n   vmovdqu %ymm0, 224(%rsp)\n"
+    "vpbroadcastd 24(%rsp), %ymm0\n   vmovdqu %ymm0, 256(%rsp)\n   vpbroadcastd 28(%rsp), %ymm0\n   vmovdqu %ymm0, 288(%rsp)\n"
+    "32: cmp $8, %rdx\n   jb 6f\n   vmovdqu (%rsi), %ymm0\n"
+    "vpsrld $16, %ymm0, %ymm1\n   vpand 288(%rsp), %ymm1, %ymm1\n   vpsrld $8, %ymm0, %ymm2\n   vpand 288(%rsp), %ymm2, %ymm2\n"
+    "vpand 288(%rsp), %ymm0, %ymm3\n"
+    "vpmulld 64(%rsp), %ymm1, %ymm1\n   vpaddd 96(%rsp), %ymm1, %ymm1\n   vpsrld $8, %ymm1, %ymm1\n"
+    "vpmulld 64(%rsp), %ymm2, %ymm2\n   vpaddd 128(%rsp), %ymm2, %ymm2\n   vpsrld $8, %ymm2, %ymm2\n"
+    "vpmulld 64(%rsp), %ymm3, %ymm3\n   vpaddd 160(%rsp), %ymm3, %ymm3\n   vpsrld $8, %ymm3, %ymm3\n"
+    "vpmaxud %ymm2, %ymm1, %ymm4\n   vpmaxud %ymm3, %ymm4, %ymm4\n"
+    "vpminud %ymm2, %ymm1, %ymm5\n   vpminud %ymm3, %ymm5, %ymm5\n"
+    "vpcmpgtd 192(%rsp), %ymm4, %ymm6\n"
+    "vmovdqu 224(%rsp), %ymm7\n   vpcmpgtd %ymm5, %ymm7, %ymm7\n   vpandn %ymm7, %ymm6, %ymm7\n"
+    "vpor %ymm6, %ymm7, %ymm13\n"
+    "vmovdqu 288(%rsp), %ymm8\n   vpsubd %ymm5, %ymm8, %ymm8\n   vpblendvb %ymm6, %ymm4, %ymm8, %ymm8\n"
+    "vpcmpeqd %ymm9, %ymm9, %ymm9\n   vpgatherdd %ymm9, (%rbx,%ymm8,4), %ymm10\n"
+    "vpmulld 192(%rsp), %ymm1, %ymm11\n   vmovdqu 288(%rsp), %ymm12\n   vpsubd %ymm1, %ymm12, %ymm12\n"
+    "vpmulld 256(%rsp), %ymm12, %ymm12\n   vpblendvb %ymm7, %ymm12, %ymm11, %ymm11\n"
+    "vpmulld %ymm10, %ymm11, %ymm11\n   vpsrld $24, %ymm11, %ymm11\n"
+    "vmovdqu 288(%rsp), %ymm12\n   vpsubd %ymm11, %ymm12, %ymm12\n   vpblendvb %ymm7, %ymm12, %ymm11, %ymm11\n"
+    "vpblendvb %ymm13, %ymm11, %ymm1, %ymm1\n"
+    "vpmulld 192(%rsp), %ymm2, %ymm11\n   vmovdqu 288(%rsp), %ymm12\n   vpsubd %ymm2, %ymm12, %ymm12\n"
+    "vpmulld 256(%rsp), %ymm12, %ymm12\n   vpblendvb %ymm7, %ymm12, %ymm11, %ymm11\n"
+    "vpmulld %ymm10, %ymm11, %ymm11\n   vpsrld $24, %ymm11, %ymm11\n"
+    "vmovdqu 288(%rsp), %ymm12\n   vpsubd %ymm11, %ymm12, %ymm12\n   vpblendvb %ymm7, %ymm12, %ymm11, %ymm11\n"
+    "vpblendvb %ymm13, %ymm11, %ymm2, %ymm2\n"
+    "vpmulld 192(%rsp), %ymm3, %ymm11\n   vmovdqu 288(%rsp), %ymm12\n   vpsubd %ymm3, %ymm12, %ymm12\n"
+    "vpmulld 256(%rsp), %ymm12, %ymm12\n   vpblendvb %ymm7, %ymm12, %ymm11, %ymm11\n"
+    "vpmulld %ymm10, %ymm11, %ymm11\n   vpsrld $24, %ymm11, %ymm11\n"
+    "vmovdqu 288(%rsp), %ymm12\n   vpsubd %ymm11, %ymm12, %ymm12\n   vpblendvb %ymm7, %ymm12, %ymm11, %ymm11\n"
+    "vpblendvb %ymm13, %ymm11, %ymm3, %ymm3\n"
+    "vpslld $16, %ymm1, %ymm1\n   vpslld $8, %ymm2, %ymm2\n   vpor %ymm2, %ymm1, %ymm1\n   vpor %ymm3, %ymm1, %ymm1\n"
+    "vmovdqu %ymm1, (%rdi)\n   add $32, %rdi\n   add $32, %rsi\n   sub $8, %rdx\n   jmp 32b\n"
+    "6:  vzeroupper\n   jmp 2b\n"
+    //  Sixteen a turn with AVX-512: the same steps on zmm, the compares into mask registers, the blends by mask, the
+    //  dwords as embedded broadcasts. Fewer than sixteen left go to the AVX2 loop at 31.
+    "21: cmp $16, %rdx\n   jb 31b\n"
+    "vmovdqu32 (%rsi), %zmm0\n"
+    "vpsrld $16, %zmm0, %zmm1\n   vpandd 28(%rsp){1to16}, %zmm1, %zmm1\n   vpsrld $8, %zmm0, %zmm2\n   vpandd 28(%rsp){1to16}, %zmm2, %zmm2\n"
+    "vpandd 28(%rsp){1to16}, %zmm0, %zmm3\n"
+    "vpmulld 0(%rsp){1to16}, %zmm1, %zmm1\n   vpaddd 4(%rsp){1to16}, %zmm1, %zmm1\n   vpsrld $8, %zmm1, %zmm1\n"
+    "vpmulld 0(%rsp){1to16}, %zmm2, %zmm2\n   vpaddd 8(%rsp){1to16}, %zmm2, %zmm2\n   vpsrld $8, %zmm2, %zmm2\n"
+    "vpmulld 0(%rsp){1to16}, %zmm3, %zmm3\n   vpaddd 12(%rsp){1to16}, %zmm3, %zmm3\n   vpsrld $8, %zmm3, %zmm3\n"
+    "vpmaxud %zmm2, %zmm1, %zmm4\n   vpmaxud %zmm3, %zmm4, %zmm4\n"
+    "vpminud %zmm2, %zmm1, %zmm5\n   vpminud %zmm3, %zmm5, %zmm5\n"
+    "vpcmpgtd 16(%rsp){1to16}, %zmm4, %k1\n   vpcmpltd 20(%rsp){1to16}, %zmm5, %k2\n"
+    "kandnw %k2, %k1, %k2\n   korw %k1, %k2, %k4\n"
+    "vpbroadcastd 28(%rsp), %zmm8\n   vpsubd %zmm5, %zmm8, %zmm8\n   vpblendmd %zmm4, %zmm8, %zmm8{%k1}\n"
+    "kxnorw %k3, %k3, %k3\n   vpgatherdd (%rbx,%zmm8,4), %zmm10{%k3}\n"
+    "vpmulld 16(%rsp){1to16}, %zmm1, %zmm11\n   vpbroadcastd 28(%rsp), %zmm12\n   vpsubd %zmm1, %zmm12, %zmm12\n"
+    "vpmulld 24(%rsp){1to16}, %zmm12, %zmm12\n   vpblendmd %zmm12, %zmm11, %zmm11{%k2}\n"
+    "vpmulld %zmm10, %zmm11, %zmm11\n   vpsrld $24, %zmm11, %zmm11\n"
+    "vpbroadcastd 28(%rsp), %zmm12\n   vpsubd %zmm11, %zmm12, %zmm12\n   vpblendmd %zmm12, %zmm11, %zmm11{%k2}\n"
+    "vpblendmd %zmm11, %zmm1, %zmm1{%k4}\n"
+    "vpmulld 16(%rsp){1to16}, %zmm2, %zmm11\n   vpbroadcastd 28(%rsp), %zmm12\n   vpsubd %zmm2, %zmm12, %zmm12\n"
+    "vpmulld 24(%rsp){1to16}, %zmm12, %zmm12\n   vpblendmd %zmm12, %zmm11, %zmm11{%k2}\n"
+    "vpmulld %zmm10, %zmm11, %zmm11\n   vpsrld $24, %zmm11, %zmm11\n"
+    "vpbroadcastd 28(%rsp), %zmm12\n   vpsubd %zmm11, %zmm12, %zmm12\n   vpblendmd %zmm12, %zmm11, %zmm11{%k2}\n"
+    "vpblendmd %zmm11, %zmm2, %zmm2{%k4}\n"
+    "vpmulld 16(%rsp){1to16}, %zmm3, %zmm11\n   vpbroadcastd 28(%rsp), %zmm12\n   vpsubd %zmm3, %zmm12, %zmm12\n"
+    "vpmulld 24(%rsp){1to16}, %zmm12, %zmm12\n   vpblendmd %zmm12, %zmm11, %zmm11{%k2}\n"
+    "vpmulld %zmm10, %zmm11, %zmm11\n   vpsrld $24, %zmm11, %zmm11\n"
+    "vpbroadcastd 28(%rsp), %zmm12\n   vpsubd %zmm11, %zmm12, %zmm12\n   vpblendmd %zmm12, %zmm11, %zmm11{%k2}\n"
+    "vpblendmd %zmm11, %zmm3, %zmm3{%k4}\n"
+    "vpslld $16, %zmm1, %zmm1\n   vpslld $8, %zmm2, %zmm2\n   vpord %zmm2, %zmm1, %zmm1\n   vpord %zmm3, %zmm1, %zmm1\n"
+    "vmovdqu32 %zmm1, (%rdi)\n   add $64, %rdi\n   add $64, %rsi\n   sub $16, %rdx\n   jmp 21b\n"
+    "8:  " ASM_RET
+    "9:  add $320, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Ltint_u32_reciprocal:\n"
+    "   .long 0, 16777216, 8388608, 5592406, 4194304, 3355444, 2796203, 2396746\n"
+    "   .long 2097152, 1864136, 1677722, 1525202, 1398102, 1290556, 1198373, 1118482\n"
+    "   .long 1048576, 986896, 932068, 883012, 838861, 798916, 762601, 729445\n"
+    "   .long 699051, 671089, 645278, 621379, 599187, 578525, 559241, 541201\n"
+    "   .long 524288, 508401, 493448, 479350, 466034, 453439, 441506, 430186\n"
+    "   .long 419431, 409201, 399458, 390168, 381301, 372828, 364723, 356963\n"
+    "   .long 349526, 342393, 335545, 328966, 322639, 316552, 310690, 305041\n"
+    "   .long 299594, 294338, 289263, 284360, 279621, 275037, 270601, 266306\n"
+    "   .long 262144, 258112, 254201, 250407, 246724, 243149, 239675, 236299\n"
+    "   .long 233017, 229825, 226720, 223697, 220753, 217886, 215093, 212370\n"
+    "   .long 209716, 207127, 204601, 202136, 199729, 197380, 195084, 192842\n"
+    "   .long 190651, 188509, 186414, 184366, 182362, 180401, 178482, 176603\n"
+    "   .long 174763, 172961, 171197, 169467, 167773, 166112, 164483, 162886\n"
+    "   .long 161320, 159784, 158276, 156797, 155345, 153920, 152521, 151147\n"
+    "   .long 149797, 148471, 147169, 145889, 144632, 143396, 142180, 140986\n"
+    "   .long 139811, 138655, 137519, 136401, 135301, 134218, 133153, 132105\n"
+    "   .long 131072, 130056, 129056, 128071, 127101, 126145, 125204, 124276\n"
+    "   .long 123362, 122462, 121575, 120700, 119838, 118988, 118150, 117324\n"
+    "   .long 116509, 115705, 114913, 114131, 113360, 112599, 111849, 111108\n"
+    "   .long 110377, 109656, 108943, 108241, 107547, 106862, 106185, 105518\n"
+    "   .long 104858, 104207, 103564, 102928, 102301, 101681, 101068, 100463\n"
+    "   .long 99865, 99274, 98690, 98113, 97542, 96979, 96421, 95870\n"
+    "   .long 95326, 94787, 94255, 93728, 93207, 92692, 92183, 91679\n"
+    "   .long 91181, 90688, 90201, 89718, 89241, 88769, 88302, 87839\n"
+    "   .long 87382, 86929, 86481, 86038, 85599, 85164, 84734, 84308\n"
+    "   .long 83887, 83469, 83056, 82647, 82242, 81841, 81443, 81050\n"
+    "   .long 80660, 80274, 79892, 79513, 79138, 78767, 78399, 78034\n"
+    "   .long 77673, 77315, 76960, 76609, 76261, 75916, 75574, 75235\n"
+    "   .long 74899, 74566, 74236, 73909, 73585, 73263, 72945, 72629\n"
+    "   .long 72316, 72006, 71698, 71393, 71090, 70790, 70493, 70198\n"
+    "   .long 69906, 69616, 69328, 69043, 68760, 68479, 68201, 67924\n"
+    "   .long 67651, 67379, 67109, 66842, 66577, 66314, 66053, 65794\n"
+    ".popsection\n"
+    ASM_END(memory_tint_u32)
+#endif
+
+#ifndef KERNEL_MODE
+    //
     //       memory_translate_u32_rect -- a rectangle of bytes made words
     //       through a table: rdi into, rsi into_stride in words, rdx from,
     //       rcx from_stride, r8 width, r9 height, the table on the stack.
@@ -23467,6 +23719,159 @@ __asm__(
 #endif
 
 #ifndef KERNEL_MODE
+    //
+    //       memory_saturate_u32: x0 into, x1 from, x2 count: the integer steps
+    //       of the x86_64 block (the contract is there), four pixels a turn
+    //       in q registers: the channels by ushr and and, grey by mul, two
+    //       mla and a shift, each channel's difference by sshr and added back,
+    //       clamped by smax and smin, packed by shl and orr. A pixel at a time
+    //       under four, on csel. Kernel builds have neither.
+    //
+    ASM_FUNC(memory_saturate_u32)
+    "cbz x2, 9f\n   movi v6.4s, #255\n   movi v7.4s, #77\n   movi v8.4s, #150\n   movi v9.4s, #29\n   movi v10.4s, #0\n"
+    "cmp x2, #4\n   b.lo 2f\n"
+    "4:  ldr q0, [x1], #16\n"
+    "ushr v1.4s, v0.4s, #16\n   and v1.16b, v1.16b, v6.16b\n"
+    "ushr v2.4s, v0.4s, #8\n   and v2.16b, v2.16b, v6.16b\n"
+    "and v3.16b, v0.16b, v6.16b\n"
+    "mul v4.4s, v1.4s, v7.4s\n   mla v4.4s, v2.4s, v8.4s\n   mla v4.4s, v3.4s, v9.4s\n"
+    "ushr v4.4s, v4.4s, #8\n"
+    "sub v5.4s, v1.4s, v4.4s\n   sshr v5.4s, v5.4s, #1\n   add v1.4s, v1.4s, v5.4s\n"
+    "sub v5.4s, v2.4s, v4.4s\n   sshr v5.4s, v5.4s, #1\n   add v2.4s, v2.4s, v5.4s\n"
+    "sub v5.4s, v3.4s, v4.4s\n   sshr v5.4s, v5.4s, #1\n   add v3.4s, v3.4s, v5.4s\n"
+    "smax v1.4s, v1.4s, v10.4s\n   smin v1.4s, v1.4s, v6.4s\n"
+    "smax v2.4s, v2.4s, v10.4s\n   smin v2.4s, v2.4s, v6.4s\n"
+    "smax v3.4s, v3.4s, v10.4s\n   smin v3.4s, v3.4s, v6.4s\n"
+    "shl v1.4s, v1.4s, #16\n   shl v2.4s, v2.4s, #8\n   orr v1.16b, v1.16b, v2.16b\n   orr v1.16b, v1.16b, v3.16b\n"
+    "str q1, [x0], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 4b\n"
+    "2:  cbz x2, 9f\n"
+    "ldr w3, [x1], #4\n"
+    "ubfx w4, w3, #16, #8\n   ubfx w5, w3, #8, #8\n   and w6, w3, #255\n"
+    "mov w7, #77\n   mul w8, w4, w7\n   mov w7, #150\n   madd w8, w5, w7, w8\n   mov w7, #29\n   madd w8, w6, w7, w8\n"
+    "lsr w8, w8, #8\n"
+    "sub w9, w4, w8\n   asr w9, w9, #1\n   add w9, w9, w4\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n"
+    "mov w10, #255\n   cmp w9, w10\n   csel w4, w10, w9, gt\n"
+    "sub w9, w5, w8\n   asr w9, w9, #1\n   add w9, w9, w5\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n"
+    "mov w10, #255\n   cmp w9, w10\n   csel w5, w10, w9, gt\n"
+    "sub w9, w6, w8\n   asr w9, w9, #1\n   add w9, w9, w6\n   cmp w9, #0\n   csel w9, wzr, w9, lt\n"
+    "mov w10, #255\n   cmp w9, w10\n   csel w6, w10, w9, gt\n"
+    "lsl w4, w4, #16\n   orr w4, w4, w5, lsl #8\n   orr w4, w4, w6\n   str w4, [x0], #4\n   subs x2, x2, #1\n   b.ne 2b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_saturate_u32)
+#endif
+
+#ifndef KERNEL_MODE
+    //
+    //       memory_tint_u32: x0 into, x1 from, x2 count, x3 toward, x4 amount,
+    //       x5 cap, x6 floor: the x86_64 block's steps (the contract is there)
+    //       four pixels a turn in v registers, the constants splat once, and
+    //       the reciprocal of each lane's divisor fetched by four scalar loads
+    //       (NEON has no gather). Masks by cmhi, bic and bsl; the division's
+    //       multiply and shift are the same as the x86 body. A pixel at a time
+    //       under four, on csel and branches. Kernel builds have neither.
+    //
+    ASM_FUNC(memory_tint_u32)
+    "cbz x2, 9f\n"
+    "ubfx w10, w3, #16, #8\n   mul w10, w10, w4\n   add w10, w10, #128\n"
+    "ubfx w11, w3, #8, #8\n   mul w11, w11, w4\n   add w11, w11, #128\n"
+    "and w12, w3, #255\n   mul w12, w12, w4\n   add w12, w12, #128\n"
+    "mov w3, #256\n   sub w3, w3, w4\n   mov w4, w10\n   mov w7, w11\n   mov w8, w12\n"
+    "dup v16.4s, w3\n   dup v17.4s, w4\n   dup v18.4s, w7\n   dup v19.4s, w8\n   dup v20.4s, w5\n   dup v21.4s, w6\n"
+    "mov w10, #255\n   dup v23.4s, w10\n   sub w11, w10, w6\n   dup v22.4s, w11\n"
+    "adrp x9, .Ltint_a64_reciprocal\n   add x9, x9, :lo12:.Ltint_a64_reciprocal\n"
+    "cmp x2, #4\n   b.lo 2f\n"
+    "4:  ldr q0, [x1], #16\n"
+    "ushr v1.4s, v0.4s, #16\n   and v1.16b, v1.16b, v23.16b\n"
+    "ushr v2.4s, v0.4s, #8\n   and v2.16b, v2.16b, v23.16b\n"
+    "and v3.16b, v0.16b, v23.16b\n"
+    "mul v1.4s, v1.4s, v16.4s\n   add v1.4s, v1.4s, v17.4s\n   ushr v1.4s, v1.4s, #8\n"
+    "mul v2.4s, v2.4s, v16.4s\n   add v2.4s, v2.4s, v18.4s\n   ushr v2.4s, v2.4s, #8\n"
+    "mul v3.4s, v3.4s, v16.4s\n   add v3.4s, v3.4s, v19.4s\n   ushr v3.4s, v3.4s, #8\n"
+    "umax v4.4s, v1.4s, v2.4s\n   umax v4.4s, v4.4s, v3.4s\n"
+    "umin v5.4s, v1.4s, v2.4s\n   umin v5.4s, v5.4s, v3.4s\n"
+    "cmhi v6.4s, v4.4s, v20.4s\n"
+    "cmhi v7.4s, v21.4s, v5.4s\n   bic v7.16b, v7.16b, v6.16b\n"
+    "sub v8.4s, v23.4s, v5.4s\n   mov v25.16b, v6.16b\n   bsl v25.16b, v4.16b, v8.16b\n"
+    "umov w10, v25.s[0]\n   umov w11, v25.s[1]\n   umov w12, v25.s[2]\n   umov w13, v25.s[3]\n"
+    "ldr w10, [x9, w10, uxtw #2]\n   ldr w11, [x9, w11, uxtw #2]\n   ldr w12, [x9, w12, uxtw #2]\n   ldr w13, [x9, w13, uxtw #2]\n"
+    "ins v26.s[0], w10\n   ins v26.s[1], w11\n   ins v26.s[2], w12\n   ins v26.s[3], w13\n"
+    "mul v27.4s, v1.4s, v20.4s\n   mul v27.4s, v27.4s, v26.4s\n   ushr v27.4s, v27.4s, #24\n"
+    "sub v28.4s, v23.4s, v1.4s\n   mul v28.4s, v28.4s, v22.4s\n   mul v28.4s, v28.4s, v26.4s\n"
+    "ushr v28.4s, v28.4s, #24\n   sub v28.4s, v23.4s, v28.4s\n"
+    "mov v29.16b, v7.16b\n   bsl v29.16b, v28.16b, v1.16b\n   mov v30.16b, v6.16b\n   bsl v30.16b, v27.16b, v29.16b\n"
+    "mov v1.16b, v30.16b\n"
+    "mul v27.4s, v2.4s, v20.4s\n   mul v27.4s, v27.4s, v26.4s\n   ushr v27.4s, v27.4s, #24\n"
+    "sub v28.4s, v23.4s, v2.4s\n   mul v28.4s, v28.4s, v22.4s\n   mul v28.4s, v28.4s, v26.4s\n"
+    "ushr v28.4s, v28.4s, #24\n   sub v28.4s, v23.4s, v28.4s\n"
+    "mov v29.16b, v7.16b\n   bsl v29.16b, v28.16b, v2.16b\n   mov v30.16b, v6.16b\n   bsl v30.16b, v27.16b, v29.16b\n"
+    "mov v2.16b, v30.16b\n"
+    "mul v27.4s, v3.4s, v20.4s\n   mul v27.4s, v27.4s, v26.4s\n   ushr v27.4s, v27.4s, #24\n"
+    "sub v28.4s, v23.4s, v3.4s\n   mul v28.4s, v28.4s, v22.4s\n   mul v28.4s, v28.4s, v26.4s\n"
+    "ushr v28.4s, v28.4s, #24\n   sub v28.4s, v23.4s, v28.4s\n"
+    "mov v29.16b, v7.16b\n   bsl v29.16b, v28.16b, v3.16b\n   mov v30.16b, v6.16b\n   bsl v30.16b, v27.16b, v29.16b\n"
+    "mov v3.16b, v30.16b\n"
+    "shl v1.4s, v1.4s, #16\n   shl v2.4s, v2.4s, #8\n   orr v1.16b, v1.16b, v2.16b\n   orr v1.16b, v1.16b, v3.16b\n"
+    "str q1, [x0], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 4b\n"
+    "2:  cbz x2, 9f\n"
+    "ldr w14, [x1], #4\n"
+    "ubfx w15, w14, #16, #8\n   ubfx w16, w14, #8, #8\n   and w17, w14, #255\n"
+    "madd w15, w15, w3, w4\n   lsr w15, w15, #8\n"
+    "madd w16, w16, w3, w7\n   lsr w16, w16, #8\n"
+    "madd w17, w17, w3, w8\n   lsr w17, w17, #8\n"
+    "cmp w15, w16\n   csel w10, w15, w16, hi\n   cmp w10, w17\n   csel w10, w10, w17, hi\n"
+    "cmp w15, w16\n   csel w11, w15, w16, lo\n   cmp w11, w17\n   csel w11, w11, w17, lo\n"
+    "cmp w10, w5\n   b.hi 3f\n   cmp w11, w6\n   b.lo 6f\n   b 5f\n"
+    "3:  ldr w12, [x9, w10, uxtw #2]\n"
+    "mul w15, w15, w5\n   mul w15, w15, w12\n   lsr w15, w15, #24\n"
+    "mul w16, w16, w5\n   mul w16, w16, w12\n   lsr w16, w16, #24\n"
+    "mul w17, w17, w5\n   mul w17, w17, w12\n   lsr w17, w17, #24\n"
+    "b 5f\n"
+    "6:  mov w13, #255\n   sub w13, w13, w11\n   ldr w12, [x9, w13, uxtw #2]\n"
+    "mov w13, #255\n   sub w13, w13, w6\n"
+    "mov w11, #255\n   sub w11, w11, w15\n   mul w11, w11, w13\n   mul w11, w11, w12\n   lsr w11, w11, #24\n   mov w15, #255\n   sub w15, w15, w11\n"
+    "mov w11, #255\n   sub w11, w11, w16\n   mul w11, w11, w13\n   mul w11, w11, w12\n   lsr w11, w11, #24\n   mov w16, #255\n   sub w16, w16, w11\n"
+    "mov w11, #255\n   sub w11, w11, w17\n   mul w11, w11, w13\n   mul w11, w11, w12\n   lsr w11, w11, #24\n   mov w17, #255\n   sub w17, w17, w11\n"
+    "5:  lsl w15, w15, #16\n   orr w15, w15, w16, lsl #8\n   orr w15, w15, w17\n   str w15, [x0], #4\n   sub x2, x2, #1\n   b 2b\n"
+    "9:  " ASM_RET
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Ltint_a64_reciprocal:\n"
+    "   .long 0, 16777216, 8388608, 5592406, 4194304, 3355444, 2796203, 2396746\n"
+    "   .long 2097152, 1864136, 1677722, 1525202, 1398102, 1290556, 1198373, 1118482\n"
+    "   .long 1048576, 986896, 932068, 883012, 838861, 798916, 762601, 729445\n"
+    "   .long 699051, 671089, 645278, 621379, 599187, 578525, 559241, 541201\n"
+    "   .long 524288, 508401, 493448, 479350, 466034, 453439, 441506, 430186\n"
+    "   .long 419431, 409201, 399458, 390168, 381301, 372828, 364723, 356963\n"
+    "   .long 349526, 342393, 335545, 328966, 322639, 316552, 310690, 305041\n"
+    "   .long 299594, 294338, 289263, 284360, 279621, 275037, 270601, 266306\n"
+    "   .long 262144, 258112, 254201, 250407, 246724, 243149, 239675, 236299\n"
+    "   .long 233017, 229825, 226720, 223697, 220753, 217886, 215093, 212370\n"
+    "   .long 209716, 207127, 204601, 202136, 199729, 197380, 195084, 192842\n"
+    "   .long 190651, 188509, 186414, 184366, 182362, 180401, 178482, 176603\n"
+    "   .long 174763, 172961, 171197, 169467, 167773, 166112, 164483, 162886\n"
+    "   .long 161320, 159784, 158276, 156797, 155345, 153920, 152521, 151147\n"
+    "   .long 149797, 148471, 147169, 145889, 144632, 143396, 142180, 140986\n"
+    "   .long 139811, 138655, 137519, 136401, 135301, 134218, 133153, 132105\n"
+    "   .long 131072, 130056, 129056, 128071, 127101, 126145, 125204, 124276\n"
+    "   .long 123362, 122462, 121575, 120700, 119838, 118988, 118150, 117324\n"
+    "   .long 116509, 115705, 114913, 114131, 113360, 112599, 111849, 111108\n"
+    "   .long 110377, 109656, 108943, 108241, 107547, 106862, 106185, 105518\n"
+    "   .long 104858, 104207, 103564, 102928, 102301, 101681, 101068, 100463\n"
+    "   .long 99865, 99274, 98690, 98113, 97542, 96979, 96421, 95870\n"
+    "   .long 95326, 94787, 94255, 93728, 93207, 92692, 92183, 91679\n"
+    "   .long 91181, 90688, 90201, 89718, 89241, 88769, 88302, 87839\n"
+    "   .long 87382, 86929, 86481, 86038, 85599, 85164, 84734, 84308\n"
+    "   .long 83887, 83469, 83056, 82647, 82242, 81841, 81443, 81050\n"
+    "   .long 80660, 80274, 79892, 79513, 79138, 78767, 78399, 78034\n"
+    "   .long 77673, 77315, 76960, 76609, 76261, 75916, 75574, 75235\n"
+    "   .long 74899, 74566, 74236, 73909, 73585, 73263, 72945, 72629\n"
+    "   .long 72316, 72006, 71698, 71393, 71090, 70790, 70493, 70198\n"
+    "   .long 69906, 69616, 69328, 69043, 68760, 68479, 68201, 67924\n"
+    "   .long 67651, 67379, 67109, 66842, 66577, 66314, 66053, 65794\n"
+    ".popsection\n"
+    ASM_END(memory_tint_u32)
+#endif
+
+#ifndef KERNEL_MODE
     //       memory_translate_u32_rect: eight words a turn. The eight bytes are
     //       one load and eight ubfx, the words eight loads, paired with orr
     //       and stored by two stp; the tail a word at a time. NEON has no
@@ -32351,6 +32756,171 @@ __asm__(
 #endif
     ASM_END(memory_glass_over_u32)
     ".option pop\n"
+#endif
+
+#ifndef KERNEL_MODE
+    //
+    //       memory_saturate_u32: a0 into, a1 from, a2 count: the integer steps
+    //       of the x86_64 block (the contract is there). With V, strips of as
+    //       many pixels as two registers hold at e32, the channels by vsrl,
+    //       vand and vmul.vx, grey by two vadd and a shift, each channel's
+    //       difference by vsra and added back, clamped by vmax.vx and
+    //       vmin.vx, packed by vsll and vor. Without V, a pixel at a time on
+    //       branches. Kernel builds keep the word at a time body alone.
+    //
+    ASM_FUNC(memory_saturate_u32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM) && !defined(KERNEL_MODE)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Lsaturate_rv_vector\n   bnez t3, .Lsaturate_rv_scalar\n"
+    "addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a0, 0(sp)\n   sd a1, 8(sp)\n   sd a2, 16(sp)\n   call cpu_vector_detect\n"
+    "ld a0, 0(sp)\n   ld a1, 8(sp)\n   ld a2, 16(sp)\n   ld ra, 24(sp)\n   addi sp, sp, 32\n   j memory_saturate_u32\n"
+    ".option push\n   .option arch, +v\n"
+    ".Lsaturate_rv_vector:\n   li t1, 255\n   li t2, 77\n   li t3, 150\n   li t4, 29\n"
+    ".Lsaturate_rv_strip:\n   beqz a2, .Lsaturate_rv_done\n"
+    "vsetvli t5, a2, e32, m2, ta, ma\n   vle32.v v8, (a1)\n"
+    "vsrl.vi v10, v8, 16\n   vand.vx v10, v10, t1\n   vsrl.vi v12, v8, 8\n   vand.vx v12, v12, t1\n   vand.vx v14, v8, t1\n"
+    "vmul.vx v16, v10, t2\n   vmul.vx v18, v12, t3\n   vadd.vv v16, v16, v18\n"
+    "vmul.vx v18, v14, t4\n   vadd.vv v16, v16, v18\n   vsrl.vi v16, v16, 8\n"
+    "vsub.vv v18, v10, v16\n   vsra.vi v18, v18, 1\n   vadd.vv v10, v10, v18\n"
+    "vsub.vv v18, v12, v16\n   vsra.vi v18, v18, 1\n   vadd.vv v12, v12, v18\n"
+    "vsub.vv v18, v14, v16\n   vsra.vi v18, v18, 1\n   vadd.vv v14, v14, v18\n"
+    "vmax.vx v10, v10, zero\n   vmin.vx v10, v10, t1\n   vmax.vx v12, v12, zero\n   vmin.vx v12, v12, t1\n"
+    "vmax.vx v14, v14, zero\n   vmin.vx v14, v14, t1\n"
+    "vsll.vi v10, v10, 16\n   vsll.vi v12, v12, 8\n   vor.vv v10, v10, v12\n   vor.vv v10, v10, v14\n"
+    "vse32.v v10, (a0)\n   slli t6, t5, 2\n   add a0, a0, t6\n   add a1, a1, t6\n   sub a2, a2, t5\n   j .Lsaturate_rv_strip\n"
+    ".Lsaturate_rv_done:\n" ASM_RET
+    ".option pop\n"
+#endif
+    ".Lsaturate_rv_scalar:\n   beqz a2, .Lsaturate_rv_word_done\n   lwu t0, 0(a1)\n"
+    "srli t1, t0, 16\n   andi t1, t1, 255\n   srli t2, t0, 8\n   andi t2, t2, 255\n   andi t3, t0, 255\n"
+    "li t4, 77\n   mul t5, t1, t4\n   li t4, 150\n   mul t6, t2, t4\n   add t5, t5, t6\n"
+    "li t4, 29\n   mul t6, t3, t4\n   add t5, t5, t6\n   srli t5, t5, 8\n"
+    "sub t6, t1, t5\n   srai t6, t6, 1\n   add t6, t6, t1\n   bgez t6, 11f\n   li t6, 0\n"
+    "11: li t4, 255\n   ble t6, t4, 12f\n   mv t6, t4\n12: mv t1, t6\n"
+    "sub t6, t2, t5\n   srai t6, t6, 1\n   add t6, t6, t2\n   bgez t6, 13f\n   li t6, 0\n"
+    "13: li t4, 255\n   ble t6, t4, 14f\n   mv t6, t4\n14: mv t2, t6\n"
+    "sub t6, t3, t5\n   srai t6, t6, 1\n   add t6, t6, t3\n   bgez t6, 15f\n   li t6, 0\n"
+    "15: li t4, 255\n   ble t6, t4, 16f\n   mv t6, t4\n16: mv t3, t6\n"
+    "slli t1, t1, 16\n   slli t2, t2, 8\n   or t1, t1, t2\n   or t1, t1, t3\n   sw t1, 0(a0)\n"
+    "addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n   j .Lsaturate_rv_scalar\n"
+    ".Lsaturate_rv_word_done:\n" ASM_RET
+    ASM_END(memory_saturate_u32)
+#endif
+
+#ifndef KERNEL_MODE
+    //
+    //       memory_tint_u32: a0 into, a1 from, a2 count, a3 toward, a4
+    //       amount, a5 cap, a6 floor: the x86_64 block's steps (the contract
+    //       is there). With V, strips of as many pixels as two registers hold
+    //       at e32: the channels by vmul.vx, vadd.vx and vsrl.vi, the brightest
+    //       and dimmest by vmaxu and vminu, the two cases as 0 and 1 vectors
+    //       (the sign of a difference shifted down), the divisor's reciprocal
+    //       fetched by vluxei32 from .rodata, and each choice made by
+    //       vmerge under v0. Without V, a pixel at a time, the constants held
+    //       on the stack. Kernel builds keep the word at a time body alone.
+    //
+    ASM_FUNC(memory_tint_u32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM) && !defined(KERNEL_MODE)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, .Ltint_rv_vector\n   bnez t3, .Ltint_rv_scalar\n"
+    "addi sp, sp, -64\n   sd ra, 56(sp)\n   sd a0, 0(sp)\n   sd a1, 8(sp)\n   sd a2, 16(sp)\n   sd a3, 24(sp)\n   sd a4, 32(sp)\n"
+    "sd a5, 40(sp)\n   sd a6, 48(sp)\n   call cpu_vector_detect\n"
+    "ld a0, 0(sp)\n   ld a1, 8(sp)\n   ld a2, 16(sp)\n   ld a3, 24(sp)\n   ld a4, 32(sp)\n   ld a5, 40(sp)\n   ld a6, 48(sp)\n"
+    "ld ra, 56(sp)\n   addi sp, sp, 64\n   j memory_tint_u32\n"
+    ".option push\n   .option arch, +v\n"
+    ".Ltint_rv_vector:\n   beqz a2, .Ltint_rv_done\n   li t0, 255\n"
+    "srli t2, a3, 16\n   andi t2, t2, 255\n   mul t2, t2, a4\n   addi t2, t2, 128\n"
+    "srli t3, a3, 8\n   andi t3, t3, 255\n   mul t3, t3, a4\n   addi t3, t3, 128\n"
+    "andi t4, a3, 255\n   mul t4, t4, a4\n   addi t4, t4, 128\n"
+    "li t1, 256\n   sub t1, t1, a4\n   sub a7, t0, a6\n   lla a4, .Ltint_u32_rv_reciprocal\n"
+    ".Ltint_rv_strip:\n   beqz a2, .Ltint_rv_vdone\n"
+    "vsetvli a3, a2, e32, m2, ta, ma\n   vle32.v v8, (a1)\n"
+    "vsrl.vi v10, v8, 16\n   vand.vx v10, v10, t0\n   vsrl.vi v12, v8, 8\n   vand.vx v12, v12, t0\n   vand.vx v14, v8, t0\n"
+    "vmul.vx v10, v10, t1\n   vadd.vx v10, v10, t2\n   vsrl.vi v10, v10, 8\n"
+    "vmul.vx v12, v12, t1\n   vadd.vx v12, v12, t3\n   vsrl.vi v12, v12, 8\n"
+    "vmul.vx v14, v14, t1\n   vadd.vx v14, v14, t4\n   vsrl.vi v14, v14, 8\n"
+    "vmaxu.vv v16, v10, v12\n   vmaxu.vv v16, v16, v14\n"
+    "vminu.vv v18, v10, v12\n   vminu.vv v18, v18, v14\n"
+    "vrsub.vx v20, v16, a5\n   vsrl.vi v20, v20, 31\n"
+    "vsub.vx v22, v18, a6\n   vsrl.vi v22, v22, 31\n"
+    "vxor.vi v28, v20, 1\n   vand.vv v22, v22, v28\n"
+    "vrsub.vx v24, v18, t0\n   vmsne.vi v0, v20, 0\n   vmerge.vvm v24, v24, v16, v0\n"
+    "vsll.vi v24, v24, 2\n   vluxei32.v v26, (a4), v24\n"
+    "vmul.vx v28, v10, a5\n   vmul.vv v28, v28, v26\n   vsrl.vi v28, v28, 24\n"
+    "vrsub.vx v30, v10, t0\n   vmul.vx v30, v30, a7\n   vmul.vv v30, v30, v26\n   vsrl.vi v30, v30, 24\n   vrsub.vx v30, v30, t0\n"
+    "vmsne.vi v0, v22, 0\n   vmerge.vvm v30, v10, v30, v0\n   vmsne.vi v0, v20, 0\n   vmerge.vvm v10, v30, v28, v0\n"
+    "vmul.vx v28, v12, a5\n   vmul.vv v28, v28, v26\n   vsrl.vi v28, v28, 24\n"
+    "vrsub.vx v30, v12, t0\n   vmul.vx v30, v30, a7\n   vmul.vv v30, v30, v26\n   vsrl.vi v30, v30, 24\n   vrsub.vx v30, v30, t0\n"
+    "vmsne.vi v0, v22, 0\n   vmerge.vvm v30, v12, v30, v0\n   vmsne.vi v0, v20, 0\n   vmerge.vvm v12, v30, v28, v0\n"
+    "vmul.vx v28, v14, a5\n   vmul.vv v28, v28, v26\n   vsrl.vi v28, v28, 24\n"
+    "vrsub.vx v30, v14, t0\n   vmul.vx v30, v30, a7\n   vmul.vv v30, v30, v26\n   vsrl.vi v30, v30, 24\n   vrsub.vx v30, v30, t0\n"
+    "vmsne.vi v0, v22, 0\n   vmerge.vvm v30, v14, v30, v0\n   vmsne.vi v0, v20, 0\n   vmerge.vvm v14, v30, v28, v0\n"
+    "vsll.vi v10, v10, 16\n   vsll.vi v12, v12, 8\n   vor.vv v10, v10, v12\n   vor.vv v10, v10, v14\n"
+    "vse32.v v10, (a0)\n   slli t5, a3, 2\n   add a0, a0, t5\n   add a1, a1, t5\n   sub a2, a2, a3\n   j .Ltint_rv_strip\n"
+    ".Ltint_rv_vdone:\n   .option pop\n"
+    ".Ltint_rv_done:\n" ASM_RET
+#endif
+    //  A pixel at a time without V: the constants on the stack (K, A red, A green, A blue, cap, floor, 255 - floor).
+    ".Ltint_rv_scalar:\n   beqz a2, .Ltint_rv_word_done\n   addi sp, sp, -64\n"
+    "srli t2, a3, 16\n   andi t2, t2, 255\n   mul t2, t2, a4\n   addi t2, t2, 128\n   sd t2, 8(sp)\n"
+    "srli t2, a3, 8\n   andi t2, t2, 255\n   mul t2, t2, a4\n   addi t2, t2, 128\n   sd t2, 16(sp)\n"
+    "andi t2, a3, 255\n   mul t2, t2, a4\n   addi t2, t2, 128\n   sd t2, 24(sp)\n"
+    "li t2, 256\n   sub t2, t2, a4\n   sd t2, 0(sp)\n   sd a5, 32(sp)\n   sd a6, 40(sp)\n   li t2, 255\n   sub t2, t2, a6\n   sd t2, 48(sp)\n"
+    "lla a3, .Ltint_u32_rv_reciprocal\n"
+    ".Ltint_rv_word:\n   beqz a2, .Ltint_rv_word_out\n   lwu t1, 0(a1)\n"
+    "srli t2, t1, 16\n   andi t2, t2, 255\n   srli t3, t1, 8\n   andi t3, t3, 255\n   andi t4, t1, 255\n"
+    "ld t5, 0(sp)\n   mul t2, t2, t5\n   ld t5, 8(sp)\n   add t2, t2, t5\n   srli t2, t2, 8\n"
+    "ld t5, 0(sp)\n   mul t3, t3, t5\n   ld t5, 16(sp)\n   add t3, t3, t5\n   srli t3, t3, 8\n"
+    "ld t5, 0(sp)\n   mul t4, t4, t5\n   ld t5, 24(sp)\n   add t4, t4, t5\n   srli t4, t4, 8\n"
+    "mv t5, t2\n   bge t5, t3, 31f\n   mv t5, t3\n31: bge t5, t4, 32f\n   mv t5, t4\n32: "
+    "mv t6, t2\n   bge t3, t6, 33f\n   mv t6, t3\n33: bge t4, t6, 34f\n   mv t6, t4\n34: "
+    "ld a7, 32(sp)\n   bgt t5, a7, 35f\n   ld a7, 40(sp)\n   blt t6, a7, 36f\n   j 37f\n"
+    "35: slli a4, t5, 2\n   add a4, a4, a3\n   lwu a4, 0(a4)\n"
+    "ld a7, 32(sp)\n   mul t2, t2, a7\n   mul t2, t2, a4\n   srli t2, t2, 24\n"
+    "ld a7, 32(sp)\n   mul t3, t3, a7\n   mul t3, t3, a4\n   srli t3, t3, 24\n"
+    "ld a7, 32(sp)\n   mul t4, t4, a7\n   mul t4, t4, a4\n   srli t4, t4, 24\n   j 37f\n"
+    "36: li a7, 255\n   sub a7, a7, t6\n   slli a7, a7, 2\n   add a7, a7, a3\n   lwu a4, 0(a7)\n"
+    "li a7, 255\n   sub a7, a7, t2\n   ld a5, 48(sp)\n   mul a7, a7, a5\n   mul a7, a7, a4\n   srli a7, a7, 24\n   li t2, 255\n   sub t2, t2, a7\n"
+    "li a7, 255\n   sub a7, a7, t3\n   ld a5, 48(sp)\n   mul a7, a7, a5\n   mul a7, a7, a4\n   srli a7, a7, 24\n   li t3, 255\n   sub t3, t3, a7\n"
+    "li a7, 255\n   sub a7, a7, t4\n   ld a5, 48(sp)\n   mul a7, a7, a5\n   mul a7, a7, a4\n   srli a7, a7, 24\n   li t4, 255\n   sub t4, t4, a7\n"
+    "37: slli t2, t2, 16\n   slli t3, t3, 8\n   or t2, t2, t3\n   or t2, t2, t4\n   sw t2, 0(a0)\n"
+    "addi a0, a0, 4\n   addi a1, a1, 4\n   addi a2, a2, -1\n   j .Ltint_rv_word\n"
+    ".Ltint_rv_word_out:\n   addi sp, sp, 64\n"
+    ".Ltint_rv_word_done:\n" ASM_RET
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Ltint_u32_rv_reciprocal:\n"
+    "   .word 0, 16777216, 8388608, 5592406, 4194304, 3355444, 2796203, 2396746\n"
+    "   .word 2097152, 1864136, 1677722, 1525202, 1398102, 1290556, 1198373, 1118482\n"
+    "   .word 1048576, 986896, 932068, 883012, 838861, 798916, 762601, 729445\n"
+    "   .word 699051, 671089, 645278, 621379, 599187, 578525, 559241, 541201\n"
+    "   .word 524288, 508401, 493448, 479350, 466034, 453439, 441506, 430186\n"
+    "   .word 419431, 409201, 399458, 390168, 381301, 372828, 364723, 356963\n"
+    "   .word 349526, 342393, 335545, 328966, 322639, 316552, 310690, 305041\n"
+    "   .word 299594, 294338, 289263, 284360, 279621, 275037, 270601, 266306\n"
+    "   .word 262144, 258112, 254201, 250407, 246724, 243149, 239675, 236299\n"
+    "   .word 233017, 229825, 226720, 223697, 220753, 217886, 215093, 212370\n"
+    "   .word 209716, 207127, 204601, 202136, 199729, 197380, 195084, 192842\n"
+    "   .word 190651, 188509, 186414, 184366, 182362, 180401, 178482, 176603\n"
+    "   .word 174763, 172961, 171197, 169467, 167773, 166112, 164483, 162886\n"
+    "   .word 161320, 159784, 158276, 156797, 155345, 153920, 152521, 151147\n"
+    "   .word 149797, 148471, 147169, 145889, 144632, 143396, 142180, 140986\n"
+    "   .word 139811, 138655, 137519, 136401, 135301, 134218, 133153, 132105\n"
+    "   .word 131072, 130056, 129056, 128071, 127101, 126145, 125204, 124276\n"
+    "   .word 123362, 122462, 121575, 120700, 119838, 118988, 118150, 117324\n"
+    "   .word 116509, 115705, 114913, 114131, 113360, 112599, 111849, 111108\n"
+    "   .word 110377, 109656, 108943, 108241, 107547, 106862, 106185, 105518\n"
+    "   .word 104858, 104207, 103564, 102928, 102301, 101681, 101068, 100463\n"
+    "   .word 99865, 99274, 98690, 98113, 97542, 96979, 96421, 95870\n"
+    "   .word 95326, 94787, 94255, 93728, 93207, 92692, 92183, 91679\n"
+    "   .word 91181, 90688, 90201, 89718, 89241, 88769, 88302, 87839\n"
+    "   .word 87382, 86929, 86481, 86038, 85599, 85164, 84734, 84308\n"
+    "   .word 83887, 83469, 83056, 82647, 82242, 81841, 81443, 81050\n"
+    "   .word 80660, 80274, 79892, 79513, 79138, 78767, 78399, 78034\n"
+    "   .word 77673, 77315, 76960, 76609, 76261, 75916, 75574, 75235\n"
+    "   .word 74899, 74566, 74236, 73909, 73585, 73263, 72945, 72629\n"
+    "   .word 72316, 72006, 71698, 71393, 71090, 70790, 70493, 70198\n"
+    "   .word 69906, 69616, 69328, 69043, 68760, 68479, 68201, 67924\n"
+    "   .word 67651, 67379, 67109, 66842, 66577, 66314, 66053, 65794\n"
+    ".popsection\n"
+    ASM_END(memory_tint_u32)
 #endif
 
 #ifndef KERNEL_MODE
@@ -44618,6 +45188,16 @@ fn memory_double_u32(p32 address_to into, positive into_pitch, const p32 address
 // (255 - alpha) / 255 rounded.
 fn memory_glass_over_u32(p32 address_to into, const p32 address_to picture, const p32 address_to ground,
                          positive count, const p32 address_to grain);
+// count pixels of from, each with its red, green and blue pushed away from the grey of the pixel by half again and
+// clamped (the top byte is ignored and answers zero): the colour boost the glass is made more vivid with. Integer
+// only, so every tier answers the same bits; the words past the count are not touched.
+fn memory_saturate_u32(p32 address_to into, const p32 address_to from, positive count);
+// count pixels of from, each mixed toward toward (0 or 0xffffff, per channel) by amount of 256, then with its brightest
+// channel capped at cap (every channel scaled down by cap over it) or else its dimmest raised to floor (every channel
+// taken toward 255 by the same proportion); the window's tint. Integer only; exact for every pixel and every cap and
+// floor from 0 to 255, and the words past the count are not touched.
+fn memory_tint_u32(p32 address_to into, const p32 address_to from, positive count, unsigned int toward, unsigned int amount,
+                   unsigned int cap, unsigned int floor);
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);

@@ -3614,7 +3614,8 @@ static int compositor_glass_scene_make(void *context, int x, int y, int width, i
         return compositor_glass_make(scene->windows, scene->count, x, y, width, height);
 }
 
-// A colour half as far again from its grey, kept in a byte.
+// A colour half as far again from its grey, kept in a byte. One pixel stays here: a call into the library costs more
+// than these few instructions, and spans of the glass go through memory_saturate_u32 (compositor_glass_pass).
 static unsigned int compositor_vivid(unsigned int pixel)
 {
         int r = (int)(pixel >> 16 & 255), g = (int)(pixel >> 8 & 255), b = (int)(pixel & 255);
@@ -3679,6 +3680,15 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 #define COMPOSITOR_GLASS_MARGIN 3 // the blocks kept round a window: what the rise reads past its edge
 
 // The tint of a pixel already made more vivid (compositor_vivid), so a caller holding that value does not boost it again.
+// The tint of count boosted pixels into into, for a window of the side given: memory_tint_u32 with the glass's mix
+// toward the side's colour, and the brightest capped (dark glass) or the dimmest raised (light glass).
+static void compositor_glass_tone_span(unsigned int *into, const unsigned int *from, positive count, unsigned int side)
+{
+        memory_tint_u32(into, from, count, side ? 0xffffffu : 0, COMPOSITOR_GLASS_TINT, side ? 255 : COMPOSITOR_GLASS_DARKEST,
+                        side ? COMPOSITOR_GLASS_LIGHTEST : 0);
+}
+
+// One pixel stays in C, as compositor_vivid does: the library call is the loss at this length (see there).
 static unsigned int compositor_glass_tone(unsigned int boosted, unsigned int side)
 {
         unsigned int pixel = window_mix(boosted, side ? 0xffffffu : 0, COMPOSITOR_GLASS_TINT);
@@ -3916,17 +3926,21 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                         compositor_glass_drop(row);
                                         continue;
                                 }
+                                // Each row of the changed cells: boosted in one call, its sums moved cell by cell (the one boost of
+                                // each cell), and tinted from the boost in another. The boosts wait in the tinted row until it is written.
                                 for (int by = by0; by < by1; by++)
-                                        for (int bx = bx0; bx < bx1; bx++)
-                                        {
-                                                long cell = (long)(by - blocks[1]) * blocks[2] + (bx - blocks[0]);
-                                                unsigned int now = compositor_vivid(compositor.backdrop[row][cell]);
+                                {
+                                        long first = (long)(by - blocks[1]) * blocks[2] + (bx0 - blocks[0]);
+                                        unsigned int *now = compositor.tinted[row] + first;
 
-                                                // The one boost of the cell: its sum moves, and its tint comes from it.
-                                                compositor_glass_sum_change(compositor.glass_sum[row], compositor.boosted[row][cell], now);
-                                                compositor.boosted[row][cell] = now;
-                                                compositor.tinted[row][cell] = compositor_glass_tone(now, compositor.glass_side[row]);
+                                        memory_saturate_u32(now, compositor.backdrop[row] + first, (positive)(bx1 - bx0));
+                                        for (int bx = 0; bx < bx1 - bx0; bx++)
+                                        {
+                                                compositor_glass_sum_change(compositor.glass_sum[row], compositor.boosted[row][first + bx], now[bx]);
+                                                compositor.boosted[row][first + bx] = now[bx];
                                         }
+                                        compositor_glass_tone_span(now, compositor.boosted[row] + first, (positive)(bx1 - bx0), compositor.glass_side[row]);
+                                }
                                 compositor.blurred += (positive)(bx1 - bx0) * (positive)(by1 - by0);
 
                                 // The pixels those blocks rise into: a block each way past them.
@@ -3937,8 +3951,8 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                 if (compositor_glass_side(row))
                                 {
                                         // Every cell's boosted pixel is current (the sums were kept as the cells changed), so the flip boosts none.
-                                        for (long cell = 0; cell < (long)blocks[2] * blocks[3]; cell++)
-                                                compositor.tinted[row][cell] = compositor_glass_tone(compositor.boosted[row][cell], compositor.glass_side[row]);
+                                        compositor_glass_tone_span(compositor.tinted[row], compositor.boosted[row], (positive)blocks[2] * (positive)blocks[3],
+                                                                   compositor.glass_side[row]);
                                         memory_copy(compositor.dirty[row], box, sizeof(box));
                                 }
                         }
