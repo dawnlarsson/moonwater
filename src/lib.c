@@ -52259,12 +52259,15 @@ __asm__(
     ASM_FUNC(host_into)
     "mv t6, a0  # where it started\n"
     "li t0, 24  # shift down to this octet\n"
-    "1:  srl t1, a1, t0\n   andi t1, t1, 255\n   li t2, 100\n   bltu t1, t2, 2f\n   li t3, 41\n   mul t3, t1, t3\n   srli t3, t3, 12  # hundreds\n"
-    "addi t4, t3, 48\n   sb t4, 0(a0)\n   addi a0, a0, 1\n   li t4, 100\n   mul t3, t3, t4\n   sub t1, t1, t3\n   j 3f  # having written a hundreds digit, the tens is written too\n"
-    "2:  li t2, 10\n   bltu t1, t2, 4f\n"
-    "3:  li t3, 205\n   mul t3, t1, t3\n   srli t3, t3, 11  # tens\n"
-    "addi t4, t3, 48\n   sb t4, 0(a0)\n   addi a0, a0, 1\n   li t4, 10\n   mul t3, t3, t4\n   sub t1, t1, t3\n"
-    "4:  addi t1, t1, 48\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   beqz t0, 5f\n   li t1, 46\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, -8\n   j 1b\n"
+    // The constants are loaded once a call, into argument registers (free
+    // to clobber, as the caller saves them): 100, 10, 41, 205 and the dot.
+    "li a2, 100\n   li a3, 10\n   li a4, 41\n   li a5, 205\n   li a6, 46\n"
+    "1:  srl t1, a1, t0\n   andi t1, t1, 255\n   bltu t1, a2, 2f\n   mul t3, t1, a4\n   srli t3, t3, 12  # hundreds\n"
+    "addi t4, t3, 48\n   sb t4, 0(a0)\n   addi a0, a0, 1\n   mul t3, t3, a2\n   sub t1, t1, t3\n   j 3f  # having written a hundreds digit, the tens is written too\n"
+    "2:  bltu t1, a3, 4f\n"
+    "3:  mul t3, t1, a5\n   srli t3, t3, 11  # tens\n"
+    "addi t4, t3, 48\n   sb t4, 0(a0)\n   addi a0, a0, 1\n   mul t3, t3, a3\n   sub t1, t1, t3\n"
+    "4:  addi t1, t1, 48\n   sb t1, 0(a0)\n   addi a0, a0, 1\n   beqz t0, 5f\n   sb a6, 0(a0)\n   addi a0, a0, 1\n   addi t0, t0, -8\n   j 1b\n"
     "5:  sub a0, a0, t6\n" ASM_RET
     ASM_END(host_into)
 );
