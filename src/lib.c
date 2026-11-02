@@ -52071,15 +52071,17 @@ __asm__(
     //
     //       The IMAFD floor promises neither unaligned word accesses nor
     //       Zbb's rev8, so packet fields are assembled a byte at a time. The
-    //       final addiw gives a p32 return the canonical ABI sign extension.
+    //       first byte is loaded signed, so its shift carries bit 31 into the
+    //       bits above it, which is the canonical sign extension a p32 return
+    //       wants without a final addiw.
     //
     ASM_FUNC(network_load_16)
     "lbu t0, 0(a0)\n   lbu t1, 1(a0)\n   slli a0, t0, 8\n   or a0, a0, t1\n" ASM_RET
     ASM_END(network_load_16)
 
     ASM_FUNC(network_load_32)
-    "lbu t0, 0(a0)\n   lbu t1, 1(a0)\n   lbu t2, 2(a0)\n   lbu t3, 3(a0)\n   slli t0, t0, 24\n   slli t1, t1, 16\n   slli t2, t2, 8\n"
-    "or a0, t0, t1\n   or a0, a0, t2\n   or a0, a0, t3\n   addiw a0, a0, 0\n" ASM_RET
+    "lb t0, 0(a0)\n   lbu t1, 1(a0)\n   lbu t2, 2(a0)\n   lbu t3, 3(a0)\n   slli t0, t0, 24\n   slli t1, t1, 16\n   slli t2, t2, 8\n"
+    "or a0, t0, t1\n   or a0, a0, t2\n   or a0, a0, t3\n" ASM_RET
     ASM_END(network_load_32)
 
     ASM_FUNC(network_store_16)

@@ -57934,6 +57934,24 @@ static fn byte_order(void)
                 check("network_store_32 fourth byte", wire[offset + 3] == 0xdc);
                 check("network_load_32", network_load_32(wire + offset) == 0x81fe23dcu);
         }
+
+        /* Every first byte, sign bit included, at every start residue that
+           matters to the byte-wise assembly: the value is the four bytes in
+           order, whichever of them has the top bit. */
+        for (positive first = 0; first < 256; first++)
+                for (positive offset = 0; offset < 4; offset++)
+                {
+                        p8 wire[12];
+                        unsigned int want = ((unsigned int)first << 24) | 0x003ca96eu;
+
+                        memory_fill(wire, 0xa5, sizeof wire);
+                        wire[offset] = (p8)first;
+                        wire[offset + 1] = 0x3c;
+                        wire[offset + 2] = 0xa9;
+                        wire[offset + 3] = 0x6e;
+                        check("network_load_32 every first byte",
+                              network_load_32(wire + offset) == want);
+                }
 }
 
 /*
