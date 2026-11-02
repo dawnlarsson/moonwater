@@ -132882,6 +132882,39 @@ static fn field_picture(struct ui address_to wui, struct ui_text address_to t, u
         memory_copy(into, wui->pixels, 400 * 100 * sizeof(unsigned int));
 }
 
+/*
+        The touch selection of a field: a finger that lands and is held still is a long press (the compositor cancels the
+        press, then sends the right button flagged WINDOW_KEY_HOLD). It selects the word under it, the moves after it extend
+        the selection by words, and the lift ends it, keeping the selection. A short tap is only a caret, and a long press's
+        right button is no menu (a mouse's right button still asks for one, which field_check holds).
+*/
+static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t)
+{
+        const unsigned int touch = WINDOW_KEY_TOUCH, hold = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD;
+        const unsigned int cancel = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD | WINDOW_KEY_CANCEL;
+        int y, beta, gamma;
+        p32 asks;
+
+        ui_text_set(t, (const p8 address_to) "alpha beta gamma", 16);
+        doc_select_set(&t->doc, 0, 0);
+        ui_text_draw(wui, t, 20, 20, 300, 30, 0);
+        y = t->top + t->line_height / 2;
+        beta = field_x(wui, t, 6), gamma = field_x(wui, t, 13);
+        field_button(wui, t, 0x110, true, beta + 1, y, touch);
+        field_button(wui, t, 0x110, false, beta + 1, y, touch);
+        check("touch: a short tap is a caret, not a selection", field_selected(t, 6, 6));
+        field_button(wui, t, 0x110, true, beta + 1, y, touch);
+        field_button(wui, t, 0x110, false, beta + 1, y, cancel);
+        asks = field_button(wui, t, 0x111, true, beta + 1, y, hold);
+        check("touch: a long press selects the word under the finger, and its right button is no menu",
+              field_selected(t, 6, 10) && !(asks & UI_TEXT_MENU));
+        field_button(wui, t, 0x111, false, beta + 1, y, hold);
+        asks = ui_field_event(wui, t, null, &(struct window_event){WINDOW_EVENT_MOTION, touch, gamma + 1, y}, gamma + 1, y);
+        check("touch: a drag after a long press extends the selection by words", field_selected(t, 6, 16));
+        asks = field_button(wui, t, 0x110, false, gamma + 1, y, cancel);
+        check("touch: the lift ends the drag and keeps the selection", (asks & UI_TEXT_MOVED) && field_selected(t, 6, 16) && !t->dragging);
+}
+
 static fn field_check(struct ui address_to wui)
 {
         static struct ui_text t;
@@ -133222,6 +133255,8 @@ static fn field_check(struct ui address_to wui)
                 check("field: the right button asks for the menu", field_button(wui, &t, 0x111, true, beta + 1, y, 0) & UI_TEXT_MENU);
                 check("field: the wheel is never a field's", !ui_field_event(wui, &t, null, &(struct window_event){WINDOW_EVENT_WHEEL, 0, -120, 0}, beta, y));
         }
+
+        touch_hold_check(wui, &t);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {

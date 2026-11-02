@@ -7550,6 +7550,7 @@ struct ui_text
         int clicks, click_x, click_y;
         positive click_at;
         b32 dragging, drag_box, touch;
+        b32 holding;                            // a finger's long press holds the selection (ui_text_hold) until its lift
         int drag_kind;                          // 1 characters, 2 words, 3 lines
         p64 drag_start, drag_end;
         p64 box_line, box_column;
@@ -8264,6 +8265,26 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
         The pointer and the wheel. x and y are the window's device pixels; the widget's box is where it was last drawn.
         Answers what changed, and UI_TEXT_MENU for the right button (menu_x and menu_y say where).
 */
+// A finger's long press (the compositor's right button, WINDOW_KEY_HOLD): the word under it is selected, and the drag after it
+// is by words from there (drag_kind 2) until the lift. A masked field has no words, so its whole text is taken, as a double
+// click takes it.
+static p32 ui_text_hold(struct ui address_to ui, struct ui_text address_to t, int x, int y)
+{
+        p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
+
+        if (t->masked)
+                start = 0, finish = doc_length(&t->doc);
+        else
+                doc_word_at(&t->doc, at, &start, &finish);
+        ui_drag_stop(&t->kinetic);
+        doc_select_set(&t->doc, start, finish);
+        t->touch = false, t->holding = true, t->dragging = true, t->drag_box = false;
+        t->drag_kind = 2, t->drag_start = start, t->drag_end = finish;
+        ui_text_reveal(ui, t);
+        ui_text_wake(t);
+        return UI_TEXT_MOVED;
+}
+
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
         b32 inside = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
@@ -8290,6 +8311,22 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         {
                 b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
 
+                // A finger held still (the compositor's long press): its right button selects the word under it, and the moves
+                // after it extend the selection by words. The press's own cancel comes before that button and is no lift; the
+                // left release after it is the lift, which ends the drag and keeps the selection.
+                if (event->a == 0x111 && (event->flags & WINDOW_KEY_HOLD))
+                        return down && inside ? ui_text_hold(ui, t, x, y) : 0;
+                if (event->a == 0x110 && (event->flags & WINDOW_KEY_HOLD) && !down)
+                {
+                        b32 lifted = t->dragging && t->holding;
+
+                        t->dragging = t->holding = false;
+                        if (!lifted)
+                                return 0;
+                        if (doc_any_selected(&t->doc))
+                                ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
+                        return UI_TEXT_MOVED;
+                }
                 if (!down)
                 {
                         b32 was = t->dragging;
