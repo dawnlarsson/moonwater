@@ -9,10 +9,12 @@
         window is glass (WINDOW_GLASS): the screen is frosted behind it and the number is drawn in the ink that stands out
         from that glass. It has no close button and no tab (WINDOW_NO_CLOSE, WINDOW_NO_TAB), and it is placed by the
         compositor's own placement, fullscreen on its screen (WINDOW_PLACE_FULLSCREEN with WINDOW_PLACE_SCREEN), so it
-        covers the screen, the taskbar too, and is on top as a window is when it first shows. It does not take the keys.
+        covers the screen, the taskbar too, and is on top as a window is when it first shows. It asks for no keys, and
+        Alt-Tab and the refocus pass over it (compositor_cycles), so it normally has none.
 
-        It goes away after IDENTIFY_SECONDS, or at once when its screen is pressed (any button) or a key goes down while it
-        holds the keys. Each screen's window goes on its own: a press on one leaves the others for the rest of their time.
+        It goes away after IDENTIFY_SECONDS, or at once when its screen is pressed (any button), or when a key goes down
+        while it has the keys (should it have them). Each screen's window goes on its own: a press on one leaves the
+        others for the rest of their time.
 */
 #ifndef MOONWATER_CANVAS_IDENTIFY
 #define MOONWATER_CANVAS_IDENTIFY
