@@ -11941,6 +11941,23 @@ test(bit_counting_noise_around_the_bit) {
         return true;
 }
 
+test(bit_counting_rounding_at_the_top) {
+        //      The exponent bodies convert the word to a double, rounding
+        //      toward zero. The words that sit just under a power of two,
+        //      or just under the top of the 64 bit range, are where a round
+        //      up would move the exponent, so each is checked against the
+        //      reference in every routine.
+        positive edges[] = {~0ULL, ~0ULL << 1, ~0ULL << 11, 0xfffffffffffff800ULL,
+                            0x7ffffffffffffc00ULL, 0xfffffffffffffffeULL,
+                            0x8000000000000001ULL, (1ULL << 53) - 1,
+                            (1ULL << 53) + 1, (1ULL << 54) - 1};
+
+        for (positive at = 0; at < sizeof(edges) / sizeof(*edges); at++)
+                fail(bit_test_all(edges[at]));
+
+        return true;
+}
+
 test(bit_counting_every_sixteen_bit_word) {
         for (positive at = 0; at < 65536; at++) {
                 fail(bit_test_all(at));
@@ -13791,6 +13808,7 @@ test_case test_cases[] = {
         case(bit_counting_defined_at_zero),
         case(bit_counting_single_bits),
         case(bit_counting_noise_around_the_bit),
+        case(bit_counting_rounding_at_the_top),
         case(bit_counting_every_sixteen_bit_word),
         case(bit_counting_patterns_and_random_words),
         case(decimal_truncated_sweep),

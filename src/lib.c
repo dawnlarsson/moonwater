@@ -55506,8 +55506,24 @@ __asm__(
     //       answer this is defined to give, arrived at rather than tested
     //       for.
     //
+    //
+    //       Outside the kernel the count is the exponent of a double, which
+    //       is the cheaper way to read a position on this baseline. x & -x
+    //       is one bit or nothing, and converting one bit to a double is
+    //       exact: its exponent field is 1023 plus the position. Zero
+    //       converts to 0.0, whose field is zero, so zero reads as minus
+    //       1023 and is masked to the 64 it is defined to give. Eleven
+    //       instructions where the popcount route took twenty six; the
+    //       kernel keeps the integer route, because it may not touch the
+    //       floating point registers.
+    //
     ASM_FUNC(bits_trailing_zeros)
+#ifndef KERNEL_MODE
+    "neg t0, a0\n   and t0, a0, t0\n   fcvt.d.lu ft0, t0, rtz\n   fmv.x.d t1, ft0\n   srli t1, t1, 52\n   addi t2, t1, -1023\n"
+    "seqz t3, t1\n   addi t4, t3, -1\n   and t2, t2, t4\n   slli t3, t3, 6\n   or a0, t2, t3\n" ASM_RET
+#else
     "neg t0, a0\n   and a0, a0, t0\n   addi a0, a0, -1\n   j bits_counted\n"
+#endif
     ASM_END(bits_trailing_zeros)
 
     //
@@ -55517,9 +55533,23 @@ __asm__(
     //       the ones to be counted. Zero smears to zero and complements to
     //       the whole word, so it counts 64 the same way.
     //
+    //
+    //       The exponent route again, with the rounding named. Converting
+    //       the word to a double rounding toward zero never carries into the
+    //       next power of two, so the exponent field is 1023 plus the
+    //       position of the highest bit, and the count of leading zeros is
+    //       1086 less that field. Zero reads as 1086 and is masked to 64.
+    //       Ten instructions where the smear and the popcount took
+    //       thirty six. The kernel keeps the smear.
+    //
     ASM_FUNC(bits_leading_zeros)
+#ifndef KERNEL_MODE
+    "fcvt.d.lu ft0, a0, rtz\n   fmv.x.d t1, ft0\n   srli t1, t1, 52\n   li t2, 1086\n   sub t2, t2, t1\n"
+    "seqz t3, t1\n   addi t4, t3, -1\n   and t2, t2, t4\n   slli t3, t3, 6\n   or a0, t2, t3\n" ASM_RET
+#else
     "srli t0, a0, 1\n   or a0, a0, t0\n   srli t0, a0, 2\n   or a0, a0, t0\n   srli t0, a0, 4\n   or a0, a0, t0\n   srli t0, a0, 8\n   or a0, a0, t0\n   srli t0, a0, 16\n   or a0, a0, t0\n"
     "srli t0, a0, 32\n   or a0, a0, t0\n   not a0, a0\n   j bits_counted\n"
+#endif
     ASM_END(bits_leading_zeros)
 
     //
@@ -55539,12 +55569,29 @@ __asm__(
     //       sits above the low thirty two, so it can never be the lowest
     //       one. A zero int extends to a zero word, and answers zero.
     //
+    //
+    //       Outside the kernel, the lowest bit's exponent gives the answer
+    //       directly, as it does for the trailing zeros above: one plus the
+    //       position is the field less 1022, and zero reads as zero, which
+    //       the sign-spread of "was anything set" masks in. Nine
+    //       instructions where the borrow route took twenty eight.
+    //
     ASM_FUNC(bits_first_set)
+#ifndef KERNEL_MODE
+    "neg t0, a0\n   and t0, a0, t0\n   fcvt.d.lu ft0, t0, rtz\n   fmv.x.d t1, ft0\n   srli t1, t1, 52\n   addi t2, t1, -1022\n"
+    "snez t3, t1\n   neg t3, t3\n   and a0, t2, t3\n" ASM_RET
+#else
     "snez t0, a0\n   neg t0, t0\n   addi t1, a0, -1\n   xor a0, a0, t1\n   and a0, a0, t0\n   j bits_counted\n"
+#endif
     ASM_END(bits_first_set)
 
     ASM_FUNC(bits_first_set_wide)
+#ifndef KERNEL_MODE
+    "neg t0, a0\n   and t0, a0, t0\n   fcvt.d.lu ft0, t0, rtz\n   fmv.x.d t1, ft0\n   srli t1, t1, 52\n   addi t2, t1, -1022\n"
+    "snez t3, t1\n   neg t3, t3\n   and a0, t2, t3\n" ASM_RET
+#else
     "snez t0, a0\n   neg t0, t0\n   addi t1, a0, -1\n   xor a0, a0, t1\n   and a0, a0, t0\n   j bits_counted\n"
+#endif
     ASM_END(bits_first_set_wide)
 
     // ------------------------------------------------------------
