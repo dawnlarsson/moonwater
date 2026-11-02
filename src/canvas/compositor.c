@@ -868,32 +868,140 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 
 static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
 
+// A run of the tint's colour and cover, as long as the row routine takes them at a time (compositor_mix_run).
+#define COMPOSITOR_TINT_RUN 256
+
+// The pixels the snap preview's tints were made over, all of them since the start: what a drag over a target costs.
+unsigned long compositor_tint_pixels;
+
+/*
+        A run of a row mixed with one ink: memory_mix_u32_row over it with the colour and cover runs made once for the tint
+        (compositor_tint), which is the same pixels as compositor_mix per pixel. A cover of 0 or 255 is the pixel rule
+        itself (compositor_mix's clear and its whole ink), which the row routine does not take, so those are per pixel.
+*/
+static void compositor_mix_run(unsigned int *pixels, long count, unsigned int ink, const unsigned int *colour,
+                               const unsigned char *cover)
+{
+        if ((ink >> 24) == 0 || (ink >> 24) >= 255)
+        {
+                for (long at = 0; at < count; at++)
+                        pixels[at] = compositor_mix(pixels[at], ink & 0xffffffu, ink >> 24);
+                return;
+        }
+        for (long done = 0; done < count; done += COMPOSITOR_TINT_RUN)
+        {
+                long n = count - done < COMPOSITOR_TINT_RUN ? count - done : COMPOSITOR_TINT_RUN;
+
+                memory_mix_u32_row(pixels + done, colour, cover, (positive)n);
+        }
+}
+
+/*
+        A window's line and round corners drawn again over a tint: its outline less its contents' cross (the pixels
+        compositor_tint leaves alone, which hold its contents already), as eight rectangles that meet at no pixel, so each
+        pixel is drawn once and a corner is mixed once. The line is four bands, the corners' squares are the ri of the
+        radius past the line; a square window, or one with no line, has none.
+*/
+static void compositor_draw_ring(const struct compositor_target *cell, const struct compositor_frame *f, int r)
+{
+        int ox, oy, ow, oh, line, ri, x = f->x, y = f->y, w = f->width, h = f->height;
+        int rects[8][4];
+
+        compositor_outline(f, &ox, &oy, &ow, &oh);
+        line = x - ox;
+        ri = r > line ? r - line : 0;
+        int top[4] = {ox, oy, ow, y - oy}, bottom[4] = {ox, y + h, ow, oy + oh - (y + h)}, left[4] = {ox, y, x - ox, h},
+            right[4] = {x + w, y, ox + ow - (x + w), h};
+        memory_copy(rects[0], top, sizeof(top));
+        memory_copy(rects[1], bottom, sizeof(bottom));
+        memory_copy(rects[2], left, sizeof(left));
+        memory_copy(rects[3], right, sizeof(right));
+        int corners[4][4] = {{x, y, ri, ri}, {x + w - ri, y, ri, ri}, {x, y + h - ri, ri, ri}, {x + w - ri, y + h - ri, ri, ri}};
+        memory_copy(rects[4], corners, sizeof(corners));
+        for (int at = 0; at < 8; at++)
+        {
+                struct compositor_target part;
+
+                if (rects[at][2] <= 0 || rects[at][3] <= 0)
+                        continue;
+                part = compositor_clipped(cell, rects[at][0], rects[at][1], rects[at][2], rects[at][3]);
+                if (part.x2 > part.x1 && part.y2 > part.y1)
+                        compositor_draw_with(&part, f, r);
+        }
+}
+
 /*
         A tint over a rectangle of the scene, at the ink's own alpha (its top byte), cut to the band being drawn; then
         the frames from `from` up drawn again over it, so what is over the tint is as it is and the tint shows only
-        where none of them is. Run after the scene is composed, so what the tint is over is final.
+        where none of them is. Run after the scene is composed, so what the tint is over is final. Under is the snap
+        preview of frames[from], the window it belongs to: its own contents are copied over the tint, so the tint is not
+        made where they are (the cross compositor_draw_with copies), and the pixels are the same as with it made.
 */
 static void compositor_tint(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count,
-                            const int *radii, const int *rect, unsigned int ink, unsigned int from)
+                            const int *radii, const int *rect, unsigned int ink, unsigned int from, int under)
 {
+        const struct compositor_frame *owner = under && from < count && !frames[from].builtin ? &frames[from] : 0;
         struct compositor_target cell;
+        unsigned int colour[COMPOSITOR_TINT_RUN];
+        unsigned char cover[COMPOSITOR_TINT_RUN];
+        unsigned long made = 0;
+        int line = 0, ri = 0;
 
         if (rect[2] <= 0 || rect[3] <= 0)
                 return;
         cell = compositor_clipped(t, rect[0], rect[1], rect[2], rect[3]);
         if (cell.x2 <= cell.x1 || cell.y2 <= cell.y1)
                 return;
-        for (int py = cell.y1; py < cell.y2; py++)
-                for (int px = cell.x1; px < cell.x2; px++)
-                {
-                        unsigned int *pixel = cell.pixels + (unsigned long)(py - cell.oy) * cell.pitch + (unsigned long)(px - cell.ox);
+        memory_fill_u32(colour, COMPOSITOR_TINT_RUN, ink & 0xffffffu);
+        memory_fill(cover, (int)(ink >> 24), COMPOSITOR_TINT_RUN);
+        // The contents are the frame less its line, and less the round corners' squares of the radius past the line.
+        if (owner)
+        {
+                int ox, oy, ow, oh;
 
-                        *pixel = compositor_mix(*pixel, ink & 0xffffffu, ink >> 24);
+                compositor_outline(owner, &ox, &oy, &ow, &oh);
+                line = owner->x - ox;
+                ri = radii[from] > line ? radii[from] - line : 0;
+        }
+        for (int py = cell.y1; py < cell.y2; py++)
+        {
+                // The columns [hide_from, hide_to) of this row are the owner's contents: the tint is made left and right of them.
+                int hide_from = cell.x2, hide_to = cell.x2, lo, hi;
+                unsigned int *at = cell.pixels + (unsigned long)(py - cell.oy) * cell.pitch + (unsigned long)(cell.x1 - cell.ox);
+
+                if (owner && py >= owner->y && py < owner->y + owner->height)
+                {
+                        int inside = py >= owner->y + ri && py < owner->y + owner->height - ri;
+
+                        hide_from = inside ? owner->x : owner->x + ri;
+                        hide_to = inside ? owner->x + owner->width : owner->x + owner->width - ri;
+                        if (hide_to <= hide_from)
+                                hide_from = hide_to = cell.x2;
                 }
+                lo = hide_from < cell.x2 ? hide_from : cell.x2;
+                hi = hide_to > cell.x1 ? hide_to : cell.x1;
+                if (lo > cell.x1)
+                {
+                        compositor_mix_run(at, lo - cell.x1, ink, colour, cover);
+                        made += (unsigned long)(lo - cell.x1);
+                }
+                if (hi < cell.x2)
+                {
+                        compositor_mix_run(at + (hi - cell.x1), cell.x2 - hi, ink, colour, cover);
+                        made += (unsigned long)(cell.x2 - hi);
+                }
+        }
+        // The bands of a scene are drawn on threads of their own: each adds its own, once.
+        __atomic_fetch_add(&compositor_tint_pixels, made, __ATOMIC_RELAXED);
         for (unsigned int each = from; each < count; each++)
         {
                 int x, y, width, height;
 
+                if (owner && each == from)
+                {
+                        compositor_draw_ring(&cell, owner, radii[from]);
+                        continue;
+                }
                 compositor_outline(&frames[each], &x, &y, &width, &height);
                 if (x < cell.x2 && x + width > cell.x1 && y < cell.y2 && y + height > cell.y1)
                         compositor_draw_with(&cell, &frames[each], radii[each]);
@@ -909,9 +1017,9 @@ static void compositor_preview_draw(const struct compositor_target *t, const str
                                     const int *radii)
 {
         for (unsigned int at = 0; at < count; at++)
-                compositor_tint(t, frames, count, radii, frames[at].preview, frames[at].preview_ink, at);
+                compositor_tint(t, frames, count, radii, frames[at].preview, frames[at].preview_ink, at, 1);
         for (unsigned int at = 0; at < count; at++)
-                compositor_tint(t, frames, count, radii, frames[at].mark, frames[at].mark_ink, at + 1);
+                compositor_tint(t, frames, count, radii, frames[at].mark, frames[at].mark_ink, at + 1, 0);
 }
 
 // Every frame's radius, as compositor_radius gives it: made once for the frames of a damage, and read by every band of it.

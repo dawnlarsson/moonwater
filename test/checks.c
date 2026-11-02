@@ -118073,6 +118073,182 @@ static void check_compositor_preview(void)
 }
 
 /*
+        A snap preview held over its target costs what the drag costs. Over the window dragged the tint is made only where
+        the window does not cover it: its contents are copied over the tint, so those pixels are not tinted at all, and the
+        rest are the pixels the whole tint and redraw made (checked against that reference, over a rounded window with a
+        line, a square one and one with neither, inks at a cover of 0, 255 and between, and a window above). The pointer
+        stopped is idle: once presented nothing is damaged, and a target held is damaged once, and only it.
+*/
+#define HELD_W 96
+#define HELD_H 64
+#define HELD_OUT_W 640
+#define HELD_OUT_H 400
+static void check_compositor_preview_held(void)
+{
+    static unsigned int pixels[HELD_W * HELD_H], want[HELD_W * HELD_H], wall[HELD_W * HELD_H];
+    static unsigned int window[40 * 30], above[12 * 10];
+    struct compositor_target t = {pixels, HELD_W, HELD_W, HELD_H, 0, 0, HELD_W, HELD_H, 0, 0, 0};
+    struct compositor_target reference = {want, HELD_W, HELD_W, HELD_H, 0, 0, HELD_W, HELD_H, 0, 0, 0};
+    const unsigned int inks[4] = {0x40ffffffu, 0x00102030u, 0xff102030u, 0x9f0a0b0cu};
+    struct compositor_frame frames[3], plain[3];
+    int radii[3];
+    unsigned int wrong = 0;
+    unsigned long counted = 0, expected = 0;
+
+    for (unsigned int at = 0; at < HELD_W * HELD_H; at++)
+        wall[at] = at * 2654435761u;
+    for (unsigned int at = 0; at < 40 * 30; at++)
+        window[at] = 0xc06020u + at;
+    for (unsigned int at = 0; at < 12 * 10; at++)
+        above[at] = 0x204080u;
+    for (int config = 0; config < 3; config++)
+        for (int k = 0; k < 4; k++)
+        {
+            const unsigned int ink = inks[k];
+            const int line = config == 2 ? 0 : 4, x = 20, y = 12, w = 40, h = 30;
+            unsigned long before;
+
+            frames[0] = (struct compositor_frame){.x = 0, .y = 0, .width = HELD_W, .height = HELD_H, .scale = 1, .pixels = wall, .pitch = HELD_W};
+            frames[1] = (struct compositor_frame){.x = x, .y = y, .width = w, .height = h, .scale = 1, .pixels = window, .pitch = 40,
+                                                  .radius = config == 2 ? 0 : 10, .line = line, .edge = 0x335577u,
+                                                  .square = config == 1 ? 15 : 0, .preview = {0, 0, 48, 32}, .preview_ink = ink};
+            frames[2] = (struct compositor_frame){.x = 30, .y = 20, .width = 12, .height = 10, .scale = 1, .pixels = above, .pitch = 12};
+            memory_copy(plain, frames, sizeof(frames));
+            plain[1].preview[2] = 0;
+
+            // The reference: the scene with no tint, the whole target tinted per pixel, then the window and the one over it drawn over it.
+            memory_copy(want, wall, sizeof(wall));
+            compositor_scene(&reference, plain, 3);
+            for (int py = 0; py < 32; py++)
+                for (int px = 0; px < 48; px++)
+                    want[py * HELD_W + px] = compositor_mix(want[py * HELD_W + px], ink & 0xffffffu, ink >> 24);
+            {
+                struct compositor_target cell = compositor_clipped(&reference, 0, 0, 48, 32);
+
+                compositor_radii(plain, 3, radii);
+                for (unsigned int each = 1; each < 3; each++)
+                    compositor_draw_with(&cell, &plain[each], radii[each]);
+            }
+
+            memory_copy(pixels, wall, sizeof(wall));
+            before = compositor_tint_pixels;
+            compositor_scene(&t, frames, 3);
+            counted += compositor_tint_pixels - before;
+            for (unsigned int at = 0; at < HELD_W * HELD_H; at++)
+                wrong += pixels[at] != want[at];
+
+            compositor_radii(frames, 3, radii);
+            {
+                int ri = radii[1] > line ? radii[1] - line : 0;
+
+                for (int py = 0; py < 32; py++)
+                    for (int px = 0; px < 48; px++)
+                    {
+                        int cross = (py >= y && py < y + h && px >= x + ri && px < x + w - ri) ||
+                                    (py >= y + ri && py < y + h - ri && px >= x && px < x + w);
+
+                        expected += !cross;
+                    }
+            }
+        }
+    check("preview held: over a window the tint and redraw leave the same pixels as the whole tint, at every ink and corner",
+          wrong == 0);
+    check("preview held: a window over its target tints only the pixels it does not cover",
+          counted == expected && expected > 0);
+
+    // The pointer goes onto the top-left quarter of a dragged window's output and stops there.
+    {
+        static unsigned int scanout[HELD_OUT_W * HELD_OUT_H];
+        unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+        unsigned long buffer = ((unsigned long)HELD_OUT_W * HELD_OUT_H * 4 + 4095) & ~4095ul;
+        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+        struct windows address_to table;
+        int target[4];
+
+        if (mapped < 0 && mapped > -4096)
+        {
+            check("preview held: the table is mapped", false);
+            return;
+        }
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.preview_row = COMPOSITOR_NONE;
+        compositor.mark_row = compositor.mark_with = compositor.shared_row = COMPOSITOR_NONE;
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+        compositor.width = HELD_OUT_W;
+        compositor.height = HELD_OUT_H;
+        compositor.scale = 1;
+        compositor.card = -1;
+        compositor.scanout = scanout;
+        compositor.scanout_pitch = HELD_OUT_W * 4;
+        compositor.outputs = 1;
+        compositor.screen[0][2] = HELD_OUT_W, compositor.screen[0][3] = HELD_OUT_H;
+        compositor.stride = compositor.most_w = HELD_OUT_W;
+        compositor.room_h = compositor.most_h = HELD_OUT_H;
+        table = compositor.table = (struct windows address_to)mapped;
+        table->motion = 1;
+        compositor.pixels = table->pixels = header;
+        compositor.buffer = table->buffer = buffer;
+        table->stride = HELD_OUT_W;
+        table->output_width = HELD_OUT_W;
+        table->output_height = HELD_OUT_H;
+
+        // Row 2 is shown at 200 by 140, floating, and dragged by its own offset, so the window stays where it is.
+        {
+            unsigned int address_to pixels = windows_buffer(table, 2, 0);
+
+            table->pid[2] = 2;
+            table->x[2] = 60, table->y[2] = 50, table->width[2] = 200, table->height[2] = 140;
+            for (unsigned int y = 0; y < 140; y++)
+                for (unsigned int x = 0; x < 200; x++)
+                    pixels[y * HELD_OUT_W + x] = 0x203040u;
+            memory_copy(table->title[2], "held", 5);
+            table->buffer_index[2] = 0;
+            table->damage_width[2] = 0;
+            table->damage_height[2] = 140;
+            table->frame[2] = 1;
+            compositor.showing[2] = 1;
+            compositor.stack[0] = 2, compositor.stacked = 1;
+            compositor.x[2] = 60, compositor.y[2] = 50, compositor.w[2] = 200, compositor.h[2] = 140;
+            compositor_take(2);
+        }
+        compositor_damage(0, 0, HELD_OUT_W, HELD_OUT_H);
+        compositor_present();
+
+        compositor.drag = 2;
+        compositor.drag_moved = 1;
+        compositor.button_down = 1;
+        compositor.button_row[0] = 2;
+        compositor.drag_x = 300 - 60, compositor.drag_y = 300 - 50;
+        compositor.pointer_x = 300, compositor.pointer_y = 300;
+        compositor_motion();
+        compositor_present();
+        check("preview held: the window dragged off every target shows none, and the pointer's stop is idle",
+              compositor.preview[2] == 0 && compositor.damages == 0);
+
+        // The pointer moves onto the top-left quarter: that quarter is damaged, and nothing else is.
+        compositor.pointer_x = 2, compositor.pointer_y = 2;
+        compositor.drag_x = 2 - 60, compositor.drag_y = 2 - 50;
+        compositor_preview(2);
+        target[0] = 0, target[1] = 0, target[2] = HELD_OUT_W / 2, target[3] = HELD_OUT_H / 2;
+        check("preview held: a target entered is damaged as its own rectangle, and no other",
+              compositor.damages == 1 && compositor.damage[0][0] == target[0] && compositor.damage[0][1] == target[1] &&
+                  compositor.damage[0][2] == target[0] + target[2] && compositor.damage[0][3] == target[1] + target[3] &&
+                  compositor.preview[2] == target[2]);
+        compositor_preview(2);
+        check("preview held: the pointer held still over the target damages nothing more", compositor.damages == 1);
+
+        // The frame loop: present what is damaged, then nothing is damaged again while the pointer stays put.
+        compositor_present();
+        compositor_land_keep();
+        check("preview held: once presented, with the pointer still on the target, the compositor has nothing to do",
+              compositor.damages == 0 && compositor.preview[2] == target[2] && compositor.preview_row == 2);
+        compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+        memory_zero(&compositor, sizeof(compositor));
+    }
+}
+
+/*
         A shared edge: two windows that meet edge to edge with the same extent take a press on the middle half of their
         edge as one resize, one grown as the other shrinks and both still meeting. The indicator is a tint across that
         middle half and nowhere else. An edge that does not meet exactly, a press off the middle, and a corner are the
@@ -132923,6 +133099,7 @@ b32 main()
         check_compositor_held();
         check_compositor_screens();
         check_compositor_preview();
+        check_compositor_preview_held();
         check_compositor_shared();
         check_compositor_cycle();
         check_compositor_hover();
