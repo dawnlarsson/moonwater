@@ -22741,6 +22741,16 @@ def counts(name):
 
 until(lambda: len(pids("terminal")) == 1, 60)
 time.sleep(2)
+#   U1.0 is the running terminal, with no key pressed after the change: its paper is the theme's, as the gallery's is.
+shell.run("moonwater canvas theme default", 10)
+time.sleep(3)
+term_light0, term_dark0, _, _ = counts("u1-term-dark")
+shell.run("moonwater canvas theme light", 10)
+time.sleep(4)
+term_light1, term_dark1, _, _ = counts("u1-term-light")
+out.append(("U1.0 moonwater canvas theme light turns a running terminal's paper to the light paper, with no key pressed",
+            "yes" if term_light1 > 100000 and term_dark1 < term_dark0 // 4
+            else "%d light, %d dark (was %d)" % (term_light1, term_dark1, term_dark0), "yes"))
 shell.run("moonwater canvas theme default; moonwater canvas theme accent reset", 10)
 opened = shell.run("moonwater settings gallery; echo status $?", 15)[0]
 until(lambda: len(pids("settings")) == 1, 15)
