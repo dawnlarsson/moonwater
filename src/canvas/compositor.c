@@ -2762,6 +2762,28 @@ struct compositor_poll
 #define COMPOSITOR_TOUCH_HOLD_NS 400000000ull
 #define COMPOSITOR_TOUCH_TAP_NS 400000000ull
 #define COMPOSITOR_TOUCH_WHEEL 48
+/*
+        The prediction a frame ahead, per class: the mouse, a touch screen's fingers, and a tablet or pen. A class's newest two
+        places give its velocity; the place it is shown at (the mouse's cursor) or delivered at (a finger or a pen, to the
+        windows it reaches) is its newest place led by that velocity over one frame, and no further than the cap. A class
+        with no new place for a frame is back on its newest place, so a stop is not carried past the cap.
+*/
+#define COMPOSITOR_PREDICT_MOUSE 0
+#define COMPOSITOR_PREDICT_TOUCH 1
+#define COMPOSITOR_PREDICT_PEN 2
+#define COMPOSITOR_PREDICTS 3
+#define COMPOSITOR_PREDICT_CAP 4                // logical pixels a lead may take a place past its newest
+#define COMPOSITOR_PREDICT_MIN_NS 1000000ull    // two places this close are one batch of reports: no velocity
+#define COMPOSITOR_PREDICT_STALE_NS 50000000ull // two places this far apart are a pause, not a motion: no velocity
+
+struct compositor_predict
+{
+        int x[2], y[2];     // the newest two places the class reported, the newest last
+        positive at[2];     // when each of them was reported
+        unsigned int count; // how many of them are held
+        positive last;      // when the newest was reported (a new place, not a repeat of one)
+        int lead_x, lead_y; // how far ahead of the newest place it is shown or delivered; 0 for none
+};
 // How long a finger's mark fades once it is up.
 #define COMPOSITOR_SPOT_FADE_NS 1000000000ull
 #define COMPOSITOR_STEP 20
@@ -3035,6 +3057,9 @@ static struct
         unsigned char touchscreen[COMPOSITOR_INPUTS];
         struct compositor_touch_screen screen_touch[COMPOSITOR_INPUTS];
         struct compositor_touch touch;
+        // The prediction a frame ahead, per class (COMPOSITOR_PREDICT_*), and the classes `moonwater canvas predict` turned off.
+        struct compositor_predict predict[COMPOSITOR_PREDICTS];
+        unsigned char predict_off[COMPOSITOR_PREDICTS];
         int touching;
         /*
                 The marks of the fingers (`moonwater canvas touch on`, spots_on), one a slot of the touch screen being
@@ -6920,6 +6945,17 @@ static void compositor_cursor_start(void)
         compositor.cursor.handle[1] = dumb[1].handle;
 }
 
+// Where the pointer is drawn: the mouse's lead over the pointer. A finger or a pen is the pointer already, led (predict).
+static int compositor_drawn_x(void)
+{
+        return compositor.pointer_x + compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x;
+}
+
+static int compositor_drawn_y(void)
+{
+        return compositor.pointer_y + compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_y;
+}
+
 static void compositor_cursor_move(void)
 {
         int scale = compositor_cursor_scale();
@@ -6947,8 +6983,8 @@ static void compositor_cursor_move(void)
                 if (compositor.cursor.drawn)
                         compositor_cursor_cell_damage(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape,
                                                       compositor.cursor.drawn_scale);
-                compositor.cursor.x = compositor.pointer_x;
-                compositor.cursor.y = compositor.pointer_y;
+                compositor.cursor.x = compositor_drawn_x();
+                compositor.cursor.y = compositor_drawn_y();
                 compositor.cursor.drawn_shape = shape;
                 compositor.cursor.drawn_scale = scale;
                 compositor.cursor.drawn = 1;
@@ -6970,7 +7006,7 @@ static void compositor_cursor_move(void)
         {
                 int fitted = compositor_cursor_fit(scale), left, top;
 
-                compositor_cursor_cell(&left, &top, compositor.pointer_x, compositor.pointer_y, shape, fitted);
+                compositor_cursor_cell(&left, &top, compositor_drawn_x(), compositor_drawn_y(), shape, fitted);
 
                 if (((int)shape == compositor.cursor.plane_shape && fitted == compositor.cursor.plane_scale) ||
                     compositor_cursor_paint(shape, fitted) == 0)
@@ -7459,6 +7495,7 @@ static void compositor_taskbar_settings_read(void)
 }
 
 static void compositor_touch_settings_read(void);
+static void compositor_predict_read(void);
 
 // Read when the compositor starts and again when a file of them is written.
 static void compositor_input_settings_read(void)
@@ -7472,6 +7509,7 @@ static void compositor_input_settings_read(void)
         compositor_input_settings_set(words[0], words[1], words[2], words[3], words[4], words[5]);
         compositor_taskbar_settings_read();
         compositor_touch_settings_read();
+        compositor_predict_read();
 }
 
 _Static_assert(COMPOSITOR_INPUTS == WINDOWS_INPUTS, "an input slot is a row of the table's");
@@ -10711,6 +10749,166 @@ static int compositor_pad_report(struct compositor_pad *pad, int *x, int *y)
         return *x || *y ? kind : 0;
 }
 
+/* ---- the prediction a frame ahead ---- */
+
+// The frame a lead looks ahead by: the compositor's period, and 60 Hz before any screen has said one.
+static positive compositor_predict_period(void)
+{
+        return compositor.period ? compositor.period : 1000000000ull / 60;
+}
+
+// The lead two places give: their velocity over one frame, no further than the cap (the length is rounded up before the
+// scale, so the lead is never past the cap, whole pixels or not).
+static void compositor_predict_lead(const struct compositor_predict *track, int *lead_x, int *lead_y)
+{
+        long long period = (long long)compositor_predict_period(), cap = (long long)COMPOSITOR_PREDICT_CAP * compositor.scale;
+        long long dt, dx, dy, length2, length;
+
+        *lead_x = *lead_y = 0;
+        if (track->count < 2 || cap <= 0)
+                return;
+        dt = (long long)(track->at[1] - track->at[0]);
+        if (dt < (long long)COMPOSITOR_PREDICT_MIN_NS || dt > (long long)COMPOSITOR_PREDICT_STALE_NS)
+                return;
+        dx = ((long long)track->x[1] - track->x[0]) * period / dt;
+        dy = ((long long)track->y[1] - track->y[0]) * period / dt;
+        length2 = dx * dx + dy * dy;
+        if (length2 <= cap * cap)
+        {
+                *lead_x = (int)dx, *lead_y = (int)dy;
+                return;
+        }
+        length = (long long)compositor_isqrt((unsigned long long)length2);
+        if (length * length < length2)
+                length++;
+        *lead_x = (int)(dx * cap / length);
+        *lead_y = (int)(dy * cap / length);
+}
+
+// A class reported the place x, y at now. A place it repeats is no new one, and its lead stays as it was. The place it is
+// shown or delivered at is x, y led by the lead, held on a screen (compositor_screen_keep_point, from x, y).
+static void compositor_predict_sample(unsigned int cls, int x, int y, positive now, int *shown_x, int *shown_y)
+{
+        struct compositor_predict *track = &compositor.predict[cls];
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        if (!track->count || track->x[track->count - 1] != x || track->y[track->count - 1] != y)
+        {
+                int lead_x = 0, lead_y = 0;
+
+                if (track->count == 2)
+                {
+                        track->x[0] = track->x[1], track->y[0] = track->y[1], track->at[0] = track->at[1];
+                        track->count = 1;
+                }
+                track->x[track->count] = x, track->y[track->count] = y, track->at[track->count] = now;
+                track->count++;
+                track->last = now;
+                if (!compositor.predict_off[cls])
+                        compositor_predict_lead(track, &lead_x, &lead_y);
+                track->lead_x = lead_x, track->lead_y = lead_y;
+        }
+        *shown_x = x + track->lead_x;
+        *shown_y = y + track->lead_y;
+        compositor_screen_keep_point(screens, count, x, y, shown_x, shown_y);
+        track->lead_x = *shown_x - x;
+        track->lead_y = *shown_y - y;
+}
+
+// The mouse moved to the pointer: its cursor is drawn led by its lead. Its clicks and hovers stay at the pointer.
+static void compositor_predict_mouse(positive now)
+{
+        int shown_x, shown_y;
+
+        compositor_predict_sample(COMPOSITOR_PREDICT_MOUSE, compositor.pointer_x, compositor.pointer_y, now, &shown_x, &shown_y);
+}
+
+// A finger or a pen is at x, y: the pointer is where it will be, so that is where the windows it reaches are told. The mouse
+// has no lead while the finger or the pen is the pointer.
+static void compositor_predict_place(unsigned int cls, int x, int y, positive now)
+{
+        int shown_x, shown_y;
+
+        compositor_predict_sample(cls, x, y, now, &shown_x, &shown_y);
+        compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x = compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_y = 0;
+        compositor.pointer_x = shown_x;
+        compositor.pointer_y = shown_y;
+}
+
+// A class's lead is over (a touch lifted, a pen out of range, a stop, or its setting turned off). The mouse's cursor is drawn at
+// its pointer again; a finger or a pen goes back to its newest place, and the windows are told where that is.
+static void compositor_predict_clear(unsigned int cls)
+{
+        struct compositor_predict *track = &compositor.predict[cls];
+
+        if (!track->lead_x && !track->lead_y)
+                return;
+        track->lead_x = track->lead_y = 0;
+        if (cls == COMPOSITOR_PREDICT_MOUSE)
+        {
+                compositor_cursor_move();
+                return;
+        }
+        compositor.pointer_x = track->x[track->count - 1];
+        compositor.pointer_y = track->y[track->count - 1];
+        compositor.kept_x = compositor.pointer_x;
+        compositor.kept_y = compositor.pointer_y;
+        compositor.touching = cls == COMPOSITOR_PREDICT_TOUCH;
+        compositor_motion();
+        compositor.touching = 0;
+}
+
+// The time the next lead is due to be cleared (a frame after its newest place), or 0 when no class is led.
+static positive compositor_predict_due(void)
+{
+        positive period = compositor_predict_period(), due = 0;
+
+        for (unsigned int cls = 0; cls < COMPOSITOR_PREDICTS; cls++)
+        {
+                const struct compositor_predict *track = &compositor.predict[cls];
+
+                if ((track->lead_x || track->lead_y) && (!due || track->last + period < due))
+                        due = track->last + period;
+        }
+        return due;
+}
+
+// The leads whose frame has gone by with no new place are cleared: a hand that stopped is back on where it stopped.
+static void compositor_predict_expire(positive now)
+{
+        positive period = compositor_predict_period();
+
+        for (unsigned int cls = 0; cls < COMPOSITOR_PREDICTS; cls++)
+                if ((compositor.predict[cls].lead_x || compositor.predict[cls].lead_y) && now >= compositor.predict[cls].last + period)
+                        compositor_predict_clear(cls);
+}
+
+// `moonwater canvas predict mouse|touch`, read with the other settings the compositor takes at once. Touch and pen are one row.
+static void compositor_predict_set(unsigned int cls, int on)
+{
+        compositor.predict_off[cls] = (unsigned char)!on;
+        if (!on)
+                compositor_predict_clear(cls);
+}
+
+static void compositor_predict_read(void)
+{
+        char word[16];
+        long value;
+        int mouse, touch;
+
+        compositor_word(SETTING_PREDICT_MOUSE_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_PREDICT_MOUSE_PATH, word, &value);
+        mouse = value == 0;
+        compositor_word(SETTING_PREDICT_TOUCH_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_PREDICT_TOUCH_PATH, word, &value);
+        touch = value == 0;
+        compositor_predict_set(COMPOSITOR_PREDICT_MOUSE, mouse);
+        compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, touch);
+        compositor_predict_set(COMPOSITOR_PREDICT_PEN, touch);
+}
+
 /*
         One report of a device is over: a mouse's counts since the last one are
         one movement of the hand, with the gain of its speed, and a tablet's
@@ -10731,6 +10929,7 @@ static int compositor_report(positive now)
                 if (compositor.tablet_have & 2)
                         compositor.pointer_y = compositor.tablet_y;
                 compositor.tablet_have = 0;
+                compositor_predict_place(COMPOSITOR_PREDICT_PEN, compositor.pointer_x, compositor.pointer_y, now);
                 compositor.absolute = 1;
                 moved = 1;
         }
@@ -10745,6 +10944,7 @@ static int compositor_report(positive now)
                 compositor.stamp = now;
                 compositor.pointer_x += compositor_accel(dx, &compositor.accel_x, gain);
                 compositor.pointer_y += compositor_accel(dy, &compositor.accel_y, gain);
+                compositor_predict_mouse(now);
                 moved = 1;
         }
 
@@ -11058,12 +11258,11 @@ static void compositor_touch_button(unsigned int code, int down)
         compositor.touching = 0;
 }
 
-static void compositor_touch_motion(int x, int y)
+static void compositor_touch_motion(int x, int y, positive now)
 {
-        compositor.pointer_x = x;
-        compositor.pointer_y = y;
-        compositor.kept_x = x;
-        compositor.kept_y = y;
+        compositor_predict_place(COMPOSITOR_PREDICT_TOUCH, x, y, now);
+        compositor.kept_x = compositor.pointer_x;
+        compositor.kept_y = compositor.pointer_y;
         compositor.touching = 1;
         compositor_motion();
         compositor.touching = 0;
@@ -11148,6 +11347,8 @@ static void compositor_touch_report(unsigned int at, positive now)
                         compositor_spot_lift(slot, now);
 
         count = compositor_touch_fingers(at, -1, &other);
+        if (!count)
+                compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
 
         // The first finger down: the pointer is where it is, hidden, and the left button goes down there.
         if (touch->mode == COMPOSITOR_TOUCH_NONE && count)
@@ -11161,7 +11362,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                 touch->start_ns = now;
                 compositor_touch_point(at, other, &touch->start_x, &touch->start_y);
                 touch->hidden = 1;
-                compositor_touch_motion(touch->start_x, touch->start_y);
+                compositor_touch_motion(touch->start_x, touch->start_y, now);
                 compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
         }
 
@@ -11173,6 +11374,8 @@ static void compositor_touch_report(unsigned int at, positive now)
                 {
                         // Lifted: a release where it is, or on the close button it went down on, unmoved, the window goes.
                         int closing = touch->closing;
+
+                        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
 
                         touch->closing = COMPOSITOR_NONE;
                         if (closing >= 0 && !touch->moved)
@@ -11209,7 +11412,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                                 touch->closing = COMPOSITOR_NONE;
                         }
                         if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
-                                compositor_touch_motion(x, y);
+                                compositor_touch_motion(x, y, now);
                 }
         }
         else if (touch->mode == COMPOSITOR_TOUCH_TWO)
@@ -11277,7 +11480,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                 if (!touch->moved && compositor_past_slop(touch->start_x, touch->start_y, x, y, COMPOSITOR_TOUCH_SLOP * compositor.scale))
                         touch->moved = 1;
                 if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
-                        compositor_touch_motion(x, y);
+                        compositor_touch_motion(x, y, now);
         }
 
         memory_copy(screen->was, screen->id, sizeof(screen->was));
@@ -11437,6 +11640,9 @@ static void compositor_input_read(unsigned int at)
                         else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
                                  compositor_pad_finger_key(event->code))
                                 compositor_pad_key(&compositor.pad[at], event->code, event->value);
+                        else if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOOL_PEN && !event->value &&
+                                 !compositor.touchpad[at] && !compositor.touchscreen[at])
+                                compositor_predict_clear(COMPOSITOR_PREDICT_PEN);
                         else if (event->type == COMPOSITOR_EV_KEY &&
                                  ((event->code >= COMPOSITOR_BTN_LEFT && event->code <= COMPOSITOR_BTN_TASK) ||
                                   event->code == COMPOSITOR_BTN_TOUCH))
@@ -12201,6 +12407,13 @@ static b32 compositor_main()
                                                                                      : until;
                 }
 
+                // A lead is cleared a frame after its newest place, so the loop wakes for it.
+                if (compositor_predict_due())
+                {
+                        now = clock_monotonic_nanoseconds();
+                        until = !until || compositor_predict_due() < until ? compositor_predict_due() : until;
+                }
+
                 // A finger held still is the right button when its time is up; a finger's mark fades a frame at a time.
                 // Neither wakes the loop while no finger is down and no mark is fading.
                 if (compositor_touch_due())
@@ -12287,6 +12500,9 @@ static b32 compositor_main()
                         compositor.cursor.magnified = 0;
                         compositor_cursor_move();
                 }
+
+                if (compositor_predict_due())
+                        compositor_predict_expire(clock_monotonic_nanoseconds());
 
                 // A finger held long enough, and the marks that fade.
                 if (compositor_touch_due())

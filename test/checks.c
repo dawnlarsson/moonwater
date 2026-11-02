@@ -120019,6 +120019,166 @@ static void check_compositor_hover(void)
 }
 
 /*
+        The prediction a frame ahead (compositor.c's predict). The mouse's cursor is drawn at its pointer led by one frame of its
+        last two places' motion, no further than the cap, and its clicks are where the pointer is; a finger or a pen is delivered
+        where it will be. A stopped hand is back on its newest place once a frame has gone by; a lifted finger, or a pen out of
+        range, has no lead; and each class honours its own row.
+*/
+static struct windows address_to predict_setup(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    compositor.cursor.soft = 1;
+    compositor.period = 1000000000ull / 60;
+    if (!glass_table_map())
+        return null;
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_present();
+    return table;
+}
+
+// The mouse's report moved the pointer to x, y at now: the place is sampled, the cursor drawn, and the window under it told.
+static void predict_mouse_to(int x, int y, positive now)
+{
+    compositor.pointer_x = x;
+    compositor.pointer_y = y;
+    compositor_predict_mouse(now);
+    compositor_motion();
+}
+
+// The lead of a steady motion of step pixels every 10 ms at a frame of period, after two places, in pixels.
+static int predict_lead_at(positive period, int step)
+{
+    const positive when = 5000000000ull, ms = 1000000ull;
+
+    compositor.period = period;
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    predict_mouse_to(60, 50, when);
+    predict_mouse_to(60 + step, 50, when + 10 * ms);
+    return compositor.cursor.x - compositor.pointer_x;
+}
+
+static void check_compositor_predict(void)
+{
+    struct windows address_to table = predict_setup();
+    const positive t0 = 1000000000ull, ms = 1000000ull;
+    long value;
+    int lead_x, lead_y;
+
+    if (!table)
+    {
+        check("predict: the table is mapped", false);
+        return;
+    }
+
+    /* The mouse at 60 Hz: 2 px in 10 ms is 2 * 16666666 / 10000000 = 3 px in a frame, drawn past the last place by that. */
+    predict_mouse_to(100, 50, t0);
+    check("predict: a first place has no lead, so the cursor is on the pointer", compositor.cursor.x == 100 && compositor.cursor.y == 50);
+    predict_mouse_to(102, 50, t0 + 10 * ms);
+    check("predict: a moving mouse is drawn a frame ahead, by the frame's motion (3 px at 60 Hz for 2 px in 10 ms)",
+          compositor.cursor.x == 105 && compositor.pointer_x == 102 && compositor.cursor.y == 50);
+
+    /* 10 px in 10 ms would be 16 px in a frame: led by the cap, 4 px, and no further. */
+    predict_mouse_to(112, 50, t0 + 20 * ms);
+    check("predict: a fast mouse is led by no more than the cap, 4 px", compositor.cursor.x - compositor.pointer_x == 4);
+    compositor_predict_expire(t0 + 20 * ms + compositor_predict_period() - 1);
+    check("predict: the lead holds until a frame has gone by with no new place", compositor.cursor.x == 116);
+    compositor_predict_expire(t0 + 20 * ms + compositor_predict_period());
+    check("predict: a stopped mouse is drawn on its last place once a frame has gone by",
+          compositor.cursor.x == 112 && compositor.cursor.y == 50 && compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x == 0);
+
+    /* The cap is on the length: a diagonal of 10 px in each axis is led by 2 px in each, 2.8 px in all. */
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    predict_mouse_to(20, 60, t0 + 100 * ms);
+    predict_mouse_to(30, 70, t0 + 110 * ms);
+    lead_x = compositor.cursor.x - compositor.pointer_x;
+    lead_y = compositor.cursor.y - compositor.pointer_y;
+    check("predict: a diagonal is led by no more than the cap in its length", lead_x > 0 && lead_y > 0 && lead_x * lead_x + lead_y * lead_y <= 16);
+
+    /* A frame at 120 Hz: the same 2 px in 10 ms is 1 px. The distance a steady motion is led, in pixels, at 60 and at 120 Hz. */
+    check("predict: the frame-ahead distance at 60 Hz is 1, 3 and the cap 4 px for 1, 2 and 5 px in 10 ms",
+          predict_lead_at(1000000000ull / 60, 1) == 1 && predict_lead_at(1000000000ull / 60, 2) == 3 &&
+              predict_lead_at(1000000000ull / 60, 5) == 4);
+    check("predict: the frame-ahead distance at 120 Hz is 0, 1 and the cap 4 px for 1, 2 and 5 px in 10 ms",
+          predict_lead_at(1000000000ull / 120, 1) == 0 && predict_lead_at(1000000000ull / 120, 2) == 1 &&
+              predict_lead_at(1000000000ull / 120, 5) == 4);
+    compositor.period = 1000000000ull / 60;
+
+    /* A finger: its place is where it will be, so the window it reaches is told the led place; the press is at it too. */
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    compositor_touch_motion(100, 60, t0 + 200 * ms);
+    compositor_touch_motion(102, 60, t0 + 210 * ms);
+    check("predict: a finger is delivered where it will be: 3 px past its last place, and the window is told 55 across it",
+          compositor.pointer_x == 105 && compositor.told_x == 55 && compositor.told_row == 1);
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
+    check("predict: a finger's press is delivered where it will be too", compositor.told_x == 55 && compositor.pointer_x == 105);
+    compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+    check("predict: a finger that lifts drops its lead at once: the windows are told its last place", compositor.predict[COMPOSITOR_PREDICT_TOUCH].lead_x == 0 &&
+          compositor.pointer_x == 102 && compositor.told_x == 52);
+    compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
+
+    /* A mouse's click is at its real place even while its cursor is drawn led. */
+    predict_mouse_to(102, 50, t0 + 300 * ms);
+    predict_mouse_to(104, 50, t0 + 310 * ms);
+    check("predict: the mouse's cursor is drawn led, and the pointer is where the hand is", compositor.cursor.x == 107 && compositor.pointer_x == 104);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    check("predict: a mouse's click is delivered at its real place, not the led one", compositor.told_x == 54 && compositor.cursor.x == 107);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+
+    /* A pen is delivered where it will be, and a pen out of range has no lead. */
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    compositor_predict_place(COMPOSITOR_PREDICT_PEN, 60, 90, t0 + 400 * ms);
+    compositor_predict_place(COMPOSITOR_PREDICT_PEN, 62, 90, t0 + 410 * ms);
+    check("predict: a pen is delivered 3 px past its last place", compositor.pointer_x == 65 && compositor.pointer_y == 90);
+    compositor_predict_clear(COMPOSITOR_PREDICT_PEN);
+    check("predict: a pen out of range drops its lead at once", compositor.pointer_x == 62 && compositor.predict[COMPOSITOR_PREDICT_PEN].lead_x == 0);
+
+    /* Each class honours its own row: the mouse off leaves touch led, and touch off leaves the mouse led. */
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    compositor_predict_set(COMPOSITOR_PREDICT_MOUSE, 0);
+    predict_mouse_to(106, 50, t0 + 500 * ms);
+    predict_mouse_to(108, 50, t0 + 510 * ms);
+    check("predict: with the mouse off the mouse is drawn on its pointer", compositor.cursor.x == 108 && compositor.pointer_x == 108);
+    compositor_touch_motion(200, 60, t0 + 520 * ms);
+    compositor_touch_motion(202, 60, t0 + 530 * ms);
+    check("predict: with the mouse off a finger is still led", compositor.pointer_x == 205);
+    compositor_predict_set(COMPOSITOR_PREDICT_MOUSE, 1);
+    compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, 0);
+    compositor_touch_motion(204, 60, t0 + 540 * ms);
+    check("predict: with touch off a finger is not led", compositor.pointer_x == 204 && compositor.predict[COMPOSITOR_PREDICT_TOUCH].lead_x == 0);
+    predict_mouse_to(110, 50, t0 + 550 * ms);
+    predict_mouse_to(112, 50, t0 + 560 * ms);
+    check("predict: with touch off the mouse is still led", compositor.cursor.x == 115);
+    compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, 1);
+
+    /* The two rows: live to the compositor, on by default, and off is the word that turns them off. */
+    {
+        const struct settings_row address_to mouse = setting_by_path((string_address)SETTING_PREDICT_MOUSE_PATH);
+        const struct settings_row address_to touch = setting_by_path((string_address)SETTING_PREDICT_TOUCH_PATH);
+
+        check("predict: the mouse's row is a live switch, on by default, that a word of off turns off",
+              mouse && mouse->kind == SETTINGS_SWITCH && mouse->live == SETTING_LIVE_COMPOSITOR && mouse->how == SETTING_PLAIN &&
+                  string_equals((string_address)mouse->standard, (string_address)"on") && !setting_kept(mouse, (string_address)"", &value) &&
+                  value == 0 && setting_kept(mouse, (string_address)"off", &value) && value == 1);
+        check("predict: the touch row is a live switch, on by default, that a word of off turns off",
+              touch && touch->kind == SETTINGS_SWITCH && touch->live == SETTING_LIVE_COMPOSITOR && touch->how == SETTING_PLAIN &&
+                  string_equals((string_address)touch->standard, (string_address)"on") && !setting_kept(touch, (string_address)"", &value) &&
+                  value == 0 && setting_kept(touch, (string_address)"off", &value) && value == 1);
+    }
+}
+
+/*
         The wheel through the compositor's reader, from a pipe that stands for a device in slot 0: what a notch
         becomes in the ring of the window under the pointer, what moonwater debug is told of it, and a swipe at a
         window that is not reading while it comes, which its ring of WINDOWS_EVENTS events used to cut off.
@@ -121763,6 +121923,8 @@ static void check_compositor_touch(void)
     int unchanged;
 
     memory_zero(&compositor, sizeof(compositor));
+    /* These are gestures, timed by the wall clock between reports: the lead a finger is given is check_compositor_predict's. */
+    compositor.predict_off[COMPOSITOR_PREDICT_TOUCH] = 1;
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
@@ -137017,6 +137179,7 @@ b32 main()
         check_compositor_lit();
         check_compositor_chrome();
         check_compositor_minimise();
+        check_compositor_predict();
         check_compositor_lifecycle();
         check_compositor_lifecycle_seam();
         check_compositor_lifecycle_more();
