@@ -115444,7 +115444,7 @@ static fn check_saturate(void)
                 // destination at offset b, in a buffer of 512 words the sentinel fills first.
                 for (positive width = 0; width <= 300; width++)
                         for (positive a = 0; a < 16; a++)
-                                for (positive b = 0; b < 16; b += 5)
+                                for (positive b = 0; b < 16; b++)
                                 {
                                         p32 address_to from = small + a, address_to into = small_made + b;
 
@@ -115527,7 +115527,7 @@ static fn check_sum_swap(void)
         // wrap), and the words past the count left as they were.
         for (positive width = 0; width <= 300; width++)
                 for (positive a = 0; a < 16; a++)
-                        for (positive b = 0; b < 16; b += 5)
+                        for (positive b = 0; b < 16; b++)
                         {
                                 p32 address_to from = now + a, address_to into = old + b;
 
@@ -115603,7 +115603,7 @@ static fn check_invert(void)
         // words outside the count left as they were.
         for (positive width = 0; width <= 300; width++)
                 for (positive a = 0; a < 16; a++)
-                        for (positive b = 0; b < 16; b += 5)
+                        for (positive b = 0; b < 16; b++)
                         {
                                 for (positive i = 0; i < 300 + 32; i++)
                                 {
@@ -115709,7 +115709,7 @@ static fn check_tint(void)
 #endif
                 for (positive width = 0; width <= 300; width++)
                         for (positive a = 0; a < 16; a++)
-                                for (positive b = 0; b < 16; b += 5)
+                                for (positive b = 0; b < 16; b++)
                                 {
                                         p32 address_to from = small + a, address_to into = small_made + b;
                                         p32 toward = (width & 1) ? 0xffffffu : 0, amount = amounts[(width >> 1) & 3];
