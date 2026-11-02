@@ -1756,6 +1756,16 @@ static fn ui_inks(struct ui address_to ui, unsigned int ground)
         ui->ring = ui_tone(ui->ink, 190);
 }
 
+// The caret's blink and width, the places of canvas caret blink (slow, normal, fast, off) and canvas caret thickness (thin,
+// normal, thick). The table keeps one more than a place, so a table nobody has set holds 0, which is the standard.
+#define UI_CARET_SLOW 0u
+#define UI_CARET_NORMAL 1u
+#define UI_CARET_FAST 2u
+#define UI_CARET_OFF 3u
+#define UI_CARET_THIN 0u
+#define UI_CARET_MID 1u
+#define UI_CARET_THICK 2u
+
 /*
         What one process draws with: the theme as the table last said it and
         the colours shown this frame, and the frame's clock. A frame sets
@@ -1768,6 +1778,8 @@ static struct ui_kit
         struct ui_tween turn;              // 0 to UI_ONE while the theme turns
         unsigned int mode, accent, motion; // UI_THEME_LIGHT or _DARK, 0xrrggbb, 0 full or 1 reduced
         unsigned int wheel_off;            // 1 when a notch of the wheel moves a row at once (canvas wheel smooth off), 0 the glide
+        unsigned int caret_speed;          // UI_CARET_SLOW, _NORMAL, _FAST or _OFF: the caret's blink (canvas caret blink)
+        unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
         b64 wheel_clock;                   // a test's clock for the wheel's rate, ns; 0 the monotonic clock
         unsigned int themed;               // the table's theme count as last taken
         b64 now;                           // the frame's time, ns
@@ -1780,7 +1792,14 @@ static struct ui_kit
         // are all that is marked of it: tabs on end, whose box is one item of a column.
         b32 reached;
         int reach_top, reach_bottom;
-} ui_kit;
+} ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
+
+// The caret's settings as the table holds them, taken with the wheel's: a table nobody has set is the standard.
+static fn ui_kit_caret_take(const struct windows address_to table)
+{
+        ui_kit.caret_speed = table->caret_speed ? table->caret_speed - 1 : UI_CARET_NORMAL;
+        ui_kit.caret_thick = table->caret_thick ? table->caret_thick - 1 : UI_CARET_MID;
+}
 
 // Rows top to bottom (logical pixels) of the control being drawn move this frame.
 static fn ui_kit_reach(int top, int bottom)
@@ -6251,7 +6270,7 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
         {
-                ui_kit.wheel_off = table->wheel_off ? 1 : 0;
+                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table);
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
@@ -7617,7 +7636,7 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
-        ui_kit.wheel_off = table->wheel_off ? 1 : 0;
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table);
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], app->title, WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
@@ -7679,7 +7698,7 @@ static int ui_app_run(struct ui_app address_to app)
                 if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
                 {
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
-                        ui_kit.wheel_off = table->wheel_off ? 1 : 0;
+                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table);
                         ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_kit_inks(app->ui);
                         ui_app_changed(app);
@@ -7863,7 +7882,6 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_AREA 1
 #define UI_TEXT_CODE 2
 #define UI_TEXT_CLUSTERS 2048 // the clusters of a line laid out at most: past them a line is drawn to there
-#define UI_TEXT_BLINK_NS 530000000ull
 #define UI_TEXT_ROWS 512
 
 // What the widget asks of the app after an event: ui_text_event answers these bits.
@@ -7908,8 +7926,8 @@ struct ui_text
         p64 drag_start, drag_end;
         p64 box_line, box_column;
         struct ui_drag kinetic;
-        positive blink_at;
-        b32 caret_off;
+        positive blink_at;                      // where the caret's phase restarted (ui_text_wake): a key or a move
+        unsigned int caret_fade;                // how far the caret has faded: 0 solid, UI_CARET_FULL gone (0 new, so drawn)
         p32 asks, command;
         int menu_x, menu_y;
         int zoom;
@@ -8095,7 +8113,7 @@ static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_t
         memory_zero(t->preedit, sizeof(t->preedit));
         memory_copy(t->preedit, text, length);
         t->preedit_length = (p32)length;
-        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_off = false;
+        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_fade = 0;
         return true;
 }
 
@@ -8115,7 +8133,7 @@ static p32 SPARE ui_text_preedit_end(struct ui_text address_to t, b32 commit)
         }
         memory_zero(t->preedit, sizeof(t->preedit));
         t->preedit_length = 0;
-        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_off = false;
+        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_fade = 0;
         return (t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED) | (refused ? UI_TEXT_REFUSED : 0);
 }
 
@@ -8304,39 +8322,109 @@ static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int
         return ui_text_at_x(&l, x - t->left + (int)t->scroll_x);
 }
 
-// The caret is drawn for the next half second whatever the blink says: it is moving, or just typed at.
+/*
+        The caret's blink: a rounded square wave, not a sine. The caret is solid for most of each half of its cycle and gone
+        for most of the other half, and each change between the two is a smoothstep fade across UI_CARET_EDGE_PERCENT of
+        a half, centred on the change, so it reads as steady and never jumps. The cycle is the person's (canvas caret
+        blink): 1.6 s slow, 1.06 s normal, 0.53 s fast; off is no cycle at all, a solid caret.
+*/
+#define UI_CARET_FULL 255u
+#define UI_CARET_EDGE_PERCENT 15ull    // a fade's length, percent of a half cycle
+#define UI_CARET_STEP_NS 16000000ull   // a fade is drawn at most this often: a display period
+
+// The cycle in ns, or 0 when the caret does not blink.
+static b64 ui_caret_cycle(void)
+{
+        switch (ui_kit.caret_speed)
+        {
+        case UI_CARET_SLOW:
+                return 1600000000ull;
+        case UI_CARET_FAST:
+                return 530000000ull;
+        case UI_CARET_OFF:
+                return 0;
+        default:
+                return 1060000000ull;
+        }
+}
+
+// The width in logical pixels of the caret's bar: 1 thin, 2 normal, 3 thick.
+static int ui_caret_thick(void)
+{
+        return ui_kit.caret_thick == UI_CARET_THIN ? 1 : ui_kit.caret_thick == UI_CARET_THICK ? 3 : 2;
+}
+
+// A fade's cover, 0 to UI_CARET_FULL, at `at` ns into a fade of `edge` ns: smoothstep, rising or falling.
+static unsigned int ui_caret_ramp(b64 at, b64 edge, int rising)
+{
+        b64 x = at * 65536 / edge, s = (3 * x * x * 65536 - 2 * x * x * x) >> 32; // 0 to 65536, exact in 64 bits
+        unsigned int cover = (unsigned int)(s * UI_CARET_FULL / 65536);
+
+        return rising ? cover : UI_CARET_FULL - cover;
+}
+
+// The caret's cover at q ns into a cycle of `cycle` ns (q below cycle): solid, then gone, each change a fade centred on it.
+// The solid half runs from reach to half - reach, so the fades are edge long, and the wrap joins the fade up to 0 at cycle.
+static unsigned int ui_caret_wave(b64 q, b64 cycle)
+{
+        b64 half = cycle / 2, edge = half * UI_CARET_EDGE_PERCENT / 100, reach = edge / 2;
+
+        if (q < reach)
+                return ui_caret_ramp(q + reach, edge, 1);
+        if (q < half - reach)
+                return UI_CARET_FULL;
+        if (q < half + reach)
+                return ui_caret_ramp(q - (half - reach), edge, 0);
+        if (q < cycle - reach)
+                return 0;
+        return ui_caret_ramp(q - (cycle - reach), edge, 1);
+}
+
+// The ns from q until the cover can next change: to the next fade while it is solid or gone, and a frame's step while it fades.
+static b64 ui_caret_until(b64 q, b64 cycle, unsigned int cover)
+{
+        b64 half = cycle / 2, reach = half * UI_CARET_EDGE_PERCENT / 100 / 2, stops[4] = {reach, half - reach, half + reach, cycle - reach};
+        b64 next = cycle - q;
+
+        for (positive k = 0; k < 4; k++)
+                if (stops[k] > q && stops[k] - q < next)
+                        next = stops[k] - q;
+        if (cover == 0 || cover == UI_CARET_FULL || next < UI_CARET_STEP_NS)
+                return next;
+        return UI_CARET_STEP_NS;
+}
+
+// The caret is solid for the next half cycle whatever the blink says: it is moving, or just typed at. Its phase starts a
+// quarter of a cycle into the solid half, so the caret is solid at once and stays solid while the keys keep coming.
 static fn ui_text_wake(struct ui_text address_to t)
 {
         t->blink_at = t->awake_at = clock_monotonic_nanoseconds();
-        t->caret_off = false;
+        t->caret_fade = 0;
 }
 
 /*
-        The blink: when the widget next needs a frame (0 for never: it has not the keys), the caret turned when its time
-        is up. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys. Ten
-        seconds after the last key or move the caret stops blinking and stays drawn, so a field left alone wakes nothing.
+        The blink: when the widget next needs a frame (0 for never: it has not the keys), the caret's cover as its phase
+        says. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys. Ten seconds
+        after the last key or move the caret stops blinking and stays drawn, so a field left alone wakes nothing.
 */
 static positive ui_text_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
 {
-        positive due;
+        b64 cycle = ui_caret_cycle(), q;
+        unsigned int cover;
 
         if (!t->focused || t->read_only)
                 return 0;
-        if (now > t->awake_at && now - t->awake_at >= UI_TEXT_BLINK_FOR_NS)
+        if (!cycle || (now > t->awake_at && now - t->awake_at >= UI_TEXT_BLINK_FOR_NS))
         {
-                if (t->caret_off)
-                        t->caret_off = false, *redraw = true;
+                if (t->caret_fade)
+                        t->caret_fade = 0, *redraw = true;
                 return 0;
         }
-        due = t->blink_at + UI_TEXT_BLINK_NS;
-        if (now >= due)
-        {
-                t->caret_off = !t->caret_off;
-                t->blink_at = now;
-                *redraw = true;
-                due = now + UI_TEXT_BLINK_NS;
-        }
-        return due;
+        q = now < t->blink_at ? cycle / 4 : (now - t->blink_at + cycle / 4) % cycle;
+        cover = ui_caret_wave(q, cycle);
+        if (t->caret_fade != UI_CARET_FULL - cover)
+                t->caret_fade = UI_CARET_FULL - cover, *redraw = true;
+        return now + ui_caret_until(q, cycle, cover);
 }
 
 /*
@@ -9423,19 +9511,21 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 for (int x = origin + ui_text_x_of(l, range->start), stop = origin + ui_text_x_of(l, range->finish); x < stop; x++)
                         ui_text_fill(ui, t, x, baseline + 2 * ui->scale + ((x / (2 * ui->scale)) & 1) * ui->scale, 1, ui->scale, ui_tone(colour & 0xffffffu, 255));
         }
-        // The carets on this line, in the accent, unless it is the blink's off half; a composition's text after the
-        // primary, underlined. A bar caret stands on the edge between two characters, half in each one's bearing: drawn
-        // from the edge rightwards it covered the next letter's stem (a caret before "beta" read "peta").
-        if (t->focused && !t->caret_off)
+        // The carets on this line, in the accent, at the blink's cover (solid, faded or gone: ui_text_wake); a composition's
+        // text after the primary, underlined. A bar caret stands on the edge between two characters, half in each one's
+        // bearing: drawn from the edge rightwards it covered the next letter's stem (a caret before "beta" read "peta").
+        if (t->focused && t->caret_fade < UI_CARET_FULL)
                 for (positive s = 0; s < t->doc.selection_count; s++)
                 {
                         p64 caret = t->doc.selections[s].active;
+                        unsigned int cover = UI_CARET_FULL - t->caret_fade;
 
                         if (caret < l->offset[0] || caret > l->offset[l->count])
                                 continue;
                         ui_fill(ui, origin + ui_text_x_of(l, caret) - (t->doc.overwrite ? 0 : ui->scale), y + ui->scale,
-                                t->doc.overwrite ? t->cell : 2 * ui->scale,
-                                t->line_height - 2 * ui->scale, ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 : 255));
+                                t->doc.overwrite ? t->cell : ui_caret_thick() * ui->scale,
+                                t->line_height - 2 * ui->scale,
+                                ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 * cover / UI_CARET_FULL : cover));
                 }
         if (t->preedit_length && t->focused)
         {

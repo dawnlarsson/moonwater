@@ -136209,7 +136209,7 @@ static fn text_widget_check(string_address inter, string_address mono)
                 ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to) "alpha one\n        beta two\n\n        gamma\nzz  zz\n", 45, ui_text_keymap());
                 view.doc.tab_size = 4;
                 view.focused = true;
-                view.caret_off = true;
+                view.caret_fade = UI_CARET_FULL;
                 doc_select_set(&view.doc, 0, 0);
                 two = doc_line_start(&view.doc, 1);
                 four = doc_line_start(&view.doc, 4);
@@ -136866,10 +136866,10 @@ static fn field_check(struct ui address_to wui)
                 field_type(wui, &t, "z");
                 now = clock_monotonic_nanoseconds();
                 check("field: the caret blinks after a key", ui_text_tick(&t, now, &redraw) != 0);
-                t.caret_off = true;
+                t.caret_fade = UI_CARET_FULL;
                 redraw = false;
                 check("field: and a while after the last it stays drawn, and no frame is due",
-                      !ui_text_tick(&t, now + UI_TEXT_BLINK_FOR_NS + 1, &redraw) && redraw && !t.caret_off);
+                      !ui_text_tick(&t, now + UI_TEXT_BLINK_FOR_NS + 1, &redraw) && redraw && !t.caret_fade);
         }
         ui_text_close(&t);
         compositor_call(syscall(munmap), (positive)pixels, 400 * 100 * 4, 0, 0, 0, 0);
@@ -137124,6 +137124,94 @@ static fn check_one_blink(void)
         }
         check("blink: every field's caret deadline is ui_text_timeout in ui.c, asked by each window with a field", read == sizeof(files) / sizeof(files[0]) && asked == read && !hand_found && defined == 1);
 }
+
+#if MOONWATER_UI_ANY
+/*
+        The caret's blink as ui.c draws it: a rounded square wave. Over one cycle it is solid for most of the first half and
+        gone for most of the second, each change a smoothstep fade across 15 percent of a half, centred on the change; it never
+        jumps, its two halves mirror each other, a key restarts it solid, and the speed off is solid for good. The cycle is
+        the person's (ui_kit.caret_speed): 1.6 s, 1.06 s and 0.53 s, and off has none.
+*/
+static fn check_caret_blink(void)
+{
+        static const unsigned int speeds[4] = {UI_CARET_SLOW, UI_CARET_NORMAL, UI_CARET_FAST, UI_CARET_OFF};
+        static const b64 cycles[4] = {1600000000ull, 1060000000ull, 530000000ull, 0};
+        static struct ui_text t;
+        unsigned int saved = ui_kit.caret_speed;
+        b64 cycle, step, half, edge;
+        positive samples = 0, full = 0, gone = 0, partial = 0, on = 0, off = 0, jumps = 0, rises = 0, falls = 0, mirror = 0;
+        unsigned int previous = 0;
+        b32 redraw = false, solid = true;
+        b64 now = 1000000000000ull;
+
+        for (positive k = 0; k < 4; k++)
+        {
+                ui_kit.caret_speed = speeds[k];
+                check("caret: the speed's cycle is 1.6 s, 1.06 s and 0.53 s, and off has none", ui_caret_cycle() == cycles[k]);
+        }
+        ui_kit.caret_speed = UI_CARET_NORMAL;
+        cycle = ui_caret_cycle();
+        half = cycle / 2;
+        edge = half * UI_CARET_EDGE_PERCENT / 100;
+        step = cycle / 10600;
+        for (b64 q = 0; q < cycle; q += step)
+        {
+                unsigned int cover = ui_caret_wave(q, cycle);
+
+                samples++;
+                full += cover == UI_CARET_FULL;
+                gone += cover == 0;
+                partial += cover > 0 && cover < UI_CARET_FULL;
+                on += cover >= UI_CARET_FULL / 2;
+                off += cover < UI_CARET_FULL / 2;
+                if (samples > 1)
+                {
+                        unsigned int change = cover > previous ? cover - previous : previous - cover;
+
+                        jumps += change > 1;
+                        rises += cover > previous;
+                        falls += cover < previous;
+                }
+                if (q < half)
+                        mirror += ui_caret_wave(q, cycle) + ui_caret_wave(q + half, cycle) != UI_CARET_FULL;
+                previous = cover;
+        }
+        // The integer cover rounds the first and last few samples of each fade to solid or gone, so the fades are a little short.
+        check("caret: solid for 42.5 percent of a cycle, gone for 42.5, and the fades take the other 15",
+              (full * 1000 / samples) >= 415 && (full * 1000 / samples) <= 435 && (gone * 1000 / samples) >= 415 &&
+              (gone * 1000 / samples) <= 440 && (partial * 1000 / samples) >= 135 && (partial * 1000 / samples) <= 160);
+        check("caret: on for half the cycle and off for the other half", (on * 1000 / samples) >= 495 && (on * 1000 / samples) <= 505 &&
+              (off * 1000 / samples) >= 495 && (off * 1000 / samples) <= 505);
+        check("caret: the fades are smooth: no step of more than one level in a hundred microseconds", jumps == 0);
+        // One rising fade and one falling fade a cycle, each a level at a time from solid to gone (255 levels, the ends flat).
+        check("caret: one rising fade and one falling fade a cycle, each a level at a time from one end to the other",
+              rises >= 230 && rises <= 256 && falls >= 230 && falls <= 256);
+        check("caret: the second half is the first one turned over: solid where the other is gone", mirror == 0);
+
+        // A key restarts the phase: solid at once, gone in the middle of the cycle of its own, solid again at the next key.
+        ui_text_open(&t, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
+        t.focused = true;
+        t.blink_at = t.awake_at = now;
+        check("caret: solid at the key", ui_text_tick(&t, now, &redraw) != 0 && t.caret_fade == 0);
+        check("caret: gone three quarters round its own cycle", ui_text_tick(&t, now + cycle / 2, &redraw) != 0 && t.caret_fade == UI_CARET_FULL);
+        t.blink_at = t.awake_at = now + cycle / 2 + 1000000;
+        check("caret: a key restarts it solid", ui_text_tick(&t, now + cycle / 2 + 1000000, &redraw) != 0 && t.caret_fade == 0);
+
+        // Off is solid, and asks for no frame, whatever the time.
+        ui_kit.caret_speed = UI_CARET_OFF;
+        for (positive k = 0; k < 64; k++)
+                solid = solid && ui_text_tick(&t, now + k * 77000000ull, &redraw) == 0 && t.caret_fade == 0;
+        check("caret: off is solid, and no frame is due", solid);
+
+        // Left alone past the ten seconds, it stays drawn with no frame due.
+        ui_kit.caret_speed = UI_CARET_NORMAL;
+        redraw = false;
+        check("caret: left alone it stays drawn and asks for no frame",
+              ui_text_tick(&t, t.awake_at + UI_TEXT_BLINK_FOR_NS + 1, &redraw) == 0 && t.caret_fade == 0);
+        ui_text_close(&t);
+        ui_kit.caret_speed = saved;
+}
+#endif
 
 /*
         One cut for every fitted label: ui.c's ui_cut_by is the only search for the longest start that fits with dots, and the
@@ -140280,6 +140368,9 @@ b32 main()
         check_one_blink();
         check_one_cut();
         check_one_digits();
+#if MOONWATER_UI_ANY
+        check_caret_blink();
+#endif
         check_no_input_codes();
         check_no_shapes_by_hand();
         check_no_element_by_hand();
