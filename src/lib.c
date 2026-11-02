@@ -7582,22 +7582,42 @@ __asm__(
     // vector body two compares and an or.
     ASM_FUNC(memory_first_of_ascii_case)
     "xor %eax, %eax\n   test %rdx, %rdx\n   jz .Lmemory_first_icase_x64_done\n   movzbl %sil, %r8d\n   mov %r8d, %r9d\n   or $32, %r9d\n"
-    "lea -'a'(%r9), %ecx\n   cmp $25, %ecx\n   ja .Lmemory_first_icase_x64_one_case\n   lea -32(%r9), %r10d\n   jmp .Lmemory_first_icase_x64_ready\n"
-    ".Lmemory_first_icase_x64_one_case:\n   mov %r8d, %r9d\n   mov %r8d, %r10d\n"
+    "lea -'a'(%r9), %ecx\n   cmp $25, %ecx\n   ja .Lmemory_first_icase_x64_one_case\n   lea -32(%r9), %r10d\n   mov $0x20, %esi\n   jmp .Lmemory_first_icase_x64_ready\n"
+    ".Lmemory_first_icase_x64_one_case:\n   mov %r8d, %r9d\n   mov %r8d, %r10d\n   xor %esi, %esi\n"
     ".Lmemory_first_icase_x64_ready:\n"
     ASM_USERSPACE_WIDE(
     ASM_NARROW("cpu_has_avx2", ".Lmemory_first_icase_x64_scalar")
-    "cmp $16, %rdx\n   jb .Lmemory_first_icase_x64_scalar\n   vmovd %r9d, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   vmovd %r10d, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
+    //
+    //      The two spellings of a letter are the one byte with bit 0x20 set and the one with it clear, so
+    //      (byte | 0x20) == lower is exactly the pair, and a byte that is no letter has one spelling and is
+    //      compared as it is: ymm2 holds 0x20 for a letter and nought otherwise, ymm1 the lower spelling. One or
+    //      and one compare a vector where the two compares and their or were three, and four vectors a turn
+    //      while a hundred and twenty eight bytes are left, as memory_last_of does.
+    //
+    "cmp $16, %rdx\n   jb .Lmemory_first_icase_x64_scalar\n   vmovd %r9d, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
+    "vmovd %esi, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n"
     "cmp $32, %rdx\n   jb .Lmemory_first_icase_x64_xmm\n"
-    ".Lmemory_first_icase_x64_vector:\n   vmovdqu (%rdi), %ymm0\n   vpcmpeqb %ymm1, %ymm0, %ymm3\n   vpcmpeqb %ymm2, %ymm0, %ymm0\n   vpor %ymm3, %ymm0, %ymm0\n   vpmovmskb %ymm0, %ecx\n"
-    "test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_vector_hit\n   add $32, %rdi\n   sub $32, %rdx\n   cmp $32, %rdx\n   jae .Lmemory_first_icase_x64_vector\n"
-    ".Lmemory_first_icase_x64_xmm:\n   cmp $16, %rdx\n   jb .Lmemory_first_icase_x64_wide_done\n   vmovdqu (%rdi), %xmm0\n   vpcmpeqb %xmm1, %xmm0, %xmm3\n   vpcmpeqb %xmm2, %xmm0, %xmm0\n"
-    "vpor %xmm3, %xmm0, %xmm0\n   vpmovmskb %xmm0, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_xmm_hit\n   add $16, %rdi\n   sub $16, %rdx\n"
+    "vpor (%rdi), %ymm2, %ymm0\n   vpcmpeqb %ymm1, %ymm0, %ymm0\n   vpmovmskb %ymm0, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_vector_hit\n"
+    "add $32, %rdi\n   sub $32, %rdx\n   cmp $32, %rdx\n   jb .Lmemory_first_icase_x64_xmm\n"
+    "cmp $128, %rdx\n   jb .Lmemory_first_icase_x64_vector\n"
+    ".Lmemory_first_icase_x64_quad:\n   vpor (%rdi), %ymm2, %ymm3\n   vpor 32(%rdi), %ymm2, %ymm4\n   vpor 64(%rdi), %ymm2, %ymm5\n   vpor 96(%rdi), %ymm2, %ymm6\n"
+    "vpcmpeqb %ymm1, %ymm3, %ymm3\n   vpcmpeqb %ymm1, %ymm4, %ymm4\n   vpcmpeqb %ymm1, %ymm5, %ymm5\n   vpcmpeqb %ymm1, %ymm6, %ymm6\n"
+    "vpor %ymm3, %ymm4, %ymm7\n   vpor %ymm5, %ymm6, %ymm8\n   vpor %ymm7, %ymm8, %ymm7\n   vptest %ymm7, %ymm7\n   jnz .Lmemory_first_icase_x64_quad_hit\n"
+    "add $128, %rdi\n   sub $128, %rdx\n   cmp $128, %rdx\n   jae .Lmemory_first_icase_x64_quad\n"
+    "cmp $32, %rdx\n   jae .Lmemory_first_icase_x64_vector\n   jmp .Lmemory_first_icase_x64_xmm\n"
+    ".Lmemory_first_icase_x64_vector:\n   vpor (%rdi), %ymm2, %ymm0\n   vpcmpeqb %ymm1, %ymm0, %ymm0\n   vpmovmskb %ymm0, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_vector_hit\n"
+    "add $32, %rdi\n   sub $32, %rdx\n   cmp $32, %rdx\n   jae .Lmemory_first_icase_x64_vector\n"
+    ".Lmemory_first_icase_x64_xmm:\n   cmp $16, %rdx\n   jb .Lmemory_first_icase_x64_wide_done\n   vmovdqu (%rdi), %xmm0\n   vpor %xmm2, %xmm0, %xmm0\n   vpcmpeqb %xmm1, %xmm0, %xmm0\n"
+    "vpmovmskb %xmm0, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_xmm_hit\n   add $16, %rdi\n   sub $16, %rdx\n"
     ".Lmemory_first_icase_x64_wide_done:\n   vzeroupper\n   jmp .Lmemory_first_icase_x64_scalar\n"
     ".Lmemory_first_icase_x64_xmm_hit:\n   bsf %ecx, %ecx\n"
     "lea (%rdi,%rcx), %rax\n   vzeroupper\n" ASM_RET
     ".Lmemory_first_icase_x64_vector_hit:\n   bsf %ecx, %ecx\n"
     "lea (%rdi,%rcx), %rax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_first_icase_x64_quad_hit:\n   vpmovmskb %ymm3, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_vector_hit\n   vpmovmskb %ymm4, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_quad_32\n"
+    "vpmovmskb %ymm5, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_first_icase_x64_quad_64\n   vpmovmskb %ymm6, %ecx\n   bsf %ecx, %ecx\n   lea 96(%rdi,%rcx), %rax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_first_icase_x64_quad_32:\n   bsf %ecx, %ecx\n   lea 32(%rdi,%rcx), %rax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_first_icase_x64_quad_64:\n   bsf %ecx, %ecx\n   lea 64(%rdi,%rcx), %rax\n   vzeroupper\n" ASM_RET
     )
     ".Lmemory_first_icase_x64_scalar:\n   test %rdx, %rdx\n   jz .Lmemory_first_icase_x64_done\n"
     ".Lmemory_first_icase_x64_byte:\n   movzbl (%rdi), %ecx\n   cmp %r9d, %ecx\n   je .Lmemory_first_icase_x64_hit\n   cmp %r10d, %ecx\n   je .Lmemory_first_icase_x64_hit\n"

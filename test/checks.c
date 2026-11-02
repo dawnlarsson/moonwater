@@ -26558,7 +26558,7 @@ static address_any reference_memory_search_ascii_case(address_any block, positiv
 */
 fn check_memory_search_ascii_case()
 {
-        static p8 room[320];
+        static p8 room[448];
         static p8 needle[80];
 
         same("memory_first_of_ascii_case", "zero bound null block",
@@ -26584,6 +26584,25 @@ fn check_memory_search_ascii_case()
                                      (positive)reference_memory_first_ascii_case(
                                          room + offset, (b8)target, size));
                 }
+
+        //      Every width to 300 at every alignment from 0 to 63, for a letter of each case, other
+        //      punctuation and the upper half of the byte range: the bodies cut their blocks by where the
+        //      span starts as well as by its width.
+        {
+                static const p8 targets[] = {'a', 'Z', 'm', '0', ' ', '[', 0x80, 0xff};
+
+                for (positive ti = 0; ti < sizeof(targets); ti++)
+                        for (positive offset = 0; offset < 64; offset++)
+                                for (positive size = 0; size <= 300; size++)
+                                {
+                                        for (positive i = 0; i < sizeof(room); i++)
+                                                room[i] = (p8)(i * 37 + offset * 11 + ti);
+
+                                        same("memory_first_of_ascii_case", "every width and alignment",
+                                             (positive)memory_first_of_ascii_case(room + offset, targets[ti], size),
+                                             (positive)reference_memory_first_ascii_case(room + offset, targets[ti], size));
+                                }
+        }
 
         for (positive offset = 0; offset < 7; offset++)
                 for (positive size = 0; size <= 160; size += 5)
