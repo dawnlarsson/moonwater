@@ -2330,8 +2330,28 @@ static void compositor_screen_keep_window(const int (*screens)[4], unsigned int 
         bottom half, and a side band alone is that half. An edge another screen
         is against is no edge: the pointer goes on across it.
 */
+static unsigned int compositor_screen_snap_box(const int (*screens)[4], unsigned int count, int x, int y, const int *box,
+                                               int margin, int *screen);
+
 static unsigned int compositor_screen_snap(const int (*screens)[4], unsigned int count, int x, int y, int margin,
                                            int *screen)
+{
+        return compositor_screen_snap_box(screens, count, x, y, null, margin, screen);
+}
+
+// Whether a window's edge is inside its screen's edge by less than margin: one that sticks out past the edge is not at it.
+static int compositor_near_edge(int gap, int margin)
+{
+        return gap >= 0 && gap < margin;
+}
+
+/*
+        compositor_screen_snap, and the window's own edges as well as the pointer's: box is the window dragged (x, y, width,
+        height), or null. An edge of the window inside the screen's free edge by less than margin is a band too, so a window
+        pushed to an edge snaps there whatever the pointer is doing, and the pointer at an edge still does.
+*/
+static unsigned int compositor_screen_snap_box(const int (*screens)[4], unsigned int count, int x, int y, const int *box,
+                                               int margin, int *screen)
 {
         int at = compositor_screen_at(screens, count, x, y);
         const int *s;
@@ -2341,10 +2361,14 @@ static unsigned int compositor_screen_snap(const int (*screens)[4], unsigned int
         if (at < 0)
                 return COMPOSITOR_FLOATING;
         s = screens[at];
-        at_top = y - s[1] < margin && compositor_screen_at(screens, count, x, s[1] - 1) < 0;
-        at_bottom = s[1] + s[3] - 1 - y < margin && compositor_screen_at(screens, count, x, s[1] + s[3]) < 0;
-        at_left = x - s[0] < margin && compositor_screen_at(screens, count, s[0] - 1, y) < 0;
-        at_right = s[0] + s[2] - 1 - x < margin && compositor_screen_at(screens, count, s[0] + s[2], y) < 0;
+        at_top = (y - s[1] < margin || (box && compositor_near_edge(box[1] - s[1], margin))) &&
+                 compositor_screen_at(screens, count, x, s[1] - 1) < 0;
+        at_bottom = (s[1] + s[3] - 1 - y < margin || (box && compositor_near_edge(s[1] + s[3] - (box[1] + box[3]), margin))) &&
+                    compositor_screen_at(screens, count, x, s[1] + s[3]) < 0;
+        at_left = (x - s[0] < margin || (box && compositor_near_edge(box[0] - s[0], margin))) &&
+                  compositor_screen_at(screens, count, s[0] - 1, y) < 0;
+        at_right = (s[0] + s[2] - 1 - x < margin || (box && compositor_near_edge(s[0] + s[2] - (box[0] + box[2]), margin))) &&
+                   compositor_screen_at(screens, count, s[0] + s[2], y) < 0;
         if (at_top && at_left)
                 return COMPOSITOR_TOP_LEFT;
         if (at_top && at_right)
@@ -10236,12 +10260,21 @@ static void compositor_motion(void)
 
 // Where a drag ended, read as an arrangement: the pointer and not the window, because the pointer is what the
 // hand aimed, on the screen under it and at its free edges (compositor_screen_snap), and which screen that is.
-static unsigned int compositor_snap(int x, int y, int *screen)
+static unsigned int compositor_snap(int x, int y, const int *box, int *screen)
 {
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
 
-        return compositor_screen_snap(screens, count, x, y, COMPOSITOR_SNAP * compositor.scale, screen);
+        return compositor_screen_snap_box(screens, count, x, y, box, COMPOSITOR_SNAP * compositor.scale, screen);
+}
+
+// The rectangle a window dragged is where the hand has it, before placement keeps it on its screen (compositor_place
+// clamps it to the screen, so a window held at an edge by the clamp is not one pushed there): a snap reads its edges
+// from it (compositor_snap).
+static void compositor_box_of(int row, int *box)
+{
+        box[0] = compositor.pointer_x - compositor.drag_x, box[1] = compositor.pointer_y - compositor.drag_y;
+        box[2] = (int)compositor.w[row], box[3] = (int)compositor.h[row];
 }
 
 /*
@@ -10253,11 +10286,12 @@ static void compositor_preview(int row)
 {
         unsigned int count, how = COMPOSITOR_FLOATING;
         const int (*screens)[4] = compositor_screens(&count);
-        int screen, rect[4] = {0, 0, 0, 0};
+        int screen, rect[4] = {0, 0, 0, 0}, box[4];
 
         if (row >= 0 && row == compositor.drag && compositor.drag_moved)
         {
-                how = compositor_snap(compositor.pointer_x, compositor.pointer_y, &screen);
+                compositor_box_of(row, box);
+                how = compositor_snap(compositor.pointer_x, compositor.pointer_y, box, &screen);
                 if (how != COMPOSITOR_FLOATING)
                         compositor_screen_part(screens[screen], how, rect);
         }
@@ -10317,8 +10351,11 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
         if (dragged >= 0 && snap && compositor.drag_moved)
         {
-                int screen;
-                unsigned int how = compositor_snap(compositor.pointer_x, compositor.pointer_y, &screen);
+                int screen, box[4];
+                unsigned int how;
+
+                compositor_box_of(dragged, box);
+                how = compositor_snap(compositor.pointer_x, compositor.pointer_y, box, &screen);
 
                 if (how != COMPOSITOR_FLOATING)
                         compositor_arrange_on(dragged, how, screen);

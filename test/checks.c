@@ -121123,6 +121123,178 @@ static void check_compositor_layout(void)
           layout_is(1, COMPOSITOR_BOTTOM_LEFT, 0, 80, WINDOW_MIN_WIDTH, 80) && compositor.table->want_width[1] == WINDOW_MIN_WIDTH);
 }
 
+/*
+        A window pushed to an edge snaps there by its own edge, not only by the pointer: a window within 8 px of a free edge
+        of its screen takes that edge's band, while the pointer is 20 px or more from it. The window starts at 60, 60 and is
+        grabbed 20 px in from its top left; the pointer goes to the target and the window follows it. A window away from every
+        edge snaps to nothing, and the preview is shown while the window is pushed and not after it is pulled back.
+*/
+static void push_drag(int x0, int y0, int to_x, int to_y, unsigned int *how, int *shown)
+{
+    layout_setup(256, 1);
+    layout_show(1, x0, y0, 100, 80);
+    screens_hand(x0 + 20, y0 + 20, 1);
+    screens_hand(to_x, to_y, 0);
+    *shown = compositor.preview_row == 1 && compositor.preview[2] > 0;
+    screens_hand(to_x, to_y, -1);
+    compositor.press = COMPOSITOR_NONE;
+    *how = compositor.arranged[1];
+}
+
+static void check_compositor_push(void)
+{
+    unsigned int how;
+    int shown;
+
+    if (!layout_table_map(256))
+    {
+        check("push: the table is mapped", false);
+        return;
+    }
+
+    push_drag(60, 60, 27, 100, &how, &shown);
+    check("push: a window pushed to the left edge, the pointer 27 px off it, snaps to the left half",
+          how == COMPOSITOR_LEFT && shown);
+    push_drag(60, 60, 172, 100, &how, &shown);
+    check("push: a window pushed to the right edge, the pointer 83 px off it, snaps to the right half",
+          how == COMPOSITOR_RIGHT && shown);
+    push_drag(60, 60, 80, 25, &how, &shown);
+    check("push: a window pushed to the top edge, the pointer 25 px off it, is maximized", how == COMPOSITOR_MAXIMIZED && shown);
+    push_drag(60, 60, 80, 190, &how, &shown);
+    check("push: a window pushed to the bottom edge, the pointer 65 px off it, takes the bottom half",
+          how == COMPOSITOR_BOTTOM && shown);
+    push_drag(60, 60, 27, 25, &how, &shown);
+    check("push: a window pushed into the top left corner by its edges takes that quarter", how == COMPOSITOR_TOP_LEFT && shown);
+    push_drag(60, 60, 100, 120, &how, &shown);
+    check("push: a window away from every edge snaps to nothing, and shows no preview", how == COMPOSITOR_FLOATING && !shown);
+}
+
+/*
+        Snapping across two displays, in both arrangements: the second display to the right of the first (A 320 by 192 at the
+        left, B 256 by 240 beside it) and the second to its left (the primary 320 by 192 at the right, the second 256 by 240).
+        A window snaps onto any free edge of either screen, the far edge of the second included: each edge no other screen
+        is beyond. The edge where the two meet is no edge, and a drop on it arranges nothing. The window starts on the primary
+        and is grabbed 20 px in from its top left. It starts on the seam: its right edge on the primary's left one in layout 0,
+        its left edge on the primary's right one in layout 1.
+*/
+static const int seam_screens[2][2][4] = {{{0, 0, 320, 192}, {320, 0, 256, 240}}, {{256, 0, 320, 192}, {0, 0, 256, 240}}};
+
+// A drag of the window from x0, y0 by its top left (grabbed 20 px in) to to_x, to_y, and the let go there.
+static void seam_drop(int x0, int y0, int to_x, int to_y)
+{
+    screens_hand(x0 + 20, y0 + 20, 1);
+    screens_hand(to_x, to_y, 0);
+    screens_hand(to_x, to_y, -1);
+    compositor.press = COMPOSITOR_NONE;
+}
+
+// The window back on the screen at x0, y0 as it was floating, ready for the next drop.
+static void seam_reset(int x0, int y0)
+{
+    compositor_float(1);
+    compositor.x[1] = compositor.table->x[1] = x0, compositor.y[1] = compositor.table->y[1] = y0;
+    compositor.saved_x[1] = x0, compositor.saved_y[1] = y0;
+}
+
+static void check_compositor_seam(void)
+{
+    static unsigned int scanout[SCREENS_W * SCREENS_H];
+    struct windows address_to table;
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
+    int part[4];
+
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("seam: the table is mapped", false);
+        return;
+    }
+    for (int layout = 0; layout < 2; layout++)
+    {
+        int start_x = layout ? 256 : 220, start_y = 20;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.preview_row = COMPOSITOR_NONE;
+        compositor.shared_row = compositor.mark_row = COMPOSITOR_NONE;
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+        compositor.width = SCREENS_W;
+        compositor.height = SCREENS_H;
+        compositor.scale = 1;
+        compositor.card = -1;
+        compositor.scanout = scanout;
+        compositor.scanout_pitch = SCREENS_W * 4;
+        compositor.outputs = 2;
+        for (int screen = 0; screen < 2; screen++)
+                memory_copy(compositor.screen[screen], seam_screens[layout][screen], sizeof(compositor.screen[screen])),
+                memory_copy(compositor.output[screen].name, names[screen], sizeof(names[screen]));
+        compositor.stride = compositor.most_w = SCREENS_A_W;
+        compositor.room_h = compositor.most_h = SCREENS_H;
+        table = compositor.table = (struct windows address_to)mapped;
+        table->motion = 1;
+        compositor.pixels = table->pixels = header;
+        compositor.buffer = table->buffer = buffer;
+        table->stride = SCREENS_A_W;
+        compositor_table_outputs();
+        compositor.input_count = 1;
+
+        compositor.showing[1] = 1;
+        table->pid[1] = 1;
+        compositor.stack[0] = 1, compositor.stacked = 1;
+        table->width[1] = 100, table->height[1] = 80;
+        compositor.w[1] = 100, compositor.h[1] = 80;
+        table->want_width[1] = 100, table->want_height[1] = 80;
+        seam_reset(start_x, start_y);
+
+        /* Dragged onto the far edges of the second display, and onto the free edges of the primary. Layout 0 has the second
+           to the right, layout 1 to the left. */
+        if (layout == 0)
+        {
+            seam_drop(start_x, start_y, SCREENS_W - 1, 100);
+            check("seam: a window dragged onto the far right edge of the second display takes its right half",
+                  compositor.arranged[1] == COMPOSITOR_RIGHT && compositor_screen_of(1) == 1 && compositor.x[1] == SCREENS_A_W + SCREENS_B_W / 2 &&
+                      compositor.y[1] == 0);
+        }
+        else
+        {
+            seam_drop(start_x, start_y, 0, 100);
+            check("seam: a window dragged onto the far left edge of the second display takes its left half",
+                  compositor.arranged[1] == COMPOSITOR_LEFT && compositor_screen_of(1) == 1 && compositor.x[1] == 0 && compositor.y[1] == 0);
+        }
+
+        seam_reset(start_x, start_y);
+        seam_drop(start_x, start_y, layout ? 100 : 500, 3);
+        compositor_screen_part(compositor.screen[1], COMPOSITOR_MAXIMIZED, part);
+        check("seam: onto the far top edge of the second display it is maximized there",
+              compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor_screen_of(1) == 1 && compositor.x[1] == part[0] && compositor.y[1] == part[1]);
+
+        seam_reset(start_x, start_y);
+        seam_drop(start_x, start_y, layout ? 100 : 500, 237);
+        compositor_screen_part(compositor.screen[1], COMPOSITOR_BOTTOM, part);
+        check("seam: onto the far bottom edge of the second display it takes its bottom half there",
+              compositor.arranged[1] == COMPOSITOR_BOTTOM && compositor_screen_of(1) == 1 && compositor.y[1] == part[1] && compositor.x[1] == part[0]);
+
+        seam_reset(start_x, start_y);
+        seam_drop(start_x, start_y, layout ? SCREENS_W - 3 : 2, 100);
+        compositor_screen_part(compositor.screen[0], layout ? COMPOSITOR_RIGHT : COMPOSITOR_LEFT, part);
+        check("seam: onto the free outer edge of the primary, which the second display is not beyond, it takes that half",
+              compositor.arranged[1] == (layout ? COMPOSITOR_RIGHT : COMPOSITOR_LEFT) && compositor_screen_of(1) == 0 &&
+                  compositor.x[1] == part[0]);
+
+        seam_reset(start_x, start_y);
+        seam_drop(start_x, start_y, layout ? 400 : 100, SCREENS_A_H - 3);
+        compositor_screen_part(compositor.screen[0], COMPOSITOR_BOTTOM, part);
+        check("seam: onto the bottom edge of the first display, which no screen is under, it takes its bottom half",
+              compositor.arranged[1] == COMPOSITOR_BOTTOM && compositor_screen_of(1) == 0 && compositor.y[1] == part[1]);
+
+        seam_reset(start_x, start_y);
+        seam_drop(start_x, start_y, layout ? 258 : SCREENS_A_W - 2, 100);
+        check("seam: a drop on the edge where the displays meet arranges nothing", compositor.arranged[1] == COMPOSITOR_FLOATING);
+    }
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -136851,6 +137023,8 @@ b32 main()
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();
+        check_compositor_push();
+        check_compositor_seam();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();
