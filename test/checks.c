@@ -118177,24 +118177,24 @@ static void check_compositor_screens(void)
     screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
     screens_hand(100, 100, 0);
     check("snap: a window dragged into the middle of a screen shows no target",
-          compositor.drag_moved && compositor.preview[2] == 0 && compositor.preview_row != 2);
+          compositor.drag_moved && compositor.preview_goal == 0);
     screens_hand(1, 1, 0);
     check("snap: a corner shows its quarter, and the corner wins over the top and the left",
           compositor.preview_row == 2 && compositor.preview[0] == 0 && compositor.preview[1] == 0 &&
               compositor.preview[2] == SCREENS_A_W / 2 && compositor.preview[3] == SCREENS_A_H / 2);
     screens_hand(100, 120, 0);
-    check("snap: dragged off the target before it is let go, the tint goes", compositor.preview[2] == 0);
+    check("snap: dragged off the target before it is let go, the tint fades out (its goal is none)", compositor.preview_goal == 0);
     screens_hand(1, 1, 0);
     screens_hand(1, 1, -1);
     check("snap: let go on the quarter, the window takes it, and the size asked is the quarter",
           compositor.arranged[2] == COMPOSITOR_TOP_LEFT && compositor.x[2] == 0 && compositor.y[2] == 0 &&
-              table->want_width[2] == SCREENS_A_W / 2 && table->want_height[2] == SCREENS_A_H / 2 && compositor.preview[2] == 0);
+              table->want_width[2] == SCREENS_A_W / 2 && table->want_height[2] == SCREENS_A_H / 2 && compositor.preview_goal == 0);
     compositor.press = COMPOSITOR_NONE;
     screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
     screens_hand(100, 150, 0);
     screens_hand(100, 150, -1);
     check("snap: let go in the middle, the window that was arranged floats where it is and takes no target",
-          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.preview[2] == 0);
+          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.preview_goal == 0);
     compositor.press = COMPOSITOR_NONE;
     screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
     screens_hand(150, 190, 0);
@@ -121773,6 +121773,63 @@ static void check_compositor_glide(void)
     compositor_frame_of(1, &frame);
     check("glide: reduced motion snaps: no glide, and the window is at its rectangle at once",
           !compositor.glide[1] && frame.x == 128 && frame.width == 128);
+    compositor.table->motion = 0;
+}
+
+/*
+        The snap preview fades: in over COMPOSITOR_SNAP_FADE_NS when a target is entered, from none to its full tint; out
+        when it is left, from full, keeping its rectangle until it has gone; and out when the window is let go, under the
+        window that glides to the place. Reduced motion has no fade.
+*/
+static void check_compositor_preview_fade(void)
+{
+    positive now;
+
+    if (!layout_table_map(256))
+    {
+        check("preview fade: the table is mapped", false);
+        return;
+    }
+    layout_setup(256, 1);
+    compositor.table->motion = 0;
+    assist_fresh();
+    compositor.showing[2] = compositor.showing[3] = 0;
+    now = clock_monotonic_nanoseconds();
+
+    screens_hand(80, 64, 1);
+    screens_hand(0, 100, 0);
+    check("preview fade: entered, the preview is at none, and its rectangle is the target",
+          compositor.preview[2] == 128 && compositor_preview_alpha() == 0 && compositor.preview_goal == 100);
+    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS / 2;
+    check("preview fade: half way in it is between none and its full tint", compositor_preview_alpha() > 0 && compositor_preview_alpha() < 100);
+    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
+    check("preview fade: in, it is at its full tint", compositor_preview_alpha() == 100);
+
+    screens_hand(100, 100, 0);
+    check("preview fade: left, it fades out from full and keeps its rectangle until it has gone",
+          compositor.preview[2] == 128 && compositor_preview_alpha() == 100 && compositor.preview_goal == 0);
+    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
+    compositor_preview_keep();
+    check("preview fade: out, it is gone: no rectangle and no row", compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE);
+
+    screens_hand(0, 100, 0);
+    screens_hand(0, 100, -1);
+    check("preview fade: let go, the preview fades out where it was, under the window that glides to it",
+          compositor.preview[2] == 128 && compositor.preview_row == 1 && compositor.preview_goal == 0 && compositor.glide[1] &&
+              compositor.arranged[1] == COMPOSITOR_LEFT);
+    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
+    compositor_preview_keep();
+    check("preview fade: let go and faded, nothing is left", compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE);
+
+    layout_setup(256, 1);
+    compositor.table->motion = 1;
+    assist_fresh();
+    compositor.showing[2] = compositor.showing[3] = 0;
+    screens_hand(80, 64, 1);
+    screens_hand(0, 100, 0);
+    check("preview fade: reduced motion has no fade: the tint is at its full strength at once",
+          compositor.preview[2] == 128 && compositor_preview_alpha() == 100);
+    screens_hand(0, 100, -1);
     compositor.table->motion = 0;
 }
 
@@ -137889,6 +137946,7 @@ b32 main()
         check_compositor_snap_cover();
         check_compositor_snap_closing();
         check_compositor_glide();
+        check_compositor_preview_fade();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();

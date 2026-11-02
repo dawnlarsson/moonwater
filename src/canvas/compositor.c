@@ -116,7 +116,8 @@ static struct taskbar_view compositor_taskbar_view(void);
 static unsigned int compositor_line_lit(void); // the lit line of the window with the keys, the theme's (compositor_theme_read)
 static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: a line without the keys, the close button, a tab unlit
 static unsigned int compositor_ink_selection(void); // the chrome's selection, 0xaarrggbb: the snap preview's tint
-static unsigned int compositor_snap_ink(void); // the snap's tint, 0xaarrggbb: the selection at COMPOSITOR_SNAP_ALPHA, read on the wallpaper
+static unsigned int compositor_snap_ink(void); // the snap's tint, 0xaarrggbb: the selection at its percent, read on the wallpaper
+static unsigned int compositor_preview_alpha(void); // the percent of the snap preview's tint drawn now (compositor_preview_fade)
 static void compositor_preview(int row); // the snap preview of the drag of row (none clears it), from the pointer
 static unsigned int compositor_tab_target(b32 lit); // what a tab's glass is tinted toward, the theme's
 
@@ -3108,9 +3109,13 @@ static struct
         // The window whose line is lit (lit_row, COMPOSITOR_NONE for none), what of it, and whether held (else hovered).
         int lit_row;
         unsigned int lit_edges, lit_held;
-        // The snap preview a drag shows (compositor_preview): the row whose drag it is, and the rectangle it is drawn on.
+        // The snap preview a drag shows (compositor_preview): the row whose drag it is, and the rectangle it is drawn on. It
+        // fades in when a target is entered and out when it is left or let go (compositor_preview_fade): from preview_from
+        // percent of its tint at preview_at, toward preview_goal percent; a fade out keeps its rectangle until it is gone.
         int preview_row;
         int preview[4];
+        unsigned int preview_from, preview_goal;
+        positive preview_at;
         // What moonwater debug is told of each device, kept here for the table that is made after they are opened.
         unsigned int input_kinds[COMPOSITOR_INPUTS];
         unsigned short input_id[COMPOSITOR_INPUTS][4];
@@ -3689,11 +3694,13 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                 frame->lit_ink = compositor.lit_held ? COMPOSITOR_INK_LINE_HELD : COMPOSITOR_INK_LINE_HOVER;
         }
         // The snap preview is the dragged window's: drawn under it, where its target is (compositor_scene).
-        if (row == compositor.preview_row && row == compositor.drag && compositor.preview[2] > 0)
+        if (row == compositor.preview_row && compositor.preview[2] > 0)
         {
+                unsigned int ink = compositor_snap_ink(), percent = compositor_preview_alpha();
+
                 frame->preview[0] = compositor.preview[0], frame->preview[1] = compositor.preview[1];
                 frame->preview[2] = compositor.preview[2], frame->preview[3] = compositor.preview[3];
-                frame->preview_ink = compositor_snap_ink();
+                frame->preview_ink = (ink & 0xffffffu) | ((ink >> 24) * percent / 100) << 24;
         }
         if (row == compositor.mark_row && compositor.mark[2] > 0)
         {
@@ -10872,9 +10879,57 @@ static void compositor_box_of(int row, int *box)
 }
 
 /*
+        The snap preview's fade: the percent of its tint it is drawn at now, from preview_from toward preview_goal over
+        COMPOSITOR_SNAP_FADE_NS on the kit's ease, begun at preview_at. Reduced motion has no fade: the goal at once.
+*/
+static unsigned int compositor_preview_alpha(void)
+{
+        int from = (int)compositor.preview_from, goal = (int)compositor.preview_goal;
+        b64 done;
+
+        if (!compositor.preview_at || !compositor_glides())
+                return compositor.preview_goal;
+        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.preview_at), COMPOSITOR_SNAP_FADE_NS));
+        return (unsigned int)(from + (int)((long long)(goal - from) * (long long)done / (long long)UI_ONE));
+}
+
+// The preview fades toward goal percent from where it is now: a fade in, or out to none (compositor_preview_keep takes it away).
+static void compositor_preview_fade(unsigned int goal)
+{
+        compositor.preview_from = compositor_preview_alpha();
+        compositor.preview_goal = goal;
+        compositor.preview_at = compositor_glides() ? clock_monotonic_nanoseconds() : 0;
+}
+
+/*
+        After a present: a preview that is fading is damaged again, so the next present draws it at its next percent. One that
+        has faded out is taken away, and the loop goes idle.
+*/
+static void compositor_preview_keep(void)
+{
+        int *rect = compositor.preview;
+
+        if (rect[2] <= 0)
+                return;
+        if (compositor.preview_at && clock_monotonic_nanoseconds() - compositor.preview_at < COMPOSITOR_SNAP_FADE_NS)
+        {
+                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+                return;
+        }
+        if (!compositor.preview_goal)
+        {
+                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+                memory_zero(compositor.preview, sizeof(compositor.preview));
+                compositor.preview_row = COMPOSITOR_NONE;
+                compositor.preview_at = 0;
+        }
+}
+
+/*
         The snap preview: the rectangle a drop of the window row being moved would arrange it to, from the pointer as it
         is now, drawn as a tint (compositor_preview_draw) and damaged where it was and where it is. Once the window has
-        moved only; a pointer off every target, or row none, takes the preview away.
+        moved only. A pointer off every target takes it away by a fade (compositor_preview_fade), as a drop does, and the
+        window it belonged to keeps it while it fades.
 */
 static void compositor_preview(int row)
 {
@@ -10895,16 +10950,23 @@ static void compositor_preview(int row)
                 compositor_overlays_damage();
                 compositor.grid_on = 0;
         }
+        // No target: the preview fades out where it was, and goes when it has (compositor_preview_keep).
         if (how == COMPOSITOR_FLOATING)
-                row = COMPOSITOR_NONE;
-        if (row == compositor.preview_row && !memory_compare(rect, compositor.preview, sizeof(rect)))
+        {
+                if (compositor.preview[2] > 0 && compositor.preview_goal)
+                        compositor_preview_fade(0);
                 return;
+        }
+        if (row == compositor.preview_row && compositor.preview_goal && !memory_compare(rect, compositor.preview, sizeof(rect)))
+                return;
+        // A target entered from none, or back to the one it is fading out of, fades in; one moved to another keeps its fade.
+        if (compositor.preview[2] <= 0 || !compositor.preview_goal)
+                compositor_preview_fade(100);
         if (compositor.preview[2] > 0)
                 compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]);
         memory_copy(compositor.preview, rect, sizeof(rect));
         compositor.preview_row = row;
-        if (rect[2] > 0)
-                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+        compositor_damage(rect[0], rect[1], rect[2], rect[3]);
 }
 
 // The button is let go. A window that was being moved is arranged by where the
@@ -13122,6 +13184,7 @@ static b32 compositor_main()
                                 compositor_present();
                                 compositor_land_keep();
                                 compositor_glide_keep();
+                                compositor_preview_keep();
                                 if (compositor.motion_ts)
                                 {
                                         compositor_latency(1, compositor.motion_ts, clock_monotonic_nanoseconds());
