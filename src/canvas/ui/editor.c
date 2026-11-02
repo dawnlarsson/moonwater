@@ -288,6 +288,8 @@ static fn editor_close_tab(void)
                 editor_open(null);
                 editor.tab = 0;
         }
+        // The tab shown now has the caret when the editor has the keys: a close is not a key, so no event gives it one.
+        editor_now()->view.focused = editor.focused && !editor.find.focused;
 }
 
 /*

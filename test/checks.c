@@ -137955,6 +137955,11 @@ static fn editor_tabs_check(struct ui address_to wui)
                   doc_read(&editor.tabs[1].view.doc, 0, got, 4) == 4 && !memory_compare(got, "two\n", 4));
         check("editor tabs: and the others keep theirs", doc_length(&editor.tabs[0].view.doc) == 4 &&
               doc_length(&editor.tabs[2].view.doc) == 6);
+        // A close is not a key, so nothing else gives the tab it shows the caret: it has it when the editor has the keys.
+        editor.focused = true;
+        editor.tab = 2;
+        editor_close_tab();
+        check("editor tabs: the tab a close shows has the caret", editor.count == 2 && editor.tab == 1 && editor_now()->view.focused);
         editor.count = 0;
         editor_open(null);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);
