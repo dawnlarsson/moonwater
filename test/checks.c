@@ -120638,6 +120638,197 @@ static void check_compositor_tiling(void)
     compositor_keys.count = 0;
 }
 
+/*
+        A snap leaves the others on its screen their share. A window that snaps to a half or a quarter takes that region, and
+        a tile (half or quarter) of another window on the screen that the region covers is given the cells it leaves: a half
+        that loses its top quarter becomes its bottom quarter. A tile the region covers wholly floats back to the rectangle
+        its window had. A tile below a window's least is cut to the least at its corner, and the rest of the tile stays free.
+        A maximized window is not a tile. Super with Left or Right and a drop on the same edge give the same rectangles.
+*/
+#define LAYOUT_SIDE 512
+static unsigned int layout_pixels[LAYOUT_SIDE * LAYOUT_SIDE];
+
+static unsigned int address_to layout_table_map(int side)
+{
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)side * side * 4 + 4095) & ~4095ul;
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+
+    if (mapped < 0 && mapped > -4096)
+        return null;
+    compositor.table = (struct windows address_to)mapped;
+    compositor.table->motion = 1;
+    compositor.pixels = compositor.table->pixels = header;
+    compositor.buffer = compositor.table->buffer = buffer;
+    compositor.table->stride = compositor.table->output_width = compositor.table->output_height = (unsigned int)side;
+    return (unsigned int address_to)mapped;
+}
+
+// A compositor of one screen side by side at scale, with no window and the Super key held for the chords.
+static void layout_setup(int side, int scale)
+{
+    struct windows address_to table = compositor.table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.table = table;
+    compositor.pixels = table->pixels;
+    compositor.buffer = table->buffer;
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.shared_row = compositor.mark_row = compositor.preview_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = (unsigned int)side;
+    compositor.scale = scale;
+    compositor.card = -1;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.scanout = layout_pixels;
+    compositor.scanout_pitch = (unsigned int)side * 4;
+    compositor.stride = compositor.most_w = (unsigned int)side;
+    compositor.room_h = compositor.most_h = (unsigned int)side;
+    compositor.input_count = 1;
+    compositor.held[0] = CK_HELD_LSUPER;
+}
+
+// A window shown at x, y by width and height, floating: its rectangle is the one a snap keeps for it to come back to.
+static void layout_show(int row, int x, int y, int width, int height)
+{
+    compositor.showing[row] = 1;
+    compositor.table->pid[row] = (unsigned int)row;
+    compositor.x[row] = compositor.table->x[row] = (unsigned int)x;
+    compositor.y[row] = compositor.table->y[row] = (unsigned int)y;
+    compositor.w[row] = compositor.table->width[row] = (unsigned int)width;
+    compositor.h[row] = compositor.table->height[row] = (unsigned int)height;
+    compositor.table->want_width[row] = (unsigned int)width;
+    compositor.table->want_height[row] = (unsigned int)height;
+    compositor.saved_x[row] = (unsigned int)x, compositor.saved_y[row] = (unsigned int)y;
+    compositor.saved_w[row] = (unsigned int)width, compositor.saved_h[row] = (unsigned int)height;
+    if (compositor.stacked < WINDOWS)
+        compositor.stack[compositor.stacked++] = row;
+}
+
+// Whether row is arranged as how, at x, y, and asked for width by height.
+static int layout_is(int row, unsigned int how, int x, int y, int width, int height)
+{
+    return compositor.arranged[row] == how && compositor.x[row] == (unsigned int)x && compositor.y[row] == (unsigned int)y &&
+           compositor.table->want_width[row] == (unsigned int)width && compositor.table->want_height[row] == (unsigned int)height;
+}
+
+// A window is dropped by its top: the press at its top left plus from, a move to x, y and the let go there.
+static void layout_drop(int row, int from_x, int from_y, int x, int y)
+{
+    screens_hand((int)compositor.x[row] + from_x, (int)compositor.y[row] + from_y, 1);
+    screens_hand(x, y, 0);
+    screens_hand(x, y, -1);
+    compositor.press = COMPOSITOR_NONE;
+}
+
+// The chord Super with key on the focused window, as the keys make it.
+static void layout_chord(int row, unsigned int key)
+{
+    compositor_focus(row);
+    compositor_key(0, key, 1, 0);
+}
+
+static void check_compositor_layout(void)
+{
+    int chord[2][4], drop[2][4];
+
+    /* A half, then a quarter on the other half: the half is cut to the quarter it has left. */
+    if (!layout_table_map(256))
+    {
+        check("layout: the table is mapped", false);
+        return;
+    }
+    layout_setup(256, 1);
+    layout_show(1, 60, 60, 120, 80);
+    layout_show(2, 150, 150, 100, 80);
+    layout_show(3, 20, 20, 100, 100);
+    layout_chord(1, CK_KEY_LEFT);
+    compositor_arrange(2, COMPOSITOR_TOP_LEFT);
+    check("layout: a quarter snapped on the half it was on leaves the half its bottom quarter, and the quarter is its own",
+          layout_is(1, COMPOSITOR_BOTTOM_LEFT, 0, 128, 128, 128) && layout_is(2, COMPOSITOR_TOP_LEFT, 0, 0, 128, 128));
+    check("layout: a window floating on the other half is not moved by a quarter snapped on the first half",
+          compositor.arranged[3] == COMPOSITOR_FLOATING && compositor.x[3] == 20 && compositor.y[3] == 20);
+
+    /* A half snapped over the quarter of the half's window: the window's cells are all taken, so it floats back. */
+    compositor_arrange(2, COMPOSITOR_LEFT);
+    check("layout: a half over the quarter that was the other window's floats that window back to its own rectangle",
+          layout_is(1, COMPOSITOR_FLOATING, 60, 60, 120, 80) && compositor.arranged[2] == COMPOSITOR_LEFT);
+
+    /* A maximized window is not a tile: a half snapped beside it leaves it maximized. */
+    layout_setup(256, 1);
+    layout_show(1, 0, 0, 256, 256);
+    layout_show(2, 40, 40, 100, 100);
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    compositor_arrange(2, COMPOSITOR_LEFT);
+    check("layout: a maximized window is not a tile, and a half snapped on it leaves it maximized",
+          layout_is(1, COMPOSITOR_MAXIMIZED, 0, 0, 256, 256));
+
+    /* The chord and a drop on the same edges give the same rectangles. */
+    layout_setup(256, 1);
+    layout_show(1, 60, 60, 120, 80);
+    layout_show(2, 150, 150, 100, 80);
+    layout_chord(1, CK_KEY_LEFT);
+    layout_chord(2, CK_KEY_RIGHT);
+    for (int row = 1; row <= 2; row++)
+        chord[row - 1][0] = (int)compositor.x[row], chord[row - 1][1] = (int)compositor.y[row],
+        chord[row - 1][2] = (int)compositor.w[row], chord[row - 1][3] = (int)compositor.h[row];
+    layout_setup(256, 1);
+    layout_show(1, 60, 60, 120, 80);
+    layout_show(2, 150, 150, 100, 80);
+    layout_drop(1, 20, 4, 0, 100);
+    layout_drop(2, 20, 4, 255, 100);
+    for (int row = 1; row <= 2; row++)
+        drop[row - 1][0] = (int)compositor.x[row], drop[row - 1][1] = (int)compositor.y[row],
+        drop[row - 1][2] = (int)compositor.w[row], drop[row - 1][3] = (int)compositor.h[row];
+    check("layout: Super with Left and Right and a drop on the same edges make the same rectangles",
+          !memory_compare(chord, drop, sizeof(chord)) && layout_is(1, COMPOSITOR_LEFT, 0, 0, 128, 256) &&
+              layout_is(2, COMPOSITOR_RIGHT, 128, 0, 128, 256));
+
+    /* A drop in the top left corner is a quarter, and the half that was there keeps its bottom quarter. */
+    layout_setup(256, 1);
+    layout_show(1, 60, 60, 120, 80);
+    layout_show(2, 150, 150, 100, 80);
+    layout_chord(1, CK_KEY_LEFT);
+    layout_drop(2, 20, 4, 0, 0);
+    check("layout: a drop in the top left corner is that quarter, and the half on the left is cut to its bottom quarter",
+          layout_is(2, COMPOSITOR_TOP_LEFT, 0, 0, 128, 128) && layout_is(1, COMPOSITOR_BOTTOM_LEFT, 0, 128, 128, 128));
+
+    /* At 2x the same rectangles are in device pixels. */
+    if (!layout_table_map(LAYOUT_SIDE))
+    {
+        check("layout: the 2x table is mapped", false);
+        return;
+    }
+    layout_setup(LAYOUT_SIDE, 2);
+    layout_show(1, 120, 120, 240, 160);
+    layout_show(2, 300, 300, 200, 160);
+    layout_chord(1, CK_KEY_LEFT);
+    layout_chord(2, CK_KEY_RIGHT);
+    check("layout at 2x: a half is 256 device pixels across, and the other half is the other window's",
+          layout_is(1, COMPOSITOR_LEFT, 0, 0, 256, 512) && layout_is(2, COMPOSITOR_RIGHT, 256, 0, 256, 512));
+    layout_setup(LAYOUT_SIDE, 2);
+    layout_show(1, 120, 120, 240, 160);
+    layout_show(2, 300, 300, 200, 160);
+    layout_chord(1, CK_KEY_LEFT);
+    compositor_arrange(2, COMPOSITOR_TOP_LEFT);
+    check("layout at 2x: a quarter on a half leaves the half its bottom quarter, 256 device pixels high",
+          layout_is(1, COMPOSITOR_BOTTOM_LEFT, 0, 256, 256, 256) && layout_is(2, COMPOSITOR_TOP_LEFT, 0, 0, 256, 256));
+
+    /* A screen so small that a quarter is under the least a window is: the half is cut to the least at its corner. */
+    if (!layout_table_map(160))
+    {
+        check("layout: the small table is mapped", false);
+        return;
+    }
+    layout_setup(160, 1);
+    layout_show(1, 30, 30, 60, 60);
+    layout_show(2, 120, 120, 30, 30);
+    layout_chord(1, CK_KEY_LEFT);
+    compositor_arrange(2, COMPOSITOR_TOP_LEFT);
+    check("layout: a quarter under the least a window is cut to the least at its corner, and the rest of its tile is free",
+          layout_is(1, COMPOSITOR_BOTTOM_LEFT, 0, 80, WINDOW_MIN_WIDTH, 80) && compositor.table->want_width[1] == WINDOW_MIN_WIDTH);
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -135702,6 +135893,7 @@ b32 main()
         check_compositor_lifecycle_more();
         check_compositor_asked();
         check_compositor_tiling();
+        check_compositor_layout();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();

@@ -8325,19 +8325,88 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
         compositor_want(row, rect[2], rect[3]);
 }
 
+static void compositor_float(int row);
+
+/*
+        The cells a tile fills, one bit a quarter: top left 1, top right 2, bottom left 4, bottom right 8. A half is two of
+        them. A window that is not a tile (floating, maximized, placed in its room) fills none.
+*/
+static unsigned int compositor_tile_cells(unsigned int how)
+{
+        switch (how)
+        {
+        case COMPOSITOR_LEFT: return 1u | 4u;
+        case COMPOSITOR_RIGHT: return 2u | 8u;
+        case COMPOSITOR_BOTTOM: return 4u | 8u;
+        case COMPOSITOR_TOP_LEFT: case COMPOSITOR_TOP_RIGHT: case COMPOSITOR_BOTTOM_LEFT: case COMPOSITOR_BOTTOM_RIGHT:
+                return 1u << (how - COMPOSITOR_TOP_LEFT);
+        default: return 0;
+        }
+}
+
+// The tile that fills exactly cells, or COMPOSITOR_FLOATING when no tile does.
+static unsigned int compositor_cells_tile(unsigned int cells)
+{
+        static const unsigned int tiles[] = {COMPOSITOR_LEFT, COMPOSITOR_RIGHT, COMPOSITOR_BOTTOM, COMPOSITOR_TOP_LEFT,
+                                             COMPOSITOR_TOP_RIGHT, COMPOSITOR_BOTTOM_LEFT, COMPOSITOR_BOTTOM_RIGHT};
+
+        for (unsigned int at = 0; at < array_count(tiles); at++)
+                if (compositor_tile_cells(tiles[at]) == cells)
+                        return tiles[at];
+        return COMPOSITOR_FLOATING;
+}
+
+/*
+        A tile that row fills on screen leaves the tiles of the other windows on that screen the cells it does not fill.
+        Each one it covers is cut to what is left, which is a tile again: a half that loses its top quarter is its bottom
+        quarter, and a quarter that loses its half is the other quarter of it. One left nothing floats back to its own
+        rectangle (compositor_float). A cut under a window's least is asked for the least at the cut's corner
+        (compositor_want), so the rest of the cut is left free for the snap assist. A window that is not a tile is not
+        touched, and neither is one on another screen.
+*/
+static void compositor_tile_others(int row, unsigned int how, int screen)
+{
+        unsigned int count, taken = compositor_tile_cells(how);
+        const int (*screens)[4] = compositor_screens(&count);
+
+        for (int other = 0; other < WINDOWS; other++)
+        {
+                unsigned int was = compositor_tile_cells(compositor.arranged[other]), left;
+                int part[4];
+
+                if (other == row || !was || !compositor.showing[other] || compositor_screen_of(other) != screen)
+                        continue;
+                left = was & ~taken;
+                if (left == was)
+                        continue;
+                if (!left)
+                        compositor_float(other);
+                else
+                {
+                        unsigned int rest = compositor_cells_tile(left);
+
+                        compositor_screen_part(screens[screen], rest, part);
+                        compositor_arrange_rect(other, rest, part);
+                }
+        }
+}
+
 // All of a screen or half of it (compositor_screen_part): the screen named, or with none (-1) the window's own
-// (compositor_screen_of).
+// (compositor_screen_of). A tile leaves the others on the screen their share (compositor_tile_others).
 static void compositor_arrange_on(int row, unsigned int how, int on)
 {
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
-        int part[4];
+        int part[4], screen;
 
         if (!compositor.showing[row])
                 return;
 
-        compositor_screen_part(screens[on >= 0 && (unsigned int)on < count ? on : compositor_screen_of(row)], how, part);
+        screen = on >= 0 && (unsigned int)on < count ? on : compositor_screen_of(row);
+        compositor_screen_part(screens[screen], how, part);
         compositor_arrange_rect(row, how, part);
+        if (compositor_tile_cells(how))
+                compositor_tile_others(row, how, screen);
 }
 
 static void compositor_arrange(int row, unsigned int how)
