@@ -8240,6 +8240,20 @@ static positive ui_text_tick(struct ui_text address_to t, positive now, b32 addr
         return due;
 }
 
+/*
+        The blink as a loop's timeout: the widget's next frame folded into the timeout the loop sleeps (-1 for none, as the
+        tick answers it), with the redraw the blink asked for. Every app's tick asks this for its field, and none of them
+        keeps its own deadline.
+*/
+static long ui_text_timeout(struct ui_text address_to t, long timeout, positive now, b32 address_to redraw)
+{
+        positive due = ui_text_tick(t, now, redraw);
+
+        if (due && (timeout < 0 || (long)(due - now) < timeout))
+                timeout = (long)(due - now);
+        return timeout;
+}
+
 // A selection's text to a selection of the clipboard; never a masked field's.
 static fn ui_text_copy(struct ui_text address_to t, unsigned int which)
 {

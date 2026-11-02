@@ -4818,16 +4818,15 @@ static long settings_tick(long timeout, long address_to other)
         {
                 struct ui_text address_to t = settings_gallery.on ? &settings_gallery.field[settings_gallery.field[1].focused]
                                               : settings.editing >= 0 ? &settings.edit : &settings.filter_edit;
-                positive now = clock_monotonic_nanoseconds(), due;
+                positive now = clock_monotonic_nanoseconds();
                 b32 redraw = false;
 
                 if (!settings_gallery.on)
                         t->focused = settings.focused;
-                due = t->doc.selections ? ui_text_tick(t, now, &redraw) : 0;
+                if (t->doc.selections)
+                        timeout = ui_text_timeout(t, timeout, now, &redraw);
                 if (redraw)
                         settings_changed(t->well_top, t->well_bottom);
-                if (due && (timeout < 0 || (long)(due - now) < timeout))
-                        timeout = (long)(due - now);
         }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {

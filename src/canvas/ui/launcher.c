@@ -922,15 +922,13 @@ static b32 launcher_focus(b32 focused)
 // The caret's blink: the next frame it needs, and none once it has stopped (a while after the last key).
 static long launcher_tick(long timeout, long address_to other)
 {
-        positive now = clock_monotonic_nanoseconds(), due;
+        positive now = clock_monotonic_nanoseconds();
         b32 redraw = false;
 
         (void)other;
-        due = ui_text_tick(launcher_field(), now, &redraw);
+        timeout = ui_text_timeout(launcher_field(), timeout, now, &redraw);
         if (redraw)
                 launcher.dirty = true;
-        if (due && (timeout < 0 || (long)(due - now) < timeout))
-                timeout = (long)(due - now);
         return timeout;
 }
 

@@ -136815,6 +136815,64 @@ static fn check_no_hand_typing(void)
         check("fields: no window of Canvas types by hand: every input is the kit's field", read == sizeof(files) / sizeof(files[0]) && !found);
 }
 
+// How many times idiom is in the first size bytes of text.
+static positive check_hits(const char address_to text, positive size, const char address_to idiom)
+{
+        positive length = string_length((string_address)idiom), hits = 0;
+
+        for (positive at = 0; at + length <= size;)
+        {
+                const char address_to hit = (const char address_to)memory_search((address_any)(text + at), size - at, (address_any)idiom, length);
+
+                if (!hit)
+                        break;
+                hits++;
+                at = (positive)(hit - text) + length;
+        }
+        return hits;
+}
+
+/*
+        One blink for every field: ui.c's ui_text_timeout is the only place a field's caret deadline is folded into a loop's
+        timeout, and the three windows with a field each ask it (none reads the engine's tick, or folds the deadline by
+        hand). Read from the tree the check runs in, as check_no_hand_typing does; not run where the sources are not.
+*/
+static fn check_one_blink(void)
+{
+        static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c"};
+        static const char address_to const hand[] = {"ui_text_tick(", "(long)(due - now) < timeout"};
+        positive read = 0, asked = 0, hand_found = 0, defined = 0;
+
+        for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size);
+                const char address_to text = (const char address_to)bytes;
+
+                if (!bytes)
+                        continue;
+                read++;
+                asked += check_hits(text, size, "ui_text_timeout(") > 0;
+                for (positive i = 0; i < sizeof(hand) / sizeof(hand[0]); i++)
+                        hand_found += check_hits(text, size, hand[i]);
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        {
+                positive size = 0, bytes = compositor_map_file((string_address) "src/canvas/ui/ui.c", &size);
+
+                if (bytes)
+                {
+                        defined = check_hits((const char address_to)bytes, size, "static long ui_text_timeout(");
+                        compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+                }
+        }
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: one blink for every field, the sources are not here\n");
+                return;
+        }
+        check("blink: every field's caret deadline is ui_text_timeout in ui.c, asked by each window with a field", read == sizeof(files) / sizeof(files[0]) && asked == read && !hand_found && defined == 1);
+}
+
 /*
         No input code by hand: a key and a pointer button are the kit's names (UI_KEY_*, UI_POINTER_*, in ui.c), so no
         window of Canvas defines its own key or button numbers or writes a button's evdev code as a literal. The scan
@@ -139845,6 +139903,7 @@ b32 main()
                 check_glass_pieces(program_argument(3));
 #endif
         check_no_hand_typing();
+        check_one_blink();
         check_no_input_codes();
         check_no_shapes_by_hand();
 #if MOONWATER_UI_ANY
