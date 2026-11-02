@@ -132023,6 +132023,7 @@ static fn editor_check(struct ui address_to wui);
 static fn editor_close_check(struct ui address_to wui);
 static fn editor_tabs_check(struct ui address_to wui);
 static fn editor_disk_check(struct ui address_to wui);
+static fn editor_edge_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
 /*
@@ -132435,6 +132436,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_close_check(&wui);
         editor_tabs_check(&wui);
         editor_disk_check(&wui);
+        editor_edge_check(&wui);
         field_check(&wui);
         ui_over_check();
         ui_edge_row_check();
@@ -134545,6 +134547,108 @@ static fn check_screen_numbers(void)
         table.outputs = WINDOWS_OUTPUTS + 1;
         count = windows_screen_numbers(&table, number);
         check("identify: a list past what the table holds is one screen, numbered 1", count == 1 && number[0] == 1);
+}
+
+/*
+        The editor at the edges of its window and of its files. A window one column wide, or none tall, with the find bar
+        and the tab strip shown, draws nothing outside its box. A file that is no longer a regular file when Ctrl+R reads
+        it leaves a tab shown, never an index past the last tab. A file replaced by a FIFO after it was read is seen when
+        the window gets the keys, and does not hang the window while it waits for a writer.
+*/
+static fn editor_edge_check(struct ui address_to wui)
+{
+        static const int sizes[][2] = {{1, 300}, {0, 300}, {300, 1}, {300, 0}, {2, 40}, {1, 1}, {7, 27}, {0, 0}};
+        char dir[48], one[96], two[96];
+        positive named = string_length(string_copy((string_address)dir, (string_address) "editor-edge."));
+        unsigned int address_to picture;
+        long pixels;
+        b32 clean = true;
+        bipolar handle;
+
+        named += positive_into_string((string_address)dir + named, (positive)system_call(syscall(getpid)));
+        string_copy((string_address)dir + named, (string_address) ".tmp");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
+        string_copy(string_copy((string_address)one, (string_address)dir) + string_length((string_address)dir), (string_address) "/one.c");
+        string_copy(string_copy((string_address)two, (string_address)dir) + string_length((string_address)dir), (string_address) "/two.c");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)one, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "one\n", 4);
+        system_close(handle);
+        handle = system_open_at_mode(AT_FDCWD, (string_address)two, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "two\n", 4);
+        system_close(handle);
+
+        // The box: the window's pixels are its own stride, and nothing past the window's width or height is drawn.
+        pixels = ui_map(800 * 600 * 4);
+        picture = (unsigned int address_to)pixels;
+        editor.ui = *wui;
+        editor.count = 0;
+        editor.own.stride = 800;
+        check("editor edge: two files open for the tabs", editor_open((string_address)one) && editor_open((string_address)two) && editor.count == 2);
+        editor_find_open(1);
+        for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
+        {
+                for (positive i = 0; i < 800 * 600; i++)
+                        picture[i] = 0x5a5a5a5au;
+                editor.width = sizes[at][0];
+                editor.height = sizes[at][1];
+                editor_draw(picture);
+                for (int y = 0; y < 600; y++)
+                        for (int x = 0; x < 800; x++)
+                                if ((x >= editor.width || y >= editor.height) && picture[(positive)y * 800 + (positive)x] != 0x5a5a5a5au)
+                                        clean = false;
+        }
+        check("editor edge: at any window size, with the find bar and the tabs shown, nothing is drawn outside the window", clean);
+        editor.width = 800 * 3 / 5, editor.height = 600 * 3 / 4;
+
+        // Ctrl+R finds the last tab's file gone and a directory in its place: the editor still shows a tab it can point at.
+        editor.tab = 1;
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)two, 0);
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)two, 0700);
+        editor_focus(true);
+        check("editor edge: the file changed to a directory is seen when the window gets the keys", editor_now()->changed_on_disk);
+        editor_reload();
+        check("editor edge: a reload that finds no regular file leaves a tab shown, the one it can point at",
+              editor.count >= 1 && editor.tab >= 0 && editor.tab < editor.count);
+        editor.count = 0;
+        editor_open(null);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)two, 0x200);
+
+        // A file replaced by a FIFO is not read: the window's focus returns, with no writer on the FIFO.
+        handle = system_open_at_mode(AT_FDCWD, (string_address)one, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+        system_write_all((b32)handle, "one\n", 4);
+        system_close(handle);
+        editor.count = 0;
+        check("editor edge: a file opens for the FIFO test", editor_open((string_address)one) && editor.count == 1);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);
+        system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)one, 0010600, 0);
+        {
+                bipolar child = system_fork();
+                bipolar status = 0, reaped = 0;
+                positive duration[2] = {0, 1000000};
+
+                if (child == 0)
+                {
+                        editor_focus(true);
+                        system_call_1(syscall(exit_group), 0);
+                }
+                for (int tries = 0; tries < 2000 && reaped != child; tries++)
+                {
+                        reaped = (bipolar)system_call_4(syscall(wait4), child, (positive)address_of status, 1, 0);
+                        if (reaped != child)
+                                system_call_2(syscall(nanosleep), (positive)address_of duration, 0);
+                }
+                if (reaped != child)
+                {
+                        system_call_2(syscall(kill), child, 9);
+                        system_wait4_retry(child, address_of status, 0, null);
+                }
+                check("editor edge: a file replaced by a FIFO does not hang the window when it gets the keys", reaped == child && (status & 0x7f) == 0);
+        }
+        editor.count = 0;
+        editor_open(null);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
 }
 
 /*
