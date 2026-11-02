@@ -8998,9 +8998,12 @@ static void compositor_overlay_fade(unsigned int goal)
         compositor.overlay_at = compositor_glides() ? clock_monotonic_nanoseconds() : 0;
 }
 
+// Whether the overlays are drawn: up now, or still fading out. Up is read live (compositor_overlays_up), not as the last
+// present saw it: a drag brings the snap assist up and damages its thumbnails before the next present, and those are
+// the rectangles it must repaint.
 static int compositor_overlays_shown(void)
 {
-        return compositor.overlays_up || compositor_overlay_alpha() > 0;
+        return compositor_overlays_up() || compositor_overlay_alpha() > 0;
 }
 
 /*
@@ -9045,7 +9048,7 @@ static int compositor_overlay_boxes(int boxes[COMPOSITOR_ASSIST_MAX + 1][4])
                 boxes[n][2] = rect[2] + 2 * line, boxes[n][3] = rect[3] + 2 * line;
                 n++;
         }
-        if (shown && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
+        if (shown && compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
         {
                 const int *screen = screens[compositor.grid_screen];
 
@@ -9114,7 +9117,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                 }
                 added += 2;
         }
-        if (shown && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
+        if (shown && compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
         {
                 const int *screen = screens[compositor.grid_screen];
                 unsigned int line = COMPOSITOR_LINE * compositor.scale;
