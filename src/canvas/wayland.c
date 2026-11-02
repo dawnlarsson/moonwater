@@ -1240,6 +1240,15 @@ static inline int shell_xwayland_stop(struct shell_side *side)
 #define WAYLAND_SEAT_KEYBOARD 2UL
 #define WAYLAND_KEYBOARD_XKB_V1 1UL
 #define WAYLAND_SHM_ERR_INVALID_FD 2L
+#define WAYLAND_SHM_POOL_ERR_INVALID_STRIDE 0L
+#define WAYLAND_SHM_POOL_ERR_INVALID_FORMAT 1L
+#define WAYLAND_XDG_WM_BASE_ERR_ROLE 0L
+#define WAYLAND_XDG_SURFACE_ERR_ALREADY_CONSTRUCTED 2L
+#define WAYLAND_XDG_SURFACE_ERR_INVALID_SERIAL 4L
+#define WAYLAND_XDG_SURFACE_ERR_INVALID_SIZE 5L
+#define WAYLAND_XDG_SURFACE_ERR_DEFUNCT_ROLE 6L
+#define WAYLAND_XDG_TOPLEVEL_ERR_INVALID_PARENT 1L
+#define WAYLAND_XDG_TOPLEVEL_ERR_INVALID_SIZE 2L
 
 /*
         wl_display.error codes: the object does not exist, the request does
@@ -2281,7 +2290,7 @@ static int pool_request(long client, struct wayland_client *c, long index, long 
                 else if (args[5].number == 1)
                         format = SHELL_FORMAT_XRGB8888;
                 else
-                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "format not offered");
+                        return wire_fail(c, object->id, WAYLAND_SHM_POOL_ERR_INVALID_FORMAT, "format not offered");
                 buffer.kind = SHELL_BUFFER_SHM;
                 buffer.format = format;
                 buffer.fd = pool->fd;
@@ -2289,12 +2298,12 @@ static int pool_request(long client, struct wayland_client *c, long index, long 
                 buffer.height = args[3].number;
                 buffer.stride = args[4].number;
                 if (!shell_buffer_ok(&buffer))
-                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "buffer geometry");
+                        return wire_fail(c, object->id, WAYLAND_SHM_POOL_ERR_INVALID_STRIDE, "buffer geometry");
                 if (args[1].number < 0 || args[1].number > pool->size)
-                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "buffer past the pool");
+                        return wire_fail(c, object->id, WAYLAND_SHM_POOL_ERR_INVALID_STRIDE, "buffer past the pool");
                 bytes = buffer.stride * buffer.height;
                 if (bytes > pool->size - args[1].number)
-                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "buffer past the pool");
+                        return wire_fail(c, object->id, WAYLAND_SHM_POOL_ERR_INVALID_STRIDE, "buffer past the pool");
                 if (!wire_id_free(c, args[0].id))
                         return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
                 if (wire_free_record(c) < 0)
@@ -2378,7 +2387,7 @@ static int xdg_wm_base_request(struct wayland_client *c, long index, long opcode
                 if (surface < 0)
                         return wire_fail(c, args[1].id, WAYLAND_ERR_OBJECT, "not a surface");
                 if (c->objects[surface].role)
-                        return wire_fail(c, args[1].id, WAYLAND_ERR_METHOD, "surface has a role");
+                        return wire_fail(c, c->objects[index].id, WAYLAND_XDG_WM_BASE_ERR_ROLE, "surface has a role");
                 if (!wire_id_free(c, args[0].id))
                         return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
                 if (wire_free_record(c) < 0)
@@ -2407,14 +2416,14 @@ static int xdg_surface_request(long client, struct wayland_client *c, long index
         {
         case 0:
                 if (wire_has_child(c, W_XDG_TOPLEVEL, xdg->surface))
-                        return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "toplevel still attached");
+                        return wire_fail(c, xdg->id, WAYLAND_XDG_SURFACE_ERR_DEFUNCT_ROLE, "toplevel still attached");
                 if (surface >= 0)
                         c->objects[surface].role = 0;
                 wire_object_remove(c, index);
                 return SHELL_OK;
         case 1:
                 if (surface < 0 || c->objects[index].role)
-                        return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "surface already has a toplevel");
+                        return wire_fail(c, xdg->id, WAYLAND_XDG_SURFACE_ERR_ALREADY_CONSTRUCTED, "surface already has a toplevel");
                 if (!wire_id_free(c, args[0].id))
                         return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
                 if (wire_free_record(c) < 0)
@@ -2443,10 +2452,12 @@ static int xdg_surface_request(long client, struct wayland_client *c, long index
         case 2:
                 return wire_fail(c, xdg->id, WAYLAND_ERR_IMPLEMENTATION, "popups are not built");
         case 3:
+                if (args[2].number <= 0 || args[3].number <= 0)
+                        return wire_fail(c, xdg->id, WAYLAND_XDG_SURFACE_ERR_INVALID_SIZE, "window geometry must be positive");
                 return SHELL_OK;
         case 4:
                 if (xdg->configure == 0 || args[0].id != xdg->configure)
-                        return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "serial is not the last configure");
+                        return wire_fail(c, xdg->id, WAYLAND_XDG_SURFACE_ERR_INVALID_SERIAL, "serial is not the last configure");
                 return SHELL_OK;
         default:
                 return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "no such request");
@@ -2488,7 +2499,7 @@ static int toplevel_request(long client, struct wayland_client *c, long index, l
                 return SHELL_OK;
         case 1:
                 if (args[0].id && wire_of_type(c, args[0].id, W_XDG_TOPLEVEL) < 0)
-                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "not a toplevel");
+                        return wire_fail(c, toplevel->id, WAYLAND_XDG_TOPLEVEL_ERR_INVALID_PARENT, "parent is not a toplevel");
                 return SHELL_OK;
         case 2:
                 status = shell_window_title(&wayland.side, client, slot, (const char *)args[0].text, args[0].length);
@@ -2503,7 +2514,7 @@ static int toplevel_request(long client, struct wayland_client *c, long index, l
         case 7:
         case 8:
                 if (args[0].number < 0 || args[1].number < 0)
-                        return wire_fail(c, toplevel->id, WAYLAND_ERR_METHOD, "negative size");
+                        return wire_fail(c, toplevel->id, WAYLAND_XDG_TOPLEVEL_ERR_INVALID_SIZE, "negative size");
                 return SHELL_OK;
         case 9:
                 status = shell_window_maximize(&wayland.side, client, slot, 1);

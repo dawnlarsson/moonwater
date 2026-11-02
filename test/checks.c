@@ -143238,6 +143238,19 @@ static void wire_refused(long client, const char *what, long bytes_n, const unsi
         WIRE_CHECK(events == 1 && objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
 }
 
+/*
+        A refusal whose wl_display.error names the object it was made on and the
+        code that object's interface gives for it.
+*/
+static unsigned long wire_word_at(long at);
+
+static void wire_refused_as(long client, const char *what, long bytes_n, const unsigned char *bytes, unsigned long object, unsigned long code)
+{
+        wire_refused(client, what, bytes_n, bytes);
+        WIRE_CHECK(wire_word_at(8) == object);
+        WIRE_CHECK(wire_word_at(12) == code);
+}
+
 static void wire_good_objects_check(void)
 {
         long client = wayland_client_connect();
@@ -143616,7 +143629,7 @@ static void wire_object_checks(void)
         /* an ack must name the serial that was sent: a stale one is refused, the right one accepted. */
         wb_begin(&m, 9, 4);
         wb_u(&m, serial + 1);
-        wire_refused(client, "stale configure serial", wb_end(&m), m.b);
+        wire_refused_as(client, "stale configure serial", wb_end(&m), m.b, 9, 4);
         wb_begin(&m, 9, 4);
         wb_u(&m, serial);
         WIRE_CHECK(wire_feed_build(client, &m) == 0);
@@ -143660,7 +143673,7 @@ static void wire_object_checks(void)
         wb_u(&m, 16);
         wb_u(&m, 64);
         wb_u(&m, 2);
-        wire_refused(client, "format not offered", wb_end(&m), m.b);
+        wire_refused_as(client, "format not offered", wb_end(&m), m.b, 11, 1);
         wb_begin(&m, 11, 0);
         wb_u(&m, 13);
         wb_u(&m, 2000);
@@ -143668,7 +143681,7 @@ static void wire_object_checks(void)
         wb_u(&m, 16);
         wb_u(&m, 64);
         wb_u(&m, 0);
-        wire_refused(client, "buffer past the pool", wb_end(&m), m.b);
+        wire_refused_as(client, "buffer past the pool", wb_end(&m), m.b, 11, 0);
 
         /* attach takes a buffer and nothing else; a commit of the attached buffer is one damage to the shell,
            then the release, the output entry once, and the frame callback's done and delete. */
@@ -144187,7 +144200,7 @@ static void wire_role_checks(void)
         wire_take(client, objects, ops, 80);
         wb_begin(&m, 11, 1);
         wb_u(&m, 13);
-        wire_refused(client, "second toplevel on an xdg surface", wb_end(&m), m.b);
+        wire_refused_as(client, "second toplevel on an xdg surface", wb_end(&m), m.b, 11, 2);
         wb_begin(&m, 11, 0);
         WIRE_CHECK(wire_feed_build(client, &m) == 0);
         wb_begin(&m, 10, 0);
@@ -144618,6 +144631,75 @@ static void wire_fuzz_checks(void)
                invariant_failures, after_open - before_open);
 }
 
+/*
+        Error codes. Each refusal names the object it was made on, and the code
+        is the one the object's interface gives for it: the xdg_wm_base role
+        error, xdg_surface's already_constructed, invalid_serial, invalid_size
+        and defunct_role_object, xdg_toplevel's invalid_parent and invalid_size.
+        A window's toplevel and its surface are left alone by each refusal.
+*/
+static void wire_error_code_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
+        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 4) == 0);
+        wire_take(client, objects, ops, 80);
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 4, 2);
+        wb_u(&m, 11);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 11, 1);
+        wb_u(&m, 12);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+
+        /* the surface has a role: the wm base refuses, and names itself. */
+        wb_begin(&m, 4, 2);
+        wb_u(&m, 13);
+        wb_u(&m, 10);
+        wire_refused_as(client, "surface has a role", wb_end(&m), m.b, 4, 0);
+        /* the xdg surface is destroyed while its toplevel is alive: defunct_role_object. */
+        wb_begin(&m, 11, 0);
+        wire_refused_as(client, "xdg surface destroyed with its toplevel", wb_end(&m), m.b, 11, 6);
+        /* a window size of zero is no size: xdg_surface.invalid_size. */
+        wb_begin(&m, 11, 3);
+        wb_u(&m, 0);
+        wb_u(&m, 0);
+        wb_u(&m, 0);
+        wb_u(&m, 0);
+        wire_refused_as(client, "zero window geometry", wb_end(&m), m.b, 11, 5);
+        /* a parent that is not a toplevel: the toplevel names itself, invalid_parent. */
+        wb_begin(&m, 12, 1);
+        wb_u(&m, 10);
+        wire_refused_as(client, "parent is a surface", wb_end(&m), m.b, 12, 1);
+        /* a negative minimum size: the toplevel names itself, invalid_size. */
+        wb_begin(&m, 12, 8);
+        wb_u(&m, 0xffffffffUL);
+        wb_u(&m, 0);
+        wire_refused_as(client, "negative minimum size", wb_end(&m), m.b, 12, 2);
+
+        wb_begin(&m, 12, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 11, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 10, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -144633,6 +144715,7 @@ int main(void)
         wire_role_checks();
         wire_backpressure_checks();
         wire_pool_checks();
+        wire_error_code_checks();
         wire_fuzz_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
