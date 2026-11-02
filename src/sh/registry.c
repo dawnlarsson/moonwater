@@ -60,6 +60,7 @@
 #define SETTINGS_OUT_TURN 2u
 #define SETTINGS_OUT_REFRESH 3u
 #define SETTINGS_OUT_NOTE 4u
+#define SETTINGS_OUT_SCALE 5u
 
 // The words of a verb, at most: canvas cursor shake delay.
 #define SETTING_WORDS 4
@@ -272,6 +273,8 @@ static const struct settings_row settings_rows[] = {
      .help = "who turns the picture: the screen itself, or Moonwater (slower)", .output = SETTINGS_OUT_NOTE},
     {null, "Refresh rate", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
      .help = "how many times a second the screen is drawn: the rates it supports, the best marked", .output = SETTINGS_OUT_REFRESH},
+    {null, "Scale of this screen", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+     .help = "how big the screen draws things, in percent of its size: 50, 75, 100, 125, 150 or 200 [100]", .output = SETTINGS_OUT_SCALE},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
     {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0, null,

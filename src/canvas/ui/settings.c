@@ -1324,6 +1324,25 @@ static positive settings_screen_label(unsigned int number, const char address_to
 }
 
 // A rate in Hz, with the screen's first rate, the one it recommends, marked.
+// The six scale presets in percent, in the order the Scale dropdown lists them.
+static const unsigned int settings_scales[] = {50, 75, 100, 125, 150, 200};
+
+// The scale a screen's native size suggests, in percent: a 5K or 6K screen 200, a 4K one 150, any smaller one 100.
+static unsigned int settings_scale_suggested(const struct windows address_to table, int chosen)
+{
+        unsigned int width = table->output_w[chosen];
+
+        return width >= 5120 ? 200 : width >= 3840 ? 150 : 100;
+}
+
+// A scale in percent, with the marker of the one the screen suggests: 150% (recommended).
+static positive settings_scale_label(unsigned int percent, b32 recommended, char address_to into, positive room)
+{
+        positive at = settings_map_number(into, room, 0, (long)percent);
+
+        return settings_map_add(into, room, at, recommended ? "% (recommended)" : "%");
+}
+
 static positive settings_rate_label(unsigned int hz, b32 recommended, char address_to into, positive room)
 {
         positive at = settings_map_number(into, room, 0, (long)hz);
@@ -1349,6 +1368,13 @@ static const char address_to settings_output_text(int row, int chosen)
                 return "";
         if (settings_rows[row].output == SETTINGS_OUT_TURN)
                 return settings_turn_label(table->output_turn[chosen]);
+        if (settings_rows[row].output == SETTINGS_OUT_SCALE)
+        {
+                unsigned int percent = table->output_asked_scale[chosen];
+
+                settings_scale_label(percent, percent == settings_scale_suggested(table, chosen), settings_shown_rate, sizeof(settings_shown_rate));
+                return settings_shown_rate;
+        }
         if (settings_rows[row].output == SETTINGS_OUT_REFRESH)
         {
                 rates = settings_rates_of(chosen);
@@ -2957,6 +2983,13 @@ static b32 settings_output_choice(const struct settings_row address_to which, po
                 string_copy_bounded((string_address)into, (string_address)settings_turns[index].label, room);
                 return true;
         }
+        if (which->output == SETTINGS_OUT_SCALE && chosen >= 0 && index < sizeof(settings_scales) / sizeof(settings_scales[0]))
+        {
+                unsigned int percent = settings_scales[index];
+
+                settings_scale_label(percent, percent == settings_scale_suggested(table, chosen), into, room);
+                return true;
+        }
         if (which->output == SETTINGS_OUT_REFRESH && chosen >= 0 && index < settings_rates_of(chosen))
         {
                 settings_rate_label(table->output_hz[chosen][index], index == 0, into, room);
@@ -3056,6 +3089,13 @@ static fn settings_output_apply(int row, const char address_to label)
                         return;
                 length = settings_map_add(value, sizeof(value), length, " rotation ");
                 settings_map_number(value, sizeof(value), length, settings_turns[at].degrees);
+        }
+        else if (which->output == SETTINGS_OUT_SCALE && at < (int)(sizeof(settings_scales) / sizeof(settings_scales[0])))
+        {
+                if (settings_scales[at] == table->output_asked_scale[chosen])
+                        return;
+                length = settings_map_add(value, sizeof(value), length, " scale ");
+                settings_map_number(value, sizeof(value), length, (long)settings_scales[at]);
         }
         else if (which->output == SETTINGS_OUT_REFRESH && at < (int)settings_rates_of(chosen))
         {

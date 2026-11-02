@@ -127410,6 +127410,39 @@ static fn check_display_section(void)
                   string_equals((string_address)text, (string_address) "144 Hz (recommended)") && settings_choice(&settings_rows[refresh_row], 1, text, sizeof(text)) &&
                   string_equals((string_address)text, (string_address) "75 Hz") && !settings_choice(&settings_rows[refresh_row], 3, text, sizeof(text)));
         check("display section: the refresh dropdown shows the rate the screen is at", string_equals((string_address)settings_shown_value(refresh_row), (string_address) "75 Hz"));
+
+        // The Scale dropdown: six presets in plain words, the one a 1920 screen suggests (100%) marked, and the row showing the scale
+        // its screen's line asks. A screen's native width suggests 150% at 4K and 200% at 5K or 6K.
+        {
+                int scale_row = -1;
+                unsigned int width;
+
+                for (positive at = 0; at < SETTINGS_ROWS; at++)
+                        if (settings_rows[at].output == SETTINGS_OUT_SCALE)
+                                scale_row = (int)at;
+                check("display section: the Scale row is one row of the Display section", scale_row >= 0 && settings_rows[scale_row].section == null &&
+                      settings_output_row(SETTINGS_OUT_SCALE) == scale_row);
+                check("display section: the Scale dropdown lists six presets in percent, the 100% marked as a 1920 screen suggests it",
+                      settings_options(&settings_rows[scale_row]) == 6 && settings_choice(&settings_rows[scale_row], 0, text, sizeof(text)) &&
+                          string_equals((string_address)text, (string_address) "50%") &&
+                          settings_choice(&settings_rows[scale_row], 2, text, sizeof(text)) &&
+                          string_equals((string_address)text, (string_address) "100% (recommended)") &&
+                          settings_choice(&settings_rows[scale_row], 5, text, sizeof(text)) && string_equals((string_address)text, (string_address) "200%") &&
+                          !settings_choice(&settings_rows[scale_row], 6, text, sizeof(text)));
+                table.output_asked_scale[1] = 150;
+                check("display section: the Scale row shows the scale its screen's line asks, in percent",
+                      string_equals((string_address)settings_shown_value(scale_row), (string_address) "150%"));
+                check("display section: the choice that is the screen's scale is found by its label", settings_choice_index(scale_row, "150%") == 4 &&
+                      settings_choice_index(scale_row, "75%") == 1 && settings_choice_index(scale_row, "60%") == -1);
+                table.output_asked_scale[1] = 100;
+                width = table.output_w[1];
+                table.output_w[1] = 3840;
+                check("display section: a 4K screen suggests 150%, marked in the dropdown", settings_scale_suggested(&table, 1) == 150 &&
+                      settings_choice(&settings_rows[scale_row], 4, text, sizeof(text)) && string_equals((string_address)text, (string_address) "150% (recommended)"));
+                table.output_w[1] = 5120;
+                check("display section: a 5K screen suggests 200%", settings_scale_suggested(&table, 1) == 200);
+                table.output_w[1] = width;
+        }
         memory_copy(table.output_model[1], "Dell U2720Q", 12);
         check("display section: a screen whose EDID names it shows the name, its connector in brackets after it",
               string_equals((string_address)settings_shown_value(screen_row), (string_address) "Screen 1: Dell U2720Q [DP-1]"));
