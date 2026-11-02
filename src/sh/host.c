@@ -24663,7 +24663,7 @@ static b32 host_answer(bool update, string_address disk)
 
 //      The files of the settings table's plain rows are added when a wipe runs
 //      (host_wipe_table), after the files named here by hand.
-static string_address host_wipe_keep[96] = {
+static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(HOST_MACHINE_SCRIPT),
     HOST_WIPE_KEEP(NET_WIFI_LIST),
     HOST_WIPE_KEEP(RADIO_RULES_PATH),

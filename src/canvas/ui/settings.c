@@ -291,7 +291,9 @@ static const struct settings_ink address_to settings_ink_table(const struct sett
         return settings_inks;
 }
 
-_Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) < 64, "the rows to ask are a bit each of a word");
+// The rows to ask are a bit each, SETTINGS_UNREAD_WORDS words of 64 bits.
+#define SETTINGS_UNREAD_WORDS 2
+_Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) <= 64 * SETTINGS_UNREAD_WORDS, "the rows to ask fit their words");
 
 /*
         What changes the machine or ends what a person has, as the words that
@@ -753,7 +755,7 @@ static struct
         int job;
         b32 job_sets;
         char job_value[SETTINGS_TYPED];
-        positive unread;  // rows to ask, a bit each
+        positive unread[SETTINGS_UNREAD_WORDS]; // rows to ask, a bit each
         struct settings_change queue[SETTINGS_QUEUE]; // changes to make once the verb running is done, in order
         positive queued;
         b32 told;         // the first reading is said in the machine's log
@@ -2134,6 +2136,30 @@ static b32 settings_same_verb(const struct settings_row address_to one, const st
         return true;
 }
 
+// The rows to ask (settings.unread): a bit each, and the lowest is asked first.
+static void settings_unread_set(positive row, int on)
+{
+        positive bit = (positive)1 << (row % 64);
+
+        if (on)
+                settings.unread[row / 64] |= bit;
+        else
+                settings.unread[row / 64] &= ~bit;
+}
+
+static int settings_unread_is(positive row)
+{
+        return (int)((settings.unread[row / 64] >> (row % 64)) & 1);
+}
+
+static int settings_unread_any(void)
+{
+        for (positive word = 0; word < SETTINGS_UNREAD_WORDS; word++)
+                if (settings.unread[word])
+                        return 1;
+        return 0;
+}
+
 // The next verb to run: a change first, then the rows not yet asked, then help.
 static fn settings_next_job(void)
 {
@@ -2152,10 +2178,14 @@ static fn settings_next_job(void)
                         // Nothing a change carried (a passphrase) stays in the slot it leaves.
                         memory_zero(&settings.queue[settings.queued], sizeof(settings.queue[0]));
                 }
-                else if (settings.unread)
+                else if (settings_unread_any())
                 {
-                        settings.job = (int)bits_trailing_zeros(settings.unread);
-                        settings.unread &= settings.unread - 1;
+                        positive first = 0;
+
+                        while (!settings_unread_is(first))
+                                first++;
+                        settings.job = (int)first;
+                        settings_unread_set(first, 0);
                         settings.job_sets = false;
                 }
                 else if (settings.help == 1)
@@ -2230,10 +2260,10 @@ static fn settings_next_job(void)
 // Every row asked again: a change to one can move another (airplane mode turns the radios off).
 static fn settings_ask_all(void)
 {
-        settings.unread = 0;
+        memory_zero(settings.unread, sizeof(settings.unread));
         for (positive row = 0; row < SETTINGS_ROWS; row++)
                 if (settings_rows[row].output == SETTINGS_OUT_NONE)
-                        settings.unread |= (positive)1 << row;
+                        settings_unread_set(row, 1);
 }
 
 // Where a change to row waits in the queue, or queued when it has none.
@@ -2588,7 +2618,7 @@ static fn settings_feed_rows(void)
         for (positive at = 0; at < SETTINGS_ROWS; at++)
                 if ((settings_rows[at].flags & SETTINGS_TICK) && settings_group_of((int)at) == settings.group &&
                     settings.editing != (int)at)
-                        settings.unread |= (positive)1 << at;
+                        settings_unread_set(at, 1);
 }
 
 /*
@@ -2607,7 +2637,7 @@ static long settings_feed_tick(void)
 
         if (feed < 0 || settings.view || settings.editing >= 0 || settings.filter_length ||
             (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED) || settings.child > 0 || settings.queued ||
-            settings.unread || settings.help == 1)
+            settings_unread_any() || settings.help == 1)
                 return -1;
         if (now < settings.feed_due)
                 return (long)(settings.feed_due - now);
@@ -2702,11 +2732,11 @@ static fn settings_finished(b32 killed)
                         char before[SETTINGS_VALUE];
                         unsigned char was = settings.state[other];
 
-                        if ((int)other != row && !((settings.unread >> other) & 1))
+                        if ((int)other != row && !settings_unread_is(other))
                                 continue;
                         if (!settings_same_verb(&settings_rows[row], &settings_rows[other]))
                                 continue;
-                        settings.unread &= ~((positive)1 << other);
+                        settings_unread_set(other, 0);
                         string_copy_bounded((string_address)before, (string_address)settings.value[other], sizeof(before));
                         settings.state[other] = killed ? SETTINGS_FAILED
                                                        : (unsigned char)settings_read(&settings_rows[other], settings_large->said,
@@ -2722,7 +2752,7 @@ static fn settings_finished(b32 killed)
         settings_next_job();
 
         // The first reading of every row, said once where the machine's log is: how many were unread or not understood.
-        if (!settings.told && !settings.unread && settings.child <= 0 && !settings.queued)
+        if (!settings.told && !settings_unread_any() && settings.child <= 0 && !settings.queued)
         {
                 positive failed = 0;
 
