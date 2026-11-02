@@ -123044,6 +123044,137 @@ static void check_compositor_touch_hold(void)
     compositor.table->motion = 0;
 }
 
+/*
+        The touch path, end to end as a field's window gets it: a finger's reports go through the compositor's input, and the
+        events the window's own queue holds (windows_event) are drained into a text field the way the app's loop drains them
+        (a motion's place is kept for the presses after it). The finger taps the field, is held for a long press, drags on by
+        words, lifts; then it takes the end's handle and moves that end by characters. The window is far from the screen's
+        edges, as a field's is in a window with room, so no edge grip takes a press meant for the text. Each step is checked on
+        the field's selection and on the pixels its handle draws.
+*/
+#define TOUCH_PATH_LEFT 20
+#define TOUCH_PATH_TOP 20
+
+static int touch_path_x(struct ui address_to wui, struct ui_text address_to t, p64 offset)
+{
+    static struct ui_text_layout l;
+
+    ui_text_layout_line(wui, t, 0, &l);
+    return t->left - (int)t->scroll_x + ui_text_x_of(&l, offset);
+}
+
+static void touch_path_drain(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, int *px, int *py, p32 address_to asks)
+{
+    struct window_event event;
+
+    while (windows_event(own, &event))
+    {
+        if (event.type == WINDOW_EVENT_MOTION)
+            *px = event.a, *py = event.b;
+        *asks |= ui_field_event(wui, t, null, &event, *px, *py);
+    }
+}
+
+static void check_touch_path(struct ui address_to wui)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static struct ui_text t;
+    struct windows address_to table;
+    struct window_row own;
+    int px = 0, py = 0, bx, by, gx, ex, knob;
+    unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
+    p32 asks = 0;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.hold = -1;
+    compositor.holds = ~0ul;
+    compositor.told_row = COMPOSITOR_NONE;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map() || system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK))
+    {
+        check("touch path: the table and the device are made", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = TOUCH_PATH_LEFT, table->y[1] = TOUCH_PATH_TOP, table->width[1] = 230, table->height[1] = 200;
+    glass_paint(1, 0, 0, 230, 200, 0x404040u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    touch_clock = 1000000;
+    touch_down = 0;
+    compositor.touchscreen[0] = 1;
+    compositor.screen_touch[0] = (struct compositor_touch_screen){0};
+    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
+    compositor.screen_touch[0].slots = 1;
+    compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1020;
+    compositor.pointer_x = 60;
+    compositor.pointer_y = 70;
+
+    own.table = table, own.row = 1, own.door = -1;
+    ui_field_open(&t, &own, "alpha beta gamma");
+    doc_select_set(&t.doc, 0, 0);
+    ui_begin(wui, wui->pixels, wui->pitch, wui->width, wui->height);
+    ui_text_draw(wui, &t, 20, 60, 190, 44, 0);
+    t.focused = true;
+    by = t.top + t.line_height / 2;
+    bx = touch_path_x(wui, &t, 6) + 1;
+    gx = touch_path_x(wui, &t, 13) + 1;
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+
+    /* The tap: a finger that lands and lifts puts a caret, and asks for no menu. */
+    touch_one(TOUCH_PATH_LEFT + bx, TOUCH_PATH_TOP + by, false);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    touch_one(TOUCH_PATH_LEFT + bx, TOUCH_PATH_TOP + by, true);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    check("touch path: a tap puts the caret where the finger is", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 6);
+
+    /* The long press: held still, the word under the finger is selected, and the right button is no menu. */
+    asks = 0;
+    touch_one(TOUCH_PATH_LEFT + bx, TOUCH_PATH_TOP + by, false);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    check("touch path: a long press selects the word under the finger", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 10);
+    check("touch path: and the long press asks for no menu", !(asks & UI_TEXT_MENU));
+
+    /* The drag after it: the finger moves on, and the selection grows by words to the end of the word it reaches. */
+    asks = 0;
+    touch_one(TOUCH_PATH_LEFT + gx, TOUCH_PATH_TOP + by, false);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    check("touch path: a drag after the long press extends the selection by words", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 16);
+    touch_one(TOUCH_PATH_LEFT + gx, TOUCH_PATH_TOP + by, true);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    check("touch path: the lift keeps the selection, and nothing is still dragged", doc_sel_end(&t.doc.selections[0]) == 16 && !t.dragging);
+
+    /* The handle: the end of the selection has a knob hung under its line, in the accent, and a finger on it moves that end by
+       characters, the start staying where it is. */
+    ui_begin(wui, wui->pixels, wui->pitch, wui->width, wui->height);
+    ui_text_draw(wui, &t, 20, 60, 190, 44, 0);
+    ex = touch_path_x(wui, &t, 16);
+    knob = t.top + t.line_height + 6 * compositor.scale;
+    check("touch path: the end of the selection has a handle, a knob in the accent under its line",
+          (wui->pixels[(positive)knob * wui->pitch + (positive)ex] & 0xffffffu) == accent);
+    touch_one(TOUCH_PATH_LEFT + ex, TOUCH_PATH_TOP + knob, false);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    touch_one(TOUCH_PATH_LEFT + gx, TOUCH_PATH_TOP + by, false);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    touch_one(TOUCH_PATH_LEFT + gx, TOUCH_PATH_TOP + by, true);
+    touch_path_drain(wui, &t, &own, &px, &py, &asks);
+    check("touch path: a finger on the end's handle moves that end by characters, the start staying",
+          doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 13);
+
+    ui_text_close(&t);
+}
+
 static void check_compositor_touch(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -136361,6 +136492,7 @@ static fn field_check(struct ui address_to wui)
 
         touch_hold_check(wui, &t);
         touch_scroll_check(wui);
+        check_touch_path(wui);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {
