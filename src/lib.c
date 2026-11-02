@@ -20593,9 +20593,21 @@ __asm__(
     ".Lmemory_first_icase_arm64_one_case:\n   mov w9, w8\n   mov w10, w8\n"
     ".Lmemory_first_icase_arm64_ready:\n"
 #ifndef KERNEL_MODE
-    "cmp x2, #16\n   b.lo .Lmemory_first_icase_arm64_scalar\n   dup v1.16b, w9\n   dup v2.16b, w10\n"
-    ".Lmemory_first_icase_arm64_vector:\n   ldr q0, [x0]\n   cmeq v3.16b, v0.16b, v1.16b\n   cmeq v0.16b, v0.16b, v2.16b\n   orr v0.16b, v0.16b, v3.16b\n   umaxv b3, v0.16b\n"
-    "umov w3, v3.b[0]\n   cbnz w3, .Lmemory_first_icase_arm64_scalar\n   add x0, x0, #16\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs .Lmemory_first_icase_arm64_vector\n"
+    //
+    //       The two spellings of a letter are (byte | 0x20) == lower, and a byte that is no letter is compared
+    //       as it is: v3 holds 0x20 for a letter and nought otherwise, which is w9 less w10. One orr and one
+    //       compare a vector where two compares and their or were three, four vectors a turn while sixty four
+    //       bytes are left once the first sixteen have been looked at, as memory_first_of does.
+    //
+    "cmp x2, #16\n   b.lo .Lmemory_first_icase_arm64_scalar\n   sub w11, w9, w10\n   dup v1.16b, w9\n   dup v3.16b, w11\n"
+    ".Lmemory_first_icase_arm64_vector:\n   ldr q0, [x0]\n   orr v0.16b, v0.16b, v3.16b\n   cmeq v0.16b, v0.16b, v1.16b\n   umaxv b4, v0.16b\n"
+    "umov w3, v4.b[0]\n   cbnz w3, .Lmemory_first_icase_arm64_scalar\n   add x0, x0, #16\n   sub x2, x2, #16\n"
+    "cmp x2, #16\n   b.lo .Lmemory_first_icase_arm64_scalar\n   cmp x2, #64\n   b.hs .Lmemory_first_icase_arm64_quad\n   b .Lmemory_first_icase_arm64_vector\n"
+    ".Lmemory_first_icase_arm64_quad:\n   ld1 {v4.16b-v7.16b}, [x0]\n   orr v4.16b, v4.16b, v3.16b\n   orr v5.16b, v5.16b, v3.16b\n"
+    "orr v6.16b, v6.16b, v3.16b\n   orr v7.16b, v7.16b, v3.16b\n   cmeq v4.16b, v4.16b, v1.16b\n   cmeq v5.16b, v5.16b, v1.16b\n"
+    "cmeq v6.16b, v6.16b, v1.16b\n   cmeq v7.16b, v7.16b, v1.16b\n   orr v4.16b, v4.16b, v5.16b\n   orr v6.16b, v6.16b, v7.16b\n"
+    "orr v4.16b, v4.16b, v6.16b\n   umaxp v4.4s, v4.4s, v4.4s\n   fmov x4, d4\n   cbnz x4, .Lmemory_first_icase_arm64_vector\n"
+    "add x0, x0, #64\n   sub x2, x2, #64\n   cmp x2, #16\n   b.lo .Lmemory_first_icase_arm64_scalar\n   cmp x2, #64\n   b.hs .Lmemory_first_icase_arm64_quad\n   b .Lmemory_first_icase_arm64_vector\n"
 #endif
     ".Lmemory_first_icase_arm64_scalar:\n   cbz x2, .Lmemory_first_icase_arm64_absent\n"
     ".Lmemory_first_icase_arm64_byte:\n   ldrb w3, [x0]\n   cmp w3, w9\n   b.eq .Lmemory_first_icase_arm64_found\n   cmp w3, w10\n   b.eq .Lmemory_first_icase_arm64_found\n"
