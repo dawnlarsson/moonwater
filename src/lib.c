@@ -54417,7 +54417,8 @@ __asm__(
     //       instruction as every other input, where gcc jumps over it.
     //
     ASM_FUNC(bits_leading_zeros)
-    "bsr %rdi, %rax\n   mov $127, %edx\n   cmovz %edx, %eax\n   xor $63, %eax\n" ASM_RET
+    "bsr %rdi, %rax\n   cmovz .Lbits_leading_zeros_zero(%rip), %eax\n   xor $63, %eax\n" ASM_RET
+    ".Lbits_leading_zeros_zero:  .long 127\n"
     ASM_END(bits_leading_zeros)
 
     //
