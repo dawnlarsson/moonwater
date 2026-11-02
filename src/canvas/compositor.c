@@ -8312,7 +8312,9 @@ static void compositor_take(int row)
                         return;
                 compositor_first_put(row, x, y);
                 compositor_raise(row);
-                if (compositor_visible(row))
+                // Raised over the others, but given the keys only when the person asked for the program (its launch
+                // carried WINDOW_ASKED_VARIABLE): a window a program opens on its own shows and leaves the keys alone.
+                if (compositor_visible(row) && __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE))
                         compositor_focus(row);
                 compositor_land(row);
                 compositor_tabs_changed();

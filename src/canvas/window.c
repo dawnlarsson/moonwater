@@ -605,6 +605,10 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOW_PLACE_VARIABLE "MOONWATER_PLACE"
 #define WINDOW_PLACE_WORDS 14u
 #define WINDOW_PLACE_TEXT 112u
+// A launch the user asked for (the launcher, a typed command, a terminal the keys opened) carries this variable as 1,
+// and the first window its program opens takes the keys when it first shows. Any other window shows without them.
+#define WINDOW_ASKED_VARIABLE "MOONWATER_ASKED"
+#define WINDOW_ASKED_ENVIRONMENT 256
 
 // A placement as it is parsed, and as a row's columns hold it.
 struct window_place
@@ -707,6 +711,7 @@ struct windows
         int damage_x[WINDOWS], damage_y[WINDOWS], damage_width[WINDOWS], damage_height[WINDOWS];
         char title[WINDOWS][WINDOWS_TITLE];
         unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, WINDOW_NO_CLOSE and WINDOW_DISMISS, read with the first picture
+        unsigned int asked[WINDOWS];  // the launch's: 1 when the user asked for the program (MOONWATER_ASKED=1 at its start), so its first window takes the keys
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
         unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
@@ -1363,6 +1368,7 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         for (unsigned int at = 0; at < WINDOWS_TITLE; at++)
                 table->title[row][at] = 0;
         table->glass[row] = 0;
+        table->asked[row] = 0;
         table->ground[row] = 0;
         __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->hover_off[row], 0u, __ATOMIC_RELEASE);
@@ -1651,6 +1657,57 @@ static void windows_place_take(struct windows *table, unsigned int row)
                 }
                 entry[prefix] = 0;
         }
+}
+
+/*
+        MOONWATER_ASKED=1 in the environment the program was started with makes its row asked, which is what gives the
+        keys to its first window when it shows (compositor_take). The variable is emptied the same way a placement is,
+        so the programs this one starts after its first window are not asked. Any other value is not asked.
+*/
+static void windows_asked_take(struct windows *table, unsigned int row, string_address address_to environment)
+{
+        const unsigned int prefix = sizeof(WINDOW_ASKED_VARIABLE);
+
+        for (unsigned int at = 0; environment && environment[at]; at++)
+        {
+                char *entry = (char *)environment[at];
+                unsigned int same = 0;
+
+                while (same + 1 < prefix && entry[same] == WINDOW_ASKED_VARIABLE[same])
+                        same++;
+                if (same + 1 != prefix || entry[same] != '=')
+                        continue;
+                if (entry[prefix] == '1' && !entry[prefix + 1])
+                        __atomic_store_n(&table->asked[row], 1u, __ATOMIC_RELEASE);
+                entry[prefix] = 0;
+        }
+}
+
+/*
+        The environment of a program the user asked for: the program's own, with MOONWATER_ASKED=1 first and any
+        MOONWATER_ASKED it had taken out. Built once in a static array; a program with more variables than that is
+        started as it is, without the mark, which is what it was before the mark.
+*/
+static string_address address_to window_asked_environment(void)
+{
+        static string_address environment[WINDOW_ASKED_ENVIRONMENT];
+        static char asked[] = WINDOW_ASKED_VARIABLE "=1";
+        string_address address_to inherited = program_environment_list();
+        unsigned int used = 0;
+
+        for (unsigned int at = 0; inherited && inherited[at]; at++)
+                if (!string_has_prefix(inherited[at], WINDOW_ASKED_VARIABLE "="))
+                        used++;
+        if (used + 2 > WINDOW_ASKED_ENVIRONMENT)
+                return inherited;
+
+        used = 0;
+        environment[used++] = asked;
+        for (unsigned int at = 0; inherited && inherited[at]; at++)
+                if (!string_has_prefix(inherited[at], WINDOW_ASKED_VARIABLE "="))
+                        environment[used++] = inherited[at];
+        environment[used] = null;
+        return environment;
 }
 
 // The name a program's windows are remembered by, unless its placement named one.
@@ -1944,6 +2001,7 @@ static long windows_take(struct window_row *own)
         }
         windows_reset_row(table, own->row);
         windows_place_take(table, own->row);
+        windows_asked_take(table, own->row, program_environment_list());
 
         windows_door_name(name, own->row, 0);
         probe = window_call(WINDOW_SYS_OPENAT, -100, (long)name, WINDOWS_O_WRITE, 0, 0, 0);

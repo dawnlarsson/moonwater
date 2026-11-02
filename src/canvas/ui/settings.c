@@ -1548,7 +1548,7 @@ static b32 settings_start(string_address address_to words, positive count, const
                 system_call_3(syscall(dup3), (positive)ends[1], 1, 0);
                 system_call_3(syscall(dup3), (positive)ends[1], 2, 0);
                 // As its own: not reading from where this program writes.
-                (void)shell_exec_file(words[0], words, count, program_environment_list());
+                (void)shell_exec_file(words[0], words, count, window_asked_environment());
                 system_call_1(syscall(exit), 127);
         }
         system_close(ends[1]);

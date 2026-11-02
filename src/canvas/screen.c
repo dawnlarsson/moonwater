@@ -286,6 +286,9 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
                     // What the shell looks for before it writes a failed command's status at the right of its prompt.
                     "TERM_PROGRAM=moonwater",
                     "TERMINFO=" TERM_INFO_DIRECTORY,
+                    // A terminal's shell is where the person types: what they start from it is asked for, its first window
+                    // takes the keys (WINDOW_ASKED_VARIABLE).
+                    "MOONWATER_ASKED=1",
                     "HOME=/root",
                     "PATH=" BOWL_DEFAULT_PATH,
                     "LANG=C.UTF-8",

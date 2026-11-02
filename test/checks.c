@@ -117239,6 +117239,7 @@ static fn check_take(void)
         table.frame[2] = 2;
         table.buffer_index[2] = 1;
         string_copy((string_address)table.title[2], (string_address) "two");
+        table.asked[2] = 1;
 
         compositor_take(2);
         check("compositor: a window that showed twice before it was looked at has the other buffer back",
@@ -118029,6 +118030,7 @@ static void check_compositor_cycle(void)
     table = compositor.table;
     for (int row = 1; row <= 3; row++)
     {
+        table->asked[row] = 1;
         table->x[row] = 10 + 40 * row;
         table->y[row] = 10 + 20 * row;
         table->width[row] = 120;
@@ -118745,6 +118747,7 @@ static void check_compositor_popup(void)
     compositor_stack_remove(1);
     compositor.showing[1] = 0;
     compositor.focus = COMPOSITOR_NONE;
+    table->asked[1] = 1;
     table->x[1] = 60;
     table->y[1] = 40;
     table->width[1] = 100;
@@ -119144,6 +119147,53 @@ static void check_compositor_minimise(void)
     check("minimise: a window with no close button has no minimise button", !(compositor.state[3] & WINDOW_MINIMIZED));
 }
 
+/*
+        A window takes the keys when it first shows only when its launch was asked for: MOONWATER_ASKED=1 in the
+        environment its program started with (windows_asked_take reads it and empties it, as it does a placement). A
+        window its program opened on its own is raised and shows, and the keys stay where they were.
+*/
+static void check_compositor_asked(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static char asked_yes[] = "MOONWATER_ASKED=1", asked_no[] = "MOONWATER_ASKED=yes";
+    string_address environment_yes[] = {"PATH=/bin", asked_yes, null};
+    string_address environment_no[] = {asked_no, null};
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("asked: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    table->x[2] = 180, table->y[2] = 110, table->width[2] = 60, table->height[2] = 60;
+    windows_asked_take(table, 1, environment_no);
+    windows_asked_take(table, 2, environment_yes);
+    check("asked: MOONWATER_ASKED=1 marks the row and is emptied in the environment, and any other value does not mark it",
+          table->asked[2] == 1 && table->asked[1] == 0 && asked_yes[sizeof("MOONWATER_ASKED=") - 1] == 0 &&
+              asked_no[sizeof("MOONWATER_ASKED=") - 1] == 0);
+
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    check("asked: a window the program opened on its own shows and takes no keys",
+          compositor.showing[1] && compositor.focus == COMPOSITOR_NONE);
+
+    glass_paint(2, 0, 0, 60, 60, 0x404040u, true);
+    compositor_present();
+    check("asked: a window its program was asked to open takes the keys when it first shows",
+          compositor.showing[2] && compositor.focus == 2 && table->focus == 2);
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -119461,6 +119511,7 @@ static void check_compositor_lit(void)
         return;
     }
     table = compositor.table;
+    table->asked[1] = table->asked[2] = table->asked[3] = 1;
     table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
     glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
     compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
@@ -132204,6 +132255,7 @@ b32 main()
         check_compositor_lit();
         check_compositor_chrome();
         check_compositor_minimise();
+        check_compositor_asked();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();

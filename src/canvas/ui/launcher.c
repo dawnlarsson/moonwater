@@ -540,7 +540,7 @@ static b32 launcher_start(string_address address_to words, positive count)
                 quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
                 for (positive at = 0; quiet >= 0 && at < 3; at++)
                         system_call_3(syscall(dup3), (positive)quiet, at, 0);
-                (void)shell_exec_file(words[0], words, count, program_environment_list());
+                (void)shell_exec_file(words[0], words, count, window_asked_environment());
                 system_call_1(syscall(exit_group), 127);
         }
         system_wait4_retry(child, address_of status, 0, null);

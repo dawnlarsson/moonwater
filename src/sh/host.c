@@ -25049,11 +25049,14 @@ static b32 host_window(string_address address_to arguments, positive count)
         memory_copy(entry, WINDOW_PLACE_VARIABLE "=", length);
         window_place_say(&place, (char *)entry + length, WINDOW_PLACE_TEXT);
         environment[used++] = entry;
-        //      One placement: one the caller already had is this one's now.
+        //      What a typed command is: asked for, so its first window takes the keys (window.c's windows_asked_take).
+        environment[used++] = WINDOW_ASKED_VARIABLE "=1";
+        //      One placement: one the caller already had is this one's now, and so is the mark.
         inherited = file_environment_all();
         for (positive variable = 0; inherited && inherited[variable]; variable++)
         {
-                if (string_has_prefix(inherited[variable], WINDOW_PLACE_VARIABLE "="))
+                if (string_has_prefix(inherited[variable], WINDOW_PLACE_VARIABLE "=") ||
+                    string_has_prefix(inherited[variable], WINDOW_ASKED_VARIABLE "="))
                         continue;
                 return_if(used == HOST_WINDOW_ENVIRONMENT,
                           host_refuse("the environment has more than %p variables, which is more than this hands on\n",

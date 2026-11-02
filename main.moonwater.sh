@@ -52,13 +52,13 @@ function moonwater_canvas_off {
 }
 
 function key_ctrl_shift_t {
-  desktop_terminal
+  desktop_asked desktop_terminal
 }
 
 # Super and Space: the launcher, a search bar in the middle of the screen for the desktop's programs, the programs of
 # PATH and shell commands. -x puts away the one that is up, so the same chord opens it and closes it.
 function key_super_space {
-  desktop_launcher
+  desktop_asked desktop_launcher
 }
 
 # The desktop: the compositor, the kernel log and a terminal on it, under a
@@ -99,6 +99,12 @@ function desktop_font {
 # reap; its pid is kept so the session's end ends it.
 function desktop_run {
   ("$@" & echo $! >> /run/moonwater/desktop.kids)
+}
+
+# A desktop program the person asked for, from a key or the tray: MOONWATER_ASKED=1 in what it starts, so its first
+# window takes the keys when it shows. A subshell, so the mark goes to nothing else the script starts.
+function desktop_asked {
+  (MOONWATER_ASKED=1; export MOONWATER_ASKED; "$@")
 }
 
 function desktop_wait_for {
@@ -159,7 +165,7 @@ function desktop_keys_answer {
     while IFS= read -r desktop_pressed; do
       case $desktop_pressed in
       key_*) declare -F "$desktop_pressed" > /dev/null && "$desktop_pressed" ;;
-      tray_double) desktop_settings ;;
+      tray_double) desktop_asked desktop_settings ;;
       esac
     done < /run/moonwater/keys.fire
   done
