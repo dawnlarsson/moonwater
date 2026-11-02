@@ -117008,6 +117008,9 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #if MOONWATER_UI_LAUNCHER
 #include "../src/canvas/ui/launcher.c"
 #endif
+#if MOONWATER_UI_IDENTIFY
+#include "../src/canvas/ui/identify.c"
+#endif
 #if MOONWATER_UI_EDITOR
 #include "../src/canvas/ui/editor.c"
 #endif
@@ -134884,6 +134887,39 @@ static fn check_no_tab(void)
 }
 
 /*
+        The identify overlay's number for each screen (identify_number, which the window is given at its start) is the one
+        windows_screen_numbers gives that screen, and the window is put on that screen's rectangle, windows_output's, by the
+        same index. Three screens listed out of order, as check_screen_numbers has them.
+*/
+static fn check_identify_numbers(void)
+{
+        static struct windows table;
+        unsigned int number[WINDOWS_OUTPUTS], count;
+        int x, y, width, height;
+        b32 matched = true, placed = true;
+
+        memory_zero(&table, sizeof(table));
+        table.outputs = 3;
+        table.output_x[0] = 1920, table.output_y[0] = 0, table.output_w[0] = 1920, table.output_h[0] = 1080;
+        table.output_x[1] = 0, table.output_y[1] = 540, table.output_w[1] = 1280, table.output_h[1] = 720;
+        table.output_x[2] = 0, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
+        count = windows_screen_numbers(&table, number);
+        for (unsigned int at = 0; at < count; at++)
+        {
+                unsigned int shown = windows_output(&table, at, &x, &y, &width, &height);
+
+                matched &= shown == at && identify_number(&table, at) == number[at];
+                placed &= x == table.output_x[at] && y == table.output_y[at] && width == (int)table.output_w[at] &&
+                          height == (int)table.output_h[at];
+        }
+        check("identify: each screen's window shows the number windows_screen_numbers gives that screen",
+              count == 3 && matched && number[0] == 3 && number[1] == 2 && number[2] == 1);
+        check("identify: each screen's window is put on that screen's rectangle", placed);
+        table.outputs = 0;
+        check("identify: a table with no screens shows the one number, 1", identify_number(&table, 0) == 1);
+}
+
+/*
         The terminal's selection on the frame: what a drag marks is marked in the frame's cells (so the frames redraw
         it), its text is the lines' text with a line end between and the trailing blanks left off, and a rectangle takes
         its columns.
@@ -135191,6 +135227,7 @@ b32 main()
         check_glass();
         check_screen_numbers();
         check_no_tab();
+        check_identify_numbers();
         check_compositor_partial();
         check_compositor_held();
         check_compositor_screens();

@@ -851,8 +851,20 @@ config MOONWATER_TOOL_COMPOSITOR
     bool "compositor"
     default MOONWATER_TOOLS_ALL
 
+config MOONWATER_TOOL_DISPLAYS
+    bool "displays"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_EDIT
     bool "edit"
+    default MOONWATER_TOOLS_ALL
+
+config MOONWATER_TOOL_EDITOR
+    bool "editor"
+    default MOONWATER_TOOLS_ALL
+
+config MOONWATER_TOOL_IDENTIFY
+    bool "identify"
     default MOONWATER_TOOLS_ALL
 
 config MOONWATER_TOOL_KLOG

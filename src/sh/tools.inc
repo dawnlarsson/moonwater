@@ -212,6 +212,9 @@ SHELL_TOOL(SYSTEM, klog, klog_main)
 #if MOONWATER_UI_LAUNCHER
 SHELL_TOOL(SYSTEM, launcher, launcher_main)
 #endif
+#if MOONWATER_UI_IDENTIFY
+SHELL_TOOL(SYSTEM, identify, identify_main)
+#endif
 #if MOONWATER_UI_SETTINGS
 SHELL_TOOL(SYSTEM, settings, settings_main)
 SHELL_TOOL(SYSTEM, displays, displays_main)

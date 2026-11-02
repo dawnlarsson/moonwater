@@ -21,6 +21,11 @@
 #define MOONWATER_UI_SETTINGS 1
 #endif
 
+// The identify overlay: `moonwater canvas identify`, each screen's number on it for a few seconds.
+#ifndef MOONWATER_UI_IDENTIFY
+#define MOONWATER_UI_IDENTIFY 1
+#endif
+
 // The taskbar: the strip along an edge of the desktop with the windows' tabs, the clock and, when the settings show it,
 // the battery. It is drawn by the compositor, which is always in the shell; this switch takes the band out of it.
 #ifndef MOONWATER_UI_TASKBAR
@@ -32,6 +37,6 @@
 #define MOONWATER_UI_EDITOR 1
 #endif
 
-#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR)
+#define MOONWATER_UI_ANY (MOONWATER_UI_LAUNCHER || MOONWATER_UI_SETTINGS || MOONWATER_UI_TASKBAR || MOONWATER_UI_EDITOR || MOONWATER_UI_IDENTIFY)
 
 #endif
