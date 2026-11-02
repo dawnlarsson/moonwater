@@ -7742,6 +7742,7 @@ struct ui_text
         int size;                               // logical pixels of the text
         int left, top, right, bottom, gutter;   // the last draw's text box, device pixels
         int line_height, cell;
+        int laid_width, laid_height, laid_line; // the box and line height the last draw had: a change reveals the caret
         p64 top_line;
         int top_row;
         b64 scroll_x;
@@ -9325,6 +9326,12 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 t->top = y + (height - t->line_height) / 2, t->bottom = t->top + t->line_height;
                 ui_text_reveal(ui, t);
         }
+        // A code view's caret is in sight in the box it is drawn in: a box that changed size since the last draw (a window
+        // shrunk, a zoom) reveals it once. The first draw leaves the view where it was put (a restored scroll), and a draw
+        // with the same box leaves it where the reading put it.
+        if (t->mode == UI_TEXT_CODE && t->laid_width > 0 && (width != t->laid_width || height != t->laid_height || t->line_height != t->laid_line))
+                ui_text_reveal(ui, t);
+        t->laid_width = width, t->laid_height = height, t->laid_line = t->line_height;
         if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
         {
                 unsigned int text = ui_text_colour(ui, UI_ON_SURFACE), alpha = 92;

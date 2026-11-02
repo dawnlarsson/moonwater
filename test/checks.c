@@ -135423,6 +135423,24 @@ static fn text_widget_check(string_address inter, string_address mono)
                 ui_text_close(&view);
                 memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
         }
+        // A code view's caret is in sight when its box changes size (a window shrinks, a zoom): the box it is drawn in
+        // now has the caret's line, with no key between.
+        {
+                static char tall[160];
+                int rows = 0;
+
+                for (int k = 0; k < 40; k++)
+                        tall[k * 4] = 'l', tall[k * 4 + 1] = (char)('0' + k / 10), tall[k * 4 + 2] = (char)('0' + k % 10), tall[k * 4 + 3] = '\n';
+                ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to)tall, 160, ui_text_keymap());
+                ui_text_draw(&wui, &view, 50, 50, 300, 400, 0x111113);
+                view.doc.selections[0].anchor = view.doc.selections[0].active = 80; // line 20
+                ui_text_draw(&wui, &view, 50, 50, 300, 60, 0x111113);
+                rows = ui_text_rows(&view);
+                check("text widget: a code view's caret is in sight after its box shrinks",
+                      rows > 0 && view.top_line <= 20 && 20 < view.top_line + (p64)rows);
+                ui_text_close(&view);
+                memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
+        }
 
         /*
                 The code view's decorations, read off the picture: the current line's tint is under its cells as past
