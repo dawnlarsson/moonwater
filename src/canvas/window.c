@@ -642,7 +642,7 @@ struct windows
         // size it drew; 7 not wholly on the output; 8 too short past its corners and close button; 9 it meets the
         // tabs; 10 the card has no overlay for it; 11 the card refused its framebuffer (refused says why); 12 the card
         // refused the overlay's commit; 13 the desktop spans more than one screen, where every frame is composed; 14 a
-        // finger's mark is drawn over it (`moonwater canvas touch on`).
+        // finger's mark is drawn over it (`moonwater canvas touch on`); 15 a screen is turned (its displays line), so no window is shown straight.
         unsigned int unscanned;
         // The compositor's card for moonwater debug: its driver's name, whether the pointer is on a plane of its own,
         // and the overlay: 1 found, -1 none or refused, 0 not yet asked.
@@ -1219,6 +1219,105 @@ static unsigned int windows_mode_at(const unsigned int (*modes)[3], unsigned int
                 if (modes[at][0] == width && modes[at][1] == height && modes[at][2] == hz)
                         return at;
         return count;
+}
+
+/*
+        The value a plane's rotation property is set to for degrees, when the card lists that rotation: its enum
+        "rotate-DEGREES", whose value is a bit (names[i] with values[i], the enums of the property), so the value is the
+        one-bit mask. 0 when the card lists none, and the screen is then rotated in software.
+*/
+static unsigned long windows_rotation_bit(const char *const *names, const unsigned long *values, unsigned int count,
+                                          unsigned int degrees)
+{
+        static const char *const wanted[] = {"rotate-0", "rotate-90", "rotate-180", "rotate-270"};
+
+        if (degrees % 90 || degrees > 270)
+                return 0;
+        for (unsigned int at = 0; at < count; at++)
+                if (windows_display_same_name(names[at], wanted[degrees / 90]) && values[at] < 32)
+                        return 1ul << values[at];
+        return 0;
+}
+
+/*
+        A picture turned for the panel it is shown on, in software. The picture is lw wide and lh tall, and for 90 and 270
+        the panel is lh wide and lw tall (for 0 and 180 the same size). The panel's pixel for a picture pixel lx, ly is
+        where the turn sends it: 90 clockwise puts the picture's top left at the panel's top right, 270 anti-clockwise
+        puts it at the bottom left, and 180 turns it over both ways. windows_rotate_u32 copies the picture's rectangle
+        x0, y0 to x1, y1 from from (rows from_pitch words apart) into into (rows into_pitch words apart).
+*/
+static void windows_rotate_at(unsigned int lw, unsigned int lh, unsigned int degrees, unsigned int lx, unsigned int ly,
+                              unsigned int *px, unsigned int *py)
+{
+        if (degrees == 90)
+                *px = lh - 1 - ly, *py = lx;
+        else if (degrees == 180)
+                *px = lw - 1 - lx, *py = lh - 1 - ly;
+        else if (degrees == 270)
+                *px = ly, *py = lw - 1 - lx;
+        else
+                *px = lx, *py = ly;
+}
+
+static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
+                               unsigned int lw, unsigned int lh, unsigned int degrees, unsigned int x0, unsigned int y0,
+                               unsigned int x1, unsigned int y1)
+{
+        // The turn is chosen once a row, and each row's stores step through the panel by a constant: a row of the
+        // picture is a column of the panel for a quarter turn, so its stores step by a panel row.
+        for (unsigned int ly = y0; ly < y1; ly++)
+        {
+                const unsigned int *row = from + (unsigned long)ly * from_pitch;
+
+                if (degrees == 90)
+                {
+                        unsigned long at = (unsigned long)x0 * into_pitch + (lh - 1 - ly);
+
+                        for (unsigned int lx = x0; lx < x1; lx++, at += into_pitch)
+                                into[at] = row[lx];
+                }
+                else if (degrees == 270)
+                {
+                        unsigned long at = (unsigned long)(lw - 1 - x0) * into_pitch + ly;
+
+                        for (unsigned int lx = x0; lx < x1; lx++, at -= into_pitch)
+                                into[at] = row[lx];
+                }
+                else if (degrees == 180)
+                {
+                        unsigned long at = (unsigned long)(lh - 1 - ly) * into_pitch + (lw - 1 - x0);
+
+                        for (unsigned int lx = x0; lx < x1; lx++, at--)
+                                into[at] = row[lx];
+                }
+                else
+                {
+                        unsigned long at = (unsigned long)ly * into_pitch + x0;
+
+                        for (unsigned int lx = x0; lx < x1; lx++, at++)
+                                into[at] = row[lx];
+                }
+        }
+}
+
+// The panel rectangle (left, top, right, bottom) the picture rectangle x0, y0 to x1, y1 turns into; the corners are
+// where a turn puts the extremes, since each axis of the turn is one of the picture's.
+static void windows_rotate_panel(unsigned int lw, unsigned int lh, unsigned int degrees, unsigned int x0, unsigned int y0,
+                                 unsigned int x1, unsigned int y1, unsigned int *panel)
+{
+        unsigned int corner[4][2] = {{x0, y0}, {x1 - 1, y0}, {x0, y1 - 1}, {x1 - 1, y1 - 1}};
+
+        panel[0] = panel[1] = ~0u, panel[2] = panel[3] = 0;
+        for (unsigned int each = 0; each < 4; each++)
+        {
+                unsigned int px, py;
+
+                windows_rotate_at(lw, lh, degrees, corner[each][0], corner[each][1], &px, &py);
+                panel[0] = px < panel[0] ? px : panel[0];
+                panel[1] = py < panel[1] ? py : panel[1];
+                panel[2] = px + 1 > panel[2] ? px + 1 : panel[2];
+                panel[3] = py + 1 > panel[3] ? py + 1 : panel[3];
+        }
 }
 
 // Appends text (length bytes) to into at *at, bounded by room with its NUL; 0 when it does not fit.

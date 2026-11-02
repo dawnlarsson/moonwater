@@ -139756,6 +139756,34 @@ static void check_compositor_displays(void) {
       co_check(windows_mode_at(modes,3,1920,1080,60)==0);
       co_check(windows_mode_at(modes,3,1280,720,50)==3);
       co_check(windows_mode_at(modes,3,1280,1024,60)==3); }
+    /* The rotation: the card's rotate-DEGREES enum is its bit; a card that lists none rotates in software. */
+    { static const char *const listed[]={"rotate-0","rotate-180","reflect-x"};
+      static const unsigned long bits[]={0,2,4};
+      static const char *const more[]={"rotate-0","rotate-90","rotate-180","rotate-270"};
+      static const unsigned long more_bits[]={0,1,2,3};
+      co_check(windows_rotation_bit(listed,bits,3,180)==4);
+      co_check(windows_rotation_bit(listed,bits,3,90)==0);
+      co_check(windows_rotation_bit(listed,bits,3,270)==0);
+      co_check(windows_rotation_bit(more,more_bits,4,90)==2);
+      co_check(windows_rotation_bit(more,more_bits,4,270)==8);
+      co_check(windows_rotation_bit(more,more_bits,4,45)==0);
+      co_check(windows_rotation_bit(more,more_bits,4,0)==1); }
+    /* Software rotation: a 3 by 2 picture turned for the panel, 90 clockwise to 2 by 3, 270 anti-clockwise, 180 both ways. */
+    { unsigned int pic[2][3]={{1,2,3},{4,5,6}}, quarter[3][2]={{0}}, anti[3][2]={{0}}, turned[2][3]={{0}}, panel[4];
+      windows_rotate_u32(&quarter[0][0],2,&pic[0][0],3,3,2,90,0,0,3,2);
+      co_check(quarter[0][0]==4&&quarter[0][1]==1&&quarter[1][0]==5&&quarter[1][1]==2&&quarter[2][0]==6&&quarter[2][1]==3);
+      windows_rotate_u32(&anti[0][0],2,&pic[0][0],3,3,2,270,0,0,3,2);
+      co_check(anti[0][0]==3&&anti[0][1]==6&&anti[1][0]==2&&anti[1][1]==5&&anti[2][0]==1&&anti[2][1]==4);
+      windows_rotate_u32(&turned[0][0],3,&pic[0][0],3,3,2,180,0,0,3,2);
+      co_check(turned[0][0]==6&&turned[0][2]==4&&turned[1][0]==3&&turned[1][2]==1);
+      /* A part of the picture turns into the part of the panel it lands on, and the panel rectangle says where. */
+      windows_rotate_panel(3,2,90,0,0,3,2,panel);
+      co_check(panel[0]==0&&panel[1]==0&&panel[2]==2&&panel[3]==3);
+      windows_rotate_panel(3,2,180,2,0,3,1,panel);
+      co_check(panel[0]==0&&panel[1]==1&&panel[2]==1&&panel[3]==2);
+      memset(quarter,0,sizeof(quarter));
+      windows_rotate_u32(&quarter[0][0],2,&pic[0][0],3,3,2,90,2,0,3,1);
+      co_check(quarter[2][1]==3&&quarter[0][0]==0&&quarter[0][1]==0&&quarter[1][0]==0&&quarter[1][1]==0&&quarter[2][0]==0); }
 }
 
 static void check_compositor_outputs(void) {

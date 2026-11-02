@@ -2775,6 +2775,10 @@ struct compositor_output
         // the turn (turn_software); the table says them to the Displays field (compositor_table_outputs).
         unsigned int hz[WINDOWS_OUTPUT_HZ], hz_count;
         unsigned int turn, turn_software;
+        // The turn its displays line asks for: degrees, and turned 0 none, 1 by the card (its primary plane's property
+        // turn_property, set to turn_value on turn_plane) or 2 by Canvas in software.
+        unsigned int degrees, turned, turn_plane, turn_property;
+        unsigned long turn_value;
 };
 
 static struct
@@ -3051,9 +3055,12 @@ static unsigned int compositor_cursor_ink(int outline, unsigned int alpha)
 
 // Whether the pointer is drawn into the scanout: when the card has no plane for it, or the plane is too
 // small for the size it was asked to be.
+static int compositor_turning(void);
+
 static int compositor_cursor_in_scene(void)
 {
-        return compositor.cursor.soft ||
+        // A screen turned (by the card or by Canvas) has no plane that turns with it: its pointer is drawn into the scene.
+        return compositor.cursor.soft || compositor_turning() ||
                (compositor.cursor.handle[0] && compositor.cursor.size > compositor_cursor_fit(compositor.cursor.size));
 }
 
@@ -5065,6 +5072,143 @@ static int compositor_overlay_buffers(unsigned int rows)
         return 1;
 }
 
+// One enum of a property: its value, a bit for a bitmask, and its name.
+struct compositor_enum
+{
+        unsigned long value;
+        char name[32];
+};
+
+/*
+        The enums of the property called name on object (of type), in the card's order, as many as room: the count, or 0
+        when the object has no property by that name. Its id comes back in id.
+*/
+static unsigned int compositor_enums_of(unsigned int object, unsigned int type, const char *name, unsigned int *id,
+                                        struct compositor_enum *enums, unsigned int room)
+{
+        unsigned int ids[64];
+        unsigned long values[64];
+        struct
+        {
+                unsigned long props, values;
+                unsigned int count, object, type;
+        } got = {(unsigned long)ids, (unsigned long)values, 64, object, type};
+
+        if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+                return 0;
+        for (unsigned int at = 0; at < got.count; at++)
+        {
+                struct
+                {
+                        unsigned long values, enums;
+                        unsigned int id, flags;
+                        char name[32];
+                        unsigned int count_values, count_enums;
+                } property = {0, 0, ids[at], 0, {0}, 0, 0};
+                unsigned int same = 0;
+
+                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
+                        continue;
+                while (name[same] && name[same] == property.name[same])
+                        same++;
+                if (name[same] || property.name[same])
+                        continue;
+                *id = ids[at];
+                property.enums = (unsigned long)enums;
+                property.count_enums = room;
+                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
+                        return 0;
+                return property.count_enums < room ? property.count_enums : room;
+        }
+        return 0;
+}
+
+/*
+        The turn the card does for a screen on crtc_index, in hardware: the primary plane of that crtc with a rotation
+        property that lists rotate-DEGREES (windows_rotation_bit), the property's id and the value to set it to. False
+        when no such plane is: the screen is then turned in software.
+*/
+static int compositor_rotation_hardware(unsigned int crtc_index, unsigned int degrees, unsigned int *plane,
+                                        unsigned int *property, unsigned long *value)
+{
+        unsigned int planes[32];
+        struct
+        {
+                unsigned long ids;
+                unsigned int count, pad;
+        } resources = {(unsigned long)planes, 32, 0};
+
+        if (system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 32)
+                return 0;
+        for (unsigned int at = 0; at < resources.count; at++)
+        {
+                unsigned int formats[64], props[COMPOSITOR_PLANE_PROPS], id = 0, count;
+                unsigned long type = 3, bits[8] = {0};
+                struct compositor_enum enums[8];
+                const char *names[8] = {0};
+                struct
+                {
+                        unsigned int id, crtc, fb, possible, gamma, count;
+                        unsigned long formats;
+                } plane_info = {planes[at], 0, 0, 0, 0, 64, (unsigned long)formats};
+
+                if (system_control(compositor.card, COMPOSITOR_GETPLANE, address_of plane_info) != 0 || plane_info.count > 64 ||
+                    !(plane_info.possible & 1u << crtc_index) || !compositor_plane_props(planes[at], props, &type) || type != 1)
+                        continue;
+                count = compositor_enums_of(planes[at], COMPOSITOR_OBJECT_PLANE, "rotation", &id, enums, 8);
+                for (unsigned int each = 0; each < count; each++)
+                        names[each] = enums[each].name, bits[each] = enums[each].value;
+                *value = windows_rotation_bit(names, bits, count, degrees);
+                if (!*value)
+                        continue;
+                *plane = planes[at];
+                *property = id;
+                return 1;
+        }
+        return 0;
+}
+
+/*
+        A screen the card turns: its plane shows the screen's rectangle of the scanout (source, in the scanout's pixels,
+        and width by height) at the panel's own size, with the rotation property set to value, in one commit. False
+        when the card refuses it.
+*/
+static int compositor_rotate_commit(const struct compositor_output *output, const int *source, unsigned int width,
+                                    unsigned int height, unsigned int fb)
+{
+        unsigned int props[COMPOSITOR_PLANE_PROPS], ids[11], plane = output->turn_plane, n = 0;
+        unsigned long type = 0, values[11];
+        unsigned int objects[1] = {plane}, counts[1];
+        struct
+        {
+                unsigned int flags, count;
+                unsigned long objects, counts, props, values, reserved, user_data;
+        } commit;
+
+        if (!compositor_plane_props(plane, props, &type))
+                return 0;
+        ids[n] = props[COMPOSITOR_PLANE_FB], values[n++] = fb;
+        ids[n] = props[COMPOSITOR_PLANE_CRTC], values[n++] = output->crtc;
+        ids[n] = props[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)source[0] << 16;
+        ids[n] = props[COMPOSITOR_PLANE_SRC_Y], values[n++] = (unsigned long)source[1] << 16;
+        ids[n] = props[COMPOSITOR_PLANE_SRC_W], values[n++] = (unsigned long)width << 16;
+        ids[n] = props[COMPOSITOR_PLANE_SRC_H], values[n++] = (unsigned long)height << 16;
+        ids[n] = props[COMPOSITOR_PLANE_CRTC_X], values[n++] = 0;
+        ids[n] = props[COMPOSITOR_PLANE_CRTC_Y], values[n++] = 0;
+        ids[n] = props[COMPOSITOR_PLANE_CRTC_W], values[n++] = output->mode.hdisplay;
+        ids[n] = props[COMPOSITOR_PLANE_CRTC_H], values[n++] = output->mode.vdisplay;
+        ids[n] = output->turn_property, values[n++] = output->turn_value;
+        counts[0] = n;
+        commit.flags = 0;
+        commit.count = 1;
+        commit.objects = (unsigned long)objects;
+        commit.counts = (unsigned long)counts;
+        commit.props = (unsigned long)ids;
+        commit.values = (unsigned long)values;
+        commit.reserved = commit.user_data = 0;
+        return system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) == 0;
+}
+
 /*
         One commit: fb on the primary plane and, where overlay says, the
         overlay's buffer which at rect, or the overlay off (rect none). It
@@ -5355,6 +5499,10 @@ static void compositor_dirty_screens(const unsigned short (*clip)[4], unsigned i
         for (unsigned int at = 0; at < compositor.outputs; at++)
         {
                 unsigned int fb = compositor.output[at].fb ? compositor.output[at].fb : compositor.fb, told = 0, users = 0;
+
+                // A screen Canvas turns is told by compositor_turn_frame, on its own buffer.
+                if (compositor.output[at].turned == 2)
+                        continue;
                 unsigned short mine[COMPOSITOR_DAMAGE][4];
                 int seen = 0;
 
@@ -5383,6 +5531,82 @@ static void compositor_dirty_screens(const unsigned short (*clip)[4], unsigned i
                 if (told)
                 {
                         struct compositor_dirty dirty = {fb, 0, 0, told, (unsigned long)mine};
+
+                        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+                }
+        }
+}
+
+// A screen Canvas turns in software: its framebuffer over the buffer its panel is drawn in, by screen (see
+// compositor_turn_buffer).
+struct compositor_turn
+{
+        unsigned int fb, handle;
+        unsigned int *pixels;
+        unsigned long bytes, pitch; // pitch in bytes
+        unsigned int width, height;
+};
+static struct compositor_turn compositor_turns[WINDOWS_OUTPUTS];
+
+// The framebuffer the primary plane shows when the overlay is taken off it: the scanout, or the buffer Canvas turns the
+// first screen in.
+static unsigned int compositor_primary_fb(void)
+{
+        return compositor.outputs && compositor.output[0].turned == 2 ? compositor.output[0].fb : compositor.fb;
+}
+
+// Whether any screen is turned, by the card or by Canvas. Then no window is shown straight and no overlay is put up.
+static int compositor_turning(void)
+{
+        for (unsigned int at = 0; at < compositor.outputs; at++)
+                if (compositor.output[at].turned)
+                        return 1;
+        return 0;
+}
+
+/*
+        The part of the scene a turned screen shows, turned into its own buffer and told to its framebuffer: the bounding
+        box of the damage, cut to the screen, is turned for the panel (windows_rotate_u32), and the panel's rectangle of
+        it is given to the card in one DIRTYFB. The scene is composed on the scanout first, so the pointer and the tabs
+        are in it.
+*/
+static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int clips)
+{
+        unsigned int box[4] = {~0u, ~0u, 0, 0}, pitch = compositor.scanout_pitch / 4;
+
+        for (unsigned int at = 0; at < clips; at++)
+        {
+                box[0] = clip[at][0] < box[0] ? clip[at][0] : box[0];
+                box[1] = clip[at][1] < box[1] ? clip[at][1] : box[1];
+                box[2] = clip[at][2] > box[2] ? clip[at][2] : box[2];
+                box[3] = clip[at][3] > box[3] ? clip[at][3] : box[3];
+        }
+        for (unsigned int at = 0; at < compositor.outputs && clips; at++)
+        {
+                const int *screen = compositor.screen[at];
+                unsigned int x0, y0, x1, y1, panel[4], degrees = compositor.output[at].degrees;
+                unsigned int *into, *from;
+                unsigned short rect[1][4];
+
+                if (compositor.output[at].turned != 2)
+                        continue;
+                x0 = box[0] > (unsigned int)screen[0] ? box[0] : (unsigned int)screen[0];
+                y0 = box[1] > (unsigned int)screen[1] ? box[1] : (unsigned int)screen[1];
+                x1 = box[2] < (unsigned int)(screen[0] + screen[2]) ? box[2] : (unsigned int)(screen[0] + screen[2]);
+                y1 = box[3] < (unsigned int)(screen[1] + screen[3]) ? box[3] : (unsigned int)(screen[1] + screen[3]);
+                if (x0 >= x1 || y0 >= y1)
+                        continue;
+                from = compositor.scanout + (unsigned long)screen[1] * pitch + (unsigned long)screen[0];
+                into = compositor_turns[at].pixels;
+                windows_rotate_u32(into, compositor_turns[at].pitch / 4, from, pitch, (unsigned int)screen[2],
+                                   (unsigned int)screen[3], degrees, x0 - screen[0], y0 - screen[1], x1 - screen[0],
+                                   y1 - screen[1]);
+                windows_rotate_panel((unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0], y0 - screen[1],
+                                     x1 - screen[0], y1 - screen[1], panel);
+                rect[0][0] = (unsigned short)panel[0], rect[0][1] = (unsigned short)panel[1];
+                rect[0][2] = (unsigned short)panel[2], rect[0][3] = (unsigned short)panel[3];
+                {
+                        struct compositor_dirty dirty = {compositor_turns[at].fb, 0, 0, 1, (unsigned long)rect};
 
                         system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
                 }
@@ -5471,7 +5695,12 @@ static void compositor_present(void)
                 compositor_spots_ready();
 
         // A window that fills the output alone is shown straight from its buffer, and nothing is composed.
-        int direct = compositor_direct_candidate(frames, rows, windows);
+        // A turned screen is composed and shown from its buffer, never straight from a window's: no direct scanout.
+        int turning = compositor_turning();
+        int direct = turning ? -1 : compositor_direct_candidate(frames, rows, windows);
+
+        if (turning)
+                compositor_unscanned(15);
 
         if (direct >= 0 &&
             ((compositor_overlay_ready() && compositor_present_overlaid(direct, frames, count, windows)) ||
@@ -5485,7 +5714,7 @@ static void compositor_present(void)
         }
 
         // Not now: the compositor's own screen is shown again, drawn whole, once the card has finished a flip.
-        int back = compositor.on_screen && compositor.on_screen != compositor.fb;
+        int back = !turning && compositor.on_screen && compositor.on_screen != compositor.fb;
 
         if (back)
         {
@@ -5499,7 +5728,7 @@ static void compositor_present(void)
         compositor.screen_stale = 0;
 
         // The top window on the overlay where it can be: nothing of it composed under the plane.
-        int planed[4], plane = !back ? compositor_plane_candidate(frames, rows, windows, planed) : -1;
+        int planed[4], plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, planed) : -1;
 
         if (compositor.plane_row >= 0 && (plane != compositor.plane_row ||
                                           memory_compare(planed, compositor.plane_rect, sizeof(planed)) != 0))
@@ -5510,7 +5739,7 @@ static void compositor_present(void)
                 compositor_damage(compositor.plane_rect[0], compositor.plane_rect[1],
                                   compositor.plane_rect[2] - compositor.plane_rect[0],
                                   compositor.plane_rect[3] - compositor.plane_rect[1]);
-                if (plane < 0 && !compositor_atomic_to(compositor.fb, -1, 0, 1, 0, 0, 0))
+                if (plane < 0 && !compositor_atomic_to(compositor_primary_fb(), -1, 0, 1, 0, 0, 0))
                         compositor_overlay_off();
                 compositor.plane_row = compositor.direct_row = -1;
                 compositor.plane_fb = 0;
@@ -5582,10 +5811,13 @@ static void compositor_present(void)
 
         // No clips at all would tell the card everything changed.
         dirty.clip_count = clips;
-        if (clips && compositor_output_count() < 2)
+        if (clips && compositor_output_count() < 2 && !turning)
                 system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
         else if (clips)
                 compositor_dirty_screens((const unsigned short (*)[4])clip, clips);
+        // The screens Canvas turns: their part of the scene, turned into their own buffers and told to their cards.
+        if (clips && turning)
+                compositor_turn_frame((const unsigned short (*)[4])clip, clips);
         compositor.damages = 0;
 
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
@@ -5621,6 +5853,8 @@ static void compositor_present(void)
 */
 static void compositor_kmsg(string_address text, positive value, string_address tail);
 static void compositor_text(const char *path, char *text, unsigned int room);
+static int compositor_turn_buffer(unsigned int at, unsigned int width, unsigned int height, struct compositor_turn *retired);
+static void compositor_turn_retire(const struct compositor_turn *retired);
 static void compositor_cursor_move(void);
 static void compositor_arrange_on(int row, unsigned int how, int on);
 static void compositor_place(int row, int x, int y);
@@ -5672,6 +5906,29 @@ static void compositor_refresh_pick(const char *name, unsigned int count, const 
         length = compositor_said(line, length, " Hz, kept the mode it has");
         line[length] = 0;
         compositor_kmsg((string_address)line, 0, (string_address) "");
+}
+
+// Says on the kernel log that a screen is turned degrees, by the card's rotation (hardware) or by Canvas's (software).
+static void compositor_turn_say(const char *name, unsigned int degrees, int hardware)
+{
+        char line[160];
+        unsigned int length = compositor_said(line, 0, "compositor: canvas.displays: ");
+
+        length = compositor_said(line, length, name);
+        length = compositor_said(line, length, " turned ");
+        length += positive_into_string((p8 *)line + length, degrees);
+        length = compositor_said(line, length, hardware ? " degrees by hardware rotation" : " degrees by software rotation");
+        line[length] = 0;
+        compositor_kmsg((string_address)line, 0, (string_address) "");
+}
+
+// The degrees a screen is turned by its displays line (0 when it has none): the screen is laid out at its turned size.
+static unsigned int compositor_display_degrees(const char *name)
+{
+        const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
+                                                                   windows_name_length(name));
+
+        return display ? display->rotation : 0;
 }
 
 /*
@@ -5787,6 +6044,13 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                         continue;
                 found->size[n][0] = found->mode[n].hdisplay;
                 found->size[n][1] = found->mode[n].vdisplay;
+                // A screen turned a quarter is laid out at its turned size, its width and height the other way round.
+                if (compositor_display_degrees(found->name[n]) % 180 == 90)
+                {
+                        int turned = found->size[n][0];
+
+                        found->size[n][0] = found->size[n][1], found->size[n][1] = turned;
+                }
                 if (found->size[n][0] && found->size[n][1])
                 {
                         for (unsigned int each = 0; listed && each < probe.mode_count; each++)
@@ -5957,6 +6221,35 @@ static unsigned int compositor_screen_fb(void)
         return system_control(compositor.card, COMPOSITOR_ADDFB, address_of fb) == 0 ? fb.fb_id : 0;
 }
 
+/*
+        The framebuffer a screen Canvas turns in software is drawn into, at the panel's size: one for each screen, kept
+        while the size is the same. A buffer whose size changes is handed back in retired, and given back once the
+        crtcs show the new one (compositor_turn_retire). False when the card gives none.
+*/
+static int compositor_turn_buffer(unsigned int at, unsigned int width, unsigned int height, struct compositor_turn *retired)
+{
+        struct compositor_turn *turn = &compositor_turns[at];
+
+        if (turn->fb && turn->width == width && turn->height == height)
+                return 1;
+        if (turn->fb)
+                *retired = *turn;
+        memory_zero(turn, sizeof(*turn));
+        if (compositor_scanout_make((int)width, (int)height, &turn->fb, &turn->handle, &turn->pixels, &turn->bytes,
+                                    &turn->pitch) < 0)
+                return 0;
+        turn->width = width;
+        turn->height = height;
+        return 1;
+}
+
+// A buffer given back, which no crtc shows any more.
+static void compositor_turn_retire(const struct compositor_turn *retired)
+{
+        if (retired->fb)
+                compositor_scanout_free(retired->fb, retired->handle, retired->pixels, retired->bytes);
+}
+
 // A crtc that shows nothing: off, its screen dark.
 static void compositor_crtc_off(unsigned int crtc)
 {
@@ -6098,6 +6391,7 @@ static b32 compositor_space_take(int first)
         for (unsigned int attempt = 0; attempt <= found.count; attempt++)
         {
                 unsigned int lit = compositor_space_lay(&found, dropped, rects, order), refused = 0, same;
+                struct compositor_turn retired[WINDOWS_OUTPUTS] = {{0}};
                 unsigned int old_fb = compositor.fb, old_handle = compositor.scanout_handle, *old_pixels = compositor.scanout;
                 unsigned long old_bytes = compositor.scanout_bytes;
                 unsigned int fb = compositor.fb, handle = compositor.scanout_handle, *pixels = compositor.scanout;
@@ -6126,7 +6420,8 @@ static b32 compositor_space_take(int first)
                         same = compositor.output[at].crtc == found.crtc[order[at]] &&
                                compositor.output[at].connector == found.connector[order[at]] &&
                                !memory_compare(compositor.screen[at], screens[at], sizeof(screens[at])) &&
-                               compositor_mode_same(&compositor.output[at].mode, &found.mode[order[at]]);
+                               compositor_mode_same(&compositor.output[at].mode, &found.mode[order[at]]) &&
+                               compositor.output[at].degrees == compositor_display_degrees(found.name[order[at]]);
                 if (same)
                         return 0;
 
@@ -6149,7 +6444,7 @@ static b32 compositor_space_take(int first)
                 // own are given back once no crtc shows them.
                 extras = 0;
                 for (unsigned int at = 0; at < compositor.outputs; at++)
-                        if (compositor.output[at].fb && compositor.output[at].fb != compositor.fb)
+                        if (compositor.output[at].fb && compositor.output[at].fb != compositor.fb && compositor.output[at].turned != 2)
                                 extra[extras++] = compositor.output[at].fb;
                 memory_zero(compositor.output, sizeof(compositor.output));
                 for (unsigned int at = 0; at < lit; at++)
@@ -6166,6 +6461,21 @@ static b32 compositor_space_take(int first)
                         for (unsigned int index = 0; index < found.crtc_count; index++)
                                 if (found.crtcs[index] == found.crtc[n])
                                         compositor.output[at].crtc_index = index;
+                        // The turn its displays line asks for: the card's own rotation where its plane has one, else Canvas's.
+                        compositor.output[at].degrees = compositor_display_degrees(found.name[n]);
+                        compositor.output[at].turned = !compositor.output[at].degrees ? 0 :
+                                compositor_rotation_hardware(compositor.output[at].crtc_index, compositor.output[at].degrees,
+                                                             &compositor.output[at].turn_plane,
+                                                             &compositor.output[at].turn_property,
+                                                             &compositor.output[at].turn_value) ? 1 : 2;
+                        if (compositor.output[at].turned == 2 &&
+                            !compositor_turn_buffer(at, (unsigned int)found.mode[n].hdisplay, (unsigned int)found.mode[n].vdisplay,
+                                                    &retired[at]))
+                        {
+                                compositor.output[at].turned = 0;
+                                compositor_kmsg((string_address) "compositor: canvas.displays: no buffer to turn a screen in software, left unturned",
+                                                0, (string_address) "");
+                        }
                         memory_copy(compositor.screen[at], screens[at], sizeof(screens[at]));
                         most_w = screens[at][2] > most_w ? screens[at][2] : most_w;
                         most_h = screens[at][3] > most_h ? screens[at][3] : most_h;
@@ -6212,7 +6522,8 @@ static b32 compositor_space_take(int first)
                 }
                 // The primary shows the scanout's framebuffer, and each other screen one of its own over it.
                 for (unsigned int at = 0; at < lit; at++)
-                        compositor.output[at].fb = at ? compositor_screen_fb() : compositor.fb;
+                        compositor.output[at].fb = compositor.output[at].turned == 2 ? compositor_turns[at].fb :
+                                                   at ? compositor_screen_fb() : compositor.fb;
                 if (!first)
                 {
                         carried = 1;
@@ -6227,15 +6538,40 @@ static b32 compositor_space_take(int first)
 
                 for (unsigned int at = 0; at < lit; at++)
                 {
+                        // A screen Canvas turns is shown from its own buffer, whole: its crtc reads from the origin.
+                        unsigned int from_x = compositor.output[at].turned == 2 ? 0 : (unsigned int)screens[at][0];
+                        unsigned int from_y = compositor.output[at].turned == 2 ? 0 : (unsigned int)screens[at][1];
                         struct compositor_crtc set = {(unsigned long)address_of compositor.output[at].connector, 1,
                                                       compositor.output[at].crtc,
                                                       compositor.output[at].fb ? compositor.output[at].fb : compositor.fb,
-                                                      (unsigned int)screens[at][0], (unsigned int)screens[at][1], 0, 1,
-                                                      compositor.output[at].mode};
+                                                      from_x, from_y, 0, 1, compositor.output[at].mode};
 
                         if (system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set) != 0)
                                 refused |= 1u << order[at];
                 }
+                // The screens the card turns are turned by their plane once their crtcs are set: a refusal turns it in software.
+                for (unsigned int at = 0; at < lit; at++)
+                {
+                        unsigned int fb_of = compositor.output[at].fb ? compositor.output[at].fb : compositor.fb;
+                        int source[2] = {screens[at][0], screens[at][1]};
+
+                        if (compositor.output[at].turned == 1 &&
+                            !compositor_rotate_commit(&compositor.output[at], source, (unsigned int)screens[at][2],
+                                                      (unsigned int)screens[at][3], fb_of))
+                                compositor.output[at].turned = 2;
+                        if (compositor.output[at].turned && compositor.output[at].degrees)
+                                compositor_turn_say(compositor.output[at].name, compositor.output[at].degrees,
+                                                    compositor.output[at].turned == 1);
+                }
+                // The turn each screen has, for the table's output_turn and output_software (compositor_table_outputs).
+                for (unsigned int at = 0; at < lit; at++)
+                {
+                        compositor.output[at].turn = compositor.output[at].turned ? compositor.output[at].degrees : 0;
+                        compositor.output[at].turn_software = compositor.output[at].turned == 2;
+                }
+                // The buffers the screens had before, which the crtcs now show no more.
+                for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
+                        compositor_turn_retire(&retired[at]);
                 // The crtcs no screen of the space has: a screen that went, one arranged dark, one left dark above.
                 for (unsigned int at = 0; at < was_count; at++)
                 {
@@ -6594,7 +6930,8 @@ static void compositor_resume(int cycle)
                 struct compositor_crtc off = {0, 0, output->crtc, 0, 0, 0, 0, 0, {0}};
                 struct compositor_crtc on = {(unsigned long)address_of output->connector, 1, output->crtc,
                                              output->fb ? output->fb : compositor.fb,
-                                             (unsigned int)compositor.screen[at][0], (unsigned int)compositor.screen[at][1],
+                                             output->turned == 2 ? 0 : (unsigned int)compositor.screen[at][0],
+                                             output->turned == 2 ? 0 : (unsigned int)compositor.screen[at][1],
                                              0, 1, output->mode};
 
                 system_control(compositor.card, COMPOSITOR_SETCRTC, address_of off);
