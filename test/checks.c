@@ -117470,7 +117470,7 @@ static fn check_pointer(void)
                 terminal_receive(-1, &land, &dirty);
                 terminal_receive(-1, &lift, &dirty);
                 check("pointer: a finger's tap is a click where it landed, the press and the release",
-                      to_shell_length == 0 && !terminal.finger && !terminal.finger_moved);
+                      to_shell_length == 0 && !terminal.finger_press.down && !terminal.finger_press.dragged);
                 to_shell_length = 0;
         }
 
@@ -124419,6 +124419,12 @@ static void check_ui_press(void)
               !ui_press_move(&ui, &press, 14, 13) && ui_pressed(&press, 3));
         check("ui press: past the slop it is a drag, pressed no more, and no click when it comes up",
               ui_press_move(&ui, &press, 10, 19) && !ui_pressed(&press, 3) && ui_press_end(&press, false) == -1);
+        // One slop for every press (the apps and the terminal's finger take this rule): UI_SLOP logical pixels at the scale.
+        ui.scale = 2;
+        ui_press_begin(&press, 10, 10, 3, true);
+        check("ui press: the slop is UI_SLOP logical pixels at the window's scale, for every press alike",
+              !ui_press_move(&ui, &press, 10 + UI_SLOP * 2 - 1, 10) && ui_press_move(&ui, &press, 10 + UI_SLOP * 2, 10));
+        ui.scale = 1;
         ui_press_begin(&press, 10, 10, 3, false);
         clicked = ui_press_end(&press, false);
         ui_press_begin(&press, 10, 10, 3, true);

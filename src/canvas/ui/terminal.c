@@ -164,12 +164,12 @@ static struct
         int wheel_remainder;
         int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
         /*
-                A finger on the paper (WINDOW_KEY_TOUCH) with no program that asked for the pointer: where it went down,
-                whether it went past the slop, and then the view it drags, line by line as its pixels make lines
-                (finger_left, what is under a line), thrown when it lifts moving.
+                A finger on the paper (WINDOW_KEY_TOUCH) with no program that asked for the pointer: its press (the kit's rule:
+                where it went down, whether it went past the slop), and then the view it drags, line by line as its pixels make
+                lines (finger_left, what is under a line), thrown when it lifts moving.
         */
-        b32 finger, finger_moved;
-        int finger_x, finger_y, finger_left;
+        struct ui_press finger_press;
+        int finger_left;
         struct ui_drag fling;
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
@@ -1930,23 +1930,21 @@ static b32 terminal_finger_scroll(b32 master, int pixels, b32 address_to dirty, 
 static b32 terminal_finger(b32 master, const struct window_event address_to event, b32 address_to dirty, b32 address_to handled)
 {
         struct window_key key;
-        b32 moved, sent;
+        struct ui kit;
+        b32 moved, sent, dragged, clicked;
 
         *handled = false;
         if (!(event->flags & WINDOW_KEY_TOUCH) || mouse_mode || terminal.bar.held)
                 return true;
-        if (event->type == WINDOW_EVENT_MOTION && terminal.finger)
+        if (event->type == WINDOW_EVENT_MOTION && terminal.finger_press.down)
         {
-                long dx = (long)terminal.pointer_x - terminal.finger_x, dy = (long)terminal.pointer_y - terminal.finger_y;
-                long slop = (long)UI_SLOP * terminal_scale();
-
+                // The slop is the kit's, at the scale the terminal draws at (its own ui may not have one yet).
+                kit = terminal.ui;
+                kit.scale = terminal_scale();
                 *handled = true;
-                if (!terminal.finger_moved && dx * dx + dy * dy >= slop * slop)
-                {
-                        terminal.finger_moved = true;
-                        ui_drag_start(&terminal.fling, terminal.finger_y, clock_monotonic_nanoseconds());
-                }
-                if (!terminal.finger_moved)
+                if (!terminal.finger_press.dragged && ui_press_move(&kit, &terminal.finger_press, terminal.pointer_x, terminal.pointer_y))
+                        ui_drag_start(&terminal.fling, terminal.finger_press.y, clock_monotonic_nanoseconds());
+                if (!terminal.finger_press.dragged)
                         return true;
                 return terminal_finger_scroll(master, ui_drag_follow(&terminal.fling, terminal.pointer_y, clock_monotonic_nanoseconds()),
                                               dirty, &moved);
@@ -1960,22 +1958,20 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         if (event->flags & WINDOW_KEY_DOWN)
         {
                 ui_drag_stop(&terminal.fling);
-                terminal.finger = true;
-                terminal.finger_moved = false;
-                terminal.finger_x = terminal.pointer_x;
-                terminal.finger_y = terminal.pointer_y;
+                ui_press_begin(&terminal.finger_press, terminal.pointer_x, terminal.pointer_y, 0, true);
                 terminal.finger_left = 0;
                 return true;
         }
-        if (!terminal.finger)
+        if (!terminal.finger_press.down)
                 return true;
-        terminal.finger = false;
-        if (terminal.finger_moved)
+        dragged = terminal.finger_press.dragged;
+        clicked = ui_press_end(&terminal.finger_press, (event->flags & WINDOW_KEY_CANCEL) != 0) >= 0;
+        if (dragged)
         {
                 ui_drag_let_go(&terminal.fling, clock_monotonic_nanoseconds());
                 return true;
         }
-        if (event->flags & WINDOW_KEY_CANCEL)
+        if (!clicked)
                 return true;
         terminal_pointer_key(0, WINDOW_KEY_DOWN, &key);
         sent = term_input(master, &key);
