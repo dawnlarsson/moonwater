@@ -1687,9 +1687,11 @@ static fn ui_kit_reach(int top, int bottom)
 }
 
 /*
-        Everything is placed again, not moved: the window was resized, the
-        theme or the scale changed. A control drawn after this is drawn at its
-        state, its transitions and springs put at their ends (ui_control_place).
+        Everything is placed again, not moved: the window was resized or the
+        scale changed. A control drawn after this is drawn at its state, its
+        transitions and springs put at their ends (ui_control_place). A theme
+        turn is not this: it moves each colour through the kit's clock and
+        leaves every control where it is (ui_kit_theme).
 */
 static fn ui_kit_settle(void)
 {
@@ -1770,7 +1772,7 @@ static fn ui_kit_theme(unsigned int mode, unsigned int accent, unsigned int moti
                 return;
         ui_kit.mode = mode;
         ui_kit.accent = accent & 0xffffffu;
-        ui_kit.epoch += 1 + !ui_kit.epoch; // the controls are placed in the new colours; only the theme's own turn moves
+        ui_kit.epoch += !ui_kit.epoch; // the first theme: the kit's controls are placed from the start (a later turn places none)
         ui_kit.from = ui_kit.shown;
         ui_theme_make(&ui_kit.to, mode == UI_THEME_DARK, ui_kit.accent);
         if (!ui_kit.made || motion)
