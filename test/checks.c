@@ -13131,6 +13131,46 @@ test(byte_classes) {
         return true;
 }
 
+//      byte_class_holds answers from a table of sixteen bit words, one per
+//      byte, so this compares every class the routine names, and the ones it
+//      refuses, against every byte. The definitions are written out here,
+//      not read back from the table, so a wrong table entry cannot agree
+//      with itself.
+static bool class_definition(b32 which, p8 value)
+{
+        b32 digit = value >= '0' && value <= '9';
+        b32 upper = value >= 'A' && value <= 'Z';
+        b32 lower = value >= 'a' && value <= 'z';
+        b32 alpha = upper || lower;
+        b32 alnum = alpha || digit;
+        b32 graph = value >= 33 && value <= 126;
+        b32 xdigit = digit || (value >= 'A' && value <= 'F') || (value >= 'a' && value <= 'f');
+
+        switch (which) {
+        case 0:  return alpha;
+        case 1:  return digit;
+        case 2:  return alnum;
+        case 3:  return upper;
+        case 4:  return lower;
+        case 5:  return value == ' ' || (value >= 9 && value <= 13);
+        case 6:  return value == ' ' || value == '\t';
+        case 7:  return value >= 32 && value <= 126;
+        case 8:  return graph;
+        case 9:  return value < 32 || value == 127;
+        case 10: return graph && !alnum;
+        case 11: return xdigit;
+        default: return false;
+        }
+}
+
+test(byte_class_table) {
+        for (b32 which = -2; which <= 40; which++)
+                for (positive value = 0; value < 256; value++)
+                        fail(byte_class_holds(which, (p8)value) == class_definition(which, (p8)value));
+
+        return true;
+}
+
 //      Case, which must change exactly the twenty six that have another case
 //      and leave every other byte as it found it.
 test(byte_case) {
@@ -13846,6 +13886,7 @@ test_case test_cases[] = {
         case(narrow_smaller_and_larger),
         case(narrow_square_root_is_exact),
         case(byte_classes),
+        case(byte_class_table),
         case(byte_case),
         case(memory_ascii_case),
         case(memory_hash_33),
