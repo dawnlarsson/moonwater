@@ -4948,7 +4948,7 @@ struct ui_scroll
         b32 bounds;
         int edge, scale;
         int reach;                 // how far down the region's rows are drawn, device pixels, when past its track (a list's pad); 0 for its height
-        b64 notch;                 // when the region last took a notch of the wheel, ns
+        b64 notch;                 // when the region last took a notch of the wheel, ns (ui_wheel_rate)
 };
 
 // A list stretches past its bounds (ui_list_row_span): a pull past an end, and a wheel turn at one, scale its rows in the scroll axis.
@@ -5453,22 +5453,47 @@ static b64 ui_wheel_clock(void)
         return ui_kit.wheel_clock ? ui_kit.wheel_clock : (b64)clock_monotonic_nanoseconds();
 }
 
+/*
+        The wheel's acceleration, one curve for every region that takes the wheel: a notch after a pause of UI_WHEEL_SLOW_NS
+        moves one unit, a notch within UI_WHEEL_FAST_NS of the region's last moves UI_WHEEL_FAST (Q8) units, and between them
+        the rate is a straight line in the time since that last notch. A fast spin travels further than the same notches fired
+        slowly, and a single notch still moves one unit. ui_scroll_wheel caps the travel (UI_WHEEL_REACH) so a long spin does
+        not run away, and the glide settles on its aim (ui_scroll_limit), so it never overshoots.
+*/
+#define UI_WHEEL_SLOW_NS 180000000l
+#define UI_WHEEL_FAST_NS 45000000l
+#define UI_WHEEL_FAST 1024 // Q8: four units a notch at the fast end
+#define UI_WHEEL_REACH 12  // units a spin may carry the aim past where the region is drawn
+#define UI_WHEEL_RUN 60    // rows a second the glide of a spin may run at most
+
+static b64 ui_wheel_rate(const struct ui_scroll address_to s, b64 now)
+{
+        b64 gap = s->notch && now > s->notch ? now - s->notch : UI_WHEEL_SLOW_NS;
+
+        if (gap >= UI_WHEEL_SLOW_NS)
+                return 256;
+        if (gap <= UI_WHEEL_FAST_NS)
+                return UI_WHEEL_FAST;
+        return 256 + (UI_WHEEL_FAST - 256) * (UI_WHEEL_SLOW_NS - gap) / (UI_WHEEL_SLOW_NS - UI_WHEEL_FAST_NS);
+}
+
 // A turn of the wheel, in the 120ths of a notch the compositor sends: what is under a step is kept for the next turn.
-// A notch is a row (a unit, where there are them), and its distance is added to the glide's speed as well as its aim. With the
-// wheel smooth off (ui_kit.wheel_off) a notch is one row at once: no glide.
+// A notch is a row (a unit, where there are them), and its distance is added to the glide's speed as well as its aim, at the
+// wheel's rate (ui_wheel_rate). With the wheel smooth off (ui_kit.wheel_off) a notch is one row at once: no glide, no rate.
 static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll address_to s, int delta)
 {
         long total = (long)s->wheel + (long)delta * (s->unit > 0 ? 1 : UI_ROW * ui->scale);
         int steps = (int)(total / 120);
-        b64 base, aim, now, unit = s->unit > 0 ? s->unit : 1;
+        b64 base, aim, now, rate, reach, lim, pos, unit = s->unit > 0 ? s->unit : 1;
 
         s->wheel = (int)(total - (long)steps * 120);
         if (!steps)
                 return false;
         now = ui_wheel_clock();
+        rate = ui_kit.wheel_off ? 256 : ui_wheel_rate(s, now);
         s->notch = now;
         base = s->gliding || s->back.live ? s->aim : s->dragging ? s->at : (b64)s->scroll << 8;
-        aim = base - (b64)steps * unit * UI_SCROLL_SCALE;
+        aim = base - (b64)steps * unit * UI_SCROLL_SCALE * rate / 256;
         if (ui_scroll_fit(s, aim) == base)
         {
                 // A turn at the end of a region that scrolls stretches it briefly from that end, and does not move it: a region that
@@ -5483,6 +5508,10 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
                 ui_spring_go(&s->back, ui_scroll_pull(s, (b64)UI_ROW * ui->scale * UI_SCROLL_SCALE), 0);
                 return true;
         }
+        // The travel is capped where the region is drawn: a spin's aim is at most UI_WHEEL_REACH units past it.
+        pos = s->gliding || s->back.live || s->dragging ? s->at : (b64)s->scroll << 8;
+        reach = (b64)UI_WHEEL_REACH * (s->unit > 0 ? s->unit : UI_ROW * ui->scale) * UI_SCROLL_SCALE;
+        aim = aim < pos - reach ? pos - reach : aim > pos + reach ? pos + reach : aim;
         aim = ui_scroll_fit(s, aim);
         if (ui_kit.wheel_off)
                 return ui_scroll_set(s, (int)(aim >> 8));
@@ -5491,8 +5520,11 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
         if (s->dragging)
                 s->dragging = 0, s->speed = 0;
         ui_scroll_rest(s);
-        // The notch's own speed is its distance over the time constant, the throw's rule, so a notch and a throw decay alike.
+        // The notch's own speed is its distance over the time constant, the throw's rule, so a notch and a throw decay alike; a spin
+        // is held to UI_WHEEL_RUN rows a second, so the glide does not run away however fast the notches come.
         s->speed += (aim - base) * 1000000000ll / UI_SCROLL_TAU_NS;
+        lim = (b64)UI_WHEEL_RUN * (s->unit > 0 ? s->unit : UI_ROW * ui->scale) * UI_SCROLL_SCALE;
+        s->speed = s->speed > lim ? lim : s->speed < -lim ? -lim : s->speed;
         ui_scroll_glide_to(s, aim, UI_SCROLL_TAU_NS);
         return true;
 }

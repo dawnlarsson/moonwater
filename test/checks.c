@@ -131798,6 +131798,40 @@ static fn check_kit_slider_below(void)
               ui_slider_snap(&c, -2 * UI_ONE - UI_ONE / 3) == c.low);
 }
 
+// The wheel's notches fired gap ns apart, a frame at a time between them, then settled: where the region ends, the fastest its
+// glide was set to run at a notch (256ths of a device pixel a second, either way), and whether it ever drew past its aim.
+struct wheel_run
+{
+        int scroll;
+        b64 fastest;
+        b32 passed;
+};
+
+static struct wheel_run wheel_spin(const struct ui address_to ui, struct ui_scroll address_to s, int notches, b64 gap)
+{
+        struct wheel_run run = {0, 0, false};
+
+        for (int k = 0; k < notches; k++)
+        {
+                for (b64 t = 0; t < gap; t += 16666667)
+                {
+                        ui_kit.now += 16666667, ui_kit.wheel_clock += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(ui, s);
+                        run.passed = run.passed || (b64)s->scroll * UI_SCROLL_SCALE > s->aim + UI_SCROLL_SCALE;
+                }
+                ui_scroll_wheel(ui, s, -120);
+                run.fastest = s->speed > run.fastest ? s->speed : -s->speed > run.fastest ? -s->speed : run.fastest;
+        }
+        for (int frame = 0; frame < 300 && (s->gliding || s->back.live); frame++)
+        {
+                ui_kit.now += 16666667, ui_kit.wheel_clock += 16666667, ui_kit.busy = 0;
+                ui_scroll_glide(ui, s);
+                run.passed = run.passed || (b64)s->scroll * UI_SCROLL_SCALE > s->aim + UI_SCROLL_SCALE;
+        }
+        run.scroll = s->scroll;
+        return run;
+}
+
 // A list for the bounds checks: rows of one line each, in a window of h device pixels at the kit's scale.
 static void bounds_row(int id, struct ui_row address_to row)
 {
@@ -132308,12 +132342,17 @@ static fn check_kit_place(void)
                       revealed && !shown_again);
         }
 
-        // The wheel (canvas wheel smooth): with the wheel smooth a notch glides to its row over several frames and no frame jumps a
-        // row; with it off a notch is one row at once.
+        // The wheel (canvas wheel smooth, and the acceleration of a spin). With the wheel smooth a notch glides to its row over several
+        // frames and no frame jumps a row; with it off a notch is one row at once. A single slow notch is one row, the same notches
+        // fired fast travel further than fired slowly, the glide's speed is held to UI_WHEEL_RUN rows a second, and it settles on
+        // its aim without passing it.
         {
                 struct ui_scroll smooth = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
-                int row = UI_ROW * ui.scale, frames_between = 0, jump = 0, last = 0, frame;
-                b32 glides = false, once = false;
+                struct ui_scroll slow = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
+                struct ui_scroll fast = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
+                struct wheel_run run;
+                int row = UI_ROW * ui.scale, frames_between = 0, jump = 0, last = 0, frame, fast_travel = 0, slow_travel = 0;
+                b32 glides = false, once = false, travel_ok = false, capped = false;
 
                 ui_kit.now = 8000000000ll, ui_kit.busy = 0, ui_kit.wheel_off = 0;
                 ui_kit.wheel_clock = 30000000000ll;
@@ -132334,9 +132373,17 @@ static fn check_kit_place(void)
                 once = smooth.scroll == row && !smooth.gliding && !smooth.back.live;
                 ui_kit.wheel_off = 0;
 
+                run = wheel_spin(&ui, &slow, 5, 400000000ll);
+                slow_travel = run.scroll;
+                run = wheel_spin(&ui, &fast, 5, 30000000ll);
+                fast_travel = run.scroll;
+                travel_ok = slow_travel == 5 * row && fast_travel > slow_travel;
+                capped = run.fastest <= (b64)UI_WHEEL_RUN * row * UI_SCROLL_SCALE && !run.passed && !fast.gliding;
                 ui_kit.wheel_clock = 0;
                 check("kit wheel: with the wheel smooth a notch glides to its row over several frames with no frame jumping a row, and off a notch is one row at once",
                       glides && once);
+                check("kit wheel: a single slow notch is one row, and the same notches fired fast travel further than fired slowly", travel_ok);
+                check("kit wheel: a fast spin's glide is held to 60 rows a second, and it settles on its aim without passing it", capped);
         }
 
         // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
