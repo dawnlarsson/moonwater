@@ -58148,7 +58148,18 @@ __asm__(
 
     ASM_FUNC(memory_growth)
     "cmp x0, x1\n   b.hs 2f\n   cbnz x0, 1f\n   mov x0, x2\n   cbz x0, 3f\n"
-    "1:  cmp x0, x1\n   b.hs 2f\n   adds x0, x0, x0\n   b.cc 1b\n"
+    //
+    //      The same answer as the doubling loop without the loop: clz of the
+    //      start and of the want differ by the shift that brings the start's top
+    //      bit to the want's. One doubling is taken first, the growth most stores
+    //      ask for; past it, the shifted start is the answer if it reaches the
+    //      want, otherwise one more doubling is, and it carries out (zero) only
+    //      when the want's top bit is 63.
+    //
+    "1:  cmp x0, x1\n   b.hs 2f\n   adds x0, x0, x0\n   b.cs 3f\n   cmp x0, x1\n   b.hs 2f\n"
+    "clz x3, x0\n   clz x4, x1\n   sub x5, x3, x4\n   lsl x6, x0, x5\n   cmp x6, x1\n   b.hs 4f\n"
+    "cbz x4, 3f\n   lsl x0, x6, #1\n" ASM_RET
+    "4:  mov x0, x6\n" ASM_RET
     "3:  mov x0, xzr\n"
     "2:\n" ASM_RET
     ASM_END(memory_growth)
