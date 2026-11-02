@@ -734,6 +734,60 @@ static void terminal_blanks(unsigned int address_to pixels, unsigned int from, u
         terminal_fill(pixels, (int)(from * terminal.cell_w), y, count * terminal.cell_w, terminal.cell_h, colour);
 }
 
+//      The cells terminal_row takes one at a time on the plainest path, in one loop. A plain cell has none of the
+//      flags that change how it is drawn (a wide half, a hidden or selected or dimmed one, a line through it, a handle),
+//      and it differs from the buffer it is drawn over. From at to end, while the cell's paper is the run's paper:
+//      a glyph whose ink and style (bold and italic bits) are the run's is appended to codes, and a blank is appended
+//      as a space when codes is set; with codes null (a run of blanks) a glyph ends the scan and a blank is counted.
+//      The count is what terminal_row adds to its run, so each cell it takes is the one its own path would have taken.
+#define TERMINAL_PLAIN_OUT (WINDOW_CELL_WIDE | WINDOW_CELL_WIDE_RIGHT | WINDOW_CELL_HIDDEN | WINDOW_CELL_SELECTED | \
+                            WINDOW_CELL_DIM | WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR |        \
+                            WINDOW_CELL_HANDLE_START | WINDOW_CELL_HANDLE_END)
+#define TERMINAL_STYLE_BITS (WINDOW_CELL_BOLD | WINDOW_CELL_ITALIC)
+
+struct terminal_plain
+{
+        unsigned int ink, paper, bits;
+};
+
+static unsigned int terminal_plain_scan(const struct window_cell address_to now, const struct window_cell address_to old,
+                                        unsigned int at, unsigned int limit, p32 address_to codes,
+                                        const struct terminal_plain address_to run)
+{
+        unsigned int n = 0;
+
+        for (; at + n < limit; n++)
+        {
+                const struct window_cell address_to cell = now + at + n;
+
+                if (cell->flags & TERMINAL_PLAIN_OUT)
+                        break;
+                if (old && *(const terminal_word address_to)cell == *(const terminal_word address_to)(old + at + n))
+                        break;
+                if (terminal_colour[cell->paper] != run->paper)
+                        break;
+                if (cell->character > ' ')
+                {
+                        if (!codes || terminal_colour[cell->ink] != run->ink || (cell->flags & TERMINAL_STYLE_BITS) != run->bits)
+                                break;
+                        codes[n] = cell->character;
+                }
+                else if (codes)
+                        codes[n] = ' ';
+        }
+        return n;
+}
+
+// The scan for a glyph run that holds glyphs codes already: as many more cells as the run has room for.
+static unsigned int terminal_plain_glyphs(const struct window_cell address_to now, const struct window_cell address_to old,
+                                          unsigned int at, unsigned int last, p32 address_to codes, unsigned int glyphs,
+                                          const struct terminal_plain address_to run)
+{
+        unsigned int limit = FONT_RUN - glyphs < last - at ? at + (FONT_RUN - glyphs) : last;
+
+        return terminal_plain_scan(now, old, at, limit, codes + glyphs, run);
+}
+
 static void terminal_row(struct terminal_painter address_to painter, unsigned int address_to pixels, unsigned int row,
                          const struct window_cell address_to now,
                          const struct window_cell address_to old, unsigned int first,
@@ -742,7 +796,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
         font_target target = {pixels, terminal.pitch, (b32)terminal.width, (b32)terminal.height};
         int y = (int)(row * terminal.cell_h);
         unsigned int run = 0, run_from = 0, run_colour = 0;
-        unsigned int glyphs = 0, glyphs_from = 0, glyphs_ink = 0, glyphs_paper = 0;
+        unsigned int glyphs = 0, glyphs_from = 0, glyphs_ink = 0, glyphs_paper = 0, glyphs_bits = 0;
         b32 glyphs_heavy = 0;
         p32 glyphs_flags = 0;
 
@@ -818,8 +872,16 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                                 glyphs_paper = paper;
                                 glyphs_heavy = heavy;
                                 glyphs_flags = style;
+                                glyphs_bits = cell->flags & TERMINAL_STYLE_BITS;
                         }
                         painter->codes[glyphs++] = cell->character;
+                        {
+                                struct terminal_plain key = {glyphs_ink, glyphs_paper, glyphs_bits};
+                                unsigned int taken = terminal_plain_glyphs(now, old, at + 1, last, painter->codes, glyphs, &key);
+
+                                glyphs += taken;
+                                at += taken;
+                        }
                         continue;
                 }
                 // A blank between glyphs on the run's ground is a cell of the run: a space no
@@ -829,6 +891,13 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                     glyphs < FONT_RUN)
                 {
                         painter->codes[glyphs++] = ' ';
+                        {
+                                struct terminal_plain key = {glyphs_ink, glyphs_paper, glyphs_bits};
+                                unsigned int taken = terminal_plain_glyphs(now, old, at + 1, last, painter->codes, glyphs, &key);
+
+                                glyphs += taken;
+                                at += taken;
+                        }
                         continue;
                 }
                 TERMINAL_GLYPHS();
@@ -845,6 +914,13 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                                 run = 1;
                                 run_from = at;
                                 run_colour = paper;
+                        }
+                        {
+                                struct terminal_plain key = {0, run_colour, 0};
+                                unsigned int taken = terminal_plain_scan(now, old, at + 1, last, null, &key);
+
+                                run += taken;
+                                at += taken;
                         }
                         continue;
                 }
