@@ -137460,6 +137460,8 @@ static int simd_usable(void) {
 
 /* Every wide body against its narrow one, on the same inputs: the same
    pixels, and nothing written outside the cell, row or run. */
+/* The canvas routines these name exist only in the kernel build: lib.c emits them under KERNEL_MODE and CONFIG_MOONWATER_CANVAS. */
+#if defined(KERNEL_MODE) && defined(CONFIG_MOONWATER_CANVAS)
 static void check_wide_bodies(void) {
     const u32 colors[]={0,1,0x80000000,0xffffffff,0xaabbccdd,0x10203040};
     static u32 got[4096],want[4096];
@@ -137534,6 +137536,7 @@ static void check_wide_bodies(void) {
         check(!memcmp(got,want,sizeof(got)));
     }
 }
+#endif /* KERNEL_MODE && CONFIG_MOONWATER_CANVAS */
 
 /* The cells a run is drawn from are the program's shared page, and the
    bodies read each character again on every scanline, after the caller
@@ -137573,7 +137576,9 @@ static void check_character_bounds(int wide) {
 
 int main(void) {
     const int wide=simd_usable();
+#if defined(KERNEL_MODE) && defined(CONFIG_MOONWATER_CANVAS)
     if(wide)check_wide_bodies();
+#endif
     check_character_bounds(wide);
     const u32 colors[]={0,1,0x80000000,0xffffffff,0xaabbccdd,0x10203040};
     for(unsigned a=0;a<6;a++)for(unsigned b=0;b<6;b++)for(unsigned pattern=0;pattern<256;pattern++) {
