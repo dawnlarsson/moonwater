@@ -123499,6 +123499,126 @@ static fn settings_frames_gallery(void)
         settings_frames_until(settings_frames.now + 200 * SETTINGS_FRAMES_MS);
 }
 
+/*
+        The list's scroll as the wheel turns it down a notch at a time, frame by frame, to its last row: the drawn scroll never
+        passes the last row, the aim never passes it, and once it is there it does not come back. Then it settles there.
+*/
+struct settings_end_probe
+{
+        int peak, returned, reached;
+        b64 peak_at;
+};
+
+static fn settings_end_look(struct settings_end_probe address_to p, int most)
+{
+        const struct ui_scroll address_to s = &settings.list.scroll;
+        b64 over = s->at - (b64)most * UI_SCROLL_SCALE;
+
+        p->peak_at = over > p->peak_at ? over : p->peak_at;
+        p->peak = s->scroll - most > p->peak ? s->scroll - most : p->peak;
+        if (s->scroll == most)
+                p->reached = 1;
+        else if (p->reached && s->scroll < most)
+                p->returned++;
+}
+
+static fn settings_wheel_end_check(string_address name, positive gap, int notches)
+{
+        struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
+        int most, group = 0, best = -1;
+        b32 settled;
+
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.menu.owner = -1, settings.view = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.list.hover = settings.list.down = -1;
+        for (int g = 0; g < settings_groups(); g++)
+        {
+                settings.group = g;
+                settings_refilter();
+                if (settings.list.count > best)
+                        best = settings.list.count, group = g;
+        }
+        settings.group = group;
+        settings_refilter();
+        settings_scroll_to(0);
+        settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
+        most = ui_scroll_most(&settings.list.scroll);
+        settings_frames_event(WINDOW_EVENT_MOTION, 0, (settings.page.left + settings.page.right) / 2, (settings.page.top + settings.page.bottom) / 2);
+        for (int k = 0; k < notches; k++)
+        {
+                settings_frames_event(WINDOW_EVENT_WHEEL, 0, -120, 0);
+                settings_frames_pass();
+                for (positive t = 0; t < gap; t += 16)
+                {
+                        settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
+                        settings_end_look(&p, most);
+                }
+        }
+        settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
+        settings_end_look(&p, most);
+        settled = !settings.list.scroll.gliding && !settings.list.scroll.back.live && settings.list.scroll.scroll == most;
+        string_format(log, "  settings wheel end (%s): %p rows, last row at %p, scroll %p, drawn past it by %b, at past it by %b/256, back %p frames\n",
+                      name, (positive)settings.list.count, (positive)most, (positive)settings.list.scroll.scroll, (bipolar)p.peak,
+                      (bipolar)p.peak_at, (positive)p.returned);
+        check("settings wheel end: a wheel turned down to the last row never passes it, and does not come back from it",
+              p.peak <= 0 && p.peak_at <= 0 && p.returned == 0);
+        check("settings wheel end: it settles on the last row with nothing moving", settled);
+}
+
+// A finger flicks the list down: it lands at the list's middle, moves up the rows by step pixels a frame for steps frames
+// from start pixels above the end, and lets go. The drawn scroll is watched to the end of the glide.
+static b32 settings_flick_check(string_address name, int start, int step, int steps)
+{
+        struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
+        int most, group = 0, best = -1, x, y;
+
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.menu.owner = -1, settings.view = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.list.hover = settings.list.down = -1;
+        for (int g = 0; g < settings_groups(); g++)
+        {
+                settings.group = g;
+                settings_refilter();
+                if (settings.list.count > best)
+                        best = settings.list.count, group = g;
+        }
+        settings.group = group;
+        settings_refilter();
+        settings_scroll_to(0);
+        settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
+        most = ui_scroll_most(&settings.list.scroll);
+        settings_scroll_to(most - start);
+        settings_frames_until(settings_frames.now + 100 * SETTINGS_FRAMES_MS);
+        x = (settings.page.left + settings.page.right) / 2, y = (settings.page.top + settings.page.bottom) / 2;
+        settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
+        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+        settings_frames_pass();
+        for (int k = 0; k < steps; k++)
+        {
+                y -= step;
+                settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
+                settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
+                settings_end_look(&p, most);
+        }
+        // Let go: from here the list may only move toward the end it is going to, and must rest there. The drag's own give past
+        // the end (a finger holding it there) is the pull's, and is not counted.
+        p.returned = p.reached = 0;
+        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+        for (positive t = 0; t < 3000 * SETTINGS_FRAMES_MS; t += 16 * SETTINGS_FRAMES_MS)
+        {
+                int before = settings.list.scroll.scroll;
+
+                settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
+                settings_end_look(&p, most);
+                if ((before < most && settings.list.scroll.scroll < before) || (before > most && settings.list.scroll.scroll > before))
+                        p.returned++;
+        }
+        string_format(log, "  settings flick (%s): %p rows, last row at %p, drawn past it by %b at most, moved back %p frames, rest at %p\n",
+                      name, (positive)settings.list.count, (positive)most, (bipolar)p.peak, (positive)p.returned,
+                      (positive)settings.list.scroll.scroll);
+        return p.returned == 0 && settings.list.scroll.scroll == most && !settings.list.scroll.back.live;
+}
+
 static fn check_settings_frames(string_address regular, string_address bold)
 {
         static font_face faces[2];
@@ -123644,6 +123764,24 @@ static fn check_settings_frames(string_address regular, string_address bold)
         }
         settings.ui.scale = 1;
         ui_kit_settle();
+        settings_size(SETTINGS_WIDTH, 300);
+        settings_wheel_end_check((string_address) "a tall window, the wheel a notch at a time", 66, 70);
+        settings_wheel_end_check((string_address) "a tall window, notches 150 ms apart", 150, 70);
+        settings_wheel_end_check((string_address) "a tall window, notches 300 ms apart", 300, 70);
+        settings.ui.scale = 2;
+        ui_kit_settle();
+        settings_size(SETTINGS_WIDTH * 2, 300 * 2);
+        settings_wheel_end_check((string_address) "scale 2, the wheel a notch at a time", 66, 70);
+        settings.ui.scale = 1;
+        ui_kit_settle();
+        settings_size(SETTINGS_WIDTH, 300);
+        check("settings flick: a gentle flick 300 px above the last row settles on it, no overshoot, no return",
+              settings_flick_check((string_address) "gentle, 300 px above", 300, 30, 3));
+        check("settings flick: a flick 150 px above the last row settles on it, no overshoot, no return",
+              settings_flick_check((string_address) "medium, 150 px above", 150, 25, 4));
+        check("settings flick: a hard flick 100 px above the last row, let go past it, settles on it with no return",
+              settings_flick_check((string_address) "hard, 100 px above", 100, 40, 6));
+        settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_frames_gallery();
         string_format(log, "  settings frames: %p frames drawn and compared, at scales 1 and 2\n", settings_frames.frames);
 

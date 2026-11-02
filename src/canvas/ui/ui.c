@@ -6330,8 +6330,9 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
         {
                 b32 thrown = ui_drag_let_go(&f->drag, clock_monotonic_nanoseconds());
 
+                // The drag's speed is the finger's, down the screen positive; the region moves the other way (ui_finger_move).
                 if (f->region)
-                        ui_scroll_let_go(f->region, thrown, f->drag.speed);
+                        ui_scroll_let_go(f->region, thrown, -f->drag.speed);
         }
         return f->press.down ? ui_press_end(&f->press, cancelled) : -1;
 }
