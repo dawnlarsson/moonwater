@@ -3460,6 +3460,15 @@ static int compositor_line(int row)
         return compositor.arranged[row] == COMPOSITOR_FLOATING ? COMPOSITOR_LINE * compositor.scale : 0;
 }
 
+// The line a window is drawn with: a floating window's, and a tile's (a half or a quarter reads as a window, the same
+// line and corners). A window filling the output, or its room, is square and has none: its edges are the screen's.
+// The geometry keeps compositor_line, which a placement clamps to.
+static int compositor_frame_line(int row)
+{
+        return compositor.arranged[row] == COMPOSITOR_MAXIMIZED || compositor.arranged[row] == COMPOSITOR_ROOM
+                   ? 0 : COMPOSITOR_LINE * compositor.scale;
+}
+
 /*
         A window's first show lands: its picture starts at 96 percent of its size and grows to all of it over
         COMPOSITOR_LAND_NS, on the kit's --ease, about its centre. A scale only: no fade, no shadow, no outline.
@@ -3579,7 +3588,7 @@ static void compositor_stretch(int row)
 
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
-        int line = compositor_line(row);
+        int line = compositor_frame_line(row);
 
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
                                            (int)compositor.h[row], compositor.scale, compositor_pixels(row),

@@ -121632,6 +121632,53 @@ static void check_compositor_assist(void)
     compositor.grid_on = 0;
 }
 
+/* Every pixel of a window's picture, both buffers, in one colour: what a tile's edge and corners are read against. */
+static void layout_paint(int row, unsigned int colour)
+{
+    unsigned int front = compositor.front[row];
+
+    for (unsigned int which = 0; which < 2; which++)
+    {
+        unsigned int *pixels;
+
+        compositor.front[row] = which;
+        pixels = compositor_pixels(row);
+        for (unsigned int y = 0; y < compositor.h[row]; y++)
+            for (unsigned int x = 0; x < compositor.w[row]; x++)
+                pixels[y * (unsigned int)compositor_stride() + x] = colour;
+    }
+    compositor.front[row] = front;
+}
+
+/*
+        A tile is drawn as a window is: the line round it is the window's 1 px line, outside its picture on the inner sides
+        (the screen's own sides are off the output), and its corners are the window's 8 px round. The left half of a 256 px
+        screen: its right line is the column past its picture, its top left corner is ground, and a point 12 px in is its picture.
+*/
+static void check_compositor_tile_line(void)
+{
+    const unsigned int picture = 0xc06020u, ground = compositor_ground;
+    unsigned int line_at, corner_at, inside_at, beyond_at;
+
+    assist_fresh();
+    compositor.showing[2] = compositor.showing[3] = 0; /* the others would cover the tile's corner */
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    layout_paint(1, picture);
+    screens_hand(250, 250, 0); /* the pointer's own picture is not the tile's */
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    line_at = layout_pixels[100 * 256 + 128] & 0xffffffu;
+    beyond_at = layout_pixels[100 * 256 + 129] & 0xffffffu;
+    corner_at = layout_pixels[0] & 0xffffffu;
+    inside_at = layout_pixels[12 * 256 + 12] & 0xffffffu;
+    check("tile line: a half is drawn with the window's 1 px line on its inner side, and nothing past it",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.w[1] == 128 &&
+              line_at == (compositor_ink_shadow() & 0xffffffu) && beyond_at == (ground & 0xffffffu));
+    check("tile corners: a half's corners are the window's 8 px round, the corner ground and the picture inside it",
+          corner_at == (ground & 0xffffffu) && inside_at == picture);
+    compositor_float(1);
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -137513,6 +137560,7 @@ b32 main()
         check_compositor_push();
         check_compositor_seam();
         check_compositor_assist();
+        check_compositor_tile_line();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();
