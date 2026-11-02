@@ -1625,6 +1625,12 @@ static b32 ui_box_row(const struct ui_box address_to box, b32 y, unsigned short 
         return any;
 }
 
+#if defined(__SSE2__) || defined(__aarch64__)
+// Four lines at a time, in GCC and clang's vector extensions (SSE2 on x86-64, NEON on arm64); elsewhere one line at a time.
+typedef int ui_lanes4 __attribute__((vector_size(16), may_alias));
+#define UI_SPANS_LANES 1
+#endif
+
 /*
         A box over one row of pixels as its lines' spans, the cover a line would make worked out pixel by pixel only
         at the shape's edges. Each of the UI_SUB lines is a span (256ths, from pixel first, cut to width pixels);
@@ -1637,69 +1643,47 @@ struct ui_spans
         b32 lo, hi, a, b;     // the pixels touched, and those of them every line covers whole
         unsigned int inside;  // the cover of a pixel from a to b
         int count;            // the lines that cover anything
-        b32 left[UI_SUB], right[UI_SUB];
+        b32 left[UI_SUB] __attribute__((aligned(16))), right[UI_SUB] __attribute__((aligned(16)));
 };
 
-static b32 ui_box_spans(const struct ui_box address_to box, b32 y, b32 first, b32 width, struct ui_spans address_to s)
+static b32 ui_box_spans_radii(const struct ui_box address_to box, b32 rx, b32 ry, b32 y, b32 first, b32 width, struct ui_spans address_to s)
 {
-        b32 top = y * 256, bottom = top + 256, ry = box->ry, rx = box->rx, low = 0, high = 0, inner_low = 0, inner_high = 0;
-        b32 straight, last = -1;
-        p64 step = 0, rest = 0, quotient = 0, remainder = 0;
+        b32 top = y * 256, bottom = top + 256, low = 0, high = 0, inner_low = 0, inner_high = 0, base = first * 256, reach = width * 256;
+        b32 straight, corner;
 
         s->count = 0;
         if (bottom <= box->y0 || top >= box->y1 || box->x1 <= box->x0)
                 return 0;
-        ui_box_radii(box, &rx, &ry);
         // A row in the straight middle, all of it inside, is every line the box's own span.
         straight = top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1;
-        // A line's place in a corner over its radius is ui_box_span's (dy << 16) / ry. The lines are 256 / UI_SUB
-        // apart, so from one to the next dy moves by that and the quotient by a step and a rest, kept with its
-        // remainder: one division a row for the step, and one more wherever dy does not follow the line before.
-        if (!straight && ry > 0)
-                step = ((p64)(256 / UI_SUB) << 16) / (p64)ry, rest = ((p64)(256 / UI_SUB) << 16) % (p64)ry;
+        corner = !straight && ry > 0 && rx > 0;
         for (b32 sub = 0; sub < UI_SUB; sub++)
         {
                 b32 left = box->x0, right = box->x1, at = top + sub * (256 / UI_SUB) + 256 / UI_SUB / 2, dy = 0;
 
                 if (!straight)
                 {
-                        // ui_box_span, with the quotient carried from line to line.
+                        // ui_box_span's line: its place over the radius, (dy << 16) / ry, taken directly (the same quotient).
                         if (at < box->y0 || at >= box->y1)
                                 continue;
                         if (at < box->y0 + ry)
                                 dy = box->y0 + ry - at;
                         else if (at >= box->y1 - ry)
                                 dy = at - (box->y1 - ry) + 1;
-                        if (dy > 0 && ry > 0 && rx > 0)
+                        if (dy > 0 && corner)
                         {
-                                b32 dx;
+                                p64 u = ((p64)dy << 16) / (p64)ry;
+                                b32 dx = u >= 65536 ? 0 : (b32)(((p64)rx * ui_arc(u)) >> 16);
 
-                                if (last > 0 && dy == last + 256 / UI_SUB)
-                                {
-                                        quotient += step, remainder += rest;
-                                        if (remainder >= (p64)ry)
-                                                quotient++, remainder -= (p64)ry;
-                                }
-                                else if (last > 0 && dy == last - 256 / UI_SUB)
-                                {
-                                        quotient -= step;
-                                        if (remainder < rest)
-                                                quotient--, remainder += (p64)ry;
-                                        remainder -= rest;
-                                }
-                                else
-                                        quotient = ((p64)dy << 16) / (p64)ry, remainder = ((p64)dy << 16) % (p64)ry;
-                                last = dy;
-                                dx = quotient >= 65536 ? 0 : (b32)(((p64)rx * ui_arc(quotient)) >> 16);
                                 left = box->x0 + rx - dx;
                                 right = box->x1 - rx + dx;
                                 if (right <= left)
                                         continue;
                         }
                 }
-                left -= first * 256, right -= first * 256;
+                left -= base, right -= base;
                 left = left < 0 ? 0 : left;
-                right = right > width * 256 ? width * 256 : right;
+                right = right > reach ? reach : right;
                 if (right <= left)
                         continue;
                 if (!s->count)
@@ -1709,6 +1693,9 @@ static b32 ui_box_spans(const struct ui_box address_to box, b32 y, b32 first, b3
                 s->left[s->count] = left, s->right[s->count] = right;
                 s->count++;
         }
+        // The lines past count are nothing (0 to 0), which the cover sum takes as none.
+        for (b32 k = s->count; k < UI_SUB; k++)
+                s->left[k] = s->right[k] = 0;
         if (!s->count)
                 return 0;
         s->lo = low >> 8, s->hi = (high + 255) >> 8;
@@ -1719,6 +1706,15 @@ static b32 ui_box_spans(const struct ui_box address_to box, b32 y, b32 first, b3
         return 1;
 }
 
+// ui_box_spans_radii with the box's radii as drawn (ui_box_radii), for a caller that has not resolved them.
+static b32 ui_box_spans(const struct ui_box address_to box, b32 y, b32 first, b32 width, struct ui_spans address_to s)
+{
+        b32 rx = box->rx, ry = box->ry;
+
+        ui_box_radii(box, &rx, &ry);
+        return ui_box_spans_radii(box, rx, ry, y, first, width, s);
+}
+
 // The cover of pixel x of a row's spans: what each line covers of it, summed.
 static unsigned int ui_spans_cover(const struct ui_spans address_to s, b32 x)
 {
@@ -1727,12 +1723,31 @@ static unsigned int ui_spans_cover(const struct ui_spans address_to s, b32 x)
 
         if (x >= s->a && x < s->b)
                 return s->inside;
+#ifdef UI_SPANS_LANES
+        {
+                ui_lanes4 low = {p0, p0, p0, p0}, high = {p1, p1, p1, p1}, sum = {0, 0, 0, 0};
+
+                for (int k = 0; k < UI_SUB; k += 4)
+                {
+                        ui_lanes4 l = *(const ui_lanes4 address_to)&s->left[k], r = *(const ui_lanes4 address_to)&s->right[k], m, from, to, d;
+
+                        m = l > low;
+                        from = (l & m) | (low & ~m);
+                        m = r < high;
+                        to = (r & m) | (high & ~m);
+                        d = to - from;
+                        sum += d & (d > 0);
+                }
+                cover = (unsigned int)(sum[0] + sum[1] + sum[2] + sum[3]);
+        }
+#else
         for (int k = 0; k < s->count; k++)
         {
                 b32 from = s->left[k] > p0 ? s->left[k] : p0, to = s->right[k] < p1 ? s->right[k] : p1;
 
                 cover += to > from ? (unsigned int)(to - from) : 0;
         }
+#endif
         return cover;
 }
 
@@ -1837,11 +1852,15 @@ static inline unsigned int ui_kit_tone(unsigned int argb, unsigned int cover)
 */
 static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, const struct ui_box address_to clip)
 {
-        b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8, ry = ui_box_ry(box);
+        b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8, rx = box->rx, ry = box->ry;
+        b32 cut_rx = 0, cut_ry = 0;
         unsigned int whole = argb >> 24 == 255 ? argb | 0xff000000u : ui_premultiplied(argb, UI_FULL);
 
         if (!(argb >> 24))
                 return;
+        ui_box_radii(box, &rx, &ry);
+        if (clip)
+                cut_rx = clip->rx, cut_ry = clip->ry, ui_box_radii(clip, &cut_rx, &cut_ry);
         first = first < 0 ? 0 : first;
         last = last > ui->width ? ui->width : last;
         if (clip)
@@ -1881,7 +1900,7 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
                         b32 lo, hi, a, b;
                         unsigned int inside;
 
-                        if (!ui_box_spans(box, y, first, width, &spans) || (clip && !ui_box_spans(clip, y, first, width, &cut)))
+                        if (!ui_box_spans_radii(box, rx, ry, y, first, width, &spans) || (clip && !ui_box_spans_radii(clip, cut_rx, cut_ry, y, first, width, &cut)))
                                 continue;
                         row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
                         lo = spans.lo, hi = spans.hi, a = spans.a, b = spans.b, inside = spans.inside;
