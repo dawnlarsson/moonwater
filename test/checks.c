@@ -136049,6 +136049,254 @@ static fn check_no_hand_typing(void)
 }
 
 /*
+        The kit's defaults, which every window takes and none keeps a copy of. A press again to confirm is the kit's
+        (ui_confirm: the first press arms it, the next with nothing between fires it, another press or key drops it, and
+        the same line says so in every app). A field is UI_FIELD_H high, the kit's touch target. A press outside a field
+        commits a plain value and cancels a secret or a command, in the kit. The kit's click window (450 ms, 4 px) counts
+        the clicks of a text and of the terminal alike. The editor's tab strip is the kit's tab control, chosen by the
+        mouse on its release. The sources of the apps hold none of the copies these replaced (a scan, as above).
+        Where a default is not in the tree yet, its check is red: the names it needs are not declared.
+*/
+static b32 kit_defaults_scan(const char *file, const char *phrase)
+{
+        positive size = 0, bytes = compositor_map_file((string_address)file, &size);
+        positive length = string_length((string_address)phrase), found = 0;
+        const char address_to text = (const char address_to)bytes;
+
+        if (!bytes)
+                return false;
+        for (positive at = 0; at + length <= size;)
+        {
+                const char address_to hit = (const char address_to)memory_search((address_any)(text + at), size - at, (address_any)phrase, length);
+
+                if (!hit)
+                        break;
+                found++;
+                string_format(log, "  %s still has: %s\n", (string_address)file, (string_address)phrase);
+                at = (positive)(hit - text) + length;
+        }
+        compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        return found != 0;
+}
+
+// The fraction of a ripple's pixels that fall outside a box's rounded corners (radius r, device pixels), with a pixel's
+// edge given a pixel of slack: a ripple cut square at a corner lies outside the arc by up to 0.41 r.
+static positive ripple_outside_rounded(const unsigned int address_to with, const unsigned int address_to without, int x0, int y0, int x1, int y1, int r,
+                                       positive address_to differing)
+{
+        positive outside = 0;
+
+        *differing = 0;
+        for (int y = 0; y < 300; y++)
+                for (int x = 0; x < 600; x++)
+                {
+                        int cx = x < x0 + r ? x0 + r : x >= x1 - r ? x1 - r : x, cy = y < y0 + r ? y0 + r : y >= y1 - r ? y1 - r : y;
+                        long dx = x - cx, dy = y - cy, reach = (long)(r + 1) * (r + 1);
+
+                        if (with[y * 600 + x] == without[y * 600 + x])
+                                continue;
+                        (*differing)++;
+                        if (x < x0 || x >= x1 || y < y0 || y >= y1 || dx * dx + dy * dy > reach)
+                                outside++;
+                }
+        return outside;
+}
+
+#if MOONWATER_UI_ANY
+static fn check_kit_defaults(struct ui address_to wui)
+{
+        static unsigned int with[600 * 300], without[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui ui = *wui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        b32 ripples_held = true, confirm_ok = false, field_ok = false, outside_ok = false, clicks_ok = false, tabs_ok = false;
+        positive differing = 0, outside = 0;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit defaults: the face loads", false);
+                return;
+        }
+        ui.regular = ui.bold = ui.mono = &face;
+        static const char *const copies[][2] = {
+            {"src/canvas/ui/settings.c", "press Enter again"},    {"src/canvas/ui/settings.c", "press Delete again"},
+            {"src/canvas/ui/settings.c", "settings.confirm_args"}, {"src/canvas/ui/settings.c", "settings.forget[0]"},
+            {"src/canvas/ui/settings.c", "ui_page_column_press(&settings.ui, &settings.page, row, x, y)"}, {"src/canvas/ui/settings.c", "settings.confirm = 0"},
+            {"src/canvas/ui/editor.c", "editor.armed"},           {"src/canvas/ui/editor.c", "again writes over"},
+            {"src/canvas/ui/editor.c", "Ctrl+W again"},           {"src/canvas/ui/editor.c", "UI_SEARCH_H"},
+            {"src/canvas/ui/launcher.c", "UI_SEARCH_H"},          {"src/canvas/ui/launcher.c", "(row == launcher.press.target ? row : -1)"}, {"src/canvas/ui/settings.c", "(settings.list.down == settings.press.target))"},
+            {"src/canvas/ui/terminal.c", "TERMINAL_CLICKS_NS"},   {"src/canvas/ui/terminal.c", "terminal.click_row"},
+            {"src/canvas/ui/ui.c", "UI_SEARCH_H"}};
+        positive copied = 0;
+
+        ui.pixels = with, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = 7000000000ll;
+
+        // Every control's ripple is cut to its own hover rect, with its corners: a pill button, a segmented strip's item, a
+        // vertical strip's item and a switch's row. A press in the middle of each, fourteen frames in (about 230 ms), its
+        // ripple's pixels all lie inside the rounded box of the item or row the press went down on, the box the hover layer fills.
+        {
+                static struct
+                {
+                        int kind, variant, x, y, w, h, count, item, radius;
+                } specs[] = {{UI_BUTTON, UI_BUTTON_PRIMARY, 20, 20, 160, 44, 1, 0, 22},
+                             {UI_BUTTON, UI_BUTTON_OUTLINED, 20, 80, 160, 44, 1, 0, 22},
+                             {UI_TABS, UI_TABS_SEGMENTED, 20, 140, 180, 32, 3, 0, 16},
+                             {UI_TABS, UI_TABS_VERTICAL, 240, 20, 150, 34, 12, 5, 8},
+                             {UI_SWITCH, 0, 20, 200, 200, 44, 1, 0, 0}};
+
+                for (positive s = 0; s < sizeof(specs) / sizeof(specs[0]); s++)
+                {
+                        struct ui_control c;
+                        int bx, by, bw, bh, press_x, press_y;
+                        b32 vertical = specs[s].kind == UI_TABS && specs[s].variant == UI_TABS_VERTICAL;
+
+                        memory_zero(&c, sizeof(c));
+                        c.kind = specs[s].kind, c.variant = specs[s].variant, c.x = specs[s].x, c.y = specs[s].y, c.w = specs[s].w, c.h = specs[s].h;
+                        c.count = specs[s].count;
+                        for (int k = 0; k < specs[s].count; k++)
+                                c.items[k] = "Item";
+                        c.label = "Run";
+                        c.at = specs[s].item;
+                        ui_control_start(&c);
+                        ui_control_draw(&ui, &c);
+                        // The box of the item the press is on, as the kit lays it out.
+                        bx = c.x, by = c.y, bw = c.w, bh = c.h;
+                        if (c.kind == UI_TABS && !vertical)
+                                bx = ui_tab_left(&ui, &c, specs[s].item), bw = ui_tab_width(&ui, &c, specs[s].item);
+                        if (vertical)
+                                by = c.y + specs[s].item * c.h;
+                        if (c.kind == UI_SWITCH)
+                                ui_control_row(&c, &bx, &by, &bw, &bh);
+                        press_x = bx + bw / 2, press_y = by + bh / 2;
+                        ui_kit_pointer(&ui, &c, 1, WINDOW_EVENT_BUTTON, press_x, press_y, true, 0);
+                        for (int frame = 0; frame < 14; frame++)
+                                ui_kit.now += 16666667, ui_kit.busy = 0, ui_control_draw(&ui, &c);
+                        check_ripple_frame(&ui, &c, with, without, 0xff202020u);
+                        outside = ripple_outside_rounded(with, without, bx, by, bx + bw, by + bh, specs[s].radius, &differing);
+                        if (differing < 200 || outside)
+                                ripples_held = false;
+                        string_format(log, "  ripple control %p: %p pixels, %p outside the hover rect\n", (p64)s, (p64)differing, (p64)outside);
+                }
+        }
+        check("kit ripple: a ripple's pixels lie inside its control's hover rect, corners and all, for every control", ripples_held);
+
+        // Confirm: the first press arms it and does not fire, the second with nothing between fires, another press drops it,
+        // a different thing arms again, and the line says the same to every app.
+#ifdef UI_CONFIRM_TEXT
+        {
+                struct ui_confirm confirm;
+                char line[UI_CONFIRM_TEXT];
+
+                memory_zero(&confirm, sizeof(confirm));
+                confirm_ok = !ui_confirm_ask(&confirm, 1, "a") && ui_confirm_ask(&confirm, 1, "a") && !ui_confirm_ask(&confirm, 1, "a") &&
+                             !ui_confirm_ask(&confirm, 2, "a") && ui_confirm_ask(&confirm, 2, "a");
+                ui_confirm_ask(&confirm, 3, "b");
+                ui_confirm_drop(&confirm);
+                confirm_ok = confirm_ok && !ui_confirm_ask(&confirm, 3, "b") && ui_confirm_ask(&confirm, 3, "b");
+                ui_confirm_ask(&confirm, 3, "b");
+                ui_confirm_drop(&confirm);
+                ui_confirm_line(line, sizeof(line), "forget the net");
+                confirm_ok = confirm_ok && string_equals((string_address)line, (string_address) "press again to confirm: forget the net");
+        }
+        check("kit confirm: the first press arms it, the second fires it, and another press or a drop cancels it", confirm_ok);
+#else
+        check("kit confirm: the first press arms it, the second fires it, and another press or a drop cancels it", false);
+#endif
+
+        // Fields: every text field is the kit's height, and a press outside a field commits a plain value and cancels a
+        // secret or a command.
+#ifdef UI_CONFIRM_TEXT
+        {
+                static struct ui_text t, plain, secret;
+                static struct windows table;
+                static struct window_row own;
+                own.table = &table, own.row = 0, own.door = -1;
+                field_ok = UI_FIELD_H == UI_TARGET && UI_TARGET == 44;
+                ui_field_open(&plain, &own, "");
+                ui_field_open(&secret, &own, "");
+                secret.masked = 1, secret.command = 1;
+                for (int k = 0; k < 2; k++)
+                {
+                        struct ui_text address_to f = k ? &secret : &plain;
+
+                        f->well_left = 0, f->well_top = 0, f->well_right = 100, f->well_bottom = 44;
+                        field_type(wui, f, "abc");
+                }
+                {
+                        p32 out_plain = field_button(wui, &plain, 0x110, true, 300, 300, 0);
+                        p32 out_secret = field_button(wui, &secret, 0x110, true, 300, 300, 0);
+
+                        outside_ok = (out_plain & UI_TEXT_COMMIT) && field_is(&plain, "abc") && (out_secret & UI_TEXT_CANCEL) &&
+                                     !(out_plain & UI_TEXT_CANCEL) && !(out_secret & UI_TEXT_COMMIT);
+                }
+        }
+        check("kit field: every text field is UI_FIELD_H, the kit's 44 px touch target", field_ok);
+        check("kit field: a press outside a plain field commits its value, and outside a secret or a command it cancels", outside_ok);
+#else
+        check("kit field: every text field is UI_FIELD_H, the kit's 44 px touch target", false);
+        check("kit field: a press outside a plain field commits its value, and outside a secret or a command it cancels", false);
+#endif
+
+        // The click window: 450 ms and 4 px, as the kit's text counts its clicks, so a terminal's and a field's agree.
+#ifdef UI_CLICK_NS
+        {
+                struct ui_click k;
+                int twice, once, thrice, far;
+
+                memory_zero(&k, sizeof(k));
+                twice = ui_click_count(&ui, &k, 1000000000ll, 10, 10);
+                twice = ui_click_count(&ui, &k, 1000000000ll + 449000000ll, 14, 10);
+                thrice = ui_click_count(&ui, &k, 1000000000ll + 898000000ll, 14, 10);
+                memory_zero(&k, sizeof(k));
+                ui_click_count(&ui, &k, 1000000000ll, 10, 10);
+                far = ui_click_count(&ui, &k, 1000000000ll + 100000000ll, 15, 10);
+                memory_zero(&k, sizeof(k));
+                ui_click_count(&ui, &k, 1000000000ll, 10, 10);
+                once = ui_click_count(&ui, &k, 1000000000ll + 451000000ll, 10, 10);
+                clicks_ok = twice == 2 && thrice == 3 && far == 1 && once == 1;
+        }
+        check("kit clicks: a second click 450 ms and 4 px on counts two, a third three, and a slow or far one starts over", clicks_ok);
+#else
+        check("kit clicks: a second click 450 ms and 4 px on counts two, a third three, and a slow or far one starts over", false);
+#endif
+
+        // The editor's tabs are the kit's tab control, and a mouse press and release on one chooses it.
+#ifdef UI_CONFIRM_TEXT
+        {
+                unsigned int pixels[600 * 300];
+                int at_x, at_y;
+
+                editor.ui = ui;
+                editor.width = 600, editor.height = 300, editor.own.stride = 600;
+                editor.count = 0;
+                editor_open(null), editor_open(null), editor_open(null);
+                editor.tab = 0;
+                editor_draw(pixels);
+                at_x = ui_tab_left(&editor.ui, &editor.strip, 2) + ui_tab_width(&editor.ui, &editor.strip, 2) / 2;
+                at_y = editor.strip.y * editor.ui.scale + editor.strip.h * editor.ui.scale / 2;
+                editor.pointer_x = at_x, editor.pointer_y = at_y;
+                editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0});
+                tabs_ok = editor.tab == 0;
+                editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, 0, 0x110, 0});
+                tabs_ok = tabs_ok && editor.tab == 2;
+                editor.count = 0;
+        }
+        check("editor tabs: a mouse press and release on a tab choose it, as the kit's tabs do", tabs_ok);
+#else
+        check("editor tabs: a mouse press and release on a tab choose it, as the kit's tabs do", false);
+#endif
+
+        // No app keeps a copy of a default: the phrases of the copies it had are gone from its sources.
+        for (positive k = 0; k < sizeof(copies) / sizeof(copies[0]); k++)
+                copied += kit_defaults_scan(copies[k][0], copies[k][1]) ? 1 : 0;
+        check("kit defaults: no app keeps its own copy of a confirm, a field height, a click window or a press that fires on press", copied == 0);
+}
+#endif
+
+/*
         The fields of the windows themselves, drawn with the repository's Inter and worked by the keys and the hand as
         their windows are: the launcher's (a click puts the caret, a drag selects, and what is typed goes there), the
         settings' filter (the arrows move in it, and a blank typed between letters parts its words) and the field a
@@ -138447,6 +138695,9 @@ b32 main()
                 check_glass_pieces(program_argument(3));
 #endif
         check_no_hand_typing();
+#if MOONWATER_UI_ANY
+        check_kit_defaults(&terminal.ui);
+#endif
 
         // What the terminal says its paper and ink are is what it paints them with.
         {
