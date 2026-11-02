@@ -2579,7 +2579,10 @@ static int wire_request(long client, struct wayland_client *c, long index, long 
         if (!signature)
                 return wire_fail(c, id, WAYLAND_ERR_METHOD, "no such request");
         if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+        {
+                c->dead = 1;
                 return SHELL_ENOSPC;
+        }
         if (!wire_args(c, signature, r, args, &count, &needed))
                 return wire_fail(c, id, WAYLAND_ERR_METHOD, "arguments do not match");
         switch (type)
@@ -2675,7 +2678,9 @@ static int wire_dispatch(long client, struct wayland_client *c, const unsigned c
         it disconnects. A message that fails in its dispatch is refused and
         its bytes are consumed; the messages after it in the same call are
         still read, so the stream stays in step, and the call returns the first
-        refusal. The descriptors are queued first, so a message that needs one
+        refusal. A request that finds its client's output queue full is refused
+        and the client is dead the same way: an answer it cannot have is not
+        queued, so the client is never left waiting for one. The descriptors are queued first, so a message that needs one
         finds it. Messages that completed are not undone by a refusal: the
         caller disconnects the client, which is what a refusal means.
 */
@@ -2729,6 +2734,8 @@ int wayland_feed(long client, const unsigned char *bytes, long length, const lon
                         c->in_length = 0;
                         if (status < 0 && refused == SHELL_OK)
                                 refused = status;
+                        if (c->dead)
+                                break;
                 }
         }
         return refused;

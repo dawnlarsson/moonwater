@@ -144139,6 +144139,60 @@ static void wire_role_checks(void)
         WIRE_CHECK(wayland_client_disconnect(client) == 0);
 }
 
+/*
+        Back-pressure. A client that does not read its events while the output
+        fills cannot be answered. The request that finds no room is refused and
+        consumed, and that client is dead: every later call is refused (EINVAL)
+        until it disconnects, so no answer is lost without the bridge knowing.
+        A client that reads in time is not affected.
+*/
+static void wire_backpressure_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        unsigned long objects[1024], ops[1024];
+        long sent = 0;
+        int status = 0;
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 1024);
+        for (sent = 0; sent < 400; sent++)
+        {
+                wb_begin(&m, WAYLAND_DISPLAY, 0);
+                wb_u(&m, 3);
+                status = wire_feed_build(client, &m);
+                if (status < 0)
+                        break;
+        }
+        WIRE_CHECK(status == SHELL_ENOSPC);
+        WIRE_CHECK(sent > 0 && sent < 400);
+        WIRE_CHECK(wire_take(client, objects, ops, 1024) == 2 * sent);
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_u(&m, 3);
+        WIRE_CHECK(wire_feed_build(client, &m) == SHELL_EINVAL);
+        WIRE_CHECK(wire_take(client, objects, ops, 1024) == 0);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
+        /* a client that reads between its requests is never refused for room. */
+        client = wayland_client_connect();
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        for (sent = 0; sent < 400; sent++)
+        {
+                wb_begin(&m, WAYLAND_DISPLAY, 0);
+                wb_u(&m, 3);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wire_take(client, objects, ops, 1024);
+        }
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -144152,6 +144206,7 @@ int main(void)
         wire_descriptor_checks();
         wire_frame_checks();
         wire_role_checks();
+        wire_backpressure_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;
