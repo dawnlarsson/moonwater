@@ -863,6 +863,7 @@ static int ui_px(const struct ui address_to ui, int logical)
         How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
 */
 #define UI_TARGET 44 // a finger's least target in logical pixels: about 9 mm at the 96 to 120 dpi of most screens
+#define UI_FIELD_H UI_TARGET // every text field's height: a field is a touch target, the same in every window
 #define UI_SLOP 8    // how far a press moves before it is a drag, as the compositor's finger (COMPOSITOR_TOUCH_SLOP)
 
 struct ui_press
@@ -898,6 +899,71 @@ static int ui_press_end(struct ui_press address_to press, b32 cancelled)
 static b32 ui_pressed(const struct ui_press address_to press, int target)
 {
         return press->down && !press->dragged && target >= 0 && press->target == target;
+}
+
+/*
+        A click's count, the kit's one rule for every text and the terminal: a press within UI_CLICK_NS (450 ms) of the last
+        one, and within UI_CLICK_PX (4 logical px) of where it was, is the next click of its run (a double click, then a
+        triple, then the first again); any other press is the first of a run.
+*/
+#define UI_CLICK_NS 450000000ull
+#define UI_CLICK_PX 4
+
+struct ui_click
+{
+        b64 at;
+        int x, y, count;
+};
+
+static int ui_click_count(const struct ui address_to ui, struct ui_click address_to k, b64 now, int x, int y)
+{
+        long dx = (long)x - k->x, dy = (long)y - k->y, reach = UI_CLICK_PX * (long)ui->scale;
+        b32 again = k->count && now - k->at < UI_CLICK_NS && dx * dx + dy * dy <= reach * reach;
+
+        k->count = again ? k->count % 3 + 1 : 1;
+        k->at = now, k->x = x, k->y = y;
+        return k->count;
+}
+
+/*
+        A press again to confirm, the kit's one default for an action that is not undone (a forget, a command that asks, a
+        close with changes in it). The first press arms it, and the line that says so is ui_confirm_line's, the same in every
+        app; the next press with nothing between, of the same thing with the same text, fires it. A press or a key that is
+        not that one drops it, and Escape is a key, so it does too. What is armed is an app's number (what) and its text.
+*/
+#define UI_CONFIRM_TEXT 96
+
+struct ui_confirm
+{
+        int what;
+        b32 armed;
+        char text[UI_CONFIRM_TEXT];
+};
+
+// Answers true when this press fires the confirm; any other press arms it for this thing and says nothing.
+static b32 ui_confirm_ask(struct ui_confirm address_to c, int what, const char address_to text)
+{
+        if (c->armed && c->what == what && string_equals((string_address)c->text, (string_address)text))
+        {
+                c->armed = 0;
+                return true;
+        }
+        c->armed = 1, c->what = what;
+        string_copy_bounded((string_address)c->text, (string_address)text, sizeof(c->text));
+        return false;
+}
+
+// A press or a key that is not the confirm's own: the confirm is no longer armed.
+static void ui_confirm_drop(struct ui_confirm address_to c)
+{
+        c->armed = 0;
+}
+
+// The line an armed confirm shows: the hint, then what the next press does.
+static void ui_confirm_line(char address_to into, positive room, const char address_to what)
+{
+        string_copy_bounded((string_address)into, (string_address) "press again to confirm: ", room);
+        string_append_bounded((string_address)into, (string_address)what, room);
 }
 
 static b32 ui_kit_touch; // the event is a finger's (WINDOW_KEY_TOUCH): what it can press is at least UI_TARGET each way
@@ -4036,7 +4102,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
         int state = c->focused ? UI_FIELD_FOCUS : c->hover ? UI_FIELD_HOVER : UI_FIELD_REST;
         b64 want[15], now[15], p;
         b32 bare = c->variant == UI_FIELD_BARE;
-        int above = bare ? 0 : 24 + 6, tall = bare && c->h ? c->h : 48;
+        int above = bare ? 0 : 24 + 6, tall = bare && c->h ? c->h : UI_FIELD_H;
         b32 fy = ui_dev(ui, c->y) + ui_dev(ui, above);
         struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y + above), ui_q(c->w), ui_q(tall), ui_q(6));
         unsigned int fill;
@@ -4585,9 +4651,9 @@ static int ui_control_hit(struct ui address_to ui, const struct ui_control addre
                 return -1;
         }
         if (c->kind == UI_INPUT && c->variant == UI_FIELD_BARE)
-                return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y), ui_dev(ui, c->w), ui_dev(ui, c->h ? c->h : 48)) ? 0 : -1;
+                return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y), ui_dev(ui, c->w), ui_dev(ui, c->h ? c->h : UI_FIELD_H)) ? 0 : -1;
         if (c->kind == UI_INPUT)
-                return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + 30), ui_dev(ui, c->w), ui_dev(ui, 48)) ? 0 : -1;
+                return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + 30), ui_dev(ui, c->w), ui_dev(ui, UI_FIELD_H)) ? 0 : -1;
         if (c->kind == UI_SWATCHES)
                 return ui_swatch_at(ui, c, x, y);
         (void)lx, (void)ly;
@@ -6205,7 +6271,6 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_PAGE_FOOT 40      // its status line's band
 #define UI_PAGE_INSET 6      // the title and the status line in from the margin
 #define UI_SEARCH_W 190      // a page's search field, at the title's right
-#define UI_SEARCH_H 28
 #define UI_SEARCH_Y 24
 #define UI_COLUMN_SHARE 30   // a page's column: this share of the window,
 #define UI_COLUMN_LEAST 88   // no narrower than this, no wider than the most, and never more than half of the window
@@ -6857,6 +6922,23 @@ static fn ui_list_let_go(const struct ui address_to ui, struct ui_list address_t
         l->down = -1;
 }
 
+/*
+        A mouse's press held on a list's row shows the row pressed while the pointer is on the row the press went down on, and
+        not once it slides off; row is the row under the pointer (-1 for none). True when what shows pressed changed.
+*/
+static b32 ui_list_press_slide(const struct ui address_to ui, struct ui_list address_to l, const struct ui_press address_to press, int row)
+{
+        int on = row >= 0 && row == press->target ? row : -1;
+
+        (void)ui;
+        if (!press->down || on == l->down)
+                return false;
+        ui_list_let_go(ui, l);
+        if (on >= 0)
+                l->down = on;
+        return true;
+}
+
 static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l, int type, int x, int y, b32 down)
 {
         int id = ui_list_hit(ui, l, x, y);
@@ -7184,7 +7266,7 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
                         c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
                         ui_control_start(c);
                 }
-                c->w = UI_SEARCH_W, c->h = UI_SEARCH_H;
+                c->w = UI_SEARCH_W, c->h = UI_FIELD_H;
                 c->x = (p->width - pad) / ui->scale - c->w, c->y = UI_SEARCH_Y;
                 c->focused = keys;
                 ui_control_draw(ui, c);
@@ -7609,7 +7691,6 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_CODE 2
 #define UI_TEXT_CLUSTERS 2048 // the clusters of a line laid out at most: past them a line is drawn to there
 #define UI_TEXT_BLINK_NS 530000000ull
-#define UI_TEXT_CLICKS_NS 450000000ull
 #define UI_TEXT_ROWS 512
 
 // What the widget asks of the app after an event: ui_text_event answers these bits.
@@ -7622,6 +7703,7 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_PASTE 64u     // a paste was asked of the compositor
 #define UI_TEXT_REFUSED 128u  // a field refused what was typed or pasted: refused says why, in the field's own words
 #define UI_TEXT_BLINK_FOR_NS 10000000000ull // the caret blinks this long after the last key or move, then stays
+#define UI_TEXT_COMMIT 256u   // a press outside a field that has the keys: the field's plain value is kept (the app commits it)
 
 struct ui_text
 {
@@ -7638,8 +7720,8 @@ struct ui_text
         p64 top_line;
         int top_row;
         b64 scroll_x;
-        int clicks, click_x, click_y;
-        positive click_at;
+        int clicks;
+        struct ui_click click;                  // the kit's click count (ui_click_count): a double click and a triple
         b32 dragging, drag_box, touch;
         b32 holding;                            // a finger's long press holds the selection (ui_text_hold) until its lift
         struct ui_press tap;                    // a finger's press on the selection: its lift with no drag asks for the menu
@@ -7671,6 +7753,7 @@ struct ui_text
         const char address_to (*accept)(p32 code);
         const char address_to refused;
         b32 masked;
+        b32 command;                            // a command or a passphrase: a press outside cancels it (a masked field always does); a plain value commits
         b32 keeps_vertical;                     // the app takes Up and Down (a list's, rows', a scroll): else they go to the ends, as Home and End
         b32 pasting;                            // it asked the clipboard, and the answer is its
         int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
@@ -8615,12 +8698,10 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         return UI_TEXT_MOVED;
                 }
                 {
-                        b32 again = now - t->click_at < UI_TEXT_CLICKS_NS && (t->click_x - x) * (t->click_x - x) + (t->click_y - y) * (t->click_y - y) <= 16 * ui->scale * ui->scale;
                         p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
 
                         t->handles = false;
-                        t->clicks = again ? t->clicks % 3 + 1 : 1;
-                        t->click_at = now, t->click_x = x, t->click_y = y;
+                        t->clicks = ui_click_count(ui, &t->click, now, x, y);
                         t->drag_box = false;
                         // A masked field has no words: a double click takes it all, as a triple does.
                         if (t->clicks == 2 && t->masked)
@@ -8863,7 +8944,8 @@ static b32 ui_text_inside(const struct ui_text address_to t, int x, int y)
         A field's events, the one call an app makes for one: the keys while it has them, the pointer on its well (a
         press of any button there, and the motion and the release of a drag it began), the clipboard's answer to a
         paste it asked for, and the context menu it asks for, opened at once in menu (the app's popup; none: no
-        menu). The wheel is never a field's. Answers what changed (UI_TEXT_*); 0 when the event is not the field's,
+        menu). The wheel is never a field's. A press outside a field with the keys answers UI_TEXT_COMMIT, or UI_TEXT_CANCEL for
+        a command or a secret, and is the app's still. Answers what changed (UI_TEXT_*); 0 when the event is not the field's,
         which the app then does as its own: Enter is SUBMIT and Escape CANCEL for it to act on, and a key a field does
         not take (Up, Down, Tab, a page, a chord) comes back 0.
 */
@@ -8877,7 +8959,12 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
                 return 0;
         if (event->type == WINDOW_EVENT_BUTTON)
         {
-                if ((event->flags & WINDOW_KEY_DOWN) ? !ui_text_inside(t, x, y) : !t->dragging)
+                // A press outside a field that has the keys ends the typing, by the one rule for every field: a plain value is
+                // kept (UI_TEXT_COMMIT), and a command or a secret is cancelled (UI_TEXT_CANCEL). The press is not the field's:
+                // the app goes on with it, to the row or the button it is on.
+                if ((event->flags & WINDOW_KEY_DOWN) && !ui_text_inside(t, x, y))
+                        return t->focused ? (t->masked || t->command ? UI_TEXT_CANCEL : UI_TEXT_COMMIT) : 0;
+                if (!(event->flags & WINDOW_KEY_DOWN) && !t->dragging)
                         return 0;
                 ending = !(event->flags & WINDOW_KEY_DOWN);
         }
