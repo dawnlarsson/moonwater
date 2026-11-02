@@ -36798,28 +36798,51 @@ ASM_FUNC(positive_to_string)
     ".quad 0x6b6e616c62, 0x746e697270, 0x6870617267\n   .quad 0x6c72746e63, 0x74636e7570, 0x746967696478\n"
     ".popsection\n"
     ASM_END(byte_class_index)
+    // Whether one byte belongs to one of those classes, from the same table
+    // the other machines read: a halfword load, a shift by the class and a
+    // mask. Counted under qemu-user, guest instructions per byte for every
+    // class: the branching body 21 to 27, this one 17 for each class. Cycles
+    // are unmeasured on this machine; the branches it removes are the ones
+    // that mispredicted on the other two. test/checks.c's byte_class_table
+    // covers every class and byte.
     ASM_FUNC(byte_class_holds)
-    "andi a1, a1, 255\n   li t0, 11\n   bltu t0, a0, .Lbyte_holds_false\n   li t0, 5\n   bltu t0, a0, .Lbyte_holds_high\n   li t0, 2\n   bltu t0, a0, .Lbyte_holds_mid\n   li t0, 1\n"
-    "bltu t0, a0, .Lbyte_holds_alnum\n   beq a0, t0, .Lbyte_holds_digit\n"
-    ".Lbyte_holds_alpha:\n   addi t0, a1, -65\n   li t1, 25\n   bgeu t1, t0, .Lbyte_holds_true\n   addi t0, a1, -97\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_digit:\n   addi t0, a1, -48\n   li t1, 9\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_alnum:\n   addi t0, a1, -48\n   li t1, 9\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_alpha\n"
-    ".Lbyte_holds_mid:\n   li t0, 4\n   bltu t0, a0, .Lbyte_holds_space\n   beq a0, t0, .Lbyte_holds_lower\n"
-    ".Lbyte_holds_upper:\n   addi t0, a1, -65\n   li t1, 25\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_lower:\n   addi t0, a1, -97\n   li t1, 25\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_space:\n   li t0, 32\n   beq a1, t0, .Lbyte_holds_true\n   addi t0, a1, -9\n   li t1, 4\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_high:\n   li t0, 8\n   bltu t0, a0, .Lbyte_holds_last\n   li t0, 7\n   bltu t0, a0, .Lbyte_holds_graph\n   beq a0, t0, .Lbyte_holds_print\n"
-    ".Lbyte_holds_blank:\n   li t0, 32\n   beq a1, t0, .Lbyte_holds_true\n   li t0, 9\n   beq a1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_print:\n   addi t0, a1, -32\n   li t1, 94\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_graph:\n   addi t0, a1, -33\n   li t1, 93\n   bgeu t1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_last:\n   li t0, 10\n   bltu t0, a0, .Lbyte_holds_xdigit\n   beq a0, t0, .Lbyte_holds_punct\n"
-    ".Lbyte_holds_cntrl:\n   li t0, 31\n   bgeu t0, a1, .Lbyte_holds_true\n   li t0, 127\n   beq a1, t0, .Lbyte_holds_true\n   j .Lbyte_holds_false\n"
-    ".Lbyte_holds_punct:\n   addi t0, a1, -33\n   li t1, 93\n   bltu t1, t0, .Lbyte_holds_false\n   addi t0, a1, -48\n   li t1, 9\n   bgeu t1, t0, .Lbyte_holds_false\n   addi t0, a1, -65\n"
-    "li t1, 25\n   bgeu t1, t0, .Lbyte_holds_false\n   addi t0, a1, -97\n   bgeu t1, t0, .Lbyte_holds_false\n   j .Lbyte_holds_true\n"
-    ".Lbyte_holds_xdigit:\n   addi t0, a1, -48\n   li t1, 9\n   bgeu t1, t0, .Lbyte_holds_true\n   ori t0, a1, 32\n   addi t0, t0, -97\n   li t1, 5\n   bgeu t1, t0, .Lbyte_holds_true\n"
-    ".Lbyte_holds_false:\n   li a0, 0\n   j .Lbyte_holds_return\n"
-    ".Lbyte_holds_true:\n   li a0, 1\n"
-    ".Lbyte_holds_return:\n" ASM_RET
+    "andi a1, a1, 255\n   li t0, 11\n   bltu t0, a0, 1f\n   lla t1, .Lbyte_class_masks\n"
+    "   slli t2, a1, 1\n   add t1, t1, t2\n   lhu t1, 0(t1)\n   srl t1, t1, a0\n   andi a0, t1, 1\n" ASM_RET
+    "1:  li a0, 0\n" ASM_RET
+    ".pushsection .rodata\n   .balign 2\n.Lbyte_class_masks:\n"
+    ".short 0x200, 0x200, 0x200, 0x200, 0x200, 0x200, 0x200, 0x200\n"
+    ".short 0x200, 0x260, 0x220, 0x220, 0x220, 0x220, 0x200, 0x200\n"
+    ".short 0x200, 0x200, 0x200, 0x200, 0x200, 0x200, 0x200, 0x200\n"
+    ".short 0x200, 0x200, 0x200, 0x200, 0x200, 0x200, 0x200, 0x200\n"
+    ".short 0x0e0, 0x580, 0x580, 0x580, 0x580, 0x580, 0x580, 0x580\n"
+    ".short 0x580, 0x580, 0x580, 0x580, 0x580, 0x580, 0x580, 0x580\n"
+    ".short 0x986, 0x986, 0x986, 0x986, 0x986, 0x986, 0x986, 0x986\n"
+    ".short 0x986, 0x986, 0x580, 0x580, 0x580, 0x580, 0x580, 0x580\n"
+    ".short 0x580, 0x98d, 0x98d, 0x98d, 0x98d, 0x98d, 0x98d, 0x18d\n"
+    ".short 0x18d, 0x18d, 0x18d, 0x18d, 0x18d, 0x18d, 0x18d, 0x18d\n"
+    ".short 0x18d, 0x18d, 0x18d, 0x18d, 0x18d, 0x18d, 0x18d, 0x18d\n"
+    ".short 0x18d, 0x18d, 0x18d, 0x580, 0x580, 0x580, 0x580, 0x580\n"
+    ".short 0x580, 0x995, 0x995, 0x995, 0x995, 0x995, 0x995, 0x195\n"
+    ".short 0x195, 0x195, 0x195, 0x195, 0x195, 0x195, 0x195, 0x195\n"
+    ".short 0x195, 0x195, 0x195, 0x195, 0x195, 0x195, 0x195, 0x195\n"
+    ".short 0x195, 0x195, 0x195, 0x580, 0x580, 0x580, 0x580, 0x200\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".short 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000\n"
+    ".popsection\n"
     ASM_END(byte_class_holds)
     // A run of bytes that are all in a set. The table is a byte per member as
     // it is on arm64; the loop around it is not, and this is why.
