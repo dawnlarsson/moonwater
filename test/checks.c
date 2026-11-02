@@ -142890,6 +142890,9 @@ int main(void)
         only the wl_display.error the refusal names. A good message must do
         what the protocol says: the globals on get_registry, the callback on
         sync, the object a bind makes, the split and the batched messages.
+        The fuzz at the end feeds a fixed-seed stream of messages and checks
+        every refusal and every table after each one; WIRE_FUZZ_SEED and
+        WIRE_FUZZ_ROUNDS replay another stream (the printed line names both).
 
             gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_wayland_wire -DCONFIG_MOONWATER_WAYLAND test/checks.c
 */
@@ -144322,6 +144325,299 @@ static void wire_pool_checks(void)
         WIRE_CHECK(wayland_client_disconnect(client) == 0);
 }
 
+/*
+        The fuzz. A xorshift stream with a fixed seed makes FUZZ_ROUNDS messages:
+        an object drawn from a small range of ids (and sometimes any id), an
+        opcode from zero to fifteen, one to six arguments of small numbers, large
+        numbers, strings or nothing, now and then a descriptor (a duplicate of a
+        regular file, which the shim takes or closes), and now and then a header
+        whose size is malformed. Each goes to one client, which starts with the
+        display's registry and the globals bound, so the requests reach the
+        objects. Three things must hold for every round:
+
+        - a refused message changes nothing the shim keeps, the engine and the
+          object table alike, and queues no descriptor it did not take; a
+          framing error or a full output queue kills the client, which is then
+          replaced, and every later call on it is refused;
+        - the tables agree with themselves: ids unique, pool references equal
+          the buffers that use them, an attachment names a buffer, a toplevel
+          names a surface, and no count is past its cap;
+        - at the end every client is gone and every descriptor the test gave
+          out is closed, so nothing leaked.
+
+        The seed and the counts are printed, so a failure can be replayed.
+*/
+#define FUZZ_ROUNDS 4000
+#define FUZZ_SEED 0x9e3779b97f4a7c15UL
+
+static unsigned long fuzz_next(unsigned long *state)
+{
+        unsigned long x = *state;
+
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *state = x;
+        return x * 2685821657736338717UL;
+}
+
+static unsigned long fuzz_small(unsigned long *state, unsigned long most)
+{
+        return fuzz_next(state) % most;
+}
+
+static const char *fuzz_text[] = {"wl_compositor", "wl_shm", "wl_output", "wl_seat", "xdg_wm_base",
+                                  "bogus", "fuzz", "a\001b", "", "org.moonwater.fuzz"};
+
+static unsigned long fuzz_known(unsigned long *state, const struct wayland_client *c)
+{
+        long index = (long)fuzz_small(state, WAYLAND_OBJECTS);
+
+        if (c->objects[index].type != W_NONE && fuzz_small(state, 6) != 0)
+                return c->objects[index].id;
+        return fuzz_small(state, 2) ? 0 : 1 + fuzz_small(state, 80);
+}
+
+static unsigned long fuzz_number(unsigned long *state)
+{
+        return fuzz_small(state, 3) == 0 ? (fuzz_next(state) & 0xffffffffUL) : fuzz_small(state, 3000);
+}
+
+/*
+        A message the way a client would send it: an object the client holds
+        (or nearly), an opcode, and each argument by its signature. Most of
+        them are accepted; the rest are refused at the arguments or the object.
+*/
+static void fuzz_structured(unsigned long *state, const struct wayland_client *c, struct wire_build *m, long *want_fd)
+{
+        long live = 0, pick, index = 0;
+        unsigned long object;
+        long type;
+        long op;
+        const char *signature;
+
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                live += c->objects[i].type != W_NONE;
+        pick = (long)fuzz_small(state, (unsigned long)live);
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type != W_NONE && pick-- == 0)
+                {
+                        index = i;
+                        break;
+                }
+        object = c->objects[index].id;
+        type = c->objects[index].type;
+        op = (long)fuzz_small(state, 16);
+        if (fuzz_small(state, 10) != 0)
+                for (long tries = 0; tries < 16 && !wire_signature(type, op); tries++)
+                        op = (op + 1) % 16;
+        signature = wire_signature(type, op);
+
+        wb_begin(m, object, (unsigned long)op);
+        for (const char *s = signature ? signature : ""; *s; s++)
+        {
+                if (*s == 'u' || *s == 'i' || *s == 'f')
+                        wb_u(m, fuzz_number(state));
+                else if (*s == 'o')
+                        wb_u(m, fuzz_known(state, c));
+                else if (*s == 'n')
+                        wb_u(m, fuzz_small(state, 8) ? 2 + fuzz_small(state, 70) : fuzz_known(state, c));
+                else if (*s == 's')
+                        wb_s(m, fuzz_text[fuzz_small(state, sizeof fuzz_text / sizeof fuzz_text[0])]);
+                else if (*s == 'a')
+                {
+                        unsigned long length = fuzz_small(state, 17);
+
+                        wb_u(m, length);
+                        for (unsigned long i = 0; i < length; i += 4)
+                                wb_u(m, fuzz_next(state) & 0xffffffffUL);
+                }
+                else if (*s == 'h')
+                        *want_fd = 1;
+        }
+        if (!signature)
+                wb_u(m, fuzz_number(state));
+        wb_end(m);
+}
+
+static void fuzz_random(unsigned long *state, struct wire_build *m)
+{
+        unsigned long object = fuzz_small(state, 8) == 0 ? fuzz_next(state) & 0xffffffffUL : 1 + fuzz_small(state, 40);
+        unsigned long op = fuzz_small(state, 16);
+        long arguments = (long)fuzz_small(state, 7);
+
+        wb_begin(m, object, op);
+        for (long i = 0; i < arguments; i++)
+        {
+                unsigned long kind = fuzz_small(state, 4);
+
+                if (kind == 0)
+                        wb_s(m, fuzz_text[fuzz_small(state, sizeof fuzz_text / sizeof fuzz_text[0])]);
+                else
+                        wb_u(m, fuzz_number(state));
+        }
+        wb_end(m);
+}
+
+/*
+        One message: seven in ten structured, the rest random; one in forty
+        with a malformed size in its header (a framing error, which kills the
+        client); and a descriptor for the messages that take one.
+*/
+static void fuzz_message(unsigned long *state, const struct wayland_client *c, struct wire_build *m, long *want_fd, long *bad_size)
+{
+        *want_fd = 0;
+        if (fuzz_small(state, 10) < 7)
+                fuzz_structured(state, c, m, want_fd);
+        else
+                fuzz_random(state, m);
+        *bad_size = fuzz_small(state, 40) == 0;
+        if (*bad_size)
+        {
+                static const unsigned long sizes[] = {0, 4, 6, 10, 4100, 0xffff};
+
+                wire_put(m->b + 4, (sizes[fuzz_small(state, 6)] << 16) | (unsigned long)(wire_get(m->b + 4) & 0xffffUL));
+        }
+}
+
+static int fuzz_invariants(long client)
+{
+        const struct wayland_client *c = &wayland.clients[client];
+        int ok = 1;
+
+        if (c->fd_count < 0 || c->fd_count > WAYLAND_FDS || c->in_length < 0 || c->in_length >= WAYLAND_MSG_MAX)
+                ok = 0;
+        if (c->out_length < 0 || c->out_length > WAYLAND_OUT_MAX)
+                ok = 0;
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+        {
+                const struct wayland_object *o = &c->objects[i];
+
+                if (o->type == W_NONE)
+                        continue;
+                if (o->id < 1 || o->id > WAYLAND_ID_MAX || wire_object_index(c, o->id) != i)
+                        ok = 0;
+                if (o->type == W_BUFFER && (o->pool < 0 || o->pool >= WAYLAND_POOLS || !c->pools[o->pool].live))
+                        ok = 0;
+                if (o->type == W_SURFACE && o->attached && wire_of_type(c, o->attached, W_BUFFER) < 0)
+                        ok = 0;
+                if (o->type == W_XDG_TOPLEVEL && wire_of_type(c, o->surface, W_SURFACE) < 0)
+                        ok = 0;
+        }
+        for (long p = 0; p < WAYLAND_POOLS; p++)
+        {
+                long uses = 0;
+
+                if (!c->pools[p].live)
+                        continue;
+                for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                        if (c->objects[i].type == W_BUFFER && c->objects[i].pool == p)
+                                uses++;
+                if (uses != c->pools[p].refs || c->pools[p].fd < 0)
+                        ok = 0;
+        }
+        return ok;
+}
+
+static void wire_fuzz_checks(void)
+{
+        unsigned long seed = FUZZ_SEED;
+        unsigned long rounds = FUZZ_ROUNDS;
+        unsigned long state;
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+        long client = -1;
+        long base_fd[4];
+        long before_open = 0, after_open = 0;
+        unsigned int accepted = 0, refused = 0, framing = 0, reconnects = 0, invariant_failures = 0;
+        unsigned int unchanged_failures = 0;
+
+        if (getenv("WIRE_FUZZ_SEED"))
+                seed = strtoul(getenv("WIRE_FUZZ_SEED"), 0, 0);
+        if (getenv("WIRE_FUZZ_ROUNDS"))
+                rounds = strtoul(getenv("WIRE_FUZZ_ROUNDS"), 0, 0);
+        state = seed;
+        for (long fd = 0; fd < 1024; fd++)
+                before_open += fcntl((int)fd, F_GETFD) != -1;
+        for (long i = 0; i < 4; i++)
+                base_fd[i] = wire_file(4096);
+
+        for (unsigned long round = 0; round < rounds; round++)
+        {
+                long bad_size = 0, want_fd = 0, fds[2], count = 0, before, after, status;
+                struct wayland_client *c;
+
+                if (client < 0 || wayland.clients[client].dead)
+                {
+                        if (client >= 0)
+                        {
+                                WIRE_CHECK(wayland_client_disconnect(client) == 0);
+                                reconnects++;
+                        }
+                        client = wayland_client_connect();
+                        WIRE_CHECK(client >= 0);
+                        if (client < 0)
+                                break;
+                        wb_begin(&m, WAYLAND_DISPLAY, 1);
+                        wb_u(&m, 2);
+                        wire_feed_build(client, &m);
+                        wire_bind(client, 1, "wl_compositor", 4, 3);
+                        wire_bind(client, 2, "wl_shm", 1, 4);
+                        wire_bind(client, 5, "xdg_wm_base", 1, 5);
+                        wire_bind(client, 4, "wl_seat", 5, 6);
+                        wire_bind(client, 3, "wl_output", 3, 7);
+                        wire_take(client, objects, ops, 80);
+                }
+                c = &wayland.clients[client];
+                fuzz_message(&state, c, &m, &want_fd, &bad_size);
+                if (want_fd || fuzz_small(&state, 8) == 0)
+                {
+                        count = 1;
+                        fds[0] = dup((int)base_fd[fuzz_small(&state, 4)]);
+                }
+                before = c->fd_count;
+                wire_snap(client);
+                status = wayland_feed(client, m.b, m.n, fds, count);
+                after = c->fd_count;
+                if (status >= 0)
+                        accepted++;
+                else
+                {
+                        int queued = after == before + count;
+
+                        refused++;
+                        if (bad_size)
+                                framing++;
+                        if (!queued && count)
+                                close((int)fds[0]);
+                        if (!c->dead && !bad_size && !(status == SHELL_ENOSPC && c->dead))
+                        {
+                                if (!(memcmp(&wire_before.side, &wayland.side, sizeof wayland.side) == 0 &&
+                                      memcmp(wire_before.objects, c->objects, sizeof wire_before.objects) == 0 &&
+                                      wire_before.serial == c->serial && after == before + (queued ? count : 0)))
+                                        unchanged_failures++;
+                        }
+                }
+                if (!fuzz_invariants(client))
+                        invariant_failures++;
+                if (fuzz_small(&state, 4) == 0)
+                        wire_take(client, objects, ops, 80);
+        }
+        if (client >= 0)
+                WIRE_CHECK(wayland_client_disconnect(client) == 0);
+        for (long i = 0; i < 4; i++)
+                close((int)base_fd[i]);
+        for (long fd = 0; fd < 1024; fd++)
+                after_open += fcntl((int)fd, F_GETFD) != -1;
+        WIRE_CHECK(unchanged_failures == 0);
+        WIRE_CHECK(invariant_failures == 0);
+        WIRE_CHECK(after_open == before_open);
+        printf("CHECK_wayland_wire fuzz: seed 0x%lx, %lu rounds, %u accepted, %u refused (%u framing), %u clients replaced, "
+               "%u refusals that changed state, %u broken invariants, %ld descriptors open after\n",
+               seed, rounds, accepted, refused, framing, reconnects, unchanged_failures,
+               invariant_failures, after_open - before_open);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -144337,6 +144633,7 @@ int main(void)
         wire_role_checks();
         wire_backpressure_checks();
         wire_pool_checks();
+        wire_fuzz_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;
