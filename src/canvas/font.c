@@ -282,6 +282,9 @@
 #define FONT_PAIRS 64
 #define FONT_WAYS 4
 #define FONT_MEMO 512
+//      The kerning memo's sets of FONT_WAYS: a frame's pairs are a few hundred,
+//      and a direct-mapped table lost some of them to collisions every frame.
+#define FONT_KERN_SETS 512
 #define FONT_RECENT 256
 #define FONT_STRIP (1 << 17)
 #define FONT_RUN 1024
@@ -379,6 +382,14 @@ typedef struct
         b32 value;
 } font_memo;
 
+//      A kerning pair's units in a face, memo'd in a set of FONT_WAYS ways:
+//      the face's id (never 0, at most 0xffff), the two glyphs and the value.
+typedef struct
+{
+        p16 face, left, right;
+        b32 value;
+} font_kern_way;
+
 //      What a face measures, once a face: its standard stem and its zones
 //      (see font_face_measure), kept per face id in the engine's own table
 //      of FONT_MEASURES, so the glyph memo's churn cannot evict them.
@@ -469,7 +480,8 @@ typedef struct
         font_slot slots[FONT_SLOTS * 3 / 4];
         p16 index[FONT_SLOTS];
         font_pairing pairs[FONT_PAIRS];
-        font_memo glyph_memo[FONT_MEMO], kern_memo[FONT_MEMO];
+        font_memo glyph_memo[FONT_MEMO];
+        font_kern_way kern_memo[FONT_KERN_SETS][FONT_WAYS];
         font_measure measures[FONT_MEASURES];
         font_recent recent[FONT_RECENT];
         font_ident idents[FONT_IDENTS];
@@ -5044,12 +5056,31 @@ static fn font_find(font_engine address_to e, const font_face address_to const a
 
 static b32 font_kern(font_engine address_to e, const font_face address_to face, p32 left, p32 right, p32 size)
 {
-        p64 key = (p64)1 << 63 | (p64)face->id << 32 | left << 16 | right;
-        font_memo address_to memo = font_recall(e->kern_memo, key);
+        //      The way holds 16 bits of each glyph: a pair past that is looked up, not memo'd.
+        if (left > 0xffff || right > 0xffff)
+                return font_kerning(face, left, right, size);
 
-        if (memo->key != key)
-                *memo = (font_memo){key, font_kerning_units(face, left, right)};
-        return memo->value ? font_fixed(face, memo->value, size) : 0;
+        p64 hash = ((p64)face->id << 32 | left << 16 | right) * 0x9e3779b97f4a7c15ull;
+        font_kern_way address_to ways = e->kern_memo[(hash >> 55) & (FONT_KERN_SETS - 1)];
+        font_kern_way address_to way = null, address_to empty = null;
+
+        for (p32 w = 0; w < FONT_WAYS; w++)
+        {
+                if (ways[w].face == face->id && ways[w].left == left && ways[w].right == right)
+                {
+                        way = &ways[w];
+                        break;
+                }
+                if (!ways[w].face && !empty)
+                        empty = &ways[w];
+        }
+        if (!way)
+        {
+                //      A new pair takes an empty way; a full set gives up the way the hash names.
+                way = empty ? empty : &ways[(hash >> 53) & (FONT_WAYS - 1)];
+                *way = (font_kern_way){(p16)face->id, (p16)left, (p16)right, font_kerning_units(face, left, right)};
+        }
+        return way->value ? font_fixed(face, way->value, size) : 0;
 }
 
 //      The pen in eighths of a pixel, to the nearest, halves right.
