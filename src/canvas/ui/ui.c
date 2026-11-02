@@ -435,6 +435,146 @@ static int ui_run(struct ui address_to ui, int x, int baseline, string_address t
         return ui_run_in(ui, faces, x, baseline, text, size, colour, alpha, low, high, 0);
 }
 
+/*
+        The walk of a run's rows and columns (ui_run_in's, after its scratch is drawn): each row in the band, each column from
+        first to last, the coverage of the column as the cover of its pixel (the ink's cover, with the stroke's share of a
+        neighbour), laid over the picture by the ramp -- the over of the cover on the ground, made the first time the walk
+        meets it (ui_run_make_over), else the tone of the cover (ui_run_make_tone) laid over what is there by ui_run_blend.
+        A paper run is skipped a vector at a time. On x86-64 the walk is ui_run_walk's body, which reads this struct at the
+        offsets the asserts below pin; elsewhere ui_run_in's own loop does it, and checks.c holds that loop as the reference.
+*/
+struct ui_walk
+{
+        unsigned int address_to scratch;   // the coverage, row 0: wide words a row
+        long wide, rows, top, first, last; // the coverage's width and rows, the y of row 0, the columns walked
+        unsigned int address_to pixels;    // the picture
+        long pitch, pen_x;                 // its pitch in words, and the pen's x in device pixels
+        long ui_top, ui_bottom, ui_height; // the rows the ui may draw
+        long band_top, band_bottom;        // a repaint's band (none when band_bottom <= band_top)
+        unsigned long paper, ground;       // the paper the coverage is clear to, and the ground the picture is cleared to
+        unsigned long flip;                // 255 for a dark ink (cover = 255 - value), 0 for a light one
+        unsigned long stroke;              // the stroke, 0 for none
+        struct ui_ramp address_to ramp;
+};
+_Static_assert(__builtin_offsetof(struct ui_walk, scratch) == 0 && __builtin_offsetof(struct ui_walk, wide) == 8 &&
+               __builtin_offsetof(struct ui_walk, rows) == 16 && __builtin_offsetof(struct ui_walk, top) == 24 &&
+               __builtin_offsetof(struct ui_walk, first) == 32 && __builtin_offsetof(struct ui_walk, last) == 40 &&
+               __builtin_offsetof(struct ui_walk, pixels) == 48 && __builtin_offsetof(struct ui_walk, pitch) == 56 &&
+               __builtin_offsetof(struct ui_walk, pen_x) == 64 && __builtin_offsetof(struct ui_walk, ui_top) == 72 &&
+               __builtin_offsetof(struct ui_walk, ui_bottom) == 80 && __builtin_offsetof(struct ui_walk, ui_height) == 88 &&
+               __builtin_offsetof(struct ui_walk, band_top) == 96 && __builtin_offsetof(struct ui_walk, band_bottom) == 104 &&
+               __builtin_offsetof(struct ui_walk, paper) == 112 && __builtin_offsetof(struct ui_walk, ground) == 120 &&
+               __builtin_offsetof(struct ui_walk, flip) == 128 && __builtin_offsetof(struct ui_walk, stroke) == 136 &&
+               __builtin_offsetof(struct ui_walk, ramp) == 144,
+               "ui_run_walk reads struct ui_walk at fixed offsets");
+_Static_assert(__builtin_offsetof(struct ui_ramp, tone) == 16 && __builtin_offsetof(struct ui_ramp, over) == 1040 &&
+               __builtin_offsetof(struct ui_ramp, known) == 2064 && __builtin_offsetof(struct ui_ramp, made) == 2096,
+               "ui_run_walk reads struct ui_ramp at fixed offsets");
+
+// The walk's out-of-line parts: a cover's tone, and its over the ground, made the first time it is met, and the blend.
+__attribute__((used, externally_visible, noinline)) void ui_run_make_tone(struct ui_ramp address_to ramp, unsigned int cover)
+{
+        ramp->tone[cover] = ui_tone(ramp->colour, cover * ramp->alpha / 255);
+        ramp->known[cover >> 6] |= 1ull << (cover & 63);
+}
+
+__attribute__((used, externally_visible, noinline)) void ui_run_make_over(struct ui_ramp address_to ramp, unsigned int cover)
+{
+        ramp->over[cover] = ui_over(ui_tone(ramp->colour, cover * ramp->alpha / 255), ramp->ground);
+        ramp->made[cover >> 6] |= 1ull << (cover & 63);
+}
+
+__attribute__((used, externally_visible, noinline)) unsigned int ui_run_blend(unsigned int pixel, unsigned int under)
+{
+        return ui_over(pixel, under);
+}
+
+void ui_run_walk(struct ui_walk address_to walk);
+
+#if X64
+/*
+        ui_run_walk on x86-64, in the registers: rbx the walk, r12 the row, r13 the column, r14 the picture's pixel for column 0
+        of the row, r15 the coverage's, rbp the cover across the calls. The stack holds the alignment only.
+*/
+__asm__(
+    ASM_FUNC(ui_run_walk)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $8, %rsp\n"
+    "mov %rdi, %rbx\n"
+    "mov 32(%rbx), %r13\n   cmp 40(%rbx), %r13\n   jge .Lrw_done\n"
+    "xor %r12d, %r12d\n"
+    ".Lrw_row:\n"
+    "cmp 16(%rbx), %r12\n   jge .Lrw_done\n"
+    "mov 24(%rbx), %rax\n   add %r12, %rax\n"
+    "cmp 72(%rbx), %rax\n   jl .Lrw_next_row\n"
+    "cmp 80(%rbx), %rax\n   jge .Lrw_next_row\n"
+    "cmp 88(%rbx), %rax\n   jge .Lrw_next_row\n"
+    "mov 104(%rbx), %rcx\n   cmp 96(%rbx), %rcx\n   jle .Lrw_band\n"
+    "cmp 96(%rbx), %rax\n   jl .Lrw_next_row\n"
+    "cmp 104(%rbx), %rax\n   jge .Lrw_next_row\n"
+    ".Lrw_band:\n"
+    "mov 56(%rbx), %rcx\n   imul %rax, %rcx\n   add 64(%rbx), %rcx\n   mov 48(%rbx), %r14\n   lea (%r14,%rcx,4), %r14\n"
+    "mov 8(%rbx), %rcx\n   mov %r12, %rdx\n   imul %rcx, %rdx\n   mov (%rbx), %r15\n   lea (%r15,%rdx,4), %r15\n"
+    "mov 32(%rbx), %r13\n"
+    ".Lrw_col:\n"
+    "cmp 40(%rbx), %r13\n   jge .Lrw_next_row\n"
+    "cmpq $0, 136(%rbx)\n   jne .Lrw_value\n"
+    "mov (%r15,%r13,4), %eax\n   mov 112(%rbx), %rdx\n   cmp %edx, %eax\n   jne .Lrw_value\n"
+    "lea (%r15,%r13,4), %rdi\n   mov 40(%rbx), %rsi\n   sub %r13, %rsi\n"
+    "call memory_first_differs_u32\n"
+    "add %rax, %r13\n   cmp 40(%rbx), %r13\n   jge .Lrw_next_row\n"
+    ".Lrw_value:\n"
+    "mov (%r15,%r13,4), %eax\n   shr $8, %eax\n   and $255, %eax\n   xor 128(%rbx), %eax\n"
+    "cmpq $0, 136(%rbx)\n   je .Lrw_cover\n"
+    "cmp $255, %eax\n   jae .Lrw_cover\n"
+    "xor %r9d, %r9d\n"
+    "test %r13, %r13\n   jz .Lrw_s1\n   mov -4(%r15,%r13,4), %edx\n"
+    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
+    ".Lrw_s1:\n"
+    "lea 1(%r13), %rdx\n   cmp 8(%rbx), %rdx\n   jge .Lrw_s2\n   mov 4(%r15,%r13,4), %edx\n"
+    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
+    ".Lrw_s2:\n"
+    "test %r12, %r12\n   jz .Lrw_s3\n"
+    "mov 8(%rbx), %rdx\n   shl $2, %rdx\n   mov %r15, %rsi\n   sub %rdx, %rsi\n   mov (%rsi,%r13,4), %edx\n"
+    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
+    ".Lrw_s3:\n"
+    "lea 1(%r12), %rdx\n   cmp 16(%rbx), %rdx\n   jge .Lrw_s4\n"
+    "mov 8(%rbx), %rdx\n   shl $2, %rdx\n   mov %r15, %rsi\n   add %rdx, %rsi\n   mov (%rsi,%r13,4), %edx\n"
+    "shr $8, %edx\n   and $255, %edx\n   xor 128(%rbx), %edx\n   cmp %r9d, %edx\n   cmova %edx, %r9d\n"
+    ".Lrw_s4:\n"
+    "mov %r9d, %edx\n   imull 136(%rbx), %edx\n   shr $7, %edx\n   add %edx, %eax\n"
+    "cmp $255, %eax\n   jbe .Lrw_cover\n   mov $255, %eax\n"
+    ".Lrw_cover:\n"
+    "test %eax, %eax\n   jz .Lrw_next\n"
+    "mov %eax, %ebp\n"
+    "mov 144(%rbx), %rsi\n"
+    "mov %ebp, %ecx\n   and $63, %ecx\n"
+    "mov %ebp, %edx\n   shr $6, %edx\n"
+    "mov (%r14,%r13,4), %r8d\n"
+    "cmp 120(%rbx), %r8d\n   jne .Lrw_known\n"
+    "mov 2096(%rsi,%rdx,8), %rax\n   bt %rcx, %rax\n   jnc .Lrw_make_over\n"
+    ".Lrw_have_over:\n"
+    "mov 1040(%rsi,%rbp,4), %eax\n   mov %eax, (%r14,%r13,4)\n   jmp .Lrw_next\n"
+    ".Lrw_make_over:\n"
+    "mov %rsi, %rdi\n   mov %ebp, %esi\n   call ui_run_make_over\n"
+    "mov 144(%rbx), %rsi\n   jmp .Lrw_have_over\n"
+    ".Lrw_known:\n"
+    "mov 2064(%rsi,%rdx,8), %rax\n   bt %rcx, %rax\n   jc .Lrw_blend\n"
+    "mov %rsi, %rdi\n   mov %ebp, %esi\n   call ui_run_make_tone\n"
+    "mov 144(%rbx), %rsi\n"
+    ".Lrw_blend:\n"
+    "mov 16(%rsi,%rbp,4), %edi\n   mov (%r14,%r13,4), %esi\n   call ui_run_blend\n"
+    "mov %eax, (%r14,%r13,4)\n"
+    ".Lrw_next:\n"
+    "inc %r13\n   jmp .Lrw_col\n"
+    ".Lrw_next_row:\n"
+    "inc %r12\n   jmp .Lrw_row\n"
+    ".Lrw_done:\n"
+    "add $8, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    ASM_RET
+    ASM_END(ui_run_walk)
+);
+#endif
+
 static int ui_run_in(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
                      string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
                      unsigned int stroke)
@@ -482,6 +622,17 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                         first = -pen_x;
                 if (ui->width - pen_x < last)
                         last = ui->width - pen_x;
+#if X64
+                {
+                        struct ui_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
+                                               .last = last, .pixels = ui->pixels, .pitch = (long)ui->pitch, .pen_x = pen_x,
+                                               .ui_top = ui->top, .ui_bottom = ui->bottom, .ui_height = ui->height,
+                                               .band_top = ui->band_top, .band_bottom = ui->band_bottom, .paper = paper,
+                                               .ground = ground, .flip = light ? 0 : 255, .stroke = stroke, .ramp = ramp};
+
+                        ui_run_walk(&walk);
+                }
+#else
                 for (int row = 0; row < rows && first < last; row++)
                 {
                         int y = top + row;
@@ -554,6 +705,7 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                                 *picture = ui_over(ramp->tone[cover], *picture);
                         }
                 }
+#endif
         }
         return width;
 }

@@ -128193,6 +128193,164 @@ static fn check_kit_ramps(void)
         check("kit ramps: kept ramps draw the picture fresh ramps draw, and the runs drew", !different && painted > 1000);
 }
 
+#if X64
+/*
+        ui_run_walk (ui.c's run walk, the asm on x86-64) against the loop it replaces, ui_run_walk_reference: the same scratch,
+        picture, ramp and band, walked by each and compared pixel for pixel and ramp for ramp. The scratch is random coverage
+        with runs of paper (a word the paper's), a stroke or none, the ink dark or light, the ground the surface, none or
+        another; the band, the clip rows and the pitch are random too, since a run's rows are the ones the ui may draw.
+*/
+#define WALK_W 61
+#define WALK_ROWS 19
+#define WALK_PITCH 80
+static p64 walk_state = 0x2545f4914f6cdd1dull;
+static unsigned int walk_scratch[WALK_W * WALK_ROWS], walk_picture[WALK_PITCH * 40], walk_want[WALK_PITCH * 40], walk_before[WALK_PITCH * 40];
+static struct ui_ramp walk_ramp_a, walk_ramp_b;
+
+static p64 walk_next(void)
+{
+        XORSHIFT64(walk_state);
+        return walk_state;
+}
+
+// The loop ui_run_in had, over the walk's own inputs (the ramp and the picture the walk is given).
+static void ui_run_walk_reference(const struct ui_walk address_to w)
+{
+        for (long row = 0; row < w->rows && w->first < w->last; row++)
+        {
+                long y = w->top + row;
+                const unsigned int address_to coverage = w->scratch + (unsigned long)row * (unsigned long)w->wide;
+                unsigned int address_to picture;
+                struct ui_ramp address_to ramp = w->ramp;
+
+                if (y < w->ui_top || y >= w->ui_bottom || y >= w->ui_height ||
+                    !(w->band_bottom <= w->band_top || (y >= w->band_top && y < w->band_bottom)))
+                        continue;
+                picture = w->pixels + (unsigned long)y * (unsigned long)w->pitch + (unsigned long)(w->pen_x + w->first);
+                for (long column = w->first; column < w->last; column++, picture++)
+                {
+                        unsigned int value, cover, bit;
+
+                        if (!w->stroke && coverage[column] == (unsigned int)w->paper)
+                        {
+                                long from = column;
+
+                                column += (long)memory_first_differs_u32(coverage + column, (positive)(w->last - column), (unsigned int)w->paper);
+                                picture += column - from;
+                                if (column >= w->last)
+                                        break;
+                        }
+                        value = coverage[column] >> 8 & 255;
+                        cover = (unsigned int)w->flip ^ value;
+                        if (w->stroke && cover < 255)
+                        {
+                                const unsigned int address_to here = coverage + column;
+                                unsigned int most = 0, n[4], have = 0;
+
+                                if (column > 0)
+                                        n[have++] = here[-1];
+                                if (column + 1 < w->wide)
+                                        n[have++] = here[1];
+                                if (row > 0)
+                                        n[have++] = here[-w->wide];
+                                if (row + 1 < w->rows)
+                                        n[have++] = here[w->wide];
+                                for (unsigned int k = 0; k < have; k++)
+                                {
+                                        unsigned int v = n[k] >> 8 & 255, c = (unsigned int)w->flip ^ v;
+
+                                        most = c > most ? c : most;
+                                }
+                                cover += most * (unsigned int)w->stroke / 128;
+                                cover = cover > 255 ? 255 : cover;
+                        }
+                        bit = cover & 63;
+                        if (!cover)
+                                continue;
+                        if (*picture == (unsigned int)w->ground)
+                        {
+                                if (!(ramp->made[cover >> 6] >> bit & 1))
+                                {
+                                        ramp->over[cover] = ui_over(ui_tone(ramp->colour, cover * ramp->alpha / 255), ramp->ground);
+                                        ramp->made[cover >> 6] |= 1ull << bit;
+                                }
+                                *picture = ramp->over[cover];
+                                continue;
+                        }
+                        if (!(ramp->known[cover >> 6] >> bit & 1))
+                        {
+                                ramp->tone[cover] = ui_tone(ramp->colour, cover * ramp->alpha / 255);
+                                ramp->known[cover >> 6] |= 1ull << bit;
+                        }
+                        *picture = ui_over(ramp->tone[cover], *picture);
+                }
+        }
+}
+
+static fn check_kit_walk(void)
+{
+        positive wrong = 0, drawn = 0, trials = 0, stroked = 0, grounded = 0;
+
+        for (int trial = 0; trial < 4000; trial++)
+        {
+                struct ui_walk w;
+                unsigned int paper, ground;
+                int light = (int)(walk_next() % 2);
+                b32 pick_band = walk_next() % 3 == 0;
+                positive wide = 1 + (positive)(walk_next() % (WALK_W - 1)), rows = 1 + (positive)(walk_next() % (WALK_ROWS - 1));
+                unsigned int colour = (unsigned int)walk_next() & 0xffffffu, alpha = (unsigned int)(walk_next() % 256);
+                int top = (int)(walk_next() % 12) - 2;
+
+                paper = light ? 0 : 0xffffffu;
+                ground = walk_next() % 3 == 0 ? 0 : walk_next() % 2 ? ui_role_surface() : (unsigned int)walk_next();
+                for (positive at = 0; at < (positive)(wide * rows); at++)
+                {
+                        p64 r = walk_next();
+
+                        // Runs of paper, runs of ink, and the odd word that is neither.
+                        walk_scratch[at] = r % 5 == 0 ? (unsigned int)r : paper;
+                        if (r % 7 == 0 && at > 0)
+                                walk_scratch[at] = walk_scratch[at - 1];
+                }
+                for (positive at = 0; at < sizeof(walk_picture) / sizeof(walk_picture[0]); at++)
+                {
+                        p64 r = walk_next();
+
+                        walk_picture[at] = r % 3 == 0 ? ground : (unsigned int)(r >> 8) & 0xffffffu | (r % 4 ? 0xff000000u : 0);
+                }
+                memory_copy(walk_want, walk_picture, sizeof(walk_picture));
+                memory_copy(walk_before, walk_picture, sizeof(walk_picture));
+                memory_zero(&walk_ramp_a, sizeof(walk_ramp_a));
+                walk_ramp_a.colour = colour, walk_ramp_a.alpha = alpha, walk_ramp_a.ground = ground, walk_ramp_a.set = 1;
+                memory_copy(&walk_ramp_b, &walk_ramp_a, sizeof(walk_ramp_a));
+                memory_zero(&w, sizeof(w));
+                w.scratch = walk_scratch, w.wide = (long)wide, w.rows = (long)rows, w.top = top;
+                w.first = (long)(walk_next() % wide);
+                w.last = w.first + 1 + (long)(walk_next() % (wide - (positive)w.first));
+                w.pixels = walk_picture, w.pitch = WALK_PITCH, w.pen_x = (long)(walk_next() % 4);
+                w.ui_top = (long)(walk_next() % 3), w.ui_bottom = top + (long)rows - (long)(walk_next() % 3), w.ui_height = 24;
+                w.band_top = pick_band ? top + (long)(walk_next() % 6) : 0;
+                w.band_bottom = pick_band ? w.band_top + (long)(walk_next() % 9) - 2 : 0;
+                w.paper = paper, w.ground = ground, w.flip = light ? 0 : 255;
+                w.stroke = walk_next() % 3 == 0 ? 0 : 1 + (unsigned long)(walk_next() % 256);
+                stroked += w.stroke != 0;
+                grounded += ground != 0;
+                w.ramp = &walk_ramp_a;
+                ui_run_walk(&w);
+                w.pixels = walk_want, w.ramp = &walk_ramp_b;
+                ui_run_walk_reference(&w);
+                trials++;
+                for (positive at = 0; at < sizeof(walk_picture) / sizeof(walk_picture[0]); at++)
+                        wrong += walk_picture[at] != walk_want[at];
+                wrong += memory_compare(&walk_ramp_a, &walk_ramp_b, sizeof(walk_ramp_a)) != 0;
+                for (positive at = 0; at < sizeof(walk_picture) / sizeof(walk_picture[0]); at++)
+                        drawn += walk_want[at] != walk_before[at];
+        }
+        check("kit walk: the asm's run walk writes the picture and the ramps the loop it replaces does, for random runs, strokes, bands and grounds",
+              !wrong && trials == 4000 && stroked > 500 && grounded > 500 && drawn > 1000);
+}
+#endif
+
 /*
         The kit's fills and rings (ui.c's ui_kit_fill and ui_kit_ring, with their fast paths: a straight row's spans, a run
         laid as one, the glass over a run) against the cover each pixel has from its own lines. A line is the span
@@ -132346,6 +132504,9 @@ b32 main()
         check_kit_theme();
         check_kit_arc();
         check_kit_ramps();
+#if X64
+        check_kit_walk();
+#endif
         check_kit_fills();
         check_kit_corners();
         check_kit_slider_below();
