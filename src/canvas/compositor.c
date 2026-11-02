@@ -7687,10 +7687,23 @@ static void compositor_wheel_publish(unsigned int off)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
+// The caret's blink and width (ui.c's ui_caret_wave and ui_caret_thick), as the table keeps them, each one more than its place:
+// a change knocks every window, as a theme change does.
+static void compositor_caret_publish(unsigned int speed, unsigned int thick)
+{
+        struct windows *table = compositor.table;
+
+        if (!table || (table->caret_speed == speed && table->caret_thick == thick))
+                return;
+        table->caret_speed = speed;
+        table->caret_thick = thick;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+}
+
 static void compositor_theme_read(void)
 {
         char word[16];
-        long accent = -1, smooth = 0;
+        long accent = -1, smooth = 0, blink = 0, thick = 0;
         unsigned int motion;
 
         compositor_word(SETTING_THEME_PATH, word, sizeof(word));
@@ -7705,6 +7718,11 @@ static void compositor_theme_read(void)
         compositor_word(SETTING_WHEEL_SMOOTH_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_WHEEL_SMOOTH_PATH, word, &smooth);
         compositor_wheel_publish(smooth != 0);
+        compositor_word(SETTING_CARET_BLINK_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_CARET_BLINK_PATH, word, &blink);
+        compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_CARET_THICKNESS_PATH, word, &thick);
+        compositor_caret_publish((unsigned int)blink + 1, (unsigned int)thick + 1);
         // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
                              accent < 0 ? 0xffffffu : (unsigned int)accent, motion);

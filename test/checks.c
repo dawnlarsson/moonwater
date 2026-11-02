@@ -137433,6 +137433,45 @@ static fn field_check(struct ui address_to wui)
                 check("field: and a while after the last it stays drawn, and no frame is due",
                       !ui_text_tick(&t, now + UI_TEXT_BLINK_FOR_NS + 1, &redraw) && redraw && !t.caret_fade);
         }
+        // The caret's width: 1, 2 and 3 pixels at scale 1 (thin, normal, thick), and as many times that at scale 2. An empty field
+        // holds nothing but the caret, so the widest run of pixels that are not the ground is the caret.
+        {
+                static const unsigned int places[3] = {UI_CARET_THIN, UI_CARET_MID, UI_CARET_THICK};
+                static const int wanted[3] = {1, 2, 3};
+                unsigned int saved_thick = ui_kit.caret_thick, saved_speed = ui_kit.caret_speed;
+                int scale_was = wui->scale, widths = 0;
+
+                ui_kit.caret_speed = UI_CARET_OFF;
+                ui_text_set(&t, (const p8 address_to) "", 0);
+                t.focused = true;
+                t.caret_fade = 0;
+                for (int scale = 1; scale <= 2; scale++)
+                        for (positive k = 0; k < 3; k++)
+                        {
+                                unsigned int *shown = (unsigned int address_to)pixels;
+                                int widest = 0;
+
+                                wui->scale = scale;
+                                ui_kit.caret_thick = places[k];
+                                memory_fill_u32(shown, 400 * 100, 0x111113);
+                                ui_text_draw(wui, &t, 20, 0, 200, 100, 0x111113); // clear of the left edge, where the caret's left pixel is
+                                for (int y = 0; y < 100; y++)
+                                {
+                                        int run = 0;
+
+                                        for (int x = 0; x < 200; x++)
+                                        {
+                                                run = shown[(positive)y * 400 + (positive)x] != 0x111113u ? run + 1 : 0;
+                                                widest = run > widest ? run : widest;
+                                        }
+                                }
+                                widths += widest == wanted[k] * scale;
+                        }
+                check("caret: thin, normal and thick are 1, 2 and 3 pixels, and each scales with the screen", widths == 6);
+                wui->scale = scale_was;
+                ui_kit.caret_thick = saved_thick;
+                ui_kit.caret_speed = saved_speed;
+        }
         ui_text_close(&t);
         compositor_call(syscall(munmap), (positive)pixels, 400 * 100 * 4, 0, 0, 0, 0);
 }

@@ -114,6 +114,8 @@
 #define SETTING_ACCENT_PATH "/root/canvas.theme.accent"
 #define SETTING_MOTION_PATH "/root/canvas.motion"
 #define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"
+#define SETTING_CARET_BLINK_PATH "/root/canvas.caret.blink"
+#define SETTING_CARET_THICKNESS_PATH "/root/canvas.caret.thickness"
 
 struct settings_row
 {
@@ -212,6 +214,17 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas wheel smooth [on|off]",
                       .help = "a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]"),
+    //  The caret of every text field and the terminal (ui.c's ui_caret_wave): how it blinks, and how wide it is. Off is solid.
+    SETTING_PLAIN_ROW(null, "Caret blink speed", SETTINGS_CHOICE, 0, ("canvas", "caret", "blink"), "blink ", "slow normal fast off",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CARET_BLINK_PATH, .standard = "normal", .reset = "normal",
+                      .need = "how Canvas draws", .refusal = "caret blink is slow, normal, fast or off, not %s\n",
+                      .usage = "canvas caret blink [slow|normal|fast|off]",
+                      .help = "how the caret blinks, or off for a solid caret [normal]"),
+    SETTING_PLAIN_ROW(null, "Caret thickness", SETTINGS_CHOICE, 0, ("canvas", "caret", "thickness"), "thickness ", "thin normal thick",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CARET_THICKNESS_PATH, .standard = "normal", .reset = "normal",
+                      .need = "how Canvas draws", .refusal = "caret thickness is thin, normal or thick, not %s\n",
+                      .usage = "canvas caret thickness [thin|normal|thick]",
+                      .help = "how wide the caret is: 1, 2 or 3 pixels at scale 1; a block cursor is a whole cell [normal]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
