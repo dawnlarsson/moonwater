@@ -144539,7 +144539,8 @@ static void wire_fuzz_checks(void)
         unsigned long state;
         struct wire_build m;
         unsigned long objects[80], ops[80];
-        long client = -1;
+        long client = 0;
+        int live = 0;
         long base_fd[4];
         long before_open = 0, after_open = 0;
         unsigned int accepted = 0, refused = 0, framing = 0, reconnects = 0, invariant_failures = 0;
@@ -144560,17 +144561,19 @@ static void wire_fuzz_checks(void)
                 long bad_size = 0, want_fd = 0, fds[2], count = 0, before, after, status;
                 struct wayland_client *c;
 
-                if (client < 0 || wayland.clients[client].dead)
+                if (!live || wayland.clients[client].dead)
                 {
-                        if (client >= 0)
+                        if (live)
                         {
                                 WIRE_CHECK(wayland_client_disconnect(client) == 0);
                                 reconnects++;
+                                live = 0;
                         }
                         client = wayland_client_connect();
                         WIRE_CHECK(client >= 0);
                         if (client < 0)
                                 break;
+                        live = 1;
                         wb_begin(&m, WAYLAND_DISPLAY, 1);
                         wb_u(&m, 2);
                         wire_feed_build(client, &m);
@@ -144616,7 +144619,7 @@ static void wire_fuzz_checks(void)
                 if (fuzz_small(&state, 4) == 0)
                         wire_take(client, objects, ops, 80);
         }
-        if (client >= 0)
+        if (live)
                 WIRE_CHECK(wayland_client_disconnect(client) == 0);
         for (long i = 0; i < 4; i++)
                 close((int)base_fd[i]);
