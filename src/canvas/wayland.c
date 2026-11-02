@@ -2403,7 +2403,7 @@ static int xdg_surface_request(long client, struct wayland_client *c, long index
                 wire_object_remove(c, index);
                 return SHELL_OK;
         case 1:
-                if (surface < 0 || c->objects[surface].slot >= 0)
+                if (surface < 0 || c->objects[index].role)
                         return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "surface already has a toplevel");
                 if (!wire_id_free(c, args[0].id))
                         return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
@@ -2416,6 +2416,7 @@ static int xdg_surface_request(long client, struct wayland_client *c, long index
                 if (status < 0)
                         return wire_fail_with(c, xdg->id, WAYLAND_ERR_IMPLEMENTATION, "window refused", status);
                 c->objects[surface].slot = slot;
+                c->objects[index].role = 1;
                 made = wire_object_new(c, args[0].id, W_XDG_TOPLEVEL);
                 c->objects[made].surface = xdg->surface;
                 serial = ++c->serial;

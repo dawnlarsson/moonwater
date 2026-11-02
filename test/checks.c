@@ -144094,6 +144094,51 @@ static void wire_frame_checks(void)
         WIRE_CHECK(wayland_client_disconnect(client) == 0);
 }
 
+/*
+        Roles. An xdg surface takes one role for its life. Destroying its
+        toplevel does not give the surface a new one: a second get_toplevel is
+        refused, and the surface is destroyed with its role, as the protocol says.
+*/
+static void wire_role_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
+        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 4) == 0);
+        wire_take(client, objects, ops, 80);
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 4, 2);
+        wb_u(&m, 11);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 11, 1);
+        wb_u(&m, 12);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        wb_begin(&m, 12, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        wb_begin(&m, 11, 1);
+        wb_u(&m, 13);
+        wire_refused(client, "second toplevel on an xdg surface", wb_end(&m), m.b);
+        wb_begin(&m, 11, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 10, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -144106,6 +144151,7 @@ int main(void)
         wire_pointer_room_checks();
         wire_descriptor_checks();
         wire_frame_checks();
+        wire_role_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;
