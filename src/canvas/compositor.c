@@ -4125,7 +4125,6 @@ static void compositor_band_draw(const struct compositor_frame *windows, unsigne
 #define COMPOSITOR_GLASS_TINT 96      // how far toward its side a glass window's tint goes, in 256ths
 #define COMPOSITOR_GLASS_DARKEST 0x5c // dark glass: no colour of a pixel brighter
 #define COMPOSITOR_GLASS_LIGHTEST 0xb4 // light glass: none dimmer
-#define COMPOSITOR_GLASS_SIDE 116394750u // window_light's line between the sides
 #define COMPOSITOR_GLASS_UNSIDED 2u
 #define COMPOSITOR_GLASS_MARGIN 3 // the blocks kept round a window: what the rise reads past its edge
 
@@ -4205,20 +4204,14 @@ static int compositor_glass_compose(int row, const int *c)
 static int compositor_glass_side(int row)
 {
         unsigned long *sum = compositor.glass_sum[row], count = (unsigned long)compositor.glass_blocks[row][2] * compositor.glass_blocks[row][3];
-        unsigned int was = compositor.glass_side[row], mean, light, ground;
+        unsigned int was = compositor.glass_side[row], mean, ground;
 
         if (!count)
                 return 0;
 
         mean = (unsigned int)(sum[0] / count << 16 | sum[1] / count << 8 | sum[2] / count);
-        {
-                unsigned int r = mean >> 16 & 255, g = mean >> 8 & 255, b = mean & 255;
-
-                light = 2126u * r * r + 7152u * g * g + 722u * b * b;
-        }
         // The side is the theme's: a light theme's windows are light glass over whatever is under them, and a dark
         // one's dark, so the inks they draw in (the theme's) stand out from their ground everywhere.
-        (void)light;
         compositor.glass_side[row] = compositor.theme_side;
         ground = compositor_glass_tint(mean, compositor.glass_side[row]);
 
