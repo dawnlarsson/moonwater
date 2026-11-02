@@ -122035,6 +122035,89 @@ static fn check_compositor_remember(void)
         memory_zero(&compositor, sizeof(compositor));
 }
 
+// The mean of a pixel's channels, for the lift: how light a colour is, 0 to 255.
+static unsigned int glass_lift_luma(unsigned int pixel)
+{
+        return ((pixel >> 16 & 255) + (pixel >> 8 & 255) + (pixel & 255)) / 3;
+}
+
+/*
+        A glass window's look over a flat wallpaper, a dark one and a light one, on each theme. The glass is lifted from
+        what is behind it (lighter over the dark wallpaper, darker over the light one, by COMPOSITOR_GLASS_LIFT toward
+        mid grey), its ink stands out UI_READABLE from the composed pixel, and its corners and line are a normal window's:
+        the corner pixel is the wallpaper's and the edge pixel is the window's line. A window that is not glass is the
+        control: the same geometry, its own colour inside, and the same corners and line.
+*/
+static void check_glass_lift(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+        static const unsigned int walls[] = {0x1e1e1eu, 0xe6e6e6u};
+        unsigned int lifted = 0, inked = 0, cornered = 0, bordered = 0, plain = 0, scenes = 0;
+
+        for (unsigned int theme = UI_THEME_LIGHT; theme <= UI_THEME_DARK; theme++)
+                for (unsigned int at = 0; at < sizeof(walls) / sizeof(walls[0]); at++)
+                        for (unsigned int glassy = 0; glassy < 2; glassy++)
+                        {
+                                unsigned int wall = walls[at], centre, corner, edge, ground, ink, quiet, desktop;
+                                int lift;
+                                struct windows address_to table;
+                                struct ui probe;
+
+                                memory_zero(&compositor, sizeof(compositor));
+                                compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+                                compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+                                compositor.width = compositor.height = GLASS_SIDE;
+                                compositor.scale = 1;
+                                compositor.card = -1;
+                                compositor.scanout = screen;
+                                compositor.scanout_pitch = GLASS_SIDE * 4;
+                                if (!glass_table_map())
+                                {
+                                        check("glass lift: the table is mapped", false);
+                                        return;
+                                }
+                                table = compositor.table;
+                                compositor_theme_set(theme, table->accent, table->motion);
+                                compositor_ground = wall;
+                                table->x[2] = 40, table->y[2] = 40, table->width[2] = 160, table->height[2] = 120;
+                                table->glass[2] = glassy ? WINDOW_GLASS : 0;
+                                glass_paint(2, 0, 0, 160, 120, glassy ? 0u : 0x404040u, true);
+                                compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+                                compositor_present();
+
+                                // The contents are at 40, the line is the row above them: the corner is the pixel the round corner leaves out.
+                                desktop = glass_at(5, 5), centre = glass_at(120, 100), corner = glass_at(40, 40), edge = glass_at(100, 39);
+                                ground = table->ground[2];
+                                memory_zero(&probe, sizeof(probe));
+                                probe.glass = glassy != 0;
+                                ui_inks(&probe, ground ? ground : wall);
+                                ink = probe.ink, quiet = probe.quiet;
+                                lift = (int)glass_lift_luma(centre) - (int)glass_lift_luma(wall);
+                                scenes++;
+                                if (glassy)
+                                {
+                                        // Over the dark wallpaper the glass is lighter, over the light one darker: a lift either way.
+                                        lifted += at == 0 ? lift >= 16 : -lift >= 16;
+                                        inked += ui_contrast(ink, centre) >= UI_READABLE && ui_contrast(quiet, centre) >= UI_READABLE;
+                                        string_format(log, "  glass lift: theme %p, wallpaper %p: glass %p, lift %p%s, ink contrast %p hundredths\n",
+                                                      (positive)theme, (positive)glass_lift_luma(wall), (positive)glass_lift_luma(centre),
+                                                      (positive)(lift < 0 ? -lift : lift), lift < 0 ? " darker" : " lighter",
+                                                      (positive)ui_contrast(ink, centre));
+                                }
+                                else
+                                        plain += centre == 0x404040u && desktop == wall;
+                                cornered += corner == desktop;
+                                bordered += edge == compositor_ink_shadow();
+                        }
+        check("glass lift: over a dark wallpaper the glass is at least 16 levels lighter, over a light one as much darker, on both themes",
+              lifted == 2 * 2);
+        check("glass lift: the ink and the quiet ink stand out UI_READABLE from the composed glass, on both themes and wallpapers",
+              inked == 2 * 2);
+        check("glass lift: a glass window's corners are the wallpaper's, as a normal window's are, and its line is drawn",
+              cornered == scenes && bordered == scenes);
+        check("glass lift: a window that is not glass keeps its own colour, corners and line", plain == 2 * 2);
+}
+
 static fn check_glass(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE], made[160 * 160], shown[160 * 160];
@@ -135870,6 +135953,7 @@ b32 main()
         check_take();
         check_land();
         check_glass();
+        check_glass_lift();
         check_screen_numbers();
         check_no_tab();
         check_identify_numbers();
