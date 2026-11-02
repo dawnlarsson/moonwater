@@ -31,7 +31,6 @@
 #define EDITOR_PATH 512
 #define EDITOR_BAR UI_PAGE_FOOT // the status bar: the kit's status line band, logical pixels
 #define EDITOR_FIND (UI_FIELD_H + 2 * UI_GAP1) // the find bar: the kit's field (UI_FIELD_H), a gap of UI_GAP1 above and below
-#define EDITOR_TAB_STRIP 32 // the file tabs' strip: a kit segmented tab's height (ui_tabs_draw in ui.c)
 #define EDITOR_QUERY 1024 // the bytes of what the find bar holds
 
 struct editor_tab
@@ -488,7 +487,7 @@ static fn editor_chose(int id)
 
 /*
         The file tabs: the kit's segmented tabs, one item a file's name (untitled for none), the file shown chosen; a dot
-        after a name that has changes. The strip is the top band of the window, EDITOR_TAB_STRIP high.
+        after a name that has changes. The strip is the top band of the window, UI_TABS_H high.
 */
 static fn editor_tabs_layout(struct ui address_to ui)
 {
@@ -496,7 +495,7 @@ static fn editor_tabs_layout(struct ui address_to ui)
 
         if (c->kind != UI_TABS)
                 c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-        c->x = 0, c->y = 0, c->w = editor.width / ui->scale, c->h = EDITOR_TAB_STRIP;
+        c->x = 0, c->y = 0, c->w = editor.width / ui->scale, c->h = UI_TABS_H;
         c->count = editor.count;
         for (int at = 0; at < editor.count; at++)
         {
@@ -524,11 +523,11 @@ static fn editor_tabs_draw(struct ui address_to ui, int height)
 
         editor_tabs_layout(ui);
         ui_control_draw(ui, c);
-        // The dot is 6 px, as the kit badge's (ui_badge_draw draws its dot at 6 px, and the kit names no constant for it).
+        // The dot is the kit's, the size and the inset the kit's badge and tab name (UI_DOT, UI_DOT_IN in ui.c).
         for (int at = 0; at < editor.count; at++)
                 if (doc_dirty(&editor.tabs[at].view.doc))
-                        ui_round(ui, ui_dev(ui, ui_tab_left(ui, c, at) + ui_tab_width(ui, c, at)) - ui_px(ui, 12), height / 2 - ui_px(ui, 3),
-                                 ui_px(ui, 6), ui_px(ui, 6), ui_px(ui, 3), ui_role(UI_ON_SURFACE) | 0xff000000u);
+                        ui_round(ui, ui_dev(ui, ui_tab_left(ui, c, at) + ui_tab_width(ui, c, at)) - ui_px(ui, UI_DOT_IN), height / 2 - ui_px(ui, UI_DOT / 2),
+                                 ui_px(ui, UI_DOT), ui_px(ui, UI_DOT), ui_px(ui, UI_DOT / 2), ui_role(UI_ON_SURFACE) | 0xff000000u);
 }
 
 /*
@@ -539,7 +538,7 @@ static fn editor_tabs_draw(struct ui address_to ui, int height)
 static b32 editor_tabs_event(const struct window_event address_to event)
 {
         struct ui_control address_to strip = &editor.strip;
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && editor.pointer_y >= 0 && editor.pointer_y < ui_px(&editor.ui, EDITOR_TAB_STRIP);
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && editor.pointer_y >= 0 && editor.pointer_y < ui_px(&editor.ui, UI_TABS_H);
         int x = event->type == WINDOW_EVENT_MOTION ? event->a : editor.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? event->b : editor.pointer_y;
 
         if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
@@ -559,7 +558,7 @@ static fn editor_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &editor.ui;
         struct editor_tab address_to tab = editor_now();
-        int bar = ui_px(ui, EDITOR_BAR), find = editor.finding ? ui_px(ui, EDITOR_FIND) : 0, tabs = editor.count > 1 ? ui_px(ui, EDITOR_TAB_STRIP) : 0;
+        int bar = ui_px(ui, EDITOR_BAR), find = editor.finding ? ui_px(ui, EDITOR_FIND) : 0, tabs = editor.count > 1 ? ui_px(ui, UI_TABS_H) : 0;
         unsigned int paper = ui_role(UI_SURFACE) & 0xffffffu;
 
         ui_begin(ui, pixels, editor.own.stride, editor.width, editor.height);

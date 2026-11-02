@@ -3645,6 +3645,7 @@ static int ui_tab_left(struct ui address_to ui, const struct ui_control address_
 
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c);
 
+#define UI_TABS_H 32 // a segmented tab's height, the pill (a strip of tabs, the editor's file tabs too)
 static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         b32 seg = c->variant == UI_TABS_SEGMENTED, live = 0;
@@ -3657,7 +3658,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         // A strip with no items has no pip to put on one, and no word to measure for its place.
         if (c->count == 0)
                 return;
-        int height = seg ? 32 : 40, chosen = c->at;
+        int height = seg ? UI_TABS_H : 40, chosen = c->at;
         b64 pip_x, pip_w;
 
         if (!seg)
@@ -4233,9 +4234,11 @@ static fn ui_progress_draw(struct ui address_to ui, struct ui_control address_to
         foot), a spinner (a ring and a quarter of it in the accent, a turn in
         .7 s), a card and a window (hairline, 14 and 20 round).
 */
+#define UI_DOT 6     // a status dot's width: a badge's, and a tab's in the editor (which takes it from here)
+#define UI_DOT_IN 12 // a tab's dot in from the tab's right edge
 static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 {
-        int role = c->role, width = ui_kit_measure(ui, (string_address)c->label, UI_LABEL_MEDIUM), dot = c->on ? 12 : 0;
+        int role = c->role, width = ui_kit_measure(ui, (string_address)c->label, UI_LABEL_MEDIUM), dot = c->on ? 2 * UI_DOT : 0;
         unsigned int fill = role == UI_PRIMARY ? ui_role(UI_PRIMARY_CONTAINER) : role < 0 ? 0 : ui_role(role + 1);
         unsigned int ink = role == UI_PRIMARY ? ui_role(UI_ON_PRIMARY_CONTAINER) : role < 0 ? ui_role(UI_ON_SURFACE_VARIANT) : ui_role(role);
         struct ui_box box;
@@ -4250,7 +4253,7 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
         if (role < 0)
                 ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         if (dot)
-                ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 9), ui_q8(ui, c->y + 8), ui_q8(ui, c->x + 15), ui_q8(ui, c->y + 14), ui_q8(ui, 3), ui_q8(ui, 3)},
+                ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 9), ui_q8(ui, c->y + 8), ui_q8(ui, c->x + 9 + UI_DOT), ui_q8(ui, c->y + 8 + UI_DOT), ui_q8(ui, UI_DOT / 2), ui_q8(ui, UI_DOT / 2)},
                             ink, null);
         ui_control_label(ui, c, 9 + dot, 3, UI_LABEL_MEDIUM, ink);
 }
