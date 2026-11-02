@@ -134858,8 +134858,32 @@ static fn check_no_tab(void)
         check("no tab: the window that asked for none is shown, and has no tab; the other has one",
               compositor.showing[1] && compositor.showing[2] && compositor_windows() == 1 && compositor.listed[0] == 1);
 
+        /* Stacked bottom first: 1 (tab), 2 (no tab), 3 (tab). Alt-Tab from 3 passes 2 and gives the keys to 1. */
+        table->x[3] = table->y[3] = 40;
+        table->width[3] = table->height[3] = 40;
+        glass_paint(3, 0, 0, 40, 40, 0x0000ffu, true);
+        compositor_present();
+        compositor_focus(3);
+        compositor_focus_step();
+        check("no tab: an Alt-Tab from the top passes the window that asked for none", compositor.focus == 1 && compositor.cycle == 1);
+        compositor_focus_step();
+        check("no tab: an Alt-Tab from 1 passes 2 again and gives the keys to 3", compositor.focus == 3);
+        compositor_focus_commit();
+        compositor_focus(2);
+        check("no tab: a window that asked for none keeps the keys when it has them", compositor.focus == 2);
+        compositor_focus_step();
+        check("no tab: an Alt-Tab from the window that asked for none takes the keys to a tab", compositor.focus == 3);
+        compositor_focus_commit();
+        compositor_raise(2);
+        compositor_focus(COMPOSITOR_NONE);
+        compositor_refocus();
+        check("no tab: the refocus does not give the keys to the window that asked for none, though it is on top",
+              compositor.focus == 3);
+
         table->pid[1] = 1;
         table->pid[2] = 2;
+        table->pid[3] = 3;
+        compositor_leave(3);
         compositor_leave(2);
         compositor_leave(1);
         compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);

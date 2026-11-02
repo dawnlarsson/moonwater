@@ -7800,13 +7800,21 @@ static void compositor_focus(int row)
         compositor_tabs_changed();
 }
 
+// Whether a window is in the focus cycle: one that asked for no tab (WINDOW_NO_TAB, the identify overlays) is not, so
+// neither Alt-Tab nor the refocus gives it the keys. Asked for them by its own program, it has them as any window does.
+static b32 compositor_cycles(int row)
+{
+        return !(compositor.asks[row] & WINDOW_NO_TAB);
+}
+
 // The topmost window there is to give the keys to; none that is put away.
 static void compositor_refocus(void)
 {
         int next = COMPOSITOR_NONE;
 
         for (unsigned int at = compositor.stacked; at-- && next < 0;)
-                if (compositor_visible(compositor.stack[at]) && compositor_popup_parent[compositor.stack[at]] < 0)
+                if (compositor_visible(compositor.stack[at]) && compositor_popup_parent[compositor.stack[at]] < 0 &&
+                    compositor_cycles(compositor.stack[at]))
                         next = compositor.stack[at];
 
         compositor_focus(next);
@@ -9065,7 +9073,8 @@ static void compositor_reveal(int row)
         it was put away and raises it. Starting from the top, when the window
         with the keys is the one that is on top, it is the one behind; when it
         is not (it was put away and the keys went down) it is the one on top,
-        which is the one that was put away, so one Alt-Tab restores it.
+        which is the one that was put away, so one Alt-Tab restores it. A window that asked for no tab is passed over
+        (compositor_cycles): it has no entry in the cycle.
 */
 static void compositor_focus_step(void)
 {
@@ -9077,8 +9086,10 @@ static void compositor_focus_step(void)
 
         below = compositor.cycle ? compositor.cycle : focused && focused == top ? focused : top + 1;
         next = below > 1 ? below - 1 : top;
+        for (int skipped = 0; next && skipped < top && !compositor_cycles(compositor.stack[next - 1]); skipped++)
+                next = next > 1 ? next - 1 : top;
 
-        if (!next || next == focused)
+        if (!next || next == focused || !compositor_cycles(compositor.stack[next - 1]))
                 return;
 
         compositor.cycle = next;
