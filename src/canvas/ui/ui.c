@@ -8865,10 +8865,14 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         }
         if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
         {
-                unsigned int text = ui_text_colour(ui, UI_ON_SURFACE);
+                unsigned int text = ui_text_colour(ui, UI_ON_SURFACE), alpha = 92;
 
+                // On glass the placeholder is the quiet ink at full strength: the ink at 36% is 2.0 to 2.7:1 from the glass,
+                // and the quiet ink is held at the readable threshold (ui_glass_quiet). The kit's surfaces keep the 36%.
+                if (ui->glass)
+                        text = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), alpha = 255;
                 ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, t->left, t->top + m.baseline, (string_address)t->placeholder,
-                          t->size + t->zoom, text & 0xffffffu, 92, t->left, t->right, 0);
+                          t->size + t->zoom, text & 0xffffffu, alpha, t->left, t->right, 0);
         }
         for (row_y = t->top; row_y + t->line_height <= t->bottom + (t->mode == UI_TEXT_FIELD) && line < lines; line++)
         {
