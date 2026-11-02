@@ -840,15 +840,6 @@ static struct settings_item address_to settings_item(int row)
         return list >= 0 && list < SETTINGS_LISTS && at < settings.item_count[list] ? &settings_large->item[list][at] : null;
 }
 
-static unsigned char settings_kind(int row)
-{
-        const struct settings_item address_to item = settings_item(row);
-
-        if (item)
-                return item->kind;
-        return row < SETTINGS_ANY ? settings_rows[row].kind : (unsigned char)SETTINGS_COMMAND;
-}
-
 static const char address_to settings_label(int row)
 {
         const struct settings_generic address_to generic = settings_generic_of(row);
@@ -2639,15 +2630,6 @@ static fn settings_said_of(int before)
                 settings_say((string_address)settings_text(settings.list.focus));
         else if (before >= SETTINGS_ANY)
                 settings_say((string_address) "");
-}
-
-// The focus moved by whole rows of the ones that show; a command row has what it does in the status.
-static fn settings_move(int by)
-{
-        int before = settings.list.focus;
-
-        if (ui_list_move(&settings.ui, &settings.list, by))
-                settings_said_of(before);
 }
 
 /*

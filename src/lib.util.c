@@ -34524,11 +34524,6 @@ static b32 vfscanf(scan_stream handle, string_address format, var_args list)
         return scan_run(address_of source, format, list);
 }
 
-static b32 vscanf(string_address format, var_args list)
-{
-        return vfscanf(stdin, format, list);
-}
-
 var_list_entry(fscanf, b32,
                (scan_stream handle, string_address format, ...), format,
                vfscanf(handle, format, _variadic_list))
@@ -35610,11 +35605,6 @@ static b32 putc_unlocked(b32 byte, stream address_to handle)
         __attribute__((alias("stream_put_byte")));
 static b32 fputc_unlocked(b32 byte, stream address_to handle)
         __attribute__((alias("stream_put_byte")));
-
-static b32 putchar_unlocked(b32 byte)
-{
-        return stream_put_byte_inline(byte, stdout);
-}
 
 static b32 fputs_unlocked(string_address text, stream address_to handle)
         __attribute__((alias("stream_put_string")));

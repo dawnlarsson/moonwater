@@ -1144,16 +1144,6 @@ static b32 doc_range_add(struct doc address_to doc, p64 start, p64 finish, p32 k
         return true;
 }
 
-static fn doc_ranges_clear(struct doc address_to doc, p32 kind)
-{
-        positive kept = 0;
-
-        for (positive i = 0; i < doc->range_count; i++)
-                if (doc->ranges[i].kind != kind)
-                        doc->ranges[kept++] = doc->ranges[i];
-        doc->range_count = kept;
-}
-
 // Whether a replace at at of removed bytes would touch read-only text: put something inside it, or take any of it.
 // Its edges are not inside: text typed against a read-only span is not in it.
 static b32 doc_readonly(const struct doc address_to doc, p64 at, p64 removed)
@@ -3459,22 +3449,6 @@ static fn doc_select_lines(struct doc address_to doc)
                 sel->active = doc_line_start(doc, last + 1);
                 if (sel->active == doc_length(doc) && last + 1 >= doc_line_count(doc))
                         sel->active = doc_length(doc);
-        }
-        doc_normalize(doc);
-        doc_seal(doc);
-}
-
-static fn doc_select_word(struct doc address_to doc)
-{
-        for (positive s = 0; s < doc->selection_count; s++)
-        {
-                struct doc_selection address_to sel = &doc->selections[s];
-                p64 start, finish;
-
-                if (sel->anchor != sel->active)
-                        continue;
-                doc_word_at(doc, sel->active, &start, &finish);
-                sel->anchor = start, sel->active = finish;
         }
         doc_normalize(doc);
         doc_seal(doc);

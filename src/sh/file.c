@@ -6881,25 +6881,6 @@ static bipolar collate_compare(p8 address_to a, positive la, p8 address_to b, po
         locale's point is a point, which is every locale but the few that
         write a comma.
 */
-static string_address locale_number_text(string_address text)
-{
-        static p8 copy[160];
-        locale_category address_to one = locale_open(LOCALE_NUMERIC);
-        string_address point = one ? locale_string(LOCALE_NUMERIC, LOCALE_NUMERIC_DECIMAL) : null;
-
-        if (!point || !point[0] || point[1] || point[0] == '.')
-                return text;
-
-        positive length = string_length(text);
-
-        if (length >= sizeof(copy))
-                return text;
-        for (positive at = 0; at < length; at++)
-                copy[at] = text[at] == '.' ? 'x' : text[at] == point[0] ? '.' : (p8)text[at];
-        copy[length] = end;
-        return (string_address)copy;
-}
-
 /*
         stdbuf -oL or -o0 in front of one of these programs. They are
         statically linked, so libstdbuf's preload never reaches them; stdbuf

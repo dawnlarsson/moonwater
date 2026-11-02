@@ -2178,11 +2178,6 @@ static void windows_clip_ask(const struct window_row *own, unsigned int which)
         windows_knock(own);
 }
 
-static void windows_clip_watch(const struct window_row *own, unsigned int wanted)
-{
-        __atomic_store_n(&own->table->clip_watch[own->row], wanted ? 1u : 0u, __ATOMIC_RELEASE);
-}
-
 // Whether bytes are text a selection may hold: UTF-8, every sequence whole and shortest, no surrogate, no NUL.
 static int windows_clip_text(const unsigned char *bytes, unsigned long length)
 {

@@ -2505,11 +2505,6 @@ static fn ui_kit_ripples_exit(struct ui_control address_to c)
         squashes it (BB) and the release springs it home, drawn through the
         .1s transform transition. Disabled: the ink at 38%, the fill at 8%.
 */
-static int ui_button_width(struct ui address_to ui, const char address_to label, int variant)
-{
-        return ui_kit_measure(ui, (string_address)label, UI_LABEL_LARGE) / ui->scale + 2 * (variant == UI_BUTTON_TEXT ? 10 : 14);
-}
-
 static fn ui_button_targets(struct ui_control address_to c)
 {
         unsigned int fill = 0, ink;
@@ -3643,29 +3638,6 @@ struct ui_rise
         int index;
         b32 from_top;
 };
-
-// The rise at a frame: its opacity and scale (Q30). Shown, both are one.
-static fn ui_rise_at(struct ui_rise address_to r, b64 now, b64 address_to opacity, b64 address_to scale)
-{
-        b64 p, delay;
-
-        *opacity = *scale = UI_ONE;
-        if (!r->start || ui_kit.motion)
-        {
-                r->start = 0;
-                return;
-        }
-        if (r->start == 1)
-                r->start = now;
-        delay = (b64)r->index * 48 * UI_MS;
-        p = ui_bezier_at(&ui_ease_rise, ui_progress(now - r->start - delay, 440 * UI_MS));
-        *opacity = p;
-        *scale = UI_Q2(145) + ui_qmul(UI_ONE - UI_Q2(145), p);
-        if (now - r->start - delay >= 440 * UI_MS)
-                r->start = 0;
-        else
-                ui_kit.busy = 1;
-}
 
 // The rows a control that moved this frame reaches, with room for its ripple, its shadow and its stretch: those it
 // said move, with room for a stretch and a ring, when it said (tabs on end), else its box and room round it.
