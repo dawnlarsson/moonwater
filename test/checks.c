@@ -119534,7 +119534,7 @@ static void check_popup_reopen(void)
     struct window_row parent_row;
     struct ui parent_ui = terminal.ui;
     struct windows address_to table;
-    int blank = 0, partial = 0, missing = 0, stale = 0, opens = 200;
+    int blank = 0, partial = 0, missing = 0, stale = 0, on_screen_lost = 0, opens = 200;
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
@@ -119571,7 +119571,7 @@ static void check_popup_reopen(void)
     {
         struct ui picture_ui;
         const unsigned int *front;
-        int hot = open % 2 ? 1 : -1, differ = 0, drawn = 0;
+        int variant = open % 3, hot = variant ? 1 : -1, differ = 0, drawn = 0;
 
         // The row as windows_take leaves it: reset, and its program's pid.
         windows_reset_row(table, 3);
@@ -119593,19 +119593,28 @@ static void check_popup_reopen(void)
             missing++;
             continue;
         }
-        if (hot >= 0)
+        // Three kinds of open: the menu as it came (0); a key moves the hot item before the compositor has taken its first
+        // picture (1); the compositor takes the picture and the glass gives the menu its ground, the app is woken and its
+        // inks are presented in flight, and only then a key moves the hot item (2).
+        if (variant == 1)
         {
             popup.menu.hot = hot;
             ui_popup_present(&popup);
         }
+        compositor_take(3);
+        compositor_present();
+        if (variant == 2)
+        {
+            ui_popup_pump(&popup);
+            popup.menu.hot = hot;
+            ui_popup_present(&popup);
+        }
         // Each knock of the compositor's takes wakes the app, which pumps the menu, and a picture it was not ready for is
-        // presented then. The ground the compositor gives is kept out of it (a re-ink presents the menu whole, which would
-        // hide a move that was dropped): this is the pending picture alone.
-        for (int round = 0; round < 2; round++)
+        // presented then, until the menu has nothing left to show.
+        for (int round = 0; round < 3; round++)
         {
             compositor_take(3);
             compositor_present();
-            popup.own.table->ground[3] = 0;
             ui_popup_pump(&popup);
         }
         compositor_take(3);
@@ -119629,8 +119638,15 @@ static void check_popup_reopen(void)
             for (int y = 0; y < popup.menu.height; y++)
                 for (int x = 0; x < popup.menu.width; x++)
                 {
+                    unsigned int pixel = front[y * GLASS_SIDE + x];
+                    int sx = compositor.x[3] + x, sy = compositor.y[3] + y;
+
                     drawn += expect[y * GLASS_SIDE + x] != 0;
-                    differ += front[y * GLASS_SIDE + x] != expect[y * GLASS_SIDE + x];
+                    differ += pixel != expect[y * GLASS_SIDE + x];
+                    // An opaque pixel of the picture is its own colour on the screen, whatever glass is under it.
+                    if (pixel >> 24 == 255 && sx >= 0 && sy >= 0 && sx < GLASS_SIDE && sy < GLASS_SIDE &&
+                        glass_at(sx, sy) != (pixel & 0xffffffu))
+                        on_screen_lost++;
                 }
             if (differ && !drawn)
                 blank++;
@@ -119643,10 +119659,11 @@ static void check_popup_reopen(void)
         compositor_popup_leave(3);
         compositor_leave(3);
     }
-    string_format(log, "  popup reopen: %p opens, %p missing, %p partial, %p blank, %p with a move not shown\n", (positive)opens,
-                  (positive)missing, (positive)partial, (positive)blank, (positive)stale);
+    string_format(log, "  popup reopen: %p opens, %p missing, %p partial, %p blank, %p opaque pixels not on the screen, %p with a move not shown\n",
+                  (positive)opens, (positive)missing, (positive)partial, (positive)blank, (positive)on_screen_lost, (positive)stale);
     check("popup reopen: every menu opened is on the screen, whole and as a popup of its window (blank, partial or missing: none)",
           !missing && !partial && !blank);
+    check("popup reopen: every opaque pixel of a menu is on the screen as it is drawn", on_screen_lost == 0);
     check("popup reopen: a move of the hot item is shown when the compositor was not ready for the present it made",
           stale == 0);
     for (int row = 0; row < WINDOWS; row++)
