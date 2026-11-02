@@ -2508,11 +2508,11 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
 
                                         if (!ui_span_ends(first, width, spans[k][0], spans[k][1], &p0, &p1, &c0, &c1))
                                                 continue;
-                                        row[p0] = ui_over(ui_premultiplied(argb, c0), row[p0]);
+                                        ui_kit_put(row, p0, c0, argb);
                                         if (p1 > p0)
                                         {
                                                 ui_kit_run(row + p0 + 1, p1 - p0 - 1, ui_premultiplied(argb, UI_FULL));
-                                                row[p1] = ui_over(ui_premultiplied(argb, c1), row[p1]);
+                                                ui_kit_put(row, p1, c1, argb);
                                         }
                                 }
                                 continue;
@@ -2547,7 +2547,7 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
                                 }
                                 cover = (int)ui_spans_cover(&outer, x) - (holed ? (int)ui_spans_cover(&hole, x) : 0);
                                 if (cover > 0)
-                                        row[x] = ui_over(ui_premultiplied(argb, (unsigned int)cover > UI_FULL ? UI_FULL : (unsigned int)cover), row[x]);
+                                        ui_kit_put(row, x, (unsigned int)cover, argb);
                         }
                 }
         }
@@ -2655,7 +2655,7 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
                         ui_kit_line[x] = 0;
                         cover = inside >= UI_FULL ? 0 : cover * (UI_FULL - inside) / UI_FULL;
                         if (cover)
-                                row[x] = ui_over(ui_premultiplied(argb, cover), row[x]);
+                                ui_kit_put(row, x, cover, argb);
                 }
         }
         memory_zero(ui_kit_clip, (positive)(last > first ? last - first : 0) * sizeof(ui_kit_clip[0]));
@@ -4392,7 +4392,7 @@ static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to 
                         {
                                 unsigned int address_to at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)x;
 
-                                *at = ui_over(ui_premultiplied(ui_role(UI_PRIMARY), hits * UI_FULL / 16), *at);
+                                ui_kit_put(at, 0, hits * UI_FULL / 16, ui_role(UI_PRIMARY));
                         }
                 }
         }
