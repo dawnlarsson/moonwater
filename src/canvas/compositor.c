@@ -8467,11 +8467,12 @@ static void compositor_take(int row)
         compositor.front[row] = front;
 
         // The picture of the size asked for: shown as it is from here on, and, the hand let go, the edges are the
-        // window's own again. One of another size while an ask is out is shown at the size asked, stretched.
+        // window's own again. One of another size while an ask is out is shown at the size asked, stretched. The
+        // other window of a shared edge keeps the edge it shares until the hand lets go (compositor_shared_begin).
         if (compositor.asking[row] && width == table->want_width[row] && height == table->want_height[row])
         {
                 compositor.asking[row] = 0;
-                if (compositor.resize != row)
+                if (compositor.resize != row && compositor.shared_row != row)
                         compositor.edges[row] = 0;
         }
         if (!compositor.asking[row] && (width != compositor.w[row] || height != compositor.h[row]))
