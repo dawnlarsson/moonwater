@@ -134154,6 +134154,7 @@ b32 main()
         and every mode draws inside its box and nothing outside it.
 */
 static fn menu_check(struct ui address_to wui);
+static fn menu_defaults_check(struct ui address_to wui);
 static fn kit_composites_check(struct ui address_to wui);
 static fn editor_check(struct ui address_to wui);
 static fn editor_close_check(struct ui address_to wui);
@@ -134568,6 +134569,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         }
         compositor_call(syscall(munmap), (positive)pixels, 800 * 600 * 4, 0, 0, 0, 0);
         menu_check(&wui);
+        menu_defaults_check(&wui);
         kit_composites_check(&wui);
         editor_check(&wui);
         editor_close_check(&wui);
@@ -136419,6 +136421,88 @@ static fn check_input_matrix(struct ui address_to ui, unsigned int address_to pi
 static p32 menu_next(p32 below)
 {
         return render_next(below);
+}
+
+/*
+        The kit's menus, held to one set of defaults (ui.c's menu section): a menu chooses on a release over the item its press
+        went down on and on no other; drawn opaque it still has no face (a menu is glass, a temporary overlay); its size comes
+        from ui_menu_sizes, the one place its numbers are; and a menu whose items do not all show has the kit's bar. The kit
+        that has these defines UI_MENU_DEFAULTS; before it, the checks that need its names are red.
+*/
+static fn menu_defaults_items(struct ui address_to wui, struct ui_popmenu address_to m)
+{
+        memory_zero(m, sizeof(*m));
+        ui_popmenu_add(m, "Copy", null, 0, 1);
+        ui_popmenu_add(m, "Paste", null, 0, 2);
+        ui_popmenu_add(m, "Select all", null, 0, 3);
+        ui_popmenu_size(wui, m, 0);
+}
+
+static fn menu_defaults_check(struct ui address_to wui)
+{
+        static struct ui_popmenu m;
+        long pixels = ui_map(600 * 900 * 4);
+        unsigned int address_to picture = (unsigned int address_to)pixels;
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0}, release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+        int row, pad, x, y1, y2, chosen_same, chosen_other, chosen_away;
+
+        menu_defaults_items(wui, &m);
+        row = ui_popmenu_row(wui, &m), pad = UI_MENU_PAD * wui->scale, x = m.width / 2;
+        y1 = pad + row + row / 2, y2 = pad + 2 * row + row / 2;
+        menu_defaults_items(wui, &m);
+        ui_popmenu_event(wui, &m, &press, x, y1);
+        chosen_other = ui_popmenu_event(wui, &m, &release, x, y2);
+        menu_defaults_items(wui, &m);
+        ui_popmenu_event(wui, &m, &press, x, y1);
+        chosen_same = ui_popmenu_event(wui, &m, &release, x, y1);
+        menu_defaults_items(wui, &m);
+        ui_popmenu_event(wui, &m, &press, x, y1);
+        chosen_away = ui_popmenu_event(wui, &m, &release, x, m.height + 40);
+        check("menu: a press on an item and a release on it chooses it", chosen_same == 2);
+        check("menu: a press released on another item chooses nothing", chosen_other == UI_MENU_NOTHING);
+        check("menu: a press released outside the menu chooses nothing, and is consumed", chosen_away == UI_MENU_NOTHING);
+        // Drawn opaque (the menu's own face is what that would show), it has no face: the glass is what is under it.
+        menu_defaults_items(wui, &m);
+        {
+                struct ui opaque = *wui;
+
+                memory_zero((void address_to)pixels, 600 * 900 * 4);
+                opaque.glass = 0;
+                ui_begin(&opaque, picture, 600, m.width, m.height);
+                ui_popmenu_draw(&opaque, &m);
+                check("menu: drawn opaque, a menu has no face (a menu is glass)", picture[2 * 600 + m.height / 2] == 0);
+        }
+#ifdef UI_MENU_DEFAULTS
+        {
+                struct ui_menu_sizes sizes = ui_menu_sizes(wui, false), finger = ui_menu_sizes(wui, true);
+
+                check("menu: a finger's row is the kit's touch row, and the mouse's the kit's row",
+                      sizes.row == UI_MENU_ROW * wui->scale && finger.row == UI_MENU_TOUCH_ROW * wui->scale);
+                check("menu: a menu is no narrower than the kit's least width", m.width >= sizes.least && row == sizes.row);
+        }
+        // A menu of twenty items shown five high has the kit's bar down its right, and nothing else there.
+        memory_zero(&m, sizeof(m));
+        for (int at = 0; at < 20; at++)
+                ui_popmenu_add(&m, "Item", null, 0, at + 1);
+        ui_popmenu_size(wui, &m, 5 * row + 2 * pad);
+        {
+                struct ui glass = *wui;
+                int bar = 0;
+
+                glass.glass = 1;
+                memory_zero((void address_to)pixels, 600 * 900 * 4);
+                ui_begin(&glass, picture, 600, m.width, m.height);
+                ui_popmenu_draw(&glass, &m);
+                for (int yy = 0; yy < m.height; yy++)
+                        for (int xx = m.width - 8 * wui->scale; xx < m.width; xx++)
+                                bar += picture[yy * 600 + xx] != 0;
+                check("menu: a menu whose items do not all show has the kit's bar", bar > 0 && m.rows_shown < 20);
+        }
+#else
+        check("menu: every menu's size comes from one place (ui_menu_sizes)", false);
+        check("menu: a menu whose items do not all show has the kit's bar", false);
+#endif
+        compositor_call(syscall(munmap), (positive)pixels, 600 * 900 * 4, 0, 0, 0, 0);
 }
 
 static fn menu_check(struct ui address_to wui)
