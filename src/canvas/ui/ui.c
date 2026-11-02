@@ -6272,7 +6272,8 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_PAGE_FOOT 40      // its status line's band
 #define UI_PAGE_INSET 6      // the title and the status line in from the margin
 #define UI_SEARCH_W 190      // a page's search field, at the title's right
-#define UI_SEARCH_Y 24
+#define UI_SEARCH_Y 8        // centred in the title band (UI_PAGE_TOP): the field is UI_FIELD_H (44) high, so it lies wholly in the band
+#define UI_SEARCH_RIGHT 46   // and ends this far from the window's right edge: clear of the close button (14 px, 5 in) and the minimise button beside it, with a gap of 8
 #define UI_COLUMN_SHARE 30   // a page's column: this share of the window,
 #define UI_COLUMN_LEAST 88   // no narrower than this, no wider than the most, and never more than half of the window
 #define UI_COLUMN_MOST 170
@@ -7285,9 +7286,12 @@ static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32
                         ui_control_start(c);
                 }
                 c->w = UI_SEARCH_W, c->h = UI_FIELD_H;
-                c->x = (p->width - pad) / ui->scale - c->w, c->y = UI_SEARCH_Y;
+                c->x = (p->width - pad) / ui->scale - c->w - UI_SEARCH_RIGHT, c->y = UI_SEARCH_Y;
                 c->focused = keys;
+                // Its own clip: the title band. A field drawn past the band's edge was cut where the list below repaints.
+                ui->bottom = p->top;
                 ui_control_draw(ui, c);
+                ui->bottom = p->height;
         }
         ui->top = p->bottom;
         if (p->status && p->status[0])
