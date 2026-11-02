@@ -3254,7 +3254,7 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
         t->masked = masked;
         // The field has the keys from its first character, and a passphrase or a network's, device's or command's is a command:
         // a press outside it cancels (the kit's rule), where a plain value is kept.
-        t->focused = true, t->command = settings_item(row) != null;
+        t->focused = true, t->cancels = settings_item(row) != null;
         t->most =row >= (int)SETTINGS_LIST ? SETTINGS_ITEM_LABEL - 1
                   : row >= SETTINGS_ANY || (settings_rows[row].flags & SETTINGS_SPLIT) ? SETTINGS_TYPED - 1
                                                                                         : SETTINGS_VALUE - 1;

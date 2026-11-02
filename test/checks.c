@@ -125032,7 +125032,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.job = clock;
                 settings.job_sets = false;
                 settings.editing = -1;
-                settings.confirm = 0;
+                ui_confirm_drop(&settings.confirm);
                 settings_activate(wipe, 1);
                 check("settings: Enter on a command with words to type opens its field", settings.editing == wipe && settings_holds(""));
                 settings_type_code('y');
@@ -125053,11 +125053,11 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.queued = 0;
                 settings_activate(sleep, 1);
                 check("settings: a command with no words to type asks on its own Enter", settings.queued == 0 && settings.editing < 0 &&
-                                                                                          settings.confirm == sleep + 1);
+                                                                                          settings.confirm.armed && settings.confirm.what == sleep + 1);
                 settings_activate(sleep, 1);
                 check("settings: and runs on the second", settings.queued == 1 && settings.queue[0].row == sleep);
                 settings.queued = 0;
-                settings.confirm = 0;
+                ui_confirm_drop(&settings.confirm);
                 settings_activate(status, 1);
                 check("settings: one that asks nothing is run by its Enter", settings.queued == 1 && settings.queue[0].row == status);
                 settings.queued = 0;
@@ -126049,7 +126049,7 @@ static fn check_settings_edges(void)
         settings.job = 0;
         settings.job_sets = false;
         settings.queued = 0;
-        settings.confirm = 0;
+        ui_confirm_drop(&settings.confirm);
         settings.group = settings_group_of(zone);
         settings_refilter();
         settings.list.focus = zone;
@@ -126111,7 +126111,7 @@ static fn check_settings_keys(void)
         settings.job = 0;
         settings.job_sets = false;
         settings.queued = 0;
-        settings.confirm = 0;
+        ui_confirm_drop(&settings.confirm);
         settings.group = settings_group_of(wired);
         settings_refilter();
         while (at < (int)settings.list.count && settings.list.id[at] != wired)
@@ -126301,7 +126301,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
         settings_frames.scenario = name;
         settings_frames.wrong = false;
         settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
-        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         for (positive at = 0; at < SETTINGS_ROWS; at++)
                 if (settings_rows[at].kind == SETTINGS_SWITCH)
                         settings.state[at] = SETTINGS_READ,
@@ -126409,7 +126409,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
         settings_frames.scenario = name;
         settings_frames.wrong = false;
         settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
-        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         settings.group = group;
         settings.list.scroll.scroll = 0;
@@ -126582,7 +126582,7 @@ static fn settings_fit_check(void)
         b32 still = true;
 
         settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
-        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {
@@ -126615,7 +126615,7 @@ static fn settings_end_check(void)
         b32 wheel_ok = true, bar_ok = true, finger_ok = true, clear_ok = true, rows_ok = true;
 
         settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
-        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {
@@ -126698,7 +126698,7 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         b32 settled;
 
         settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
-        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {
@@ -126742,7 +126742,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         int most, group = 0, best = -1, x, y;
 
         settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
-        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
         {

@@ -7753,7 +7753,7 @@ struct ui_text
         const char address_to (*accept)(p32 code);
         const char address_to refused;
         b32 masked;
-        b32 command;                            // a command or a passphrase: a press outside cancels it (a masked field always does); a plain value commits
+        b32 cancels;                            // a command or a passphrase: a press outside cancels it (a masked field always does); a plain value commits
         b32 keeps_vertical;                     // the app takes Up and Down (a list's, rows', a scroll): else they go to the ends, as Home and End
         b32 pasting;                            // it asked the clipboard, and the answer is its
         int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
@@ -8963,7 +8963,7 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
                 // kept (UI_TEXT_COMMIT), and a command or a secret is cancelled (UI_TEXT_CANCEL). The press is not the field's:
                 // the app goes on with it, to the row or the button it is on.
                 if ((event->flags & WINDOW_KEY_DOWN) && !ui_text_inside(t, x, y))
-                        return t->focused ? (t->masked || t->command ? UI_TEXT_CANCEL : UI_TEXT_COMMIT) : 0;
+                        return t->focused ? (t->masked || t->cancels ? UI_TEXT_CANCEL : UI_TEXT_COMMIT) : 0;
                 if (!(event->flags & WINDOW_KEY_DOWN) && !t->dragging)
                         return 0;
                 ending = !(event->flags & WINDOW_KEY_DOWN);
