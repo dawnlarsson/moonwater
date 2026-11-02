@@ -119620,6 +119620,419 @@ static void check_compositor_minimise(void)
 }
 
 /*
+        The lifecycle sweep: windows opened, placed, moved, put away, brought back, closed and left, on one screen and then
+        across the seam of two. After every step life_holds reads the table, the stacking, the focus and the drawing against
+        one another: a window shown is in the stack once and one that is not is in none, with no size, state or keys; the
+        keys are with a window shown and not put away, or with none; the table's focus is the compositor's; and every window
+        drawn lies on the screens. life_drawn finds each window's own colour where it is drawn, and life_ghost finds none of
+        it where a window was once it has closed.
+*/
+static unsigned int life_colour(int row)
+{
+        return (0x202020u + (unsigned int)row * 0x2d3e4fu) & 0xffffffu;
+}
+
+static int life_covered(int x, int y, const int (*screens)[4], unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (x >= screens[at][0] && x < screens[at][0] + screens[at][2] && y >= screens[at][1] &&
+                    y < screens[at][1] + screens[at][3])
+                        return 1;
+        return 0;
+}
+
+/*
+        Whether a window lies on the screens. One screen: the whole of it, when it fits on the screen, and its top left when
+        it does not (compositor_screen_keep_window). Two or more: its top left and the middle of its top edge are on a
+        screen, which is the rule the keep makes for a window across the seam -- a window may hang below a shorter screen
+        by design, so its bottom is not held to one. The size is the window's own, not the picture's: a landing one is
+        drawn at 96 percent of it.
+*/
+static int life_on_screens(int x, int y, int width, int height, const int (*screens)[4], unsigned int count)
+{
+        int right = x + width - 1, bottom = y + height - 1, fits = 0;
+
+        if (width <= 0 || height <= 0)
+                return 0;
+        for (unsigned int at = 0; at < count; at++)
+                if (width <= screens[at][2] && height <= screens[at][3])
+                        fits = 1;
+        if (count > 1 || !fits)
+                return life_covered(x, y, screens, count) && life_covered(x + width / 2, y, screens, count);
+        return life_covered(x, y, screens, count) && life_covered(right, y, screens, count) &&
+               life_covered(x, bottom, screens, count) && life_covered(right, bottom, screens, count) &&
+               life_covered(x + width / 2, y, screens, count) && life_covered(x + width / 2, bottom, screens, count) &&
+               life_covered(x, y + height / 2, screens, count) && life_covered(right, y + height / 2, screens, count);
+}
+
+static int life_on(int row)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        if (!compositor_visible(row))
+                return 0;
+        return life_on_screens(compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row],
+                               screens, count);
+}
+
+static int life_holds(const char **why)
+{
+        unsigned int count, stacked_count[WINDOWS];
+        const int (*screens)[4] = compositor_screens(&count);
+
+        memory_zero(stacked_count, sizeof(stacked_count));
+        for (unsigned int at = 0; at < compositor.stacked; at++)
+        {
+                if (compositor.stack[at] >= WINDOWS)
+                        return *why = "a stack entry is no row", 0;
+                stacked_count[compositor.stack[at]]++;
+        }
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                if (stacked_count[row] > 1)
+                        return *why = "a window is stacked twice", 0;
+                if (!compositor.showing[row] != !stacked_count[row])
+                        return *why = "a window is stacked without being shown, or shown without being stacked", 0;
+                if (!compositor.showing[row])
+                {
+                        if (compositor.w[row] || compositor.h[row] || compositor.state[row] || compositor.focus == row)
+                                return *why = "a row not shown keeps its size, its state or the keys", 0;
+                        continue;
+                }
+                if (compositor_visible(row) && !life_on_screens(compositor.x[row], compositor.y[row], (int)compositor.w[row],
+                                                                (int)compositor.h[row], screens, count))
+                        return *why = "a window is drawn past its screen", 0;
+        }
+        if (compositor.focus >= 0 && !compositor_visible(compositor.focus))
+                return *why = "the keys are with a window that is gone or put away", 0;
+        if (compositor.table->focus != (compositor.focus < 0 ? WINDOWS : (unsigned int)compositor.focus))
+                return *why = "the table's focus is not the compositor's", 0;
+        return 1;
+}
+
+/*
+        Each window shown is drawn in its own colour at its middle, where the window on top there is. A point beside a
+        window above the one drawn there is skipped: that window's line is drawn in its shadow ink just outside its
+        picture, and the line is not the window beneath's to be seen through.
+*/
+static int life_drawn(void)
+{
+        struct compositor_frame frame;
+        unsigned int pitch = compositor.scanout_pitch / 4;
+
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                int x, y, top = COMPOSITOR_NONE, beside = 0;
+
+                if (!compositor_visible(row))
+                        continue;
+                compositor_frame_of(row, &frame);
+                x = frame.x + frame.width / 2;
+                y = frame.y + frame.height / 2;
+                for (unsigned int at = compositor.stacked; at-- > 0;)
+                {
+                        struct compositor_frame other;
+                        int q = compositor.stack[at];
+
+                        if (!compositor_visible(q))
+                                continue;
+                        compositor_frame_of(q, &other);
+                        if (x >= other.x && x < other.x + other.width && y >= other.y && y < other.y + other.height)
+                        {
+                                top = q;
+                                break;
+                        }
+                        if (x >= other.x - 2 && x < other.x + other.width + 2 && y >= other.y - 2 && y < other.y + other.height + 2)
+                                beside = 1;
+                }
+                if (top < 0 || beside)
+                        continue;
+                if ((compositor.scanout[y * pitch + x] & 0xffffffu) != life_colour(top))
+                        return 0;
+        }
+        return 1;
+}
+
+// The pixels of a closed window's colour left where it was drawn: none, once it is gone and the screen is presented.
+static unsigned int life_ghost(int row, const struct compositor_frame *was)
+{
+        unsigned int pitch = compositor.scanout_pitch / 4, left = 0;
+
+        for (int y = was->y; y < was->y + was->height; y++)
+                for (int x = was->x; x < was->x + was->width; x++)
+                        if (x >= 0 && y >= 0 && x < compositor.width && y < compositor.height &&
+                            (compositor.scanout[y * pitch + x] & 0xffffffu) == life_colour(row))
+                                left++;
+        return left;
+}
+
+static void life_present(void)
+{
+        compositor_damage(0, 0, compositor.width, compositor.height);
+        compositor_present();
+}
+
+// A picture of width by height on a row, drawn in the row's colour and knocked on as a program would: the picture
+// is cut to the buffer's stride and room_rows, which is how far the program may draw.
+static void life_paint(int row, int width, int height, int room_rows)
+{
+        struct windows address_to table = compositor.table;
+        unsigned int address_to pixels = windows_buffer(table, row, 0);
+        int stride = (int)table->stride;
+        int cut_w = width > stride ? stride : width, cut_h = height > room_rows ? room_rows : height;
+
+        for (int line = 0; line < cut_h; line++)
+                for (int column = 0; column < cut_w; column++)
+                        pixels[line * stride + column] = life_colour(row);
+        table->width[row] = (unsigned int)width;
+        table->height[row] = (unsigned int)height;
+        table->buffer_index[row] = 0;
+        table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = 0;
+        table->damage_height[row] = (unsigned int)height;
+        table->frame[row]++;
+        compositor_take(row);
+}
+
+// The hand's close, then the door's: the program has gone, so the window is left as the door leaves it.
+static void life_close(int row)
+{
+        compositor_close(row);
+        compositor_popup_leave(row);
+        compositor_clip_leave(row);
+        compositor_leave(row);
+}
+
+// One step, presented and held: the step happened, and the table, the stacking, the focus and the drawing hold.
+static void life_step(const char *step, int happened)
+{
+        const char *why = 0;
+        int okay;
+
+        life_present();
+        okay = life_holds(&why) && life_drawn();
+        checks++;
+        if (!happened || !okay)
+        {
+                failures++;
+                string_format(log, "  FAIL lifecycle %s: %s\n", step, !happened ? "the step did not happen" :
+                              why ? why : "a window is not drawn where it is");
+                log_flush();
+        }
+}
+
+static void check_compositor_lifecycle(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    struct compositor_frame was;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("lifecycle: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->motion = 0; // the landing runs, so the first pictures are the ones a window shows
+    table->focus = WINDOWS; // as the table is made: no row has the keys
+
+    // Opened at the edges: off the top left, past the bottom right, and larger than the screen.
+    table->x[1] = -30, table->y[1] = -20;
+    life_paint(1, 100, 80, GLASS_SIDE);
+    life_step("open off the top left", compositor.showing[1] != 0);
+    check("lifecycle: a window opened off the top left is put on the screen", life_on(1));
+    check("lifecycle: and with no keys asked for it takes none", compositor.focus == COMPOSITOR_NONE);
+
+    table->x[2] = 250, table->y[2] = 240;
+    life_paint(2, 60, 60, GLASS_SIDE);
+    life_step("open past the bottom right", compositor.showing[2] != 0);
+    check("lifecycle: a window opened past the bottom right is put whole on the screen",
+          life_on(2) && compositor.x[2] + (int)compositor.w[2] <= GLASS_SIDE && compositor.y[2] + (int)compositor.h[2] <= GLASS_SIDE);
+
+    table->x[3] = 0, table->y[3] = 0;
+    life_paint(3, 400, 300, GLASS_SIDE);
+    life_step("open larger than the screen", compositor.showing[3] != 0);
+    check("lifecycle: a window larger than the screen is shown no larger than the screen, on it",
+          compositor.w[3] == GLASS_SIDE && compositor.h[3] == GLASS_SIDE && life_on(3));
+
+    // Moved: to the bottom right, and off every screen either way.
+    compositor_place(1, 200, 200);
+    life_step("move a window to the bottom right", compositor.showing[1] != 0);
+    check("lifecycle: a window moved to the bottom right is kept whole on the screen", life_on(1));
+    compositor_place(1, 5000, 5000);
+    life_step("move a window off the bottom right", compositor.showing[1] != 0);
+    check("lifecycle: a window moved off every screen is brought back on to it", life_on(1));
+    compositor_place(1, -5000, -5000);
+    life_step("move a window off the top left", compositor.showing[1] != 0);
+    check("lifecycle: and off the top left too", life_on(1));
+
+    // Put away and brought back: the keys go under it, and come back when its tab is pressed.
+    compositor_focus(2);
+    life_step("give the keys to the second window", compositor.focus == 2);
+    compositor_minimize_row(2);
+    life_step("put the focused window away", (compositor.state[2] & WINDOW_MINIMIZED) != 0);
+    check("lifecycle: a window put away is still shown and stacked, and the keys go to the top one shown",
+          compositor.showing[2] && compositor_stack_place(2) >= 0 && !compositor_visible(2) && compositor.focus == 3);
+    compositor_minimize_row(2);
+    life_step("put away a window again", 1);
+    check("lifecycle: a window put away twice is put away once, the keys where they were", compositor.focus == 3);
+    compositor_reveal(2);
+    life_step("bring the put away window back", compositor_visible(2) != 0);
+    check("lifecycle: bringing it back rises it over the others and gives it the keys",
+          compositor.focus == 2 && compositor.stack[compositor.stacked - 1] == 2 && table->state[2] == 0);
+
+    // Closed without the keys: no pixel of its own is left, and the keys stay where they were.
+    compositor_frame_of(1, &was);
+    life_close(1);
+    life_step("close a window without the keys", !compositor.showing[1]);
+    check("lifecycle: a closed window leaves none of its colour on the screen", life_ghost(1, &was) == 0);
+    check("lifecycle: and the keys stay with the window they were with", compositor.focus == 2);
+
+    // Closed with the keys: they go to the top window shown.
+    compositor_frame_of(2, &was);
+    life_close(2);
+    life_step("close the focused window", !compositor.showing[2]);
+    check("lifecycle: closing the focused window gives the keys to the top window shown", compositor.focus == 3);
+    check("lifecycle: and it leaves none of its colour on the screen", life_ghost(2, &was) == 0);
+
+    compositor_frame_of(3, &was);
+    life_close(3);
+    life_step("close the last window shown", !compositor.showing[3]);
+    check("lifecycle: with none shown the keys are with none, and the table says so",
+          compositor.focus == COMPOSITOR_NONE && compositor.stacked == 0 && table->focus == WINDOWS);
+    check("lifecycle: and the last one leaves none of its colour on the screen", life_ghost(3, &was) == 0);
+
+    // A window put away then closed is gone whole: the next program in its row starts shown, put away by nothing.
+    life_paint(1, 100, 80, GLASS_SIDE);
+    life_step("open a window in a row that was closed", compositor.showing[1] != 0);
+    compositor_minimize_row(1);
+    life_step("put it away", (compositor.state[1] & WINDOW_MINIMIZED) != 0);
+    life_close(1);
+    life_step("close it put away", !compositor.showing[1] && compositor.stacked == 0);
+    life_paint(1, 100, 80, GLASS_SIDE);
+    life_step("the next program in the row opens", compositor.showing[1] != 0);
+    check("lifecycle: the next program in a row is not put away by the one that closed in it",
+          !(compositor.state[1] & WINDOW_MINIMIZED) && compositor_visible(1) && table->state[1] == 0);
+    life_close(1);
+    life_step("close it again", !compositor.showing[1]);
+
+    // Many windows at once, every row, scattered over the edges, closed in an order that is not the opening one.
+    for (int row = 0; row < WINDOWS; row++)
+    {
+        table->x[row] = (row * 37) % 230 - 20;
+        table->y[row] = (row * 53) % 230 - 20;
+        life_paint(row, 60, 40, GLASS_SIDE);
+        life_step("open every row", compositor.showing[row] != 0);
+    }
+    check("lifecycle: thirty-two windows are shown, each on the screen", life_on(0) && life_on(31));
+    for (int at = 0; at < WINDOWS; at++)
+    {
+        int row = (at * 11 + 5) % WINDOWS;
+
+        if (!compositor.showing[row])
+            continue;
+        life_close(row);
+        life_step("close one of many", !compositor.showing[row]);
+    }
+    check("lifecycle: and when all are closed nothing is stacked, shown or focused",
+          compositor.stacked == 0 && compositor.focus == COMPOSITOR_NONE);
+}
+
+/*
+        The same sweep across the seam of two screens, A (320 by 192) and B (256 by 240) side by side: a window that
+        straddles the seam is drawn on both, one put past B's edge is kept on B, and one put off both is brought back on.
+*/
+static void check_compositor_lifecycle_seam(void)
+{
+    static unsigned int scanout[SCREENS_W * SCREENS_H];
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    struct windows address_to table;
+    struct compositor_frame was;
+    char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = SCREENS_W;
+    compositor.height = SCREENS_H;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = scanout;
+    compositor.scanout_pitch = SCREENS_W * 4;
+    compositor.outputs = 2;
+    compositor.screen[0][2] = SCREENS_A_W, compositor.screen[0][3] = SCREENS_A_H;
+    compositor.screen[1][0] = SCREENS_A_W, compositor.screen[1][2] = SCREENS_B_W, compositor.screen[1][3] = SCREENS_H;
+    memory_copy(compositor.output[0].name, names[0], sizeof(names[0]));
+    memory_copy(compositor.output[1].name, names[1], sizeof(names[1]));
+    compositor.stride = compositor.most_w = SCREENS_A_W;
+    compositor.room_h = compositor.most_h = SCREENS_H;
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("lifecycle seam: the table is mapped", false);
+        return;
+    }
+    table = compositor.table = (struct windows address_to)mapped;
+    table->motion = 0;
+    table->focus = WINDOWS; // as the table is made: no row has the keys
+    compositor.pixels = table->pixels = header;
+    compositor.buffer = table->buffer = buffer;
+    table->stride = SCREENS_A_W;
+    compositor_table_outputs();
+
+    table->x[1] = 280, table->y[1] = 20;
+    life_paint(1, 80, 60, SCREENS_H);
+    life_step("open across the seam", compositor.showing[1] != 0);
+    check("lifecycle seam: a window across the seam is drawn on the screens it straddles", life_on(1));
+
+    table->x[2] = 500, table->y[2] = 200;
+    life_paint(2, 100, 100, SCREENS_H);
+    life_step("open past B's bottom right", compositor.showing[2] != 0);
+    check("lifecycle seam: a window past B's bottom right is kept on B", life_on(2) && compositor.x[2] >= SCREENS_A_W);
+
+    table->x[3] = 100, table->y[3] = 100;
+    life_paint(3, 400, 200, SCREENS_H);
+    life_step("open wider than A", compositor.showing[3] != 0);
+    check("lifecycle seam: a window wider than the widest screen is cut to it, and on the screens",
+          compositor.w[3] == SCREENS_A_W && life_on(3));
+
+    compositor_place(2, -50, 150);
+    life_step("move B's window to the left, past A", compositor.showing[2] != 0);
+    check("lifecycle seam: a window moved past the left of A is kept on the screens", life_on(2));
+    compositor_place(2, 9000, 9000);
+    life_step("move B's window off both screens", compositor.showing[2] != 0);
+    check("lifecycle seam: a window moved off both screens is brought back on to B", life_on(2));
+    compositor_place(3, 300, 50);
+    life_step("move the wide window across the seam", compositor.showing[3] != 0);
+    check("lifecycle seam: a wide window moved across the seam is on the screens", life_on(3));
+
+    compositor_focus(1);
+    life_step("give the keys to the window on A", compositor.focus == 1);
+    compositor_frame_of(1, &was);
+    life_close(1);
+    life_step("close the window on A with the keys", !compositor.showing[1]);
+    check("lifecycle seam: closing it gives the keys to the top window shown, which is on the screens",
+          compositor.focus == 3 && life_on(3));
+    check("lifecycle seam: and it leaves none of its colour on either screen", life_ghost(1, &was) == 0);
+
+    compositor_frame_of(2, &was);
+    life_close(2);
+    life_step("close the window on B", !compositor.showing[2]);
+    check("lifecycle seam: and the one on B leaves none of its colour either", life_ghost(2, &was) == 0);
+}
+
+/*
         A window takes the keys when it first shows only when its launch was asked for: MOONWATER_ASKED=1 in the
         environment its program started with (windows_asked_take reads it and empties it, as it does a placement). A
         window its program opened on its own is raised and shows, and the keys stay where they were.
@@ -133821,6 +134234,8 @@ b32 main()
         check_compositor_lit();
         check_compositor_chrome();
         check_compositor_minimise();
+        check_compositor_lifecycle();
+        check_compositor_lifecycle_seam();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_wheel();

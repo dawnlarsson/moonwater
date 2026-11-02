@@ -2275,6 +2275,13 @@ static void compositor_screens_box(const int (*screens)[4], unsigned int count, 
         }
 }
 
+// The line a window keeps off a span's edges: none where the window is exactly the span, its line having no room there
+// (kept at its contents, the last column or row would be off the screen).
+static int compositor_keep_line(int line, int size, int span)
+{
+        return size == span ? 0 : line;
+}
+
 /*
         A window, width by height with a line round it, kept where a person
         can reach it: on the space, all of it when it fits and its top left
@@ -2288,10 +2295,13 @@ static void compositor_screen_keep_window(const int (*screens)[4], unsigned int 
                                           int height, int line, int grab)
 {
         int box[4], strip = height < grab ? height : grab, need = width < grab ? width : grab, owner;
+        int line_x, line_y;
 
         compositor_screens_box(screens, count, box);
-        *x = compositor_fit(*x, box[0] + line, box[0] + box[2] - width - line);
-        *y = compositor_fit(*y, box[1] + line, box[1] + box[3] - height - line);
+        line_x = compositor_keep_line(line, width, box[2]);
+        line_y = compositor_keep_line(line, height, box[3]);
+        *x = compositor_fit(*x, box[0] + line_x, box[0] + box[2] - width - line_x);
+        *y = compositor_fit(*y, box[1] + line_y, box[1] + box[3] - height - line_y);
         if (count < 2)
                 return;
 
@@ -2305,8 +2315,10 @@ static void compositor_screen_keep_window(const int (*screens)[4], unsigned int 
                         return;
         }
         owner = compositor_screen_owner(screens, count, *x, *y, width, height);
-        *x = compositor_fit(*x, screens[owner][0] + line, screens[owner][0] + screens[owner][2] - width - line);
-        *y = compositor_fit(*y, screens[owner][1] + line, screens[owner][1] + screens[owner][3] - height - line);
+        line_x = compositor_keep_line(line, width, screens[owner][2]);
+        line_y = compositor_keep_line(line, height, screens[owner][3]);
+        *x = compositor_fit(*x, screens[owner][0] + line_x, screens[owner][0] + screens[owner][2] - width - line_x);
+        *y = compositor_fit(*y, screens[owner][1] + line_y, screens[owner][1] + screens[owner][3] - height - line_y);
 }
 
 /*
