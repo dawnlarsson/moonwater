@@ -10804,8 +10804,9 @@ test(string_compare_folded_direction)
         return true;
 }
 
-/* The wide tiers of string_compare_folded against the byte reference: every
-   width from 0 to 300, both strings laid across the page edge at every offset
+/* The wide tiers of string_compare_folded and string_compare_folded_max against
+   the byte reference: every width from 0 to 300, bounds either side of every
+   window, both strings laid across the page edge at every offset
    in the last seventy bytes of a page (and one at the start of one), and each
    byte of the second string set to the values that sit on the fold's edges,
    so the first difference lands in every position of every tier. */
@@ -10836,6 +10837,16 @@ static bool folded_tier_pass(void)
 
                 fail(string_compare_folded(one, two) == folded_reference(one, two));
                 fail(string_compare_folded(two, one) == folded_reference(two, one));
+                for (positive bound = 0; bound < 16; bound++) {
+                        static const positive bounds[16] = { 1, 15, 16, 17, 31, 32, 33,
+                                63, 64, 65, 127, 128, 129, 200, 300, 301 };
+                        positive wanted = bounds[bound];
+
+                        fail(string_compare_folded_max(one, two, wanted)
+                             == folded_reference_max(one, two, wanted));
+                        fail(string_compare_folded_max(two, one, wanted)
+                             == folded_reference_max(two, one, wanted));
+                }
 
                 for (positive at = 0; at <= length; at++) {
                         p8 keep = two[at];
@@ -10846,6 +10857,10 @@ static bool folded_tier_pass(void)
                                      == folded_reference(one, two));
                                 fail(string_compare_folded(two, one)
                                      == folded_reference(two, one));
+                                fail(string_compare_folded_max(one, two, length + 1)
+                                     == folded_reference_max(one, two, length + 1));
+                                fail(string_compare_folded_max(two, one, length + 64)
+                                     == folded_reference_max(two, one, length + 64));
                         }
 
                         two[at] = keep;

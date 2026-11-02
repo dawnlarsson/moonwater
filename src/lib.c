@@ -53825,8 +53825,22 @@ __asm__(
     ASM_FUNC(string_compare_folded_max)
     "xor %eax, %eax\n   test %rdx, %rdx\n   jz 9f\n"
     ASM_USERSPACE_WIDE(
-    "cmp $16, %rdx\n   jb 1f\n   mov $0x3f3f3f3f, %eax\n   movd %eax, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0x9a9a9a9a, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "cmp $16, %rdx\n   jb 1f\n"
+    ".Lcfm_sse_body:\n   mov $0x3f3f3f3f, %eax\n   movd %eax, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0x9a9a9a9a, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
     "mov $0x20202020, %eax\n   movd %eax, %xmm7\n   pshufd $0, %xmm7, %xmm7\n   pxor %xmm4, %xmm4\n"
+    //
+    //      The first sixteen bytes, as the loop below takes them. Only a call
+    //      that still has a hundred and twenty eight or more to go after them
+    //      asks which wide tier the machine has: the tiers cost a vzeroupper
+    //      and their constants to enter and leave, and a pair shorter than
+    //      that, or answered inside sixteen bytes, pays none of it.
+    //
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 12f\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 12f\n"
+    "movdqu (%rdi), %xmm0\n   movdqu (%rsi), %xmm1\n   movdqa %xmm0, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm0\n   movdqa %xmm1, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pcmpeqb %xmm4, %xmm0\n   pandn %xmm1, %xmm0\n"
+    "pmovmskb %xmm0, %ecx\n   cmp $0xffff, %ecx\n   jne 11f\n   add $16, %rdi\n   add $16, %rsi\n   sub $16, %rdx\n"
+    "cmp $16, %rdx\n   jb 1f\n   cmp $128, %rdx\n   jae .Lcfm_avx_check\n"
     "10:  mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 12f\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja 12f\n"
     "movdqu (%rdi), %xmm0\n   movdqu (%rsi), %xmm1\n   movdqa %xmm0, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
     "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm0\n   movdqa %xmm1, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
@@ -53851,6 +53865,66 @@ __asm__(
     "2:  movzbl (%rdi,%rdx), %eax\n   movzbl (%rsi,%rdx), %ecx\n   lea -'A'(%rax), %r8d\n   lea 32(%rax), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %eax\n"
     "lea -'A'(%rcx), %r8d\n   lea 32(%rcx), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %ecx\n   sub %ecx, %eax\n   jne 9f\n   test %ecx, %ecx\n   jz 9f\n   inc %rdx\n   jnz 2b\n"
     "9:  #\n" ASM_RET
+    ASM_USERSPACE_WIDE(
+    ".Lcfm_sse_check:\n   cmp $16, %rdx\n   jb 1b\n   cmp $128, %rdx\n   jae .Lcfm_avx_check\n   jmp .Lcfm_sse_body\n"
+    ".Lcfm_avx_check:\n   cmpb $0, cpu_has_avx2(%rip)\n   je 10b\n   jmp .Lcfm_avx_dispatch\n"
+    ".Lcfm_avx_dispatch:\n   cmp $64, %rdx\n   jb .Lcfm_ymm_tier\n   cmpb $0, cpu_has_avx512(%rip)\n   jne .Lcfm_zmm\n"
+    ".Lcfm_ymm_tier:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lcfm_sse_body\n"
+    ".Lcfm_ymm:\n"
+    "mov $0x3f3f3f3f, %eax\n   vmovd %eax, %xmm5\n   vpbroadcastb %xmm5, %ymm5\n   mov $0x9a9a9a9a, %eax\n   vmovd %eax, %xmm6\n   vpbroadcastb %xmm6, %ymm6\n"
+    "mov $0x20202020, %eax\n   vmovd %eax, %xmm7\n   vpbroadcastb %xmm7, %ymm7\n   vpxor %xmm4, %xmm4, %xmm4\n"
+    ".Lcfm_ymm_turn:\n   cmp $32, %rdx\n   jb .Lcfm_ymm_exit\n"
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfe0, %ecx\n   ja .Lcfm_page\n"
+    "mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfe0, %ecx\n   ja .Lcfm_page\n"
+    "vmovdqu (%rdi), %ymm0\n   vmovdqu (%rsi), %ymm1\n"
+    "vpaddb %ymm5, %ymm0, %ymm2\n   vpcmpgtb %ymm2, %ymm6, %ymm3\n   vpand %ymm7, %ymm3, %ymm3\n   vpaddb %ymm3, %ymm0, %ymm0\n"
+    "vpaddb %ymm5, %ymm1, %ymm2\n   vpcmpgtb %ymm2, %ymm6, %ymm3\n   vpand %ymm7, %ymm3, %ymm3\n   vpaddb %ymm3, %ymm1, %ymm1\n"
+    "vpcmpeqb %ymm0, %ymm1, %ymm1\n   vpcmpeqb %ymm4, %ymm0, %ymm0\n   vpandn %ymm1, %ymm0, %ymm0\n"
+    "vpmovmskb %ymm0, %ecx\n   cmp $-1, %ecx\n   jne .Lcfm_ymm_diff\n"
+    "add $32, %rdi\n   add $32, %rsi\n   sub $32, %rdx\n   jmp .Lcfm_ymm_turn\n"
+    ".Lcfm_ymm_diff:\n   vzeroupper\n   not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rdi\n   add %rcx, %rsi\n   sub %rcx, %rdx\n   jmp .Lcfm_answer\n"
+    ".Lcfm_ymm_exit:\n   vzeroupper\n   jmp .Lcfm_sse_check\n"
+    ".Lcfm_zmm:\n"
+    "mov $0x41414141, %eax\n   vpbroadcastb %eax, %zmm8\n   mov $25, %eax\n   vpbroadcastb %eax, %zmm9\n   mov $0x20202020, %eax\n   vpbroadcastb %eax, %zmm10\n"
+    ".Lcfm_zmm_turn:\n   cmp $64, %rdx\n   jb .Lcfm_zmm_exit\n"
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfc0, %ecx\n   ja .Lcfm_page\n"
+    "mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xfc0, %ecx\n   ja .Lcfm_page\n"
+    "vmovdqu8 (%rdi), %zmm0\n   vmovdqu8 (%rsi), %zmm1\n"
+    "vpsubb %zmm8, %zmm0, %zmm2\n   vpcmpleub %zmm9, %zmm2, %k1\n   vpaddb %zmm10, %zmm0, %zmm0{%k1}\n"
+    "vpsubb %zmm8, %zmm1, %zmm2\n   vpcmpleub %zmm9, %zmm2, %k1\n   vpaddb %zmm10, %zmm1, %zmm1{%k1}\n"
+    "vpcmpneqb %zmm1, %zmm0, %k2\n   vptestnmb %zmm0, %zmm0, %k3\n   korq %k3, %k2, %k2\n   kmovq %k2, %rcx\n"
+    "test %rcx, %rcx\n   jnz .Lcfm_zmm_diff\n"
+    "add $64, %rdi\n   add $64, %rsi\n   sub $64, %rdx\n   jmp .Lcfm_zmm_turn\n"
+    ".Lcfm_zmm_diff:\n   vzeroupper\n   tzcnt %rcx, %rcx\n   add %rcx, %rdi\n   add %rcx, %rsi\n   sub %rcx, %rdx\n   jmp .Lcfm_answer\n"
+    ".Lcfm_zmm_exit:\n   vzeroupper\n   cmp $32, %rdx\n   jb .Lcfm_sse_check\n   jmp .Lcfm_ymm_tier\n"
+    //
+    //      The decisive byte is at both pointers: its two folded bytes differ,
+    //      or the first is the terminator, and their difference is the answer.
+    //
+    ".Lcfm_answer:\n   movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n"
+    "lea -'A'(%rax), %r8d\n   lea 32(%rax), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %eax\n"
+    "lea -'A'(%rcx), %r8d\n   lea 32(%rcx), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %ecx\n   sub %ecx, %eax\n   jmp 9b\n"
+    //
+    //      A page edge: within the last sixteen bytes a read still fits in,
+    //      one SSE2 step; past that, sixteen bytes the slow way. Either way the
+    //      dispatch asks again, so the wide tier resumes at once.
+    //
+    ".Lcfm_page:\n   vzeroupper\n"
+    "mov %edi, %ecx\n   and $0xfff, %ecx\n   mov %esi, %r8d\n   and $0xfff, %r8d\n   cmp %r8d, %ecx\n   cmovb %r8d, %ecx\n   cmp $0xff0, %ecx\n   ja .Lcfm_page_byte\n"
+    "mov $0x3f3f3f3f, %eax\n   movd %eax, %xmm5\n   pshufd $0, %xmm5, %xmm5\n   mov $0x9a9a9a9a, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "mov $0x20202020, %eax\n   movd %eax, %xmm7\n   pshufd $0, %xmm7, %xmm7\n   pxor %xmm4, %xmm4\n"
+    "movdqu (%rdi), %xmm0\n   movdqu (%rsi), %xmm1\n   movdqa %xmm0, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm0\n   movdqa %xmm1, %xmm2\n   paddb %xmm5, %xmm2\n   movdqa %xmm6, %xmm3\n"
+    "pcmpgtb %xmm2, %xmm3\n   pand %xmm7, %xmm3\n   paddb %xmm3, %xmm1\n"
+    "pcmpeqb %xmm0, %xmm1\n   pcmpeqb %xmm4, %xmm0\n   pandn %xmm1, %xmm0\n   pmovmskb %xmm0, %ecx\n   cmp $0xffff, %ecx\n   jne .Lcfm_page_diff\n"
+    "add $16, %rdi\n   add $16, %rsi\n   sub $16, %rdx\n   jmp .Lcfm_sse_check\n"
+    ".Lcfm_page_diff:\n   not %ecx\n   bsf %ecx, %ecx\n   add %rcx, %rdi\n   add %rcx, %rsi\n   sub %rcx, %rdx\n   jmp .Lcfm_answer\n"
+    ".Lcfm_page_byte:\n   mov $16, %r10d\n"
+    ".Lcfm_page_step:\n   movzbl (%rdi), %eax\n   movzbl (%rsi), %ecx\n"
+    "lea -'A'(%rax), %r8d\n   lea 32(%rax), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %eax\n"
+    "lea -'A'(%rcx), %r8d\n   lea 32(%rcx), %r9d\n   cmp $26, %r8d\n   cmovb %r9d, %ecx\n   sub %ecx, %eax\n   jnz 9b\n"
+    "test %ecx, %ecx\n   jz 9b\n   inc %rdi\n   inc %rsi\n   dec %rdx\n   jz 9b\n   dec %r10d\n   jnz .Lcfm_page_step\n   jmp .Lcfm_sse_check\n"
+    )
     ASM_END(string_compare_folded_max)
 
     // ------------------------------------------------------------
