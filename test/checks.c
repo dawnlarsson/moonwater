@@ -137809,8 +137809,145 @@ static fn check_caret_blink(void)
         redraw = false;
         check("caret: left alone it stays drawn and asks for no frame",
               ui_text_tick(&t, t.awake_at + UI_TEXT_BLINK_FOR_NS + 1, &redraw) == 0 && t.caret_fade == 0);
+        // The wait ends at the ten seconds, whatever phase the caret is in, so a caret that is gone then is drawn then.
+        {
+                positive due = 0;
+
+                (void)ui_caret_at(now + UI_TEXT_BLINK_FOR_NS - 50000000ull, now, now, &due);
+                check("caret: the wait ends at ten seconds, not at the next change of the wave", due == now + UI_TEXT_BLINK_FOR_NS);
+        }
         ui_text_close(&t);
         ui_kit.caret_speed = saved;
+}
+
+// The pixel at the middle of the caret's cell (column 3 of row 0) in the buffer a frame was drawn into.
+static unsigned int check_caret_pixel(struct windows address_to table, unsigned int own)
+{
+        const unsigned int address_to grid = (const unsigned int address_to)terminal_grid(windows_buffer(table, own, terminal.shown));
+
+        return grid[(unsigned int)(terminal.cell_h / 2 * terminal.pitch) + 3 * terminal.cell_w + terminal.cell_w / 2];
+}
+
+/*
+        The terminal's caret, as terminal.c draws it: the field's blink (ui_caret_at) restarted by a key, a block blended from
+        its two ways round by the cover (none at 0 is the cell as written), a bar as wide as the setting, and the settings read
+        from the kit alone (terminal.c has no caret setting of its own, as check_one_blink reads the windows).
+*/
+static fn check_caret_terminal(void)
+{
+        static const unsigned int widths[3] = {1, 2, 3};
+        unsigned int saved_speed = ui_kit.caret_speed, pixels[60 * 20];
+        b32 was_shown = shown, was_focused = terminal.focused;
+        positive since = terminal.caret_since, awake = terminal.caret_awake, now = 3000000000000ull, width_was = terminal.width;
+        positive height_was = terminal.height, pitch_was = terminal.pitch, cell_h_was = terminal.cell_h;
+        long cycle;
+
+        ui_kit.caret_speed = UI_CARET_NORMAL;
+        cycle = (long)ui_caret_cycle();
+        b32 bar_ok = true;
+        unsigned int drawn;
+
+        check("terminal caret: a blend is the first colour at none, the second at all, and between at half",
+              terminal_blend(0x000000, 0xffffff, 0) == 0 && terminal_blend(0x000000, 0xffffff, UI_CARET_FULL) == 0xffffff &&
+              (terminal_blend(0x000000, 0xffffff, UI_CARET_FULL / 2) & 0xff) >= 127 && (terminal_blend(0x000000, 0xffffff, UI_CARET_FULL / 2) & 0xff) <= 128);
+
+        shown = true;
+        terminal.focused = true;
+        ui_kit.caret_speed = UI_CARET_NORMAL;
+        terminal_caret_restart(now);
+        check("terminal caret: solid at a key, and gone three quarters round its cycle", terminal_caret_cover_at(now) == UI_CARET_FULL &&
+              terminal_caret_cover_at(now + (positive)cycle / 2) == 0);
+        terminal_caret_restart(now + (positive)cycle / 2 + 5000000ull);
+        check("terminal caret: a key restarts it solid", terminal_caret_cover_at(now + (positive)cycle / 2 + 5000000ull) == UI_CARET_FULL);
+        ui_kit.caret_speed = UI_CARET_OFF;
+        check("terminal caret: off is solid whatever the time", terminal_caret_cover_at(now + (positive)cycle / 2) == UI_CARET_FULL);
+        ui_kit.caret_speed = UI_CARET_NORMAL;
+        terminal.focused = false;
+        check("terminal caret: a window without the keys draws it solid", terminal_caret_cover_at(now + (positive)cycle / 2) == UI_CARET_FULL);
+
+        // A bar caret's width: the caret setting's pixels, drawn as the marks of a cell, one row of the buffer counted.
+        terminal.width = 60, terminal.height = 20, terminal.pitch = 60, terminal.cell_h = 20;
+        for (positive k = 0; k < 3; k++)
+        {
+                struct window_cell bar = {'x', 0, 0, WINDOW_CELL_BAR};
+
+                memory_zero(pixels, sizeof(pixels));
+                terminal_decorate(pixels, &bar, 0, 0, 1, 0xffffffu, widths[k] * 2);
+                drawn = 0;
+                for (unsigned int x = 0; x < 60; x++)
+                        drawn += pixels[5 * 60 + x] == 0xffffffu;
+                bar_ok = bar_ok && drawn == widths[k] * 2;
+        }
+        check("terminal caret: a bar is as wide as the caret setting says, in device pixels", bar_ok);
+        terminal.width = width_was, terminal.height = height_was, terminal.pitch = pitch_was, terminal.cell_h = cell_h_was;
+
+        // The frames: a block caret on a blank cell is drawn at the cover its frame was made at, so its paper is the default
+        // ink at full, the default paper at none, and between at the blend; and a frame whose cover changed repaints it.
+        {
+                struct windows address_to table = terminal.own.table;
+                unsigned int own = terminal.own.row, at_full, at_gone, at_mid, cover_full, cover_gone, cover_mid;
+                int index_full, index_gone, index_mid;
+                positive mid = clock_monotonic_nanoseconds();
+                positive quarter = (positive)cycle / 4;
+                b32 framed;
+
+                ui_kit.caret_speed = UI_CARET_NORMAL;
+                cursor_hide();
+                term_bytes((const p8 address_to) "\x1b[H\x1b[2Kabc", 11);
+                cursor_show();
+                terminal.focused = true;
+
+                // The phase is set for each frame: solid at its start, gone at three quarters of a cycle, and between at the
+                // middle of the falling fade (a quarter cycle in). Each frame is taken before the next, as the compositor does, and
+                // its caret's pixel is read at once, since the buffer is drawn into again by the frame after.
+                terminal.caret_awake = mid;
+                terminal.caret_since = mid;
+                framed = terminal_frame();
+                table->shown[own] = table->frame[own];
+                index_full = terminal.shown, cover_full = terminal.caret_cover[index_full];
+                at_full = check_caret_pixel(table, own);
+                terminal.caret_since = mid - (positive)cycle / 2;
+                framed = terminal_frame() && framed;
+                table->shown[own] = table->frame[own];
+                index_gone = terminal.shown, cover_gone = terminal.caret_cover[index_gone];
+                at_gone = check_caret_pixel(table, own);
+                terminal.caret_since = mid - quarter;
+                framed = terminal_frame() && framed;
+                table->shown[own] = table->frame[own];
+                index_mid = terminal.shown, cover_mid = terminal.caret_cover[index_mid];
+                at_mid = check_caret_pixel(table, own);
+                check("terminal caret: the frames are made and taken", framed && cover_full == UI_CARET_FULL && cover_gone == 0 &&
+                      cover_mid > 0 && cover_mid < UI_CARET_FULL);
+                check("terminal caret: the block is the default ink at full cover and the default paper at none",
+                      at_full == (terminal_default_ink() & 0xffffffu) && at_gone == (terminal_default_paper() & 0xffffffu));
+                check("terminal caret: between the two, the block is the blend at its cover",
+                      at_mid == terminal_blend(terminal_default_paper() & 0xffffffu, terminal_default_ink() & 0xffffffu, cover_mid));
+        }
+        terminal.caret_since = since, terminal.caret_awake = awake;
+
+        // The settings come from the kit alone: terminal.c asks ui_caret_at and ui_caret_thick, and reads no setting of its own.
+        {
+                positive size = 0, bytes = compositor_map_file((string_address) "src/canvas/ui/terminal.c", &size);
+
+                if (bytes)
+                {
+                        const char address_to text = (const char address_to)bytes;
+
+                        check("terminal caret: the blink and the width come from ui.c's kit, the same as a field's",
+                              check_hits(text, size, "ui_caret_at(") >= 1 && check_hits(text, size, "ui_caret_thick()") >= 1 &&
+                              check_hits(text, size, "ui_kit.caret") == 0 && check_hits(text, size, "UI_CARET_SLOW") == 0 &&
+                              check_hits(text, size, "UI_CARET_FAST") == 0 && check_hits(text, size, "UI_CARET_OFF") == 0 &&
+                              check_hits(text, size, "UI_CARET_THICK") == 0);
+                        compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+                }
+                else
+                        string_format(log, "  NOT RUN: the terminal's caret settings, the sources are not here\n");
+        }
+
+        shown = was_shown;
+        terminal.focused = was_focused;
+        terminal.caret_since = since, terminal.caret_awake = awake;
+        ui_kit.caret_speed = saved_speed;
 }
 #endif
 
@@ -141015,6 +141152,7 @@ b32 main()
         check_one_digits();
 #if MOONWATER_UI_ANY
         check_caret_blink();
+        check_caret_terminal();
 #endif
         check_no_input_codes();
         check_no_shapes_by_hand();

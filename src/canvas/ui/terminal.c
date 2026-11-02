@@ -214,7 +214,20 @@ static struct
         b32 select_touch, touch_select, touch_held;
         struct ui_click click;     // the kit's click count: a double click and a triple, as a field's
         int clicks;
-} terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1};
+        // The caret's blink (ui_caret_at, as a field's): when its phase restarted and when it was last awake (a key or a
+        // move), the caret's place and whether it was shown when last seen; and the frame cell and cover each buffer holds,
+        // so a frame draws a caret whose cover changed, as one whose cells changed.
+        positive caret_since, caret_awake;
+        unsigned int caret_row, caret_column;
+        b32 caret_seen;
+        unsigned int caret_at[2], caret_cover[2];
+} terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1, .caret_at = {~0u, ~0u}};
+
+// The caret as the frame being made draws it: its index in the frame (~0 for none), its cover, and whether it is a block
+// (its cell is turned round, so the two ways round are blended) and the marks a bar or an underline put on its cell.
+static unsigned int terminal_caret_index = ~0u, terminal_caret_cover = UI_CARET_FULL;
+static b32 terminal_caret_block;
+static unsigned int terminal_caret_marks;
 
 static unsigned int terminal_colour[256];
 
@@ -594,8 +607,10 @@ static void terminal_build(struct window_cell address_to into)
         unsigned int skip, line = terminal_top(terminal.view, &skip);
         unsigned int row = 0;
         const struct window_cell address_to block = shown && shown_block ? row_cells(shown_row) + shown_column : null;
+        const struct window_cell address_to caret = shown ? row_cells(shown_row) + shown_column : null;
 
         terminal.cursor_at = ~0u;
+        terminal_caret_index = ~0u;
 
         while (row < ROWS && line != window->head)
         {
@@ -617,6 +632,8 @@ static void terminal_build(struct window_cell address_to into)
                         memory_copy(out, cells + from, (positive)used * sizeof(struct window_cell));
                         if (block >= cells + from && block < cells + from + used)
                                 terminal.cursor_at = row * COLUMNS + (unsigned int)(block - (cells + from));
+                        if (caret >= cells + from && caret < cells + from + used)
+                                terminal_caret_index = row * COLUMNS + (unsigned int)(caret - (cells + from));
                         memory_fill_u64_aligned(out + used, COLUMNS - used, BLANK_CELL_WORD);
                         terminal_select_mark(out, line, from);
                 }
@@ -628,6 +645,70 @@ static void terminal_build(struct window_cell address_to into)
         if (row < ROWS)
                 memory_fill_u64_aligned(into + (unsigned long)row * COLUMNS, (ROWS - row) * COLUMNS,
                                         BLANK_CELL_WORD);
+}
+
+/*
+        The caret's cover at now, from the field's own blink (ui.c's ui_caret_at): solid unless the window has the keys and a
+        caret is shown. A key or a move restarts its phase (terminal_caret_restart, terminal_caret_step).
+*/
+static unsigned int terminal_caret_cover_at(positive now)
+{
+        positive due = 0;
+
+        if (!shown || !terminal.focused)
+                return UI_CARET_FULL;
+        return ui_caret_at(now, terminal.caret_since, terminal.caret_awake, &due);
+}
+
+// The caret of the frame being made: read here, in its own function, since terminal_frame has a local named shown.
+static void terminal_caret_frame(void)
+{
+        terminal_caret_cover = terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at(clock_monotonic_nanoseconds());
+        terminal_caret_block = shown && shown_block;
+        terminal_caret_marks = shown ? shown_marks : 0;
+}
+
+static void terminal_caret_restart(positive now)
+{
+        terminal.caret_since = terminal.caret_awake = now;
+}
+
+// The caret's phase restarts when it moves; the loop's wait ends when its cover next changes.
+static void terminal_caret_step(positive now, long address_to timeout)
+{
+        positive due = 0;
+
+        if (shown != terminal.caret_seen || shown_row != terminal.caret_row || shown_column != terminal.caret_column)
+        {
+                terminal.caret_seen = shown, terminal.caret_row = shown_row, terminal.caret_column = shown_column;
+                terminal_caret_restart(now);
+        }
+        if (!shown || !terminal.focused)
+                return;
+        ui_caret_at(now, terminal.caret_since, terminal.caret_awake, &due);
+        if (due && (*timeout < 0 || (long)(due - now) < *timeout))
+                *timeout = (long)(due - now);
+}
+
+// A colour the cover of the way from one to the other, channel by channel: from at cover 0, to at UI_CARET_FULL.
+static unsigned int terminal_blend(unsigned int from, unsigned int to, unsigned int cover)
+{
+        unsigned int out = 0;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+                out |= ((((from >> shift) & 255) * (UI_CARET_FULL - cover) + ((to >> shift) & 255) * cover + UI_CARET_FULL / 2) /
+                        UI_CARET_FULL) << shift;
+        return out;
+}
+
+// A row's span of changed columns taken to cover one column as well: the column alone where none changed (a span of none
+// is first and last both zero).
+static void terminal_span_take(unsigned int address_to first, unsigned int address_to last, unsigned int column)
+{
+        if (*last > *first)
+                *first = *first < column ? *first : column, *last = *last > column + 1 ? *last : column + 1;
+        else
+                *first = column, *last = column + 1;
 }
 
 /*
@@ -692,13 +773,15 @@ static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned
 
 // What a style paints over the cell: an underline, a strike and the bar.
 static void terminal_decorate(unsigned int address_to pixels, const struct window_cell address_to cell,
-                              int x, int y, unsigned int cells, unsigned int ink)
+                              int x, int y, unsigned int cells, unsigned int ink, unsigned int caret)
 {
         unsigned int width = terminal.cell_w * cells;
         unsigned int thick = (unsigned int)((terminal.grid.thickness + 0x8000) >> 16);
         int rule;
 
         thick = thick ? thick : terminal.cell_h / 16 ? terminal.cell_h / 16 : 1;
+        // A caret's own bar or underline is as wide as the caret setting says (caret is that width in device pixels, 0 for none).
+        thick = caret ? caret : thick;
 
         if (cell->flags & WINDOW_CELL_UNDERLINE)
         {
@@ -716,7 +799,7 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
         }
 
         if (cell->flags & WINDOW_CELL_BAR)
-                terminal_fill(pixels, x, y, terminal.cell_w / 8 ? terminal.cell_w / 8 : 1,
+                terminal_fill(pixels, x, y, caret ? caret : terminal.cell_w / 8 ? terminal.cell_w / 8 : 1,
                               terminal.cell_h, ink);
 
         // A touch selection's end: a flat handle, a quarter cell wide, down the outer edge of its cell in the selection's colour.
@@ -836,6 +919,10 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
         unsigned int glyphs = 0, glyphs_from = 0, glyphs_ink = 0, glyphs_paper = 0, glyphs_bits = 0;
         b32 glyphs_heavy = 0;
         p32 glyphs_flags = 0;
+        // The caret's cell in this row, if it is in the row (~0 for none): it is never a plain cell, so it is drawn at its
+        // cover whatever the buffer holds.
+        unsigned int caret = terminal_caret_index != ~0u && terminal_caret_index / COLUMNS == row ? terminal_caret_index % COLUMNS : ~0u;
+        unsigned int caret_cover = terminal_caret_cover;
 
 // The run, less the blanks it ends with, which are a fill: a line's trailing blanks would otherwise be
 // made pixels a coverage byte at a time.
@@ -861,11 +948,23 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 const struct window_cell address_to cell = now + at;
                 unsigned int ink = terminal_ink_of(cell);
                 unsigned int paper = terminal_paper_of(cell);
+                // The plain scans stop at the caret, which is drawn by itself.
+                unsigned int stop = caret > at && caret < last ? caret : last;
+                b32 here = at == caret;
 
                 // A selected cell lies on the theme's selection colour, which is a tint over its own paper, blended as the kit
                 // blends its fills (the paper is the program's, the tint the kit's; the alpha stays as the buffer's, 0).
                 if (cell->flags & WINDOW_CELL_SELECTED)
                         paper = ui_over(ui_premultiplied(ui_role(UI_SELECTION), UI_FULL), paper) & 0xffffffu;
+                // A block caret is its cell turned round in the frame, so its two ways round are blended by the cover: at the
+                // full cover the cell as it is, at none the cell as the program wrote it.
+                if (here && terminal_caret_block)
+                {
+                        unsigned int on_ink = ink, on_paper = paper;
+
+                        ink = terminal_blend(on_paper, on_ink, caret_cover);
+                        paper = terminal_blend(on_ink, on_paper, caret_cover);
+                }
                 // A wide character is both its cells; one cut by the edge of a row, or whose
                 // other half is on another row of a folded line, is blank here.
                 b32 pair = (cell->flags & WINDOW_CELL_WIDE) && at + 1 < COLUMNS &&
@@ -878,7 +977,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
 
                 // The same as the buffer has, and so are the halves it pairs with: a half whose other half changed
                 // is drawn again, whole or blank as it now is.
-                if (old && *(const terminal_word address_to)cell == *(const terminal_word address_to)(old + at) &&
+                if (old && !here && *(const terminal_word address_to)cell == *(const terminal_word address_to)(old + at) &&
                     (!(cell->flags & WINDOW_CELL_WIDE) || at + 1 >= COLUMNS ||
                      *(const terminal_word address_to)(cell + 1) == *(const terminal_word address_to)(old + at + 1)) &&
                     (!(cell->flags & WINDOW_CELL_WIDE_RIGHT) || !at ||
@@ -889,7 +988,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         cells = 0;
                 }
 
-                if (glyph && cells == 1 && !decor)
+                if (glyph && cells == 1 && !decor && !here)
                 {
                         b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
                         p32 style = terminal_style(cell);
@@ -914,7 +1013,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         painter->codes[glyphs++] = cell->character;
                         {
                                 struct terminal_plain key = {glyphs_ink, glyphs_paper, glyphs_bits};
-                                unsigned int taken = terminal_plain_glyphs(now, old, at + 1, last, painter->codes, glyphs, &key);
+                                unsigned int taken = terminal_plain_glyphs(now, old, at + 1, stop, painter->codes, glyphs, &key);
 
                                 glyphs += taken;
                                 at += taken;
@@ -924,13 +1023,13 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 // A blank between glyphs on the run's ground is a cell of the run: a space no
                 // longer ends it, so a line of words in one colour is one font_cells and not one
                 // a word, each with its own setup and its own narrow rows to make pixels.
-                if (glyphs && cells == 1 && !glyph && !decor && paper == glyphs_paper && glyphs_from + glyphs == at &&
+                if (glyphs && cells == 1 && !glyph && !decor && !here && paper == glyphs_paper && glyphs_from + glyphs == at &&
                     glyphs < FONT_RUN)
                 {
                         painter->codes[glyphs++] = ' ';
                         {
                                 struct terminal_plain key = {glyphs_ink, glyphs_paper, glyphs_bits};
-                                unsigned int taken = terminal_plain_glyphs(now, old, at + 1, last, painter->codes, glyphs, &key);
+                                unsigned int taken = terminal_plain_glyphs(now, old, at + 1, stop, painter->codes, glyphs, &key);
 
                                 glyphs += taken;
                                 at += taken;
@@ -939,7 +1038,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 }
                 TERMINAL_GLYPHS();
 
-                if (cells && !glyph && !decor)
+                if (cells && !glyph && !decor && !here)
                 {
                         // Blanks on the same ground are one rectangle.
                         if (run && run_colour == paper && run_from + run == at)
@@ -954,7 +1053,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         }
                         {
                                 struct terminal_plain key = {0, run_colour, 0};
-                                unsigned int taken = terminal_plain_scan(now, old, at + 1, last, null, &key);
+                                unsigned int taken = terminal_plain_scan(now, old, at + 1, stop, null, &key);
 
                                 run += taken;
                                 at += taken;
@@ -985,8 +1084,24 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         terminal_fill(pixels, (int)(at * terminal.cell_w), y, cells * terminal.cell_w,
                                       terminal.cell_h, paper);
 
-                if (decor)
-                        terminal_decorate(pixels, cell, (int)(at * terminal.cell_w), y, cells, ink);
+                // A bar or an underline caret: its own marks are the cover's blend of ink and paper (none at cover 0, so the
+                // glyph under it is not painted over), and the cell's own marks are as they were.
+                if (decor && here && !terminal_caret_block)
+                {
+                        struct window_cell rest = *cell, own = *cell;
+                        int left = (int)(at * terminal.cell_w);
+
+                        rest.flags = (unsigned short)(cell->flags & ~terminal_caret_marks);
+                        terminal_decorate(pixels, &rest, left, y, cells, ink, 0);
+                        if (caret_cover)
+                        {
+                                own.flags = (unsigned short)(cell->flags & terminal_caret_marks);
+                                terminal_decorate(pixels, &own, left, y, cells, terminal_blend(paper, ink, caret_cover),
+                                                  (unsigned int)(ui_caret_thick() * terminal_scale()));
+                        }
+                }
+                else if (decor)
+                        terminal_decorate(pixels, cell, (int)(at * terminal.cell_w), y, cells, ink, 0);
 
                 at += cells - 1;
         }
@@ -1311,6 +1426,7 @@ static b32 terminal_frame(void)
 
         terminal_view_clamp();
         terminal_build(now);
+        terminal_caret_frame();
         terminal_extent(&first, &shown, &total);
         pixels = windows_buffer(table, own, slot);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
@@ -1349,6 +1465,17 @@ static b32 terminal_frame(void)
                         terminal_span(line, drawn + (unsigned long)row * COLUMNS, &a0, &a1);
                 if (screen)
                         terminal_span(line, screen + (unsigned long)row * COLUMNS, &b0, &b1);
+
+                // A caret whose cover the buffer, or the screen, does not hold is drawn again, though its cells are the same.
+                if (terminal_caret_index != ~0u && terminal_caret_index / COLUMNS == row)
+                {
+                        unsigned int column = terminal_caret_index % COLUMNS;
+
+                        if (drawn && (terminal.caret_at[slot] != terminal_caret_index || terminal.caret_cover[slot] != terminal_caret_cover))
+                                terminal_span_take(&a0, &a1, column);
+                        if (screen && (terminal.caret_at[front] != terminal_caret_index || terminal.caret_cover[front] != terminal_caret_cover))
+                                terminal_span_take(&b0, &b1, column);
+                }
 
                 // The bar is drawn over the cells at the window's right edge, so when it is drawn again (it moved, grew,
                 // or went, or there is a thumb to draw) those cells are painted again too: the cells under its old thumb
@@ -1458,6 +1585,8 @@ static b32 terminal_frame(void)
         // kept as that picture, and the one it replaces is the next to be made.
         terminal.frame[2] = terminal.frame[slot];
         terminal.frame[slot] = now;
+        terminal.caret_at[slot] = terminal_caret_index;
+        terminal.caret_cover[slot] = terminal_caret_cover;
         terminal.valid[slot] = 1;
 
         table->width[own] = terminal.width;
@@ -2523,6 +2652,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         if (terminal_view_live())
                                 address_to dirty = true;
                         cursor_hide();
+                        // A key restarts the caret's blink: solid as it is typed at.
+                        terminal_caret_restart(clock_monotonic_nanoseconds());
                 }
                 return term_input(master, &key);
 
@@ -3150,6 +3281,10 @@ static long terminal_tick(long timeout, long address_to other)
 
                 timeout = timeout < 0 || left < timeout ? left : timeout;
         }
+
+        // The caret's blink: a move restarts it, and the wait ends when its cover next changes.
+        if (terminal.phase == TERMINAL_RUNNING)
+                terminal_caret_step(clock_monotonic_nanoseconds(), &timeout);
 
         /*
                 Asleep until a key, a resize or the shell's output; and, with a picture waiting for a buffer, until the compositor has

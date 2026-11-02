@@ -8462,24 +8462,38 @@ static fn ui_text_wake(struct ui_text address_to t)
         says. The app asks after each pass and sleeps till then; nothing blinks in a window without the keys. Ten seconds
         after the last key or move the caret stops blinking and stays drawn, so a field left alone wakes nothing.
 */
-static positive ui_text_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
+/*
+        A caret's cover at now, for a phase that restarted at since and an awake time (a key or a move, the last of them),
+        and when that cover next changes (0 for never). Every caret runs this: a field's and the terminal's.
+*/
+static unsigned int ui_caret_at(positive now, positive since, positive awake, positive address_to due)
 {
         b64 cycle = ui_caret_cycle(), q;
         unsigned int cover;
 
+        *due = 0;
+        if (!cycle || (now > awake && now - awake >= UI_TEXT_BLINK_FOR_NS))
+                return UI_CARET_FULL;
+        q = now < since ? cycle / 4 : (now - since + cycle / 4) % cycle;
+        cover = ui_caret_wave(q, cycle);
+        *due = now + ui_caret_until(q, cycle, cover);
+        // The caret stops at ten seconds, whatever phase it is in: the wait ends there, so a caret gone then is drawn then.
+        if (now >= awake && awake + UI_TEXT_BLINK_FOR_NS < *due)
+                *due = awake + UI_TEXT_BLINK_FOR_NS;
+        return cover;
+}
+
+static positive ui_text_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
+{
+        positive due;
+        unsigned int cover;
+
         if (!t->focused || t->read_only)
                 return 0;
-        if (!cycle || (now > t->awake_at && now - t->awake_at >= UI_TEXT_BLINK_FOR_NS))
-        {
-                if (t->caret_fade)
-                        t->caret_fade = 0, *redraw = true;
-                return 0;
-        }
-        q = now < t->blink_at ? cycle / 4 : (now - t->blink_at + cycle / 4) % cycle;
-        cover = ui_caret_wave(q, cycle);
+        cover = ui_caret_at(now, t->blink_at, t->awake_at, &due);
         if (t->caret_fade != UI_CARET_FULL - cover)
                 t->caret_fade = UI_CARET_FULL - cover, *redraw = true;
-        return now + ui_caret_until(q, cycle, cover);
+        return due;
 }
 
 static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, positive now, b32 address_to redraw);
