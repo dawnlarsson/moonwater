@@ -122,7 +122,6 @@ static unsigned int compositor_line_lit(void); // the lit line of the window wit
 static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: a line without the keys, the close button, a tab unlit
 static unsigned int compositor_ink_selection(void); // the chrome's selection, 0xaarrggbb: the snap preview's tint
 static unsigned int compositor_snap_ink(void); // the snap's tint, 0xaarrggbb: the selection at its percent, read on the wallpaper
-static unsigned int compositor_preview_alpha(void); // the percent of the snap preview's tint drawn now (compositor_preview_fade)
 static void compositor_preview(int row); // the snap preview of the drag of row (none clears it), from the pointer
 static unsigned int compositor_tab_target(b32 lit); // what a tab's glass is tinted toward, the theme's
 
@@ -2363,69 +2362,104 @@ static void compositor_screen_keep_window(const int (*screens)[4], unsigned int 
         *y = compositor_fit(*y, screens[owner][1] + line_y, screens[owner][1] + screens[owner][3] - height - line_y);
 }
 
-/*
-        The snap target a drag let go at x, y arranges its window to, on the
-        screen under the pointer, or COMPOSITOR_FLOATING for none. Four bands,
-        margin wide, run in from the screen's free edges: a corner is the
-        quarter where two bands meet and wins over the edges; a top band alone
-        is COMPOSITOR_MAXIMIZED (all of the screen), a bottom band alone is the
-        bottom half, and a side band alone is that half. An edge another screen
-        is against is no edge: the pointer goes on across it.
-*/
-static unsigned int compositor_screen_snap_box(const int (*screens)[4], unsigned int count, int x, int y, const int *box,
-                                               int margin, int *screen);
-
-static unsigned int compositor_screen_snap(const int (*screens)[4], unsigned int count, int x, int y, int margin,
-                                           int *screen)
-{
-        return compositor_screen_snap_box(screens, count, x, y, null, margin, screen);
-}
-
-// Whether a window's edge is inside its screen's edge by less than margin: one that sticks out past the edge is not at it.
-static int compositor_near_edge(int gap, int margin)
-{
-        return gap >= 0 && gap < margin;
-}
+// The screen's edges a snap may take, as bits: a window's contact with them (compositor_snap_rule) is one of these.
+#define COMPOSITOR_SNAP_LEFT 1u
+#define COMPOSITOR_SNAP_RIGHT 2u
+#define COMPOSITOR_SNAP_TOP 4u
+#define COMPOSITOR_SNAP_BOTTOM 8u
 
 /*
-        compositor_screen_snap, and the window's own edges as well as the pointer's: box is the window dragged (x, y, width,
-        height), or null. An edge of the window inside the screen's free edge by less than margin is a band too, so a window
-        pushed to an edge snaps there whatever the pointer is doing, and the pointer at an edge still does.
+        The edges of screen at that a window at box may snap to: all four, less each one another screen is against across
+        the span the window and the screen share. The seam between two screens is never an edge, the other sides of a
+        screen are.
 */
-static unsigned int compositor_screen_snap_box(const int (*screens)[4], unsigned int count, int x, int y, const int *box,
-                                               int margin, int *screen)
+static unsigned int compositor_snap_free(const int (*screens)[4], unsigned int count, const int *box, int at)
 {
-        int at = compositor_screen_at(screens, count, x, y);
-        const int *s;
-        int at_top, at_bottom, at_left, at_right;
+        const int *s = screens[at];
+        int top = box[1] > s[1] ? box[1] : s[1], bottom = box[1] + box[3] < s[1] + s[3] ? box[1] + box[3] : s[1] + s[3];
+        int left = box[0] > s[0] ? box[0] : s[0], right = box[0] + box[2] < s[0] + s[2] ? box[0] + box[2] : s[0] + s[2];
+        unsigned int free = COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT | COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM;
 
-        *screen = at;
-        if (at < 0)
-                return COMPOSITOR_FLOATING;
-        s = screens[at];
-        at_top = (y - s[1] < margin || (box && compositor_near_edge(box[1] - s[1], margin))) &&
-                 compositor_screen_at(screens, count, x, s[1] - 1) < 0;
-        at_bottom = (s[1] + s[3] - 1 - y < margin || (box && compositor_near_edge(s[1] + s[3] - (box[1] + box[3]), margin))) &&
-                    compositor_screen_at(screens, count, x, s[1] + s[3]) < 0;
-        at_left = (x - s[0] < margin || (box && compositor_near_edge(box[0] - s[0], margin))) &&
-                  compositor_screen_at(screens, count, s[0] - 1, y) < 0;
-        at_right = (s[0] + s[2] - 1 - x < margin || (box && compositor_near_edge(s[0] + s[2] - (box[0] + box[2]), margin))) &&
-                   compositor_screen_at(screens, count, s[0] + s[2], y) < 0;
-        if (at_top && at_left)
-                return COMPOSITOR_TOP_LEFT;
-        if (at_top && at_right)
-                return COMPOSITOR_TOP_RIGHT;
-        if (at_bottom && at_left)
-                return COMPOSITOR_BOTTOM_LEFT;
-        if (at_bottom && at_right)
-                return COMPOSITOR_BOTTOM_RIGHT;
-        if (at_top)
+        for (unsigned int each = 0; each < count; each++)
+        {
+                const int *o = screens[each];
+
+                if (each == (unsigned int)at)
+                        continue;
+                if (o[0] + o[2] == s[0] && o[1] < bottom && o[1] + o[3] > top)
+                        free &= ~COMPOSITOR_SNAP_LEFT;
+                if (o[0] == s[0] + s[2] && o[1] < bottom && o[1] + o[3] > top)
+                        free &= ~COMPOSITOR_SNAP_RIGHT;
+                if (o[1] + o[3] == s[1] && o[0] < right && o[0] + o[2] > left)
+                        free &= ~COMPOSITOR_SNAP_TOP;
+                if (o[1] == s[1] + s[3] && o[0] < right && o[0] + o[2] > left)
+                        free &= ~COMPOSITOR_SNAP_BOTTOM;
+        }
+        return free;
+}
+
+// The side of one axis a snap takes, of the two that bound it (lo, hi): one touched, else the one alone near, else none.
+static unsigned int compositor_snap_side(unsigned int touch, unsigned int near, unsigned int lo, unsigned int hi)
+{
+        if (touch & lo)
+                return lo;
+        if (touch & hi)
+                return hi;
+        if ((near & lo) && !(near & hi))
+                return lo;
+        if ((near & hi) && !(near & lo))
+                return hi;
+        return 0;
+}
+
+/*
+        The snap target of a window at box (x, y, width, height), before any clamp, on screen, or COMPOSITOR_FLOATING for
+        none. This reads the window's rectangle only. An edge is touched when the window's edge is at the screen's edge or
+        past it (a gap of 0 or less): the first frame it is, and that frame's target is shown. A touched edge holds until it
+        is edge pixels inside the screen's (the dead zone), which is held (the touched edges of the last frame). An axis the
+        window spans, with both its edges touched, takes no snap. A corner is the quarter of its two edges when one of them
+        is touched and the other is within corner pixels of the screen's corner: it wins over the edge that is touched. Else a
+        touched top is the whole screen, a bottom the bottom half, and a left or right side that half. free is the edges
+        that may be snapped to (compositor_snap_free). touch is set to the edges touched now, for the next frame's held.
+*/
+static unsigned int compositor_snap_rule(const int *box, const int *screen, unsigned int free, unsigned int held, int edge, int corner,
+                                         unsigned int *touch)
+{
+        int gap[4] = {box[0] - screen[0], screen[0] + screen[2] - (box[0] + box[2]), box[1] - screen[1],
+                      screen[1] + screen[3] - (box[1] + box[3])};
+        unsigned int contact = 0, near = 0, side_h, side_v;
+
+        for (int each = 0; each < 4; each++)
+        {
+                unsigned int bit = 1u << each;
+
+                if (!(free & bit))
+                        continue;
+                if (gap[each] <= 0 || ((held & bit) && gap[each] < edge))
+                        contact |= bit;
+                if (gap[each] < corner)
+                        near |= bit;
+        }
+        if ((contact & (COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT)) == (COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT))
+                contact &= ~(COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT);
+        if ((contact & (COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM)) == (COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM))
+                contact &= ~(COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM);
+        *touch = contact;
+        side_h = compositor_snap_side(contact, near, COMPOSITOR_SNAP_LEFT, COMPOSITOR_SNAP_RIGHT);
+        side_v = compositor_snap_side(contact, near, COMPOSITOR_SNAP_TOP, COMPOSITOR_SNAP_BOTTOM);
+        if (side_h && side_v && (contact & (side_h | side_v)))
+        {
+                if (side_v == COMPOSITOR_SNAP_TOP)
+                        return side_h == COMPOSITOR_SNAP_LEFT ? COMPOSITOR_TOP_LEFT : COMPOSITOR_TOP_RIGHT;
+                return side_h == COMPOSITOR_SNAP_LEFT ? COMPOSITOR_BOTTOM_LEFT : COMPOSITOR_BOTTOM_RIGHT;
+        }
+        if (contact & COMPOSITOR_SNAP_TOP)
                 return COMPOSITOR_MAXIMIZED;
-        if (at_bottom)
+        if (contact & COMPOSITOR_SNAP_BOTTOM)
                 return COMPOSITOR_BOTTOM;
-        if (at_left)
+        if (contact & COMPOSITOR_SNAP_LEFT)
                 return COMPOSITOR_LEFT;
-        if (at_right)
+        if (contact & COMPOSITOR_SNAP_RIGHT)
                 return COMPOSITOR_RIGHT;
         return COMPOSITOR_FLOATING;
 }
@@ -2859,8 +2893,14 @@ static void compositor_pointer_shown(void);
 #define COMPOSITOR_EDGE_RIGHT CP_EDGE_RIGHT
 #define COMPOSITOR_EDGE_TOP CP_EDGE_TOP
 #define COMPOSITOR_EDGE_BOTTOM CP_EDGE_BOTTOM
-// The snap bands at the output's edges, in logical pixels (compositor_screen_snap).
+// The band at the top of an output that brings the grid up, and the Display map's snap band, in logical pixels.
 #define COMPOSITOR_SNAP 8
+// The snap's dead zone, in logical pixels: a window's edge touched at its screen's edge holds until it is this far inside
+// (compositor_snap_rule). A touch is at 0 px, with no band in front of it.
+#define COMPOSITOR_SNAP_EDGE 8
+// The snap's corner dead zone, in logical pixels: a corner whose two edges are both this near its screen's corner, with
+// one of them touched, is the quarter, and wins over the edge (compositor_snap_rule).
+#define COMPOSITOR_SNAP_CORNER 16
 // The indicator of a shared edge: its half thickness across the edge, in logical pixels (compositor_shared_strip).
 #define COMPOSITOR_SHARED_MARK 2
 // How long a pointer that was shaken stays large.
@@ -3172,12 +3212,10 @@ static struct
         int lit_row;
         unsigned int lit_edges, lit_held;
         // The snap preview a drag shows (compositor_preview): the row whose drag it is, and the rectangle it is drawn on. It
-        // fades in when a target is entered and out when it is left or let go (compositor_preview_fade): from preview_from
-        // percent of its tint at preview_at, toward preview_goal percent; a fade out keeps its rectangle until it is gone.
+        // is not faded. The edges of the window's screen its rectangle touched last frame (compositor_snap_rule's dead zone).
         int preview_row;
         int preview[4];
-        unsigned int preview_from, preview_goal;
-        positive preview_at;
+        unsigned int snap_held;
         // What moonwater debug is told of each device, kept here for the table that is made after they are opened.
         unsigned int input_kinds[COMPOSITOR_INPUTS];
         unsigned short input_id[COMPOSITOR_INPUTS][4];
@@ -3418,7 +3456,7 @@ static void compositor_glass_touch(const int *rectangle)
 
 static int compositor_visible(int row);
 static void compositor_frame_of(int row, struct compositor_frame *frame);
-static unsigned int compositor_snap(int x, int y, const int *box, int *screen);
+static unsigned int compositor_snap(const int *box, unsigned int *touch, int *screen);
 static void compositor_assist_refresh(void);
 static int compositor_overlays_up(void);
 static void compositor_overlays_damage(void);
@@ -3761,11 +3799,11 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         // The snap preview is the dragged window's: drawn under it, where its target is (compositor_scene).
         if (row == compositor.preview_row && compositor.preview[2] > 0)
         {
-                unsigned int ink = compositor_snap_ink(), percent = compositor_preview_alpha();
+                unsigned int ink = compositor_snap_ink();
 
                 frame->preview[0] = compositor.preview[0], frame->preview[1] = compositor.preview[1];
                 frame->preview[2] = compositor.preview[2], frame->preview[3] = compositor.preview[3];
-                frame->preview_ink = (ink & 0xffffffu) | ((ink >> 24) * percent / 100) << 24;
+                frame->preview_ink = ink;
         }
         if (row == compositor.mark_row && compositor.mark[2] > 0)
         {
@@ -8821,10 +8859,10 @@ static unsigned int compositor_grid_under(const int *screen, int x, int y)
 }
 
 // Where a drop of the window row at x, y arranges it: the grid's region under the pointer, which is no target when a window
-// already fills it, or else the snap target of the pointer and the window's edges (compositor_snap).
-static unsigned int compositor_target(int row, int x, int y, const int *box, int *screen)
+// already fills it, or else the snap target of the window's rectangle box (compositor_snap). touch is the edges it touches.
+static unsigned int compositor_target(int row, int x, int y, const int *box, int *screen, unsigned int *touch)
 {
-        unsigned int count, tile;
+        unsigned int count, tile, snap = compositor_snap(box, touch, screen);
         const int (*screens)[4] = compositor_screens(&count);
         int at = compositor_screen_at(screens, count, x, y);
 
@@ -8839,7 +8877,7 @@ static unsigned int compositor_target(int row, int x, int y, const int *box, int
                         return compositor_region_cells(how) & compositor_occupied(row, at) ? COMPOSITOR_FLOATING : how;
                 }
         }
-        return compositor_snap(x, y, box, screen);
+        return snap;
 }
 
 // The tiles a set of free cells is cut into, the larger first: a half where it holds one, then quarters.
@@ -11063,14 +11101,24 @@ static void compositor_motion(void)
                 compositor_pointer_to(under);
 }
 
-// Where a drag ended, read as an arrangement: the pointer and not the window, because the pointer is what the
-// hand aimed, on the screen under it and at its free edges (compositor_screen_snap), and which screen that is.
-static unsigned int compositor_snap(int x, int y, const int *box, int *screen)
+/*
+        Where a drag ended, read as an arrangement: the window's own rectangle, on the screen it is mostly on, and the edges of
+        that screen it touches (compositor_snap_rule). The pointer is not read: the hand moves the window and the window is
+        what snaps. The edges touched last frame are the dead zone's (compositor.snap_held).
+*/
+static unsigned int compositor_snap(const int *box, unsigned int *touch, int *screen)
 {
-        unsigned int count;
+        unsigned int count, free;
         const int (*screens)[4] = compositor_screens(&count);
+        int at = compositor_screen_owner(screens, count, box[0], box[1], box[2], box[3]);
 
-        return compositor_screen_snap_box(screens, count, x, y, box, COMPOSITOR_SNAP * compositor.scale, screen);
+        *touch = 0;
+        *screen = at;
+        if (at < 0 || compositor_screen_cover(screens[at], box[0], box[1], box[2], box[3]) <= 0)
+                return COMPOSITOR_FLOATING;
+        free = compositor_snap_free(screens, count, box, at);
+        return compositor_snap_rule(box, screens[at], free, compositor.snap_held, COMPOSITOR_SNAP_EDGE * compositor.scale,
+                                    COMPOSITOR_SNAP_CORNER * compositor.scale, touch);
 }
 
 // The rectangle a window dragged is where the hand has it, before placement keeps it on its screen (compositor_place
@@ -11083,68 +11131,20 @@ static void compositor_box_of(int row, int *box)
 }
 
 /*
-        The snap preview's fade: the percent of its tint it is drawn at now, from preview_from toward preview_goal over
-        COMPOSITOR_SNAP_FADE_NS on the kit's ease, begun at preview_at. Reduced motion has no fade: the goal at once.
-*/
-static unsigned int compositor_preview_alpha(void)
-{
-        int from = (int)compositor.preview_from, goal = (int)compositor.preview_goal;
-        b64 done;
-
-        if (!compositor.preview_at || !compositor_glides())
-                return compositor.preview_goal;
-        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.preview_at), COMPOSITOR_SNAP_FADE_NS));
-        return (unsigned int)(from + (int)((long long)(goal - from) * (long long)done / (long long)UI_ONE));
-}
-
-// The preview fades toward goal percent from where it is now: a fade in, or out to none (compositor_preview_keep takes it away).
-static void compositor_preview_fade(unsigned int goal)
-{
-        compositor.preview_from = compositor_preview_alpha();
-        compositor.preview_goal = goal;
-        compositor.preview_at = compositor_glides() ? clock_monotonic_nanoseconds() : 0;
-}
-
-/*
-        After a present: a preview that is fading is damaged again, so the next present draws it at its next percent. One that
-        has faded out is taken away, and the loop goes idle.
-*/
-static void compositor_preview_keep(void)
-{
-        int *rect = compositor.preview;
-
-        if (rect[2] <= 0)
-                return;
-        if (compositor.preview_at && clock_monotonic_nanoseconds() - compositor.preview_at < COMPOSITOR_SNAP_FADE_NS)
-        {
-                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
-                return;
-        }
-        if (!compositor.preview_goal)
-        {
-                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
-                memory_zero(compositor.preview, sizeof(compositor.preview));
-                compositor.preview_row = COMPOSITOR_NONE;
-                compositor.preview_at = 0;
-        }
-}
-
-/*
-        The snap preview: the rectangle a drop of the window row being moved would arrange it to, from the pointer as it
-        is now, drawn as a tint (compositor_preview_draw) and damaged where it was and where it is. Once the window has
-        moved only. A pointer off every target takes it away by a fade (compositor_preview_fade), as a drop does, and the
-        window it belonged to keeps it while it fades.
+        The snap preview: the target the window being moved touches (compositor_target), drawn as its tint at full strength
+        from the frame it is touched in, and damaged where it was and where it is. It is not faded: it is there while the
+        contact is, and gone the moment it is lost or the window is let go. Once the window has moved only.
 */
 static void compositor_preview(int row)
 {
-        unsigned int count, how = COMPOSITOR_FLOATING;
+        unsigned int count, how = COMPOSITOR_FLOATING, touch = 0;
         const int (*screens)[4] = compositor_screens(&count);
-        int screen, rect[4] = {0, 0, 0, 0}, box[4];
+        int screen = 0, rect[4] = {0, 0, 0, 0}, box[4];
 
         if (row >= 0 && row == compositor.drag && compositor.drag_moved)
         {
                 compositor_box_of(row, box);
-                how = compositor_target(row, compositor.pointer_x, compositor.pointer_y, box, &screen);
+                how = compositor_target(row, compositor.pointer_x, compositor.pointer_y, box, &screen, &touch);
                 if (how != COMPOSITOR_FLOATING)
                         compositor_screen_part(screens[screen], how, rect);
                 compositor_overlays_drag(row, compositor.pointer_x, compositor.pointer_y, how, screen);
@@ -11154,18 +11154,17 @@ static void compositor_preview(int row)
                 compositor_overlays_damage();
                 compositor.grid_on = 0;
         }
-        // No target: the preview fades out where it was, and goes when it has (compositor_preview_keep).
+        compositor.snap_held = touch;
         if (how == COMPOSITOR_FLOATING)
         {
-                if (compositor.preview[2] > 0 && compositor.preview_goal)
-                        compositor_preview_fade(0);
+                if (compositor.preview[2] > 0)
+                        compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]);
+                memory_zero(compositor.preview, sizeof(compositor.preview));
+                compositor.preview_row = COMPOSITOR_NONE;
                 return;
         }
-        if (row == compositor.preview_row && compositor.preview_goal && !memory_compare(rect, compositor.preview, sizeof(rect)))
+        if (row == compositor.preview_row && !memory_compare(rect, compositor.preview, sizeof(rect)))
                 return;
-        // A target entered from none, or back to the one it is fading out of, fades in; one moved to another keeps its fade.
-        if (compositor.preview[2] <= 0 || !compositor.preview_goal)
-                compositor_preview_fade(100);
         if (compositor.preview[2] > 0)
                 compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]);
         memory_copy(compositor.preview, rect, sizeof(rect));
@@ -11183,14 +11182,15 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         int grab = compositor.grab, dragged = compositor.drag, to = grab, resized = compositor.resize;
         unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING;
         int drop_screen = 0, drop_box[4];
+        unsigned int drop_touch = 0;
 
         // Where the window lands is read before the preview and the grid are taken away: the grid's region, or the snap.
         if (dragged >= 0 && snap && compositor.drag_moved)
         {
                 compositor_box_of(dragged, drop_box);
-                drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen);
+                drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen, &drop_touch);
         }
-        // The preview goes with the drag; where the window lands is arranged below from the pointer, as before.
+        // The preview goes with the drag; where the window lands is the target read above, from its rectangle.
         compositor_preview(COMPOSITOR_NONE);
         compositor.drag = COMPOSITOR_NONE;
         compositor.grab = COMPOSITOR_NONE;
@@ -13512,7 +13512,6 @@ static b32 compositor_main()
                                 compositor_present();
                                 compositor_land_keep();
                                 compositor_glide_keep();
-                                compositor_preview_keep();
                                 compositor_overlays_keep();
                                 if (compositor.motion_ts)
                                 {

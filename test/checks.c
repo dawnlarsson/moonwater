@@ -118179,24 +118179,24 @@ static void check_compositor_screens(void)
     screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
     screens_hand(100, 100, 0);
     check("snap: a window dragged into the middle of a screen shows no target",
-          compositor.drag_moved && compositor.preview_goal == 0);
+          compositor.drag_moved && compositor.preview[2] == 0);
     screens_hand(1, 1, 0);
     check("snap: a corner shows its quarter, and the corner wins over the top and the left",
           compositor.preview_row == 2 && compositor.preview[0] == 0 && compositor.preview[1] == 0 &&
               compositor.preview[2] == SCREENS_A_W / 2 && compositor.preview[3] == SCREENS_A_H / 2);
     screens_hand(100, 120, 0);
-    check("snap: dragged off the target before it is let go, the tint fades out (its goal is none)", compositor.preview_goal == 0);
+    check("snap: dragged off the target before it is let go, the tint is gone at once", compositor.preview[2] == 0);
     screens_hand(1, 1, 0);
     screens_hand(1, 1, -1);
     check("snap: let go on the quarter, the window takes it, and the size asked is the quarter",
           compositor.arranged[2] == COMPOSITOR_TOP_LEFT && compositor.x[2] == 0 && compositor.y[2] == 0 &&
-              table->want_width[2] == SCREENS_A_W / 2 && table->want_height[2] == SCREENS_A_H / 2 && compositor.preview_goal == 0);
+              table->want_width[2] == SCREENS_A_W / 2 && table->want_height[2] == SCREENS_A_H / 2 && compositor.preview[2] == 0);
     compositor.press = COMPOSITOR_NONE;
     screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
     screens_hand(100, 150, 0);
     screens_hand(100, 150, -1);
     check("snap: let go in the middle, the window that was arranged floats where it is and takes no target",
-          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.preview_goal == 0);
+          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.preview[2] == 0);
     compositor.press = COMPOSITOR_NONE;
     screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
     screens_hand(150, 190, 0);
@@ -118481,8 +118481,9 @@ static void check_compositor_preview_held(void)
 
         // The pointer moves onto the left half: that half is damaged, and nothing else is. (A target on the top edge
         // brings the grid up, which is damaged with it; that is checked with the grid.)
+        /* The window is taken to the left edge by the hand (its rectangle touches the edge), which is what a target is now. */
         compositor.pointer_x = 2, compositor.pointer_y = 200;
-        compositor.drag_x = 2 - 60, compositor.drag_y = 200 - 50;
+        compositor.drag_x = 2, compositor.drag_y = 200 - 50;
         compositor_preview(2);
         target[0] = 0, target[1] = 0, target[2] = HELD_OUT_W / 2, target[3] = HELD_OUT_H;
         check("preview held: a target entered is damaged as its own rectangle, and no other",
@@ -121637,19 +121638,21 @@ static void check_compositor_push(void)
         return;
     }
 
-    push_drag(60, 60, 27, 100, &how, &shown);
-    check("push: a window pushed to the left edge, the pointer 27 px off it, snaps to the left half",
+    /* The grab is 20 px in from the window's top left, so the pointer is 20 px past the window's edge it is pushed to. */
+    push_drag(60, 60, 20, 100, &how, &shown);
+    check("push: a window pushed to the left edge, touching it, snaps to the left half",
           how == COMPOSITOR_LEFT && shown);
-    push_drag(60, 60, 172, 100, &how, &shown);
-    check("push: a window pushed to the right edge, the pointer 83 px off it, snaps to the right half",
+    push_drag(60, 60, 176, 100, &how, &shown);
+    check("push: a window pushed to the right edge, touching it, snaps to the right half",
           how == COMPOSITOR_RIGHT && shown);
-    push_drag(60, 60, 80, 25, &how, &shown);
-    check("push: a window pushed to the top edge, the pointer 25 px off it, is maximized", how == COMPOSITOR_MAXIMIZED && shown);
-    push_drag(60, 60, 80, 190, &how, &shown);
-    check("push: a window pushed to the bottom edge, the pointer 65 px off it, takes the bottom half",
+    push_drag(60, 60, 80, 20, &how, &shown);
+    check("push: a window pushed to the top edge, touching it, is maximized", how == COMPOSITOR_MAXIMIZED && shown);
+    push_drag(60, 60, 80, 196, &how, &shown);
+    check("push: a window pushed to the bottom edge, touching it, takes the bottom half",
           how == COMPOSITOR_BOTTOM && shown);
-    push_drag(60, 60, 27, 25, &how, &shown);
-    check("push: a window pushed into the top left corner by its edges takes that quarter", how == COMPOSITOR_TOP_LEFT && shown);
+    push_drag(60, 60, 30, 20, &how, &shown);
+    check("push: a window pushed into the top left corner, its top touching and its left 10 px off, takes that quarter",
+          how == COMPOSITOR_TOP_LEFT && shown);
     push_drag(60, 60, 100, 120, &how, &shown);
     check("push: a window away from every edge snaps to nothing, and shows no preview", how == COMPOSITOR_FLOATING && !shown);
 }
@@ -121756,7 +121759,7 @@ static void check_compositor_seam(void)
               compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor_screen_of(1) == 1 && compositor.x[1] == part[0] && compositor.y[1] == part[1]);
 
         seam_reset(start_x, start_y);
-        seam_drop(start_x, start_y, layout ? 100 : 500, 237);
+        seam_drop(start_x, start_y, layout ? 100 : 480, 237);
         compositor_screen_part(compositor.screen[1], COMPOSITOR_BOTTOM, part);
         check("seam: onto the far bottom edge of the second display it takes its bottom half there",
               compositor.arranged[1] == COMPOSITOR_BOTTOM && compositor_screen_of(1) == 1 && compositor.y[1] == part[1] && compositor.x[1] == part[0]);
@@ -121908,10 +121911,11 @@ static void check_compositor_assist(void)
     compositor.grid_on = 1, compositor.grid_screen = 0;
     {
         int box[4] = {0, 0, 50, 50}, screen;
+        unsigned int touch;
 
         check("grid: a region a window already fills is taken and is no target, and a free one is",
-              compositor_target(2, 40, 4, box, &screen) == COMPOSITOR_FLOATING &&
-                  compositor_target(2, 98, 4, box, &screen) == COMPOSITOR_RIGHT);
+              compositor_target(2, 40, 4, box, &screen, &touch) == COMPOSITOR_FLOATING &&
+                  compositor_target(2, 98, 4, box, &screen, &touch) == COMPOSITOR_RIGHT);
     }
     compositor.grid_on = 0;
 }
@@ -122060,49 +122064,34 @@ static void check_compositor_glide(void)
 }
 
 /*
-        The snap preview fades: in over COMPOSITOR_SNAP_FADE_NS when a target is entered, from none to its full tint; out
-        when it is left, from full, keeping its rectangle until it has gone; and out when the window is let go, under the
-        window that glides to the place. Reduced motion has no fade.
+        The snap preview is not faded: it is the target at full tint in the frame the window touches it, and gone in the frame
+        the contact is lost or the window is let go (the window glides to the place on its own). Reduced motion is the same.
 */
-static void check_compositor_preview_fade(void)
+static void check_compositor_preview_at_once(void)
 {
-    positive now;
-
     if (!layout_table_map(256))
     {
-        check("preview fade: the table is mapped", false);
+        check("preview at once: the table is mapped", false);
         return;
     }
     layout_setup(256, 1);
     compositor.table->motion = 0;
     assist_fresh();
     compositor.showing[2] = compositor.showing[3] = 0;
-    now = clock_monotonic_nanoseconds();
 
     screens_hand(80, 64, 1);
     screens_hand(0, 100, 0);
-    check("preview fade: entered, the preview is at none, and its rectangle is the target",
-          compositor.preview[2] == 128 && compositor_preview_alpha() == 0 && compositor.preview_goal == 100);
-    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS / 2;
-    check("preview fade: half way in it is between none and its full tint", compositor_preview_alpha() > 0 && compositor_preview_alpha() < 100);
-    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
-    check("preview fade: in, it is at its full tint", compositor_preview_alpha() == 100);
+    check("preview at once: entered, its rectangle is the target in the same frame", compositor.preview[2] == 128);
 
     screens_hand(100, 100, 0);
-    check("preview fade: left, it fades out from full and keeps its rectangle until it has gone",
-          compositor.preview[2] == 128 && compositor_preview_alpha() == 100 && compositor.preview_goal == 0);
-    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
-    compositor_preview_keep();
-    check("preview fade: out, it is gone: no rectangle and no row", compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE);
+    check("preview at once: left, it is gone in the same frame, with no row",
+          compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE);
 
     screens_hand(0, 100, 0);
     screens_hand(0, 100, -1);
-    check("preview fade: let go, the preview fades out where it was, under the window that glides to it",
-          compositor.preview[2] == 128 && compositor.preview_row == 1 && compositor.preview_goal == 0 && compositor.glide[1] &&
+    check("preview at once: let go, it is gone and the window glides to the place it took",
+          compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE && compositor.glide[1] &&
               compositor.arranged[1] == COMPOSITOR_LEFT);
-    compositor.preview_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
-    compositor_preview_keep();
-    check("preview fade: let go and faded, nothing is left", compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE);
 
     layout_setup(256, 1);
     compositor.table->motion = 1;
@@ -122110,8 +122099,7 @@ static void check_compositor_preview_fade(void)
     compositor.showing[2] = compositor.showing[3] = 0;
     screens_hand(80, 64, 1);
     screens_hand(0, 100, 0);
-    check("preview fade: reduced motion has no fade: the tint is at its full strength at once",
-          compositor.preview[2] == 128 && compositor_preview_alpha() == 100);
+    check("preview at once: reduced motion is the same: the target at once", compositor.preview[2] == 128);
     screens_hand(0, 100, -1);
     compositor.table->motion = 0;
 }
@@ -122175,9 +122163,9 @@ static void check_compositor_snap_trigger(void)
     {
         snap_fresh();
         snap_hand(1, contact[each].x, contact[each].y, 50, 40);
-        every = every && snap_rect_is(contact[each].rect) && compositor_preview_alpha() == 100;
+        every = every && snap_rect_is(contact[each].rect);
     }
-    check("snap contact: each edge touched at 0 px shows its target at the first frame, exactly, at full tint", every);
+    check("snap contact: each edge touched at 0 px shows its target at the first frame, exactly", every);
 
     snap_fresh();
     snap_hand(1, 5, 60, 50, 40);
@@ -139200,7 +139188,7 @@ b32 main()
         check_compositor_snap_cover();
         check_compositor_snap_closing();
         check_compositor_glide();
-        check_compositor_preview_fade();
+        check_compositor_preview_at_once();
         check_compositor_snap_trigger();
         check_compositor_overlay_fade();
         check_compositor_grid_drag();
@@ -145351,22 +145339,37 @@ static void check_compositor_outputs(void) {
     x=2000,y=1100;compositor_screen_keep_window(two,2,&x,&y,100,60,1,24);co_check(x==2000&&y==1019); /* top in no screen: onto A */
     x=2450,y=1100;compositor_screen_keep_window(two,2,&x,&y,200,60,1,24);co_check(x==2450&&y==1100); /* top on B for 90 px */
     x=2545,y=1100;compositor_screen_keep_window(two,2,&x,&y,30,60,1,24);co_check(x==2561&&y==1100); /* 15 of 24 on B: onto B */
-    /* Snap: the free edges of the screen under the pointer, the top before the sides; a shared edge is crossed. */
-    { static const int level[2][4]={{0,0,2560,1080},{2560,0,1920,1080}};
-      int at;
-      co_check(compositor_screen_snap(level,2,2,500,8,&at)==COMPOSITOR_LEFT&&at==0);
-      co_check(compositor_screen_snap(level,2,2555,500,8,&at)==COMPOSITOR_FLOATING&&at==0);
-      co_check(compositor_screen_snap(level,2,2562,500,8,&at)==COMPOSITOR_FLOATING&&at==1);
-      co_check(compositor_screen_snap(level,2,4475,500,8,&at)==COMPOSITOR_RIGHT&&at==1);
-      co_check(compositor_screen_snap(level,2,3000,3,8,&at)==COMPOSITOR_MAXIMIZED&&at==1);
-      co_check(compositor_screen_snap(level,2,4477,2,8,&at)==COMPOSITOR_TOP_RIGHT&&at==1);
-      co_check(compositor_screen_snap(level,2,5000,500,8,&at)==COMPOSITOR_FLOATING&&at==-1);
-      co_check(compositor_screen_snap(two,2,2563,1150,8,&at)==COMPOSITOR_LEFT&&at==1);  /* A is not against B down there */
-      co_check(compositor_screen_snap(two,2,2563,1000,8,&at)==COMPOSITOR_FLOATING&&at==1);
-      static const int one[1][4]={{0,0,2560,1080}};
-      co_check(compositor_screen_snap(one,1,7,7,8,&at)==COMPOSITOR_TOP_LEFT&&compositor_screen_snap(one,1,7,500,8,&at)==COMPOSITOR_LEFT&&
-               compositor_screen_snap(one,1,2552,500,8,&at)==COMPOSITOR_RIGHT&&compositor_screen_snap(one,1,2551,500,8,&at)==COMPOSITOR_FLOATING&&
-               compositor_screen_snap(one,1,8,500,8,&at)==COMPOSITOR_FLOATING); }
+    /* Snap: a window's rectangle against its screen, never the pointer. A seam between two screens is no edge of either;
+       the rule touches an edge at 0 px, holds it inside the dead zone, and a corner's quarter wins over the edge it meets. */
+    { static const int two_b[2][4]={{0,0,2560,1080},{2560,0,1920,1080}};
+      static const int one_s[1][4]={{0,0,2560,1080}};
+      const unsigned int all = COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT | COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM;
+      int box[4] = {2400, 100, 400, 300}, touch = 0;
+      co_check(compositor_snap_free(two_b,2,box,0)==(all&~COMPOSITOR_SNAP_RIGHT));
+      co_check(compositor_snap_free(two_b,2,box,1)==(all&~COMPOSITOR_SNAP_LEFT));
+      box[1] = 1500;
+      co_check(compositor_snap_free(two_b,2,box,0)==all && compositor_snap_free(two_b,2,box,1)==all);
+      box[0] = 0, box[1] = 500;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_LEFT && touch==COMPOSITOR_SNAP_LEFT);
+      box[0] = 1;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_FLOATING && touch==0);
+      box[0] = 7;
+      co_check(compositor_snap_rule(box,one_s[0],all,COMPOSITOR_SNAP_LEFT,8,16,&touch)==COMPOSITOR_LEFT && touch==COMPOSITOR_SNAP_LEFT);
+      box[0] = 8;
+      co_check(compositor_snap_rule(box,one_s[0],all,COMPOSITOR_SNAP_LEFT,8,16,&touch)==COMPOSITOR_FLOATING && touch==0);
+      box[0] = 7;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_FLOATING && touch==0);
+      box[0] = 15, box[1] = 0;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_TOP_LEFT && touch==COMPOSITOR_SNAP_TOP);
+      box[0] = 16;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_MAXIMIZED && touch==COMPOSITOR_SNAP_TOP);
+      box[0] = 0, box[1] = 0, box[2] = 2560;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_MAXIMIZED);
+      box[0] = 2160, box[1] = 1020, box[2] = 400, box[3] = 60;
+      co_check(compositor_snap_rule(box,one_s[0],all,0,8,16,&touch)==COMPOSITOR_BOTTOM_RIGHT && touch==(COMPOSITOR_SNAP_RIGHT|COMPOSITOR_SNAP_BOTTOM));
+      /* The bottom is a seam: the corner is no corner, and the right side alone is that half. */
+      co_check(compositor_snap_rule(box,one_s[0],all&~COMPOSITOR_SNAP_BOTTOM,0,8,16,&touch)==COMPOSITOR_RIGHT && touch==COMPOSITOR_SNAP_RIGHT);
+    }
     /* Every target at 1x and at 2x: a band is 8 logical pixels, so 16 device pixels at 2x; a corner is its quarter, and
        each target's rectangle is the screen's, halved as it says. */
     for (int scale = 1; scale <= 2; scale++)
@@ -145374,18 +145377,37 @@ static void check_compositor_outputs(void) {
       int w = 1920 * scale, h = 1080 * scale, m = 8 * scale, at, part[4];
       static int big[1][4];
       big[0][0] = 0, big[0][1] = 0, big[0][2] = w, big[0][3] = h;
-      co_check(compositor_screen_snap(big,1,m-1,h/2,m,&at)==COMPOSITOR_LEFT&&at==0);
-      co_check(compositor_screen_snap(big,1,m,h/2,m,&at)==COMPOSITOR_FLOATING);
-      co_check(compositor_screen_snap(big,1,w-m,h/2,m,&at)==COMPOSITOR_RIGHT);
-      co_check(compositor_screen_snap(big,1,w-m-1,h/2,m,&at)==COMPOSITOR_FLOATING);
-      co_check(compositor_screen_snap(big,1,w/2,m-1,m,&at)==COMPOSITOR_MAXIMIZED);
-      co_check(compositor_screen_snap(big,1,w/2,h-m,m,&at)==COMPOSITOR_BOTTOM);
-      co_check(compositor_screen_snap(big,1,w/2,h-m-1,m,&at)==COMPOSITOR_FLOATING);
-      co_check(compositor_screen_snap(big,1,m-1,m-1,m,&at)==COMPOSITOR_TOP_LEFT);
-      co_check(compositor_screen_snap(big,1,w-m,m-1,m,&at)==COMPOSITOR_TOP_RIGHT);
-      co_check(compositor_screen_snap(big,1,m-1,h-m,m,&at)==COMPOSITOR_BOTTOM_LEFT);
-      co_check(compositor_screen_snap(big,1,w-m,h-m,m,&at)==COMPOSITOR_BOTTOM_RIGHT);
-      co_check(compositor_screen_snap(big,1,m,m,m,&at)==COMPOSITOR_FLOATING);
+      /* The rule at this scale: an edge touched at 0 px, held to m px inside, and a corner whose edges are within 2m px. */
+      {
+        const unsigned int all = COMPOSITOR_SNAP_LEFT | COMPOSITOR_SNAP_RIGHT | COMPOSITOR_SNAP_TOP | COMPOSITOR_SNAP_BOTTOM;
+        int box[4] = {0, h / 3, w / 4, h / 4}, touch = 0;
+
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_LEFT && touch==COMPOSITOR_SNAP_LEFT);
+        box[0] = 1;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_FLOATING && touch==0);
+        box[0] = m - 1;
+        co_check(compositor_snap_rule(box,big[0],all,COMPOSITOR_SNAP_LEFT,m,2*m,&touch)==COMPOSITOR_LEFT);
+        box[0] = m;
+        co_check(compositor_snap_rule(box,big[0],all,COMPOSITOR_SNAP_LEFT,m,2*m,&touch)==COMPOSITOR_FLOATING);
+        box[0] = w - w / 4, box[1] = h / 3;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_RIGHT);
+        box[0] = 0, box[1] = 0;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_TOP_LEFT);
+        box[0] = w - w / 4, box[1] = 0;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_TOP_RIGHT);
+        box[0] = 0, box[1] = h - h / 4;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_BOTTOM_LEFT);
+        box[0] = w - w / 4, box[1] = h - h / 4;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_BOTTOM_RIGHT);
+        box[0] = 2*m - 1, box[1] = 0;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_TOP_LEFT);
+        box[0] = 2*m, box[1] = 0;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_MAXIMIZED);
+        box[0] = 2*m - 1, box[1] = 2*m - 1;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_FLOATING && touch==0);
+        box[0] = w / 2 - w / 8, box[1] = h / 2 - h / 8;
+        co_check(compositor_snap_rule(box,big[0],all,0,m,2*m,&touch)==COMPOSITOR_FLOATING);
+      }
       compositor_screen_part(big[0],COMPOSITOR_MAXIMIZED,part);co_check(co_rect(part,0,0,w,h));
       compositor_screen_part(big[0],COMPOSITOR_LEFT,part);co_check(co_rect(part,0,0,w/2,h));
       compositor_screen_part(big[0],COMPOSITOR_RIGHT,part);co_check(co_rect(part,w/2,0,w-w/2,h));
