@@ -225,10 +225,11 @@ static b32 editor_save(struct editor_tab address_to tab)
         return true;
 }
 
-// Whether the file was changed by someone else since it was opened or saved.
+// Whether the file was changed by someone else since it was opened or saved. Without O_NONBLOCK, a FIFO that replaced the
+// file would hang the window until a writer came (a FIFO's size is 0, so it is seen as changed).
 static fn editor_check_disk(struct editor_tab address_to tab)
 {
-        bipolar handle = tab->path[0] ? system_open_at(AT_FDCWD, (string_address)tab->path, FILE_READ | O_CLOEXEC) : -1;
+        bipolar handle = tab->path[0] ? system_open_at(AT_FDCWD, (string_address)tab->path, FILE_READ | O_NONBLOCK | O_NOCTTY | O_CLOEXEC) : -1;
         error_stat facts;
 
         if (handle < 0)
