@@ -54404,7 +54404,8 @@ __asm__(
     //       bsf already set is the same test, one instruction earlier.
     //
     ASM_FUNC(bits_trailing_zeros)
-    "bsf %rdi, %rax\n   mov $64, %edx\n   cmovz %edx, %eax\n" ASM_RET
+    "bsf %rdi, %rax\n   cmovz .Lbits_trailing_zeros_zero(%rip), %eax\n" ASM_RET
+    ".Lbits_trailing_zeros_zero:  .long 64\n"
     ASM_END(bits_trailing_zeros)
 
     //
