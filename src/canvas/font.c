@@ -285,6 +285,8 @@
 //      The kerning memo's sets of FONT_WAYS: a frame's pairs are a few hundred,
 //      and a direct-mapped table lost some of them to collisions every frame.
 #define FONT_KERN_SETS 512
+//      The cache's direct-mapped memo of the slots it found last: 256 ways of 24 bytes.
+#define FONT_CACHED 256
 #define FONT_RECENT 256
 #define FONT_STRIP (1 << 17)
 #define FONT_RUN 1024
@@ -343,6 +345,15 @@ typedef struct
         p16 x, y, width, height;
         b16 left, top;
 } font_slot;
+
+//      A key and cell font_cached last found, the atlas generation it was
+//      found in, and the slot's 1-based index in the list.
+typedef struct
+{
+        p64 key, cell;
+        p32 generation;
+        p16 slot;
+} font_cache_way;
 
 typedef struct
 {
@@ -479,6 +490,7 @@ typedef struct
 
         font_slot slots[FONT_SLOTS * 3 / 4];
         p16 index[FONT_SLOTS];
+        font_cache_way cached[FONT_CACHED];
         font_pairing pairs[FONT_PAIRS];
         font_memo glyph_memo[FONT_MEMO];
         font_kern_way kern_memo[FONT_KERN_SETS][FONT_WAYS];
@@ -4529,18 +4541,20 @@ static bool font_room(font_engine address_to e, b32 width, b32 height, p16 addre
         return true;
 }
 
-//      The cached coverage for a glyph, or for a drawn cell when face is
-//      null, with code the code point and size the cell's width << 16 |
-//      height. With cell, a glyph's whole terminal cell instead -- cell
-//      packs its width, height, baseline and the glyph's pixel offset in
-//      it, 16 bits each -- or nothing with stride 1 when the glyph does not
-//      fit inside it. An empty bitmap when there is nothing to draw.
-static font_bitmap font_cached(font_engine address_to e, const font_face address_to face,
-                               p32 code, p32 size, p32 phase, p32 style, p64 cell)
+//      A slot's bitmap as the lookup answers it.
+static inline font_bitmap font_slot_box(const font_engine address_to e, const font_slot address_to slot)
 {
-        p64 key = (p64)1 << 63 | (p64)(face ? face->id : 0) << 47 | (p64)(code & 0xffff) << 31 |
-                  (p64)(face ? size & 0x3fffff : (size >> 16 & 0x7ff) << 11 | (size & 0x7ff)) << 9 |
-                  (p64)(phase & 7) << 6 | (p64)(style & 7) << 3 | (p64)(style >> 3 & 3);
+        return (font_bitmap){slot->width ? e->atlas + (positive)slot->y * e->atlas_width + slot->x : null,
+                             slot->x == 0xffff ? 1 : e->atlas_width, slot->left, slot->top, slot->width, slot->height};
+}
+
+//      The slow half of font_cached: the slots, then a new one. A slot found
+//      is remembered in the way it was asked for, which then answers it as
+//      long as the atlas is the one it was found in.
+static font_bitmap font_cached_find(font_engine address_to e, const font_face address_to face,
+                                    p32 code, p32 size, p32 phase, p32 style, p64 cell, p64 key,
+                                    font_cache_way address_to way)
+{
         font_bitmap box = {0};
 
         if (face && size >= FONT_SIZE_LIMIT)
@@ -4558,9 +4572,10 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
                 const font_slot address_to slot = &e->slots[e->index[home] - 1];
 
                 if (slot->key == key && slot->cell == cell)
-                        return (font_bitmap){slot->width ? e->atlas + (positive)slot->y * e->atlas_width + slot->x : null,
-                                             slot->x == 0xffff ? 1 : e->atlas_width, slot->left, slot->top,
-                                             slot->width, slot->height};
+                {
+                        *way = (font_cache_way){key, cell, e->generation, e->index[home]};
+                        return font_slot_box(e, slot);
+                }
                 home = (home + 1) & (FONT_SLOTS - 1);
         }
 
@@ -4635,6 +4650,28 @@ static font_bitmap font_cached(font_engine address_to e, const font_face address
 
         font_enter(e, home, (font_slot){key, cell, x, y, (p16)box.width, (p16)box.height, (b16)box.left, (b16)box.top});
         return box;
+}
+
+//      The cached coverage for a glyph, or for a drawn cell when face is
+//      null, with code the code point and size the cell's width << 16 |
+//      height. With cell, a glyph's whole terminal cell instead -- cell
+//      packs its width, height, baseline and the glyph's pixel offset in
+//      it, 16 bits each -- or nothing with stride 1 when the glyph does not
+//      fit inside it. An empty bitmap when there is nothing to draw.
+static inline INLINE font_bitmap font_cached(font_engine address_to e, const font_face address_to face,
+                                             p32 code, p32 size, p32 phase, p32 style, p64 cell)
+{
+        p64 key = (p64)1 << 63 | (p64)(face ? face->id : 0) << 47 | (p64)(code & 0xffff) << 31 |
+                  (p64)(face ? size & 0x3fffff : (size >> 16 & 0x7ff) << 11 | (size & 0x7ff)) << 9 |
+                  (p64)(phase & 7) << 6 | (p64)(style & 7) << 3 | (p64)(style >> 3 & 3);
+        font_cache_way address_to way = &e->cached[((key ^ cell) * 0x9e3779b97f4a7c15ull) >> 56];
+
+        //      The way answers when it is this key and cell, found in this
+        //      atlas, and the lookup would not reset or refuse first.
+        if (way->key == key && way->cell == cell && way->generation == e->generation && !e->scratched &&
+            e->slot_count < FONT_SLOTS * 3 / 4 && (!face || size < FONT_SIZE_LIMIT))
+                return font_slot_box(e, &e->slots[way->slot - 1]);
+        return font_cached_find(e, face, code, size, phase, style, cell, key, way);
 }
 
 /*
