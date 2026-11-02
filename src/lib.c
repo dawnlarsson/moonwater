@@ -54434,25 +54434,43 @@ __asm__(
     // ------------------------------------------------------------
     //       set-scan
     // ------------------------------------------------------------
-    // The x86_64 block carries the reasoning; these are the same two loops in
-    // AAPCS64. ubfx lifts the word index out in one instruction and lsl by a
-    // register already takes its count modulo sixty four.
+    // The set is a byte per member on a 256 byte stack table, as string_span
+    // is, rather than a bit per member: the build is a store and a load a
+    // member and the scan is a load and a table load a byte, with no word index
+    // to lift out. Two bytes a turn, the start in x2, as string_span has it.
+    // Measured natively on the M2 Pro, clang -O2, against the bit form this
+    // replaces, a set of three members, over five runs: an input of 4 bytes
+    // 1.3 times faster (median), 16 bytes 1.5, 64 bytes 1.4, 1024 bytes 1.2 to
+    // 1.5. string_span_without_set's table is ones with the reject
+    // members and the terminator cleared. Its 4 byte case is a tie within
+    // noise (six runs, 0.97 to 1.17 of the bit form, median 0.99), and its 16
+    // byte case is 1.5 times faster in all six.
     ASM_FUNC(string_span_of_set)
-    "sub sp, sp, #32\n   stp xzr, xzr, [sp]\n   stp xzr, xzr, [sp, #16]\n   mov x4, #1\n   mov x2, xzr\n   ldrb w3, [x1]\n   cbz w3, 2f\n"
-    "1:  ubfx x5, x3, #6, #2\n   lsl x6, x4, x3\n   ldr x7, [sp, x5, lsl #3]\n   orr x7, x7, x6\n   str x7, [sp, x5, lsl #3]\n   ldrb w3, [x1, #1]!\n   cbnz w3, 1b\n"
-    "2:  b 4f\n"
-    "3:  add x2, x2, #1\n"
-    "4:  ldrb w3, [x0, x2]\n   ubfx x5, x3, #6, #2\n   ldr x7, [sp, x5, lsl #3]\n   lsr x7, x7, x3\n   tbnz w7, #0, 3b\n   mov x0, x2\n   add sp, sp, #32\n" ASM_RET
+    "sub sp, sp, #256\n   movi v0.16b, #0\n"
+    "stp q0, q0, [sp]\n   stp q0, q0, [sp, #32]\n   stp q0, q0, [sp, #64]\n   stp q0, q0, [sp, #96]\n"
+    "stp q0, q0, [sp, #128]\n   stp q0, q0, [sp, #160]\n   stp q0, q0, [sp, #192]\n   stp q0, q0, [sp, #224]\n"
+    "mov w4, #1\n   ldrb w3, [x1]\n   cbz w3, 2f\n"
+    "1:  strb w4, [sp, x3]\n   ldrb w3, [x1, #1]!\n   cbnz w3, 1b\n"
+    "2:  mov x2, x0\n"
+    "3:  ldrb w3, [x0], #1\n   ldrb w5, [sp, x3]\n   cbz w5, 7f\n"
+    "ldrb w3, [x0], #1\n   ldrb w5, [sp, x3]\n   cbnz w5, 3b\n"
+    "sub x0, x0, #1\n   b 9f\n"
+    "7:  sub x0, x0, #1\n"
+    "9:  sub x0, x0, x2\n   add sp, sp, #256\n" ASM_RET
     ASM_END(string_span_of_set)
 
-    // The one bit of difference is in the first store: the pair puts a set bit
-    // zero and a clear word one down together.
     ASM_FUNC(string_span_without_set)
-    "sub sp, sp, #32\n   mov x4, #1\n   stp x4, xzr, [sp]\n   stp xzr, xzr, [sp, #16]\n   mov x2, xzr\n   ldrb w3, [x1]\n   cbz w3, 2f\n"
-    "1:  ubfx x5, x3, #6, #2\n   lsl x6, x4, x3\n   ldr x7, [sp, x5, lsl #3]\n   orr x7, x7, x6\n   str x7, [sp, x5, lsl #3]\n   ldrb w3, [x1, #1]!\n   cbnz w3, 1b\n"
-    "2:  b 4f\n"
-    "3:  add x2, x2, #1\n"
-    "4:  ldrb w3, [x0, x2]\n   ubfx x5, x3, #6, #2\n   ldr x7, [sp, x5, lsl #3]\n   lsr x7, x7, x3\n   tbz w7, #0, 3b\n   mov x0, x2\n   add sp, sp, #32\n" ASM_RET
+    "sub sp, sp, #256\n   movi v0.16b, #1\n"
+    "stp q0, q0, [sp]\n   stp q0, q0, [sp, #32]\n   stp q0, q0, [sp, #64]\n   stp q0, q0, [sp, #96]\n"
+    "stp q0, q0, [sp, #128]\n   stp q0, q0, [sp, #160]\n   stp q0, q0, [sp, #192]\n   stp q0, q0, [sp, #224]\n"
+    "strb wzr, [sp]\n   ldrb w3, [x1]\n   cbz w3, 2f\n"
+    "1:  strb wzr, [sp, x3]\n   ldrb w3, [x1, #1]!\n   cbnz w3, 1b\n"
+    "2:  mov x2, x0\n"
+    "3:  ldrb w3, [x0], #1\n   ldrb w5, [sp, x3]\n   cbz w5, 7f\n"
+    "ldrb w3, [x0], #1\n   ldrb w5, [sp, x3]\n   cbnz w5, 3b\n"
+    "sub x0, x0, #1\n   b 9f\n"
+    "7:  sub x0, x0, #1\n"
+    "9:  sub x0, x0, x2\n   add sp, sp, #256\n" ASM_RET
     ASM_END(string_span_without_set)
 
     // w3 still holds the byte that stopped the walk, so csel turns "it was the

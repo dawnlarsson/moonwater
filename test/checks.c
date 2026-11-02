@@ -10567,6 +10567,38 @@ test(set_scans_empty_arguments) {
 }
 
 /*
+        The set-scan builds a table of one byte a member on the stack and walks
+        the source two bytes a turn, so each width has its own exit: every width
+        from 0 to 300 at every alignment in sixteen, with a source that is a run
+        of members and then a stop, for a set of three members and a set of one.
+*/
+test(set_scans_widths_alignments) {
+        static p8 buffer[16 + 300 + 8];
+        static const p8 sets[][4] = {" \t\n", "a"};
+
+        for (positive which = 0; which < sizeof(sets) / sizeof(sets[0]); which++)
+        {
+                for (positive align = 0; align < 16; align++)
+                {
+                        for (positive size = 0; size <= 300; size++)
+                        {
+                                p8 *at = buffer + align;
+                                positive run = next() % (size + 1);
+                                positive length = string_length((string_address)sets[which]);
+
+                                for (positive i = 0; i < size; i++)
+                                        at[i] = i < run ? sets[which][i % length] : (p8)'!';
+
+                                at[size] = 0;
+                                fail(set_scans_agree((string_address)at, (string_address)sets[which]));
+                        }
+                }
+        }
+
+        return true;
+}
+
+/*
         Every length to forty at every alignment to eight, with the shapes that
         break a scan: all the same byte, a match only at the front, a match
         only at the end, no match at all, and bytes with the high bit set.
