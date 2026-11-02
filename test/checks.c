@@ -35460,6 +35460,14 @@ b32 main(void)
         EVERY_VALUE(byte_to_upper,       known_to_upper);
         EVERY_VALUE(byte_to_lower,       known_to_lower);
 
+        /* Every 16-bit value against the C definitions, past what the table names. */
+        for (b32 value = 0; value < 65536; value++) {
+                b32 up = value >= 'a' && value <= 'z' ? value - 32 : value;
+                b32 down = value >= 'A' && value <= 'Z' ? value + 32 : value;
+                if (byte_to_upper(value) != up)   report("byte_to_upper wide", value, up, byte_to_upper(value));
+                if (byte_to_lower(value) != down) report("byte_to_lower wide", value, down, byte_to_lower(value));
+        }
+
         EVERY_WORD(bits_counted,         known_counted);
         EVERY_WORD(bits_trailing_zeros,  known_trailing_zeros);
         EVERY_WORD(bits_leading_zeros,   known_leading_zeros);

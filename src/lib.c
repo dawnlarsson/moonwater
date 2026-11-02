@@ -53472,7 +53472,7 @@ __asm__(
     //       is the point of not looking it up in a table.
     //
     ASM_FUNC(byte_to_upper)
-    "lea -97(%rdi), %eax\n   lea -32(%rdi), %edx\n   cmp $26, %eax\n   mov %edi, %eax\n   cmovb %edx, %eax\n" ASM_RET
+    "lea -97(%rdi), %edx\n   lea -32(%rdi), %eax\n   cmp $26, %edx\n   cmovae %edi, %eax\n" ASM_RET
     ASM_END(byte_to_upper)
 
     ASM_FUNC(byte_to_lower)
