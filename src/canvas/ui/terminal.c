@@ -220,7 +220,8 @@ static struct
         positive caret_since, caret_awake;
         unsigned int caret_row, caret_column;
         b32 caret_seen;
-        unsigned int caret_at[2], caret_cover[2];
+        unsigned int caret_at[2], caret_cover[2], caret_marks[2];
+        b32 caret_block[2];
 } terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1, .caret_at = {~0u, ~0u}};
 
 // The caret as the frame being made draws it: its index in the frame (~0 for none), its cover, and whether it is a block
@@ -660,12 +661,20 @@ static unsigned int terminal_caret_cover_at(positive now)
         return ui_caret_at(now, terminal.caret_since, terminal.caret_awake, &due);
 }
 
-// The caret of the frame being made: read here, in its own function, since terminal_frame has a local named shown.
+// The caret of the frame being made: read here, in its own function, since terminal_frame has a local named shown. With no
+// caret in the frame there is no cover, shape or mark to draw, so none is kept.
 static void terminal_caret_frame(void)
 {
         terminal_caret_cover = terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at(clock_monotonic_nanoseconds());
-        terminal_caret_block = shown && shown_block;
-        terminal_caret_marks = shown ? shown_marks : 0;
+        terminal_caret_block = terminal_caret_index != ~0u && shown && shown_block;
+        terminal_caret_marks = terminal_caret_index != ~0u && shown ? shown_marks : 0;
+}
+
+// Whether a buffer holds the caret as this frame draws it: its cell, its cover, its shape and its marks.
+static b32 terminal_caret_held(unsigned int slot)
+{
+        return terminal.caret_at[slot] == terminal_caret_index && terminal.caret_cover[slot] == terminal_caret_cover &&
+               terminal.caret_block[slot] == terminal_caret_block && terminal.caret_marks[slot] == terminal_caret_marks;
 }
 
 static void terminal_caret_restart(positive now)
@@ -1097,7 +1106,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         {
                                 own.flags = (unsigned short)(cell->flags & terminal_caret_marks);
                                 terminal_decorate(pixels, &own, left, y, cells, terminal_blend(paper, ink, caret_cover),
-                                                  (unsigned int)(ui_caret_thick() * terminal_scale()));
+                                                  (unsigned int)(ui_caret_thick() * terminal_scale() / 100));
                         }
                 }
                 else if (decor)
@@ -1466,14 +1475,14 @@ static b32 terminal_frame(void)
                 if (screen)
                         terminal_span(line, screen + (unsigned long)row * COLUMNS, &b0, &b1);
 
-                // A caret whose cover the buffer, or the screen, does not hold is drawn again, though its cells are the same.
+                // A caret the buffer, or the screen, does not hold as this frame draws it is drawn again, though its cells are the same.
                 if (terminal_caret_index != ~0u && terminal_caret_index / COLUMNS == row)
                 {
                         unsigned int column = terminal_caret_index % COLUMNS;
 
-                        if (drawn && (terminal.caret_at[slot] != terminal_caret_index || terminal.caret_cover[slot] != terminal_caret_cover))
+                        if (drawn && !terminal_caret_held(slot))
                                 terminal_span_take(&a0, &a1, column);
-                        if (screen && (terminal.caret_at[front] != terminal_caret_index || terminal.caret_cover[front] != terminal_caret_cover))
+                        if (screen && !terminal_caret_held(front))
                                 terminal_span_take(&b0, &b1, column);
                 }
 
@@ -1587,6 +1596,8 @@ static b32 terminal_frame(void)
         terminal.frame[slot] = now;
         terminal.caret_at[slot] = terminal_caret_index;
         terminal.caret_cover[slot] = terminal_caret_cover;
+        terminal.caret_block[slot] = terminal_caret_block;
+        terminal.caret_marks[slot] = terminal_caret_marks;
         terminal.valid[slot] = 1;
 
         table->width[own] = terminal.width;

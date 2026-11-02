@@ -224,7 +224,7 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CARET_THICKNESS_PATH, .standard = "normal", .reset = "normal",
                       .need = "how Canvas draws", .refusal = "caret thickness is thin, normal or thick, not %s\n",
                       .usage = "canvas caret thickness [thin|normal|thick]",
-                      .help = "how wide the caret is: 1, 2 or 3 pixels at scale 1; a block cursor is a whole cell [normal]"),
+                      .help = "how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
