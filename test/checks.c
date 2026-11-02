@@ -13173,11 +13173,19 @@ test(byte_class_table) {
         return true;
 }
 
+//      The C definition byte_to_upper is measured against by the bench path
+//      (differential.py --bench): the twenty six lower letters, every other
+//      value as it came.
+b32 byte_case_upper(b32 value)
+{
+        return (value >= 'a' && value <= 'z') ? value - 32 : value;
+}
+
 //      Case, which must change exactly the twenty six that have another case
 //      and leave every other byte as it found it.
 test(byte_case) {
         for (b32 value = -1; value < 256; value++) {
-                b32 up = (value >= 'a' && value <= 'z') ? value - 32 : value;
+                b32 up = byte_case_upper(value);
                 b32 down = (value >= 'A' && value <= 'Z') ? value + 32 : value;
 
                 fail(byte_to_upper(value) == up);
