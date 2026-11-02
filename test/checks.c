@@ -117561,6 +117561,40 @@ static void check_compositor_screens(void)
     compositor_float(1);
     check("screens: and the place it floated at before is carried too", compositor.x[1] + 60 <= SCREENS_A_W &&
                                                                             compositor.y[1] + 40 <= SCREENS_A_H);
+    /* A drag shows the target under the pointer as a tint, and a drop on it takes the target; off every target nothing
+       is shown and nothing is taken. Row 2 is on the screen A now, the only one. */
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
+    screens_hand(100, 100, 0);
+    check("snap: a window dragged into the middle of a screen shows no target",
+          compositor.drag_moved && compositor.preview[2] == 0 && compositor.preview_row != 2);
+    screens_hand(1, 1, 0);
+    check("snap: a corner shows its quarter, and the corner wins over the top and the left",
+          compositor.preview_row == 2 && compositor.preview[0] == 0 && compositor.preview[1] == 0 &&
+              compositor.preview[2] == SCREENS_A_W / 2 && compositor.preview[3] == SCREENS_A_H / 2);
+    screens_hand(100, 120, 0);
+    check("snap: dragged off the target before it is let go, the tint goes", compositor.preview[2] == 0);
+    screens_hand(1, 1, 0);
+    screens_hand(1, 1, -1);
+    check("snap: let go on the quarter, the window takes it, and the size asked is the quarter",
+          compositor.arranged[2] == COMPOSITOR_TOP_LEFT && compositor.x[2] == 0 && compositor.y[2] == 0 &&
+              table->want_width[2] == SCREENS_A_W / 2 && table->want_height[2] == SCREENS_A_H / 2 && compositor.preview[2] == 0);
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
+    screens_hand(100, 150, 0);
+    screens_hand(100, 150, -1);
+    check("snap: let go in the middle, the window that was arranged floats where it is and takes no target",
+          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.preview[2] == 0);
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
+    screens_hand(150, 190, 0);
+    check("snap: the bottom band shows the bottom half",
+          compositor.preview_row == 2 && compositor.preview[0] == 0 && compositor.preview[1] == SCREENS_A_H / 2 &&
+              compositor.preview[2] == SCREENS_A_W && compositor.preview[3] == SCREENS_A_H - SCREENS_A_H / 2);
+    screens_hand(150, 190, -1);
+    check("snap: let go on the bottom band, the window takes the bottom half",
+          compositor.arranged[2] == COMPOSITOR_BOTTOM && compositor.x[2] == 0 && compositor.y[2] == SCREENS_A_H / 2 &&
+              table->want_width[2] == SCREENS_A_W && table->want_height[2] == SCREENS_A_H - SCREENS_A_H / 2);
     //  A window the card shows straight has its newest picture taken into its other buffer and held for the flip
     //  that lets go of the one shown (flip_row its row). The screens taken again before that flip show the
     //  compositor's scanout (compositor_scanout_own, then the crtcs set and compositor_flip_done), and with two
@@ -117592,6 +117626,48 @@ static void check_compositor_screens(void)
               compositor_uevent_drm(card, (long)sizeof(card)) && !compositor_uevent_drm(usb, (long)sizeof(usb)) &&
                   !compositor_uevent_drm(near, (long)sizeof(near)) && !compositor_uevent_drm(card, 60));
     }
+}
+
+/*
+        The snap preview is a tint on its target and on nothing else. Over the desktop, the target is the kit's selection
+        at its own alpha; the window dragged is as it is over the tint, and a window above it is as it is too. Everything
+        else is the desktop, untouched.
+*/
+static void check_compositor_preview(void)
+{
+    static unsigned int pixels[64 * 40], want[64 * 40], window[16 * 8], over[8 * 8];
+    struct compositor_target t = {pixels, 64, 64, 40, 0, 0, 64, 40, 0, 0, 0};
+    struct compositor_frame frames[2];
+    const unsigned int ink = 0x40ffffffu, ground = compositor_ground;
+    unsigned int wrong = 0;
+
+    for (unsigned int at = 0; at < 64 * 40; at++)
+        pixels[at] = ground;
+    for (unsigned int at = 0; at < 16 * 8; at++)
+        window[at] = 0xc06020u;
+    for (unsigned int at = 0; at < 8 * 8; at++)
+        over[at] = 0x204080u;
+    frames[0] = (struct compositor_frame){.x = 10, .y = 4, .width = 16, .height = 8, .scale = 1, .pixels = window, .pitch = 16,
+                                          .preview = {0, 0, 32, 20}, .preview_ink = ink};
+    frames[1] = (struct compositor_frame){.x = 0, .y = 0, .width = 8, .height = 8, .scale = 1, .pixels = over, .pitch = 8};
+    for (int y = 0; y < 40; y++)
+        for (int x = 0; x < 64; x++)
+        {
+            unsigned int e = ground;
+
+            if (x < 32 && y < 20)
+                e = compositor_mix(e, ink & 0xffffffu, ink >> 24);
+            if (x >= 10 && x < 26 && y >= 4 && y < 12)
+                e = 0xc06020u;
+            if (x < 8 && y < 8)
+                e = 0x204080u;
+            want[y * 64 + x] = e;
+        }
+    compositor_scene(&t, frames, 2);
+    for (unsigned int at = 0; at < 64 * 40; at++)
+        wrong += pixels[at] != want[at];
+    check("preview: the tint is on its target and nowhere else, the window and the one over it are as they are",
+          wrong == 0 && compositor_mix(ground, ink & 0xffffffu, ink >> 24) != ground);
 }
 
 /*
@@ -131790,6 +131866,7 @@ b32 main()
         check_compositor_partial();
         check_compositor_held();
         check_compositor_screens();
+        check_compositor_preview();
         check_compositor_cycle();
         check_compositor_hover();
         check_compositor_lit();
@@ -137717,14 +137794,42 @@ static void check_compositor_outputs(void) {
       co_check(compositor_screen_snap(level,2,2562,500,8,&at)==COMPOSITOR_FLOATING&&at==1);
       co_check(compositor_screen_snap(level,2,4475,500,8,&at)==COMPOSITOR_RIGHT&&at==1);
       co_check(compositor_screen_snap(level,2,3000,3,8,&at)==COMPOSITOR_MAXIMIZED&&at==1);
-      co_check(compositor_screen_snap(level,2,4477,2,8,&at)==COMPOSITOR_MAXIMIZED&&at==1);
+      co_check(compositor_screen_snap(level,2,4477,2,8,&at)==COMPOSITOR_TOP_RIGHT&&at==1);
       co_check(compositor_screen_snap(level,2,5000,500,8,&at)==COMPOSITOR_FLOATING&&at==-1);
       co_check(compositor_screen_snap(two,2,2563,1150,8,&at)==COMPOSITOR_LEFT&&at==1);  /* A is not against B down there */
       co_check(compositor_screen_snap(two,2,2563,1000,8,&at)==COMPOSITOR_FLOATING&&at==1);
       static const int one[1][4]={{0,0,2560,1080}};
-      co_check(compositor_screen_snap(one,1,7,7,8,&at)==COMPOSITOR_MAXIMIZED&&compositor_screen_snap(one,1,7,500,8,&at)==COMPOSITOR_LEFT&&
+      co_check(compositor_screen_snap(one,1,7,7,8,&at)==COMPOSITOR_TOP_LEFT&&compositor_screen_snap(one,1,7,500,8,&at)==COMPOSITOR_LEFT&&
                compositor_screen_snap(one,1,2552,500,8,&at)==COMPOSITOR_RIGHT&&compositor_screen_snap(one,1,2551,500,8,&at)==COMPOSITOR_FLOATING&&
                compositor_screen_snap(one,1,8,500,8,&at)==COMPOSITOR_FLOATING); }
+    /* Every target at 1x and at 2x: a band is 8 logical pixels, so 16 device pixels at 2x; a corner is its quarter, and
+       each target's rectangle is the screen's, halved as it says. */
+    for (int scale = 1; scale <= 2; scale++)
+    {
+      int w = 1920 * scale, h = 1080 * scale, m = 8 * scale, at, part[4];
+      static int big[1][4];
+      big[0][0] = 0, big[0][1] = 0, big[0][2] = w, big[0][3] = h;
+      co_check(compositor_screen_snap(big,1,m-1,h/2,m,&at)==COMPOSITOR_LEFT&&at==0);
+      co_check(compositor_screen_snap(big,1,m,h/2,m,&at)==COMPOSITOR_FLOATING);
+      co_check(compositor_screen_snap(big,1,w-m,h/2,m,&at)==COMPOSITOR_RIGHT);
+      co_check(compositor_screen_snap(big,1,w-m-1,h/2,m,&at)==COMPOSITOR_FLOATING);
+      co_check(compositor_screen_snap(big,1,w/2,m-1,m,&at)==COMPOSITOR_MAXIMIZED);
+      co_check(compositor_screen_snap(big,1,w/2,h-m,m,&at)==COMPOSITOR_BOTTOM);
+      co_check(compositor_screen_snap(big,1,w/2,h-m-1,m,&at)==COMPOSITOR_FLOATING);
+      co_check(compositor_screen_snap(big,1,m-1,m-1,m,&at)==COMPOSITOR_TOP_LEFT);
+      co_check(compositor_screen_snap(big,1,w-m,m-1,m,&at)==COMPOSITOR_TOP_RIGHT);
+      co_check(compositor_screen_snap(big,1,m-1,h-m,m,&at)==COMPOSITOR_BOTTOM_LEFT);
+      co_check(compositor_screen_snap(big,1,w-m,h-m,m,&at)==COMPOSITOR_BOTTOM_RIGHT);
+      co_check(compositor_screen_snap(big,1,m,m,m,&at)==COMPOSITOR_FLOATING);
+      compositor_screen_part(big[0],COMPOSITOR_MAXIMIZED,part);co_check(co_rect(part,0,0,w,h));
+      compositor_screen_part(big[0],COMPOSITOR_LEFT,part);co_check(co_rect(part,0,0,w/2,h));
+      compositor_screen_part(big[0],COMPOSITOR_RIGHT,part);co_check(co_rect(part,w/2,0,w-w/2,h));
+      compositor_screen_part(big[0],COMPOSITOR_BOTTOM,part);co_check(co_rect(part,0,h/2,w,h-h/2));
+      compositor_screen_part(big[0],COMPOSITOR_TOP_LEFT,part);co_check(co_rect(part,0,0,w/2,h/2));
+      compositor_screen_part(big[0],COMPOSITOR_TOP_RIGHT,part);co_check(co_rect(part,w/2,0,w-w/2,h/2));
+      compositor_screen_part(big[0],COMPOSITOR_BOTTOM_LEFT,part);co_check(co_rect(part,0,h/2,w/2,h-h/2));
+      compositor_screen_part(big[0],COMPOSITOR_BOTTOM_RIGHT,part);co_check(co_rect(part,w/2,h/2,w-w/2,h-h/2));
+    }
     /* What an arrangement fills of a screen. */
     { int part[4];
       compositor_screen_part(two[1],COMPOSITOR_MAXIMIZED,part);co_check(co_rect(part,2560,0,1920,1200));

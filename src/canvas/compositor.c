@@ -105,6 +105,8 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 static struct taskbar_view compositor_taskbar_view(void);
 static unsigned int compositor_line_lit(void); // the lit line of the window with the keys, the theme's (compositor_theme_read)
 static unsigned int compositor_ink_shadow(void); // the chrome's shadow ink: a line without the keys, the close button, a tab unlit
+static unsigned int compositor_ink_selection(void); // the chrome's selection, 0xaarrggbb: the snap preview's tint
+static void compositor_preview(int row); // the snap preview of the drag of row (none clears it), from the pointer
 static unsigned int compositor_tab_target(b32 lit); // what a tab's glass is tinted toward, the theme's
 
 struct compositor_target
@@ -148,6 +150,10 @@ struct compositor_frame
         // A window landing is drawn at less than its picture's size, source_w by source_h: its contents are that
         // picture scaled (compositor_scaled). 0 for a frame drawn at its picture's size.
         int source_w, source_h;
+        // The snap preview of the window being dragged: its target's rectangle on the output (width 0 for none) and
+        // the kit's selection, 0xaarrggbb, whose alpha is the tint's (compositor_scene draws it).
+        int preview[4];
+        unsigned int preview_ink;
 };
 
 /*
@@ -750,13 +756,19 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
         return count;
 }
 
-// What a window fills: nothing, the output, or half of it; or the room of its screen, the taskbar left out, which only
-// a placement asks for (WINDOW_PLACE_MAXIMIZED) and which follows the taskbar where it is moved.
+// What a window fills: nothing, the output, half of it, or a quarter; or the room of its screen, the taskbar left out,
+// which only a placement asks for (WINDOW_PLACE_MAXIMIZED) and which follows the taskbar where it is moved.
+// The quarters are the four TOP_LEFT..BOTTOM_RIGHT in that order, and compositor_screen_part reads them as such.
 #define COMPOSITOR_FLOATING 0
 #define COMPOSITOR_MAXIMIZED 1
 #define COMPOSITOR_LEFT 2
 #define COMPOSITOR_RIGHT 3
 #define COMPOSITOR_ROOM 4
+#define COMPOSITOR_BOTTOM 5
+#define COMPOSITOR_TOP_LEFT 6
+#define COMPOSITOR_TOP_RIGHT 7
+#define COMPOSITOR_BOTTOM_LEFT 8
+#define COMPOSITOR_BOTTOM_RIGHT 9
 // The windows, and a tab for each window and a tray for each band (`taskbar display all` is one on every screen).
 #define COMPOSITOR_FRAMES (2 * WINDOWS + 1 + WINDOWS_OUTPUTS)
 
@@ -782,6 +794,43 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_PIECES (3 * COMPOSITOR_FRAMES)
 
 static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
+
+/*
+        The snap preview of a frame (frame->preview): its rectangle tinted over what the scene holds there, at the
+        tint's own alpha, and then the frames from that one up drawn again over the tint, so the window being dragged
+        and what is over it are as they are and the tint shows only where none of them is. Run after the scene is
+        composed, so what the tint is over is final.
+*/
+static void compositor_preview_draw(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count,
+                                    const int *radii)
+{
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const struct compositor_frame *f = &frames[at];
+                struct compositor_target cell;
+
+                if (f->preview[2] <= 0 || f->preview[3] <= 0)
+                        continue;
+                cell = compositor_clipped(t, f->preview[0], f->preview[1], f->preview[2], f->preview[3]);
+                if (cell.x2 <= cell.x1 || cell.y2 <= cell.y1)
+                        continue;
+                for (int py = cell.y1; py < cell.y2; py++)
+                        for (int px = cell.x1; px < cell.x2; px++)
+                        {
+                                unsigned int *pixel = cell.pixels + (unsigned long)(py - cell.oy) * cell.pitch + (unsigned long)(px - cell.ox);
+
+                                *pixel = compositor_mix(*pixel, f->preview_ink & 0xffffffu, f->preview_ink >> 24);
+                        }
+                for (unsigned int each = at; each < count; each++)
+                {
+                        int x, y, width, height;
+
+                        compositor_outline(&frames[each], &x, &y, &width, &height);
+                        if (x < cell.x2 && x + width > cell.x1 && y < cell.y2 && y + height > cell.y1)
+                                compositor_draw_with(&cell, &frames[each], radii[each]);
+                }
+        }
+}
 
 // Every frame's radius, as compositor_radius gives it: made once for the frames of a damage, and read by every band of it.
 static void compositor_radii(const struct compositor_frame *frames, unsigned int count, int *radii)
@@ -951,6 +1000,7 @@ static void compositor_scene_plan(const struct compositor_target *t, const struc
                         compositor_blit(t, cx, cy, r, r, scratch, (unsigned long)r);
                 }
         }
+        compositor_preview_draw(t, frames, count, radii);
 }
 
 // The scene of a damage with its frames' radii made here, for the callers that have no damage of their own.
@@ -2066,40 +2116,66 @@ static void compositor_screen_keep_window(const int (*screens)[4], unsigned int 
 }
 
 /*
-        Where a drag let go at x, y arranges its window: the screen under the
-        pointer and what of it the window fills (COMPOSITOR_MAXIMIZED at its
-        top, the halves at its sides, the top before the sides so a corner
-        fills it), or COMPOSITOR_FLOATING. An edge another screen is against
-        is no edge: the pointer goes on across it.
+        The snap target a drag let go at x, y arranges its window to, on the
+        screen under the pointer, or COMPOSITOR_FLOATING for none. Four bands,
+        margin wide, run in from the screen's free edges: a corner is the
+        quarter where two bands meet and wins over the edges; a top band alone
+        is COMPOSITOR_MAXIMIZED (all of the screen), a bottom band alone is the
+        bottom half, and a side band alone is that half. An edge another screen
+        is against is no edge: the pointer goes on across it.
 */
 static unsigned int compositor_screen_snap(const int (*screens)[4], unsigned int count, int x, int y, int margin,
                                            int *screen)
 {
         int at = compositor_screen_at(screens, count, x, y);
         const int *s;
+        int at_top, at_bottom, at_left, at_right;
 
         *screen = at;
         if (at < 0)
                 return COMPOSITOR_FLOATING;
         s = screens[at];
-        if (y - s[1] < margin && compositor_screen_at(screens, count, x, s[1] - 1) < 0)
+        at_top = y - s[1] < margin && compositor_screen_at(screens, count, x, s[1] - 1) < 0;
+        at_bottom = s[1] + s[3] - 1 - y < margin && compositor_screen_at(screens, count, x, s[1] + s[3]) < 0;
+        at_left = x - s[0] < margin && compositor_screen_at(screens, count, s[0] - 1, y) < 0;
+        at_right = s[0] + s[2] - 1 - x < margin && compositor_screen_at(screens, count, s[0] + s[2], y) < 0;
+        if (at_top && at_left)
+                return COMPOSITOR_TOP_LEFT;
+        if (at_top && at_right)
+                return COMPOSITOR_TOP_RIGHT;
+        if (at_bottom && at_left)
+                return COMPOSITOR_BOTTOM_LEFT;
+        if (at_bottom && at_right)
+                return COMPOSITOR_BOTTOM_RIGHT;
+        if (at_top)
                 return COMPOSITOR_MAXIMIZED;
-        if (x - s[0] < margin && compositor_screen_at(screens, count, s[0] - 1, y) < 0)
+        if (at_bottom)
+                return COMPOSITOR_BOTTOM;
+        if (at_left)
                 return COMPOSITOR_LEFT;
-        if (s[0] + s[2] - 1 - x < margin && compositor_screen_at(screens, count, s[0] + s[2], y) < 0)
+        if (at_right)
                 return COMPOSITOR_RIGHT;
         return COMPOSITOR_FLOATING;
 }
 
-// What a window arranged as how fills of a screen, x, y, width, height: all of it, or its left or right half.
+/*
+        What a window arranged as how fills of a screen, as x, y, width,
+        height. The halves and quarters are the screen's own halves: a right
+        part starts at half the width, a bottom one at half the height, and
+        the far half takes the odd pixel.
+*/
 static void compositor_screen_part(const int *screen, unsigned int how, int *part)
 {
-        int half = screen[2] / 2;
+        int half_w = screen[2] / 2, half_h = screen[3] / 2;
+        int wide = how == COMPOSITOR_LEFT || how == COMPOSITOR_RIGHT || how >= COMPOSITOR_TOP_LEFT;
+        int tall = how == COMPOSITOR_BOTTOM || how >= COMPOSITOR_TOP_LEFT;
+        int right = how == COMPOSITOR_RIGHT || how == COMPOSITOR_TOP_RIGHT || how == COMPOSITOR_BOTTOM_RIGHT;
+        int low = how == COMPOSITOR_BOTTOM || how == COMPOSITOR_BOTTOM_LEFT || how == COMPOSITOR_BOTTOM_RIGHT;
 
-        part[0] = how == COMPOSITOR_RIGHT ? screen[0] + half : screen[0];
-        part[1] = screen[1];
-        part[2] = how == COMPOSITOR_LEFT ? half : how == COMPOSITOR_RIGHT ? screen[2] - half : screen[2];
-        part[3] = screen[3];
+        part[0] = screen[0] + (right ? half_w : 0);
+        part[1] = screen[1] + (low ? half_h : 0);
+        part[2] = !wide ? screen[2] : right ? screen[2] - half_w : half_w;
+        part[3] = !tall ? screen[3] : low ? screen[3] - half_h : half_h;
 }
 
 /*
@@ -2463,6 +2539,7 @@ struct compositor_poll
 #define COMPOSITOR_EDGE_RIGHT CP_EDGE_RIGHT
 #define COMPOSITOR_EDGE_TOP CP_EDGE_TOP
 #define COMPOSITOR_EDGE_BOTTOM CP_EDGE_BOTTOM
+// The snap bands at the output's edges, in logical pixels (compositor_screen_snap).
 #define COMPOSITOR_SNAP 8
 // How long a pointer that was shaken stays large.
 #define COMPOSITOR_MAGNIFIED_NS 1200000000ull
@@ -2732,6 +2809,9 @@ static struct
         // The window whose line is lit (lit_row, COMPOSITOR_NONE for none), what of it, and whether held (else hovered).
         int lit_row;
         unsigned int lit_edges, lit_held;
+        // The snap preview a drag shows (compositor_preview): the row whose drag it is, and the rectangle it is drawn on.
+        int preview_row;
+        int preview[4];
         // What moonwater debug is told of each device, kept here for the table that is made after they are opened.
         unsigned int input_kinds[COMPOSITOR_INPUTS];
         unsigned short input_id[COMPOSITOR_INPUTS][4];
@@ -3212,6 +3292,13 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         {
                 frame->lit = compositor.lit_edges;
                 frame->lit_ink = compositor.lit_held ? COMPOSITOR_INK_LINE_HELD : COMPOSITOR_INK_LINE_HOVER;
+        }
+        // The snap preview is the dragged window's: drawn under it, where its target is (compositor_scene).
+        if (row == compositor.preview_row && row == compositor.drag && compositor.preview[2] > 0)
+        {
+                frame->preview[0] = compositor.preview[0], frame->preview[1] = compositor.preview[1];
+                frame->preview[2] = compositor.preview[2], frame->preview[3] = compositor.preview[3];
+                frame->preview_ink = compositor_ink_selection();
         }
         // Glass is shown as its picture over its backdrop, composed at its own width.
         if (compositor.glassy[row] && compositor.composed[row] && compositor.glass_made[row][2] == (int)compositor.w[row] &&
@@ -5589,6 +5676,7 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
         const int (*now)[4] = compositor_screens(&now_count);
         int nowhere = -2147483647 - 1;
 
+        compositor_preview(COMPOSITOR_NONE);
         compositor.drag = compositor.resize = COMPOSITOR_NONE;
         for (int row = -1; row < WINDOWS; row++)
         {
@@ -6441,6 +6529,12 @@ static unsigned int compositor_ink_shadow(void)
         return compositor_chrome_now()->roles.role[UI_SHADOW] & 0xffffffu;
 }
 
+// The kit's selection is the bright accent at 28%, so its alpha is the snap preview's tint as the kit draws it.
+static unsigned int compositor_ink_selection(void)
+{
+        return compositor_chrome_now()->roles.role[UI_SELECTION];
+}
+
 // The colour a tab's glass is tinted toward: the theme's surface, or its primary for the tab of the window with the keys.
 static unsigned int compositor_tab_target(b32 lit)
 {
@@ -7273,8 +7367,11 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
         // Its line goes with it: the outline it had is damaged before it is a filling one.
         compositor_damage_row(row);
         compositor.arranged[row] = how;
-        compositor.edges[row] = how == COMPOSITOR_RIGHT ? COMPOSITOR_EDGE_LEFT : 0;
+        // The edges that are the screen's stay where they are whatever size comes back: a window on the right is held by its right, one at the bottom by its bottom.
+        compositor.edges[row] = (how == COMPOSITOR_RIGHT || how == COMPOSITOR_TOP_RIGHT || how == COMPOSITOR_BOTTOM_RIGHT ? COMPOSITOR_EDGE_LEFT : 0) |
+                                (how == COMPOSITOR_BOTTOM || how == COMPOSITOR_BOTTOM_LEFT || how == COMPOSITOR_BOTTOM_RIGHT ? COMPOSITOR_EDGE_TOP : 0);
         compositor.far_x[row] = rect[0] + rect[2];
+        compositor.far_y[row] = rect[1] + rect[3];
         compositor_put(row, rect[0], rect[1]);
         compositor_damage_row(row);
         compositor_want(row, rect[2], rect[3]);
@@ -8012,6 +8109,8 @@ static void compositor_leave(int row)
         compositor.hover = compositor.hover == row ? COMPOSITOR_NONE : compositor.hover;
         compositor.told_row = compositor.told_row == row ? COMPOSITOR_NONE : compositor.told_row;
         compositor.grab = compositor.grab == row ? COMPOSITOR_NONE : compositor.grab;
+        if (compositor.preview_row == row)
+                compositor_preview(COMPOSITOR_NONE);
         compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
         compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;
         compositor.resize = compositor.resize == row ? COMPOSITOR_NONE : compositor.resize;
@@ -9043,6 +9142,7 @@ static void compositor_motion(void)
                 compositor_damage_row(row);
                 compositor_place(row, compositor.pointer_x - compositor.drag_x, compositor.pointer_y - compositor.drag_y);
                 compositor_damage_row(row);
+                compositor_preview(row);
                 return;
         }
 
@@ -9065,6 +9165,35 @@ static unsigned int compositor_snap(int x, int y, int *screen)
         return compositor_screen_snap(screens, count, x, y, COMPOSITOR_SNAP * compositor.scale, screen);
 }
 
+/*
+        The snap preview: the rectangle a drop of the window row being moved would arrange it to, from the pointer as it
+        is now, drawn as a tint (compositor_preview_draw) and damaged where it was and where it is. Once the window has
+        moved only; a pointer off every target, or row none, takes the preview away.
+*/
+static void compositor_preview(int row)
+{
+        unsigned int count, how = COMPOSITOR_FLOATING;
+        const int (*screens)[4] = compositor_screens(&count);
+        int screen, rect[4] = {0, 0, 0, 0};
+
+        if (row >= 0 && row == compositor.drag && compositor.drag_moved)
+        {
+                how = compositor_snap(compositor.pointer_x, compositor.pointer_y, &screen);
+                if (how != COMPOSITOR_FLOATING)
+                        compositor_screen_part(screens[screen], how, rect);
+        }
+        if (how == COMPOSITOR_FLOATING)
+                row = COMPOSITOR_NONE;
+        if (row == compositor.preview_row && !memory_compare(rect, compositor.preview, sizeof(rect)))
+                return;
+        if (compositor.preview[2] > 0)
+                compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]);
+        memory_copy(compositor.preview, rect, sizeof(rect));
+        compositor.preview_row = row;
+        if (rect[2] > 0)
+                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
+}
+
 // The button is let go. A window that was being moved is arranged by where the
 // hand let go, unless the release is not the hand's (the device went away).
 static void compositor_lit(int row, unsigned int edges, unsigned int held);
@@ -9075,6 +9204,8 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         int grab = compositor.grab, dragged = compositor.drag, to = grab, resized = compositor.resize;
         unsigned int index = code - COMPOSITOR_BTN_LEFT;
 
+        // The preview goes with the drag; where the window lands is arranged below from the pointer, as before.
+        compositor_preview(COMPOSITOR_NONE);
         compositor.drag = COMPOSITOR_NONE;
         compositor.grab = COMPOSITOR_NONE;
         compositor.resize = COMPOSITOR_NONE;
@@ -10731,7 +10862,7 @@ static b32 compositor_main()
         compositor.watch = compositor.uevents = -1;
         compositor.hold = -1;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = compositor.told_row = COMPOSITOR_NONE;
-        compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = compositor.preview_row = COMPOSITOR_NONE;
         compositor.touch.closing = COMPOSITOR_NONE;
 
         for (positive at = 1; at < program_argument_count(); at++)
