@@ -917,16 +917,16 @@ static void terminal_margin(unsigned int address_to whole, const struct window_c
         if (!first)
                 terminal_fill(whole, 0, (int)top, terminal.pad, height, terminal_ground(frame, row, 0));
 
-        for (unsigned int column = first; column < last; column++)
-        {
-                int x = (int)(terminal.pad + column * terminal.cell_w);
-
-                if (!row)
-                        terminal_fill(whole, x, 0, terminal.cell_w, terminal.pad_y, terminal_ground(frame, 0, column));
-                if (row + 1 == ROWS && terminal.height > below)
-                        terminal_fill(whole, x, (int)below, terminal.cell_w, terminal.height - below,
-                                      terminal_ground(frame, row, column));
-        }
+        // The top and the bottom paper are one column loop each: a middle row has neither, and walking the columns for
+        // nothing was most of the margin's cost (every row walks every column). The rectangles do not overlap.
+        if (!row)
+                for (unsigned int column = first; column < last; column++)
+                        terminal_fill(whole, (int)(terminal.pad + column * terminal.cell_w), 0, terminal.cell_w,
+                                      terminal.pad_y, terminal_ground(frame, 0, column));
+        if (row + 1 == ROWS && terminal.height > below)
+                for (unsigned int column = first; column < last; column++)
+                        terminal_fill(whole, (int)(terminal.pad + column * terminal.cell_w), (int)below, terminal.cell_w,
+                                      terminal.height - below, terminal_ground(frame, row, column));
 }
 
 // The first column the bar's track covers, one column earlier for a wide character's first cell: from there to the last
