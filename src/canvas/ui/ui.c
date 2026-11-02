@@ -2688,15 +2688,16 @@ static const struct ui_type
 } ui_types[] = {{22, 28, 1, 0}, {16, 24, 1, 0}, {14, 20, 1, 0}, {16, 24, 0, 0}, {14, 20, 0, 0},
                 {14, 20, 1, 0}, {12, 16, 0, 0}, {12, 16, 0, 1}, {13, 21, 0, 1}, {15, 20, 0, 0}};
 
-// Text of a role at x on the baseline (device pixels, whole), in a colour at its own alpha, with a stroke; its width.
+// Text of a role at x on the baseline (device pixels, whole), in a colour at its own alpha, with a stroke, cut at high (device
+// pixels: the window's width, or a control's right edge); its width.
 static int ui_kit_text_width(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb,
-                             unsigned int stroke)
+                             unsigned int stroke, int high)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to faces[2] = {t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular,
                                                ui->regular};
 
-        return ui_run_in(ui, faces, x, baseline, text, t->size, argb & 0xffffffu, argb >> 24, 0, ui->width, stroke);
+        return ui_run_in(ui, faces, x, baseline, text, t->size, argb & 0xffffffu, argb >> 24, 0, high, stroke);
 }
 
 // Whether any of the rows top to bottom (device pixels) may be written: in the picture, the region and a repaint's band.
@@ -2711,7 +2712,9 @@ static b32 ui_rows_seen(const struct ui address_to ui, int top, int bottom)
         outside those the ui may write -- a repaint's band, the region's top and bottom -- writes nothing there, and
         is not measured either. A repaint of a row of a list was measuring every other row's every word.
 */
-static fn ui_kit_text(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke)
+// The same, cut at high (device pixels): a control's text is cut at its own box, not at the window's edge.
+static fn ui_kit_text_clip(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke,
+                           int high)
 {
         const struct ui_type address_to t = &ui_types[type];
         const font_face address_to face = t->mono && ui->mono ? ui->mono : t->bold && ui->bold ? ui->bold : ui->regular;
@@ -2720,7 +2723,12 @@ static fn ui_kit_text(struct ui address_to ui, int x, int baseline, string_addre
 
         rows = rows > UI_SCRATCH_ROWS * ui->scale ? UI_SCRATCH_ROWS * ui->scale : rows;
         if (ui_rows_seen(ui, top, top + rows))
-                ui_kit_text_width(ui, x, baseline, text, type, argb, stroke);
+                ui_kit_text_width(ui, x, baseline, text, type, argb, stroke, high);
+}
+
+static fn ui_kit_text(struct ui address_to ui, int x, int baseline, string_address text, int type, unsigned int argb, unsigned int stroke)
+{
+        ui_kit_text_clip(ui, x, baseline, text, type, argb, stroke, ui->width);
 }
 
 static int ui_kit_measure(struct ui address_to ui, string_address text, int type)
@@ -3042,10 +3050,12 @@ static inline fn ui_kit_layer_fill(struct ui address_to ui, const struct ui_box 
                 ui_kit_fill(ui, box, ui_mix(ink, layer, 0), null);
 }
 
-// A control's label, unstroked, its x dx and its line's top dy logical pixels from the control's corner, in a type and ink.
+// A control's label, unstroked, its x dx and its line's top dy logical pixels from the control's corner, in a type and ink,
+// cut at the control's right edge (its width, when it has one; a control whose width is not yet set is cut at the window).
 static inline fn ui_control_label(struct ui address_to ui, const struct ui_control address_to c, int dx, int dy, int type, unsigned int ink)
 {
-        ui_kit_text(ui, ui_dev(ui, c->x + dx), ui_kit_baseline(ui, ui_dev(ui, c->y + dy), type), (string_address)c->label, type, ink, 0);
+        ui_kit_text_clip(ui, ui_dev(ui, c->x + dx), ui_kit_baseline(ui, ui_dev(ui, c->y + dy), type), (string_address)c->label, type, ink, 0,
+                         c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
 }
 
 /*
@@ -3287,8 +3297,9 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
                 x = middle / 256 - width / 2;
         }
         baseline = ui_kit_baseline(ui, (oy + ty) / 256 - ui_dev(ui, 12), UI_BODY_LARGE);
-        ui_kit_text(ui, x, baseline, (string_address)c->label, UI_BODY_LARGE, c->disabled ? ui_mix(label, 38, 0) : label,
-                    (unsigned int)(ui_kit_tween(&c->stroke) >> UI_Q));
+        // Cut before the pill (its 52 and a gap of 12 at the right): a long label is not written under the bars.
+        ui_kit_text_clip(ui, x, baseline, (string_address)c->label, UI_BODY_LARGE, c->disabled ? ui_mix(label, 38, 0) : label,
+                         (unsigned int)(ui_kit_tween(&c->stroke) >> UI_Q), c->w > 64 ? ui_dev(ui, c->x + c->w - 64) : ui->width);
         // The ripple, in the accent, over the row: its clip is the label's last child, so it lies over the bars and the text.
         {
                 struct ui_place place = {sx, sy, ox, oy, tx, ty};
@@ -4442,8 +4453,8 @@ static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to 
         ui_kit_outline(ui, &box, ui_q8(ui, 1), line);
         ui_control_label(ui, c, 16, 14, UI_LABEL_LARGE, role ? ink : ui_role(UI_ON_SURFACE));
         if (c->text[0])
-                ui_kit_text(ui, ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14 + 24), UI_BODY_MEDIUM), (string_address)c->text,
-                            UI_BODY_MEDIUM, ink, 0);
+                ui_kit_text_clip(ui, ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14 + 24), UI_BODY_MEDIUM), (string_address)c->text,
+                                 UI_BODY_MEDIUM, ink, 0, ui_dev(ui, c->x + c->w));
 }
 
 static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -4676,8 +4687,8 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
         case UI_CARD:
         case UI_WINDOW: ui_surface_draw(ui, c); break;
         case UI_HEADING:
-                ui_kit_text(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
-                            ui_role(c->role), 0);
+                ui_kit_text_clip(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
+                                 ui_role(c->role), 0, c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
                 break;
         case UI_RULE:
                 ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + 1), 0, 0},
@@ -6965,7 +6976,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if (row.label && (seen || row.kind == UI_ROW_FIELD))
                 wide = ui_kit_text_width(ui, text_left, baseline, ui_fit(ui, (string_address)row.label, UI_BODY_MEDIUM,
                                                                   label_room < ui_dev(ui, 40) ? ui_dev(ui, 40) : label_room, cut, sizeof(cut)),
-                                   UI_BODY_MEDIUM, ink, 0);
+                                   UI_BODY_MEDIUM, ink, 0, ui->width);
         if (trailing)
         {
                 ui_control_draw(ui, trailing);
