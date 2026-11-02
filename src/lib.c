@@ -57528,9 +57528,26 @@ __asm__(
 
     ASM_FUNC(memory_last_of_either)
     // rdi block, sil first, dl second, rcx size; answers the address or null
-    "test %rcx, %rcx\n   jz .Leither_x64_none\n"
     ASM_NARROW("cpu_has_avx512", ".Leither_x64_sse")
     "vpbroadcastb %esi, %zmm1\n   vpbroadcastb %edx, %zmm2\n"
+    //
+    //      Four zmm a turn while two hundred and fifty six bytes are left, each block's separator minimum kept
+    //      apart so that a hit is found from the highest block down by a test of each. One block a turn was
+    //      an or of the same two compares for every sixty four bytes, and the four are one test here.
+    //
+    ".balign 16\n.Leither_x64_q:\n"
+    "cmp $256, %rcx\n   jb .Leither_x64_z\n   sub $256, %rcx\n"
+    "vmovdqu64 (%rdi,%rcx), %zmm0\n   vmovdqu64 64(%rdi,%rcx), %zmm5\n   vmovdqu64 128(%rdi,%rcx), %zmm6\n   vmovdqu64 192(%rdi,%rcx), %zmm7\n"
+    "vpxorq %zmm1, %zmm0, %zmm3\n   vpxorq %zmm2, %zmm0, %zmm4\n   vpminub %zmm4, %zmm3, %zmm3\n"
+    "vpxorq %zmm1, %zmm5, %zmm8\n   vpxorq %zmm2, %zmm5, %zmm4\n   vpminub %zmm4, %zmm8, %zmm8\n"
+    "vpxorq %zmm1, %zmm6, %zmm9\n   vpxorq %zmm2, %zmm6, %zmm4\n   vpminub %zmm4, %zmm9, %zmm9\n"
+    "vpxorq %zmm1, %zmm7, %zmm10\n   vpxorq %zmm2, %zmm7, %zmm4\n   vpminub %zmm4, %zmm10, %zmm10\n"
+    "vpminub %zmm8, %zmm3, %zmm11\n   vpminub %zmm10, %zmm9, %zmm12\n   vpminub %zmm12, %zmm11, %zmm11\n"
+    "vptestnmb %zmm11, %zmm11, %k1\n   kortestq %k1, %k1\n   jnz .Leither_x64_q_hit\n   jmp .Leither_x64_q\n"
+    ".Leither_x64_q_hit:\n   vptestnmb %zmm10, %zmm10, %k1\n   kortestq %k1, %k1\n   jz .Leither_x64_q_2\n   add $192, %rcx\n   jmp .Leither_x64_z_hit\n"
+    ".Leither_x64_q_2:\n   vptestnmb %zmm9, %zmm9, %k1\n   kortestq %k1, %k1\n   jz .Leither_x64_q_1\n   add $128, %rcx\n   jmp .Leither_x64_z_hit\n"
+    ".Leither_x64_q_1:\n   vptestnmb %zmm8, %zmm8, %k1\n   kortestq %k1, %k1\n   jz .Leither_x64_q_0\n   add $64, %rcx\n   jmp .Leither_x64_z_hit\n"
+    ".Leither_x64_q_0:\n   vptestnmb %zmm3, %zmm3, %k1\n   jmp .Leither_x64_z_hit\n"
     ".balign 16\n.Leither_x64_z:\n"
     "cmp $64, %rcx\n   jb .Leither_x64_z_part\n   sub $64, %rcx\n   vmovdqu64 (%rdi,%rcx), %zmm0\n   vpxorq %zmm1, %zmm0, %zmm3\n"
     "vpxorq %zmm2, %zmm0, %zmm4\n   vpminub %zmm4, %zmm3, %zmm3\n   vptestnmb %zmm3, %zmm3, %k1\n   kortestq %k1, %k1\n   jz .Leither_x64_z\n   jmp .Leither_x64_z_hit\n"

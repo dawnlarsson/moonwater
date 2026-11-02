@@ -15272,6 +15272,36 @@ fn check_last_of_bodies()
 }
 
 /*
+        memory_last_of_either against the byte loop: every width to 300 at every alignment from 0 to 63, the two
+        bytes absent, one of them present at the first, middle and last place. The four-vector turn on x86-64
+        cuts its blocks by where the span starts as well as by its width.
+*/
+fn check_last_of_either_widths()
+{
+        static p8 room[448];
+
+        for (positive size = 0; size <= 300; size++)
+                for (positive off = 0; off < 64; off++)
+                {
+                        for (positive i = 0; i < sizeof(room); i++)
+                                room[i] = 'a';
+
+                        same("memory_last_of_either", "every width and alignment, absent",
+                             (positive)memory_last_of_either(room + off, 'y', 'Z', size), 0);
+                        for (positive pick = 0; pick < 3 && size; pick++)
+                        {
+                                positive at = pick == 0 ? 0 : pick == 1 ? size / 2 : size - 1;
+
+                                room[off + at] = 'Z';
+                                same("memory_last_of_either", "every width and alignment, present",
+                                     (positive)memory_last_of_either(room + off, 'y', 'Z', size),
+                                     (positive)(room + off + at));
+                                room[off + at] = 'a';
+                        }
+                }
+}
+
+/*
         memory_squeeze_bytes against the byte loop tr used to run: every size
         across the vector edges, every residue, marks from none to nearly all,
         bytes drawn from a four-letter alphabet so that repeats are the rule,
@@ -30047,6 +30077,7 @@ b32 main()
         check_delete_bytes();
         check_squeeze_bytes();
         check_last_of_bodies();
+        check_last_of_either_widths();
         check_offsets_of_either();
         check_span_byte();
         check_dirty_arguments();
