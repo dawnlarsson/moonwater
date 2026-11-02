@@ -547,10 +547,14 @@ static int compositor_corner_lit(const struct compositor_frame *frame, int corne
                 (frame->lit & (corner & 2 ? COMPOSITOR_LIT_BOTTOM : COMPOSITOR_LIT_TOP)));
 }
 
-static void compositor_draw(const struct compositor_target *t,
-                            const struct compositor_frame *frame)
+/*
+        A frame drawn over a target whose radius is r, which is compositor_radius of the frame: a scene makes those once
+        for all its frames, and compositor_draw makes this one. Nothing is written outside the frame's outline, so a
+        target the outline misses is left as it is,.
+*/
+static void compositor_draw_with(const struct compositor_target *t, const struct compositor_frame *frame, int r)
 {
-        int r = compositor_radius(frame), x = frame->x, y = frame->y, w = frame->width, h = frame->height;
+        int x = frame->x, y = frame->y, w = frame->width, h = frame->height;
         int ox, oy, ow, oh, b, ri;
         struct compositor_target part;
 
@@ -643,6 +647,11 @@ static void compositor_draw(const struct compositor_target *t,
         compositor_close_draw(t, frame);
 }
 
+static void compositor_draw(const struct compositor_target *t, const struct compositor_frame *frame)
+{
+        compositor_draw_with(t, frame, compositor_radius(frame));
+}
+
 /*
         The tabs of a panel as frames of their own, each its tab's rectangle
         and nothing of the band between them: shapes the scene draws when
@@ -711,13 +720,32 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 
 static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
 
-static void compositor_scene(const struct compositor_target *t,
-                             const struct compositor_frame *frames, unsigned int count)
+// Every frame's radius, as compositor_radius gives it: made once for the frames of a damage, and read by every band of it.
+static void compositor_radii(const struct compositor_frame *frames, unsigned int count, int *radii)
 {
-        unsigned int *scratch = t->scratch ? t->scratch : compositor_corner_scratch;
-        int edge[2 * COMPOSITOR_PIECES + 2];
+        for (unsigned int at = 0; at < count; at++)
+                radii[at] = compositor_radius(&frames[at]);
+}
+
+/*
+        The pieces of a damage's frames and the edges they cut the damage at, made once for the damage (compositor_plan_make),
+        with each frame's radius (compositor_radii). Every band of the damage draws what lies in its rows from the plan
+        (compositor_scene_plan), so none of the bands builds the list again.
+*/
+struct compositor_plan
+{
         int box[COMPOSITOR_PIECES][4];
         unsigned char owner[COMPOSITOR_PIECES];
+        unsigned int pieces;
+        int edge[2 * COMPOSITOR_PIECES + 2]; // the damage's top and bottom, and every piece's top or bottom inside them, sorted
+        unsigned int edges;
+};
+
+static void compositor_plan_make(struct compositor_plan *plan, const struct compositor_target *t,
+                                 const struct compositor_frame *frames, unsigned int count, const int *radii)
+{
+        int (*box)[4] = plan->box, *edge = plan->edge;
+        unsigned char *owner = plan->owner;
         unsigned int edges = 2, pieces = 0;
 
         edge[0] = t->y1;
@@ -726,7 +754,7 @@ static void compositor_scene(const struct compositor_target *t,
         for (unsigned int at = 0; at < count; at++)
         {
                 const struct compositor_frame *f = &frames[at];
-                int r = compositor_radius(f), fx, fy, fw, fh, x2, y2;
+                int r = radii[at], fx, fy, fw, fh, x2, y2;
                 unsigned int first = pieces;
 
                 compositor_outline(f, &fx, &fy, &fw, &fh);
@@ -758,6 +786,26 @@ static void compositor_scene(const struct compositor_target *t,
                                         edge[place] = box[piece][side];
                                 }
         }
+        plan->pieces = pieces;
+        plan->edges = edges;
+}
+
+// The scene of a band (or slice) of a damage, from its plan: the band's edges are its top and bottom and the plan's
+// that lie strictly inside them, which are the ones the band would have cut at on its own.
+static void compositor_scene_plan(const struct compositor_target *t, const struct compositor_frame *frames,
+                                  unsigned int count, const int *radii, const struct compositor_plan *plan)
+{
+        unsigned int *scratch = t->scratch ? t->scratch : compositor_corner_scratch;
+        int edge[2 * COMPOSITOR_PIECES + 2];
+        const int (*box)[4] = plan->box;
+        const unsigned char *owner = plan->owner;
+        unsigned int edges = 0, pieces = plan->pieces;
+
+        edge[edges++] = t->y1;
+        for (unsigned int k = 0; k < plan->edges; k++)
+                if (plan->edge[k] > t->y1 && plan->edge[k] < t->y2)
+                        edge[edges++] = plan->edge[k];
+        edge[edges++] = t->y2;
 
         for (unsigned int band = 0; band + 1 < edges; band++)
         {
@@ -790,7 +838,7 @@ static void compositor_scene(const struct compositor_target *t,
                                 cell.y1 = top;
                                 cell.x2 = x2;
                                 cell.y2 = bottom;
-                                compositor_draw(&cell, &frames[owner[at]]);
+                                compositor_draw_with(&cell, &frames[owner[at]], radii[owner[at]]);
 
                                 if (low < x1 && x2 < high)
                                 {
@@ -821,7 +869,7 @@ static void compositor_scene(const struct compositor_target *t,
         for (unsigned int at = 0; at < count; at++)
         {
                 const struct compositor_frame *f = &frames[at];
-                int r = compositor_radius(f), fx, fy, fw, fh;
+                int r = radii[at], fx, fy, fw, fh;
 
                 compositor_outline(f, &fx, &fy, &fw, &fh);
                 for (int corner = 0; r && corner < 4; corner++)
@@ -836,10 +884,21 @@ static void compositor_scene(const struct compositor_target *t,
                                 continue;
                         compositor_fill(&square, cx, cy, r, r, compositor_ground);
                         for (unsigned int each = 0; each < count; each++)
-                                compositor_draw(&square, &frames[each]);
+                                compositor_draw_with(&square, &frames[each], radii[each]);
                         compositor_blit(t, cx, cy, r, r, scratch, (unsigned long)r);
                 }
         }
+}
+
+// The scene of a damage with its frames' radii made here, for the callers that have no damage of their own.
+static void compositor_scene(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
+{
+        int radii[COMPOSITOR_FRAMES];
+        struct compositor_plan plan;
+
+        compositor_radii(frames, count, radii);
+        compositor_plan_make(&plan, t, frames, count, radii);
+        compositor_scene_plan(t, frames, count, radii, &plan);
 }
 
 /*
@@ -877,6 +936,8 @@ struct compositor_banding
         const struct compositor_frame *frames;
         unsigned int count, bands;
         const struct compositor_apart *apart;
+        const int *radii;
+        const struct compositor_plan *plan;
         int first[COMPOSITOR_BANDS], last[COMPOSITOR_BANDS];
 };
 
@@ -896,7 +957,7 @@ static void compositor_scene_band(address_any context, positive index)
                 return;
         if (!banding->apart)
         {
-                compositor_scene(&band, banding->frames, banding->count);
+                compositor_scene_plan(&band, banding->frames, banding->count, banding->radii, banding->plan);
                 return;
         }
         for (int top = band.y1; top < band.y2; top += COMPOSITOR_SLICE)
@@ -910,7 +971,7 @@ static void compositor_scene_band(address_any context, positive index)
                 slice.pitch = banding->apart->pitch;
                 slice.ox = 0;
                 slice.oy = top;
-                compositor_scene(&slice, banding->frames, banding->count);
+                compositor_scene_plan(&slice, banding->frames, banding->count, banding->radii, banding->plan);
                 banding->apart->flush(&slice, &first, &last);
                 if (first < 0)
                         continue;
@@ -926,7 +987,12 @@ static void compositor_scene_banded(const struct compositor_target *t, const str
 {
         positive bytes = (positive)(t->x2 - t->x1) * (positive)(t->y2 - t->y1) * 4;
         positive bands = parallel_width();
-        struct compositor_banding banding = {t, frames, count, 1, apart, {0}, {0}};
+        int radii[COMPOSITOR_FRAMES];
+        struct compositor_plan plan;
+
+        compositor_radii(frames, count, radii);
+        compositor_plan_make(&plan, t, frames, count, radii);
+        struct compositor_banding banding = {t, frames, count, 1, apart, radii, &plan, {0}, {0}};
 
         bands = bands < COMPOSITOR_BANDS ? bands : COMPOSITOR_BANDS;
         bands = bands < (positive)(t->y2 - t->y1) / 16 ? bands : (positive)(t->y2 - t->y1) / 16;
