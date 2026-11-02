@@ -179,8 +179,6 @@ static const struct settings_row settings_rows[] = {
                       .help = "repeats a second of a held key, 1 to 100, or none [30]"),
     {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0, null,
      .usage = "timezone [ZONE|list]", .help = "IANA name, country, +1 or POSIX; manual"},
-    {"Canvas", "Scale", SETTINGS_CHOICE, 0, 0, {"canvas", "scale"}, "scale ", null, {"canvas", "scale"}, "auto 1 2 3 4", 0, "auto:",
-     .usage = "canvas scale [N|auto]", .help = "device pixels to a drawn pixel, 1 to 4, read as the desktop starts [auto]"},
     SETTING_PLAIN_ROW(null, "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
                       "default black dark-grey slate midnight-blue forest plum light-grey white",
                       .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",

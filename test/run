@@ -19149,17 +19149,9 @@ def holder_said(tag, text, seconds):
     found, _ = until(lambda: text in shell.run("cat %s" % tag, 10)[0], seconds)
     return bool(found)
 
-#       The setting of the pixel scale is the machine's: it is kept in /root
-#       and the desktop takes it when it starts again, so what is asked here is
-#       what it says, from the command's own words.
-shell.run("moonwater canvas scale 2", 20)
-said = shell.run("moonwater canvas scale", 15)[0]
-out.append(("moonwater canvas scale says what it is set to",
-            "yes" if "scale 2, set" in said else "no: " + said[-80:], "yes"))
-shell.run("moonwater canvas scale auto", 20)
-said = shell.run("moonwater canvas scale", 15)[0]
-out.append(("and auto on a virtual display is one, whatever size it claims, and says it asked no screen it could trust",
-            "yes" if "scale 1, auto: no screen says a size that can be trusted" in said else "no: " + said[-80:], "yes"))
+#       The screen scale is no machine setting now: each screen's is its
+#       displays line's (canvas display NAME scale PERCENT), tested with the
+#       displays file in the compositor's checks.
 
 #       A program takes the display, the way Weston does: master of the card,
 #       a mode of its own, held. Canvas says so, and has the card back, with

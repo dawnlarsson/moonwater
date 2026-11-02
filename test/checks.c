@@ -125730,7 +125730,7 @@ static fn check_settings(string_address regular, string_address bold)
 
         // The rows a person flips beyond the first: what each says, and the words that set it.
         {
-                int scale = settings_row_named("Scale"), modes = settings_row_named("Screen modes"),
+                int modes = settings_row_named("Screen modes"),
                     server = settings_row_named("Time server (auto for the pool)"),
                     sampling = settings_row_named("Keep the lowest-delay sample"),
                     nts = settings_row_named("Authenticated time (NTS)"),
@@ -125739,14 +125739,6 @@ static fn check_settings(string_address regular, string_address bold)
                     smt = settings_row_named("Simultaneous threads (SMT)"), charge = settings_row_named("Charge limit (20 to 100, or off)"),
                     desktop = settings_row_named("Start the desktop"), mount = settings_row_named("Mount kept disks");
 
-                check("settings: a scale is its number",
-                      settings_parsed(scale, "[Moonwater] scale 2, set, kept across boots\n", value) == SETTINGS_READ &&
-                          string_equals((string_address)value, (string_address) "2"));
-                check("settings: and auto when the panel chose it, whatever number it came to",
-                      settings_parsed(scale, "[Moonwater] scale 2, auto: the panel is 96 dots to the inch\n", value) == SETTINGS_READ &&
-                          string_equals((string_address)value, (string_address) "auto") &&
-                          settings_parsed(scale, "[Moonwater] scale auto, Canvas asks its screens when it starts\n", value) == SETTINGS_READ &&
-                          string_equals((string_address)value, (string_address) "auto"));
                 check("settings: the screen modes", settings_parsed(modes, "[Moonwater] modes preferred, kept across boots\n", value) == SETTINGS_READ &&
                                                         string_equals((string_address)value, (string_address) "preferred"));
                 check("settings: the time server is a word, and sampling a switch",
@@ -125792,10 +125784,6 @@ static fn check_settings(string_address regular, string_address bold)
                 count = settings_command(&settings_rows[charge], (string_address) "/moonwater", "80", words, SETTINGS_WORDS, false);
                 check("settings: a charge limit is charge limit and the number",
                       count == 4 && string_equals(words[2], (string_address) "limit") && string_equals(words[3], (string_address) "80"));
-                count = settings_command(&settings_rows[scale], (string_address) "/moonwater", "auto", words, SETTINGS_WORDS, false);
-                check("settings: and a scale is canvas scale and its word",
-                      count == 4 && string_equals(words[1], (string_address) "canvas") && string_equals(words[2], (string_address) "scale") &&
-                          string_equals(words[3], (string_address) "auto"));
 
                 // The desktop's colour and the pointer: what canvas background and canvas cursor say, and the words that set them.
                 {
@@ -125806,8 +125794,8 @@ static fn check_settings(string_address regular, string_address bold)
                               settings_rows[ink].kind == SETTINGS_CHOICE && (settings_rows[ink].flags & SETTINGS_INK) &&
                                   settings_rows[colour].kind == SETTINGS_FIELD && !(settings_rows[colour].flags & SETTINGS_INK) &&
                                   settings_rows[size].kind == SETTINGS_CHOICE && settings_rows[look].kind == SETTINGS_CHOICE &&
-                                  settings_group_of(ink) == settings_group_of(scale) && settings_group_of(colour) == settings_group_of(scale) &&
-                                  settings_group_of(size) == settings_group_of(scale) && settings_group_of(look) == settings_group_of(scale) &&
+                                  settings_group_of(colour) == settings_group_of(ink) &&
+                                  settings_group_of(size) == settings_group_of(ink) && settings_group_of(look) == settings_group_of(ink) &&
                                   settings_same_verb(&settings_rows[ink], &settings_rows[colour]) &&
                                   !settings_same_verb(&settings_rows[size], &settings_rows[look]) &&
                                   !settings_same_verb(&settings_rows[ink], &settings_rows[size]) &&
@@ -125876,7 +125864,6 @@ static fn check_settings(string_address regular, string_address bold)
 "  bind init mount [on|off]          mount kept disks at boot [on]\n"
 "  bind init canvas [on|off]         start Canvas at boot [on]\n"
 "  canvas                            whether Canvas is on, and the screens it draws on\n"
-"  canvas scale [N|auto]             device pixels to a drawn one, 1 to 4 [auto]\n"
 "  canvas modes [largest|preferred]  which mode a screen is driven at [largest]\n"
 "  desktop [on|off|PROFILE]          the desktop, now and at every start; off leaves the text console [on]\n"
 "  desktop start|stop                begin the chosen profile now, or end its session\n"
@@ -126135,7 +126122,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.queued = 0;
                 settings_refilter();
                 {
-                        int canvas_group = 1, all = settings_groups() - 1, scale = settings_row_named("Scale");
+                        int canvas_group = 1, all = settings_groups() - 1, scale = settings_row_named("Background");
                         int first = settings.list.id[0];
 
                         check("settings: the first group is the first section, and its first row has the keys",
@@ -126144,8 +126131,8 @@ static fn check_settings(string_address regular, string_address bold)
                         check("settings: Tab goes to the column of groups", settings.pane == 0 && settings.group == 0);
                         settings_press(UI_KEY_DOWN);
                         check("settings: Down in the column chooses the next group, and its rows are at the right at once",
-                              settings.group == canvas_group && settings.list.id[0] == scale && settings.list.focus == scale &&
-                                  settings.pane == 0 && string_equals((string_address)settings_group_name(settings.group), (string_address) "Canvas"));
+                              settings_group_of(settings.list.id[0]) == settings.group && settings.group == 1 &&
+                                  settings.list.focus == settings.list.id[0] && settings.pane == 0);
                         settings_press(UI_KEY_END);
                         check("settings: End in the column chooses All commands, whose rows are the commands",
                               settings.group == all && settings.list.id[0] == SETTINGS_ANY);
@@ -127756,7 +127743,9 @@ static fn settings_end_check(void)
                         settings_frames_until(settings_frames.now + 500 * SETTINGS_FRAMES_MS);
                 }
                 settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
-                bar_ok = bar_ok && settings.list.scroll.scroll == expected && !settings.list.scroll.held;
+                // The presses page down until the thumb is at the end: the last page may stop short of the pixel, the thumb under the press.
+                bar_ok = bar_ok && settings.list.scroll.scroll >= expected - settings.list.scroll.view / 4 && settings.list.scroll.scroll <= expected &&
+                         !settings.list.scroll.held;
 
                 // A finger: down on the list, dragged up past the end in steps, and let go; the list settles at the end.
                 settings_scroll_to(0);
@@ -138341,10 +138330,12 @@ static fn check_field_hands(string_address regular)
                 // do, Escape keeps the value, and a click outside sets what the field holds.
                 {
                         // The pointer's place below the rows, where no row is: a click there is outside every row.
-                        struct window_event move = {WINDOW_EVENT_MOTION, 0, 400, 480}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                        struct window_event move = {WINDOW_EVENT_MOTION, 0, 400, settings.height - 6}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
                                             release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
                         settings.queued = 0;
+                        settings.group = settings_group_of(name);
+                        settings_refilter();
                         settings.state[name] = SETTINGS_READ;
                         string_copy_bounded((string_address)settings.value[name], (string_address) "patient-cricket", SETTINGS_VALUE);
                         settings.list.focus = name;
@@ -138497,6 +138488,7 @@ static fn inputs_open(const struct inputs_input address_to in)
         case INPUTS_FILTER:
                 settings_edit_end();
                 settings_gallery.on = 0;
+                settings.popup.open = 0, settings.choice = -1;
                 settings_group_choose(0);
                 settings_layout();
                 settings_filter_field();

@@ -38902,7 +38902,7 @@ int main(void)
         check(False, "a check of the scale and the mode failed")
     if ran.returncode and not failed:
         check(False, "the scale checks did not finish: " + ran.stderr[-600:])
-    return check.verdict("canvas scale", "canvas_scale")
+    return check.verdict("canvas_scale")
 
 
 def harness_canvas_seam(argv):
@@ -46336,7 +46336,7 @@ def harness_moonwater_cli(argv):
                 "keyboard xx", "timezone Mars/Olympus", "setup install x", "setup bogus", "setup use /dev/", "setup install /dev/", "bios reboot",
                 "airplane on", "sleep", "time sync", "boot", "boot extra", "ask", "machine", "machine extra",
                 "latency", "latency sideways", "latency reset extra", "canvas background 112233",
-                "canvas scale 2", "canvas modes preferred",
+                "canvas modes preferred",
                 "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
                 "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate off",
                 "mouse sensitivity 150", "mouse acceleration off", "taskbar text edge", "taskbar text sideways",
@@ -46368,7 +46368,6 @@ def harness_moonwater_cli(argv):
                 "machine extra": (2, ""),
                 "latency": (1, "moonwater latency needs root"), "latency sideways": (2, ""),
                 "latency reset extra": (2, ""),
-                "canvas scale 2": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
                 "canvas modes preferred": (1, "setting how Canvas draws needs root (CAP_SYS_ADMIN)"),
                 "canvas background 112233": (1, "needs root (CAP_SYS_ADMIN)"),
                 "canvas cursor size 2": (1, "needs root (CAP_SYS_ADMIN)"),
@@ -46428,8 +46427,7 @@ def harness_moonwater_cli(argv):
                 "keyboard", "keyboard xx", "keyboard a b", "name", "name random", "name x",
                 "name a b", "name random x", 'name ""', "name -x", "name x-", "name UPPER",
                 "name " + "x" * 64, "name ../x", "canvas", "canvas on", "canvas off",
-                "canvas bogus", "canvas scale", "canvas scale 2", "canvas scale auto", "canvas scale 9",
-                "canvas scale 2 3", "canvas modes", "canvas modes preferred", "canvas modes sideways",
+                "canvas bogus",                 "canvas modes", "canvas modes preferred", "canvas modes sideways",
                 "canvas modes largest preferred",
                 "canvas background", "canvas background 112233", "canvas background default", "canvas background red",
                 "canvas background a b", "canvas arrange", "canvas arrange Virtual-2 Virtual-1",
@@ -46547,10 +46545,7 @@ def harness_moonwater_cli(argv):
             'security sudo on',
             'security sudo off',
             'keyboard',
-            'canvas scale',
-            'canvas scale 2',
-            'canvas scale auto',
-            'canvas modes',
+                                                'canvas modes',
             'canvas modes preferred',
             'canvas background',
             'canvas background 112233',
@@ -46661,8 +46656,7 @@ def harness_moonwater_cli(argv):
             'name xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
             'name ../x',
             'canvas',
-            'canvas scale 9',
-            'canvas modes sideways',
+                        'canvas modes sideways',
             'canvas background red',
             'canvas arrange x@',
             'canvas arrange a a',
@@ -46750,8 +46744,7 @@ def harness_moonwater_cli(argv):
             'name a b',
             'name random x',
             'canvas bogus',
-            'canvas scale 2 3',
-            'canvas modes largest preferred',
+                        'canvas modes largest preferred',
             'canvas background a b',
             'canvas cursor size 2 3',
             'canvas cursor look dark light',
@@ -48920,7 +48913,7 @@ while True:
         # (their race ends on Paris or on Tokyo, which is JST) can spell.
         locale_say = say
         script = ("rm -f /root/timezone /root/timezone.mode /root/ntp /root/ntp.sampling "
-                  "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.scale /root/canvas.modes "
+                  "/root/ntp.server /root/keyboard /root/wired.power /root/canvas.modes "
                   "/root/canvas.background /root/canvas.cursor.size /root/canvas.cursor.look /root/canvas.arrange\n"
                   "echo '@@ tz'; TZ=QQQ-9 timeout 20 /tmp/moonwater timezone +1 2>&1; echo \"@@status $?\"\n"
                   "echo '@@ tz time'; TZ=QQQ-9 timeout 20 /tmp/moonwater time 2>&1; echo \"@@status $?\"\n"
@@ -48928,12 +48921,12 @@ while True:
                   "rm -f /root/wired.power /root/timezone /root/timezone.mode\n")
         #       What a machine nobody has told anything says, then what it says to a
         #       caller with no right to look: /root at mode 000 is closed to nobody.
-        readers = ("ntp", "ntp sampling", "ntp server", "timezone", "time", "keyboard", "canvas scale",
+        readers = ("ntp", "ntp sampling", "ntp server", "timezone", "time", "keyboard",
                    "canvas modes", "canvas background", "canvas cursor", "canvas arrange", "status")
         script += "".join(f"echo '@@ open {verb}'; timeout 20 /tmp/moonwater {verb} 2>&1; "
                           "echo \"@@status $?\"\n" for verb in readers)
         script += ("echo off > /root/ntp; echo off > /root/ntp.sampling; echo de > /root/keyboard\n"
-                   "echo 3 > /root/canvas.scale; echo preferred > /root/canvas.modes\n"
+                   "echo preferred > /root/canvas.modes\n"
                    "echo ff0000 > /root/canvas.background; echo 3 > /root/canvas.cursor.size; "
                    "echo dark > /root/canvas.cursor.look; echo Virtual-2 HDMI-A-1@off > /root/canvas.arrange\n"
                    "echo Europe/Paris > /root/timezone; echo manual > /root/timezone.mode\n"
@@ -48977,22 +48970,13 @@ while True:
         #       did not take it: kept, and said not taken.
         def canvas_kept(name):
             return "echo \"@@canvas $(cat /root/canvas.%s 2>/dev/null || echo none)\"\n" % name
-        script += ("rm -f /root/canvas.scale /root/canvas.modes\n" + locale_say("canvas scale") +
-                   locale_say("canvas modes") + canvas_kept("scale") + canvas_kept("modes") +
-                   locale_say("canvas scale 2") + canvas_kept("scale") +
-                   locale_say("canvas scale auto") + canvas_kept("scale") +
-                   locale_say("canvas scale 4") + canvas_kept("scale") +
-                   "".join(locale_say("canvas scale " + bad) + canvas_kept("scale")
-                           for bad in ("0", "5", "two", "2x", "-1", "08", '""', "99999999999")) +
+        script += ("rm -f /root/canvas.modes\n" + locale_say("canvas modes") + canvas_kept("modes") +
                    locale_say("canvas modes preferred") + canvas_kept("modes") +
                    locale_say("canvas modes largest") + canvas_kept("modes") +
-                   locale_say("canvas modes preferred") + canvas_kept("modes") +
                    "".join(locale_say("canvas modes " + bad) + canvas_kept("modes")
                            for bad in ("huge", "Largest", '""', "largest,preferred")) +
-                   locale_say("canvas scale 2 3") + locale_say("canvas modes largest preferred") +
-                   canvas_kept("scale") + canvas_kept("modes") +
-                   ": > /dev/spark\n" + locale_say("canvas scale 3") + canvas_kept("scale") +
-                   locale_say("canvas modes largest") + canvas_kept("modes") + "rm -f /dev/spark\n")
+                   locale_say("canvas modes largest preferred") + canvas_kept("modes") +
+                   ": > /dev/spark\n" + locale_say("canvas modes largest") + canvas_kept("modes") + "rm -f /dev/spark\n")
         #       The desktop's ink and the pointer are kept in /root as the scale is, and
         #       a refusal keeps nothing; each shows the file after, the way the rows above do.
         def look_kept(name):
@@ -49073,7 +49057,7 @@ while True:
               text("wired"))
         wants = {"ntp": ("ntp off", "sampling off"), "ntp sampling": ("sampling off",),
                  "ntp server": (), "timezone": ("Europe/Paris", "manual"), "time": ("Europe/Paris",),
-                 "keyboard": ("keyboard de",), "canvas scale": ("scale 3",),
+                 "keyboard": ("keyboard de",),
                  "canvas modes": ("modes preferred",), "canvas background": ("background #ff0000",),
                  "canvas cursor": ("size 3", "look dark"), "canvas arrange": ("arrange Virtual-2 HDMI-A-1@off",),
                  "status": ("Europe/Paris", "ntp off", "keyboard de")}
@@ -49099,42 +49083,30 @@ while True:
         check(seen.get("keyboard fr", {}).get("status") == 0 and "keyboard fr" in text("keyboard fr")
               and "Canvas did not" not in text("keyboard fr") and "@@kept fr" in lines,
               "a layout is kept and said, and asks no Canvas", text("keyboard fr"))
-        #       The rows above, in the order they ran: none kept, then 2, auto, 4;
-        #       the eight refusals leave 4; then the modes the same way; then the
-        #       usage lines leave both, and the Canvas that took neither keeps 3
-        #       and largest.
+        #       The modes rows, in the order they ran: none kept, then preferred and largest;
+        #       the four refusals leave largest; the Canvas that took neither keeps largest.
         kept = [line[len("@@canvas "):] for line in lines if line.startswith("@@canvas ")]
-        wanted = (["none", "none", "2", "auto", "4"] + ["4"] * 8 + ["preferred", "largest", "preferred"] +
-                  ["preferred"] * 4 + ["4", "preferred", "3", "largest"])
+        wanted = ["none", "preferred", "largest"] + ["largest"] * 6
         check(kept == wanted,
-              "canvas scale and modes keep the word they were given and nothing a refusal was given",
+              "canvas modes keep the word they were given and nothing a refusal was given",
               repr(kept))
-        check("scale auto, Canvas is not asking" in text("canvas scale") and
-              "modes largest, Canvas is not asking" in text("canvas modes") and
-              seen.get("canvas scale", {}).get("status") == 0,
-              "with no Canvas to ask the bare words say what is kept, and that nothing was asked",
-              text("canvas scale") + text("canvas modes"))
-        check(seen.get("canvas scale 2", {}).get("status") == 0 and
-              "scale 2, Canvas is not asking" in text("canvas scale 2") and
-              seen.get("canvas modes preferred", {}).get("status") == 0 and
+        check("modes largest, Canvas is not asking" in text("canvas modes") and
+              seen.get("canvas modes", {}).get("status") == 0,
+              "with no Canvas to ask the bare word says what is kept, and that nothing was asked",
+              text("canvas modes"))
+        check(seen.get("canvas modes preferred", {}).get("status") == 0 and
               "modes preferred, Canvas is not asking" in text("canvas modes preferred"),
-              "a word is kept and said", text("canvas scale 2") + text("canvas modes preferred"))
-        for bad in ("0", "5", "two", "2x", "-1", "08", '""', "99999999999"):
-            check(seen.get("canvas scale " + bad, {}).get("status") == 1 and
-                  "scale is auto or a number from 1 to 4" in text("canvas scale " + bad),
-                  f"canvas scale {bad} is refused in words", text("canvas scale " + bad))
+              "a word is kept and said", text("canvas modes preferred"))
         for bad in ("huge", "Largest", '""', "largest,preferred"):
             check(seen.get("canvas modes " + bad, {}).get("status") == 1 and
                   "modes are largest or preferred" in text("canvas modes " + bad),
                   f"canvas modes {bad} is refused in words", text("canvas modes " + bad))
-        check(seen.get("canvas scale 2 3", {}).get("status") == 2 and
-              seen.get("canvas modes largest preferred", {}).get("status") == 2,
+        check(seen.get("canvas modes largest preferred", {}).get("status") == 2,
               "a third word is a usage line", "")
-        check(seen.get("canvas scale 3", {}).get("status") == 1 and
-              "is kept, but Canvas did not take it" in text("canvas scale 3") and
-              seen.get("canvas modes largest", {}).get("status") == 1,
+        check(seen.get("canvas modes largest", {}).get("status") == 1 and
+              "is kept, but Canvas did not take it" in text("canvas modes largest"),
               "a Canvas that refused the ioctl is a word kept and said not taken",
-              text("canvas scale 3"))
+              text("canvas modes largest"))
         #       In the order they ran: none kept (three), then #ff8800, #00aaff, #336699; six refusals
         #       leave it; default; then the sizes and looks, the refusals leaving them as they were.
         looks = [line[len("@@look "):] for line in lines if line.startswith("@@look ")]
@@ -51720,7 +51692,7 @@ FUZZ_PREFAB = (
     "ntp nts servers a.example:4460 b.example", "dns 1.1.1.1 9.9.9.9", "keyboard de", "timezone Europe/London",
     "name alpha-one", "link key", "link add peer1 bZOZjGi3+wRTI3dKplm7TSptcD6cjFeYxvDqPYCDSnI= 192.0.2.1:22348",
     "link allow peer1 shell", "link group lab S3cretOne11 allow run", "link port 4000",
-    "priority internet wifi", "charge limit 80", "power powersave", "canvas scale 2", "canvas background 112233",
+    "priority internet wifi", "charge limit 80", "power powersave", "canvas background 112233",
     "mouse sensitivity 150", "keyboard repeat rate 20", "security block add " + "ab" * 32, "wired off",
     "sleep", "battery BAT0", "brightness 40", "cpu smt off", "taskbar position top", "airplane on")
 #   What is said of that machine after a file of it was changed.
@@ -51869,7 +51841,7 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
                 if str(value).encode() in made:
                     chains.append([(made, kind, False)])
                     break
-    #   A setting said and then asked for: "canvas scale 3" and then "canvas scale".
+    #   A setting said and then asked for: "canvas modes preferred" and then "canvas modes".
     for command, tree in trees:
         if tree[0] != "seq" or len(tree[1]) < 2 or tree[1][-1][0] != "opt" or \
                 any(node[0] != "lit" for node in tree[1][:-1]):
@@ -52593,7 +52565,6 @@ PAIRS = [
     ("dns over", "dns 1.1.1.1", "dns 8.8.8.8", lambda: cat("/etc/resolv.conf").split()[-1] in cat("/root/dns"), ["dns 9.9.9.9"]),
     ("keyboard over", "keyboard de", "keyboard se", lambda: cat("/root/keyboard").strip() in ("de", "se"), ["keyboard us"]),
     ("ntp server over", "ntp server b.example", "ntp server c.example", lambda: cat("/root/ntp.server").strip() in ("b.example", "c.example"), ["ntp server a.example"]),
-    ("canvas over", "canvas scale 2", "canvas scale 3", lambda: cat("/root/canvas.scale").strip() in ("2", "3"), ["canvas scale 1"]),
     ("mouse over", "mouse sensitivity 110", "mouse sensitivity 120", lambda: cat("/root/mouse.sensitivity").strip() in ("110", "120"), ["mouse sensitivity 90"]),
     ("link on over", "link on", "link on", lambda: cat("/root/link").strip() == "on", ["link on", "link off"]),
     ("link off over", "link off", "link off", lambda: cat("/root/link").strip() == "off", ["link on"]),
@@ -52816,7 +52787,6 @@ def harness_moonwater_script(argv):
         ("bind init add echo hi", 0), ("bind init add echo hi", 0), ("bind init mount off", 0),
         ("bind init mount off", 0), ("bind init", 0), ("bind exit add echo bye", 0), ("bind exit add echo bye", 0),
         ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 2), ("canvas off", 2),
-        ("canvas scale 2", 0), ("canvas modes preferred", 0),
         ("desktop off", 0), ("desktop start", 0), ("desktop stop", 1), ("desktop boot", 0), ("desktop", 0),
         ("latency", 1), ("debug", 0), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),
         ("link add peer1 " + key, 0), ("link add peer1 " + key, 0), ("link allow peer1 run", 0),
@@ -77107,7 +77077,6 @@ def harness_state_cuts(argv):
         ("name", ["name aa-bb"], "name cc-dd", None),
         ("timezone zone", ["timezone de"], "timezone Europe/Paris", None),
         ("desktop", ["desktop off"], "desktop on", None),
-        ("canvas scale", ["canvas scale 1"], "canvas scale 2", None),
         ("mouse", ["mouse sensitivity 90"], "mouse sensitivity 120", None),
         ("taskbar", ["taskbar position top"], "taskbar position left", None),
         ("keyboard repeat", ["keyboard repeat rate 20"], "keyboard repeat rate 40", None),
@@ -77467,7 +77436,7 @@ def harness_moonwater_state_fuzz(argv):
         "priority internet wired", "name box", "dns 1.1.1.1 9.9.9.9", "dns tls on",
         "link add peera " + key, "link group lab S3cretOne11xyz allow run", "link port 22400",
         "usb allow 0627:0001/S1", "usb deny 0627:0001/S2", "usb class storage allow",
-        "canvas scale 2", "canvas modes preferred", "canvas background 112233",
+        "canvas modes preferred", "canvas background 112233",
         "canvas cursor size 2", "canvas cursor look dark", "canvas cursor shake off",
         "canvas cursor shake delay 800", "keyboard repeat delay 300", "keyboard repeat rate 20",
         "mouse sensitivity 150", "mouse acceleration off", "taskbar position top",
@@ -77590,7 +77559,6 @@ def harness_moonwater_state_fuzz(argv):
         ("bowl localtime", "/bowls/one/etc/localtime", ["timezone", "timezone se", "time"], "word"),
         ("resolv.conf", "/etc/resolv.conf", ["dns", "dns 8.8.8.8", "dns auto", "ntp on", "status"], "word"),
         ("desktop", "/root/desktop", ["desktop", "desktop on", "desktop off", "status"], "word"),
-        ("canvas.scale", "/root/canvas.scale", ["canvas scale", "canvas scale 3", "canvas scale auto"], "word"),
         ("canvas.modes", "/root/canvas.modes", ["canvas modes", "canvas modes largest"], "word"),
         ("canvas.background", "/root/canvas.background", ["canvas background", "canvas background 445566", "canvas background default"], "word"),
         ("canvas.cursor.size", "/root/canvas.cursor.size", ["canvas cursor size", "canvas cursor size 3", "canvas cursor"], "word"),
@@ -78173,8 +78141,7 @@ def harness_moonwater_state_fuzz(argv):
                    "keyboard", "keyboard de", "name", "name other", "airplane on", "airplane off", "power", "cpu",
                    "usb", "usb lock", "usb allow 0627:0001/S9", "usb forget 0627:0001/S1", "usb unlock", "usb log",
                    "link", "link key", "link add wreck " + other_key, "link group wreck S3cretWreck33xyz allow run",
-                   "link on", "link off", "security", "security block add " + "ef" * 32, "canvas scale 2",
-                   "canvas background 010203", "mouse sensitivity 130", "taskbar position top", "desktop",
+                   "link on", "link off", "security", "security block add " + "ef" * 32,                    "canvas background 010203", "mouse sensitivity 130", "taskbar position top", "desktop",
                    "desktop off", "settings", "bind init add echo x", "bind exit", "wipe yes"]
     wreck_specs = [("dir", ("dir",)), ("fifo", ("fifo",)), ("link", ("link", "/etc/canary")), ("empty", ("data", b"")),
                    ("junk", ("data", b"\x1b[31m%s\xff\0" * 40)), ("A", ("data", b"A" * 4097)),

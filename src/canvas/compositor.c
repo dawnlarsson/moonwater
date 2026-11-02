@@ -13029,23 +13029,6 @@ static void compositor_hand_back(void)
         system_close(compositor.card);
 }
 
-// The desktop scale Canvas is drawing at, which is what a panel's 24 pixels are multiplied by.
-static int compositor_scale_read(void)
-{
-        struct canvas_control control = {0};
-        b32 spark = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
-        int scale = 100;
-
-        if (spark < 0)
-                return scale;
-
-        if (system_control(spark, SPARK_IOCTL_CANVAS, address_of control) == 0 &&
-            control.scale >= 1 && control.scale <= SPARK_CANVAS_SCALE_MOST)
-                scale = (int)control.scale * 100;
-
-        system_close(spark);
-        return scale;
-}
 
 /*
         No card: the scanout is a file the program maps, which is what a test
@@ -13319,7 +13302,7 @@ static b32 compositor_main()
 
         compositor_keys_read();
         if (compositor.scale < 25 || compositor.scale > 800)
-                compositor.scale = headless ? 100 : compositor_scale_read();
+                compositor.scale = WINDOWS_SCALE_DEFAULT;
         if (!headless && !compositor.layout_given)
                 compositor_layout_read();
 
