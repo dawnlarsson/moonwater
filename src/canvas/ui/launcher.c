@@ -735,7 +735,7 @@ static b32 launcher_event(const struct window_event address_to event)
                 break;
         case WINDOW_EVENT_WHEEL:
                 // The list turns under the wheel with the kit's glide, as the settings list does: a notch is a row.
-                if (!event->b && ui_scroll_wheel(&launcher.ui, &launcher.list.scroll, event->a))
+                if (ui_wheel_turn(&launcher.ui, &launcher.list.scroll, event))
                         launcher.dirty = true;
                 break;
         case WINDOW_EVENT_BUTTON:

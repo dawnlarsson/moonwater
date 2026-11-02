@@ -5668,6 +5668,12 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
         return true;
 }
 
+// The wheel turns a region by its vertical notches, the one rule for every list and page: a horizontal notch (event->b) turns nothing.
+static b32 ui_wheel_turn(const struct ui address_to ui, struct ui_scroll address_to s, const struct window_event address_to event)
+{
+        return !event->b && ui_scroll_wheel(ui, s, event->a);
+}
+
 /* ---- end of the kit's controls ---- */
 
 // Anonymous memory for an app's own state, or a negative errno.
@@ -7340,11 +7346,11 @@ static fn ui_page_moved(const struct ui address_to ui, struct ui_page address_to
 }
 
 // The wheel on the page: it turns the region under the pointer.
-static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to p, int delta)
+static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to p, const struct window_event address_to event)
 {
         struct ui_scroll address_to region = ui_page_region(ui, p, p->pointer_x, p->pointer_y);
 
-        if (region && ui_scroll_wheel(ui, region, delta))
+        if (region && ui_wheel_turn(ui, region, event))
                 ui_page_moved(ui, p, region);
 }
 

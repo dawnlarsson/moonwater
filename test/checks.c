@@ -124425,6 +124425,15 @@ static void check_ui_press(void)
         check("ui press: the slop is UI_SLOP logical pixels at the window's scale, for every press alike",
               !ui_press_move(&ui, &press, 10 + UI_SLOP * 2 - 1, 10) && ui_press_move(&ui, &press, 10 + UI_SLOP * 2, 10));
         ui.scale = 1;
+        // The wheel's rule for every list and page: a horizontal notch turns nothing, and the region is not touched.
+        {
+                struct ui_scroll sideways_s;
+                struct window_event sideways = {WINDOW_EVENT_WHEEL, 0, 120, 1};
+
+                memory_zero(&sideways_s, sizeof(sideways_s));
+                check("ui wheel: a horizontal notch turns no list, and the list is left where it was",
+                      !ui_wheel_turn(&ui, &sideways_s, &sideways) && sideways_s.wheel == 0 && sideways_s.notch == 0);
+        }
         ui_press_begin(&press, 10, 10, 3, false);
         clicked = ui_press_end(&press, false);
         ui_press_begin(&press, 10, 10, 3, true);
@@ -127267,7 +127276,11 @@ static fn settings_column_check(void)
         settings.page.pointer_x = x, settings.page.pointer_y = y;
 #ifdef UI_LIST_STRETCH
         ui_scroll_set(col, most);
-        ui_page_wheel(&settings.ui, &settings.page, -120);
+        {
+                struct window_event turn = {WINDOW_EVENT_WHEEL, 0, -120, 0};
+
+                ui_page_wheel(&settings.ui, &settings.page, &turn);
+        }
         wheel_ok = ui_scroll_stretched(col, &edge) > 0 && edge > 0;
         ui_scroll_set(col, most);
         ui_scroll_drag(col, 150);

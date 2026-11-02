@@ -4226,7 +4226,7 @@ static b32 settings_gallery_event(const struct window_event address_to event)
                         moved = ui_scroll_set(s, s->scroll + (event->a == UI_KEY_DOWN ? 1 : -1) * ui_px(&settings.ui, UI_ROW));
         }
         else if (event->type == WINDOW_EVENT_WHEEL)
-                moved = !event->b && ui_scroll_wheel(&settings.ui, s, event->a);
+                moved = ui_wheel_turn(&settings.ui, s, event);
         else if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
         {
                 int x = settings.page.pointer_x, y = settings.page.pointer_y, bar;
@@ -4566,8 +4566,7 @@ static b32 settings_event(const struct window_event address_to event)
         case WINDOW_EVENT_WHEEL:
                 // The menu turns under the wheel, and nothing else does while it is open; else what is under the pointer.
                 ui_drag_stop(&settings.finger.drag);
-                if (!event->b)
-                        ui_page_wheel(&settings.ui, &settings.page, event->a);
+                ui_page_wheel(&settings.ui, &settings.page, event);
                 break;
         }
         return true;
