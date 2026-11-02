@@ -68,6 +68,18 @@
 #define UI_ACCENT_STANDARD 0xffffffu // the accent when none is chosen: white, on the dark theme (the standard)
 #define UI_INK 0xff18181bu       // --ink
 
+/*
+        The kit's shapes and touch sizes that the compositor draws as well as the windows, so they are named here (the
+        compositor is built before ui.c and includes this file, not that one). The windows' corner radius; how far a press
+        moves before it is a drag (a finger's slop); the close button's disc, and how far in from the window's top right
+        it sits. A close button ends UI_CLOSE_BOTTOM logical pixels from its top, which is where a titlebar's content starts.
+*/
+#define UI_RADIUS 8
+#define UI_SLOP 8
+#define UI_CLOSE 14
+#define UI_CLOSE_IN 5
+#define UI_CLOSE_BOTTOM (UI_CLOSE + UI_CLOSE_IN)
+
 struct ui_theme
 {
         unsigned int role[UI_ROLES];

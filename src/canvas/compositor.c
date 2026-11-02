@@ -87,7 +87,6 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 
 // The radius of a window's corners and the width of the line round it, in logical pixels; and the largest
 // radius in device pixels, which is what the corners' scratch is made for. (The panel's height is in taskbar.h.)
-#define COMPOSITOR_RADIUS 8
 #define COMPOSITOR_LINE 1
 /*
         The snap's look, in one place. A snap preview is the selection's colour at COMPOSITOR_SNAP_PERCENT (more on a light
@@ -107,8 +106,6 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 // The top of a window that is a titlebar with nothing drawn -- a press there takes the window whatever is
 // under it -- and its close button, a disc that far in from the window's top right, in logical pixels.
 #define COMPOSITOR_GRAB 24
-#define COMPOSITOR_CLOSE 14
-#define COMPOSITOR_CLOSE_IN 5
 // The minimise button beside the close one: the same size, the same gap between them, and its dash this far in from each side.
 #define COMPOSITOR_MINIMIZE_IN 3
 #define COMPOSITOR_RADIUS_MOST 64
@@ -182,7 +179,7 @@ struct compositor_frame
 */
 static int compositor_close_box(const struct compositor_frame *frame, int *x, int *y, int *side)
 {
-        int box = COMPOSITOR_CLOSE * frame->scale, in = COMPOSITOR_CLOSE_IN * frame->scale;
+        int box = UI_CLOSE * frame->scale, in = UI_CLOSE_IN * frame->scale;
 
         if (!frame->close || frame->builtin || frame->width < box + 2 * in + 4 * box || frame->height < box + 2 * in)
                 return 0;
@@ -275,7 +272,7 @@ static unsigned int compositor_picture_at(const struct compositor_frame *frame, 
 */
 static int compositor_minimize_box(const struct compositor_frame *frame, int *x, int *y, int *side)
 {
-        int bx, by, box, in = COMPOSITOR_CLOSE_IN * frame->scale;
+        int bx, by, box, in = UI_CLOSE_IN * frame->scale;
 
         if (!compositor_close_box(frame, &bx, &by, &box) || frame->width < 2 * box + 3 * in + 4 * box)
                 return 0;
@@ -466,7 +463,7 @@ static struct compositor_target compositor_clipped(const struct compositor_targe
         window's button at every present, where the sixteen samples a pixel
         were most of a present's cost after the copy.
 */
-#define COMPOSITOR_CLOSE_MOST (COMPOSITOR_CLOSE * 8)
+#define COMPOSITOR_CLOSE_MOST (UI_CLOSE * 8)
 
 static struct
 {
@@ -855,7 +852,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
                 tabs[count].width = width;
                 tabs[count].height = height;
                 tabs[count].slot = which;
-                tabs[count].radius = COMPOSITOR_RADIUS * band->scale;
+                tabs[count].radius = UI_RADIUS * band->scale;
                 tabs[count].line = 0;
                 tabs[count].square = taskbar_square(band->position);
                 if (!band->builtin)
@@ -2822,7 +2819,7 @@ struct compositor_poll
         COMPOSITOR_TOUCH_GRIP_IN inside (the top as a pointer's, where the titlebar is), a corner is
         COMPOSITOR_TOUCH_CORNER along either edge from it, a tab reaches COMPOSITOR_TOUCH_TAB further toward the middle of
         its screen and to half the gap either side, and the close button is the finger's within COMPOSITOR_TOUCH_CLOSE
-        of its middle. It moves nothing until it is COMPOSITOR_TOUCH_SLOP from where it went down, so a tap is a click
+        of its middle. It moves nothing until it is UI_SLOP from where it went down, so a tap is a click
         where it landed and not a drag. Held COMPOSITOR_TOUCH_HOLD_NS without moving it is a long press: the right button,
         flagged WINDOW_KEY_HOLD, and then the finger may move on, the pointer following it, until it lifts, which ends the
         press with a release (CANCEL and HOLD) in the window it landed on. Two fingers lifted within COMPOSITOR_TOUCH_TAP_NS
@@ -2834,7 +2831,6 @@ struct compositor_poll
 #define COMPOSITOR_TOUCH_CORNER 24
 #define COMPOSITOR_TOUCH_TAB 20
 #define COMPOSITOR_TOUCH_CLOSE 22
-#define COMPOSITOR_TOUCH_SLOP 8
 #define COMPOSITOR_TOUCH_HOLD_NS 400000000ull
 #define COMPOSITOR_TOUCH_TAP_NS 400000000ull
 #define COMPOSITOR_TOUCH_WHEEL 48
@@ -3784,7 +3780,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
                                            (int)compositor.h[row], compositor.scale, compositor_pixels(row),
                                            (unsigned long)compositor_stride(), 0, null, 0,
-                                           line ? COMPOSITOR_RADIUS * compositor.scale : 0, line,
+                                           line ? UI_RADIUS * compositor.scale : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         compositor_land_frame(row, frame);
@@ -9102,7 +9098,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                 picture->x = rect[0], picture->y = rect[1];
                 picture->width = rect[2], picture->height = rect[3];
                 picture->source_w = (int)compositor.w[row], picture->source_h = (int)compositor.h[row];
-                picture->radius = COMPOSITOR_RADIUS * compositor.scale, picture->line = line;
+                picture->radius = UI_RADIUS * compositor.scale, picture->line = line;
                 picture->edge = compositor_snap_edge(percent);
                 picture->close = 0;
                 picture->lit = 0;
@@ -9138,7 +9134,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                         border->scale = compositor.scale;
                         border->x = box[0], border->y = box[1];
                         border->width = box[2], border->height = box[3];
-                        border->radius = COMPOSITOR_RADIUS * compositor.scale, border->line = (int)line;
+                        border->radius = UI_RADIUS * compositor.scale, border->line = (int)line;
                         border->edge = compositor_snap_edge(percent);
                         added += 2;
                 }
@@ -12391,7 +12387,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                         // Moved past the slop it is the pointer's motion, a window's drag or edge, from where it is now.
                         compositor_touch_point(at, first, &x, &y);
                         if (!touch->moved &&
-                            compositor_past_slop(touch->start_x, touch->start_y, x, y, COMPOSITOR_TOUCH_SLOP * compositor.scale))
+                            compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale))
                         {
                                 touch->moved = 1;
                                 touch->closing = COMPOSITOR_NONE;
@@ -12426,7 +12422,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                                 touch->mid_x = mid_x, touch->mid_y = mid_y;
                         }
                         else if (touch->two_moved ||
-                                 compositor_past_slop(touch->mid_x, touch->mid_y, mid_x, mid_y, COMPOSITOR_TOUCH_SLOP * compositor.scale))
+                                 compositor_past_slop(touch->mid_x, touch->mid_y, mid_x, mid_y, UI_SLOP * compositor.scale))
                         {
                                 // What is under them follows them: fingers down are the wheel up, to the right it left.
                                 long down = (long)touch->left_y + (long)(mid_y - touch->mid_y) * 120;
@@ -12462,7 +12458,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                 // Held, then moved on: the pointer follows the finger as it does before a hold, so what it drags (a selection)
                 // follows it too. Nothing is pressed; the press was taken back when the hold came.
                 compositor_touch_point(at, touch->first, &x, &y);
-                if (!touch->moved && compositor_past_slop(touch->start_x, touch->start_y, x, y, COMPOSITOR_TOUCH_SLOP * compositor.scale))
+                if (!touch->moved && compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale))
                         touch->moved = 1;
                 if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
                         compositor_touch_motion(x, y, now);

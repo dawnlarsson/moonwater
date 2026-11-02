@@ -32,13 +32,15 @@
 #ifndef MOONWATER_CANVAS_UI
 #define MOONWATER_CANVAS_UI
 
+// The shapes and touch sizes the compositor draws too (theme.h, which the compositor includes before this file).
+#include "theme.h"
+
 // What text is below the look: documents, history, selections, segmentation (text.c, which says why it is its own file).
 #include "text.c"
 
 #define UI_ROW 40      // a row of a list or a column
 #define UI_PAD 16      // the window's margin
 #define UI_INSET 14    // a row's text in from its edges
-#define UI_RADIUS 8    // the windows' corners
 #define UI_SCRATCH_ROWS 96
 
 struct ui
@@ -864,7 +866,6 @@ static int ui_px(const struct ui address_to ui, int logical)
 */
 #define UI_TARGET 44 // a finger's least target in logical pixels: about 9 mm at the 96 to 120 dpi of most screens
 #define UI_FIELD_H UI_TARGET // every text field's height: a field is a touch target, the same in every window
-#define UI_SLOP 8    // how far a press moves before it is a drag, as the compositor's finger (COMPOSITOR_TOUCH_SLOP)
 
 struct ui_press
 {
@@ -5023,7 +5024,6 @@ struct ui_scroll
         inset: a window's close button is there, so a window's bar reaches the window's bottom and no higher than that.
 */
 #define UI_SCROLL_INSET 1
-#define UI_CLOSE_BOTTOM 19 // a window's close button ends this many logical pixels from its top (compositor.c's disc)
 static void ui_scroll_track(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to height)
 {
         int inset = s->inset * ui->scale, bottom = s->y + s->height;

@@ -122753,7 +122753,7 @@ static void check_compositor_lit(void)
     check("lit: and none once it is let go", glass_at(100, 29) == 0x4d4d4du && glass_at(39, 70) == 0x4d4d4du);
 }
 
-#ifdef COMPOSITOR_TOUCH_SLOP
+#ifdef COMPOSITOR_LINE
 /*
         A touch screen through the compositor's reader, from a pipe that stands for one in slot 0, its events as a
         multitouch driver and the kernel say them: each finger's slot, id and place, then the kernel's BTN_TOUCH when
@@ -123004,8 +123004,8 @@ static void check_compositor_touch(void)
 
     /* The close button: a finger that lands on it closes nothing until it lifts there, and one dragged off it nothing. */
     {
-        int bx = compositor.x[2] + (int)compositor.w[2] - COMPOSITOR_CLOSE_IN - COMPOSITOR_CLOSE / 2;
-        int by = compositor.y[2] + COMPOSITOR_CLOSE_IN + COMPOSITOR_CLOSE / 2;
+        int bx = compositor.x[2] + (int)compositor.w[2] - UI_CLOSE_IN - UI_CLOSE / 2;
+        int by = compositor.y[2] + UI_CLOSE_IN + UI_CLOSE / 2;
 
         touch_one(bx, by, false);
         unchanged = !(table->state[2] & WINDOW_CLOSING);
@@ -123157,7 +123157,7 @@ static void check_compositor_touch(void)
     system_close(wheel_pipe[1]);
     compositor.input_count = 0;
 }
-#endif // COMPOSITOR_TOUCH_SLOP
+#endif // COMPOSITOR_LINE
 
 /*
         Where a placed window goes (compositor_first_put and the rectangles under it). The room of a screen is the
@@ -123736,10 +123736,10 @@ static fn check_glass(void)
 
                         if ((x - 40 >= 5 && x - 40 < 15 && y - 40 >= 5 && y - 40 < 15) ||
                             (x - 40 >= 15 && x - 40 < 30 && y - 40 >= 30 && y - 40 < 40) ||
-                            (x - 40 < COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
-                            (x - 40 >= 160 - COMPOSITOR_RADIUS && y - 40 < COMPOSITOR_RADIUS) ||
-                            (x - 40 < COMPOSITOR_RADIUS && y - 40 >= 160 - COMPOSITOR_RADIUS) ||
-                            (x - 40 >= 160 - COMPOSITOR_RADIUS && y - 40 >= 160 - COMPOSITOR_RADIUS) || (x >= 160 && y < 60))
+                            (x - 40 < UI_RADIUS && y - 40 < UI_RADIUS) ||
+                            (x - 40 >= 160 - UI_RADIUS && y - 40 < UI_RADIUS) ||
+                            (x - 40 < UI_RADIUS && y - 40 >= 160 - UI_RADIUS) ||
+                            (x - 40 >= 160 - UI_RADIUS && y - 40 >= 160 - UI_RADIUS) || (x >= 160 && y < 60))
                                 continue;
                         kept &= side ? (r >= COMPOSITOR_GLASS_LIGHTEST && g >= COMPOSITOR_GLASS_LIGHTEST && b >= COMPOSITOR_GLASS_LIGHTEST)
                                      : (r <= COMPOSITOR_GLASS_DARKEST + 3 && g <= COMPOSITOR_GLASS_DARKEST + 3 &&
@@ -127295,9 +127295,9 @@ static fn check_settings_search(void)
 
         check("settings search: the page's field is the kit's, UI_FIELD_H high, and drawn", c->kind == UI_INPUT && c->h == UI_FIELD_H && c->items[0] != null);
         check("settings search: it lies wholly in the title band, below the window's top inset",
-              c->y >= COMPOSITOR_CLOSE_IN && c->y + c->h <= UI_PAGE_TOP);
+              c->y >= UI_CLOSE_IN && c->y + c->h <= UI_PAGE_TOP);
         check("settings search: it is clear of the close button and its minimise beside it, at the top right",
-              width - (c->x + c->w) >= 2 * (COMPOSITOR_CLOSE + COMPOSITOR_CLOSE_IN));
+              width - (c->x + c->w) >= 2 * (UI_CLOSE + UI_CLOSE_IN));
 }
 
 static fn check_settings_frames(string_address regular, string_address bold)
@@ -139193,7 +139193,7 @@ b32 main()
         check_compositor_overlay_fade();
         check_compositor_grid_drag();
         check_compositor_wheel();
-#ifdef COMPOSITOR_TOUCH_SLOP
+#ifdef COMPOSITOR_LINE
         check_compositor_touch();
 #endif
 #if MOONWATER_UI_ANY && defined(UI_TARGET)
@@ -144710,7 +144710,7 @@ static void check_compositor_gs1(void) {
     for(unsigned i=0;i<128*64;i++)body[i]=0x3a5a7a;
     for(int scale=1;scale<=4;scale++) {
         struct compositor_target t={golden_screen,1024,1024,768,0,0,1024,768};
-        struct compositor_frame f={80,80,128,64,scale,body,128,0,0,0,COMPOSITOR_RADIUS*scale,COMPOSITOR_LINE*scale,
+        struct compositor_frame f={80,80,128,64,scale,body,128,0,0,0,UI_RADIUS*scale,COMPOSITOR_LINE*scale,
             COMPOSITOR_INK_LINE};
         compositor_fill(&t,0,0,1024,768,COMPOSITOR_INK_DESKTOP);
         compositor_draw(&t,&f);
@@ -144730,7 +144730,7 @@ static void check_compositor_gs1(void) {
         cc_check(golden_screen[top*1024+80+64]==edge&&golden_screen[(80+32)*1024+top]==edge);
         cc_check(golden_screen[80*1024+80+64]==0x3a5a7a&&golden_screen[(80+32)*1024+80]==0x3a5a7a);
         cc_check(golden_screen[(top-1)*1024+100]==COMPOSITOR_INK_DESKTOP&&golden_screen[(80+32)*1024+top-1]==COMPOSITOR_INK_DESKTOP);
-        for(int x=top;x<top+COMPOSITOR_RADIUS*scale;x++){u32 p=golden_screen[top*1024+x];between|=p!=COMPOSITOR_INK_DESKTOP&&p!=edge;}
+        for(int x=top;x<top+UI_RADIUS*scale;x++){u32 p=golden_screen[top*1024+x];between|=p!=COMPOSITOR_INK_DESKTOP&&p!=edge;}
         cc_check(between);
         /* Damage is a clip, not a different picture: the same scene drawn
            in four quarters is the same buffer. */

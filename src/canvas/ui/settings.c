@@ -1028,11 +1028,9 @@ struct settings_map_view
 #define SETTINGS_MAP_PAD 8        // logical pixels: the panel's inset, and the screens' area from its edges
 #define SETTINGS_MAP_STRIP 36     // logical pixels: the top strip of the panel, where the identify button sits
 #define SETTINGS_MAP_PANEL 150    // logical pixels: the panel the screens are drawn in
-#define SETTINGS_MAP_GAP 8        // logical pixels: between the panel, its caption and the list
 #define SETTINGS_MAP_CAPTION 24   // logical pixels: the caption's line under the panel
 #define SETTINGS_MAP_BUTTON_W 168 // logical pixels: the identify button
 #define SETTINGS_MAP_BUTTON_H 28
-#define SETTINGS_MAP_RADIUS 8
 #define SETTINGS_SHOWN 64 // bytes of a screen's label or a rate's, shown in a row
 
 static char settings_shown_screen[SETTINGS_SHOWN], settings_shown_rate[SETTINGS_SHOWN];
@@ -1272,7 +1270,7 @@ static b32 settings_map_on(void)
 
 static int settings_map_height(void)
 {
-        return ui_px(&settings.ui, SETTINGS_MAP_PANEL) + ui_px(&settings.ui, SETTINGS_MAP_GAP) + ui_px(&settings.ui, SETTINGS_MAP_CAPTION);
+        return ui_px(&settings.ui, SETTINGS_MAP_PANEL) + ui_px(&settings.ui, UI_GAP2) + ui_px(&settings.ui, SETTINGS_MAP_CAPTION);
 }
 
 // The panel, its screens' area and the button, from the page's place: where the map is drawn and hit.
@@ -1443,8 +1441,8 @@ static void settings_map_draw(struct ui address_to ui)
         struct settings_screen screens[WINDOWS_OUTPUTS];
         unsigned int number[WINDOWS_OUTPUTS] = {0};
         unsigned int count = settings_map_load(screens, number);
-        int radius = ui_px(ui, SETTINGS_MAP_RADIUS), pad = ui_px(ui, UI_INSET), line = ui_px(ui, ui_types[UI_LABEL_MEDIUM].line);
-        int caption = settings.map.y + settings.map.h + ui_px(ui, SETTINGS_MAP_GAP);
+        int radius = ui_px(ui, UI_RADIUS), pad = ui_px(ui, UI_INSET), line = ui_px(ui, ui_types[UI_LABEL_MEDIUM].line);
+        int caption = settings.map.y + settings.map.h + ui_px(ui, UI_GAP2);
         const char address_to hint = settings_map_hint(count);
 
         ui_round(ui, settings.map.x, settings.map.y, settings.map.w, settings.map.h, radius, ui_role(UI_SURFACE_LOW) | 0xff000000u);
@@ -3148,7 +3146,7 @@ static fn settings_menu_open(int row)
                 ui_popmenu_size(&measure, m, settings.height);
                 x = settings.page.right - ui_px(&settings.ui, UI_INSET) - m->width;
                 x = x < sizes.margin ? sizes.margin : x;
-                y = top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, 4);
+                y = top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, UI_GAP1);
         }
         settings.popup.field = null;
         settings.choice = row, settings.choice_x = x, settings.choice_y = y;
