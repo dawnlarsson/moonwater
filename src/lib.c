@@ -53652,8 +53652,27 @@ __asm__(
     //       below does and for the same reason. No flag byte is ever set,
     //       and the argument is consumed by the test that comes last.
     //
+    //
+    //       Two range tests and two adds are ten instructions with the call.
+    //       One table entry per byte is a compare, a branch and one load:
+    //       the compare sends everything outside 0 through 255 (EOF is -1,
+    //       which is huge unsigned) to zero, and the move zero-extends the
+    //       index into a full register, since the upper half of edi is not
+    //       the caller's to rely on.
+    //
     ASM_FUNC(byte_is_alnum)
-    "xor %eax, %eax\n   lea -48(%rdi), %edx\n   cmp $10, %edx\n   adc $0, %eax\n   or $32, %edi\n   sub $97, %edi\n   cmp $26, %edi\n   adc $0, %eax\n" ASM_RET
+    "xor %eax, %eax\n   cmp $255, %edi\n   ja 1f\n   mov %edi, %edi\n   lea .Lbyte_alnum_flags(%rip), %rdx\n   movzbl (%rdx,%rdi), %eax\n1:\n" ASM_RET
+    ".pushsection .rodata\n   .balign 16\n.Lbyte_alnum_flags:\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n   .byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n   .byte 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0\n"
+    ".byte 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1\n   .byte 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0\n"
+    ".byte 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1\n   .byte 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n   .byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n   .byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n   .byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n   .byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
+    ".byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n   .byte 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n"
+    ".popsection\n"
     ASM_END(byte_is_alnum)
 
     //
