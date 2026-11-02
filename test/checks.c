@@ -13486,6 +13486,12 @@ test(absolute_whole_and_wide) {
         fail(absolute_whole(-5) == 5);
         fail(absolute_wide(-5) == 5);
 
+        //      The most negative value is its own negation, and the sign
+        //      flag the conditional move reads stays set, so it answers
+        //      itself: the wrap the sign-spread form gave, kept exactly.
+        fail(absolute_whole(-2147483647 - 1) == -2147483647 - 1);
+        fail(absolute_wide(-9223372036854775807LL - 1) == -9223372036854775807LL - 1);
+
         return true;
 }
 

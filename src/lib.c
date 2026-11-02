@@ -53485,12 +53485,20 @@ __asm__(
     "lea -65(%rdi), %edx\n   lea 32(%rdi), %eax\n   cmp $26, %edx\n   cmovae %edi, %eax\n" ASM_RET
     ASM_END(byte_to_lower)
 
+    //
+    //       Negate, then take the original back when the negation came out
+    //       negative: the sign flag of the negation is the test, so a copy,
+    //       a neg and a cmov do it in three instructions with a two cycle
+    //       chain, where the sign-smear form was five and a three cycle chain.
+    //       The minimum is its own negation and keeps its sign flag set, so
+    //       it answers itself, the same wrap the sign-smear form gives.
+    //
     ASM_FUNC(absolute_whole)
-    "mov %edi, %eax\n   mov %edi, %edx\n   sar $31, %edx\n   xor %edx, %eax\n   sub %edx, %eax\n" ASM_RET
+    "mov %edi, %eax\n   neg %eax\n   cmovs %edi, %eax\n" ASM_RET
     ASM_END(absolute_whole)
 
     ASM_FUNC(absolute_wide)
-    "mov %rdi, %rax\n   mov %rdi, %rdx\n   sar $63, %rdx\n   xor %rdx, %rax\n   sub %rdx, %rax\n" ASM_RET
+    "mov %rdi, %rax\n   neg %rax\n   cmovs %rdi, %rax\n" ASM_RET
     ASM_END(absolute_wide)
 
 #ifndef KERNEL_MODE
