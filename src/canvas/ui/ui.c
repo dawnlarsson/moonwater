@@ -1612,6 +1612,7 @@ static b64 ui_slide_land(struct ui_slide address_to s, b64 now, b32 address_to l
 #include "theme.h"
 
 #define UI_READABLE 450 // the kit's threshold for text on a ground: WCAG's 4.5:1, in hundredths (ui_contrast, theme.h)
+#define UI_GLASS_GROUND 0x101012u // a glass window's ground before the compositor has tinted one: a dark glass's
 
 /*
         The quiet ink on a glass ground: the ground mixed toward the ink from 176 of 256, or further toward it, the least
@@ -5772,7 +5773,7 @@ static void ui_popup_look(struct ui_popup address_to p, struct windows address_t
 
         p->ui = *parent_ui;
         p->ui.opaque = false, p->ui.glass = true;
-        ui_inks(&p->ui, ground ? ground : parent_ui->ground ? parent_ui->ground : 0x101012u);
+        ui_inks(&p->ui, ground ? ground : parent_ui->ground ? parent_ui->ground : UI_GLASS_GROUND);
         table->glass[p->own.row] = UI_POPUP_GLASS;
 }
 
@@ -6744,6 +6745,12 @@ static int ui_menu_key(const struct ui address_to ui, struct ui_menu address_to 
         The menu over everything, as the kit's menus are drawn (ui_popmenu_draw, into the picture at the menu's place):
         the surface container, 8 round with a hairline, the keys' choice in the selection's layer, the row's own one
         dotted as a radio is; a finger's choice pressed, and the scrollbar when not all of it shows.
+
+        Which menus are glass is decided by where they are drawn. A popup (ui_popup_open: a context menu, a choice
+        dropdown that opens from a row as its own window) is a temporary overlay, so it is glass (UI_POPUP_GLASS) and has
+        no face and no outline. This menu, ui_menu, is drawn inside its window's own picture: the settings window's
+        choice dropdowns stay open in a window that stays, and that window is the kit's opaque surface. Making this menu
+        glass would make the settings picture transparent under it, so it keeps the surface's face and outline.
 */
 // The menu's view moves a frame at a time. The choice the keys are on is kept in the view it is going to (a reveal
 // goes to the choice, so it stays; a wheel's turn goes past it, and the choice is put in the view it is turning to).
@@ -7263,7 +7270,7 @@ static int ui_app_run(struct ui_app address_to app)
         windows_name(app->own, (const char *)app->name);
         table->glass[row] = app->glass;
         *app->ground = table->ground[row];
-        ui_inks(app->ui, *app->ground ? *app->ground : 0x101012u);
+        ui_inks(app->ui, *app->ground ? *app->ground : UI_GLASS_GROUND);
         // A window that is not glass is the kit's surface, and its inks are the surface's.
         app->ui->opaque = !(app->glass & WINDOW_GLASS);
         app->ui->glass = (app->glass & WINDOW_GLASS) != 0;
