@@ -12830,7 +12830,7 @@ static int compositor_table(void)
         compositor.table->output_width = (unsigned int)compositor_most_width();
         compositor.table->output_height = (unsigned int)compositor_most_height();
         compositor.table->stride = (unsigned int)compositor_stride();
-        compositor.table->scale = (unsigned int)compositor.scale;
+        compositor.table->scale = (unsigned int)compositor.scale * 100; // the kit draws in percent of the logical size
         compositor.table->period = (unsigned int)compositor.period;
         compositor.table->focus = WINDOWS;
         compositor.table->refused = compositor.memfd_failed;

@@ -22107,7 +22107,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
         //      What any mapper of the table wrote, as the names below are: spelled, not sent to the terminal.
         usb_shown(shown, sizeof(shown), (p8 address_to)driver, string_length((string_address)driver));
         host_say(log, "canvas\n");
-        host_say(log, "  card            %s, %px%p, scale %p\n", shown[0] ? (string_address)shown : (string_address) "none",
+        host_say(log, "  card            %s, %px%p, scale %p percent\n", shown[0] ? (string_address)shown : (string_address) "none",
                  (positive)table->output_width, (positive)table->output_height, (positive)table->scale);
         //      The screens as the table lists them, the primary first.
         screens = table->outputs <= WINDOWS_OUTPUTS ? table->outputs : 0;

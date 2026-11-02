@@ -499,7 +499,7 @@ static void terminal_view_clamp(void)
 // The scale the kit draws at: the runner's, or 1 where there is no runner (the checks).
 static int terminal_scale(void)
 {
-        return terminal.ui.scale > 0 ? terminal.ui.scale : 1;
+        return terminal.ui.scale > 0 ? terminal.ui.scale : 100;
 }
 
 // The kit's ui for the window's picture: the terminal's own engine and faces, at the scale, over the buffer whole.
@@ -524,7 +524,7 @@ static struct ui terminal_kit(unsigned int address_to whole)
 // and grab stay as the kit keeps them, from one frame to the next.
 static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned int total)
 {
-        terminal.bar.x = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale();
+        terminal.bar.x = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100;
         terminal.bar.y = 0;
         terminal.bar.height = (int)terminal.height;
         terminal.bar.inset = UI_CLOSE_BOTTOM;
@@ -1046,7 +1046,7 @@ static void terminal_margin(unsigned int address_to whole, const struct window_c
 // column is what a bar drawn over the grid's right edge can cover, so those cells are drawn again with it.
 static unsigned int terminal_bar_from(void)
 {
-        int left = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() - (int)terminal.pad;
+        int left = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100 - (int)terminal.pad;
         unsigned int column = left > 0 ? (unsigned int)left / terminal.cell_w : 0;
 
         column = column ? column - 1 : 0;
@@ -1075,7 +1075,7 @@ static void terminal_bar(unsigned int address_to whole, const struct window_cell
                               terminal_ground(frame, row, COLUMNS - 1));
         }
 
-        if (terminal.width < UI_SCROLL_WIDTH * (unsigned int)terminal_scale() || total <= shown)
+        if (terminal.width < UI_SCROLL_WIDTH * (unsigned int)terminal_scale() / 100 || total <= shown)
                 return;
 
         kit = terminal_kit(whole);
@@ -1436,9 +1436,9 @@ static b32 terminal_frame(void)
                 }
 
                 // The bar's track: down the window's right edge, the whole height.
-                if (bar_told && terminal.width >= UI_SCROLL_WIDTH * (unsigned int)terminal_scale())
+                if (bar_told && terminal.width >= UI_SCROLL_WIDTH * (unsigned int)terminal_scale() / 100)
                 {
-                        int left = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale();
+                        int left = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100;
 
                         x1 = left < x1 ? left : x1;
                         x2 = (int)terminal.width > x2 ? (int)terminal.width : x2;

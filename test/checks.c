@@ -117566,7 +117566,7 @@ static fn check_pointer(void)
                 struct window_event mouse_up = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
                 struct ui kit;
                 unsigned int first, shown, total, start;
-                int scale = (int)terminal_scale(), top, length;
+                int scale = (int)terminal_scale() / 100, top, length;
 
                 terminal_view_live();
                 terminal_extent(&first, &shown, &total);
@@ -117622,7 +117622,7 @@ static fn check_pointer(void)
 #ifdef UI_SCROLL_INSET
                 struct ui kit;
                 unsigned int first, shown, total, want = terminal.pad + 40 * terminal.cell_w + terminal.cell_w / 2 + 3;
-                int scale = (int)terminal_scale(), top, length;
+                int scale = (int)terminal_scale() / 100, top, length;
                 b32 fills, flush, below, ends;
 
                 terminal_configure(-1, want, terminal.height);
@@ -119714,7 +119714,7 @@ static void check_popup_ground_steady(void)
     glass_paint(1, 0, 0, 120, 80, 0, true);
     compositor_present();
     compositor_focus(1);
-    parent_ui.scale = 1;
+    parent_ui.scale = 100;
     parent_ui.regular = parent_ui.bold = terminal.plain[0];
     parent_ui.scratch = null, parent_ui.scratch_width = 0, parent_ui.scratch_scale = 0;
     memory_zero(&parent_row, sizeof(parent_row));
@@ -119804,7 +119804,7 @@ static void check_popup_reopen(void)
     compositor_present();
     compositor_focus(1);
 
-    parent_ui.scale = 1;
+    parent_ui.scale = 100;
     parent_ui.regular = parent_ui.bold = terminal.plain[0];
     parent_ui.scratch = null, parent_ui.scratch_width = 0, parent_ui.scratch_scale = 0;
     memory_zero(&parent_row, sizeof(parent_row));
@@ -124801,7 +124801,7 @@ static void check_ui_press(void)
         int clicked, total = 0, steps = 0, moved = 0;
         positive now = 1000000000ull;
 
-        ui.scale = 1;
+        ui.scale = 100;
         ui_press_begin(&press, 10, 10, 3, true);
         check("ui press: what a press went down on is pressed at once", ui_pressed(&press, 3) && !ui_pressed(&press, 4));
         check("ui press: a finger that shakes under the slop is still the press",
@@ -124992,7 +124992,7 @@ static fn check_launcher(void)
         launcher.own.table = &table;
         table.output_width = 1920;
         table.output_height = 1080;
-        launcher.ui.scale = 1;
+        launcher.ui.scale = 100;
         launcher.regular = "/fonts/ui.ttf";
         launcher.mono = "/fonts/mono.ttf";
         launcher.mono_bold = "/fonts/mono-bold.ttf";
@@ -125176,10 +125176,10 @@ static fn check_launcher(void)
 #ifdef UI_TARGET
         // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
         {
-                int row_y = launcher.ui.scale * (UI_PAD + UI_TARGET + UI_GAP2) + launcher.ui.scale * UI_ROW * 3 / 2;
-                struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, LAUNCHER_WIDTH * launcher.ui.scale / 2, row_y};
+                int row_y = launcher.ui.scale * (UI_PAD + UI_TARGET + UI_GAP2) / 100 + launcher.ui.scale * UI_ROW * 3 / 200;
+                struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, LAUNCHER_WIDTH * launcher.ui.scale / 100 / 2, row_y};
 
-                launcher.width = LAUNCHER_WIDTH * launcher.ui.scale;
+                launcher.width = LAUNCHER_WIDTH * launcher.ui.scale / 100;
                 struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
                 struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
                 b32 pressed;
@@ -125187,7 +125187,7 @@ static fn check_launcher(void)
                 launcher_event(&finger);
                 launcher_event(&land);
                 pressed = ui_pressed(&launcher.press, 1) && launcher.list.focus == 1;
-                finger.b += 3 * UI_ROW * launcher.ui.scale;
+                finger.b += 3 * UI_ROW * launcher.ui.scale / 100;
                 launcher_event(&finger);
                 check("launcher: a finger shows the row it lands on pressed, and run nothing as it slides off",
                       pressed && !ui_pressed(&launcher.press, 1) && launcher_event(&lift) && !launcher.press.down);
@@ -126077,7 +126077,7 @@ static fn check_settings(string_address regular, string_address bold)
                 settings.child = 0;
 
                 // The filter: letters typed with no field open, Backspace, and Escape clearing before it closes.
-                settings.ui.scale = 1;
+                settings.ui.scale = 100;
                 settings.editing = -1;
                 settings.filter_length = 0;
                 settings.group = 0;
@@ -126125,7 +126125,7 @@ static fn check_settings(string_address regular, string_address bold)
                 check("settings: a blank is no letter of it", !settings.filter_length);
 
                 // The groups at the left, the rows at the right, and the keys between them.
-                settings.ui.scale = 1;
+                settings.ui.scale = 100;
                 settings.width = SETTINGS_WIDTH;
                 settings.height = SETTINGS_HEIGHT;
                 settings.group = 0;
@@ -126193,7 +126193,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.child = 0;
                         settings.pane = 1;
                         settings_group_choose(0);
-                        settings.ui.scale = 1;
+                        settings.ui.scale = 100;
                         {
                                 const struct ui_page address_to page = &settings.page;
                                 int side = page->column_w, pad = ui_px(&settings.ui, UI_PAD), row = ui_px(&settings.ui, UI_ROW);
@@ -126232,7 +126232,7 @@ static fn check_settings(string_address regular, string_address bold)
                 positive size = 0, bytes = compositor_map_file(regular, &size), bold_size = 0,
                          bold_bytes = bold ? compositor_map_file(bold, &bold_size) : 0;
                 long engine = compositor_call(syscall(mmap), 0, sizeof(font_engine), 3, 0x22, (positive)-1, 0);
-                struct ui ui = {pixels, 320, 320, 80, 0, 80, 1};
+                struct ui ui = {pixels, 320, 320, 80, 0, 80, 100};
                 b32 drawn = true;
 
                 if (!bytes || (engine < 0 && engine > -4096) || font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
@@ -127003,7 +127003,7 @@ static fn check_settings(string_address regular, string_address bold)
                               settings.child <= 0 && settings.feed_due > clock_monotonic_nanoseconds());
                         settings.moonwater = (string_address) "/moonwater";
                         compositor_call(syscall(munmap), (positive)table, (sizeof(struct windows) + 4095) & ~(positive)4095, 0, 0, 0, 0);
-                        settings.own.table = null;
+                        settings.own.table = null, settings.shown = -1;
                         settings.group = 0;
                         settings.item_count[0] = 0;
                         settings.item_count[1] = 0;
@@ -127045,7 +127045,7 @@ static fn check_settings_edges(void)
 {
         int zone = settings_row_named("Time zone"), wired = settings_row_named("Wired");
 
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         settings.width = SETTINGS_WIDTH;
         settings.height = SETTINGS_HEIGHT;
         settings.pane = 1;
@@ -127104,7 +127104,7 @@ static fn check_settings_keys(void)
 {
         int wired = settings_row_named("Wired"), at = 0, below = 0;
 
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         settings.width = SETTINGS_WIDTH;
         settings.height = SETTINGS_HEIGHT;
         settings.pane = 1;
@@ -127438,14 +127438,14 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                 switch (s->what)
                 {
                 case SF_KEY: settings_press(s->a); break;
-                case SF_ROW: settings_frames_event(WINDOW_EVENT_MOTION, 0, s->a * settings.ui.scale, y); break;
+                case SF_ROW: settings_frames_event(WINDOW_EVENT_MOTION, 0, s->a * settings.ui.scale / 100, y); break;
                 case SF_PART:
                 {
                         const struct ui_control address_to c = ui_list_control(&settings.list, row, 1);
                         int x = !c ? 0 : c->kind == UI_TABS ? ui_tab_left(&settings.ui, c, s->a) + ui_tab_width(&settings.ui, c, s->a) / 2
                                                             : ui_swatches_left(&settings.ui, c) + s->a * (UI_SWATCH + UI_SWATCH_GAP) + UI_SWATCH / 2;
 
-                        settings_frames_event(WINDOW_EVENT_MOTION, 0, x * settings.ui.scale, y);
+                        settings_frames_event(WINDOW_EVENT_MOTION, 0, x * settings.ui.scale / 100, y);
                         break;
                 }
                 case SF_GROUP:
@@ -127476,7 +127476,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                         break;
                 case SF_SIZE:
                         ui_kit_settle();
-                        settings_size((unsigned int)(s->a * settings.ui.scale), (unsigned int)(s->b * settings.ui.scale));
+                        settings_size((unsigned int)(s->a * settings.ui.scale / 100), (unsigned int)(s->b * settings.ui.scale / 100));
                         break;
                 // A finger: it lands on the named row (its touch moves first, so the page knows where it is), moves a
                 // logical pixels from where it landed (negative up), and lifts.
@@ -127509,7 +127509,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
                         break;
                 case SF_FINGER_MOVE:
                         settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, (settings.page.left + settings.page.right) / 2,
-                                              settings_frames_finger_y + s->a * settings.ui.scale);
+                                              settings_frames_finger_y + s->a * settings.ui.scale / 100);
                         break;
                 case SF_FINGER_UP: settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0); break;
                 }
@@ -127592,7 +127592,7 @@ static fn settings_frames_gallery(void)
         check("settings frames: every buffer the gallery shows is the whole picture drawn at its time", !settings_frames.wrong && pressed > 10);
         settings_frames_event(WINDOW_EVENT_MOTION, 0, -100, -100);
         settings_gallery.on = 0;
-        settings_size(SETTINGS_WIDTH * settings.ui.scale, SETTINGS_HEIGHT * settings.ui.scale);
+        settings_size(SETTINGS_WIDTH * settings.ui.scale / 100, SETTINGS_HEIGHT * settings.ui.scale / 100);
         settings_frames_until(settings_frames.now + 200 * SETTINGS_FRAMES_MS);
 }
 
@@ -127719,7 +127719,7 @@ static fn settings_end_check(void)
         {
                 int x, y, bar_x, bar_y;
 
-                settings.ui.scale = scale;
+                settings.ui.scale = scale * 100;
                 ui_kit_settle();
                 settings_size(SETTINGS_WIDTH * scale, 300 * scale);
                 expected = settings.list.content - settings.list.scroll.view;
@@ -127931,7 +127931,7 @@ static fn check_display_section(void)
 
         // The dropdowns, from a fake table: three screens, the second at the left (number 1), with 144 Hz first (recommended).
         memory_zero(&table, sizeof(table));
-        table.outputs = 3, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+        table.outputs = 3, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
         table.output_x[0] = 1920, table.output_y[0] = 0, table.output_w[0] = 1920, table.output_h[0] = 1080;
         table.output_x[1] = 0, table.output_y[1] = 0, table.output_w[1] = 1920, table.output_h[1] = 1080;
         table.output_x[2] = 3840, table.output_y[2] = 0, table.output_w[2] = 1280, table.output_h[2] = 720;
@@ -128073,14 +128073,14 @@ static fn check_display_section(void)
         // The map is shown above the Display group only: its panel is placed at the page's top, the list under it.
         settings.group = settings_group_of(screen_row), settings.filter_length = 0, settings.view = false;
         settings.page.top = 100, settings.page.left = 0, settings.page.right = 700;
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         check("display section: the map is on for the Display group and off for another", settings_map_on() && settings.group == settings_group_of(screen_row));
         settings_map_place();
         check("display section: the map's panel is placed at the top of the page", settings.map.y == 100 && settings.map.h > 0 && settings.map.field_h > 0);
         // The Screen dropdown counts the screens in the same reading order as identify does: a 2 by 2 arrangement, listed bottom
         // right first, is Screen 1 top left, Screen 2 top right, Screen 3 bottom left and Screen 4 bottom right.
         memory_zero(&table, sizeof(table));
-        table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+        table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
         table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
         table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
         table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
@@ -128150,7 +128150,7 @@ static fn check_display_section(void)
                 memory_zero(&row, sizeof(row));
                 settings_describe_output(screen_row, &row);
                 check("display section: with no screen the Screen row says so, in words", string_equals((string_address)row.value, (string_address) "No screen is connected"));
-                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
                 table.output_w[0] = 1920, table.output_h[0] = 1080, table.output_rates[0] = 1, table.output_hz[0][0] = 60, table.output_now[0] = 60;
                 memory_copy(table.output_name[0], "DP-1", 5);
                 check("display section: with one screen the map's caption says so", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
@@ -128166,6 +128166,46 @@ static fn check_display_section(void)
                 check("display section: a screen that lists no rate says so, in words", string_equals((string_address)row.value, (string_address) "The screen lists no rates"));
         }
 
+        // The map's drag at a HiDPI scale (the kit at 2, the table at 2): the press chooses the screen and a motion drags it, as
+        // at scale 1. The panel, the screens and the snap are device pixels, the button's box logical.
+        {
+                struct settings_screen grid[WINDOWS_OUTPUTS];
+                unsigned int grid_number[WINDOWS_OUTPUTS] = {0}, grid_count;
+                struct settings_map_view grid_view;
+                struct window_event event;
+                int tx, ty, tw, th, before_x, before_y;
+
+                memory_zero(&table, sizeof(table));
+                table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 200;
+                table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
+                table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
+                table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
+                table.output_x[3] = 0, table.output_y[3] = 0, table.output_w[3] = 1920, table.output_h[3] = 1080;
+                memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
+                memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
+                settings.ui.scale = 200;
+                settings_map_place();
+                grid_count = settings_map_load(grid, grid_number);
+                settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
+                settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
+                settings.popup.open = 0, settings.editing = -1, settings.view = false, settings.filter_length = 0, settings.map.keys = false;
+                settings.map.display = settings.map.drag = -1, settings.map.nudged = false;
+                event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
+                settings_event(&event);
+                event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                settings_event(&event);
+                check("display section: at scale 2 a press on a screen of the map chooses it and starts its drag",
+                      settings.map.display == 2 && settings.map.drag == 2);
+                before_x = settings.map.target_x, before_y = settings.map.target_y;
+                event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2 + 300, ty + th / 2 + 40};
+                settings_event(&event);
+                check("display section: at scale 2 a motion over the map drags the screen it took, its target moves",
+                      settings.map.drag == 2 && (settings.map.target_x != before_x || settings.map.target_y != before_y));
+                settings.map.display = settings.map.drag = -1;
+                settings.ui.scale = 100, table.scale = 100;
+                settings_map_place();
+        }
+
         // The keyboard on the map. The four screens of the 2 by 2 (index 0 bottom right, number 4; index 3 top left, number 1): Up
         // from the Screen row goes to the map, the arrows choose a screen by its number (clamped), and Down goes back to the rows.
         // A key's Shift step is checked on its own (settings_map_stepped), since a sent change would run the verb.
@@ -128173,7 +128213,7 @@ static fn check_display_section(void)
                 struct window_event key;
 
                 memory_zero(&table, sizeof(table));
-                table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+                table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
                 table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
                 table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
                 table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
@@ -128213,7 +128253,7 @@ static fn check_display_section(void)
                 int x, y;
 
                 memory_zero(&table, sizeof(table));
-                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 100;
                 table.output_x[0] = 5000, table.output_y[0] = 5000, table.output_w[0] = 1920, table.output_h[0] = 1080;
                 memory_copy(table.output_name[0], "DP-1", 5);
                 settings.map.display = 0, settings.map.keys = true, settings.map.nudged = false;
@@ -128312,7 +128352,7 @@ static fn check_display_section(void)
 static fn check_settings_search(void)
 {
         const struct ui_control address_to c = &settings.page.search;
-        int width = settings.width / settings.ui.scale;
+        int width = settings.width * 100 / settings.ui.scale;
 
         check("settings search: the page's field is the kit's, UI_FIELD_H high, and drawn", c->kind == UI_INPUT && c->h == UI_FIELD_H && c->items[0] != null);
         check("settings search: it lies wholly in the title band, below the window's top inset",
@@ -128354,7 +128394,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         font_start(settings.ui.engine, atlas, 1024, 1024);
         settings.ui.regular = &faces[0];
         settings.ui.bold = bold_bytes && font_load(&faces[1], (const p8 address_to)bold_bytes, bold_size, 0) == 0 ? &faces[1] : null;
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         settings.ui.opaque = 1;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0); // full motion, the theme put at once
@@ -128371,7 +128411,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         for (int scale = 1; scale <= 2; scale++)
         {
         // The window at a scale: placed again, its size the window's own at it, drawn whole once.
-        settings.ui.scale = scale;
+        settings.ui.scale = scale * 100;
         ui_kit_settle();
         settings_size(SETTINGS_WIDTH * scale, SETTINGS_HEIGHT * scale);
         settings_refilter();
@@ -128481,17 +128521,17 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 settings_frames_play((string_address) "a choice's menu", canvas, menu, sizeof(menu) / sizeof(menu[0]));
         }
         }
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         ui_kit_settle();
         settings_size(SETTINGS_WIDTH, 300);
         settings_wheel_end_check((string_address) "a tall window, the wheel a notch at a time", 66, 70);
         settings_wheel_end_check((string_address) "a tall window, notches 150 ms apart", 150, 70);
         settings_wheel_end_check((string_address) "a tall window, notches 300 ms apart", 300, 70);
-        settings.ui.scale = 2;
+        settings.ui.scale = 200;
         ui_kit_settle();
         settings_size(SETTINGS_WIDTH * 2, 300 * 2);
         settings_wheel_end_check((string_address) "scale 2, the wheel a notch at a time", 66, 70);
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         ui_kit_settle();
         settings_size(SETTINGS_WIDTH, 300);
         check("settings flick: a gentle flick 300 px above the last row settles on it, no overshoot, no return",
@@ -133036,7 +133076,7 @@ static fn check_kit_theme(void)
                 struct ui_control row;
                 b32 rested, pressed, settled;
 
-                ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 80, ui.top = 0, ui.bottom = 80, ui.scale = 1;
+                ui.pixels = pixels, ui.pitch = 400, ui.width = 400, ui.height = 80, ui.top = 0, ui.bottom = 80, ui.scale = 100;
                 ui.scratch = scratch, ui.scratch_width = 400, ui.band_top = ui.band_bottom = 0;
                 ui.mono = null;
                 // The face the settings draw in: the image's Inter, the third font the check is given (else the first).
@@ -133111,7 +133151,7 @@ static fn check_kit_ramps(void)
                 return;
         }
         ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
-        ui.regular = ui.bold = &face, ui.scale = 1, ui.top = 0, ui.bottom = 40, ui.width = 600, ui.height = 40, ui.pitch = 600;
+        ui.regular = ui.bold = &face, ui.scale = 100, ui.top = 0, ui.bottom = 40, ui.width = 600, ui.height = 40, ui.pitch = 600;
         ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
         for (int pass = 0; pass < 2; pass++)
         {
@@ -133385,7 +133425,7 @@ static fn check_kit_fills(void)
 
         memory_zero(&ui, sizeof(ui));
         ui.pitch = KIT_PAGE_PITCH, ui.width = KIT_PAGE_WIDTH, ui.height = KIT_PAGE_HEIGHT, ui.top = 0, ui.bottom = KIT_PAGE_HEIGHT;
-        ui.scale = 1;
+        ui.scale = 100;
         ui.pixels = kit_page_after;
         for (int trial = 0; trial < 1500; trial++)
         {
@@ -133577,7 +133617,7 @@ static void bounds_list_make(const struct ui address_to ui, struct ui_list addre
         l->count = rows, l->ids = rows, l->describe = bounds_row, l->empty = "", l->focus = -1, l->hover = l->down = -1;
         for (int at = 0; at < rows; at++)
                 l->id[at] = (unsigned short)at;
-        ui_list_place(ui, l, 100 * ui->scale, 10 * ui->scale, 300 * ui->scale, h);
+        ui_list_place(ui, l, 100 * ui->scale / 100, 10 * ui->scale / 100, 300 * ui->scale / 100, h);
         ui_list_layout(ui, l);
 }
 
@@ -133616,7 +133656,7 @@ static fn check_kit_place(void)
                 check("kit place: the face loads", false);
                 return;
         }
-        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
         ui.regular = ui.bold = &face;
         ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
@@ -133850,7 +133890,7 @@ static fn check_kit_place(void)
         {
 #ifdef UI_SCROLL_INSET
                 struct ui_scroll capped = {100, 0, 200, 1000, 200, 800, false, false, 0};
-                int top = 0, length = 0, inset = UI_CLOSE_BOTTOM * ui.scale;
+                int top = 0, length = 0, inset = UI_CLOSE_BOTTOM * ui.scale / 100;
                 b32 starts, ends, pressed;
 
                 capped.inset = UI_CLOSE_BOTTOM;
@@ -134083,7 +134123,7 @@ static fn check_kit_place(void)
                 struct ui_scroll slow = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
                 struct ui_scroll fast = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
                 struct wheel_run run;
-                int row = UI_ROW * ui.scale, frames_between = 0, jump = 0, last = 0, frame, fast_travel = 0, slow_travel = 0;
+                int row = UI_ROW * ui.scale / 100, frames_between = 0, jump = 0, last = 0, frame, fast_travel = 0, slow_travel = 0;
                 b32 glides = false, once = false, travel_ok = false, capped = false;
 
                 ui_kit.now = 8000000000ll, ui_kit.busy = 0, ui_kit.wheel_off = 0;
@@ -134182,8 +134222,8 @@ static fn check_kit_place(void)
                 int track_top = 0, track_height = 0, changed_inside = 0, changed_below = 0, view_bottom;
                 b32 track_ends = true;
 
-                bounds_list_make(&ui, &scrolled, 40, 120 * ui.scale);
-                bounds_list_make(&ui, &fitting, 2, 120 * ui.scale);
+                bounds_list_make(&ui, &scrolled, 40, 120 * ui.scale / 100);
+                bounds_list_make(&ui, &fitting, 2, 120 * ui.scale / 100);
                 for (int k = 0; k < 2; k++)
                 {
                         struct ui_list address_to l = k ? &fitting : &scrolled;
@@ -134191,7 +134231,7 @@ static fn check_kit_place(void)
                         ui_scroll_track(&ui, &l->scroll, &track_top, &track_height);
                         track_ends = track_ends && track_top == l->y && track_top + track_height == l->y + l->h && l->h == l->scroll.view;
                 }
-                ui_scroll_set(&scrolled.scroll, 20 * ui.scale);
+                ui_scroll_set(&scrolled.scroll, 20 * ui.scale / 100);
                 for (int at = 0; at < 600 * 300; at++)
                         pixels[at] = 0x00ff00ffu;
                 memory_copy(before_draw, pixels, sizeof(pixels));
@@ -134336,8 +134376,8 @@ static fn check_kit_place(void)
                 int edge = 0;
 
                 ui_kit.now = 8000000000ll, ui_kit.busy = 0;
-                bounds_list_make(&ui, &fits, 3, 300 * ui.scale);
-                bounds_list_make(&ui, &tall, 40, 300 * ui.scale);
+                bounds_list_make(&ui, &fits, 3, 300 * ui.scale / 100);
+                bounds_list_make(&ui, &tall, 40, 300 * ui.scale / 100);
                 row2 = bounds_span(&ui, &fits, 2, &height);
                 first = bounds_span(&ui, &fits, 0, &height);
                 ui_scroll_wheel(&ui, &fits.scroll, -120);
@@ -134350,7 +134390,7 @@ static fn check_kit_place(void)
                                 bounds_span(&ui, &fits, 2, &height) == row2;
                 }
                 // A finger pulls a list that fits past its top, and lets go: its scroll stays 0 all the way, and its first row stays put.
-                ui_scroll_drag(&fits.scroll, -150 * ui.scale);
+                ui_scroll_drag(&fits.scroll, -150 * ui.scale / 100);
                 for (frame = 0; frame < 30; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
@@ -134376,7 +134416,7 @@ static fn check_kit_place(void)
                 for (int k = 0; k < 3; k++)
                 {
                         ui_scroll_set(&tall.scroll, most);
-                        ui_scroll_drag(&tall.scroll, (40 * (k + 1)) * ui.scale);
+                        ui_scroll_drag(&tall.scroll, (40 * (k + 1)) * ui.scale / 100);
 #ifdef UI_LIST_STRETCH
                         peaks[k] = ui_scroll_stretched(&tall.scroll, &edge);
                         pulled_edge = pulled_edge || edge > 0;
@@ -134384,7 +134424,7 @@ static fn check_kit_place(void)
                         shown = shown && tall.scroll.scroll == most;
                 }
                 ui_scroll_set(&tall.scroll, most);
-                ui_scroll_drag(&tall.scroll, 120 * ui.scale);
+                ui_scroll_drag(&tall.scroll, 120 * ui.scale / 100);
 #ifdef UI_LIST_STRETCH
                 stretch = ui_scroll_stretched(&tall.scroll, &edge);
                 stretch_tall = stretch > 0 && edge > 0;
@@ -134469,17 +134509,17 @@ static fn check_kit_place(void)
                 b64 stretch = 0, last = 0, lowest = 0;
 
                 ui_kit.now = 9000000000ll, ui_kit.busy = 0;
-                bounds_list_make(&ui, &held, 40, 300 * ui.scale);
+                bounds_list_make(&ui, &held, 40, 300 * ui.scale / 100);
                 most = ui_scroll_most(&held.scroll);
                 ui_scroll_set(&held.scroll, most);
                 ui_scroll_thumb(&ui, &held.scroll, &top, &length);
-                x = held.scroll.x + UI_SCROLL_WIDTH * ui.scale / 2;
+                x = held.scroll.x + UI_SCROLL_WIDTH * ui.scale / 100 / 2;
                 y = top + length / 2;
                 memory_zero(&page, sizeof(page));
                 page.body = &held.scroll;
                 page.pointer_x = x, page.pointer_y = y;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, true);
-                page.pointer_y = y + 60 * ui.scale;
+                page.pointer_y = y + 60 * ui.scale / 100;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
 #ifdef UI_LIST_STRETCH
                 stretched = ui_scroll_stretched(&held.scroll, &edge) > 0 && edge > 0;
@@ -134490,7 +134530,7 @@ static fn check_kit_place(void)
                         ui_scroll_glide(&ui, &held.scroll);
                         kept = kept && held.scroll.scroll == most;
                 }
-                page.pointer_y = y + 90 * ui.scale;
+                page.pointer_y = y + 90 * ui.scale / 100;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
                 kept = kept && held.scroll.scroll == most;
                 ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, false);
@@ -134610,7 +134650,7 @@ static fn check_kit_tab_ripple(void)
                 check("kit tab ripple: the face loads", false);
                 return;
         }
-        ui.pixels = with, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.pixels = with, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
         ui.regular = ui.bold = &face;
         ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
@@ -134722,7 +134762,7 @@ static fn check_kit_states(void)
                 check("kit states: the face loads", false);
                 return;
         }
-        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
         ui.regular = ui.bold = &face;
         ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
@@ -135203,7 +135243,7 @@ static fn check_kit_turn(void)
                 check("kit turn: the face loads", false);
                 return;
         }
-        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
         ui.regular = ui.bold = &face;
 
@@ -135328,7 +135368,7 @@ static fn check_kit_controls(void)
                 check("kit controls: the face loads", false);
                 return;
         }
-        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
         ui.regular = ui.bold = &face;
         ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
@@ -135694,7 +135734,7 @@ b32 main()
         settings.ui.mono = &frames_faces[2];
         settings.ui.scratch = frames_scratch;
         settings.ui.scratch_width = 1400;
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         settings.ui.pixels = frames_pixels;
         settings.ui.pitch = SETTINGS_GALLERY_W;
         settings.ui.width = SETTINGS_GALLERY_W;
@@ -135724,7 +135764,7 @@ b32 main()
                         positive frames = 0;
 
                         memory_zero(&scroll_ui, sizeof(scroll_ui));
-                        scroll_ui.scale = 1;
+                        scroll_ui.scale = 100;
                         ui_kit.now = 1000000000ll;
                         for (positive turn = 0; turn < count; turn++)
                         {
@@ -136416,7 +136456,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         wui.regular = &regular;
         wui.bold = &regular;
         wui.mono = &code;
-        wui.scale = 1;
+        wui.scale = 100;
         // A scratch line of its own: the terminal's is the terminal's.
         wui.scratch = null;
         wui.scratch_width = 0;
@@ -136817,7 +136857,7 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
         ui_text_draw(wui, t, 20, 20, 300, 60, 0);
         y = t->top + t->line_height / 2;
         {
-                int bottom = t->top + t->line_height, radius = 6 * wui->scale, knob = field_x(wui, t, 10);
+                int bottom = t->top + t->line_height, radius = 6 * wui->scale / 100, knob = field_x(wui, t, 10);
 
                 check("touch: a selection's end has a handle, a knob in the accent under its line",
                       (wui->pixels[(positive)(bottom + radius) * wui->pitch + (positive)knob] & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu));
@@ -137304,7 +137344,7 @@ static fn check_glass_pieces(string_address regular)
         ui.engine = (font_engine address_to)engine;
         font_start(ui.engine, atlas, 512, 512);
         ui.regular = ui.bold = &face;
-        ui.scale = 1;
+        ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 800;
         ui.opaque = 0, ui.glass = 1;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
@@ -137936,7 +137976,7 @@ static fn check_kit_defaults(struct ui address_to wui)
             {"src/canvas/ui/ui.c", "UI_SEARCH_H"}};
         positive copied = 0;
 
-        ui.pixels = with, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.pixels = with, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0;
         ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
         ui_kit.now = 7000000000ll;
@@ -138088,7 +138128,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                 editor.tab = 0;
                 editor_draw(pixels);
                 at_x = ui_tab_left(&editor.ui, &editor.strip, 2) + ui_tab_width(&editor.ui, &editor.strip, 2) / 2;
-                at_y = editor.strip.y * editor.ui.scale + editor.strip.h * editor.ui.scale / 2;
+                at_y = editor.strip.y * editor.ui.scale / 100 + editor.strip.h * editor.ui.scale / 100 / 2;
                 editor.pointer_x = at_x, editor.pointer_y = at_y;
                 editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0});
                 tabs_ok = editor.tab == 0;
@@ -138136,7 +138176,7 @@ static fn check_field_hands(string_address regular)
         ui.engine = (font_engine address_to)engine;
         font_start(ui.engine, atlas, 512, 512);
         ui.regular = ui.bold = &face;
-        ui.scale = 1;
+        ui.scale = 100;
         ui.scratch = scratch, ui.scratch_width = 800;
         ui.opaque = 1;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
@@ -139181,7 +139221,7 @@ static fn menu_defaults_check(struct ui address_to wui)
         int row, pad, x, y1, y2, chosen_same, chosen_other, chosen_away;
 
         menu_defaults_items(wui, &m);
-        row = ui_popmenu_row(wui, &m), pad = UI_MENU_PAD * wui->scale, x = m.width / 2;
+        row = ui_popmenu_row(wui, &m), pad = UI_MENU_PAD * wui->scale / 100, x = m.width / 2;
         y1 = pad + row + row / 2, y2 = pad + 2 * row + row / 2;
         menu_defaults_items(wui, &m);
         ui_popmenu_event(wui, &m, &press, x, y1);
@@ -139233,7 +139273,7 @@ static fn menu_defaults_check(struct ui address_to wui)
                 struct ui_menu_sizes sizes = ui_menu_sizes(wui, false), finger = ui_menu_sizes(wui, true);
 
                 check("menu: a finger's row is the kit's touch row, and the mouse's the kit's row",
-                      sizes.row == UI_MENU_ROW * wui->scale && finger.row == UI_MENU_TOUCH_ROW * wui->scale);
+                      sizes.row == UI_MENU_ROW * wui->scale / 100 && finger.row == UI_MENU_TOUCH_ROW * wui->scale / 100);
                 check("menu: a menu is no narrower than the kit's least width", m.width >= sizes.least && row == sizes.row);
         }
         // A menu of twenty items shown five high has the kit's bar down its right, and nothing else there.
@@ -139255,7 +139295,7 @@ static fn menu_defaults_check(struct ui address_to wui)
                 memory_zero((void address_to)pixels, 600 * 900 * 4);
                 ui_popmenu_draw(&glass, &m);
                 for (int yy = 0; yy < m.height; yy++)
-                        for (int xx = m.width - 8 * wui->scale; xx < m.width; xx++)
+                        for (int xx = m.width - 8 * wui->scale / 100; xx < m.width; xx++)
                                 bar += picture[yy * 600 + xx] != 0;
                 check("menu: a menu whose items do not all show has the kit's bar", bar > 0 && m.rows_shown < 20);
         }
@@ -139340,7 +139380,7 @@ static fn kit_composites_check(struct ui address_to wui)
         static struct ui_popmenu up_m, pad_m, empty_m, none_m;
         static struct ui_list keyed;
         static struct ui_popmenu reopened;
-        int s = wui->scale, bottom;
+        int s = wui->scale / 100, bottom;
         b32 tops_ok = true;
         struct window_event up = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 103, 0}, down = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 108, 0};
 
@@ -140026,7 +140066,7 @@ static void identify_check_ui(int scale)
         identify.ui.regular = identify.ui.bold = terminal.plain[0];
         identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
         identify.ui.glass = false, identify.ui.opaque = true;
-        identify.ui.scale = scale;
+        identify.ui.scale = scale * 100;
         identify_size(0, 0);
 }
 

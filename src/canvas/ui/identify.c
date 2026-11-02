@@ -71,7 +71,7 @@ static unsigned int identify_number(const struct windows address_to table, unsig
 // digit at this scale, whatever the badge's width.
 static fn identify_size(unsigned int width, unsigned int height)
 {
-        unsigned int room = (unsigned int)IDENTIFY_SIZE * (unsigned int)identify.ui.scale;
+        unsigned int room = (unsigned int)IDENTIFY_SIZE * (unsigned int)identify.ui.scale / 100;
 
         (void)width, (void)height;
         ui_scratch_fit(&identify.ui, room);
@@ -90,8 +90,8 @@ static void identify_badge_fit(struct ui address_to ui, int width, int height, s
 
         for (int size = IDENTIFY_SIZE;; size -= 2)
         {
-                int em = size * ui->scale, pad = em / 6, margin = em / 3;
-                int least_w = WINDOW_MIN_WIDTH * ui->scale, least_h = WINDOW_MIN_HEIGHT * ui->scale;
+                int em = size * ui->scale / 100, pad = em / 6, margin = em / 3;
+                int least_w = WINDOW_MIN_WIDTH * ui->scale / 100, least_h = WINDOW_MIN_HEIGHT * ui->scale / 100;
                 int wide = ui_advance(ui, faces, identify.text, 1, (p32)em << 6) + 2 * pad, tall = em + 2 * pad;
 
                 // The compositor makes no window smaller than WINDOW_MIN_WIDTH by WINDOW_MIN_HEIGHT: the badge is padded to

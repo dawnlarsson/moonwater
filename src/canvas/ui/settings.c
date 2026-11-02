@@ -1286,9 +1286,9 @@ static void settings_map_place(void)
         settings.map.field_x = settings.map.x + pad, settings.map.field_y = settings.map.y + strip;
         settings.map.field_w = settings.map.w - 2 * pad, settings.map.field_h = settings.map.h - strip - pad;
         c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address) "Identify screens";
-        c->w = button_w / ui->scale, c->h = button_h / ui->scale;
-        c->x = (settings.map.x + settings.map.w - pad - button_w) / ui->scale;
-        c->y = (settings.map.y + (strip - button_h) / 2) / ui->scale;
+        c->w = button_w * 100 / ui->scale, c->h = button_h * 100 / ui->scale;
+        c->x = (settings.map.x + settings.map.w - pad - button_w) * 100 / ui->scale;
+        c->y = (settings.map.y + (strip - button_h) / 2) * 100 / ui->scale;
 }
 
 // The Rotation dropdown's words, in the order it lists them, and the degrees each one is.
@@ -1904,7 +1904,7 @@ struct settings_run
 static int settings_run_width(struct ui address_to ui, struct settings_run address_to run, positive from, positive to)
 {
         const font_face address_to faces[2] = {ui->regular, ui->regular};
-        p32 em = (p32)(ui_types[UI_BODY_MEDIUM].size * ui->scale) << 6;
+        p32 em = ((p32)(ui_types[UI_BODY_MEDIUM].size * ui->scale) << 6) / 100;
 
         if (from != run->from || to < run->at)
         {
@@ -3690,7 +3690,7 @@ static b32 settings_map_stepped(int dx, int dy, int *x, int *y)
         base_x = settings.map.nudged ? settings.map.nudge_x : screens[at].x;
         base_y = settings.map.nudged ? settings.map.nudge_y : screens[at].y;
         *x = base_x + dx * SETTINGS_MAP_STEP, *y = base_y + dy * SETTINGS_MAP_STEP;
-        settings_map_snap(screens, count, (unsigned int)at, x, y, COMPOSITOR_SNAP * (int)settings.own.table->scale);
+        settings_map_snap(screens, count, (unsigned int)at, x, y, COMPOSITOR_SNAP * (int)settings.own.table->scale / 100);
         if (*x == base_x && *y == base_y)
                 return false;
         settings.map.nudged = true, settings.map.nudge_at = at, settings.map.nudge_x = *x, settings.map.nudge_y = *y;
@@ -4143,7 +4143,7 @@ static fn settings_gallery_draw(struct ui address_to ui)
         int right = 0, row_y = -1, scroll;
 
         ui_scroll_glide(ui, &settings_gallery.scroll);
-        scroll = settings_gallery.scroll.scroll / ui->scale;
+        scroll = settings_gallery.scroll.scroll * 100 / ui->scale;
         ui->top = 0;
         ui->bottom = ui->height;
         ui_fill(ui, 0, 0, ui->width, ui->height, ui_role_surface());
@@ -4161,7 +4161,7 @@ static fn settings_gallery_draw(struct ui address_to ui)
                                 c->x = 761;
                 }
                 c->y = y - scroll;
-                if (c->y + c->h + 120 > 0 && c->y - 120 < ui->height / ui->scale)
+                if (c->y + c->h + 120 > 0 && c->y - 120 < ui->height * 100 / ui->scale)
                         ui_control_draw(ui, c);
                 c->y = y;
                 if (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD)
@@ -4186,7 +4186,7 @@ static fn settings_gallery_place(void)
 static b32 settings_gallery_event(const struct window_event address_to event)
 {
         struct ui_scroll address_to s = &settings_gallery.scroll;
-        int offset = s->scroll / settings.ui.scale;
+        int offset = s->scroll * 100 / settings.ui.scale;
         b32 moved = false;
 
         settings_gallery_place();
@@ -4398,7 +4398,7 @@ static void settings_map_drag_to(int x, int y)
         settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
         tx = (int)(settings_map_table_x(&view, x) - settings.map.grab_x);
         ty = (int)(settings_map_table_y(&view, y) - settings.map.grab_y);
-        settings_map_snap(screens, count, (unsigned int)settings.map.drag, &tx, &ty, COMPOSITOR_SNAP * (int)settings.own.table->scale);
+        settings_map_snap(screens, count, (unsigned int)settings.map.drag, &tx, &ty, COMPOSITOR_SNAP * (int)settings.own.table->scale / 100);
         settings.map.target_x = tx, settings.map.target_y = ty;
         settings_dirty();
 }

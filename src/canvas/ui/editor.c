@@ -493,7 +493,7 @@ static fn editor_tabs_layout(struct ui address_to ui)
 
         if (c->kind != UI_TABS)
                 c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
-        c->x = 0, c->y = 0, c->w = editor.width / ui->scale, c->h = UI_TABS_H;
+        c->x = 0, c->y = 0, c->w = editor.width * 100 / ui->scale, c->h = UI_TABS_H;
         c->count = editor.count;
         for (int at = 0; at < editor.count; at++)
         {
@@ -569,7 +569,7 @@ static fn editor_draw(unsigned int address_to pixels)
                 static const char address_to const hints[4] = {"", "Find", "Find/Replace with", "Line"};
 
                 c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
-                c->x = UI_GAP2, c->y = (tabs + ui_px(ui, UI_GAP1)) / ui->scale, c->w = editor.width / ui->scale - 2 * UI_GAP2, c->h = UI_FIELD_H;
+                c->x = UI_GAP2, c->y = (tabs + ui_px(ui, UI_GAP1)) * 100 / ui->scale, c->w = editor.width * 100 / ui->scale - 2 * UI_GAP2, c->h = UI_FIELD_H;
                 c->items[0] = hints[editor.finding];
                 c->focused = editor.find.focused;
                 c->edit = &editor.find;
