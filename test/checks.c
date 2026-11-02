@@ -134700,6 +134700,64 @@ static fn terminal_selection_check(void)
 }
 
 /*
+        The terminal at its edges. A selection made from the top row of a view scrolled to the top copies the lines it
+        covers, the same text after the wheel moves the view and in the frame's top rows. A selection that runs past the
+        new right edge of a narrower grid keeps its text, and the grid's cursor is held inside the new columns.
+*/
+static fn terminal_edge_check(void)
+{
+        static struct window_cell built[80 * 8];
+        p8 address_to text;
+        positive room, length;
+        unsigned int top, top_column, below, below_column, saved = COLUMNS, line;
+        b32 marked = false, held = false;
+
+        full_reset();
+        for (line = 0; line < 2 * ROWS; line++)
+                term_bytes((const p8 address_to) "alpha beta\r\n", 12);
+        terminal.view = TERMINAL_LIVE;
+        terminal_view_set(0);
+        terminal_place_at(0, 0, &top, &top_column);
+        terminal_place_at(2, 5, &below, &below_column);
+        terminal.selecting = true;
+        terminal.select_box = false;
+        terminal.select_anchor_line = top, terminal.select_anchor_column = 0;
+        terminal.select_active_line = below, terminal.select_active_column = below_column;
+        length = terminal_select_text(&text, &room);
+        check("terminal edge: a selection from the top row of a view at the top copies its lines",
+              length == 27 && text && !memory_compare(text, "alpha beta\nalpha beta\nalpha", 27));
+        array_store_release(text, room, length);
+        terminal_view_scroll(-1);
+        length = terminal_select_text(&text, &room);
+        check("terminal edge: the wheel moves the view and the selection's text stays the same",
+              length == 27 && text && !memory_compare(text, "alpha beta\nalpha beta\nalpha", 27));
+        array_store_release(text, room, length);
+        terminal_view_set(0);
+        terminal_build(built);
+        marked = (built[0].flags & WINDOW_CELL_SELECTED) && (built[2 * COLUMNS + 4].flags & WINDOW_CELL_SELECTED) &&
+                 !(built[2 * COLUMNS + 5].flags & WINDOW_CELL_SELECTED);
+        check("terminal edge: the marks of that selection are in the view's top rows", marked);
+
+        // The grid narrows to 6 columns with the selection's end past the new edge and the cursor at column 10 of the old
+        // grid: the text is the same, and the cursor is held in the 6 columns.
+        term_bytes((const p8 address_to) "alpha beta", 10);
+        terminal.select_active_line = top, terminal.select_active_column = 10;
+        window->columns = 6;
+        regrid(-1);
+        terminal_view_clamp();
+        length = terminal_select_text(&text, &room);
+        check("terminal edge: a selection past the new right edge keeps its text", length == 10 && text && !memory_compare(text, "alpha beta", 10));
+        array_store_release(text, room, length);
+        held = COLUMNS == 6 && column < COLUMNS && column == 5;
+        check("terminal edge: the cursor after a narrower grid is inside its columns", held);
+        window->columns = saved;
+        regrid(-1);
+        terminal_view_clamp();
+        terminal.selecting = false;
+        full_reset();
+}
+
+/*
         A press and a release in the gutter to the right of the grid are the scroll bar's, scrolled back or not, and a
         program that asked for the pointer is not told of them: a report there would be clamped onto the grid's last column.
 */
@@ -134870,6 +134928,7 @@ b32 main()
                 }
                 check("glyphs: every printable ASCII character, and each shape, braille, box and block glyph btop draws, lights its cell", every);
         }
+        terminal_edge_check();
 
         for (positive step = 0; step < 40000; step++)
                 if (!render_step(&compared, &wrong, step))
