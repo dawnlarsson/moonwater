@@ -117228,7 +117228,7 @@ static fn check_pointer(void)
                 ui_scroll_thumb(&kit, &terminal.bar, &top, &length);
                 start = first;
                 /* The thumb's reach is UI_TARGET tall, so a thumb shorter than that reaches a little past it: the track's top is beyond. */
-                at.a = terminal.bar.x + 5 * scale, at.b = terminal.bar.y + 2 * scale;
+                at.a = terminal.bar.x + 5 * scale, at.b = terminal.bar.y + (UI_CLOSE_BOTTOM + 2) * scale;
                 terminal_receive(-1, &at, &dirty);
                 terminal_receive(-1, &down, &dirty);
                 terminal_receive(-1, &up, &dirty);
@@ -117247,6 +117247,48 @@ static fn check_pointer(void)
                 terminal_receive(-1, &mouse_up, &dirty);
                 terminal.selecting = false;
                 terminal_view_live();
+        }
+
+        /*
+                The cells run to the window's right edge with no column kept for the bar: the grid ends within a cell of the edge
+                whether or not there is a scrollback, and the bar, where there is one, is over that edge, flush with it, from
+                below the close button to the window's bottom, and its thumb is in its track at both ends of the scrollback.
+        */
+        {
+#ifdef UI_SCROLL_INSET
+                struct ui kit;
+                unsigned int first, shown, total, want = terminal.pad + 40 * terminal.cell_w + terminal.cell_w / 2 + 3;
+                int scale = (int)terminal_scale(), top, length;
+                b32 fills, flush, below, ends;
+
+                terminal_configure(-1, want, terminal.height);
+                fills = COLUMNS == 40 && terminal.pad + COLUMNS * terminal.cell_w <= terminal.width &&
+                        terminal.pad + (COLUMNS + 1) * terminal.cell_w > terminal.width;
+                terminal_view_live();
+                for (int line = 0; line < 3 * (int)ROWS; line++)
+                        term_bytes("scrollback\r\n", 12);
+                terminal_view_live();
+                terminal_extent(&first, &shown, &total);
+                terminal_bar_place(first, shown, total);
+                kit = terminal_kit(null);
+                flush = total > shown && terminal.bar.x + UI_SCROLL_WIDTH * scale == (int)terminal.width &&
+                        terminal.bar.inset == UI_CLOSE_BOTTOM && terminal.bar.height == (int)terminal.height;
+                below = ui_scroll_thumb(&kit, &terminal.bar, &top, &length) && top + length == (int)terminal.height &&
+                        top >= UI_CLOSE_BOTTOM * scale;
+                terminal_view_set(0);
+                terminal_extent(&first, &shown, &total);
+                terminal_bar_place(first, shown, total);
+                ends = ui_scroll_thumb(&kit, &terminal.bar, &top, &length) && top == UI_CLOSE_BOTTOM * scale;
+                terminal_view_live();
+                check("terminal: the cells run to the window's right edge with no column kept for the bar, and the bar takes none",
+                      fills);
+                check("terminal: the bar is flush with the window's right edge, from below the close button to its bottom", flush);
+                check("terminal: the thumb is in the track, reaching the bottom at the live end and the close button's inset at the top", below && ends);
+#else
+                check("terminal: the cells run to the window's right edge with no column kept for the bar, and the bar takes none", false);
+                check("terminal: the bar is flush with the window's right edge, from below the close button to its bottom", false);
+                check("terminal: the thumb is in the track, reaching the bottom at the live end and the close button's inset at the top", false);
+#endif
         }
 
         /*
