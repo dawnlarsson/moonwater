@@ -5530,9 +5530,11 @@ static b32 host_canvas_on(void)
 
 }
 
+static b32 host_canvas_identify(positive count);
+
 /* moonwater canvas [scale [N|auto]|modes [largest|preferred]|arrange [NAME[@X,Y|@off]...|default]|
    display NAME rotation DEGREES|refresh HZ|preferred|place X Y|
-   background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
+   identify|background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
@@ -5551,6 +5553,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return locale_canvas_arrange(arguments, count);
         if (count >= 3 && string_equals(arguments[2], "display"))
                 return locale_canvas_display(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "identify"))
+                return host_canvas_identify(count);
 
         return_if(count > 3, host_usage());
 
@@ -24223,6 +24227,7 @@ static const host_row host_rows[] = {
     {null, "canvas", "whether Canvas is on, and the screens it draws on", 'b'},
     {null, "@canvas", null, 'r'},
     {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
+    {null, "canvas identify", "show each screen's number for three seconds", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
     {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, every control of the UI kit", 'b'},
@@ -24921,6 +24926,44 @@ static b32 host_ask_verb(string_address address_to arguments, positive count)
                 return host_refuse("there is nothing to ask\n");
 
         host_question(verdict + 4);
+        return 0;
+}
+
+/*
+        moonwater canvas identify: each screen's number, large, in the middle of that screen for three seconds (the window
+        is src/canvas/ui/identify.c). The numbers are windows_screen_numbers' (window.c), the ones the settings' Display map
+        shows. One window is started per screen, with that screen's index, each in a session of its own as the settings
+        window is (host_detach), and this returns at once. The desktop must be up, as `moonwater settings` needs: the
+        compositor's pid alive and its table there.
+*/
+static b32 host_canvas_identify(positive count)
+{
+        const struct windows address_to table;
+        unsigned int numbers[WINDOWS_OUTPUTS], screens;
+        positive pid;
+
+        return_if(count != 3, host_usage());
+        pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
+        return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
+                      system_access_at(AT_FDCWD, (string_address)WINDOWS_TABLE, 0) != 0,
+                  host_refuse("the compositor's desktop is not up, and the identify windows are its windows: "
+                              "moonwater desktop on starts it\n"));
+        table = host_windows_header();
+        return_if(!table, host_refuse("the compositor's window table cannot be read\n"));
+        screens = windows_screen_numbers(table, numbers);
+        for (unsigned int at = 0; at < screens; at++)
+        {
+                p8 index[16];
+                positive length = positive_into_string(index, (positive)at);
+                string_address words[3] = {(string_address) "/identify", (string_address)index, null};
+
+                index[length] = 0;
+                if (host_detach(descriptors_none, descriptors_none))
+                {
+                        (void)shell_exec_file(words[0], words, 2, file_environment_all());
+                        system_call_1(syscall(exit), 127);
+                }
+        }
         return 0;
 }
 
