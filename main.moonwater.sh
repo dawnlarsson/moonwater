@@ -185,7 +185,8 @@ function desktop_session {
   desktop_keys_answer &
   echo $! >> /run/moonwater/desktop.kids
   desktop_log
-  desktop_terminal
+  # The terminal the person is at takes the keys when it shows, as a key's would: the mark is its launch's.
+  desktop_asked desktop_terminal
   wait $desktop_compositor
   desktop_status=$?
   if [ $desktop_status -gt 128 ]; then
