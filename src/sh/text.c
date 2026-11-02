@@ -39019,12 +39019,13 @@ static fn sort_emit_serial(sort_writer address_to out)
 }
 
 /*
-        The answer a block of items a job. Each job copies its lines once, in
-        sorted order with the next records and texts fetched ahead, into
-        scratch its own thread owns, and hands the block to the writer in one
-        piece; the pool gives the blocks to the caller in order. -u asks of
-        every item whether the item before it in sorted order has the same
-        keys, which the first item of a block can ask as well as any.
+        The answer a block of items a job. Each emit job copies its lines once,
+        in sorted order with the next records and texts fetched ahead, straight
+        into the output the pool gives it, which the pool hands to the writer
+        in order. A merge piece still builds its block in scratch its own
+        thread owns. -u asks of every item whether the item before it in
+        sorted order has the same keys, which the first item of a block can
+        ask as well as any.
 */
 typedef struct
 {
@@ -39057,10 +39058,21 @@ static fn sort_emit_job(address_any context, positive index,
 {
         positive from = index * SORT_BLOCK;
         positive to = min(from + SORT_BLOCK, sort_lines_count);
-        sort_scratch address_to scratch = sort_scratches + parallel_slot();
+        positive bound = to - from + SORT_SLACK;
         positive used = 0;
 
         (void)context;
+
+        //      The block's lines and delimiters are reserved in the output
+        //      at once, and each line is copied straight into it; the room
+        //      the unique check drops, and the slack, are given back.
+        for (positive at = from; at < to; at++)
+                bound += sort_lines[sort_items[at].line].length;
+
+        p8 address_to into = parallel_reserve(output, bound);
+
+        if (!into)
+                return;
 
         for (positive at = from; at < to; at++)
         {
@@ -39082,30 +39094,18 @@ static fn sort_emit_job(address_any context, positive index,
 
                 sort_line address_to line = sort_lines + sort_items[at].line;
                 p8 address_to text = sort_text + line->at;
-                positive wanted = used + line->length + 1 + SORT_SLACK;
-
-                if (wanted > scratch->room &&
-                    !array_store_reserve(scratch->bytes, scratch->room, used, wanted,
-                                         sort_sized(4 << 20, wanted)))
-                {
-                        parallel_stop();
-                        return;
-                }
-
-                p8 address_to into = scratch->bytes + used;
 
                 if (line->length <= 64)
                         for (positive copied = 0; copied < line->length; copied += 16)
-                                __builtin_memcpy(into + copied, text + copied, 16);
+                                __builtin_memcpy(into + used + copied, text + copied, 16);
                 else
-                        memory_copy_apart(into, text, line->length);
+                        memory_copy_apart(into + used, text, line->length);
 
-                into[line->length] = text_delimiter;
+                into[used + line->length] = text_delimiter;
                 used += line->length + 1;
         }
 
-        if (used)
-                parallel_write(output, scratch->bytes, used);
+        output->used -= bound - used;
 }
 
 static bool sort_emit_sink(address_any context, positive index, address_any data,
@@ -39124,12 +39124,6 @@ static bool sort_emit_sink(address_any context, positive index, address_any data
 static fn sort_emit(sort_writer address_to out)
 {
         if (sort_lines_count <= 2 * SORT_BLOCK || sort_alone || out->annotate || out->piped)
-        {
-                sort_emit_serial(out);
-                return;
-        }
-
-        if (!sort_slots_ready())
         {
                 sort_emit_serial(out);
                 return;
