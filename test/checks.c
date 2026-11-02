@@ -134926,6 +134926,187 @@ static fn check_identify_numbers(void)
 }
 
 /*
+        The screens of two arrangements check_screen_numbers does not have: a 2 by 2 grid listed in no order, and three
+        screens across a gap. The numbers run left to right, then top to bottom, and each screen's window shows the number
+        its rectangle carries on the Display map (windows_screen_numbers is the one function both read).
+*/
+static fn check_screen_arrangements(void)
+{
+        static struct windows table;
+        unsigned int number[WINDOWS_OUTPUTS], count;
+        int x, y, width, height;
+        b32 matched = true, placed = true;
+
+        memory_zero(&table, sizeof(table));
+        table.outputs = 4;
+        table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
+        table.output_x[1] = 0, table.output_y[1] = 0, table.output_w[1] = 1920, table.output_h[1] = 1080;
+        table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
+        table.output_x[3] = 0, table.output_y[3] = 1080, table.output_w[3] = 1920, table.output_h[3] = 1080;
+        count = windows_screen_numbers(&table, number);
+        check("identify: a 2 by 2 grid is numbered by its left edges first: top left 1, bottom left 2, top right 3, bottom right 4, whatever the list order",
+              count == 4 && number[0] == 4 && number[1] == 1 && number[2] == 3 && number[3] == 2);
+        for (unsigned int at = 0; at < count; at++)
+        {
+                unsigned int shown = windows_output(&table, at, &x, &y, &width, &height);
+
+                matched &= shown == at && identify_number(&table, at) == number[at];
+                placed &= x == table.output_x[at] && y == table.output_y[at];
+        }
+        check("identify: each screen of the grid shows its own number and is put on its own rectangle", matched && placed);
+
+        memory_zero(&table, sizeof(table));
+        table.outputs = 3;
+        table.output_x[0] = 3000, table.output_y[0] = 1200, table.output_w[0] = 1280, table.output_h[0] = 1024;
+        table.output_x[1] = 0, table.output_y[1] = 0, table.output_w[1] = 1920, table.output_h[1] = 1080;
+        table.output_x[2] = 2200, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
+        count = windows_screen_numbers(&table, number);
+        check("identify: screens across a gap are numbered left to right, then top to bottom",
+              count == 3 && number[0] == 3 && number[1] == 1 && number[2] == 2);
+        table.outputs = 0;
+}
+
+// The bounding box of the pixels that are ink (alpha 128 and over) in a width by height picture: box is left, top, right
+// and bottom, and the answer is whether there was any ink.
+static b32 identify_ink_box(const unsigned int address_to pixels, int stride, int width, int height, int box[4])
+{
+        b32 any = false;
+
+        box[0] = width, box[1] = height, box[2] = -1, box[3] = -1;
+        for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                        if (pixels[y * stride + x] >> 24 >= 128)
+                        {
+                                any = true;
+                                box[0] = x < box[0] ? x : box[0];
+                                box[1] = y < box[1] ? y : box[1];
+                                box[2] = x > box[2] ? x : box[2];
+                                box[3] = y > box[3] ? y : box[3];
+                        }
+        return any;
+}
+
+/*
+        The identify picture (identify_paint, through identify_size and the scratch the size gives) as the overlay draws it:
+        the digit in the middle of its screen at the screen's scale, in the ink for the glass, nothing outside the screen,
+        and a screen narrower than the digit still gets all of it, centred. A run is cut to the scratch's width, which was
+        only the screen's width and so cut a digit on a narrow screen.
+*/
+static fn check_identify_picture(void)
+{
+        static struct windows screens;
+        static unsigned int pixels[800 * 600];
+        int box[4], small[4], large[4], narrow[4];
+        b32 inked, inside = true, stands_out = true;
+        unsigned int ground = 0x202020u;
+
+        memory_zero(&screens, sizeof(screens));
+        screens.output_width = 1000, screens.output_height = 800;
+        identify.own.table = &screens;
+        identify.text[0] = '8', identify.text[1] = 0;
+        identify.ui = terminal.ui;
+        identify.ui.regular = identify.ui.bold = terminal.plain[0];
+        identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
+        identify.ui.glass = true, identify.ui.opaque = false;
+        identify.ui.ink = window_contrast(ground);
+
+        identify.ui.scale = 1;
+        identify_size(400, 300);
+        memory_zero(pixels, sizeof(pixels));
+        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
+        inked = identify_ink_box(pixels, 800, 400, 300, box);
+        check("identify picture: the digit is drawn at scale 1, in ink", inked && box[2] - box[0] > 20 && box[3] - box[1] > 20);
+        check("identify picture: the digit is centred on a 400 by 300 screen",
+              inked && (box[0] + box[2] - 399 <= 6 && 399 - box[0] - box[2] <= 6) &&
+                  (box[1] + box[3] - 299 <= 8 && 299 - box[1] - box[3] <= 8));
+        {
+                unsigned int found = 0;
+
+                for (int at = 0; at < 800 * 300; at++)
+                        found |= (pixels[at] >> 24 == 255) && (pixels[at] & 0xffffffu) == identify.ui.ink;
+                check("identify picture: the digit's pixels are the glass's ink, not the ground", found != 0);
+        }
+
+        identify.ui.scale = 2;
+        identify_size(800, 600);
+        memory_zero(pixels, sizeof(pixels));
+        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
+        inked = identify_ink_box(pixels, 800, 800, 600, large);
+        identify.ui.scale = 1;
+        identify_size(400, 300);
+        memory_zero(pixels, sizeof(pixels));
+        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
+        identify_ink_box(pixels, 800, 400, 300, small);
+        check("identify picture: the digit is twice as large at scale 2 as at scale 1, and centred on the screen",
+              inked && large[3] - large[1] >= 2 * (small[3] - small[1]) - 3 && large[3] - large[1] <= 2 * (small[3] - small[1]) + 3 &&
+                  large[2] - large[0] >= 2 * (small[2] - small[0]) - 3 && large[2] - large[0] <= 2 * (small[2] - small[0]) + 3 &&
+                  large[0] + large[2] - 799 <= 12 && 799 - large[0] - large[2] <= 12);
+
+        /* A fresh scratch: the overlay on a narrow screen maps its first one at that width, and the scratch only grows. */
+        identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
+        identify_size(20, 300);
+        memory_zero(pixels, sizeof(pixels));
+        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
+        inked = identify_ink_box(pixels, 800, 20, 300, narrow);
+        check("identify picture: a screen 20 px wide shows the whole digit, from its left edge to its right, centred",
+              inked && narrow[0] <= 1 && narrow[2] >= 18 && narrow[0] + narrow[2] - 19 <= 2 && 19 - narrow[0] - narrow[2] <= 2);
+
+        identify_size(40, 40);
+        memory_zero(pixels, sizeof(pixels));
+        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
+        for (int y = 0; y < 600; y++)
+                for (int x = 0; x < 800; x++)
+                        if ((x >= 40 || y >= 40) && pixels[y * 800 + x] >> 24)
+                                inside = false;
+        check("identify picture: nothing is drawn outside its screen", inside);
+
+        for (unsigned int grey = 0; grey < 256; grey++)
+        {
+                int ink, distance;
+
+                if (grey > 0x5c && grey < 0xb4)
+                        continue;
+                ink = (int)(window_contrast(grey * 0x010101u) & 255);
+                distance = ink > (int)grey ? ink - (int)grey : (int)grey - ink;
+                stands_out &= distance >= 128;
+        }
+        check("identify picture: the ink stands out from every ground the glass can take, dark or light", stands_out);
+
+        identify.own.table = null;
+}
+
+static fn check_identify_events(void)
+{
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0, 0};
+        struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0, 0};
+        struct window_event key = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 30, 'a'};
+        struct window_event up = {WINDOW_EVENT_KEY, 0, 30, 'a'};
+        struct window_event motion = {WINDOW_EVENT_MOTION, 0, 5, 5};
+        struct window_event wheel = {WINDOW_EVENT_WHEEL, 0, 0, -1};
+
+        check("identify: a press of any button puts the overlay away", !identify_event(&press));
+        check("identify: a key going down puts it away", !identify_event(&key));
+        check("identify: a button or key coming up, the pointer and the wheel do not",
+              identify_event(&release) && identify_event(&up) && identify_event(&motion) && identify_event(&wheel));
+}
+
+// The overlay's three seconds: due at its own start plus IDENTIFY_SECONDS, the loop's wait shortened to it, and done
+// when it is reached.
+static fn check_identify_timing(void)
+{
+        positive now = clock_monotonic_nanoseconds();
+        long other = -1, timeout;
+
+        identify.until = now + (positive)IDENTIFY_SECONDS * 1000000000ull;
+        timeout = identify_tick(-1, &other);
+        check("identify: its wait is the three seconds left, and it is not done before them",
+              !identify_done() && timeout > 2900000000L && timeout <= (long)(IDENTIFY_SECONDS * 1000000000L));
+        check("identify: a shorter wait than the time left is kept", identify_tick(10, &other) == 10);
+        identify.until = now;
+        check("identify: it is done when its three seconds are over", identify_done());
+}
+
+/*
         The terminal's selection on the frame: what a drag marks is marked in the frame's cells (so the frames redraw
         it), its text is the lines' text with a line end between and the trailing blanks left off, and a rectangle takes
         its columns.
@@ -135234,6 +135415,10 @@ b32 main()
         check_screen_numbers();
         check_no_tab();
         check_identify_numbers();
+        check_screen_arrangements();
+        check_identify_picture();
+        check_identify_events();
+        check_identify_timing();
         check_compositor_partial();
         check_compositor_held();
         check_compositor_screens();

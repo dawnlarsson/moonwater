@@ -52,28 +52,39 @@ static unsigned int identify_number(const struct windows address_to table, unsig
 static fn identify_size(unsigned int width, unsigned int height)
 {
         struct windows address_to table = identify.own.table;
+        unsigned int room = (unsigned int)IDENTIFY_SIZE * (unsigned int)identify.ui.scale;
 
         identify.width = (int)(width > table->output_width ? table->output_width : width);
         identify.height = (int)(height > table->output_height ? table->output_height : height);
-        ui_scratch_fit(&identify.ui, width);
+        // The scratch is at least one em wide, whatever the screen: a run is cut to the scratch's width, and a digit of
+        // this size is not as wide as its em, so a screen narrower than the digit still gets all of it, centred.
+        ui_scratch_fit(&identify.ui, width > room ? width : room);
         identify.dirty = true;
 }
 
-// One picture: the number in the middle of the screen, in the ink for the glass, into the buffer the compositor is not
-// reading. False when that buffer is still being read, and the picture is due again.
+// The number in the middle of a picture of width by height, drawn at stride pixels a row into pixels, in the ink for the
+// glass. Its digit's middle is the picture's middle, and its size is the scale's.
+static void identify_paint(struct ui address_to ui, unsigned int address_to pixels, int stride, int width, int height)
+{
+        int wide, baseline;
+
+        ui_begin(ui, pixels, stride, width, height);
+        wide = ui_run(ui, 0, 0, identify.text, IDENTIFY_SIZE, true, ui->ink, 0, 0, ui->width);
+        baseline = ui->height / 2 + IDENTIFY_SIZE * ui->scale * IDENTIFY_DIGIT / 100;
+        ui_run(ui, (ui->width - wide) / 2, baseline, identify.text, IDENTIFY_SIZE, true, ui->ink, 255, 0, ui->width);
+}
+
+// One picture: the number in the middle of the screen, into the buffer the compositor is not reading. False when that
+// buffer is still being read, and the picture is due again.
 static b32 identify_frame(void)
 {
         struct windows address_to table = identify.own.table;
         unsigned int row = identify.own.row;
-        int slot = identify.shown < 0 ? 0 : 1 - identify.shown, wide, baseline;
-        struct ui address_to ui = &identify.ui;
+        int slot = identify.shown < 0 ? 0 : 1 - identify.shown;
 
         if (identify.shown >= 0 && !windows_ready(&identify.own))
                 return false;
-        ui_begin(ui, windows_buffer(table, row, (unsigned int)slot), table->stride, identify.width, identify.height);
-        wide = ui_run(ui, 0, 0, identify.text, IDENTIFY_SIZE, true, ui->ink, 0, 0, ui->width);
-        baseline = ui->height / 2 + IDENTIFY_SIZE * ui->scale * IDENTIFY_DIGIT / 100;
-        ui_run(ui, (ui->width - wide) / 2, baseline, identify.text, IDENTIFY_SIZE, true, ui->ink, 255, 0, ui->width);
+        identify_paint(&identify.ui, windows_buffer(table, row, (unsigned int)slot), table->stride, identify.width, identify.height);
         table->width[row] = (unsigned int)identify.width;
         table->height[row] = (unsigned int)identify.height;
         table->damage_width[row] = 0;
