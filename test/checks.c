@@ -124988,17 +124988,17 @@ static fn check_settings(string_address regular, string_address bold)
                                           string_equals((string_address)value, (string_address) "80%, Charging") &&
                                           settings_parsed(battery, "[Moonwater] this machine has no battery\n", value) == SETTINGS_ABSENT &&
                                           settings_rows[battery].kind == SETTINGS_INFO);
-                                settings.unread = 0;
+                                memory_zero(settings.unread, sizeof(settings.unread));
                                 settings.group = settings_group_of(battery);
                                 settings_feed_rows();
                                 check("settings: a rows feed asks again the rows of its group that change by themselves, and those only",
-                                      settings.unread == ((positive)1 << battery));
-                                settings.unread = 0;
+                                      settings.unread[0] == ((positive)1 << battery) && !settings.unread[1]);
+                                memory_zero(settings.unread, sizeof(settings.unread));
                                 settings.group = settings_group_of(clock_row);
                                 settings_feed_rows();
                                 check("settings: the clock is such a row, and the time server beside it is not",
-                                      settings.unread == ((positive)1 << clock_row));
-                                settings.unread = 0;
+                                      settings.unread[0] == ((positive)1 << clock_row) && !settings.unread[1]);
+                                memory_zero(settings.unread, sizeof(settings.unread));
                         }
                         settings.own.table = table;
                         settings.group = bt_group;
@@ -125008,7 +125008,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.queued = 0;
                         settings.help = 2;
                         settings.child = 0;
-                        settings.unread = 0;
+                        memory_zero(settings.unread, sizeof(settings.unread));
                         settings.feed_due = clock_monotonic_nanoseconds() + 5000000000ull;
                         {
                                 long wait = settings_feed_tick();
@@ -125036,9 +125036,9 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.child = 1;
                         check("settings: nor while another verb runs", settings_feed_tick() == -1);
                         settings.child = 0;
-                        settings.unread = 1;
+                        settings_unread_set(0, 1);
                         check("settings: nor while rows are still to be asked", settings_feed_tick() == -1);
-                        settings.unread = 0;
+                        memory_zero(settings.unread, sizeof(settings.unread));
                         settings.feed_due = 0;
                         settings.moonwater = (string_address) "/nonexistent/moonwater-check";
                         settings_feed_tick();
