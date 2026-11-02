@@ -53,6 +53,14 @@
 #define SETTINGS_INK 8u   // a choice of named colours: the verb says rrggbb, and a name is what is shown and chosen
 #define SETTINGS_BATTERIES 16u // a choice of the batteries the machine has: auto, each name from the kernel, and none
 
+// The Display rows of a screen (settings.c draws the map above them): the screen chosen, its rotation and refresh (the
+// window table says what each is, and the verb sets it), and a note of who turns it.
+#define SETTINGS_OUT_NONE 0u
+#define SETTINGS_OUT_SCREEN 1u
+#define SETTINGS_OUT_TURN 2u
+#define SETTINGS_OUT_REFRESH 3u
+#define SETTINGS_OUT_NOTE 4u
+
 // The words of a verb, at most: canvas cursor shake delay.
 #define SETTING_WORDS 4
 
@@ -134,6 +142,7 @@ struct settings_row
         const char address_to refusal;  // what a word that is none is told: %s is the word (generated when none)
         const char address_to unit;     // a number's unit, said after it
         long low, high;                 // a number's least and greatest
+        unsigned char output;           // SETTINGS_OUT_*: a row of the Display map's screen, which the table says, not a verb
 };
 
 /*
@@ -239,19 +248,18 @@ static const struct settings_row settings_rows[] = {
                       .standard = "16", .unit = "MiB", .low = 1, .high = 16, .need = "how Canvas draws",
                       .usage = "canvas clipboard limit [MIB|default]",
                       .help = "the most one copy may be, 1 to 16 MiB [16]"),
-    //  The Display group: the screens (the Displays window, which the row opens: its read is canvas's first line), their modes
-    //  and where they are, and the backlight (which a machine may lack).
-    {"Display", "Screens: drag into place, rotation and refresh (Enter opens the Displays window)", SETTINGS_ACTION, 0, SETTINGS_LINE,
-     {"canvas"}, "", null, {"settings", "displays"}, null, 0, null,
-     .usage = "settings displays", .help = "the screens as a field to drag into place, with each one's rotation and refresh"},
+    //  The Display group: the map above these rows (settings.c) shows the screens; the rows are for the screen chosen on it.
+    //  The rotation and refresh are the table's, and each change is `canvas display NAME ...` run with the screen's name.
+    {"Display", "Screen", SETTINGS_CHOICE, 0, 0, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+     .help = "the screen the rows under the map are for", .output = SETTINGS_OUT_SCREEN},
+    {null, "Rotation", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+     .help = "which way up the screen is", .output = SETTINGS_OUT_TURN},
+    {null, "Turned by the screen", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0, null,
+     .help = "who turns the picture: the screen itself, or Moonwater (slower)", .output = SETTINGS_OUT_NOTE},
+    {null, "Refresh rate", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0, null,
+     .help = "how many times a second the screen is drawn: the rates it supports, the best marked", .output = SETTINGS_OUT_REFRESH},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
-    //  A special row (host.c locale_canvas_arrange) whose file the compositor watches: the words are screens' names.
-    {null, "Screens left to right (names, NAME@X,Y, NAME@off)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT,
-     {"canvas", "arrange"}, "arrange ", null, {"canvas", "arrange"}, null, 0, null,
-     .usage = "canvas arrange [NAME[@X,Y|@off]...|default]",
-     .help = "where each screen is: names left to right, the first the primary [default]",
-     .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CANVAS_ARRANGE_PATH},
     {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0, null,
      .usage = "brightness [N%|+N|-N]", .help = "the screen backlight"},
     SETTING_PLAIN_ROW("Mouse", "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,

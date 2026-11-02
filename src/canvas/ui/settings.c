@@ -241,6 +241,7 @@ static const struct settings_feed settings_feeds[] = {
 // Jobs that are no row's: the help, a feed's reading, and what is done to a list's row.
 #define SETTINGS_JOB_FEED -3
 #define SETTINGS_JOB_ACT -4
+#define SETTINGS_JOB_IDENTIFY -5 // the map's button: canvas identify, which is no row of the list
 
 // A network or a device, as a row of a list: what the verb said of it.
 #define SETTINGS_ITEM_JOINED 1u
@@ -661,6 +662,19 @@ struct settings_generic
         unsigned char verb;           // the bytes of the command that are its verb, which are not typed
 };
 
+// The map of the screens above the Display rows (settings_map_*): the screen the rows are for, a drag of one screen (applied
+// on release), and the identify button. The positions are the window's device pixels, set by settings_map_place.
+struct settings_map
+{
+        int display;                            // the table's index of the screen the rows are for, -1 none chosen
+        int drag;                               // the table's index of the screen being dragged, -1 none
+        int grab_x, grab_y;                     // where on the screen the drag took hold, in table pixels
+        int target_x, target_y;                 // where a screen dragged now would be let go at, snapped
+        int x, y, w, h;                         // the panel: its top left and size
+        int field_x, field_y, field_w, field_h; // the screens' area, under the panel's top strip
+        struct ui_control identify;             // the button on the strip
+};
+
 static struct
 {
         struct window_row own;
@@ -753,6 +767,7 @@ static struct
         b32 wrap_made;
         int wrap_width, wrap_scale;
         unsigned int wrap_card;
+        struct settings_map map;
 } settings;
 
 _Static_assert(SETTINGS_ALL <= UI_LIST_MOST, "every row the window shows is a place of the kit's list");
@@ -1006,6 +1021,416 @@ static b32 settings_matches(int row)
         return true;
 }
 
+/* ---- the map of the screens, above the Display rows ---- */
+
+// A screen as the map draws it: the table's rectangle (device pixels, before any turn) and its turn in degrees.
+struct settings_screen
+{
+        int x, y, width, height;
+        unsigned int turn;
+};
+
+// The map's view of the screens: a table point (x, y) is at ox + (x - bx) * f / 1000 in device pixels.
+struct settings_map_view
+{
+        long bx, by, f, ox, oy;
+};
+
+#define SETTINGS_MAP_PAD 8        // logical pixels: the panel's inset, and the screens' area from its edges
+#define SETTINGS_MAP_STRIP 36     // logical pixels: the top strip of the panel, where the identify button sits
+#define SETTINGS_MAP_PANEL 150    // logical pixels: the panel the screens are drawn in
+#define SETTINGS_MAP_GAP 8        // logical pixels: between the panel, its caption and the list
+#define SETTINGS_MAP_CAPTION 24   // logical pixels: the caption's line under the panel
+#define SETTINGS_MAP_BUTTON_W 168 // logical pixels: the identify button
+#define SETTINGS_MAP_BUTTON_H 28
+#define SETTINGS_MAP_RADIUS 8
+#define SETTINGS_SHOWN 64 // bytes of a screen's label or a rate's, shown in a row
+
+static char settings_shown_screen[SETTINGS_SHOWN], settings_shown_rate[SETTINGS_SHOWN];
+
+// The Display row of an output kind (SETTINGS_OUT_*), or -1 when there is none.
+static int settings_output_row(unsigned char output)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].output == output)
+                        return (int)at;
+        return -1;
+}
+
+static long settings_map_abs(long value)
+{
+        return value < 0 ? -value : value;
+}
+
+// A screen's size once its turn is taken: a quarter turn swaps its width and height.
+static void settings_map_turned(const struct settings_screen address_to s, int address_to width, int address_to height)
+{
+        b32 quarter = s->turn == 90 || s->turn == 270;
+
+        *width = quarter ? s->height : s->width;
+        *height = quarter ? s->width : s->height;
+}
+
+// The table's rectangle of every screen: the field is drawn to fit it.
+static void settings_map_bounds(const struct settings_screen address_to screens, unsigned int count, long address_to x0,
+                            long address_to y0, long address_to x1, long address_to y1)
+{
+        *x0 = *y0 = 0;
+        *x1 = *y1 = 1;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int width, height;
+
+                settings_map_turned(&screens[at], &width, &height);
+                if (at == 0 || screens[at].x < *x0)
+                        *x0 = screens[at].x;
+                if (at == 0 || screens[at].y < *y0)
+                        *y0 = screens[at].y;
+                if (at == 0 || screens[at].x + width > *x1)
+                        *x1 = screens[at].x + width;
+                if (at == 0 || screens[at].y + height > *y1)
+                        *y1 = screens[at].y + height;
+        }
+}
+
+/*
+        The field's view: the screens' bounding box scaled to the largest
+        thousandths that fit fw by fh, centred in it. Integer arithmetic only,
+        so a checks lane can state the exact rectangles.
+*/
+static void settings_map_view_of(const struct settings_screen address_to screens, unsigned int count, int fx, int fy, int fw,
+                             int fh, struct settings_map_view address_to view)
+{
+        long x0, y0, x1, y1, bw, bh, by_width, by_height, f, across, down;
+
+        settings_map_bounds(screens, count, &x0, &y0, &x1, &y1);
+        bw = x1 - x0 > 0 ? x1 - x0 : 1;
+        bh = y1 - y0 > 0 ? y1 - y0 : 1;
+        across = (long)fw * 1000 / bw;
+        down = (long)fh * 1000 / bh;
+        f = across < down ? across : down;
+        f = f < 1 ? 1 : f;
+        by_width = bw * f / 1000;
+        by_height = bh * f / 1000;
+        view->bx = x0;
+        view->by = y0;
+        view->f = f;
+        view->ox = fx + ((long)fw - by_width) / 2;
+        view->oy = fy + ((long)fh - by_height) / 2;
+}
+
+static int settings_map_field_x(const struct settings_map_view address_to view, long x)
+{
+        return (int)(view->ox + (x - view->bx) * view->f / 1000);
+}
+
+static int settings_map_field_y(const struct settings_map_view address_to view, long y)
+{
+        return (int)(view->oy + (y - view->by) * view->f / 1000);
+}
+
+static long settings_map_table_x(const struct settings_map_view address_to view, long px)
+{
+        return view->bx + (px - view->ox) * 1000 / view->f;
+}
+
+static long settings_map_table_y(const struct settings_map_view address_to view, long py)
+{
+        return view->by + (py - view->oy) * 1000 / view->f;
+}
+
+// A screen's rectangle on the field, in device pixels; a screen is never less than a pixel.
+static void settings_map_tile(const struct settings_map_view address_to view, const struct settings_screen address_to s, int address_to x,
+                          int address_to y, int address_to width, int address_to height)
+{
+        int w, h;
+
+        settings_map_turned(s, &w, &h);
+        *x = settings_map_field_x(view, s->x);
+        *y = settings_map_field_y(view, s->y);
+        *width = (int)((long)w * view->f / 1000);
+        *height = (int)((long)h * view->f / 1000);
+        *width = *width < 1 ? 1 : *width;
+        *height = *height < 1 ? 1 : *height;
+}
+
+/*
+        The snap of a screen dragged to (x, y): where a side of it lies within
+        margin of the side of a neighbour it overlaps, it is pulled to that
+        side, nearest first; left, right, above and below each. A corner
+        touches both sides at once. Answers whether it moved.
+*/
+static b32 settings_map_snap(const struct settings_screen address_to screens, unsigned int count, unsigned int index, int address_to x,
+                         int address_to y, int margin)
+{
+        int width, height, best_x = *x, best_y = *y;
+        long dist_x = margin + 1, dist_y = margin + 1;
+        b32 moved = false;
+
+        settings_map_turned(&screens[index], &width, &height);
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int other_w, other_h;
+                long d;
+
+                if (at == index)
+                        continue;
+                settings_map_turned(&screens[at], &other_w, &other_h);
+                if (*y < screens[at].y + other_h && *y + height > screens[at].y)
+                {
+                        d = settings_map_abs(*x - (screens[at].x + other_w));
+                        if (d <= margin && d < dist_x)
+                                dist_x = d, best_x = screens[at].x + other_w;
+                        d = settings_map_abs(*x + width - screens[at].x);
+                        if (d <= margin && d < dist_x)
+                                dist_x = d, best_x = screens[at].x - width;
+                }
+                if (*x < screens[at].x + other_w && *x + width > screens[at].x)
+                {
+                        d = settings_map_abs(*y - (screens[at].y + other_h));
+                        if (d <= margin && d < dist_y)
+                                dist_y = d, best_y = screens[at].y + other_h;
+                        d = settings_map_abs(*y + height - screens[at].y);
+                        if (d <= margin && d < dist_y)
+                                dist_y = d, best_y = screens[at].y - height;
+                }
+        }
+        if (best_x != *x || best_y != *y)
+                moved = true;
+        *x = best_x;
+        *y = best_y;
+        return moved;
+}
+
+// Appends text at at (and a null after it), as far as room allows: its length.
+static positive settings_map_add(char address_to into, positive room, positive at, const char address_to text)
+{
+        for (positive n = 0; text[n] && at + 1 < room; n++)
+                into[at++] = text[n];
+        into[at] = 0;
+        return at;
+}
+
+static positive settings_map_number(char address_to into, positive room, positive at, long value)
+{
+        char digits[24];
+        positive count = 0;
+        unsigned long magnitude = value < 0 ? (unsigned long)(-(value + 1)) + 1 : (unsigned long)value;
+
+        if (value < 0)
+                at = settings_map_add(into, room, at, "-");
+        do
+                digits[count++] = (char)('0' + magnitude % 10), magnitude /= 10;
+        while (magnitude && count < sizeof(digits));
+        while (count && at + 1 < room)
+                into[at++] = digits[--count];
+        into[at] = 0;
+        return at;
+}
+
+// The screens the table lists, as the map draws them and numbers them: how many, 0 when it lists none or too many.
+static unsigned int settings_map_load(struct settings_screen address_to screens, unsigned int address_to number)
+{
+        struct windows address_to table = settings.own.table;
+        unsigned int count;
+
+        if (!table || !(count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE)) || count > WINDOWS_OUTPUTS)
+                return 0;
+        windows_screen_numbers(table, number);
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int x, y, width, height;
+
+                windows_output(table, at, &x, &y, &width, &height);
+                screens[at].x = x, screens[at].y = y, screens[at].width = width, screens[at].height = height;
+                screens[at].turn = table->output_turn[at];
+        }
+        return count;
+}
+
+// The table's index of the screen numbered wanted (from 1), or -1.
+static int settings_map_numbered(const unsigned int address_to number, unsigned int count, unsigned int wanted)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (number[at] == wanted)
+                        return (int)at;
+        return -1;
+}
+
+// The screen the Display rows are for: the one chosen on the map, or the first by number while none is. Its table index,
+// or -1 when the table lists no screen.
+static int settings_map_chosen(void)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0};
+        unsigned int count = settings_map_load(screens, number);
+
+        if (!count)
+                return -1;
+        if (settings.map.display < 0 || settings.map.display >= (int)count)
+                settings.map.display = settings_map_numbered(number, count, 1);
+        return settings.map.display;
+}
+
+// Whether the map is shown: the Display group is the one chosen, with no filter typed and no card.
+static b32 settings_map_on(void)
+{
+        int row = settings_output_row(SETTINGS_OUT_SCREEN);
+
+        return row >= 0 && !settings.view && !settings.filter_length && settings_group_of(row) == settings.group;
+}
+
+static int settings_map_height(void)
+{
+        return ui_px(&settings.ui, SETTINGS_MAP_PANEL) + ui_px(&settings.ui, SETTINGS_MAP_GAP) + ui_px(&settings.ui, SETTINGS_MAP_CAPTION);
+}
+
+// The panel, its screens' area and the button, from the page's place: where the map is drawn and hit.
+static void settings_map_place(void)
+{
+        struct ui address_to ui = &settings.ui;
+        int pad = ui_px(ui, SETTINGS_MAP_PAD), strip = ui_px(ui, SETTINGS_MAP_STRIP);
+        int button_w = ui_px(ui, SETTINGS_MAP_BUTTON_W), button_h = ui_px(ui, SETTINGS_MAP_BUTTON_H);
+        struct ui_control address_to c = &settings.map.identify;
+
+        settings.map.x = settings.page.left, settings.map.y = settings.page.top;
+        settings.map.w = settings.page.right - settings.page.left, settings.map.h = ui_px(ui, SETTINGS_MAP_PANEL);
+        settings.map.field_x = settings.map.x + pad, settings.map.field_y = settings.map.y + strip;
+        settings.map.field_w = settings.map.w - 2 * pad, settings.map.field_h = settings.map.h - strip - pad;
+        c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address) "Identify screens";
+        c->w = button_w / ui->scale, c->h = button_h / ui->scale;
+        c->x = (settings.map.x + settings.map.w - pad - button_w) / ui->scale;
+        c->y = (settings.map.y + (strip - button_h) / 2) / ui->scale;
+}
+
+// The Rotation dropdown's words, in the order it lists them, and the degrees each one is.
+static const struct settings_turn
+{
+        const char address_to label;
+        int degrees;
+} settings_turns[] = {{"Normal", 0}, {"Turned right", 90}, {"Upside down", 180}, {"Turned left", 270}};
+
+static const char address_to settings_turn_label(unsigned int turn)
+{
+        for (positive at = 0; at < sizeof(settings_turns) / sizeof(settings_turns[0]); at++)
+                if (settings_turns[at].degrees == (int)turn)
+                        return settings_turns[at].label;
+        return settings_turns[0].label;
+}
+
+// A screen's name as the Screen dropdown and the rows show it: Screen 1: DP-1.
+static positive settings_screen_label(unsigned int number, const char address_to name, char address_to into, positive room)
+{
+        positive at = settings_map_add(into, room, 0, "Screen ");
+
+        at = settings_map_number(into, room, at, (long)number);
+        at = settings_map_add(into, room, at, ": ");
+        return settings_map_add(into, room, at, name);
+}
+
+// A rate in Hz, with the screen's first rate, the one it recommends, marked.
+static positive settings_rate_label(unsigned int hz, b32 recommended, char address_to into, positive room)
+{
+        positive at = settings_map_number(into, room, 0, (long)hz);
+
+        return settings_map_add(into, room, at, recommended ? " Hz (recommended)" : " Hz");
+}
+
+// How many refresh rates the chosen screen lists, at most WINDOWS_OUTPUT_HZ.
+static unsigned int settings_rates_of(int chosen)
+{
+        unsigned int rates = settings.own.table->output_rates[chosen];
+
+        return rates > WINDOWS_OUTPUT_HZ ? WINDOWS_OUTPUT_HZ : rates;
+}
+
+// What a Display row shows for the chosen screen now: its label, its turn's word, or its rate's.
+static const char address_to settings_output_text(int row, int chosen)
+{
+        struct windows address_to table = settings.own.table;
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, rates;
+
+        if (chosen < 0)
+                return "";
+        if (settings_rows[row].output == SETTINGS_OUT_TURN)
+                return settings_turn_label(table->output_turn[chosen]);
+        if (settings_rows[row].output == SETTINGS_OUT_REFRESH)
+        {
+                rates = settings_rates_of(chosen);
+                for (unsigned int at = 0; at < rates; at++)
+                        if (table->output_hz[chosen][at] == table->output_now[chosen])
+                        {
+                                settings_rate_label(table->output_hz[chosen][at], at == 0, settings_shown_rate, sizeof(settings_shown_rate));
+                                return settings_shown_rate;
+                        }
+                settings_map_number(settings_shown_rate, sizeof(settings_shown_rate), 0, (long)table->output_now[chosen]);
+                return settings_shown_rate;
+        }
+        windows_screen_numbers(table, number);
+        settings_screen_label(number[chosen], table->output_name[chosen], settings_shown_screen, sizeof(settings_shown_screen));
+        return settings_shown_screen;
+}
+
+// The screen under (px, py) on the map, the one on top (the last drawn), or -1.
+static int settings_map_at(int px, int py, const struct settings_screen address_to screens, unsigned int count)
+{
+        struct settings_map_view view;
+
+        settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+        for (int at = (int)count - 1; at >= 0; at--)
+        {
+                int x, y, width, height;
+
+                settings_map_tile(&view, &screens[at], &x, &y, &width, &height);
+                if (px >= x && px < x + width && py >= y && py < y + height)
+                        return at;
+        }
+        return -1;
+}
+
+// The panel, its screens drawn to fit it (a drag shows the screen where it would be let go), each one's number, and the
+// caption under the panel. Nothing is drawn but the panel's words when the table lists no screen.
+static void settings_map_draw(struct ui address_to ui)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0};
+        unsigned int count = settings_map_load(screens, number);
+        int radius = ui_px(ui, SETTINGS_MAP_RADIUS), pad = ui_px(ui, UI_INSET), line = ui_px(ui, ui_types[UI_LABEL_MEDIUM].line);
+        int caption = settings.map.y + settings.map.h + ui_px(ui, SETTINGS_MAP_GAP);
+        const char address_to hint = settings.map.drag >= 0 ? "Let go to place the screen" : "Drag a screen to move it.";
+
+        ui_round(ui, settings.map.x, settings.map.y, settings.map.w, settings.map.h, radius, ui_role(UI_SURFACE_LOW) | 0xff000000u);
+        if (!count)
+                ui_kit_text(ui, settings.map.field_x + pad, ui_kit_baseline(ui, settings.map.field_y + pad, UI_LABEL_MEDIUM), (string_address) "No screens",
+                            UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+        for (unsigned int at = 0; count && at < count; at++)
+        {
+                struct settings_map_view view;
+                struct settings_screen moved;
+                int x, y, width, height;
+                char text[SETTINGS_SHOWN];
+
+                settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+                moved = screens[at];
+                if (settings.map.drag == (int)at)
+                        moved.x = settings.map.target_x, moved.y = settings.map.target_y;
+                settings_map_tile(&view, &moved, &x, &y, &width, &height);
+                ui_round(ui, x, y, width, height, radius, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u);
+                if ((int)at == settings.map.display)
+                        ui_fill(ui, x, y, width, height, (ui_role(UI_PRIMARY) & 0x00ffffffu) | 0x40000000u);
+                settings_map_number(text, sizeof(text), 0, (long)number[at]);
+                ui_kit_text(ui, x + (width - ui_kit_measure(ui, (string_address)text, UI_TITLE_LARGE)) / 2,
+                            ui_kit_baseline(ui, y + (height - ui_px(ui, ui_types[UI_TITLE_LARGE].line)) / 2, UI_TITLE_LARGE), (string_address)text,
+                            UI_TITLE_LARGE, ui_role(UI_ON_SURFACE), 0);
+                if (height >= 3 * line)
+                        ui_kit_text(ui, x + pad, ui_kit_baseline(ui, y + height - pad - line, UI_LABEL_MEDIUM),
+                                    (string_address)settings.own.table->output_name[at], UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+        }
+        ui_kit_text(ui, settings.map.x, ui_kit_baseline(ui, caption, UI_LABEL_MEDIUM), (string_address)hint, UI_LABEL_MEDIUM,
+                    ui_role(UI_ON_SURFACE_VARIANT), 0);
+        ui_control_draw(ui, &settings.map.identify);
+}
+
 static fn settings_describe(int id, struct ui_row address_to row);
 
 // The page laid out for the window's size: the kit's bands, its column and the list in the body.
@@ -1021,6 +1446,7 @@ static fn settings_layout(void)
                 settings.list.damaged = settings_changed;
                 settings.list.empty = "Nothing matches what is typed";
                 settings.list.hover = settings.list.down = -1;
+        settings.map.display = settings.map.drag = -1;
                 for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
                 {
                         if (k)
@@ -1036,8 +1462,13 @@ static fn settings_layout(void)
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
         settings.page.bottom = settings.height; // the content runs to the window's bottom edge
-        ui_list_place(ui, &settings.list, settings.page.left, settings.page.top, settings.page.right - settings.page.left,
-                      settings.page.bottom - settings.page.top);
+        {
+                int top = settings.page.top;
+
+                if (settings_map_on())
+                        settings_map_place(), top += settings_map_height();
+                ui_list_place(ui, &settings.list, settings.page.left, top, settings.page.right - settings.page.left, settings.page.bottom - top);
+        }
         ui_list_layout(ui, &settings.list);
         settings.list.scroll.content += ui_px(ui, SETTINGS_BOTTOM_PAD); // the last row scrolls clear of the bottom edge
         ui_scroll_clamp(&settings.list.scroll);
@@ -1687,6 +2118,14 @@ static fn settings_next_job(void)
                         memory_zero(settings.job_value, sizeof(settings.job_value));
                         count = 0;
                 }
+                else if (settings.job == SETTINGS_JOB_IDENTIFY)
+                {
+                        words[0] = settings.moonwater;
+                        words[1] = (string_address) "canvas";
+                        words[2] = (string_address) "identify";
+                        words[3] = null;
+                        count = 3;
+                }
                 else if (settings.job >= SETTINGS_ANY)
                         count = settings_generic_words(settings.job, settings.job_value, words, SETTINGS_WORDS);
                 else
@@ -1721,7 +2160,10 @@ static fn settings_next_job(void)
 // Every row asked again: a change to one can move another (airplane mode turns the radios off).
 static fn settings_ask_all(void)
 {
-        settings.unread = ((positive)1 << SETTINGS_ROWS) - 1;
+        settings.unread = 0;
+        for (positive row = 0; row < SETTINGS_ROWS; row++)
+                if (settings_rows[row].output == SETTINGS_OUT_NONE)
+                        settings.unread |= (positive)1 << row;
 }
 
 // Where a change to row waits in the queue, or queued when it has none.
@@ -2340,8 +2782,12 @@ static b32 settings_stop(void)
         was taken with, then none. The list is taken when the list opens and
         kept, so drawing it reads no kernel file.
 */
+static b32 settings_output_choice(const struct settings_row address_to which, positive index, char address_to into, positive room);
+
 static b32 settings_choice(const struct settings_row address_to row, positive index, char address_to into, positive room)
 {
+        if (row->output != SETTINGS_OUT_NONE)
+                return settings_output_choice(row, index, into, room);
         positive names = settings.battery_menu_count < BATTERY_LIST ? settings.battery_menu_count : BATTERY_LIST;
 
         if (!(row->flags & SETTINGS_BATTERIES))
@@ -2376,6 +2822,123 @@ static const char address_to settings_battery_choice(void)
         return settings.value[picker];
 }
 
+// The screens the table lists, counted for the map and the dropdowns: how many, 0 when it lists none or too many.
+static unsigned int settings_map_count(void)
+{
+        unsigned int count = settings.own.table ? __atomic_load_n(&settings.own.table->outputs, __ATOMIC_ACQUIRE) : 0;
+
+        return count > WINDOWS_OUTPUTS ? 0 : count;
+}
+
+// Whether a row sets the screen's Screen modes: its verb is canvas modes, which says largest and preferred.
+static b32 settings_is_modes(int row)
+{
+        return settings_rows[row].set[1] && string_equals((string_address)settings_rows[row].set[1], (string_address) "modes");
+}
+
+// The plain word a row's verb word is read as: Screen modes says Biggest picture and Recommended, others say their word.
+static const char address_to settings_label_of(int row, const char address_to word)
+{
+        if (!settings_is_modes(row))
+                return word;
+        return string_equals((string_address)word, (string_address) "largest") ? "Biggest picture"
+               : string_equals((string_address)word, (string_address) "preferred") ? "Recommended" : word;
+}
+
+// The verb's word for a plain word shown in a row's menu (the inverse of settings_label_of).
+static void settings_word_of(int row, const char address_to label, char address_to into, positive room)
+{
+        const char address_to word = label;
+
+        if (settings_is_modes(row))
+                word = string_equals((string_address)label, (string_address) "Biggest picture") ? "largest"
+                       : string_equals((string_address)label, (string_address) "Recommended") ? "preferred" : label;
+        string_copy_bounded((string_address)into, (string_address)word, room);
+}
+
+// The words a Display dropdown lists, one by one: the screens by number, the four turns, or the refresh rates the chosen
+// screen lists, the first marked as recommended. False past the last one.
+static b32 settings_output_choice(const struct settings_row address_to which, positive index, char address_to into, positive room)
+{
+        struct windows address_to table = settings.own.table;
+        int chosen = settings_map_chosen();
+
+        if (which->output == SETTINGS_OUT_SCREEN)
+        {
+                unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_count();
+                int at;
+
+                if (index >= count)
+                        return false;
+                windows_screen_numbers(table, number);
+                at = settings_map_numbered(number, count, (unsigned int)index + 1);
+                if (at < 0)
+                        return false;
+                settings_screen_label((unsigned int)index + 1, table->output_name[at], into, room);
+                return true;
+        }
+        if (which->output == SETTINGS_OUT_TURN)
+        {
+                if (index >= sizeof(settings_turns) / sizeof(settings_turns[0]))
+                        return false;
+                string_copy_bounded((string_address)into, (string_address)settings_turns[index].label, room);
+                return true;
+        }
+        if (which->output == SETTINGS_OUT_REFRESH && chosen >= 0 && index < settings_rates_of(chosen))
+        {
+                settings_rate_label(table->output_hz[chosen][index], index == 0, into, room);
+                return true;
+        }
+        return false;
+}
+
+// The place of a plain word, or a Display label, in a row's dropdown: -1 when the row lists none of them.
+static int settings_choice_index(int row, const char address_to label)
+{
+        char word[SETTINGS_VALUE];
+
+        for (int at = 0; settings_choice(&settings_rows[row], (positive)at, word, sizeof(word)); at++)
+                if (string_equals((string_address)settings_label_of(row, word), (string_address)label))
+                        return at;
+        return -1;
+}
+
+// What a row shows as its current value, in the words its menu lists: a Display row's now, or a plain row's word.
+static const char address_to settings_shown_value(int row)
+{
+        if (settings_rows[row].output == SETTINGS_OUT_NONE)
+                return settings_label_of(row, settings.value[row]);
+        return settings_output_text(row, settings_map_chosen());
+}
+
+// A Display row as the kit lists it: the Screen, Rotation and Refresh rate dropdowns with the chosen screen's words, the
+// note under Rotation (who turns the picture), and a dim word where there is no screen or no rate to choose.
+static void settings_describe_output(int id, struct ui_row address_to row)
+{
+        struct windows address_to table = settings.own.table;
+        int chosen = settings_map_chosen();
+        unsigned char output = settings_rows[id].output;
+
+        row->kind = UI_ROW_CHOICE;
+        if (output == SETTINGS_OUT_NOTE)
+        {
+                row->kind = UI_ROW_PLAIN, row->dim = true;
+                row->label = chosen >= 0 && table->output_software[chosen] ? "Turned by Moonwater (slower)" : "Turned by the screen";
+                return;
+        }
+        if (chosen < 0)
+        {
+                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "No screens";
+                return;
+        }
+        if (output == SETTINGS_OUT_REFRESH && !settings_rates_of(chosen))
+        {
+                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "Not changeable";
+                return;
+        }
+        row->value = settings_output_text(id, chosen);
+}
+
 // How many choices a row has.
 static positive settings_options(const struct settings_row address_to row)
 {
@@ -2385,6 +2948,54 @@ static positive settings_options(const struct settings_row address_to row)
         while (settings_choice(row, count, word, sizeof(word)))
                 count++;
         return count;
+}
+
+// A Display dropdown's choice, made: the screen the rows are for, or a turn or a refresh rate the verb is run with for the
+// chosen screen by its name (canvas display NAME rotation|refresh ...). A choice the screen has already is sent nothing.
+static fn settings_output_apply(int row, const char address_to label)
+{
+        const struct settings_row address_to which = &settings_rows[row];
+        struct windows address_to table = settings.own.table;
+        int at = settings_choice_index(row, label), chosen = settings_map_chosen();
+        char value[SETTINGS_TYPED];
+        positive length;
+
+        if (at < 0 || !table)
+                return;
+        if (which->output == SETTINGS_OUT_SCREEN)
+        {
+                unsigned int number[WINDOWS_OUTPUTS] = {0};
+
+                windows_screen_numbers(table, number);
+                settings.map.display = settings_map_numbered(number, settings_map_count(), (unsigned int)at + 1);
+                settings_dirty();
+                return;
+        }
+        if (chosen < 0)
+                return;
+        length = settings_map_add(value, sizeof(value), 0, table->output_name[chosen]);
+        if (which->output == SETTINGS_OUT_TURN)
+        {
+                if (settings_turns[at].degrees == (int)table->output_turn[chosen])
+                        return;
+                length = settings_map_add(value, sizeof(value), length, " rotation ");
+                settings_map_number(value, sizeof(value), length, settings_turns[at].degrees);
+        }
+        else if (which->output == SETTINGS_OUT_REFRESH && at < (int)settings_rates_of(chosen))
+        {
+                unsigned int hz = table->output_hz[chosen][at];
+
+                if (hz == table->output_now[chosen])
+                        return;
+                length = settings_map_add(value, sizeof(value), length, " refresh ");
+                if (at == 0)
+                        settings_map_add(value, sizeof(value), length, "preferred");
+                else
+                        settings_map_number(value, sizeof(value), length, (long)hz);
+        }
+        else
+                return;
+        settings_change(row, value);
 }
 
 static fn settings_menu_close(void)
@@ -2420,7 +3031,8 @@ static fn settings_menu_open(int row)
         settings.list.focus = row;
         ui_menu_open(&settings.menu, row, settings.touching);
         for (int at = 0; settings_choice(which, (positive)at, word, sizeof(word)); at++)
-                ui_menu_add(&settings.ui, &settings.menu, word, string_equals((string_address)word, (string_address)settings.value[row]));
+                ui_menu_add(&settings.ui, &settings.menu, settings_label_of(row, word),
+                            string_equals((string_address)settings_label_of(row, word), (string_address)settings_shown_value(row)));
         settings_reveal();
         if (settings_menu_place())
                 ui_menu_go(&settings.ui, &settings.menu, settings.menu.at);
@@ -2436,8 +3048,17 @@ static fn settings_menu_apply(int at)
 
         ui_menu_word(&settings.menu, at < 0 ? 0 : at, word, sizeof(word));
         settings_menu_close();
-        if (at >= 0 && !string_equals((string_address)word, (string_address)settings.value[row]))
-                settings_change(row, word);
+        if (at < 0)
+                return;
+        if (settings_rows[row].output != SETTINGS_OUT_NONE)
+                settings_output_apply(row, word);
+        else if (!string_equals((string_address)word, (string_address)settings_shown_value(row)))
+        {
+                char value[SETTINGS_TYPED];
+
+                settings_word_of(row, word, value, sizeof(value));
+                settings_change(row, value);
+        }
 }
 
 // A key with the menu open: it has every key.
@@ -2601,7 +3222,7 @@ static fn settings_activate(int row, int way)
                         settings_run(row, "");
                 return;
         }
-        if (settings.state[row] == SETTINGS_ABSENT || settings.state[row] == SETTINGS_UNREAD)
+        if (!which->output && (settings.state[row] == SETTINGS_ABSENT || settings.state[row] == SETTINGS_UNREAD))
                 return;
 
         switch (which->kind)
@@ -3079,9 +3700,14 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 row->value = settings_row_asks(id) ? "asks first" : null;
                 return;
         }
+        if (which->output != SETTINGS_OUT_NONE)
+        {
+                settings_describe_output(id, row);
+                return;
+        }
         row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT;
         row->value = state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? "not on this machine"
-                     : state == SETTINGS_FAILED || !shown[0] ? "unknown" : shown;
+                     : state == SETTINGS_FAILED || !shown[0] ? "unknown" : settings_label_of(id, shown);
         if (state != SETTINGS_READ)
                 return;
         if (which->kind == SETTINGS_SWITCH)
@@ -3505,12 +4131,102 @@ static fn settings_finger(const struct window_event address_to event)
         }
 }
 
+// The map's drag: the screen taken moves with the pointer, snapped to a neighbour's edge within the compositor's snap band
+// (COMPOSITOR_SNAP, in device pixels as the compositor draws it), and where it is let go is written on release.
+static void settings_map_drag_to(int x, int y)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
+        struct settings_map_view view;
+        int tx, ty;
+
+        if (!count || settings.map.drag < 0 || settings.map.drag >= (int)count)
+                return;
+        settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+        tx = (int)(settings_map_table_x(&view, x) - settings.map.grab_x);
+        ty = (int)(settings_map_table_y(&view, y) - settings.map.grab_y);
+        settings_map_snap(screens, count, (unsigned int)settings.map.drag, &tx, &ty, COMPOSITOR_SNAP * (int)settings.own.table->scale);
+        settings.map.target_x = tx, settings.map.target_y = ty;
+        settings_dirty();
+}
+
+// A press in the map's panel: the button runs canvas identify, and a screen is chosen and taken to drag. True when the
+// press was the map's, which it is anywhere in the panel.
+static b32 settings_map_press(int x, int y)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, count;
+        struct settings_map_view view;
+        int at;
+
+        if (x < settings.map.x || x >= settings.map.x + settings.map.w || y < settings.map.y || y >= settings.map.y + settings.map.h)
+                return false;
+        if (ui_control_hit(&settings.ui, &settings.map.identify, x, y))
+        {
+                settings_change(SETTINGS_JOB_IDENTIFY, "");
+                return true;
+        }
+        count = settings_map_load(screens, number);
+        if ((at = count ? settings_map_at(x, y, screens, count) : -1) >= 0)
+        {
+                settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
+                settings.map.display = settings.map.drag = at;
+                settings.map.grab_x = (int)(settings_map_table_x(&view, x) - screens[at].x);
+                settings.map.grab_y = (int)(settings_map_table_y(&view, y) - screens[at].y);
+                settings.map.target_x = screens[at].x, settings.map.target_y = screens[at].y;
+        }
+        settings_dirty();
+        return true;
+}
+
+// A drag let go: a screen that moved is written where it was dropped, as the Rotation row's verb with its name and the
+// place; nothing is written for a drag back to where it was.
+static void settings_map_release(void)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
+        int at = settings.map.drag, row = settings_output_row(SETTINGS_OUT_TURN);
+        char value[SETTINGS_TYPED];
+        positive length;
+
+        settings.map.drag = -1;
+        if (count && at >= 0 && at < (int)count && row >= 0 && (settings.map.target_x != screens[at].x || settings.map.target_y != screens[at].y))
+        {
+                length = settings_map_add(value, sizeof(value), 0, settings.own.table->output_name[at]);
+                length = settings_map_add(value, sizeof(value), length, " place ");
+                length = settings_map_number(value, sizeof(value), length, settings.map.target_x);
+                length = settings_map_add(value, sizeof(value), length, " ");
+                settings_map_number(value, sizeof(value), length, settings.map.target_y);
+                settings_change(row, value);
+        }
+        settings_dirty();
+}
+
 static b32 settings_event(const struct window_event address_to event)
 {
         if (settings_gallery.on)
                 return settings_gallery_event(event);
         if (event->type == WINDOW_EVENT_MOTION)
                 settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
+        // The map of the screens (above the Display rows): a press in its panel, the drag of a screen it took, and its release.
+        if (settings_map_on() && settings.menu.owner < 0 && !(event->flags & WINDOW_KEY_TOUCH))
+        {
+                if (event->type == WINDOW_EVENT_MOTION && settings.map.drag >= 0)
+                {
+                        settings_map_drag_to(settings.page.pointer_x, settings.page.pointer_y);
+                        return true;
+                }
+                if (event->type == WINDOW_EVENT_BUTTON && event->a == SETTINGS_BUTTON_LEFT)
+                {
+                        if ((event->flags & WINDOW_KEY_DOWN) && settings_map_press(settings.page.pointer_x, settings.page.pointer_y))
+                                return true;
+                        if (!(event->flags & WINDOW_KEY_DOWN) && settings.map.drag >= 0)
+                        {
+                                settings_map_release();
+                                return true;
+                        }
+                }
+        }
         // The scrollbars take a mouse's motion, press and release on them (a finger drags the region itself).
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH) &&
             (event->type != WINDOW_EVENT_BUTTON || event->a == SETTINGS_BUTTON_LEFT) &&
@@ -3733,6 +4449,8 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         {
                 ui_page_groups(ui, &settings.page, settings_group_name, settings_groups());
                 ui_page_column(ui, &settings.page, settings.group, settings.focused && !settings.pane, settings.filter_length != 0);
+                if (settings_map_on())
+                        settings_map_draw(ui);
                 // A row typed in is a field on the page, not a band: its well is the only thing lit there.
                 settings.list.lit = (settings.pane || settings.filter_length) && settings.editing < 0;
                 settings.list.keys = settings.focused && settings.pane;

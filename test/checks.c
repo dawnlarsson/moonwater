@@ -117003,7 +117003,6 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #endif
 #if MOONWATER_UI_SETTINGS
 #include "../src/canvas/ui/settings.c"
-#include "../src/canvas/ui/displays.c"
 #endif
 #if MOONWATER_UI_LAUNCHER
 #include "../src/canvas/ui/launcher.c"
@@ -124945,178 +124944,124 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
 }
 
 /*
-        The displays window's model (ui/displays.c): the field lays two screens side by side at the right scale, a
-        drop beside a neighbour's edge snaps to it and one that is not beside any does not, the file's line is the
-        format the compositor reads (round-tripped through a reader written from the format), a rotation row says
-        software when the field says software, and the rows' values turn through their choices.
+        The Display section (settings.c): the map's view and tiles, the snap band the compositor draws (COMPOSITOR_SNAP,
+        in device pixels) for a drop, the dropdowns' words and what each lists for a fake table, and the section's rows: the
+        map first, no typed row, and no window of its own.
 */
-// A decimal number, with a minus sign in front of it when it has one: the reader's own, for the format's numbers.
-static long displays_check_number(const char address_to text)
+// A row has count choices, the first two being want0 and want1.
+static b32 check_display_section_words(int row, const char address_to want0, const char address_to want1, positive count)
 {
-        long value = 0;
-        b32 negative = text[0] == '-';
+        char word[SETTINGS_VALUE];
 
-        for (const char address_to c = negative ? text + 1 : text; *c >= '0' && *c <= '9'; c++)
-                value = value * 10 + (*c - '0');
-        return negative ? -value : value;
+        if (row < 0 || settings_options(&settings_rows[row]) != count)
+                return false;
+        return settings_choice(&settings_rows[row], 0, word, sizeof(word)) && string_equals((string_address)word, (string_address)want0) &&
+               settings_choice(&settings_rows[row], 1, word, sizeof(word)) && string_equals((string_address)word, (string_address)want1);
 }
 
-static void displays_check_line(const char address_to line, positive length, struct displays_screen address_to into, b32 address_to ok)
+static fn check_display_section(void)
 {
-        positive at = 0, stop = 0;
-        int fields = 0;
-        char word[32];
-
-        *ok = true;
-        while (stop < length && line[stop] != ' ')
-                stop++;
-        if (stop == 0 || stop >= sizeof(into->name))
-                return (void)(*ok = false);
-        memory_copy(into->name, line, stop);
-        into->name[stop] = 0;
-        at = stop;
-        while (at < length && line[at] != '\n')
-        {
-                positive start, size;
-
-                while (at < length && line[at] == ' ')
-                        at++;
-                start = at;
-                while (at < length && line[at] != ' ' && line[at] != '\n')
-                        at++;
-                size = at - start;
-                if (size >= sizeof(word))
-                        return (void)(*ok = false);
-                memory_copy(word, line + start, size);
-                word[size] = 0;
-                if (string_has_prefix(word, "rotation="))
-                        into->turn = (unsigned int)displays_check_number(word + 9), fields++;
-                else if (string_has_prefix(word, "refresh="))
-                        into->refresh = string_equals((string_address)word + 8, (string_address)"preferred") ? 0 : (unsigned int)displays_check_number(word + 8), fields++;
-                else if (string_has_prefix(word, "x="))
-                        into->x = (int)displays_check_number(word + 2), fields++;
-                else if (string_has_prefix(word, "y="))
-                        into->y = (int)displays_check_number(word + 2), fields++;
-                else
-                        *ok = false;
-        }
-        *ok = *ok && fields == 4;
-}
-
-static fn check_displays(void)
-{
-        struct displays_screen screens[3];
-        struct displays_view view;
-        char line[DISPLAYS_LINE];
-        positive length;
-        int x, y, width, height, bx, by, bw, bh;
-        b32 snapped, parsed;
+        struct settings_screen screens[3];
+        struct settings_map_view view;
+        unsigned int number[WINDOWS_OUTPUTS] = {0};
+        struct windows address_to saved = settings.own.table;
+        static struct windows table;
+        int x, y, width, height, bx, by, bw, bh, screen_row, turn_row, refresh_row, modes_row;
+        char text[SETTINGS_VALUE];
+        b32 snapped, typed = false, window = false;
 
         memory_zero(screens, sizeof(screens));
-        memory_copy(screens[0].name, "Virtual-1", 10);
         screens[0].width = 1920, screens[0].height = 1080;
-        memory_copy(screens[1].name, "Virtual-2", 10);
         screens[1].x = 1920, screens[1].width = 1920, screens[1].height = 1080;
-        screens[1].rate_count = 2, screens[1].rates[0] = 60, screens[1].rates[1] = 75;
 
-        // The field: 800 by 400 at 10, 20 holds two 1920 by 1080 screens side by side at 208 thousandths, centred.
-        displays_view_of(screens, 2, 10, 20, 800, 400, &view);
-        check("displays: the field scales two screens side by side to the largest fit", view.f == 208);
-        displays_tile(&view, &screens[0], &x, &y, &width, &height);
-        check("displays: the first screen is drawn 399 by 224 at the field's place", x == 11 && y == 108 && width == 399 && height == 224);
-        displays_tile(&view, &screens[1], &bx, &by, &bw, &bh);
-        check("displays: the second screen is drawn a screen's width to the right of the first", bx - x == 399 && by == y && bw == 399 && bh == 224);
-        check("displays: and a point of the field maps back to within two device pixels of the table",
-              displays_abs(displays_table_x(&view, displays_field_x(&view, 1920)) - 1920) <= 2 &&
-                  displays_abs(displays_table_y(&view, displays_field_y(&view, 540)) - 540) <= 2);
+        // The map's view: 800 by 400 at 10, 20 holds two 1920 by 1080 screens side by side at 208 thousandths, centred.
+        settings_map_view_of(screens, 2, 10, 20, 800, 400, &view);
+        check("display section: the map scales two screens side by side to the largest fit", view.f == 208);
+        settings_map_tile(&view, &screens[0], &x, &y, &width, &height);
+        check("display section: the first screen is drawn 399 by 224 at the map's place", x == 11 && y == 108 && width == 399 && height == 224);
+        settings_map_tile(&view, &screens[1], &bx, &by, &bw, &bh);
+        check("display section: the second screen is drawn a screen's width to the right of the first", bx - x == 399 && by == y && bw == 399 && bh == 224);
+        check("display section: a point of the map maps back to within two device pixels of the table",
+              settings_map_abs(settings_map_table_x(&view, settings_map_field_x(&view, 1920)) - 1920) <= 2 &&
+                  settings_map_abs(settings_map_table_y(&view, settings_map_field_y(&view, 540)) - 540) <= 2);
 
-        // A turn swaps a screen's sides: a quarter turn of the first is 1080 by 1920.
-        screens[0].turn = 90;
-        displays_turned(&screens[0], &width, &height);
-        check("displays: a quarter turn swaps the width and the height", width == 1080 && height == 1920);
-        screens[0].turn = 0;
-
-        // A drop beside the right edge of the second screen snaps to it, 4 pixels off; the third is 1280 by 720.
-        memory_copy(screens[2].name, "Virtual-3", 10);
+        // A drop 4 table pixels from a neighbour's right edge snaps to it, within the compositor's band at scale 1.
         screens[2].width = 1280, screens[2].height = 720;
-        x = 3844, y = 50;
-        snapped = displays_snap(screens, 3, 2, &x, &y, 8);
-        check("displays: a drop 4 pixels from a neighbour's right edge snaps to it", snapped && x == 3840 && y == 50);
-        x = 3838, y = 1085;
-        snapped = displays_snap(screens, 3, 2, &x, &y, 8);
-        check("displays: a drop 5 pixels under a neighbour's bottom edge snaps to it, and not sideways beside it", snapped && x == 3838 && y == 1080);
+        x = 1920 + 1920 - COMPOSITOR_SNAP / 2, y = 50;
+        snapped = settings_map_snap(screens, 3, 2, &x, &y, COMPOSITOR_SNAP * 1);
+        check("display section: a drop inside the compositor's snap band snaps to a neighbour's edge", snapped && x == 3840 && y == 50);
         x = 5000, y = 2000;
-        snapped = displays_snap(screens, 3, 2, &x, &y, 8);
-        check("displays: a drop beside no neighbour does not move", !snapped && x == 5000 && y == 2000);
+        snapped = settings_map_snap(screens, 3, 2, &x, &y, COMPOSITOR_SNAP * 1);
+        check("display section: a drop beside no neighbour does not move", !snapped && x == 5000 && y == 2000);
 
-        // The line the file has: name, rotation, refresh (preferred or Hz), x and y, and a newline.
-        screens[1].turn = 90, screens[1].refresh = 60, screens[1].x = 1920, screens[1].y = -120;
-        length = displays_line(line, sizeof(line), &screens[1]);
-        check("displays: a line is NAME rotation=90 refresh=60 x=1920 y=-120 and a newline",
-              length == 0 + sizeof("Virtual-2 rotation=90 refresh=60 x=1920 y=-120\n") - 1 &&
-                  memory_compare(line, "Virtual-2 rotation=90 refresh=60 x=1920 y=-120\n", length) == 0);
-        screens[1].refresh = 0;
-        length = displays_line(line, sizeof(line), &screens[1]);
-        check("displays: preferred is written as preferred", length > 0 && memory_compare(line, "Virtual-2 rotation=90 refresh=preferred x=1920 y=-120\n", length) == 0);
-        displays_check_line(line, length, &screens[0], &parsed);
-        check("displays: the line reads back to what it says, through the format's own reader",
-              parsed && string_equals((string_address)screens[0].name, (string_address)"Virtual-2") && screens[0].turn == 90 &&
-                  screens[0].refresh == 0 && screens[0].x == 1920 && screens[0].y == -120);
+        // The dropdowns, from a fake table: three screens, the second at the left (number 1), with 144 Hz first (recommended).
+        memory_zero(&table, sizeof(table));
+        table.outputs = 3, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+        table.output_x[0] = 1920, table.output_y[0] = 0, table.output_w[0] = 1920, table.output_h[0] = 1080;
+        table.output_x[1] = 0, table.output_y[1] = 0, table.output_w[1] = 1920, table.output_h[1] = 1080;
+        table.output_x[2] = 3840, table.output_y[2] = 0, table.output_w[2] = 1280, table.output_h[2] = 720;
+        memory_copy(table.output_name[0], "DP-2", 5), memory_copy(table.output_name[1], "DP-1", 5), memory_copy(table.output_name[2], "HDMI-A-1", 9);
+        table.output_rates[1] = 3, table.output_hz[1][0] = 144, table.output_hz[1][1] = 75, table.output_hz[1][2] = 60, table.output_now[1] = 75;
+        table.output_turn[1] = 90, table.output_software[1] = 1;
+        settings.own.table = &table;
+        settings.map.display = -1;
+        check("display section: the screens are numbered left to right, the one at the left is Screen 1",
+              windows_screen_numbers(&table, number) == 3 && number[1] == 1 && number[0] == 2 && number[2] == 3);
 
-        // What a row says of the rotation: the field's word for who turns the screen.
+        screen_row = settings_output_row(SETTINGS_OUT_SCREEN);
+        turn_row = settings_output_row(SETTINGS_OUT_TURN);
+        refresh_row = settings_output_row(SETTINGS_OUT_REFRESH);
+        modes_row = -1;
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (string_equals((string_address)settings_rows[at].label, (string_address) "Screen modes"))
+                        modes_row = (int)at;
+        check("display section: every Display row exists once: screen, rotation, refresh and modes",
+              screen_row >= 0 && turn_row >= 0 && refresh_row >= 0 && modes_row >= 0);
+
+        // The screen dropdown lists the screens by number; the rotation has exactly the four plain choices.
+        check("display section: the Screen dropdown lists the three screens in number order",
+              settings_options(&settings_rows[screen_row]) == 3 && settings_choice(&settings_rows[screen_row], 0, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "Screen 1: DP-1"));
+        check("display section: the rotation dropdown has exactly the four plain choices, Normal to Turned left",
+              check_display_section_words(turn_row, "Normal", "Turned right", 4) && settings_choice(&settings_rows[turn_row], 2, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "Upside down") && settings_choice(&settings_rows[turn_row], 3, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "Turned left"));
+        check("display section: a screen turned by Moonwater says so under its rotation",
+              settings_map_chosen() == 1 && table.output_software[1] == 1);
+
+        // The refresh dropdown lists only the rates the screen lists, the first marked recommended, and shows the one it is at.
+        check("display section: the refresh dropdown lists only the screen's three rates, the first recommended",
+              settings_options(&settings_rows[refresh_row]) == 3 && settings_choice(&settings_rows[refresh_row], 0, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "144 Hz (recommended)") && settings_choice(&settings_rows[refresh_row], 1, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "75 Hz") && !settings_choice(&settings_rows[refresh_row], 3, text, sizeof(text)));
+        check("display section: the refresh dropdown shows the rate the screen is at", string_equals((string_address)settings_shown_value(refresh_row), (string_address) "75 Hz"));
+
+        // The screen modes say plain words, and what they are read as is the verb's.
+        check("display section: Screen modes says Biggest picture and Recommended, and the verb's words are kept",
+              string_equals((string_address)settings_label_of(modes_row, "largest"), (string_address) "Biggest picture") &&
+                  string_equals((string_address)settings_label_of(modes_row, "preferred"), (string_address) "Recommended"));
+
+        // The section's rows: the map's Screen row first, no typed row among them, and the identify action is no row of the list.
+        check("display section: the Screen row, which the map is for, starts the Display section", string_equals((string_address)settings_rows[screen_row].section, (string_address) "Display"));
+        for (positive at = (positive)screen_row; at < SETTINGS_ROWS && (at == (positive)screen_row || !settings_rows[at].section); at++)
         {
-                char label[96];
-
-                displays.count = 2;
-                displays.selected = 1;
-                screens[1].software = 1;
-                displays.screen[1] = screens[1];
-                displays_row_label(DISPLAYS_ROTATION_ROW, label, sizeof(label));
-                check("displays: a rotation row the field says is software reads software", string_has_prefix(label, "Rotation: software"));
-                screens[1].software = 0;
-                displays.screen[1] = screens[1];
-                displays_row_label(DISPLAYS_ROTATION_ROW, label, sizeof(label));
-                check("displays: and one the card turns reads hardware", string_has_prefix(label, "Rotation: hardware"));
-                displays.selected = -1;
+                if (settings_rows[at].kind == SETTINGS_FIELD)
+                        typed = true;
+                if (settings_rows[at].usage && string_has_prefix((string_address)settings_rows[at].usage, (string_address) "settings displays"))
+                        window = true;
         }
+        check("display section: no row of the section is a typed field", !typed);
+        check("display section: no separate displays window: no row runs settings displays", !window);
 
-        // The rows turn through their choices: a rotation through the four, a refresh through preferred and each rate.
-        check("displays: a rotation turns 0, 90, 180, 270, 0", displays_turn_next(0) == 90 && displays_turn_next(90) == 180 && displays_turn_next(180) == 270 && displays_turn_next(270) == 0);
-        screens[1].refresh = 0;
-        {
-                unsigned int first = displays_refresh_next(&screens[1]);
-
-                screens[1].refresh = 60;
-                x = (int)displays_refresh_next(&screens[1]);
-                screens[1].refresh = 75;
-                y = (int)displays_refresh_next(&screens[1]);
-                check("displays: a refresh turns preferred, then each rate the screen lists, then preferred",
-                      first == 60 && x == 75 && y == 0);
-                screens[1].refresh = 0;
-        }
-
-        // The file: a changed screen's line is written in its place, and a line of a screen the window does not show is
-        // kept as it was; a changed screen the file had no line for is added at the end.
-        {
-                static const char file[] = "Virtual-1 rotation=0 refresh=preferred x=0 y=0\nVirtual-9 rotation=180 refresh=60 x=5 y=6\n";
-                static const char want[] = "Virtual-1 rotation=90 refresh=preferred x=0 y=0\nVirtual-9 rotation=180 refresh=60 x=5 y=6\nVirtual-2 rotation=0 refresh=75 x=1920 y=0\n";
-                char text[DISPLAYS_FILE + DISPLAYS_LINE * WINDOWS_OUTPUTS];
-                positive compose;
-
-                memory_copy(displays.file, file, sizeof(file) - 1);
-                displays.file_length = sizeof(file) - 1;
-                displays.count = 2;
-                memory_zero(&displays.screen, sizeof(displays.screen));
-                memory_copy(displays.screen[0].name, "Virtual-1", 10);
-                displays.screen[0].turn = 90, displays.screen[0].edited = true;
-                memory_copy(displays.screen[1].name, "Virtual-2", 10);
-                displays.screen[1].x = 1920, displays.screen[1].refresh = 75, displays.screen[1].edited = true;
-                compose = displays_compose(text, sizeof(text));
-                check("displays: a write keeps the other screens' lines and writes each changed screen's line",
-                      compose == sizeof(want) - 1 && memory_compare(text, want, compose) == 0);
-                displays.file_length = 0;
-                displays.count = 0;
-        }
+        // The map is shown above the Display group only: its panel is placed at the page's top, the list under it.
+        settings.group = settings_group_of(screen_row), settings.filter_length = 0, settings.view = false;
+        settings.page.top = 100, settings.page.left = 0, settings.page.right = 700;
+        settings.ui.scale = 1;
+        check("display section: the map is on for the Display group and off for another", settings_map_on() && settings.group == settings_group_of(screen_row));
+        settings_map_place();
+        check("display section: the map's panel is placed at the top of the page", settings.map.y == 100 && settings.map.h > 0 && settings.map.field_h > 0);
+        settings.own.table = saved;
+        settings.map.display = -1;
 }
 
 static fn check_settings_frames(string_address regular, string_address bold)
@@ -135290,7 +135235,7 @@ b32 main()
         check_settings_keys();
         check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                               program_argument_count() > 4 ? program_argument(4) : null);
-        check_displays();
+        check_display_section();
         check_battery();
 #endif
 #if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER
