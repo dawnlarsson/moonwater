@@ -5628,6 +5628,19 @@ static void compositor_room(const int *screen, int *room);
 static void compositor_arrange_rect(int row, unsigned int how, const int *rect);
 static void compositor_room_follow(void);
 
+// The displays file as the compositor has it: its lines, read when the screens are taken (compositor_displays_read),
+// and how many.
+static struct windows_display compositor_display[WINDOWS_DISPLAYS];
+static unsigned int compositor_displays;
+
+// Appends text to line at at, bounded; answers where it ends.
+static unsigned int compositor_said(char *line, unsigned int at, const char *text)
+{
+        for (unsigned int each = 0; text[each] && at < 127; each++)
+                line[at++] = text[each];
+        return at;
+}
+
 /*
         What the card has connected: each connector that says it is connected
         and lists a mode, in the card's order, with its name, the crtc that
@@ -5786,15 +5799,43 @@ static b32 compositor_connected_read(struct compositor_connected *found)
         return 0;
 }
 
+// Reads the displays file into compositor_display. What is bad in it is said on the kernel log (report), line by line:
+// the field and the screen it is on, which is kept at its default.
+static void compositor_displays_read(int report)
+{
+        static const char *const fields[] = {"name", "rotation", "refresh", "x", "y", "field"};
+        char text[1024];
+        unsigned int bits[] = {WINDOWS_DISPLAY_NAME, WINDOWS_DISPLAY_ROTATION, WINDOWS_DISPLAY_REFRESH, WINDOWS_DISPLAY_X,
+                               WINDOWS_DISPLAY_Y, WINDOWS_DISPLAY_OTHER};
+
+        compositor_text(SETTING_CANVAS_DISPLAYS_PATH, text, sizeof(text));
+        compositor_displays = windows_displays_read(text, compositor_display, WINDOWS_DISPLAYS);
+        for (unsigned int each = 0; report && each < compositor_displays; each++)
+                for (unsigned int bit = 0; bit < sizeof(bits) / sizeof(bits[0]); bit++)
+                {
+                        char line[160];
+                        unsigned int at = compositor_said(line, 0, "compositor: canvas.displays: bad ");
+
+                        if (!(compositor_display[each].bad & bits[bit]))
+                                continue;
+                        at = compositor_said(line, at, fields[bit]);
+                        at = compositor_said(line, at, " on ");
+                        at = compositor_said(line, at, compositor_display[each].name[0] ? compositor_display[each].name : "a line");
+                        at = compositor_said(line, at, ", kept at its default");
+                        line[at] = 0;
+                        compositor_kmsg((string_address)line, 0, (string_address) "");
+                }
+}
+
 // The connected screens laid by the arrangement, but for those in dropped (a bit each), which are dark: what
 // windows_arrange_lay answers, in the found list's order.
 static unsigned int compositor_space_lay(const struct compositor_connected *found, unsigned int dropped,
                                          int (*rects)[4], unsigned char *order)
 {
-        char names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME], text[512];
+        char names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME], text[512], pinned[512];
         int sizes[WINDOWS_OUTPUTS][2], some[WINDOWS_OUTPUTS][4];
         unsigned char map[WINDOWS_OUTPUTS], laid[WINDOWS_OUTPUTS];
-        unsigned int count = 0, lit;
+        unsigned int count = 0, lit, made;
 
         for (unsigned int n = 0; n < found->count; n++)
         {
@@ -5807,6 +5848,11 @@ static unsigned int compositor_space_lay(const struct compositor_connected *foun
                 map[count++] = (unsigned char)n;
         }
         compositor_text(SETTING_CANVAS_ARRANGE_PATH, text, sizeof(text));
+        // A display's place in the file is its word in the arrangement: the arrangement laid is that text with the places put in.
+        made = windows_arrange_pinned(text, (const char (*)[WINDOWS_OUTPUT_NAME])names, count, compositor_display,
+                                      compositor_displays, pinned, sizeof(pinned));
+        if (made)
+                memory_copy(text, pinned, made);
         lit = windows_arrange_lay(text, (const char (*)[WINDOWS_OUTPUT_NAME])names, (const int (*)[2])sizes, count, some,
                                      laid);
         for (unsigned int at = 0; at < count; at++)
@@ -5991,8 +6037,11 @@ static b32 compositor_space_take(int first)
         char was_names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
         unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0, extra[WINDOWS_OUTPUTS], extras;
         unsigned char order[WINDOWS_OUTPUTS];
-        b32 status = compositor_connected_read(&found);
+        b32 status;
         int carried = 0;
+
+        compositor_displays_read(1);
+        status = compositor_connected_read(&found);
 
         if (status < 0 || !found.count)
                 return status < 0 ? status : -COMPOSITOR_EINVAL;
@@ -7185,15 +7234,19 @@ static void compositor_inputs_watch(void)
                         if (at + 16 + (long)length > got)
                                 break;
 
-                        if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME))
+                        if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME) ||
+                            string_equals((string_address)name, (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
                         {
                                 compositor_clip_settings();
                                 compositor_look_read();
                                 compositor_theme_read();
                                 compositor_input_settings_read();
-                                // The arrangement: the screens laid again, which probes them, so only when it is the file written.
+                                // The arrangement and the displays: the screens laid again, which probes them, so only when one
+                                // of those files is the one written.
                                 if (string_equals((string_address)name,
-                                                  (string_address)SETTING_CANVAS_ARRANGE_PATH + sizeof("/root/") - 1))
+                                                  (string_address)SETTING_CANVAS_ARRANGE_PATH + sizeof("/root/") - 1) ||
+                                    string_equals((string_address)name,
+                                                  (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
                                         compositor_space_retake();
                         }
                         else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&

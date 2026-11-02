@@ -92,6 +92,9 @@
 // windows` reads it and its forget empties it, and wipe keeps it with the settings (host_wipe_keep).
 #define SETTING_WINDOWS_PLACES_PATH "/root/canvas.windows"
 #define SETTING_CANVAS_ARRANGE_PATH "/root/canvas.arrange"
+// Each screen's rotation, refresh and place, one line a screen (window.c's windows_displays_read); the compositor reads it
+// and watches it, and a wipe keeps it with the arrangement.
+#define SETTING_CANVAS_DISPLAYS_PATH "/root/canvas.displays"
 // The tray's format (`taskbar tray`): text with {names} in it, and what it is when nothing is kept. The tray with the
 // standard format is drawn as the tray always was: the battery's cell, then the clock's.
 #define SETTING_TASKBAR_TRAY_PATH "/root/taskbar.tray"
