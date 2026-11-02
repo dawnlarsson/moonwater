@@ -561,8 +561,8 @@ static fn editor_draw(unsigned int address_to pixels)
         int bar = ui_px(ui, EDITOR_BAR), find = editor.finding ? ui_px(ui, EDITOR_FIND) : 0, tabs = editor.count > 1 ? ui_px(ui, UI_TABS_H) : 0;
         unsigned int paper = ui_role(UI_SURFACE) & 0xffffffu;
 
+        // ui_begin clears the window to the kit's surface (the editor is an opaque app), so the ground is not painted again here.
         ui_begin(ui, pixels, editor.own.stride, editor.width, editor.height);
-        ui_fill(ui, 0, 0, editor.width, editor.height, ui_role_surface());
         if (tabs)
                 editor_tabs_draw(ui, tabs);
         if (find)
