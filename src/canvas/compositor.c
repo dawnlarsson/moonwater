@@ -570,6 +570,9 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
 // What is inside a frame's line, through the target's clip: a window's pixels, or one of the panel's tabs.
 static void compositor_contents(const struct compositor_target *t, const struct compositor_frame *frame)
 {
+        // A frame with no picture is its line and corners only (a grid tile's border): it has no contents to draw.
+        if (!frame->builtin && !frame->pixels)
+                return;
         if (frame->builtin)
                 compositor_panel_tab(t, frame->slot,
                                      frame->slot >= 0 && frame->slot < (int)frame->mark_count ? frame->marks[frame->slot] : 0,
@@ -664,9 +667,26 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
                 int my = down ? cy + r - 1 - py : py - cy;
                 unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
 
-                if (b)
+                if (b && !frame->builtin && !frame->pixels)
+                {
+                        // A border only (a grid tile's): the line's cover is the outer shape's less the inner's, so the square
+                        // inside the line is not painted; a picture is what covers it for a frame that has one.
+                        unsigned char ring[COMPOSITOR_RADIUS_MOST];
+
+                        for (int k = 0; k < x2 - x1; k++)
+                        {
+                                int col = x1 - cx + k, iy = my - b, ix = right ? col : col - b;
+                                unsigned int oc = outer[(unsigned long)my * r + col], ic = 0;
+
+                                if (ri && iy >= 0 && iy < ri && ix >= 0 && ix < ri)
+                                        ic = inner[(unsigned long)iy * ri + ix];
+                                ring[k] = oc > ic ? (unsigned char)(oc - ic) : 0;
+                        }
+                        memory_mix_u32_row(at, edge_row, ring, (positive)(x2 - x1));
+                }
+                else if (b)
                         memory_mix_u32_row(at, edge_row, outer + (unsigned long)my * r + (x1 - cx), (positive)(x2 - x1));
-                if (py >= y && py < y + h && ri && sx2 > sx1)
+                if (py >= y && py < y + h && ri && sx2 > sx1 && (frame->builtin || frame->pixels))
                 {
                         int kx = sx1 - cx;
                         const unsigned char *cover;
@@ -858,7 +878,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_ASSIST_MAX 8
 #define COMPOSITOR_GRID_TILES 7
 #define COMPOSITOR_CELLS 15u // the four quarters of a screen, a bit each (compositor_tile_cells)
-#define COMPOSITOR_OVERLAYS 32 // the snap assist's thumbnails and rings, and the grid's tints (compositor_overlays)
+#define COMPOSITOR_OVERLAYS 40 // the snap assist's thumbnails and veils, and the grid's tiles, borders and regions (compositor_overlays)
 #define COMPOSITOR_FRAMES (2 * WINDOWS + 1 + WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS)
 
 /*
@@ -3030,6 +3050,10 @@ static struct
         // The top edge's grid (compositor_grid_at): up on a screen, and the tile the pointer is over.
         int grid_on, grid_screen;
         unsigned int grid_hover;
+        // The overlays (the assist and the grid) are up when overlays_up; they fade in and out (compositor_overlay_fade) from
+        // overlay_from toward overlay_goal percent since overlay_at, and are drawn while they are up or fading out.
+        unsigned int overlays_up, overlay_from, overlay_goal;
+        positive overlay_at;
         // The window being resized, how large it was and where the hand took hold.
         int resize_w, resize_h, press_x, press_y;
         // A shared edge's resize (compositor_shared_begin): the window on its other side (COMPOSITOR_NONE for a resize of
@@ -3359,6 +3383,9 @@ static void compositor_frame_of(int row, struct compositor_frame *frame);
 static unsigned int compositor_snap(int x, int y, const int *box, int *screen);
 static void compositor_assist_refresh(void);
 static int compositor_overlays_up(void);
+static void compositor_overlays_damage(void);
+static int compositor_overlays_shown(void);
+static void compositor_overlay_fade(unsigned int goal);
 static unsigned int compositor_overlays(struct compositor_frame *frames, unsigned int at);
 
 /*
@@ -5853,8 +5880,19 @@ static void compositor_present(void)
                 compositor.band_at = 0;
         }
 
-        // The snap assist and the grid, over the windows and the tabs: a thumbnail's picture is drawn again each present.
-        if (compositor_overlays_up())
+        // The snap assist and the grid, over the windows and the tabs: a thumbnail's picture is drawn again each present. They
+        // fade in when they come up and out when they go (compositor_overlay_fade), a thumbnail with them.
+        if ((unsigned int)compositor_overlays_up() != compositor.overlays_up)
+        {
+                compositor.overlays_up = (unsigned int)compositor_overlays_up();
+                // Up with no assist, the thumbnails of an earlier one are none; down, they fade out with the rest (or go now).
+                if (compositor.overlays_up && !compositor.assist_on)
+                        compositor.assist_count = 0;
+                if (!compositor.overlays_up && !compositor_glides())
+                        compositor.assist_count = 0;
+                compositor_overlay_fade(compositor.overlays_up ? 100 : 0);
+        }
+        if (compositor_overlays_shown())
         {
                 if (compositor.assist_armed)
                 {
@@ -8852,29 +8890,84 @@ static int compositor_assist_at(int x, int y)
         return -1;
 }
 
-// The rectangles the overlays are drawn in now: each thumbnail with its ring, and the grid's row while it is up.
+/*
+        The overlays' fade: the percent they are drawn at now, from overlay_from toward overlay_goal over COMPOSITOR_SNAP_FADE_NS
+        on the kit's ease (reduced motion: the goal at once). They are shown while they are up or still fading out.
+*/
+static unsigned int compositor_overlay_alpha(void)
+{
+        int from = (int)compositor.overlay_from, goal = (int)compositor.overlay_goal;
+        b64 done;
+
+        if (!compositor.overlay_at || !compositor_glides())
+                return compositor.overlay_goal;
+        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.overlay_at), COMPOSITOR_SNAP_FADE_NS));
+        return (unsigned int)(from + (int)((long long)(goal - from) * (long long)done / (long long)UI_ONE));
+}
+
+static void compositor_overlay_fade(unsigned int goal)
+{
+        compositor.overlay_from = compositor_overlay_alpha();
+        compositor.overlay_goal = goal;
+        compositor.overlay_at = compositor_glides() ? clock_monotonic_nanoseconds() : 0;
+}
+
+static int compositor_overlays_shown(void)
+{
+        return compositor.overlays_up || compositor_overlay_alpha() > 0;
+}
+
+/*
+        After a present: overlays still fading are damaged again, so the next present draws them at their next percent. One
+        that has faded out is gone, its thumbnails with it, and the loop goes idle.
+*/
+static void compositor_overlays_keep(void)
+{
+        if (!compositor.overlay_at)
+                return;
+        if (clock_monotonic_nanoseconds() - compositor.overlay_at < COMPOSITOR_SNAP_FADE_NS)
+        {
+                compositor_overlays_damage();
+                return;
+        }
+        if (!compositor.overlays_up)
+                compositor.assist_count = 0;
+        compositor.overlay_at = 0;
+}
+
+// The snap's edge colour at a percent of itself over the wallpaper: a thumbnail's and a grid tile's line, which fades.
+static unsigned int compositor_snap_edge(unsigned int percent)
+{
+        unsigned int ink = compositor_snap_ink() | 0xff000000u, ground = compositor_ground | 0xff000000u;
+
+        return ui_mix(ink, percent > 100 ? 100 : percent, ground) & 0xffffffu;
+}
+
+// The rectangles the overlays are drawn in now: each thumbnail's, and the grid's row while it is up or fading out.
 static int compositor_overlay_boxes(int boxes[COMPOSITOR_ASSIST_MAX + 1][4])
 {
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
-        int n = 0, first[4], last[4], ring = 3 * compositor.scale;
+        int n = 0, first[4], last[4], shown = compositor_overlays_shown();
 
-        for (int thumb = 0; compositor.assist_on && thumb < compositor.assist_count; thumb++)
+        for (int thumb = 0; shown && thumb < compositor.assist_count; thumb++)
         {
                 const int *rect = compositor.assist_rect[thumb];
+                int line = COMPOSITOR_LINE * compositor.scale;
 
-                boxes[n][0] = rect[0] - ring, boxes[n][1] = rect[1] - ring;
-                boxes[n][2] = rect[2] + 2 * ring, boxes[n][3] = rect[3] + 2 * ring;
+                boxes[n][0] = rect[0] - line, boxes[n][1] = rect[1] - line;
+                boxes[n][2] = rect[2] + 2 * line, boxes[n][3] = rect[3] + 2 * line;
                 n++;
         }
-        if (compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
+        if (shown && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
         {
                 const int *screen = screens[compositor.grid_screen];
 
                 compositor_grid_tile(screen, 0, first);
                 compositor_grid_tile(screen, COMPOSITOR_GRID_TILES - 1, last);
-                boxes[n][0] = first[0], boxes[n][1] = screen[1];
-                boxes[n][2] = last[0] + last[2] - first[0], boxes[n][3] = first[3];
+                boxes[n][0] = first[0] - COMPOSITOR_LINE * compositor.scale, boxes[n][1] = screen[1] - COMPOSITOR_LINE * compositor.scale;
+                boxes[n][2] = last[0] + last[2] - first[0] + 2 * COMPOSITOR_LINE * compositor.scale;
+                boxes[n][3] = first[3] + 2 * COMPOSITOR_LINE * compositor.scale;
                 n++;
         }
         return n;
@@ -8895,48 +8988,69 @@ static int compositor_overlays_up(void)
         return compositor.assist_on || compositor.grid_on;
 }
 
-// The overlays of a present, from at in the frame list: each thumbnail, its window's picture scaled into its rectangle over a
-// tint ring, then the grid, each tile tinted and each region in it, the taken ones dark. Answers the frames added.
+/*
+        The overlays of a present, from at in the frame list, all at the overlays' fade. Each thumbnail: its window's picture
+        scaled into its rectangle, with the window's line and 8 px corners in the snap's colour, and a veil of the wallpaper
+        over the pair that fades the picture in or out (a tint, drawn over what is composed below it). Then the grid: each
+        tile a tint with its line and corners drawn over it (a tint frame, then a frame that is only its border), and each
+        region in it tinted, the taken ones dark. Answers the frames added.
+*/
 static unsigned int compositor_overlays(struct compositor_frame *frames, unsigned int at)
 {
-        unsigned int count, added = 0, ring = (unsigned int)(3 * compositor.scale), grid_ink, taken;
+        unsigned int count, added = 0, percent = compositor_overlay_alpha(), grid_ink, taken, ground;
         const int (*screens)[4] = compositor_screens(&count);
+        int shown = compositor_overlays_shown();
 
-        for (int thumb = 0; compositor.assist_on && thumb < compositor.assist_count; thumb++)
+        ground = compositor_ground;
+        for (int thumb = 0; shown && thumb < compositor.assist_count; thumb++)
         {
                 const int *rect = compositor.assist_rect[thumb];
-                int row = (int)compositor.assist_rows[thumb];
-                struct compositor_frame *tint = &frames[at + added], *picture = &frames[at + added + 1];
+                int row = (int)compositor.assist_rows[thumb], line = COMPOSITOR_LINE * compositor.scale;
+                struct compositor_frame *picture = &frames[at + added], *veil = &frames[at + added + 1];
 
-                memory_zero(tint, sizeof(*tint));
-                tint->scale = compositor.scale;
-                tint->preview[0] = rect[0] - (int)ring, tint->preview[1] = rect[1] - (int)ring;
-                tint->preview[2] = rect[2] + 2 * (int)ring, tint->preview[3] = rect[3] + 2 * (int)ring;
-                tint->preview_ink = compositor_snap_ink();
                 compositor_frame_of(row, picture);
                 picture->x = rect[0], picture->y = rect[1];
                 picture->width = rect[2], picture->height = rect[3];
                 picture->source_w = (int)compositor.w[row], picture->source_h = (int)compositor.h[row];
-                picture->radius = picture->line = picture->close = 0;
+                picture->radius = COMPOSITOR_RADIUS * compositor.scale, picture->line = line;
+                picture->edge = compositor_snap_edge(percent);
+                picture->close = 0;
                 picture->lit = 0;
                 memory_zero(picture->preview, sizeof(picture->preview));
                 memory_zero(picture->mark, sizeof(picture->mark));
+                memory_zero(veil, sizeof(*veil));
+                veil->scale = compositor.scale;
+                if (percent < 100)
+                {
+                        veil->mark[0] = rect[0] - line, veil->mark[1] = rect[1] - line;
+                        veil->mark[2] = rect[2] + 2 * line, veil->mark[3] = rect[3] + 2 * line;
+                        veil->mark_ink = (ground & 0xffffffu) | (100 - percent) * 255 / 100 << 24;
+                }
                 added += 2;
         }
-        if (compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
+        if (shown && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
         {
                 const int *screen = screens[compositor.grid_screen];
+                unsigned int line = COMPOSITOR_LINE * compositor.scale;
 
                 for (unsigned int tile = 0; tile < COMPOSITOR_GRID_TILES; tile++)
                 {
                         int box[4];
+                        struct compositor_frame *tint = &frames[at + added], *border = &frames[at + added + 1];
+                        unsigned int ink = tile == compositor.grid_hover ? compositor_snap_ink() : 0x40ffffffu;
 
                         compositor_grid_tile(screen, tile, box);
-                        memory_zero(&frames[at + added], sizeof(frames[0]));
-                        frames[at + added].scale = compositor.scale;
-                        memory_copy(frames[at + added].preview, box, sizeof(box));
-                        frames[at + added].preview_ink = 0x28000000u;
-                        added++;
+                        memory_zero(tint, sizeof(*tint));
+                        tint->scale = compositor.scale;
+                        memory_copy(tint->mark, box, sizeof(box));
+                        tint->mark_ink = (ink & 0xffffffu) | ((ink >> 24) * percent / 100) << 24;
+                        memory_zero(border, sizeof(*border));
+                        border->scale = compositor.scale;
+                        border->x = box[0], border->y = box[1];
+                        border->width = box[2], border->height = box[3];
+                        border->radius = COMPOSITOR_RADIUS * compositor.scale, border->line = (int)line;
+                        border->edge = compositor_snap_edge(percent);
+                        added += 2;
                 }
                 for (unsigned int tile = 0; tile < COMPOSITOR_GRID_TILES; tile++)
                 {
@@ -8954,7 +9068,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                         memory_zero(&frames[at + added], sizeof(frames[0]));
                         frames[at + added].scale = compositor.scale;
                         memory_copy(frames[at + added].preview, box, sizeof(box));
-                        frames[at + added].preview_ink = grid_ink;
+                        frames[at + added].preview_ink = (grid_ink & 0xffffffu) | ((grid_ink >> 24) * percent / 100) << 24;
                         added++;
                 }
         }
@@ -8999,7 +9113,9 @@ static void compositor_assist_close(void)
 {
         compositor_overlays_damage();
         compositor.assist_on = compositor.assist_armed = 0;
-        compositor.assist_count = 0;
+        // The thumbnails fade out with the overlays (compositor_overlays_keep), unless the grid stays up: it has none of them.
+        if (compositor.grid_on)
+                compositor.assist_count = 0;
 }
 
 // All of a screen or half of it (compositor_screen_part): the screen named, or with none (-1) the window's own
@@ -13185,6 +13301,7 @@ static b32 compositor_main()
                                 compositor_land_keep();
                                 compositor_glide_keep();
                                 compositor_preview_keep();
+                                compositor_overlays_keep();
                                 if (compositor.motion_ts)
                                 {
                                         compositor_latency(1, compositor.motion_ts, clock_monotonic_nanoseconds());

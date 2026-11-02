@@ -121548,13 +121548,16 @@ static void check_compositor_assist(void)
               assist_row_at(3) == 0 && assist_row_at(2) == 1);
     check("assist: each thumbnail is inside the space the drop left, and not over the window that took the left half", inside);
 
-    /* Presented, a thumbnail has its tint ring on the desktop round it: the pixel just outside its picture is not the ground. */
+    /* Presented, a thumbnail has the window's 1 px line in the snap's colour, and its corners rounded: the pixel just outside
+       the middle of its left edge is the line, and the one just outside its top left corner is the ground. */
     compositor_damage(0, 0, 256, 256);
     compositor_present();
     at = assist_row_at(2);
-    check("assist: presented, a thumbnail has its tint ring on the desktop round it",
+    check("assist: presented, a thumbnail has the window's 1 px line round it in the snap's colour, and its corner is rounded",
           compositor.assist_count == 2 &&
-              (layout_pixels[(compositor.assist_rect[at][1] - 1) * 256 + compositor.assist_rect[at][0] - 1] & 0xffffffu) !=
+              (layout_pixels[(compositor.assist_rect[at][1] + compositor.assist_rect[at][3] / 2) * 256 + compositor.assist_rect[at][0] - 1] &
+               0xffffffu) == (compositor_snap_ink() & 0xffffffu) &&
+              (layout_pixels[(compositor.assist_rect[at][1] - 1) * 256 + compositor.assist_rect[at][0] - 1] & 0xffffffu) ==
                   (compositor_ground & 0xffffffu));
 
     /* A click on a thumbnail places its window in the space over it; the assist is gone. */
@@ -121580,7 +121583,7 @@ static void check_compositor_assist(void)
     layout_drop(1, 20, 4, 0, 100);
     compositor_press(COMPOSITOR_BTN_LEFT, 1);
     check("assist: a click elsewhere takes the thumbnails away and places nothing",
-          !compositor.assist_armed && !compositor.assist_on && compositor.assist_count == 0 && compositor.arranged[2] == COMPOSITOR_FLOATING);
+          !compositor.assist_armed && !compositor.assist_on && compositor.arranged[2] == COMPOSITOR_FLOATING);
     compositor_press(COMPOSITOR_BTN_LEFT, 0);
 
     /* Escape takes it away. */
@@ -121716,7 +121719,7 @@ static void check_compositor_snap_closing(void)
     layout_drop(1, 20, 4, 0, 100);
     compositor_leave(1);
     check("assist: the window the assist is armed for closes, and the assist goes with it",
-          !compositor.assist_armed && !compositor.assist_on && compositor.assist_count == 0);
+          !compositor.assist_armed && !compositor.assist_on);
 }
 
 /*
@@ -121830,6 +121833,87 @@ static void check_compositor_preview_fade(void)
     check("preview fade: reduced motion has no fade: the tint is at its full strength at once",
           compositor.preview[2] == 128 && compositor_preview_alpha() == 100);
     screens_hand(0, 100, -1);
+    compositor.table->motion = 0;
+}
+
+/*
+        The snap assist and the grid fade: a thumbnail comes up from the wallpaper (its picture veiled) and is the picture at the
+        end of COMPOSITOR_SNAP_FADE_NS, and goes out from the picture to the wallpaper; a grid tile has the window's line and
+        corners in the snap's colour, the line outside the tile where the wallpaper is.
+*/
+static void check_compositor_overlay_fade(void)
+{
+    const unsigned int picture = 0xc06020u, ground = compositor_ground;
+    unsigned int centre_at, border_at;
+    positive now;
+    int at;
+
+    if (!layout_table_map(256))
+    {
+        check("overlay fade: the table is mapped", false);
+        return;
+    }
+    layout_setup(256, 1);
+    compositor.table->motion = 0;
+    assist_fresh();
+    compositor.showing[3] = 0;
+    layout_paint(2, picture);
+    layout_drop(1, 20, 4, 0, 100);
+    now = clock_monotonic_nanoseconds();
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    at = assist_row_at(2);
+    centre_at = layout_pixels[(compositor.assist_rect[at][1] + compositor.assist_rect[at][3] / 2) * 256 +
+                              compositor.assist_rect[at][0] + compositor.assist_rect[at][2] / 2] & 0xffffffu;
+    check("overlay fade: a thumbnail comes up from the wallpaper: at its first present its picture is not drawn yet",
+          at >= 0 && centre_at == (ground & 0xffffffu));
+
+    compositor.overlay_at = now - COMPOSITOR_SNAP_FADE_NS / 2;
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    centre_at = layout_pixels[(compositor.assist_rect[at][1] + compositor.assist_rect[at][3] / 2) * 256 +
+                              compositor.assist_rect[at][0] + compositor.assist_rect[at][2] / 2] & 0xffffffu;
+    check("overlay fade: half way up the picture is neither the wallpaper nor the picture",
+          centre_at != (ground & 0xffffffu) && centre_at != (picture & 0xffffffu));
+
+    compositor.overlay_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    centre_at = layout_pixels[(compositor.assist_rect[at][1] + compositor.assist_rect[at][3] / 2) * 256 +
+                              compositor.assist_rect[at][0] + compositor.assist_rect[at][2] / 2] & 0xffffffu;
+    check("overlay fade: up, the thumbnail is its picture", centre_at == (picture & 0xffffffu));
+
+    compositor_assist_close();
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    centre_at = layout_pixels[(compositor.assist_rect[at][1] + compositor.assist_rect[at][3] / 2) * 256 +
+                              compositor.assist_rect[at][0] + compositor.assist_rect[at][2] / 2] & 0xffffffu;
+    check("overlay fade: a thumbnail that goes starts from its picture, and is still there while it fades",
+          centre_at == (picture & 0xffffffu) && compositor.assist_count == 1);
+    compositor.overlay_at = now - COMPOSITOR_SNAP_FADE_NS - 1;
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    centre_at = layout_pixels[(compositor.assist_rect[at][1] + compositor.assist_rect[at][3] / 2) * 256 +
+                              compositor.assist_rect[at][0] + compositor.assist_rect[at][2] / 2] & 0xffffffu;
+    check("overlay fade: gone, the wallpaper is where it was, and the thumbnails are none", centre_at == (ground & 0xffffffu));
+    compositor_overlays_keep();
+    check("overlay fade: faded out, the thumbnails are none", compositor.assist_count == 0);
+
+    /* The grid: a tile's line is the snap's colour at its full strength, outside the tile where the wallpaper is. */
+    layout_setup(256, 1);
+    compositor.table->motion = 1;
+    assist_fresh();
+    compositor.showing[2] = compositor.showing[3] = 0;
+    screens_hand(80, 64, 1);
+    screens_hand(127, 4, 0);
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    border_at = layout_pixels[12 * 256 + 27] & 0xffffffu;
+    check("overlay fade: the grid's tile has the snap's line round it, its corner is rounded, and inside the corner is the tile",
+          compositor.grid_on && border_at == (compositor_snap_ink() & 0xffffffu) && (layout_pixels[27] & 0xffffffu) != (compositor_snap_ink() & 0xffffffu) &&
+              (layout_pixels[1 * 256 + 29] & 0xffffffu) != (compositor_snap_ink() & 0xffffffu));
+    screens_hand(127, 4, -1);
+    compositor.press = COMPOSITOR_NONE;
     compositor.table->motion = 0;
 }
 
@@ -137947,6 +138031,7 @@ b32 main()
         check_compositor_snap_closing();
         check_compositor_glide();
         check_compositor_preview_fade();
+        check_compositor_overlay_fade();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();
