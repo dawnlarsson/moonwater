@@ -124809,11 +124809,11 @@ static void check_ui_press(void)
         check("ui press: past the slop it is a drag, pressed no more, and no click when it comes up",
               ui_press_move(&ui, &press, 10, 19) && !ui_pressed(&press, 3) && ui_press_end(&press, false) == -1);
         // One slop for every press (the apps and the terminal's finger take this rule): UI_SLOP logical pixels at the scale.
-        ui.scale = 2;
+        ui.scale = 200;
         ui_press_begin(&press, 10, 10, 3, true);
         check("ui press: the slop is UI_SLOP logical pixels at the window's scale, for every press alike",
               !ui_press_move(&ui, &press, 10 + UI_SLOP * 2 - 1, 10) && ui_press_move(&ui, &press, 10 + UI_SLOP * 2, 10));
-        ui.scale = 1;
+        ui.scale = 100;
         // The wheel's rule for every list and page: a horizontal notch turns nothing, and the region is not touched.
         {
                 struct ui_scroll sideways_s;
@@ -127662,7 +127662,7 @@ static fn settings_column_check(void)
 
         settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
-        settings.ui.scale = 1;
+        settings.ui.scale = 100;
         ui_kit_settle();
         settings_size(SETTINGS_WIDTH, 300);
         ui_kit.now += 1000000000ll, ui_kit.busy = 0;
@@ -136670,7 +136670,7 @@ static fn text_widget_check(string_address inter, string_address mono)
                 {
                         int row5 = view.top + 4 * view.line_height, mid = row5 + view.line_height / 2;
                         unsigned int corner = picture[(positive)(row5 + 1) * 800 + (positive)(view.left + 2 * view.cell + 1)] & 0xffffffu;
-                        unsigned int dot = picture[(positive)(mid - wui.scale / 2) * 800 + (positive)(view.left + 2 * view.cell + view.cell / 2 - wui.scale / 2)] & 0xffffffu;
+                        unsigned int dot = picture[(positive)(mid - wui.scale / 200) * 800 + (positive)(view.left + 2 * view.cell + view.cell / 2 - wui.scale / 200)] & 0xffffffu;
 
                         check("text widget: a selected space shows a dot on the selection's paper", corner != ground && dot != corner);
                 }
