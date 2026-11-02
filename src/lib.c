@@ -6830,8 +6830,31 @@ __asm__(
     ASM_USERSPACE_WIDE(
     ASM_NARROW("cpu_has_avx2", ".Lmemory_last_x64_sse2")
     "cmp $32, %rdx\n   jb .Lmemory_last_x64_words\n   movzbl %sil, %ecx\n   vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n"
+    //
+    //      Four vectors a turn while a hundred and twenty eight bytes are left: four compares in flight, their
+    //      flags or-ed into one register and tested once. One vector a turn, as below, is a mask, a move and a
+    //      branch for every thirty two bytes, and a 4 KiB absent search cost 1057 instructions and 133 cycles on
+    //      a 9950X that way, 472 and 93 with this; the hit is found among the four by a test of each in turn,
+    //      from the highest.
+    //
+    //      The last thirty two bytes first, as one vector: a match there, which is what a search for the last
+    //      line or field of a short tail finds, costs what the vector loop costs, and the quad is only entered
+    //      when they hold none.
+    //
+    "cmp $128, %rdx\n   jb .Lmemory_last_x64_vector\n   vpcmpeqb -32(%rax), %ymm1, %ymm0\n   vpmovmskb %ymm0, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_last_x64_top\n"
+    "sub $32, %rax\n   sub $32, %rdx\n   cmp $128, %rdx\n   jb .Lmemory_last_x64_vector\n"
+    ".Lmemory_last_x64_quad:\n   sub $128, %rax\n   sub $128, %rdx\n   vpcmpeqb 96(%rax), %ymm1, %ymm2\n   vpcmpeqb 64(%rax), %ymm1, %ymm3\n"
+    "vpcmpeqb 32(%rax), %ymm1, %ymm4\n   vpcmpeqb (%rax), %ymm1, %ymm5\n   vpor %ymm2, %ymm3, %ymm6\n   vpor %ymm4, %ymm5, %ymm7\n   vpor %ymm6, %ymm7, %ymm6\n"
+    "vptest %ymm6, %ymm6\n   jnz .Lmemory_last_x64_quad_hit\n   cmp $128, %rdx\n   jae .Lmemory_last_x64_quad\n   cmp $32, %rdx\n   jb .Lmemory_last_x64_vector_rest\n"
     ".Lmemory_last_x64_vector:\n   sub $32, %rax\n   sub $32, %rdx\n   vpcmpeqb (%rax), %ymm1, %ymm0\n   vpmovmskb %ymm0, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_last_x64_vector_hit\n"
-    "cmp $32, %rdx\n   jae .Lmemory_last_x64_vector\n   vzeroupper\n   test %rdx, %rdx\n   jz .Lmemory_last_x64_none\n   jmp .Lmemory_last_x64_sse2_rest\n"
+    "cmp $32, %rdx\n   jae .Lmemory_last_x64_vector\n"
+    ".Lmemory_last_x64_vector_rest:\n   vzeroupper\n   test %rdx, %rdx\n   jz .Lmemory_last_x64_none\n   jmp .Lmemory_last_x64_sse2_rest\n"
+    ".Lmemory_last_x64_quad_hit:\n   vpmovmskb %ymm2, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_last_x64_quad_96\n   vpmovmskb %ymm3, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_last_x64_quad_64\n"
+    "vpmovmskb %ymm4, %ecx\n   test %ecx, %ecx\n   jnz .Lmemory_last_x64_quad_32\n   vpmovmskb %ymm5, %ecx\n   bsr %ecx, %ecx\n   add %rcx, %rax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_last_x64_top:\n   bsr %ecx, %ecx\n   lea -32(%rax,%rcx), %rax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_last_x64_quad_96:\n   bsr %ecx, %ecx\n   lea 96(%rax,%rcx), %rax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_last_x64_quad_64:\n   bsr %ecx, %ecx\n   lea 64(%rax,%rcx), %rax\n   vzeroupper\n" ASM_RET
+    ".Lmemory_last_x64_quad_32:\n   bsr %ecx, %ecx\n   lea 32(%rax,%rcx), %rax\n   vzeroupper\n" ASM_RET
     ".Lmemory_last_x64_vector_hit:\n   bsr %ecx, %ecx\n   add %rcx, %rax\n"
     "vzeroupper\n" ASM_RET
     //

@@ -15098,6 +15098,28 @@ fn check_last_of_bodies()
                                              (positive)(memory_last_of)(block, 'y', size), (positive)(block + at));
                                 }
                         }
+                //      Every width to 300 at every alignment from 0 to 63, the byte absent and then
+                //      present at its first, middle and last place: the quad, vector and word bodies cut
+                //      their blocks by where the span starts as well as by its length.
+                for (positive n = 0; n <= 300; n++)
+                        for (positive align = 0; align < 64; align++)
+                        {
+                                p8 address_to block = page + 1024 + align;
+
+                                memory_fill(page, 'y', 4096);
+                                memory_fill(block, 'x', n);
+                                same("memory_last_of", "every alignment, absent",
+                                     (positive)(memory_last_of)(block, 'y', n), 0);
+                                for (positive pick = 0; pick < 3 && n; pick++)
+                                {
+                                        positive at = pick == 0 ? 0 : pick == 1 ? n / 2 : n - 1;
+
+                                        block[at] = 'y';
+                                        same("memory_last_of", "every alignment, present",
+                                             (positive)(memory_last_of)(block, 'y', n), (positive)(block + at));
+                                        block[at] = 'x';
+                                }
+                        }
         }
 #if X64
         cpu_has_avx2 = avx2;
