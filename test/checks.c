@@ -127131,6 +127131,24 @@ static fn check_display_section(void)
         settings.map.display = -1;
 }
 
+/*
+        The page's search field, as the settings frames just drew it: the kit's field, UI_FIELD_H high, wholly inside the
+        title band (UI_PAGE_TOP from the window's top, and not under the window's top inset), and clear of the close button
+        and the minimise button beside it at the top right (their width and their inset from the edge). The band is the
+        field's own clip: a field that crossed its bottom edge was cut where the list below repaints.
+*/
+static fn check_settings_search(void)
+{
+        const struct ui_control address_to c = &settings.page.search;
+        int width = settings.width / settings.ui.scale;
+
+        check("settings search: the page's field is the kit's, UI_FIELD_H high, and drawn", c->kind == UI_INPUT && c->h == UI_FIELD_H && c->items[0] != null);
+        check("settings search: it lies wholly in the title band, below the window's top inset",
+              c->y >= COMPOSITOR_CLOSE_IN && c->y + c->h <= UI_PAGE_TOP);
+        check("settings search: it is clear of the close button and its minimise beside it, at the top right",
+              width - (c->x + c->w) >= 2 * (COMPOSITOR_CLOSE + COMPOSITOR_CLOSE_IN));
+}
+
 static fn check_settings_frames(string_address regular, string_address bold)
 {
         static font_face faces[2];
@@ -127186,6 +127204,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_size(SETTINGS_WIDTH * scale, SETTINGS_HEIGHT * scale);
         settings_refilter();
         settings_frames_pass();
+        check_settings_search();
 
         settings_frames_scenario((string_address) "Canvas, Space and Down every 33 ms, answered at 25", false, false,
                                  "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 6, 33, 25);
