@@ -13334,6 +13334,7 @@ __asm__(
     ASM_FUNC(memory_glass_over_u32)
     "test %rcx, %rcx\n   jz 9f\n   xor %r9d, %r9d\n"
     "pxor %xmm5, %xmm5\n   pcmpeqw %xmm6, %xmm6\n   psrlw $15, %xmm6\n   psllw $7, %xmm6\n   pcmpeqd %xmm7, %xmm7\n   psrld $24, %xmm7\n"
+    ASM_WIDER("cpu_has_avx512", "11f")
     ASM_WIDER("cpu_has_avx2", "5f")
     "2:  cmp $4, %rcx\n   jb 3f\n   mov %r9, %r10\n   and $15, %r10\n"
     "movdqu (%rdx), %xmm0\n   movdqu (%r8,%r10,4), %xmm1\n   paddusb %xmm1, %xmm0\n   movdqu 256(%r8,%r10,4), %xmm1\n   psubusb %xmm1, %xmm0\n"
@@ -13365,6 +13366,21 @@ __asm__(
     "vpackuswb %ymm0, %ymm4, %ymm0\n   vpaddusb %ymm1, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
     "add $32, %rdi\n   add $32, %rsi\n   add $32, %rdx\n   add $8, %r9\n   sub $8, %rcx\n   jmp 4b\n"
     "6:  vzeroupper\n   jmp 2b\n"
+    //  Sixteen pixels a turn with AVX-512: the AVX2 steps on zmm, the unpacks and the pack acting within each 128-bit
+    //  lane, which holds four whole pixels, so the lanes never need crossing. r9 is a multiple of sixteen here, so the
+    //  grain is read from its start. Fewer than sixteen left go to the AVX2 loop at 5, which sets its own constants.
+    "11: vpxord %zmm5, %zmm5, %zmm5\n   vpternlogd $0xff, %zmm6, %zmm6, %zmm6\n   vpsrlw $15, %zmm6, %zmm6\n   vpsllw $7, %zmm6, %zmm6\n"
+    "vpternlogd $0xff, %zmm7, %zmm7, %zmm7\n   vpsrld $24, %zmm7, %zmm7\n"
+    "12: cmp $16, %rcx\n   jb 5b\n"
+    "vmovdqu64 (%rdx), %zmm0\n   vpaddusb (%r8), %zmm0, %zmm0\n   vpsubusb 256(%r8), %zmm0, %zmm0\n   vmovdqu64 (%rsi), %zmm1\n"
+    "vpsrld $24, %zmm1, %zmm2\n   vpxord %zmm7, %zmm2, %zmm2\n   vpslld $16, %zmm2, %zmm3\n   vpord %zmm3, %zmm2, %zmm2\n"
+    "vpunpckldq %zmm2, %zmm2, %zmm3\n   vpunpckhdq %zmm2, %zmm2, %zmm2\n"
+    "vpunpcklbw %zmm5, %zmm0, %zmm4\n   vpunpckhbw %zmm5, %zmm0, %zmm0\n"
+    "vpmullw %zmm3, %zmm4, %zmm4\n   vpmullw %zmm2, %zmm0, %zmm0\n   vpaddw %zmm6, %zmm4, %zmm4\n   vpaddw %zmm6, %zmm0, %zmm0\n"
+    "vpsrlw $8, %zmm4, %zmm3\n   vpaddw %zmm3, %zmm4, %zmm4\n   vpsrlw $8, %zmm4, %zmm4\n"
+    "vpsrlw $8, %zmm0, %zmm3\n   vpaddw %zmm3, %zmm0, %zmm0\n   vpsrlw $8, %zmm0, %zmm0\n"
+    "vpackuswb %zmm0, %zmm4, %zmm0\n   vpaddusb %zmm1, %zmm0, %zmm0\n   vmovdqu64 %zmm0, (%rdi)\n"
+    "add $64, %rdi\n   add $64, %rsi\n   add $64, %rdx\n   add $16, %r9\n   sub $16, %rcx\n   jmp 12b\n"
     ASM_END(memory_glass_over_u32)
 #endif
 

@@ -114467,6 +114467,109 @@ static fn check_glass_routines()
 }
 
 /*
+        The glass routines over every width to 300 and every alignment of their sources to a 64-byte line (sixteen
+        words), each tier the machine has: AVX-512, AVX2 and SSE2 on x86-64, the vector and word bodies on riscv64,
+        one body on arm64. Halving and doubling take two rows so the row step is run; glass takes a start in the grain
+        that matches the alignment. Each output is compared with its scalar reference over its whole written area.
+*/
+static fn check_glass_tiers(void)
+{
+        static p32 field[4][8192], want[8192], grain[128];
+        p64 state = 0x2d358dccaa6c78a5ull;
+        bool halved = true, doubled = true, laid = true;
+
+        for (positive i = 0; i < 128; i++)
+        {
+                XORSHIFT64(state);
+                grain[i] = (p32)(state >> 20) & 0x03030303u;
+        }
+#if X64
+        p8 wide512 = cpu_has_avx512, wide256 = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                // Tier 0 is the AVX-512 body where the machine has it (the AVX2 body where it does not), 1 AVX2, 2 SSE2.
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide256;
+#endif
+#if RISCV64
+        p8 vector = cpu_has_vector;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_vector = tier ? 1 : 2;
+#endif
+                for (positive width = 0; width <= 300; width++)
+                        for (positive a = 0; a < 16; a++)
+                        {
+                                // Halving: two rows of width pixels (pitch 2 width + 3), into at a pitch width + 1.
+                                {
+                                        positive pitch = 2 * width + 3, ipitch = width + 1, height = 2;
+                                        p32 address_to from = field[0] + a, address_to into = field[1] + a;
+
+                                        for (positive i = 0; i < 2 * height * pitch + 2; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                from[i] = (p32)(state >> 16);
+                                        }
+                                        memory_fill(into, 0x5a, height * ipitch * 4);
+                                        memory_fill(want, 0x5a, height * ipitch * 4);
+                                        glass_halve_reference(want, ipitch, from, pitch, width, height);
+                                        memory_halve_u32(into, ipitch, from, pitch, width, height);
+                                        halved = halved && !memory_compare(into, want, height * ipitch * 4);
+                                }
+                                // Doubling: a pixel round what it names, two rows out.
+                                {
+                                        positive dpitch = width + 2, dinto = 2 * width + 1, height = 2;
+                                        p32 address_to named = field[2] + a, address_to into = field[3] + a;
+
+                                        for (positive i = 0; i < (height + 2) * dpitch; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                named[i] = (p32)(state >> 8);
+                                        }
+                                        memory_fill(into, 0x5a, 2 * height * dinto * 4);
+                                        memory_fill(want, 0x5a, 2 * height * dinto * 4);
+                                        glass_double_reference(want, dinto, named + dpitch + 1, dpitch, width, height);
+                                        memory_double_u32(into, dinto, named + dpitch + 1, dpitch, width, height);
+                                        doubled = doubled && !memory_compare(into, want, 2 * height * dinto * 4);
+                                }
+                                // A premultiplied picture over a ground, from grain start a: count = width.
+                                {
+                                        positive count = width;
+                                        p32 address_to picture = field[0] + a, address_to ground = field[1] + 16 + a;
+                                        p32 address_to into = field[2] + a;
+
+                                        for (positive i = 0; i < count; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                picture[i] = (p32)(state >> 32);
+                                                p32 alpha = (i % 5 == 0) ? 0 : (i % 7 == 0) ? 255 : picture[i] >> 24;
+                                                p32 made = alpha << 24;
+                                                for (p32 shift = 0; shift < 24; shift += 8)
+                                                        made |= (((picture[i] >> shift & 255) * alpha) / 255) << shift;
+                                                picture[i] = made;
+                                                ground[i] = (p32)(state >> 8) & 0xffffffu;
+                                        }
+                                        memory_fill(into, 0x5a, count * 4);
+                                        glass_over_reference(want, picture, ground, count, grain + a);
+                                        memory_glass_over_u32(into, picture, ground, count, grain + a);
+                                        laid = laid && !memory_compare(into, want, count * 4);
+                                }
+                        }
+#if X64
+        }
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide256;
+#endif
+#if RISCV64
+        }
+        cpu_has_vector = vector;
+#endif
+        check("glass tiers: halving is the mean of each two by two at every width to 300 and alignment, on each tier", halved);
+        check("glass tiers: doubling is the rise at every width to 300 and alignment, on each tier", doubled);
+        check("glass tiers: a picture over a ground at every width to 300 and grain start, on each tier", laid);
+}
+
+/*
         memory_fill_u32_rect: every width to 80 and rows of 127 to 300,
         heights to 6, two strides, the last row against a page that faults,
         the words between rows and before the first held to a canary; with
@@ -115241,6 +115344,7 @@ b32 main()
         check_blend();
         check_average_ahead();
         check_glass_routines();
+        check_glass_tiers();
         check_fill_rect();
         check_copy_changed();
         check_first_differs();
