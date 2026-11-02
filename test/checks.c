@@ -117327,6 +117327,84 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
         no character are the sequences ANSI names, with what was held written
         into them.
 */
+/*
+        The terminal's selection auto-scroll: a drag held past the grid's top scrolls the scrollback back (the view goes up through
+        what has been said), one held below it scrolls forward to the live end, a line at a time with the time, and the
+        selection's end follows the text. A mouse and a finger that has held a word, each both ways.
+*/
+static void check_terminal_select_scroll(void)
+{
+    b32 dirty = false;
+    int x = (int)terminal.pad + 4 * (int)terminal.cell_w + (int)terminal.cell_w / 2, top = (int)terminal.pad_y;
+    int cell = (int)terminal.cell_h;
+    unsigned int line_before, back;
+    positive now = 1000000000ull;
+    struct window_event at = {WINDOW_EVENT_MOTION, 0, 0, 0};
+    struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+    struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+    struct window_event touch_at = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+    struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+    struct window_event held = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, 0x110, 0};
+    struct window_event right_down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD, 0x111, 0};
+    struct window_event right_up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD, 0x111, 0};
+    struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, 0x110, 0};
+
+    for (int line = 0; line < 3 * (int)ROWS; line++)
+        term_bytes("scrollback\r\n", 12);
+
+    /* A mouse, above the grid: pressed on the third row, dragged up past the grid's top; the view goes back. */
+    terminal_view_live();
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    at.a = x, at.b = top + 2 * cell + cell / 2;
+    terminal_receive(-1, &at, &dirty);
+    terminal_receive(-1, &press, &dirty);
+    line_before = terminal.select_active_line;
+    at.b = top - 25;
+    terminal_receive(-1, &at, &dirty);
+    for (int step = 0; step <= 40; step++)
+        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+    check("terminal: a mouse held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
+    check("terminal: and the selection's end follows the text up", terminal.select_active_line < line_before);
+    terminal_receive(-1, &release, &dirty);
+
+    /* A mouse, below the grid: from the scrollback, pressed mid-grid and dragged down past its bottom; the view goes forward. */
+    terminal_view_live();
+    terminal_view_scroll(20);
+    back = terminal.view;
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    at.a = x, at.b = top + (int)ROWS / 2 * cell + cell / 2;
+    terminal_receive(-1, &at, &dirty);
+    terminal_receive(-1, &press, &dirty);
+    line_before = terminal.select_active_line;
+    at.b = top + (int)ROWS * cell + 25;
+    terminal_receive(-1, &at, &dirty);
+    for (int step = 0; step <= 40; step++)
+        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+    check("terminal: a mouse held below the grid scrolls the scrollback forward", terminal.view == TERMINAL_LIVE || terminal.view > back);
+    check("terminal: and the selection's end follows the text down", terminal.select_active_line > line_before);
+    terminal_receive(-1, &release, &dirty);
+
+    /* A finger: held on the third row for the long press (its word selected), then dragged up past the grid's top. */
+    terminal_view_live();
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    touch_at.a = x, touch_at.b = top + 2 * cell + cell / 2;
+    terminal_receive(-1, &touch_at, &dirty);
+    terminal_receive(-1, &land, &dirty);
+    terminal_receive(-1, &held, &dirty);
+    terminal_receive(-1, &right_down, &dirty);
+    terminal_receive(-1, &right_up, &dirty);
+    line_before = terminal.select_active_line;
+    touch_at.b = top - 25;
+    terminal_receive(-1, &touch_at, &dirty);
+    for (int step = 0; step <= 40; step++)
+        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+    check("terminal: a finger held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
+    check("terminal: and the held selection's end follows the text up", terminal.select_active_line < line_before);
+    terminal_receive(-1, &lift, &dirty);
+    terminal_view_live();
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+}
+
 static fn check_keys(void)
 {
         static const struct
@@ -140278,6 +140356,7 @@ b32 main()
         check_fold();
         check_keys();
         check_pointer();
+        check_terminal_select_scroll();
         check_take();
         check_land();
         check_glass();

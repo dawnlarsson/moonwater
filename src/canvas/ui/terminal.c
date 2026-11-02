@@ -170,6 +170,11 @@ static struct
         */
         struct ui_press finger_press;
         int finger_left;
+        // A selection drag past the grid's top (negative) or bottom, in pixels: the view scrolls while it is held there
+        // (terminal_select_autoscroll), by its own clock and the thousandths of a pixel it owes.
+        int select_past;
+        positive select_scroll_at;
+        long select_owed;
         struct ui_drag fling;
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
@@ -2315,6 +2320,9 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         {
                 int y = terminal.pointer_y < 0 ? 0 : terminal.pointer_y, x = terminal.pointer_x < 0 ? 0 : terminal.pointer_x;
 
+                terminal.select_past = terminal.pointer_y < 0 ? terminal.pointer_y
+                                       : terminal.pointer_y >= (int)ROWS * terminal.cell_h ? terminal.pointer_y - (int)ROWS * terminal.cell_h + 1
+                                                                                           : 0;
                 row = (unsigned int)y / terminal.cell_h;
                 column = (unsigned int)x / terminal.cell_w;
                 row = row < ROWS ? row : ROWS - 1;
@@ -2974,6 +2982,58 @@ static void terminal_leave(b32 show)
         last; 0 when a frame is due now and not held, so the loop runs again before it waits. The pty the wait is on is set
         too: none while the window stays.
 */
+/*
+        A selection drag held past the grid's top or bottom scrolls the scrollback, a line at a time as the time passes: 120
+        logical pixels a second at the edge, 6 more for each logical pixel the pointer is past it, at most 2400. Above the grid
+        the view goes back through what has been said, below it forward to the live end, and the selection's end is taken again
+        at the edge row each step, so it grows as the text scrolls. The alternate screen has no scrollback here, and a drag that
+        is back on the grid, or lifted, stops it. Answers when the next step is due, 0 for none.
+*/
+#define TERMINAL_SELECT_SPEED 120
+#define TERMINAL_SELECT_FAR 6
+#define TERMINAL_SELECT_MOST 2400
+
+static positive terminal_select_autoscroll(positive now, b32 address_to dirty)
+{
+        long distance, speed, rows;
+        int scale = terminal_scale(), row, column;
+        unsigned int line, at;
+
+        if (!terminal.select_dragging || !terminal.select_past || alternate || terminal.cell_h <= 0)
+        {
+                terminal.select_scroll_at = 0;
+                return 0;
+        }
+        if (!terminal.select_scroll_at || now < terminal.select_scroll_at)
+        {
+                terminal.select_scroll_at = now, terminal.select_owed = 0;
+                return now + UI_DRAG_FRAME_NS;
+        }
+        distance = (terminal.select_past < 0 ? -(long)terminal.select_past : (long)terminal.select_past) / scale;
+        speed = TERMINAL_SELECT_SPEED + distance * TERMINAL_SELECT_FAR;
+        speed = speed > TERMINAL_SELECT_MOST ? TERMINAL_SELECT_MOST : speed;
+        // Device pixels a second over the time since the last step: thousandths of a device pixel owed.
+        terminal.select_owed += speed * scale * (long)(now - terminal.select_scroll_at) / 1000000l;
+        terminal.select_scroll_at = now;
+        rows = terminal.select_owed / (1000l * terminal.cell_h);
+        if (rows <= 0)
+                return now + UI_DRAG_FRAME_NS;
+        terminal.select_owed -= rows * 1000l * terminal.cell_h;
+        if (terminal_view_scroll(terminal.select_past < 0 ? (int)rows : -(int)rows))
+                *dirty = true;
+        row = terminal.select_past < 0 ? 0 : (int)ROWS - 1;
+        column = terminal.pointer_x < 0 ? 0 : terminal.pointer_x / terminal.cell_w;
+        column = column < (int)COLUMNS ? column : (int)COLUMNS;
+        terminal_place_at((unsigned int)row, (unsigned int)column, &line, &at);
+        if (line != terminal.select_active_line || at != terminal.select_active_column)
+        {
+                terminal.select_active_line = line, terminal.select_active_column = at;
+                terminal_select_snap();
+                *dirty = true;
+        }
+        return now + UI_DRAG_FRAME_NS;
+}
+
 static long terminal_tick(long timeout, long address_to other)
 {
         b32 was = terminal.dirty, again = false;
@@ -3067,6 +3127,20 @@ static long terminal_tick(long timeout, long address_to other)
                         ui_drag_stop(&terminal.fling);
                 if (terminal.fling.flying)
                         timeout = timeout < 0 || timeout > UI_DRAG_FRAME_NS ? UI_DRAG_FRAME_NS : timeout;
+        }
+
+        // A selection drag held past the grid scrolls the scrollback a step at a time (terminal_select_autoscroll).
+        {
+                positive scroll_due = terminal_select_autoscroll(clock_monotonic_nanoseconds(), &terminal.dirty), scroll_now;
+
+                if (scroll_due)
+                {
+                        long left;
+
+                        scroll_now = clock_monotonic_nanoseconds();
+                        left = scroll_due > scroll_now ? (long)(scroll_due - scroll_now) : 0;
+                        timeout = timeout < 0 || left < timeout ? left : timeout;
+                }
         }
 
         if (terminal.title_owed)
