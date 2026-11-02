@@ -24227,7 +24227,7 @@ static const host_row host_rows[] = {
     {null, "canvas", "whether Canvas is on, and the screens it draws on", 'b'},
     {null, "@canvas", null, 'r'},
     {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
-    {null, "canvas identify", "show each screen's number for three seconds", 'b'},
+    {null, "canvas identify", "show the number of each screen for three seconds", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
     {null, "settings [gallery]", "the settings window, on the desktop of the compositor; gallery, every control of the UI kit", 'b'},
