@@ -78,6 +78,37 @@ static unsigned int ui_tone(unsigned int colour, unsigned int alpha)
         return alpha << 24 | window_mix(0, colour & 0xffffffu, alpha + (alpha >> 7));
 }
 
+/*
+        A text run's cover ramps for one ink, alpha and ground: the tone of each cover (ui_tone at the cover's alpha) and
+        the tone over the ground. A frame's runs share a few inks (the settings page has three, interleaved), so a few
+        ramps are kept for the frame, and ui_clear, which begins each frame's picture, makes them all again. Keyed by all
+        three, a ramp kept is the one a fresh run would have made.
+*/
+#define UI_RAMPS 4
+struct ui_ramp
+{
+        unsigned int colour, alpha, ground;
+        b32 set;
+        unsigned int tone[256], over[256];
+        unsigned long long known[4], made[4];
+};
+static struct ui_ramp ui_ramps[UI_RAMPS];
+static unsigned int ui_ramps_next;
+
+static struct ui_ramp address_to ui_ramp_for(unsigned int colour, unsigned int alpha, unsigned int ground)
+{
+        struct ui_ramp address_to ramp;
+
+        for (int k = 0; k < UI_RAMPS; k++)
+                if (ui_ramps[k].set && ui_ramps[k].colour == colour && ui_ramps[k].alpha == alpha && ui_ramps[k].ground == ground)
+                        return &ui_ramps[k];
+        ramp = &ui_ramps[ui_ramps_next++ % UI_RAMPS];
+        ramp->set = 1, ramp->colour = colour, ramp->alpha = alpha, ramp->ground = ground;
+        memory_zero(ramp->known, sizeof(ramp->known));
+        memory_zero(ramp->made, sizeof(ramp->made));
+        return ramp;
+}
+
 // The inks for a ground: what the compositor says the glass came to.
 static fn ui_inks(struct ui address_to ui, unsigned int ground)
 {
@@ -152,6 +183,8 @@ static fn ui_clear(struct ui address_to ui)
 {
         int top = 0, bottom = ui->height;
 
+        for (int k = 0; k < UI_RAMPS; k++)
+                ui_ramps[k].set = 0;
         if (ui->band_bottom > ui->band_top)
         {
                 top = ui->band_top < 0 ? 0 : ui->band_top;
@@ -437,8 +470,8 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
         // ground is kept for each coverage as it is first met, so a pixel on it is a compare and a load, and only a
         // pixel on anything else is laid over (ui_over) -- the same pixel either way.
         {
-                unsigned int tone[256], over[256], ground = ui->opaque ? ui_role_surface() : 0;
-                unsigned long long known[4] = {0, 0, 0, 0}, made[4] = {0, 0, 0, 0};
+                unsigned int ground = ui->opaque ? ui_role_surface() : 0;
+                struct ui_ramp address_to ramp = ui_ramp_for(colour, alpha, ground);
                 int pen_x = x - left, first = 0, last = wide;
 
                 if (low - pen_x > first)
@@ -505,20 +538,20 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                                         continue;
                                 if (*picture == ground)
                                 {
-                                        if (!(made[cover >> 6] >> bit & 1))
+                                        if (!(ramp->made[cover >> 6] >> bit & 1))
                                         {
-                                                over[cover] = ui_over(ui_tone(colour, cover * alpha / 255), ground);
-                                                made[cover >> 6] |= 1ull << bit;
+                                                ramp->over[cover] = ui_over(ui_tone(colour, cover * alpha / 255), ground);
+                                                ramp->made[cover >> 6] |= 1ull << bit;
                                         }
-                                        *picture = over[cover];
+                                        *picture = ramp->over[cover];
                                         continue;
                                 }
-                                if (!(known[cover >> 6] >> bit & 1))
+                                if (!(ramp->known[cover >> 6] >> bit & 1))
                                 {
-                                        tone[cover] = ui_tone(colour, cover * alpha / 255);
-                                        known[cover >> 6] |= 1ull << bit;
+                                        ramp->tone[cover] = ui_tone(colour, cover * alpha / 255);
+                                        ramp->known[cover >> 6] |= 1ull << bit;
                                 }
-                                *picture = ui_over(tone[cover], *picture);
+                                *picture = ui_over(ramp->tone[cover], *picture);
                         }
                 }
         }

@@ -126406,6 +126406,58 @@ static fn check_kit_arc(void)
 }
 
 /*
+        A text run's cover ramps (ui_ramp_for, kept for the frame) draw the picture a fresh ramp per run draws: runs in
+        three inks, two alphas and both grounds (the surface and the glass), interleaved over a picture, drawn once with
+        the ramps kept from run to run and once with each run's ramps forgotten first. The two pictures are the same,
+        pixel for pixel, and the runs drew something.
+*/
+static fn check_kit_ramps(void)
+{
+        static unsigned int kept[600 * 40], fresh[600 * 40], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui ui = terminal.ui;
+        const unsigned int inks[3] = {0x1f2a44u, 0xe8e8f0u, 0xc04020u};
+        const font_face address_to faces[2] = {&face, &face};
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        positive different = 0, painted = 0;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit ramps: the face loads", false);
+                return;
+        }
+        ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
+        ui.regular = ui.bold = &face, ui.scale = 1, ui.top = 0, ui.bottom = 40, ui.width = 600, ui.height = 40, ui.pitch = 600;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        for (int pass = 0; pass < 2; pass++)
+        {
+                unsigned int address_to picture = pass ? fresh : kept;
+
+                // The top twenty rows are the surface and the rest the glass (clear), so both grounds meet their own pixels.
+                memory_zero(picture, sizeof(kept));
+                for (positive at = 0; at < 600 * 20; at++)
+                        picture[at] = ui_role_surface();
+                ui.pixels = picture;
+                for (positive run = 0; run < 60; run++)
+                {
+                        // Each ink's runs come as a surface one and then a glass one, so a ramp is met on both grounds in a row.
+                        ui.opaque = run % 2 == 0;
+                        if (pass)
+                                for (int k = 0; k < UI_RAMPS; k++)
+                                        ui_ramps[k].set = 0;
+                        ui_run_in(&ui, faces, 4 + (int)(run * 37 % 500), 28, (string_address) "Aa", 14, inks[(run / 2) % 3],
+                                  run % 5 ? 255 : 92, 0, 600, 0);
+                }
+        }
+        for (positive at = 0; at < 600 * 40; at++)
+        {
+                different += kept[at] != fresh[at];
+                painted += kept[at] != (at < 600 * 20 ? ui_role_surface() : 0);
+        }
+        check("kit ramps: kept ramps draw the picture fresh ramps draw, and the runs drew", !different && painted > 1000);
+}
+
+/*
         The kit's fills and rings (ui.c's ui_kit_fill and ui_kit_ring, with their fast paths: a straight row's spans, a run
         laid as one, the glass over a run) against the cover each pixel has from its own lines. A line is the span
         ui_box_span gives it (a corner's by its place), sixteen to a pixel, and a pixel's cover is what the lines cover of
@@ -130552,6 +130604,7 @@ b32 main()
         check_kit_motion();
         check_kit_theme();
         check_kit_arc();
+        check_kit_ramps();
         check_kit_fills();
         check_kit_corners();
         check_kit_slider_below();
