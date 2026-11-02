@@ -862,4 +862,29 @@ static inline int shell_layer_strut(struct shell_side *side, long client, long s
         return shell_layer_surface(side, client, surface, &layer);
 }
 
+/*
+        XWayland is an X server that is also a Wayland client. Its own process
+        is started and stopped on the X side, and its clients come in through
+        the connect and role hooks like any other client. What this records is
+        that it is up, so that a second start is refused. The process is not
+        started here.
+*/
+static inline int shell_xwayland_start(struct shell_side *side)
+{
+        if (!side->running)
+                return SHELL_EINVAL;
+        if (side->xwayland)
+                return SHELL_EBUSY;
+        side->xwayland = 1;
+        return SHELL_OK;
+}
+
+static inline int shell_xwayland_stop(struct shell_side *side)
+{
+        if (!side->xwayland)
+                return SHELL_EINVAL;
+        side->xwayland = 0;
+        return SHELL_OK;
+}
+
 #endif /* CANVAS_SHELL_INCLUDED */
