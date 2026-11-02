@@ -5711,6 +5711,23 @@ static fn ui_popup_present(struct ui_popup address_to p)
         p->shown = slot;
 }
 
+/*
+        A menu's look: it is glass, a temporary overlay, so its face is what is under it and its inks are that ground's. The
+        compositor gives the ground as it composes the menu (ui_popup_pump takes it again as it comes); until then the
+        parent's will do. The row is glass the same way (WINDOW_GLASS, window.c), and no close button.
+*/
+#define UI_POPUP_GLASS (WINDOW_NO_CLOSE | WINDOW_GLASS)
+
+static void ui_popup_look(struct ui_popup address_to p, struct windows address_to table, const struct ui address_to parent_ui)
+{
+        unsigned int ground = table->ground[p->own.row];
+
+        p->ui = *parent_ui;
+        p->ui.opaque = false, p->ui.glass = true;
+        ui_inks(&p->ui, ground ? ground : parent_ui->ground ? parent_ui->ground : 0x101012u);
+        table->glass[p->own.row] = UI_POPUP_GLASS;
+}
+
 static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
                          int x, int y, int width, int height, unsigned int flags, b32 touch)
 {
@@ -5729,7 +5746,7 @@ static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row a
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
                 ui_kit_theme(table->theme, table->accent, table->motion);
         ui_kit.shown = ui_kit.to;
-        p->ui = *parent_ui;
+        ui_popup_look(p, table, parent_ui);
         p->shown = -1;
         p->menu.touch = touch;
         p->menu.hot = -1;
@@ -5740,7 +5757,6 @@ static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row a
         table->popup_x[p->own.row] = x, table->popup_y[p->own.row] = y;
         table->popup_w[p->own.row] = width, table->popup_h[p->own.row] = height;
         table->popup_flags[p->own.row] = flags;
-        table->glass[p->own.row] = WINDOW_NO_CLOSE;
         string_copy_bounded((string_address)table->title[p->own.row], (string_address) "menu", WINDOWS_TITLE);
         p->open = true;
         ui_popup_present(p);
@@ -5762,6 +5778,12 @@ static int ui_popup_pump(struct ui_popup address_to p)
 
         if (!p->open)
                 return UI_MENU_NOTHING;
+        // The compositor's ground for the menu as it came: its inks follow, and the menu is drawn again in them.
+        if ((p->own.table->ground[p->own.row] & 0xffffffu) && (p->own.table->ground[p->own.row] & 0xffffffu) != p->ui.ground)
+        {
+                ui_inks(&p->ui, p->own.table->ground[p->own.row]);
+                ui_popup_present(p);
+        }
         while (windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
         {
                 int hot = p->menu.hot;
