@@ -132321,10 +132321,11 @@ static fn check_kit_turn(void)
                 }
                 kept = turn_colour(kind) ? worst <= 2 * rate + eps && gap_at_turn <= 2 * rate + eps : same <= eps;
 
-                // A colour keeps its clock: the turn does not start its run again, so it lands when the unturned one does.
+                // A colour keeps its clock: it lands with the turn (the turn's .2 s runs from TURN_AT, so its last frame is
+                // TURN_AT + 12), and not a run of its own after it.
                 settle_turned = turn_settled(kind, turned, fresh[TURN_FRAMES - 1]);
                 settle_unturned = turn_settled(kind, unturned, unturned[TURN_FRAMES - 1]);
-                if (turn_colour(kind) && settle_turned > settle_unturned + 2)
+                if (turn_colour(kind) && settle_turned > TURN_AT + 12 + 2)
                         kept = 0;
 
                 // No overshoot: from the turn on, each frame is no further from where the new theme rests than the one before.

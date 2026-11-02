@@ -2876,13 +2876,31 @@ static inline unsigned int ui_kit_colour(struct ui_tween address_to t)
         return ui_tween_argb(ui_kit_tween(t));
 }
 
+/*
+        How long a new target takes, span ns. A theme turn moves every colour's target each frame (a role turns over the
+        .2 s), so while it turns a running tween keeps the clock it has: the new target takes what is left of its own run
+        or of the turn, whichever is longer, and lands when the turn does. Nothing running, or no turn, it takes its span.
+*/
+static b64 ui_kit_span(const struct ui_tween address_to t, b64 span)
+{
+        b64 left, turn;
+
+        if (!span || !ui_kit.turn.start || !t->start) // no turn under way (its start is 0 once it has landed), or nothing running
+                return span;
+        turn = ui_kit.turn.start + ui_kit.turn.duration - ui_kit.now;
+        left = t->start + t->duration - ui_kit.now;
+        if (turn > left)
+                left = turn;
+        return left > 0 ? left : span;
+}
+
 // A colour to transition to over the kit's .2s (or at once with reduced motion); its first is where it starts.
 static inline fn ui_kit_colour_to(struct ui_tween address_to t, unsigned int argb, int ms, const struct ui_bezier address_to ease)
 {
         if (!t->placed)
                 ui_tween_put(t, ui_tween_colour(argb), UI_TWEEN_COLOUR);
         else
-                ui_tween_set(t, ui_tween_colour(argb), ui_kit.motion ? 0 : ms * UI_MS, ease);
+                ui_tween_set(t, ui_tween_colour(argb), ui_kit_span(t, ui_kit.motion ? 0 : ms * UI_MS), ease);
 }
 
 static inline fn ui_kit_number_to(struct ui_tween address_to t, b64 value, int ms, const struct ui_bezier address_to ease)
@@ -2890,7 +2908,7 @@ static inline fn ui_kit_number_to(struct ui_tween address_to t, b64 value, int m
         if (!t->placed)
                 ui_tween_put(t, value, UI_TWEEN_NUMBER);
         else
-                ui_tween_set(t, value, ui_kit.motion ? 0 : ms * UI_MS, ease);
+                ui_tween_set(t, value, ui_kit_span(t, ui_kit.motion ? 0 : ms * UI_MS), ease);
 }
 
 /*
