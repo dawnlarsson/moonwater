@@ -53499,12 +53499,22 @@ __asm__(
     ASM_END(square_root)
 
     //
-    //       No scalar fabs here, so the sign bit is cleared where the bits
-    //       can be reached: through a general register, which is cheaper than
-    //       loading a mask from memory to and with.
+    //       No scalar fabs here, so the sign bit is cleared with an and
+    //       against a mask in memory. The general register route, movq out,
+    //       btr, movq back, is three instructions, but its two cross-domain
+    //       moves put about ten cycles of latency on the answer; the and
+    //       reads its mask from a line that is ready before the argument
+    //       arrives. Measured on the box (Ryzen 9 9950X) in a loop where each
+    //       result is the next argument, one turn being a subtract, the call
+    //       and the loop: the movq form takes 8 instructions and 14 cycles a
+    //       turn, the andpd form 6 and 4, and an empty ret 5 and 4. The mask
+    //       is sixteen bytes because andpd takes an aligned memory operand.
     //
     ASM_FUNC(absolute)
-    "movq %xmm0, %rax\n   btr $63, %rax\n   movq %rax, %xmm0\n" ASM_RET
+    "andpd .Labsolute_mask(%rip), %xmm0\n" ASM_RET
+    ".pushsection .rodata\n   .balign 16\n"
+    ".Labsolute_mask:\n   .quad 0x7fffffffffffffff, 0x7fffffffffffffff\n"
+    ".popsection\n"
     ASM_END(absolute)
 #endif
 

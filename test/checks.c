@@ -13537,6 +13537,35 @@ test(absolute_value) {
         return true;
 }
 
+test(absolute_clears_only_the_sign) {
+        //      The sign bit and nothing else, over the bit patterns the
+        //      values above never reach: a NaN keeps its payload, an infinity
+        //      stays one, and the smallest subnormal and the largest finite
+        //      lose only their signs. The mask body must agree with the bits
+        //      of every one, not only with the arithmetic answer.
+        unsigned long named[] = {0, 1, 0x8000000000000000ull, 0x8000000000000001ull,
+                       0x7ff0000000000000ull, 0xfff0000000000000ull,
+                       0x7ff8000000000001ull, 0xfff8000000000001ull,
+                       0x0010000000000000ull, 0x8010000000000000ull,
+                       0xffefffffffffffffull, 0x7fefffffffffffffull};
+        unsigned long seed = 0x9e3779b97f4a7c15ull;
+
+        for (positive at = 0; at < 4096; at++) {
+                unsigned long pattern = at < sizeof(named) / sizeof(*named) ? named[at] : seed;
+                decimal value, answer;
+                unsigned long result;
+
+                __builtin_memcpy(&value, &pattern, sizeof value);
+                answer = absolute(value);
+                __builtin_memcpy(&result, &answer, sizeof result);
+                fail(result == (pattern & 0x7fffffffffffffffull));
+
+                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        }
+
+        return true;
+}
+
 test(system_write_all_zero_and_fault) {
         fail_not_equals(system_write_all((positive)-1, address_bad, 0), 0);
         fail_not_equals(system_write_all((positive)-1, (address_any)"x", 1), 0);
@@ -13801,6 +13830,7 @@ test_case test_cases[] = {
         case(absolute_whole_and_wide),
         case(square_root_is_exact),
         case(absolute_value),
+        case(absolute_clears_only_the_sign),
         case(system_write_all_zero_and_fault),
         case(system_write_all_partial_then_fault),
         case(system_write_all_retries_short_progress),
