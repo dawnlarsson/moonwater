@@ -138329,73 +138329,154 @@ static b32 identify_ink_box(const unsigned int address_to pixels, int stride, in
         return any;
 }
 
+// Whether a and b are within slack of each other.
+static b32 identify_near(int a, int b, int slack)
+{
+        return a - b <= slack && b - a <= slack;
+}
+
+// The identify faces and inks for a check's picture: the terminal's faces, the kit's own, with the scratch mapped fresh.
+static void identify_check_ui(int scale)
+{
+        identify.ui = terminal.ui;
+        identify.ui.regular = identify.ui.bold = terminal.plain[0];
+        identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
+        identify.ui.glass = false, identify.ui.opaque = true;
+        identify.ui.scale = scale;
+        identify_size(0, 0);
+}
+
 /*
-        The identify badge (identify_paint through identify_size): a white square in the screen's top left corner with the
-        number in black, a third of an em from each edge, whole inside the screen, growing with the screen's scale, and
-        smaller only on a screen too small for it. Black on white is 21:1, read as the paper and the ink's exact pixels.
+        The identify badge (identify_badge_fit and identify_paint): a white square whose corner is a third of its em from the
+        screen's top left, the number black in it, whole on the screen at every size, growing with the screen's scale, and
+        smaller only on a screen too small for it. The picture is the badge's own size and opaque. Black on white is 21:1.
 */
 static fn check_identify_picture(void)
 {
         static struct windows screens;
         static unsigned int pixels[800 * 600];
-        int badge[4], digit[4], large[4], large_digit[4], narrow[4];
-        b32 inked, inside = true;
+        struct identify_badge small, large, narrow;
+        int digit[4], large_digit[4], narrow_digit[4];
+        b32 opaque = true, inked;
 
         memory_zero(&screens, sizeof(screens));
         screens.output_width = 1000, screens.output_height = 800;
         identify.own.table = &screens;
         identify.text[0] = '8', identify.text[1] = 0;
-        identify.ui = terminal.ui;
-        identify.ui.regular = identify.ui.bold = terminal.plain[0];
-        identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
-        identify.ui.glass = true, identify.ui.opaque = false;
 
-        identify.ui.scale = 1;
-        identify_size(400, 300);
+        identify_check_ui(1);
+        identify_badge_fit(&identify.ui, 400, 300, &small);
+        check("identify badge: a white square a third of its em (16 px) from the screen's top left corner, whole on a 400 by 300 screen",
+              small.x == 16 && small.y == 16 && small.width > 0 && small.height > 0 && small.x + small.width <= 400 - 16 &&
+                  small.y + small.height <= 300 - 16);
+        identify.badge = small, identify.width = small.width, identify.height = small.height;
         memory_zero(pixels, sizeof(pixels));
-        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        inked = identify_ink_box(pixels, 800, 400, 300, 0, badge);
-        check("identify badge: a white square in the top left corner, a third of its em (16 px) from each edge",
-              inked && badge[0] == 16 && badge[1] == 16 && badge[2] < 200 && badge[3] < 150);
+        identify_paint(&identify.ui, pixels, 800, small.width, small.height);
+        for (int y = 0; y < small.height; y++)
+                for (int x = 0; x < small.width; x++)
+                        opaque &= pixels[y * 800 + x] >> 24 == 255;
+        check("identify badge: the picture is the badge, opaque white with the number", opaque && pixels[0] == 0xffffffffu);
+        inked = identify_ink_box(pixels, 800, small.width, small.height, 0xff000000u, digit);
+        check("identify badge: the number is black and centred in the badge",
+              inked && identify_near(digit[0] + digit[2], small.width - 1, 6) && identify_near(digit[1] + digit[3], small.height - 1, 8));
         check("identify badge: the paper is white and the number black, exactly, which is 21:1",
-              pixels[badge[1] * 800 + badge[0]] == 0xffffffffu && IDENTIFY_INK == 0x000000u && IDENTIFY_PAPER == 0xffffffffu);
-        inked = identify_ink_box(pixels, 800, 400, 300, 0xff000000u, digit);
-        check("identify badge: the number is black, inside the badge and off its edges",
-              inked && digit[0] > badge[0] && digit[1] > badge[1] && digit[2] < badge[2] && digit[3] < badge[3]);
+              IDENTIFY_PAPER == 0xffffffffu && IDENTIFY_INK == 0x000000u && pixels[0] == IDENTIFY_PAPER);
 
-        identify.ui.scale = 2;
-        identify_size(800, 600);
+        identify_check_ui(2);
+        identify_badge_fit(&identify.ui, 800, 600, &large);
+        check("identify badge: at scale 2 it is twice the size, and still a third of its em (32 px) from the corner",
+              large.x == 32 && large.y == 32 && identify_near(large.width, 2 * small.width, 4) &&
+                  identify_near(large.height, 2 * small.height, 4));
+        identify.badge = large, identify.width = large.width, identify.height = large.height;
         memory_zero(pixels, sizeof(pixels));
-        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        inked = identify_ink_box(pixels, 800, 800, 600, 0, large);
-        identify_ink_box(pixels, 800, 800, 600, 0xff000000u, large_digit);
-        check("identify badge: at scale 2 it is twice as large, and still a third of its em (32 px) from the corner",
-              inked && large[0] == 32 && large[1] == 32 &&
-                  large[2] - large[0] >= 2 * (badge[2] - badge[0]) - 4 && large[2] - large[0] <= 2 * (badge[2] - badge[0]) + 4 &&
-                  large[3] - large[1] >= 2 * (badge[3] - badge[1]) - 4 && large[3] - large[1] <= 2 * (badge[3] - badge[1]) + 4);
+        identify_paint(&identify.ui, pixels, 800, large.width, large.height);
+        inked = identify_ink_box(pixels, 800, large.width, large.height, 0xff000000u, large_digit);
         check("identify badge: the number is twice as tall at scale 2, so it reads at every scale",
-              large_digit[3] - large_digit[1] >= 2 * (digit[3] - digit[1]) - 3 &&
-                  large_digit[3] - large_digit[1] <= 2 * (digit[3] - digit[1]) + 3);
+              inked && identify_near(large_digit[3] - large_digit[1], 2 * (digit[3] - digit[1]), 3));
 
-        /* A fresh scratch: the overlay on a narrow screen maps its first one at that width, and the scratch only grows. */
-        identify.ui.scale = 1;
-        identify.ui.scratch = null, identify.ui.scratch_width = 0, identify.ui.scratch_scale = 0;
-        identify_size(20, 300);
+        identify_check_ui(1);
+        identify_badge_fit(&identify.ui, 20, 300, &narrow);
+        check("identify badge: a screen 20 px wide gets a smaller badge that is whole inside it, two pixels or more from each edge",
+              narrow.x >= 2 && narrow.x + narrow.width <= 18 && narrow.width >= 8 && narrow.size < IDENTIFY_SIZE);
+        identify.badge = narrow, identify.width = narrow.width, identify.height = narrow.height;
         memory_zero(pixels, sizeof(pixels));
-        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        inked = identify_ink_box(pixels, 800, 20, 300, 0, narrow);
-        check("identify badge: a screen 20 px wide gets a smaller badge that is whole inside it, not cut by its right edge",
-              inked && narrow[0] >= 2 && narrow[2] <= 17 && narrow[2] - narrow[0] >= 8 && narrow[3] < 300);
+        identify_paint(&identify.ui, pixels, 800, narrow.width, narrow.height);
+        inked = identify_ink_box(pixels, 800, narrow.width, narrow.height, 0xff000000u, narrow_digit);
+        check("identify badge: the number on the narrow badge is whole and black, clear of the badge's edges",
+              inked && narrow_digit[0] > 0 && narrow_digit[2] < narrow.width - 1 && narrow_digit[1] > 0 && narrow_digit[3] < narrow.height - 1);
 
-        identify_size(40, 40);
-        memory_zero(pixels, sizeof(pixels));
-        identify_paint(&identify.ui, pixels, 800, identify.width, identify.height);
-        for (int y = 0; y < 600; y++)
-                for (int x = 0; x < 800; x++)
-                        if ((x >= 40 || y >= 40) && pixels[y * 800 + x] >> 24)
-                                inside = false;
-        check("identify badge: nothing is drawn outside its screen", inside);
+        identify.own.table = null;
+}
 
+/*
+        The identify badge on the compositor's own frame, not its picture alone: the window identify_open starts is placed at
+        the badge's corner of a 256 by 256 screen by the compositor, and the frame is read back. Every pixel outside the badge,
+        its line and its corners, is the desktop as it was with no window; a frosted glass window would change them all. The
+        badge's middle is white, and its number black.
+*/
+static fn check_identify_frame(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE], desktop[GLASS_SIDE * GLASS_SIDE];
+        struct windows address_to table;
+        int bx, by, bw, bh, placed;
+        b32 outside = true;
+        unsigned int paper = 0, ink = 0;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 1;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("identify frame: the table is mapped", false);
+                return;
+        }
+        table = compositor.table;
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+        memory_copy(desktop, screen, sizeof(screen));
+
+        identify.own.table = table;
+        identify.own.row = 1;
+        identify.own.door = -1;
+        table->glass[1] = WINDOW_NO_CLOSE | WINDOW_NO_TAB; // what ui_app_run writes for the overlay's own flags
+        identify.screen = 0;
+        identify.shown = -1;
+        identify.text[0] = '8', identify.text[1] = 0;
+        identify_check_ui(1);
+        identify_open();
+        compositor_take(1);
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+
+        bx = identify.badge.x, by = identify.badge.y, bw = identify.badge.width, bh = identify.badge.height;
+        placed = compositor.showing[1] && compositor.x[1] == bx && compositor.y[1] == by && compositor.w[1] == (unsigned int)bw &&
+                 compositor.h[1] == (unsigned int)bh;
+        check("identify frame: the compositor puts the badge's window at its corner of the screen, the size of the badge", placed);
+        for (int y = 0; y < GLASS_SIDE; y++)
+                for (int x = 0; x < GLASS_SIDE; x++)
+                {
+                        int at = y * GLASS_SIDE + x, inside_box = x >= bx - 3 && x < bx + bw + 3 && y >= by - 3 && y < by + bh + 3;
+
+                        if (!inside_box && screen[at] != desktop[at])
+                                outside = false;
+                        if (x >= bx + 4 && x < bx + bw - 4 && y >= by + 4 && y < by + bh - 4)
+                        {
+                                paper += (screen[at] & 0xffffffu) == 0xffffffu;
+                                ink += (screen[at] & 0xffffffu) == 0;
+                        }
+                }
+        check("identify frame: nothing outside the badge changes from the desktop, which is not frosted", outside);
+        check("identify frame: the badge is drawn white, with its number black, on the frame", paper > 0 && ink > 0 && paper > ink);
+
+        table->pid[1] = 1;
+        compositor_leave(1);
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
+        memory_zero(&compositor, sizeof(compositor));
         identify.own.table = null;
 }
 
@@ -138888,6 +138969,7 @@ b32 main()
         check_identify_numbers();
         check_screen_arrangements();
         check_identify_picture();
+        check_identify_frame();
         check_identify_events();
         check_identify_timing();
         check_compositor_partial();

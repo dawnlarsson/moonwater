@@ -1,21 +1,20 @@
 /*
         The identify overlay: `moonwater canvas identify` shows, on each screen, its number as a badge in the screen's
-        top left corner for three seconds: black text on a white square, flat, the whole of it inside the screen. The number
-        is the one the settings' Display map gives that screen (windows_screen_numbers, window.c), so the number on a
-        screen and the number on its rectangle on the map are the same.
+        top left corner for three seconds: black text on a white square, a third of an em from the screen's edges, whole
+        on the screen. The number is the one the settings' Display map gives that screen (windows_screen_numbers,
+        window.c), so the number on a screen and the number on its rectangle on the map are the same.
 
             identify INDEX
 
         One window per screen, started by the verb with the screen's index in the table's list (windows_output's). The
-        window is glass (WINDOW_GLASS): the screen is frosted behind it, and the badge is the one opaque thing on it. It has
-        no close button and no tab (WINDOW_NO_CLOSE, WINDOW_NO_TAB), and it is placed by the
-        compositor's own placement, fullscreen on its screen (WINDOW_PLACE_FULLSCREEN with WINDOW_PLACE_SCREEN), so it
-        covers the screen, the taskbar too, and is on top as a window is when it first shows. It asks for no keys, and
-        Alt-Tab and the refocus pass over it (compositor_cycles), so it normally has none.
+        window is the badge and nothing else: a floating window the size of the badge, placed by WINDOW_PLACE_AT at its
+        corner of its screen, opaque. The rest of the screen is the desktop, not frosted. The compositor gives it the
+        frame of a floating window (its corners and its line). It has no close button and no tab (WINDOW_NO_CLOSE,
+        WINDOW_NO_TAB), and it asks for no keys: Alt-Tab and the refocus pass over it (compositor_cycles), so it
+        normally has none.
 
-        It goes away after IDENTIFY_SECONDS, or at once when its screen is pressed (any button), or when a key goes down
-        while it has the keys (should it have them). Each screen's window goes on its own: a press on one leaves the
-        others for the rest of their time.
+        It goes away after IDENTIFY_SECONDS, or at once when the badge is pressed, or when a key goes down while it has
+        the keys (should it have them). Each screen's window goes on its own: a press on one leaves the others.
 */
 #ifndef MOONWATER_CANVAS_IDENTIFY
 #define MOONWATER_CANVAS_IDENTIFY
@@ -32,6 +31,13 @@
 #define IDENTIFY_INK 0x000000u
 #define IDENTIFY_PAPER 0xffffffffu
 
+// The badge as it is fitted to a screen: size is its text's points, em its size in pixels at the screen's scale, x and
+// y its corner's margin from the screen's top left, and width and height the badge's own, which is the window's.
+struct identify_badge
+{
+        int size, em, x, y, width, height;
+};
+
 static struct identify
 {
         struct window_row own;
@@ -39,8 +45,9 @@ static struct identify
         unsigned int screen;   // the table's index of this window's screen
         unsigned int number;   // the number drawn: the screen's, from windows_screen_numbers
         char text[2];          // number as one digit, which is all eight screens need, and its null
-        int width, height;     // the screen's size, the picture's
-        unsigned int ground;   // the glass's ground, as the compositor gives it
+        struct identify_badge badge;
+        int width, height;     // the badge's size, the picture's
+        unsigned int ground;   // the window's ground, as the compositor gives it (ui_app_run reads it)
         int shown;             // the buffer the last picture went into, or -1 for none yet
         b32 dirty, focused;
         positive until;        // the monotonic clock's time the window goes at
@@ -60,30 +67,23 @@ static unsigned int identify_number(const struct windows address_to table, unsig
         return numbers[screen < count ? screen : 0];
 }
 
+// The window's size is the badge's, fitted at its start, so the compositor's size is not taken; the scratch holds a
+// digit at this scale, whatever the badge's width.
 static fn identify_size(unsigned int width, unsigned int height)
 {
-        struct windows address_to table = identify.own.table;
         unsigned int room = (unsigned int)IDENTIFY_SIZE * (unsigned int)identify.ui.scale;
 
-        identify.width = (int)(width > table->output_width ? table->output_width : width);
-        identify.height = (int)(height > table->output_height ? table->output_height : height);
-        // The scratch is at least one em wide, whatever the screen: a run is cut to the scratch's width, and a digit of
-        // this size is not as wide as its em, so a screen narrower than the digit still gets all of it, centred.
-        ui_scratch_fit(&identify.ui, width > room ? width : room);
+        (void)width, (void)height;
+        ui_scratch_fit(&identify.ui, room);
         identify.dirty = true;
 }
 
 /*
-        The badge: a white square in the top left corner, the number centred in it. Its em is the size in points at the
-        screen's scale, so it grows with the scale as the rest of the kit does; its padding is a sixth of the em, and it
-        keeps a third of an em from the screen's edges. The size is the largest from IDENTIFY_SIZE down that fits the
-        screen with its margin, so the badge is never cut by an edge; a screen smaller than the lowest size gets that.
+        The badge for a screen of width by height: the largest text size from IDENTIFY_SIZE down that fits the screen with
+        its margin, so the badge is never cut by an edge; a screen smaller than the lowest size gets that. Its em is the size
+        at the screen's scale, so it grows with the scale as the rest of the kit does. Its padding is a sixth of the em, and
+        its margin a third of it.
 */
-struct identify_badge
-{
-        int size, em, x, y, width, height;
-};
-
 static void identify_badge_fit(struct ui address_to ui, int width, int height, struct identify_badge address_to badge)
 {
         const font_face address_to faces[2] = {ui->bold ? ui->bold : ui->regular, ui->regular};
@@ -91,36 +91,40 @@ static void identify_badge_fit(struct ui address_to ui, int width, int height, s
         for (int size = IDENTIFY_SIZE;; size -= 2)
         {
                 int em = size * ui->scale, pad = em / 6, margin = em / 3;
-                int wide = ui_advance(ui, faces, identify.text, 1, (p32)em << 6) + 2 * pad;
+                int least_w = WINDOW_MIN_WIDTH * ui->scale, least_h = WINDOW_MIN_HEIGHT * ui->scale;
+                int wide = ui_advance(ui, faces, identify.text, 1, (p32)em << 6) + 2 * pad, tall = em + 2 * pad;
 
-                if ((wide + 2 * margin <= width && em + 2 * pad + 2 * margin <= height) || size <= IDENTIFY_BADGE_LOWEST)
+                // The compositor makes no window smaller than WINDOW_MIN_WIDTH by WINDOW_MIN_HEIGHT: the badge is padded to
+                // that where the screen has room for it with its margin, and is the size it was fitted to where it has not.
+                if (wide < least_w && least_w + 2 * margin <= width)
+                        wide = least_w;
+                if (tall < least_h && least_h + 2 * margin <= height)
+                        tall = least_h;
+                if ((wide + 2 * margin <= width && tall + 2 * margin <= height) || size <= IDENTIFY_BADGE_LOWEST)
                 {
                         badge->size = size, badge->em = em;
                         badge->x = margin, badge->y = margin;
-                        badge->width = wide, badge->height = em + 2 * pad;
+                        badge->width = wide, badge->height = tall;
                         return;
                 }
         }
 }
 
-// One picture: the badge over the glass in the corner, the rest of the picture clear. The picture is width by height,
-// drawn at stride pixels a row into pixels.
+// One picture: the badge, white over the whole picture, with the number in its middle. The picture is the badge's size,
+// width by height, drawn at stride pixels a row into pixels.
 static void identify_paint(struct ui address_to ui, unsigned int address_to pixels, int stride, int width, int height)
 {
-        struct identify_badge badge;
         int wide, baseline;
 
-        identify_badge_fit(ui, width, height, &badge);
         ui_begin(ui, pixels, stride, width, height);
-        ui_fill(ui, badge.x, badge.y, badge.width, badge.height, IDENTIFY_PAPER);
-        wide = ui_run(ui, 0, 0, identify.text, badge.size, true, IDENTIFY_INK, 0, 0, ui->width);
-        baseline = badge.y + badge.height / 2 + badge.em * IDENTIFY_DIGIT / 100;
-        ui_run(ui, badge.x + (badge.width - wide) / 2, baseline, identify.text, badge.size, true, IDENTIFY_INK, 255, badge.x,
-               badge.x + badge.width);
+        ui_fill(ui, 0, 0, width, height, IDENTIFY_PAPER);
+        wide = ui_run(ui, 0, 0, identify.text, identify.badge.size, true, IDENTIFY_INK, 0, 0, width);
+        baseline = height / 2 + identify.badge.em * IDENTIFY_DIGIT / 100;
+        ui_run(ui, (width - wide) / 2, baseline, identify.text, identify.badge.size, true, IDENTIFY_INK, 255, 0, width);
 }
 
-// One picture: the number in the middle of the screen, into the buffer the compositor is not reading. False when that
-// buffer is still being read, and the picture is due again.
+// One picture: the badge, into the buffer the compositor is not reading. False when that buffer is still being read, and
+// the picture is due again.
 static b32 identify_frame(void)
 {
         struct windows address_to table = identify.own.table;
@@ -139,8 +143,11 @@ static b32 identify_frame(void)
         return true;
 }
 
-// The window's start: placed fullscreen on its screen (the compositor reads the placement with the first picture), its
-// size the screen's, and its time set. The picture is the frame's own.
+/*
+        The window's start: the badge fitted to its screen, the window placed at the badge's corner of that screen and sized
+        as the badge (WINDOW_PLACE_AT with the screen and the size; the compositor reads the placement with the first
+        picture), and its time set. The picture is the frame's own.
+*/
 static int identify_open(void)
 {
         struct windows address_to table = identify.own.table;
@@ -150,11 +157,13 @@ static int identify_open(void)
         identify.screen = windows_output(table, identify.screen, &x, &y, &width, &height);
         identify.number = identify_number(table, identify.screen);
         identify.text[0] = (char)('0' + identify.number % 10), identify.text[1] = 0;
-        table->place_x[row] = table->place_y[row] = 0;
-        table->place_width[row] = table->place_height[row] = 0;
+        identify_badge_fit(&identify.ui, width, height, &identify.badge);
+        identify.width = identify.badge.width, identify.height = identify.badge.height;
+        table->place_x[row] = identify.badge.x, table->place_y[row] = identify.badge.y;
+        table->place_width[row] = (unsigned int)identify.badge.width, table->place_height[row] = (unsigned int)identify.badge.height;
         table->place_screen[row] = identify.screen;
-        __atomic_store_n(&table->place[row], WINDOW_PLACE_FULLSCREEN | WINDOW_PLACE_SCREEN, __ATOMIC_RELEASE);
-        identify_size((unsigned int)width, (unsigned int)height);
+        __atomic_store_n(&table->place[row], WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE, __ATOMIC_RELEASE);
+        identify_size((unsigned int)identify.width, (unsigned int)identify.height);
         identify.until = clock_monotonic_nanoseconds() + (positive)IDENTIFY_SECONDS * 1000000000ull;
         identify_frame();
         return -1;
@@ -189,7 +198,7 @@ static struct ui_app identify_app = {
         .ui = &identify.ui,
         .missing = (string_address) "identify: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Identify",
-        .glass = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_NO_TAB,
+        .glass = WINDOW_NO_CLOSE | WINDOW_NO_TAB,
         .nofont = (string_address) "identify: no font to draw with, pid ",
         .dirty = &identify.dirty,
         .focused = &identify.focused,
