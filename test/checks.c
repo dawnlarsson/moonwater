@@ -20306,6 +20306,30 @@ fn check_span()
                                      string_span(subject, set), size);
                         }
                 }
+
+                /*
+                        Every width from 0 to 300 at every alignment in
+                        sixteen, with a run of the set's own members that ends
+                        where it likes: the loop takes two bytes a turn, so
+                        each width's exit is its own case and the edges alone
+                        do not prove it.
+                */
+                static p8 sweep[16 + 300 + 8];
+                positive length = string_length(sets[which]);
+
+                for (positive align = 0; align < 16; align++)
+                        for (positive size = 0; size <= 300; size++)
+                        {
+                                p8 *at = sweep + align;
+                                positive run = next() % (size + 1);
+
+                                for (positive i = 0; i < size; i++)
+                                        at[i] = i < run && length ? sets[which][i % length] : (p8)'!';
+
+                                at[size] = 0;
+                                same("string_span", "every width and alignment",
+                                     string_span(at, set), reference_span(at, set));
+                        }
         }
 }
 
