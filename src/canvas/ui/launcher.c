@@ -702,10 +702,12 @@ static b32 launcher_event(const struct window_event address_to event)
         launcher_layout();
         // The field takes the pointer on its well (a caret, a drag, the middle button's paste, its menu) and the
         // clipboard's answers; the rest is the list's.
+        // A press outside the field is the list's (the field's answer to it, commit or cancel, is the kit's and changes nothing here).
         if (event->type != WINDOW_EVENT_KEY &&
             (asks = ui_field_event(&launcher.ui, launcher_field(), &launcher.menu, event,
                                    event->type == WINDOW_EVENT_MOTION ? event->a : launcher.pointer_x,
-                                   event->type == WINDOW_EVENT_MOTION ? event->b : launcher.pointer_y)))
+                                   event->type == WINDOW_EVENT_MOTION ? event->b : launcher.pointer_y)) &&
+            !(event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL)))
         {
                 if (event->type == WINDOW_EVENT_MOTION)
                         launcher.pointer_x = event->a, launcher.pointer_y = event->b;
@@ -733,14 +735,9 @@ static b32 launcher_event(const struct window_event address_to event)
                         ui_list_let_go(&launcher.ui, &launcher.list);
                         launcher.dirty = true;
                 }
-                // A mouse held on a row shows it pressed while the pointer is on that row, and not once it slides off.
-                if (launcher.press.down && !(event->flags & WINDOW_KEY_TOUCH) && (row == launcher.press.target ? row : -1) != launcher.list.down)
-                {
-                        ui_list_let_go(&launcher.ui, &launcher.list);
-                        if (row == launcher.press.target)
-                                launcher.list.down = row;
+                // A mouse held on a row shows it pressed while the pointer is on that row, and not once it slides off (the kit's).
+                if (!(event->flags & WINDOW_KEY_TOUCH) && ui_list_press_slide(&launcher.ui, &launcher.list, &launcher.press, row))
                         launcher.dirty = true;
-                }
                 break;
         case WINDOW_EVENT_WHEEL:
                 // The list turns under the wheel with the kit's glide, as the settings list does: a notch is a row.
