@@ -1000,6 +1000,9 @@ static b64 ui_exp_neg(b64 x);
 #define UI_DRAG_STILL 20    // the speed a throw stops at
 #define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, whatever the step (the wheel glide's rule)
 
+#define UI_DRAG_SAMPLES 8
+#define UI_FLING_NS 60000000ul // the window a flick's velocity is fitted over: the reports of its last 60 ms
+
 struct ui_drag
 {
         int last;          // where the finger was at the last move
@@ -1008,17 +1011,29 @@ struct ui_drag
         b64 rate;          // a throw's speed in Q30 pixels a second, the one the steps fall by e of
         positive at;       // when the last move or step was
         b32 flying;
+        int samples;       // the finger's last reports, oldest first: when, and where it was
+        positive when[UI_DRAG_SAMPLES];
+        int where[UI_DRAG_SAMPLES];
 };
 
 static fn ui_drag_start(struct ui_drag address_to drag, int at, positive now)
 {
         drag->last = at, drag->speed = 0, drag->owed = 0, drag->rate = 0, drag->at = now, drag->flying = false;
+        drag->samples = 0;
 }
 
 static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
 {
         int moved = at - drag->last;
         long gap = now > drag->at ? (long)(now - drag->at) : 0;
+
+        if (drag->samples == UI_DRAG_SAMPLES)
+        {
+                for (int k = 1; k < UI_DRAG_SAMPLES; k++)
+                        drag->when[k - 1] = drag->when[k], drag->where[k - 1] = drag->where[k];
+                drag->samples--;
+        }
+        drag->when[drag->samples] = now, drag->where[drag->samples] = at, drag->samples++;
 
         // The speed is the moves of the last few reports, the newest weighed most.
         if (gap > 0)
@@ -1030,6 +1045,31 @@ static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
         drag->last = at;
         drag->at = now;
         return moved;
+}
+
+// The finger's velocity at its lift: a least-squares line through the reports of its last UI_FLING_NS (pixels a second, signed).
+// Fitted rather than differenced, so one jittery report does not set the throw; zero with fewer than two reports in the window.
+static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
+{
+        long n = 0, st = 0, sy = 0, stt = 0, sty = 0, num, den;
+
+        for (int k = 0; k < drag->samples; k++)
+        {
+                long t;
+
+                if (now < drag->when[k] || now - drag->when[k] > UI_FLING_NS)
+                        continue;
+                t = -(long)((now - drag->when[k]) / 128ul); // 128 ns units before the lift, as a negative time: fine enough for back-to-back reports
+                n++, st += t, sy += drag->where[k], stt += t * t, sty += t * drag->where[k];
+        }
+        if (n < 2)
+                return 0;
+        num = n * sty - st * sy;
+        den = n * stt - st * st;
+        if (den <= 0)
+                return 0;
+        // A slope in pixels a 128 ns unit, times 1e9 / 128, is pixels a second.
+        return num * 7812500l / den;
 }
 
 static b32 ui_drag_let_go(struct ui_drag address_to drag, positive now)
@@ -5213,6 +5253,7 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_SCROLL_TAU_NS 36000000l     // a wheel notch's and a throw's glide: its speed falls by e in this long (a notch settles in 158 ms at 1x)
 #define UI_SCROLL_REST 128             // a glide within half a device pixel of its aim is at it
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel
+#define UI_FLING_NS_PER_PX 120000ll // a flick's throw falls by e in this much a device pixel of the region's length (a 3000 px list: 0.36 s; it settles in about six)
 #define UI_SCROLL_GLIDE 1              // the glide is built (the checks ask for it)
 
 static b64 ui_scroll_most256(const struct ui_scroll address_to s)
@@ -5457,8 +5498,13 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
         }
         if (thrown)
         {
+                // A flick's throw: its speed falls by e in a time that grows with the region's length (UI_FLING_NS_PER_PX), so a
+                // long list travels further than a short one for the same flick; the glide stops at the region's ends (ui_scroll_fit)
+                // and never passes its aim (ui_scroll_limit).
+                b64 tau = (b64)(s->content > 0 ? s->content : 1) * UI_FLING_NS_PER_PX;
+
                 s->speed = (b64)speed * UI_SCROLL_SCALE;
-                ui_scroll_glide_to(s, s->at + s->speed * UI_SCROLL_TAU_NS / 1000000000ll, UI_SCROLL_TAU_NS);
+                ui_scroll_glide_to(s, s->at + s->speed * tau / 1000000000ll, tau);
         }
         ui_scroll_show(s);
 }
@@ -7063,11 +7109,14 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
 {
         if (f->press.dragged)
         {
-                b32 thrown = ui_drag_let_go(&f->drag, clock_monotonic_nanoseconds());
+                positive now = clock_monotonic_nanoseconds();
+                // The throw's speed is the finger's velocity over its last reports (ui_drag_fling), down the screen positive; the
+                // region moves the other way (ui_finger_move).
+                long speed = ui_drag_fling(&f->drag, now);
+                b32 thrown = speed >= UI_DRAG_THROW || speed <= -UI_DRAG_THROW;
 
-                // The drag's speed is the finger's, down the screen positive; the region moves the other way (ui_finger_move).
                 if (f->region)
-                        ui_scroll_let_go(f->region, thrown, -f->drag.speed);
+                        ui_scroll_let_go(f->region, thrown, -speed);
         }
         return f->press.down ? ui_press_end(&f->press, cancelled) : -1;
 }

@@ -126050,6 +126050,7 @@ static fn check_settings(string_address regular, string_address bold)
 
                                 settings.height = 220;
                                 settings_refilter();
+                                settings_layout();
                                 settings_scroll_to(0);
                                 finger.a = (settings.page.left + settings.page.right) / 2;
                                 finger.b = settings.page.top + ui_px(&settings.ui, 60);
@@ -126057,14 +126058,14 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_event(&land);
                                 for (int step = 1; step <= 6; step++)
                                 {
-                                        finger.b -= ui_px(&settings.ui, 5);
+                                        finger.b -= ui_px(&settings.ui, 10); // short of the end, so the lift has room to throw
                                         settings_event(&finger);
                                 }
                                 check("settings: a finger dragged up the rows moves them its way, and opens nothing",
                                       settings.choice < 0 && settings.queued == 0 && settings.editing < 0);
                                 settings_event(&lift);
                                 check("settings: let go while moving, the rows are thrown, and a press stops them",
-                                      settings.finger.drag.flying && (settings_event(&land), !settings.finger.drag.flying));
+                                      settings.list.scroll.gliding && (settings_event(&land), !settings.list.scroll.gliding));
                                 lift.flags |= WINDOW_KEY_CANCEL;
                                 settings_event(&lift);
                                 lift.flags &= ~WINDOW_KEY_CANCEL;
@@ -133456,8 +133457,8 @@ static fn check_kit_place(void)
                 shown_again = ui_scroll_reveal(&glide, 400, UI_ROW);
                 revealed = revealed && reveal_steps && jumped && glide.scroll + glide.view >= 500 + UI_ROW;
 
-                // A throw is a finger's let go at 600 pixels a second: it glides the speed times the time constant (600 x 36 ms,
-                // 21.6 pixels), and it stops at 22 once it has settled.
+                // A throw is a finger's let go at 600 pixels a second on a 1000 pixel list: it glides the speed times the time constant
+                // (a time that grows with the list, 1000 x 0.12 ms: 600 x 0.12 s, 72 pixels), and it stops at 72 once it has settled.
                 ui_scroll_set(&glide, 0);
                 ui_scroll_drag(&glide, 0);
                 ui_scroll_let_go(&glide, 1, 600);
@@ -133466,13 +133467,13 @@ static fn check_kit_place(void)
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_scroll_glide(&ui, &glide);
                 }
-                thrown = !glide.gliding && glide.scroll == 22;
+                thrown = !glide.gliding && glide.scroll == 72;
 #endif
                 check("kit glide: a wheel notch aims one row on, and the position reaches it over several frames from below, never past it, in 256ths",
                       aimed && steps && reached && notch_monotone && !overshot && idle && fine);
                 check("kit glide: a wheel notch settles in 150 to 200 ms, to half a device pixel from one row (36 ms a time constant)",
                       settle_ms >= 150 && settle_ms <= 200);
-                check("kit glide: a throw glides on from the finger's let go, the speed times the time constant (22 pixels), and stops there",
+                check("kit glide: a throw glides on from the finger's let go, the speed times its length's time constant (72 pixels), and stops there",
                       thrown);
                 check("kit glide: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
                 check("kit glide: a keyboard reveal glides to the row it shows, from where the region is, and a row in view is not moved",
@@ -133618,6 +133619,63 @@ static fn check_kit_place(void)
                 check("kit list: a list's content is clipped to its view (nothing below the view changes) and its rows draw inside it",
                       changed_below == 0 && changed_inside > 0);
                 ui.top = 0, ui.bottom = 300;
+        }
+
+        // A finger's flick: its velocity is fitted over its last 60 ms, and the throw it sets falls by a time that grows with the
+        // region's length, so a fast flick on a long list travels further than a slow one, a flick on a short list stops at its
+        // end, and the throw never passes the end it stops at.
+        {
+                struct ui_drag drag;
+                struct ui_scroll long_fast, long_slow, short_list;
+                positive base = 3000000000ull;
+                long speed = 0;
+                int frame, most_short, peak_short = 0;
+                b32 fitted = false, monotone = true;
+
+                memory_zero(&drag, sizeof(drag));
+                ui_drag_start(&drag, 0, base);
+                for (int k = 1; k <= 6; k++)
+                        ui_drag_follow(&drag, k * 16, base + (positive)k * 16000000ull);
+                speed = ui_drag_fling(&drag, base + 6 * 16000000ull);
+                fitted = speed > 985 && speed < 1015;
+
+                memory_zero(&long_fast, sizeof(long_fast));
+                memory_zero(&long_slow, sizeof(long_slow));
+                long_fast.x = long_slow.x = 100, long_fast.y = long_slow.y = 10, long_fast.height = long_slow.height = 300;
+                long_fast.view = long_slow.view = 300, long_fast.content = long_slow.content = 3000;
+                ui_scroll_drag(&long_fast, 0);
+                ui_scroll_let_go(&long_fast, 1, 2000);
+                for (frame = 0; frame < 900 && long_fast.gliding; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &long_fast);
+                }
+                ui_scroll_drag(&long_slow, 0);
+                ui_scroll_let_go(&long_slow, 1, 400);
+                for (frame = 0; frame < 900 && long_slow.gliding; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &long_slow);
+                }
+
+                memory_zero(&short_list, sizeof(short_list));
+                short_list.x = 100, short_list.y = 10, short_list.height = 300, short_list.view = 300, short_list.content = 500;
+                most_short = ui_scroll_most(&short_list);
+                ui_scroll_drag(&short_list, 0);
+                ui_scroll_let_go(&short_list, 1, 5000);
+                for (frame = 0; frame < 900 && short_list.gliding; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &short_list);
+                        peak_short = short_list.scroll > peak_short ? short_list.scroll : peak_short;
+                        monotone = monotone && short_list.scroll >= 0 && short_list.scroll <= most_short;
+                }
+                check("kit flick: a finger's velocity is the fitted line through its last 60 ms of reports (a 1000 px a second drag reads 1000)",
+                      fitted);
+                check("kit flick: a fast flick on a long list travels further than a slow one, and both settle short of its end",
+                      long_fast.scroll > 2 * long_slow.scroll && long_slow.scroll > 0 && long_fast.scroll < 3000 - 300 && !long_fast.gliding);
+                check("kit flick: a flick on a short list stops at its end, and the throw never passes it",
+                      short_list.scroll == most_short && peak_short == most_short && monotone && !short_list.gliding);
         }
 
         // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
@@ -134301,7 +134359,7 @@ static fn check_kit_states(void)
                 ui_scroll_let_go(&throw_, 1, 3000);
                 frames = sweep_settle_scroll(&ui, &throw_);
                 check("kit states: a throw glides on from its speed, stops at its aim and goes idle",
-                      frames > 0 && !throw_.gliding && !throw_.dragging && !throw_.back.live && throw_.scroll > 80 && throw_.scroll < 200);
+                      frames > 0 && !throw_.gliding && !throw_.dragging && !throw_.back.live && throw_.scroll > 400 && throw_.scroll < 480);
         }
 
         // Scroll: the hand comes onto the thumb and leaves it; the bar goes lit and back, and the frame is idle after each.
