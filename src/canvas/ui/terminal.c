@@ -214,11 +214,6 @@ static struct
 
 static unsigned int terminal_colour[256];
 
-static unsigned int terminal_palette(unsigned int index)
-{
-        return terminal_colour[index & 255];
-}
-
 // The theme's default ink and paper, as 0xrrggbb: the roles the kit sets text and surfaces in, light or dark. A cell the program
 // did not colour is drawn in them, and in reverse video the two trade places.
 static unsigned int terminal_default_ink(void)
@@ -244,6 +239,16 @@ static unsigned int terminal_paper_of(const struct window_cell address_to cell)
         if (cell->flags & WINDOW_CELL_PAPER_SET)
                 return terminal_colour[cell->paper];
         return cell->flags & WINDOW_CELL_SWAP ? terminal_default_ink() : terminal_default_paper();
+}
+
+// What a program is answered for a colour index: the palette's, or for the default ink and paper (OSC 10 and 11), the theme's.
+static unsigned int terminal_palette(unsigned int index)
+{
+        if (index == TERM_INDEX_INK)
+                return terminal_default_ink();
+        if (index == TERM_INDEX_PAPER)
+                return terminal_default_paper();
+        return terminal_colour[index & 255];
 }
 
 /* ---- the view: which cells are on the screen ---- */

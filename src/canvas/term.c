@@ -910,6 +910,11 @@ static CONST unsigned int acs_character(unsigned int c)
 // program that paints with a theme paints from, so that what is answered is what is on the screen.
 static unsigned int (*term_palette)(unsigned int index);
 
+// What OSC 10, 11 and 12 ask for, as indices past the palette: the default ink and the default paper, which term_palette
+// answers with the theme's. Where there is no term_palette, the same questions are answered from the palette's 7 and 0.
+#define TERM_INDEX_INK 256
+#define TERM_INDEX_PAPER 257
+
 // A colour in xterm's spelling, sixteen bits a channel, ended the way the
 // question was.
 static fn osc_colour(unsigned int colour, b32 bell)
@@ -994,7 +999,7 @@ static fn osc_finish(b32 bell)
         */
         while (command == 4 || (command >= 10 && command <= 12))
         {
-                unsigned int index = command == 11 ? 0 : 7;
+                unsigned int index = command == 11 ? TERM_INDEX_PAPER : TERM_INDEX_INK;
 
                 if (command == 4)
                 {
@@ -1006,7 +1011,7 @@ static fn osc_finish(b32 bell)
                                 break;
                 }
 
-                if (i < osc_length && osc_bytes[i] == '?' && index < 256 &&
+                if (i < osc_length && osc_bytes[i] == '?' && (command != 4 || index < 256) &&
                     answering())
                 {
                         emit_literal("\x1b]");
@@ -1017,7 +1022,9 @@ static fn osc_finish(b32 bell)
                                 positive_to_string(emit_bytes, index);
                                 emit(';');
                         }
-                        osc_colour(term_palette ? term_palette(index) : window_cell_colour(index), bell);
+                        osc_colour(term_palette ? term_palette(index)
+                                                : window_cell_colour(index == TERM_INDEX_PAPER ? 0 : index == TERM_INDEX_INK ? 7 : index),
+                                   bell);
                 }
 
                 while (i < osc_length && osc_bytes[i++] != ';')
