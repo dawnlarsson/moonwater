@@ -6,6 +6,8 @@
     python3 test/differential.py FARM --domain shell --mode dash
     python3 test/differential.py FARM --replay ARTIFACT.json
     python3 test/differential.py --self-test
+    python3 test/differential.py --bench byte_to_upper            current body, every machine
+    python3 test/differential.py --bench bits_first_set --candidate HEAD~1 --sizes 8,64 --arch riscv64
 
 A spec module (spec_<domain>.py for each name in DOMAINS)
 declares the surface of each program as a grammar: its options, the values an
@@ -36,11 +38,13 @@ import ast
 import base64
 import bisect
 import collections
+import contextlib
 import dataclasses
 import fcntl
 import hashlib
 import inspect
 import importlib
+import io
 import itertools
 import json
 import math
@@ -57,6 +61,7 @@ import stat
 import statistics
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import zlib
@@ -1854,6 +1859,662 @@ def show(data, limit=160):
     return text + ("..." if len(data) > limit else "")
 
 
+#       --bench ROUTINE is the one measurement path for a lib.c routine, so
+#       that every per-routine sweep is measured the same way. The current
+#       body is measured, and with --candidate REF the body that ref's src/
+#       holds. Both come from one driver text: a program that includes
+#       src/lib.c and runs a dependent chain of calls, argv naming the mode,
+#       the call count and the operand size. Each machine counts or times it:
+#       x86-64 on the box under perf stat (instructions:u and cycles:u, the
+#       one-call run subtracted as test/insns does it), riscv64 on the box
+#       under qemu-user with test/insn.c (counts only, cycles unmeasured),
+#       arm64 natively on this Mac under the timing lock (the median of
+#       BENCH_TRIALS interleaved runs, cycles unmeasured). A figure per call
+#       is the run less a nop control: the same driver with the call replaced
+#       by its own argument, over the same calls, so the loop and the operand
+#       feed cancel. A routine of one scalar argument runs at size 1; one
+#       taking a buffer and its length runs at each --sizes value. Each
+#       variant's outputs are digested over fixed inputs; a digest that differs
+#       between current and candidate, or a value that differs from the C
+#       definition in test/checks.c (BENCH_REFERENCE), exits non-zero.
+
+BENCH_ARCHES = ("x86_64", "arm64", "riscv64")
+BENCH_REFERENCE = {"byte_to_upper": "byte_case_upper", "bits_first_set": "bit_test_first"}
+BENCH_TIE = {"instructions": 0.005, "ns": 0.03}
+BENCH_TRIALS = 9
+BENCH_THRESHOLD = 64
+BENCH_BOX = "box"
+BENCH_BOX_ROOT = "/home/dawn/mw-bench"
+BENCH_SCALAR_CHECKS = 131200
+BENCH_LENGTHS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
+                 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097)
+BENCH_COLUMNS = ("routine", "arch", "size", "variant", "unit", "per_call", "cycles", "ratio", "verdict")
+
+
+class BenchRefused(Exception):
+    """A routine or a machine the bench path cannot measure; the message says why."""
+
+
+def bench_prototype(lib_text, name):
+    """(shape, return type, [(type, name), ...]) of the public prototype of NAME in lib.c."""
+    found = re.search(r"^[ \t]*(?:(?:CONST|PURE)[ \t]+)*([A-Za-z_]\w*)[ \t]+%s[ \t]*\(([^()]*)\)[ \t]*;"
+                      % re.escape(name), lib_text, re.M)
+    if not found:
+        raise BenchRefused("lib.c declares no prototype for %s" % name)
+    ret, body = found.group(1), found.group(2).strip()
+    if ret == "void":
+        raise BenchRefused("%s returns void; the bench path times integer results" % name)
+    params = []
+    if body not in ("", "void"):
+        for piece in body.split(","):
+            one = re.fullmatch(r"\s*(.*?)\s*\b([A-Za-z_]\w*)\s*", piece)
+            if not one:
+                raise BenchRefused("cannot read the parameter %r of %s" % (piece.strip(), name))
+            params.append((one.group(1), one.group(2)))
+
+    def pointer(kind):
+        return bool(re.search(r"\*|\baddress_to\b|\baddress_any\b|\bstring_address\b", kind))
+
+    if len(params) == 1 and not pointer(params[0][0]):
+        return "scalar", ret, params
+    if len(params) == 2 and pointer(params[0][0]) and not pointer(params[1][0]):
+        return "buffer", ret, params
+    raise BenchRefused("%s takes (%s): the bench path measures one value, or one buffer and its length"
+                       % (name, ", ".join(kind for kind, _ in params) or "nothing"))
+
+
+def bench_reference(checks_text, name):
+    """The C definition of NAME in test/checks.c, from its header line to the closing brace."""
+    lines = checks_text.split("\n")
+    for at, line in enumerate(lines):
+        if re.match(r"[A-Za-z_][\w \*]*\b%s\(" % re.escape(name), line):
+            end = at
+            while end < len(lines) and lines[end] != "}":
+                end += 1
+            if end < len(lines):
+                return "\n".join(lines[at:end + 1])
+            break
+    raise BenchRefused("test/checks.c has no C definition of %s" % name)
+
+
+def bench_calls(shape, size):
+    """(timed calls, counted calls): a run long enough to time, and one short enough to count
+    under qemu for the longest operands."""
+    if shape == "scalar":
+        return 1 << 26, 1 << 16
+    return max(1024, min(1 << 26, (1 << 30) // size)), max(256, min(1 << 16, (1 << 22) // size))
+
+
+BENCH_COMMON = """static volatile unsigned long long bench_sink;
+static unsigned char bench_buffer[65536 + 128];
+static unsigned long long bench_input[1024];
+static unsigned long long bench_seed = 0x9e3779b97f4a7c15ULL;
+
+static unsigned long long bench_next(void)
+{
+        bench_seed = bench_seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        return bench_seed >> 11;
+}
+
+static unsigned long long bench_pick(unsigned long long k)
+{
+        if (k < 65536ULL)
+                return k;
+        if (k < 65600ULL)
+                return 1ULL << (k - 65536ULL);
+        if (k < 65664ULL)
+                return ~(1ULL << (k - 65600ULL));
+        return bench_next();
+}
+
+static void bench_count(positive calls, positive size)
+{
+        RET x = 0;
+
+        (void)size;
+        for (positive k = 0; k < sizeof bench_buffer; k++)
+                bench_buffer[k] = (unsigned char)(1 + bench_next() % 255);
+        for (positive k = 0; k < 1024; k++)
+                bench_input[k] = bench_next();
+        for (positive i = 0; i < calls; i++)
+                STEP
+        bench_sink = (unsigned long long)x;
+}
+"""
+
+BENCH_FREE_IO = """static positive bench_number(string_address text)
+{
+        positive value = 0;
+
+        for (positive at = 0; text[at] >= '0' && text[at] <= '9'; at++)
+                value = value * 10 + (positive)(text[at] - '0');
+        return value;
+}
+
+static void bench_word(unsigned long long value)
+{
+        unsigned char text[17];
+
+        for (positive at = 0; at < 16; at++)
+        {
+                text[15 - at] = (unsigned char)"0123456789abcdef"[value & 15];
+                value >>= 4;
+        }
+        text[16] = ' ';
+        system_write_all(1, text, 17);
+}
+
+static void bench_line(unsigned long long digest, unsigned long long mismatches, unsigned long long checks)
+{
+        bench_word(digest);
+        bench_word(mismatches);
+        bench_word(checks);
+        system_write_all(1, "\\n", 1);
+}
+"""
+
+BENCH_FREE_MAIN = """
+b32 main(void)
+{
+        string_address mode = program_argument(1);
+        positive calls = bench_number(program_argument(2));
+        positive size = bench_number(program_argument(3));
+
+        if (mode[0] == '1')
+        {
+                bench_check_run(size);
+                return 0;
+        }
+        bench_count(calls, size);
+        return 0;
+}
+"""
+
+BENCH_HOSTED_PRELUDE = """#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+typedef unsigned char p8;
+typedef unsigned short p16;
+typedef unsigned int p32;
+typedef unsigned long long p64;
+typedef signed char b8;
+typedef short b16;
+typedef int b32;
+typedef long long b64;
+typedef p64 positive;
+typedef b64 bipolar;
+typedef p8 *string_address;
+#define CONST
+#define PURE
+#define address_to *
+#define address_any void *
+"""
+
+BENCH_HOSTED_IO = """static double bench_now(void)
+{
+        struct timespec now;
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return (double)now.tv_sec * 1e9 + (double)now.tv_nsec;
+}
+
+static void bench_line(unsigned long long digest, unsigned long long mismatches, unsigned long long checks)
+{
+        printf("%016llx %016llx %016llx\\n", digest, mismatches, checks);
+}
+"""
+
+BENCH_HOSTED_MAIN = """
+int main(int argc, char **argv)
+{
+        positive calls, size;
+
+        (void)argc;
+        calls = (positive)strtoull(argv[2], 0, 10);
+        size = (positive)strtoull(argv[3], 0, 10);
+        if (argv[1][0] == '1')
+        {
+                bench_check_run(size);
+                return 0;
+        }
+        {
+                double began = bench_now();
+
+                bench_count(calls, size);
+                printf("%.0f\\n", bench_now() - began);
+        }
+        return 0;
+}
+"""
+
+def bench_driver(routine, shape, ret, params, reference, hosted, nop, reference_text="", native=""):
+    """The C program one variant is built from.
+
+    Mode 1 (argv[1]) checks the routine's outputs over fixed inputs and prints
+    a digest, the mismatches against the reference and the checks made. Any
+    other mode runs the dependent chain of calls and nothing else. The nop
+    build has the call replaced by its own argument, and no check."""
+    if shape == "scalar":
+        arg = params[0][0]
+        if nop:
+            step = "x = (%s)((%s)((unsigned long long)x + bench_input[i & 1023]));" % (ret, arg)
+        else:
+            step = "x = (%s)%s((%s)((unsigned long long)x + bench_input[i & 1023]));" % (ret, routine, arg)
+        check_size = ""
+    else:
+        size_type = params[1][0]
+        if nop:
+            step = "x = (%s)bench_buffer[x & 1];" % ret
+        else:
+            step = "x = (%s)%s((void *)(bench_buffer + (x & 1)), (%s)size);" % (ret, routine, size_type)
+        check_size = size_type
+
+    if nop:
+        check = ("static void bench_check_run(positive size)\n{\n"
+                 "        (void)size;\n        bench_line(0, 0, 0);\n}\n")
+    elif shape == "scalar":
+        compare = ("if ((unsigned long long)r != (unsigned long long)(%s)%s(v))\n"
+                   "                        mismatches++;" % (ret, reference)) if reference else "(void)0;"
+        check = ("static void bench_check_run(positive size)\n{\n"
+                 "        unsigned long long digest = 1469598103934665603ULL, mismatches = 0, checks = 0;\n\n"
+                 "        (void)size;\n"
+                 "        for (unsigned long long k = 0; k < %dULL; k++)\n"
+                 "        {\n"
+                 "                %s v = (%s)bench_pick(k);\n"
+                 "                %s r = (%s)%s(v);\n\n"
+                 "                digest = (digest ^ (unsigned long long)r) * 1099511628211ULL;\n"
+                 "                checks++;\n"
+                 "                %s\n"
+                 "        }\n"
+                 "        bench_line(digest, mismatches, checks);\n}\n"
+                 % (BENCH_SCALAR_CHECKS, arg, arg, ret, ret, routine, compare))
+    else:
+        compare = ("if ((unsigned long long)r != (unsigned long long)(%s)%s((void *)(bench_buffer + off), "
+                   "(%s)length))\n                        mismatches++;" % (ret, reference, check_size)) \
+            if reference else "(void)0;"
+        check = ("static void bench_check_run(positive size)\n{\n"
+                 "        static const unsigned long long fixed[] = {%s};\n"
+                 "        unsigned long long digest = 1469598103934665603ULL, mismatches = 0, checks = 0;\n"
+                 "        unsigned long long lengths[64];\n"
+                 "        positive count = 0;\n\n"
+                 "        for (positive k = 0; k < sizeof bench_buffer; k++)\n"
+                 "                bench_buffer[k] = (unsigned char)(1 + bench_next() %% 255);\n"
+                 "        for (positive k = 0; k < sizeof fixed / sizeof fixed[0]; k++)\n"
+                 "                lengths[count++] = fixed[k];\n"
+                 "        lengths[count++] = size;\n"
+                 "        lengths[count++] = size - 1;\n"
+                 "        for (positive at = 0; at < count; at++)\n"
+                 "                for (positive off = 0; off < 8; off++)\n"
+                 "                {\n"
+                 "                        unsigned long long length = lengths[at];\n"
+                 "                        %s r = (%s)%s((void *)(bench_buffer + off), (%s)length);\n\n"
+                 "                        digest = (digest ^ (unsigned long long)r) * 1099511628211ULL;\n"
+                 "                        checks++;\n"
+                 "                        %s\n"
+                 "                }\n"
+                 "        bench_line(digest, mismatches, checks);\n}\n"
+                 % (", ".join(str(n) for n in BENCH_LENGTHS), ret, ret, routine, check_size, compare))
+
+    if hosted:
+        head = BENCH_HOSTED_PRELUDE
+        if not nop:
+            head += "extern %s %s(%s);\n" % (ret, routine, ", ".join("%s %s" % pair for pair in params))
+            head += '#include "%s"\n' % native
+        io_text, main = BENCH_HOSTED_IO, BENCH_HOSTED_MAIN
+    else:
+        head = '#include "src/lib.c"\n'
+        io_text, main = BENCH_FREE_IO, BENCH_FREE_MAIN
+    if reference_text and not nop:
+        head += reference_text + "\n"
+    common = BENCH_COMMON.replace("RET", ret).replace("STEP", step)
+    return head + "\n" + common + "\n" + io_text + "\n" + check + main
+
+
+def bench_export(root, ref, into):
+    """The src/ tree as it stands at REF, unpacked under INTO."""
+    if subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", ref + "^{commit}"],
+                      capture_output=True).returncode:
+        raise BenchRefused("no commit called %s" % ref)
+    archive = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", ref, "src"],
+                             capture_output=True)
+    if archive.returncode:
+        raise BenchRefused("git archive %s src: %s" % (ref, archive.stderr.decode(errors="replace").strip()))
+    into.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(into)
+
+
+def bench_native(lib, routine, out):
+    """The arm64 body of ROUTINE lifted out of LIB as a native C header (native_extract)."""
+    got = harness_native_extract_captured([str(lib), routine])
+    if got.returncode:
+        raise BenchRefused("no arm64 body of %s in %s: %s" % (routine, lib, got.stderr.strip()))
+    out.write_text(got.stdout)
+
+
+@contextlib.contextmanager
+def bench_timing_lock(root):
+    """The arm64 timing lock: a directory in the repository's common git dir, shared by every
+    worktree on this Mac. Waits while another run holds it; a holder whose process is gone is
+    taken over."""
+    common = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+                            capture_output=True, text=True).stdout.strip()
+    lock = (root / common).resolve() / "mw-timing.lock"
+    waited = 0
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            try:
+                owner = int((lock / "owner").read_text().strip())
+            except (OSError, ValueError):
+                owner = 0
+            if owner > 0:
+                try:
+                    os.kill(owner, 0)
+                except ProcessLookupError:
+                    shutil.rmtree(lock, ignore_errors=True)
+                    continue
+                except PermissionError:
+                    pass
+            elif time.time() - lock.stat().st_mtime > 60:
+                shutil.rmtree(lock, ignore_errors=True)
+                continue
+            if waited and waited % 60 == 0:
+                print("bench: waiting for the timing lock %s" % lock, file=sys.stderr)
+            time.sleep(2)
+            waited += 2
+    (lock / "owner").write_text(str(os.getpid()))
+    try:
+        yield lock
+    finally:
+        shutil.rmtree(lock, ignore_errors=True)
+
+
+BENCH_COUNT_AWK = """$3 == "instructions:u" { ins = $1 }
+$3 == "cycles:u" { cyc = $1 }
+END { printf "%s %s\\n", (ins == "" ? "x" : ins), (cyc == "" ? "x" : cyc) }
+"""
+
+
+def bench_box_script(arches, variants, sizes, counted):
+    """The shell script the box runs: build each variant per machine, then count and check it.
+    Prints COUNT and CHECK lines for the Mac to read."""
+    built = variants + ["nop"]
+    lines = ["set -u", 'cd "$(dirname "$0")" || exit 1',
+             "[ -f insn.so ] || gcc -O2 -shared -fPIC $(pkg-config --cflags glib-2.0) -o insn.so insn.c || exit 1"]
+    for arch in arches:
+        if arch == "x86_64":
+            cc, flags, runner = "gcc", "-march=x86-64", "perf"
+        else:
+            cc, flags, runner = "riscv64-linux-gnu-gcc", "-march=rv64imafd_zicsr_zicntr -mabi=lp64d", "qemu"
+        for v in built:
+            root = "current" if v == "nop" else v
+            source = "nop.c" if v == "nop" else "driver.c"
+            lines.append("%s -O2 -static -nostdlib -nostartfiles -fno-stack-protector -fno-builtin -w %s "
+                         "-I%s -T%s/src/build/spark.ld -Wl,-e,_start -Wl,--build-id=none "
+                         "-Wl,--no-warn-rwx-segments -o %s.%s %s || exit 1"
+                         % (cc, flags, root, root, arch, v, source))
+        for size in sizes:
+            for v in built:
+                for n in (1, counted[size]):
+                    if runner == "perf":
+                        lines.append("perf stat -x, -o perf.out -e instructions:u,cycles:u -- ./%s.%s 0 %d %d "
+                                     ">/dev/null 2>&1" % (arch, v, n, size))
+                        lines.append('echo "COUNT %s %s %d %d $(awk -F, -f count.awk perf.out)"'
+                                     % (arch, v, size, n))
+                    else:
+                        lines.append("qemu-riscv64 -plugin ./insn.so ./%s.%s 0 %d %d >/dev/null 2>plug.err"
+                                     % (arch, v, n, size))
+                        lines.append('echo "COUNT %s %s %d %d $(tail -n 1 plug.err) unmeasured"'
+                                     % (arch, v, size, n))
+            for v in variants:
+                if runner == "perf":
+                    lines.append('echo "CHECK %s %s %d $(./%s.%s 1 0 %d)"' % (arch, v, size, arch, v, size))
+                else:
+                    lines.append('echo "CHECK %s %s %d $(qemu-riscv64 ./%s.%s 1 0 %d)"'
+                                 % (arch, v, size, arch, v, size))
+    return "\n".join(lines) + "\n"
+
+
+def bench_box(root, arches, variants, sizes, counted, drivers, scratch):
+    """Build and run the x86-64 and riscv64 halves on the box; returns (counts, checks):
+    counts[(arch, variant, size, calls)] = (instructions, cycles) and checks[(arch, variant, size)]
+    = (digest, mismatches, checks), all as strings from the box. DRIVERS maps the source
+    names (driver.c for the routine, nop.c for its control) to their text."""
+    if subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", BENCH_BOX, "true"],
+                      capture_output=True).returncode:
+        raise BenchRefused("the box does not answer (ssh %s)" % BENCH_BOX)
+    local = scratch / "box"
+    local.mkdir()
+    for name, text in drivers.items():
+        (local / name).write_text(text)
+    shutil.copy(root / "test/insn.c", local / "insn.c")
+    (local / "count.awk").write_text(BENCH_COUNT_AWK)
+    (local / "run.sh").write_text(bench_box_script(arches, variants, sizes, counted))
+    remote = "%s/run-%d-%d" % (BENCH_BOX_ROOT, os.getpid(), time.time_ns())
+    subprocess.run(["ssh", "-n", BENCH_BOX, "mkdir -p %s %s/current %s/candidate" % (BENCH_BOX_ROOT, remote, remote)],
+                   check=True)
+    try:
+        for name, src in [("current", root)] + ([("candidate", scratch / "candidate")] if "candidate" in variants else []):
+            subprocess.run(["rsync", "-az", "--delete", str(src / "src") + "/", "%s:%s/%s/src/" % (BENCH_BOX, remote, name)],
+                           check=True)
+        subprocess.run(["rsync", "-az", str(local) + "/", "%s:%s/" % (BENCH_BOX, remote)], check=True)
+        ran = subprocess.run(["ssh", BENCH_BOX, "cd %s && sh run.sh" % remote], capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, timeout=1800)
+    finally:
+        subprocess.run(["ssh", "-n", BENCH_BOX, "rm -rf %s" % remote], capture_output=True)
+    if ran.returncode:
+        raise BenchRefused("the box run failed: %s" % (ran.stderr.strip() or ran.stdout.strip())[-600:])
+    counts, checks = {}, {}
+    for line in ran.stdout.splitlines():
+        words = line.split()
+        if words[:1] == ["COUNT"] and len(words) == 7:
+            counts[(words[1], words[2], int(words[3]), int(words[4]))] = (words[5], words[6])
+        elif words[:1] == ["CHECK"] and len(words) == 7:
+            checks[(words[1], words[2], int(words[3]))] = tuple(words[4:7])
+    return counts, checks
+
+
+def bench_local_driver_run(binary, mode, calls, size):
+    return subprocess.run([str(binary), mode, str(calls), str(size)], capture_output=True, text=True)
+
+
+def bench_arm64(root, variants, sizes, shape, routine, ret, params, reference_text, scratch):
+    """Build each variant natively for this Mac, check it, and time it under the timing lock.
+    Returns (per_call ns by (variant, size), checks by (variant, size))."""
+    binaries = {}
+    for v in variants + ["nop"]:
+        source = scratch / ("arm.%s.c" % v)
+        native = scratch / ("native.%s.h" % v)
+        if v != "nop":
+            lib = (root if v == "current" else scratch / "candidate") / "src/lib.c"
+            bench_native(lib, routine, native)
+        source.write_text(bench_driver(routine, shape, ret, params, BENCH_REFERENCE.get(routine),
+                                       hosted=True, nop=(v == "nop"), reference_text=reference_text,
+                                       native=str(native)))
+        binary = scratch / ("arm.%s" % v)
+        built = subprocess.run(["clang", "-O2", "-w", "-o", str(binary), str(source)], capture_output=True, text=True)
+        if built.returncode:
+            raise BenchRefused("the arm64 %s driver did not build: %s" % (v, built.stderr.strip()[-600:]))
+        binaries[v] = binary
+    checks = {}
+    for size in sizes:
+        for v in variants:
+            got = bench_local_driver_run(binaries[v], "1", 0, size)
+            words = got.stdout.split()
+            if got.returncode or len(words) != 3:
+                raise BenchRefused("arm64 %s check did not answer: %s" % (v, got.stderr.strip()))
+            checks[("arm64", v, size)] = tuple(words)
+    per_call = {}
+    with bench_timing_lock(root):
+        for size in sizes:
+            timed, _ = bench_calls(shape, size)
+            order = variants + ["nop"]
+            samples = {v: [] for v in order}
+            for trial in range(BENCH_TRIALS):
+                turn = trial % len(order)
+                for v in order[turn:] + order[:turn]:
+                    got = bench_local_driver_run(binaries[v], "0", timed, size)
+                    if got.returncode or not got.stdout.strip():
+                        raise BenchRefused("arm64 %s timing did not answer" % v)
+                    samples[v].append(float(got.stdout.split()[-1]))
+            for v in variants:
+                paired = [(samples[v][t] - samples["nop"][t]) / timed for t in range(BENCH_TRIALS)]
+                per_call[("arm64", v, size)] = statistics.median(paired)
+    return per_call, checks
+
+
+def bench_rows(routine, arches, sizes, variants, per_call, cycles, threshold, tie):
+    """The TSV rows and the verdicts: each candidate row against the current row of its arch and size."""
+    rows = []
+    for arch in arches:
+        unit = "ns" if arch == "arm64" else "instructions"
+        for size in sizes:
+            base = per_call.get((arch, "current", size))
+            for v in variants:
+                value = per_call.get((arch, v, size))
+                cyc = cycles.get((arch, v, size))
+                if value is None:
+                    rows.append((routine, arch, size, v, unit, "unmeasured", "unmeasured", "-", "-"))
+                    continue
+                cell = "unmeasured" if cyc is None else "%.2f" % cyc
+                if v == "current":
+                    rows.append((routine, arch, size, v, unit, format_value(arch, value), cell, "1.000", "-"))
+                    continue
+                if not base:
+                    rows.append((routine, arch, size, v, unit, format_value(arch, value), cell, "n/a", "-"))
+                    continue
+                ratio = value / base
+                band = BENCH_TIE[unit] if tie is None else tie
+                if ratio < 1 - band:
+                    verdict = "won"
+                elif ratio > 1 + band:
+                    verdict = "regressed" if size < threshold else "lost"
+                else:
+                    verdict = "tied"
+                rows.append((routine, arch, size, v, unit, format_value(arch, value), cell,
+                             "%.3f" % ratio, verdict))
+    return rows
+
+
+def format_value(arch, value):
+    return "%.3f" % value if arch == "arm64" else "%.2f" % value
+
+
+def bench_entry(args):
+    """--bench ROUTINE [--candidate REF] [--sizes N,N] [--arch A] [--threshold N] [--tie F]."""
+    root = HARNESS_ROOT
+    routine = args.bench
+    try:
+        lib_text = (root / "src/lib.c").read_text()
+        shape, ret, params = bench_prototype(lib_text, routine)
+        reference = BENCH_REFERENCE.get(routine)
+        reference_text = bench_reference((root / "test/checks.c").read_text(), reference) if reference else ""
+        if shape == "scalar":
+            sizes = [1]
+            if args.sizes and args.sizes.strip() not in ("1", ""):
+                print("bench: %s takes one value; it runs at size 1 (--sizes ignored)" % routine, file=sys.stderr)
+        else:
+            sizes = [int(part) for part in (args.sizes or "8,64,4096").split(",")]
+            if any(size < 1 or size > 65536 for size in sizes):
+                raise BenchRefused("--sizes must be between 1 and 65536 for a buffer routine")
+        arches = list(args.arch or BENCH_ARCHES)
+        if "arm64" in arches and (os.uname().sysname, os.uname().machine) != ("Darwin", "arm64"):
+            raise BenchRefused("arm64 is timed natively on the Mac; this host is %s %s"
+                               % (os.uname().sysname, os.uname().machine))
+        with tempfile.TemporaryDirectory(prefix="bench-") as work:
+            scratch = Path(work)
+            variants = ["current"]
+            if args.candidate:
+                bench_export(root, args.candidate, scratch / "candidate")
+                variants.append("candidate")
+            per_call, cycles, checks = {}, {}, {}
+            box_arches = [arch for arch in arches if arch != "arm64"]
+            if box_arches:
+                counted = {size: bench_calls(shape, size)[1] for size in sizes}
+                drivers = {
+                    "driver.c": bench_driver(routine, shape, ret, params, reference, hosted=False,
+                                             nop=False, reference_text=reference_text),
+                    "nop.c": bench_driver(routine, shape, ret, params, reference, hosted=False, nop=True),
+                }
+                counts, box_checks = bench_box(root, box_arches, variants, sizes, counted, drivers, scratch)
+                checks.update(box_checks)
+                for arch in box_arches:
+                    for size in sizes:
+                        for v in variants:
+                            got = bench_difference(counts, arch, v, size, counted[size])
+                            if got is not None:
+                                per_call[(arch, v, size)] = got[0]
+                                if got[1] is not None:
+                                    cycles[(arch, v, size)] = got[1]
+            if "arm64" in arches:
+                arm_per, arm_checks = bench_arm64(root, variants, sizes, shape, routine, ret, params,
+                                                  reference_text, scratch)
+                per_call.update(arm_per)
+                checks.update(arm_checks)
+            rows = bench_rows(routine, arches, sizes, variants, per_call, cycles, args.threshold, args.tie)
+    except BenchRefused as refused:
+        print("bench: %s" % refused, file=sys.stderr)
+        return 2
+    print("\t".join(BENCH_COLUMNS))
+    for row in rows:
+        print("\t".join(str(cell) for cell in row))
+    failed = bench_verdicts(arches, sizes, variants, checks, reference)
+    return 1 if failed or any(row[5] == "unmeasured" for row in rows) else 0
+
+
+def bench_difference(counts, arch, variant, size, counted):
+    """Per-call (instructions or ns, cycles or None) of VARIANT: the counted run less its
+    one-call run, less the same difference for the nop control, over the calls between."""
+    def take(name, n):
+        got = counts.get((arch, name, size, n))
+        return got
+
+    one = take(variant, 1)
+    many = take(variant, counted)
+    nop_one = take("nop", 1)
+    nop_many = take("nop", counted)
+    if not (one and many and nop_one and nop_many):
+        return None
+    try:
+        ins = ((int(many[0]) - int(one[0])) - (int(nop_many[0]) - int(nop_one[0]))) / (counted - 1)
+    except ValueError:
+        return None
+    try:
+        cyc = ((int(many[1]) - int(one[1])) - (int(nop_many[1]) - int(nop_one[1]))) / (counted - 1)
+    except ValueError:
+        cyc = None
+    return ins, cyc
+
+
+def bench_verdicts(arches, sizes, variants, checks, reference):
+    """Report every output that differs between current and candidate, or from the C reference.
+    Returns the number of such failures."""
+    failed = 0
+    for arch in arches:
+        for size in sizes:
+            seen = {}
+            for v in variants:
+                got = checks.get((arch, v, size))
+                if got is None:
+                    print("bench: %s %s size %d: the check did not run" % (arch, v, size), file=sys.stderr)
+                    failed += 1
+                    continue
+                seen[v] = got
+                if reference and int(got[1], 16) != 0:
+                    print("bench: %s %s size %d: %d of %d outputs differ from %s"
+                          % (arch, v, size, int(got[1], 16), int(got[2], 16), reference), file=sys.stderr)
+                    failed += 1
+            if len(seen) == 2 and seen["current"] != seen["candidate"]:
+                print("bench: %s size %d: the candidate's outputs differ from the current ones (digests %s, %s)"
+                      % (arch, size, seen["current"][0], seen["candidate"][0]), file=sys.stderr)
+                failed += 1
+    return failed
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1899,10 +2560,28 @@ def main(argv=None):
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--harness", nargs=argparse.REMAINDER,
                         help="run one of the folded standalone checks: --harness NAME [ARGS]")
+    parser.add_argument("--bench", metavar="ROUTINE",
+                        help="measure one lib.c routine on every machine (or --arch), current against "
+                             "--candidate; one TSV row per arch, size and variant; exits non-zero on "
+                             "any output that differs")
+    parser.add_argument("--candidate", metavar="REF",
+                        help="for --bench: the git ref whose src/ is the candidate body")
+    parser.add_argument("--sizes", help="for --bench: operand sizes, comma separated "
+                                        "(default 8,64,4096; a routine of one value runs at 1)")
+    parser.add_argument("--arch", action="append", choices=BENCH_ARCHES,
+                        help="for --bench: only these machines (default all three)")
+    parser.add_argument("--threshold", type=int, default=BENCH_THRESHOLD,
+                        help="for --bench: a candidate that is slower at a size below this is "
+                             "'regressed', at or above it 'lost'")
+    parser.add_argument("--tie", type=float,
+                        help="for --bench: the ratio either side of 1 that counts as tied "
+                             "(default 0.005 for instruction counts, 0.03 for timings)")
     args = parser.parse_args(argv)
 
     if args.self_test:
         return self_test()
+    if args.bench:
+        return bench_entry(args)
     if args.harness is not None:
         entry = globals().get("harness_main")
         if entry is not None:
