@@ -116696,6 +116696,41 @@ static fn check_edges(font_face address_to one, font_face address_to two)
               memory_compare(edge_frames[1], untouched, sizeof(untouched)) == 0);
 }
 
+/*
+        font_strip16, the strip's copy of a cell's coverage, against the loop it replaces: every row count from none up to
+        forty, every stride the strip and a bitmap can have, data random in both, and the bytes the body wrote (its
+        sixteen-byte tails included) compared with the loop's over the whole span either of them can reach.
+*/
+static fn check_strip(void)
+{
+        static p8 source[41 * 80 + 16], asm_into[41 * 96 + 16], c_into[41 * 96 + 16];
+        p64 state = 0x2c7d9e11b5a38f04ull;
+        bool same = true;
+
+        for (p32 trial = 0; trial < 4000; trial++)
+        {
+                positive rows = trial % 41;
+                positive source_stride = 16 + (trial * 7) % 65, stride = 16 + (trial * 11) % 81;
+                positive span = rows * stride + 16;
+
+                for (positive i = 0; i < sizeof(source); i++)
+                {
+                        state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+                        source[i] = (p8)state;
+                }
+                for (positive i = 0; i < sizeof(asm_into); i++)
+                        asm_into[i] = c_into[i] = (p8)(i * 37 + trial);
+                font_strip16(asm_into, stride, source, source_stride, rows);
+                for (positive r = 0; r < rows; r++)
+                        for (positive k = 0; k < 16; k++)
+                                c_into[r * stride + k] = source[r * source_stride + k];
+                for (positive i = 0; i < span; i++)
+                        if (asm_into[i] != c_into[i])
+                                same = false;
+        }
+        check("strip: the body's bytes are the loop's, every row count, stride and tail", same);
+}
+
 b32 main()
 {
         font_face one, two;
@@ -116733,6 +116768,7 @@ b32 main()
         check_cells(&small_engine, &two);
         check_translate();
         check_translate_planes();
+        check_strip();
         check_blend();
         check_text_mix(&engine);
         check_average_ahead();
