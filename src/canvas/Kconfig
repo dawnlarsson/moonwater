@@ -30,4 +30,29 @@ menu "Moonwater Canvas"
           line does not contain drm_client_lib.active=, which intentionally
           suppresses the framebuffer console for a Canvas-first desktop.
 
+    config MOONWATER_WAYLAND
+        bool "Wayland clients on Canvas's desktop (hooks; the protocol parser is not built yet)"
+        depends on MOONWATER_CANVAS
+        default n
+        help
+          Build src/canvas/wayland.c, the hooks Canvas calls for Wayland
+          clients: a client connects, gets a surface and a role, and asks
+          for the window operations the Canvas windows support (position,
+          size, minimise, maximise, fullscreen, stacking, activation, close,
+          title and the taskbar's panels). Off by default: with it off the
+          file is not built, and nothing a Wayland client sends can reach
+          Canvas. Nothing reads a client's bytes yet, so this switch on alone
+          accepts no client.
+
+    config MOONWATER_X11
+        bool "X11 and XWayland clients on Canvas's desktop (hooks; the X protocol is not built yet)"
+        depends on MOONWATER_CANVAS
+        default n
+        help
+          Build src/canvas/x11.c, the X11 hooks with the same meanings as
+          the Wayland ones, and the XWayland lifecycle. Off by default: with
+          it off the file is not built and no X client can reach Canvas. The
+          X wire protocol is not parsed yet, so this switch on alone accepts
+          no client.
+
 endmenu # Moonwater Canvas
