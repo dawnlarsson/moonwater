@@ -122265,6 +122265,27 @@ static void check_compositor_snap_trigger(void)
     check("snap screen: B's free right edge touched shows B's right half", snap_rect_is(rect));
     snap_let_go(412, 60, 50, 40);
     check("snap screen: and the let go takes B's right half", compositor.arranged[1] == COMPOSITOR_RIGHT && compositor.x[1] == 384);
+
+    /* The drawn frames: the tint is in the frame while the target is, and no frame after the let go has any of it. */
+    {
+        unsigned int ink, tint, drawn = 0, after = 0;
+
+        snap_fresh();
+        snap_hand(1, 0, 60, 50, 40);
+        compositor_damage(0, 0, 256, 256);
+        compositor_present();
+        ink = compositor_snap_ink();
+        tint = compositor_mix(compositor_ground, ink & 0xffffffu, ink >> 24);
+        for (int at = 0; at < 256 * 256; at++)
+            drawn += (layout_pixels[at] & 0xffffffu) == (tint & 0xffffffu);
+        snap_let_go(0, 60, 50, 40);
+        compositor_damage(0, 0, 256, 256);
+        compositor_present();
+        for (int at = 0; at < 256 * 256; at++)
+            after += (layout_pixels[at] & 0xffffffu) == (tint & 0xffffffu);
+        check("snap frames: while the target is touched the frame is tinted, and after the let go no frame has any of the tint",
+              drawn > 0 && after == 0);
+    }
 }
 
 /*
