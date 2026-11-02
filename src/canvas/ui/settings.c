@@ -1487,15 +1487,11 @@ static void settings_map_draw(struct ui address_to ui)
                 ui_round(ui, x, y, width, height, radius, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u);
                 if ((int)at == settings.map.display)
                         ui_fill(ui, x, y, width, height, (ui_role(UI_PRIMARY) & 0x00ffffffu) | 0x40000000u);
-                // The chosen screen is outlined while the keys are on the map (the focus), in the primary colour.
+                // The chosen screen is outlined while the keys are on the map (the focus), in the primary colour: the kit's focus outline,
+                // the list row's, round at the tile's corners.
                 if ((int)at == settings.map.display && settings.map.keys)
-                {
-                        int edge = ui_px(ui, 2);
-                        unsigned int primary = ui_role(UI_PRIMARY) | 0xff000000u;
-
-                        ui_fill(ui, x, y, width, edge, primary), ui_fill(ui, x, y + height - edge, width, edge, primary);
-                        ui_fill(ui, x, y, edge, height, primary), ui_fill(ui, x + width - edge, y, edge, height, primary);
-                }
+                        ui_kit_outline(ui, &(struct ui_box){x * 256, y * 256, (x + width) * 256, (y + height) * 256, radius * 256, radius * 256},
+                                       ui_q8(ui, 2), ui_role(UI_PRIMARY));
                 settings_map_number(text, sizeof(text), 0, (long)number[at]);
                 ui_kit_text(ui, x + (width - ui_kit_measure(ui, (string_address)text, UI_TITLE_LARGE)) / 2,
                             ui_kit_baseline(ui, y + (height - ui_px(ui, ui_types[UI_TITLE_LARGE].line)) / 2, UI_TITLE_LARGE), (string_address)text,

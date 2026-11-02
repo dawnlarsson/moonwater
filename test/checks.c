@@ -137269,8 +137269,8 @@ static fn check_no_shapes_by_hand(void)
 */
 static fn check_no_element_by_hand(void)
 {
-        static const char address_to const files[] = {"src/canvas/ui/editor.c"};
-        static const char address_to const copies[] = {"ui_round(ui, ui_dev(ui, ui_tab_left"};
+        static const char address_to const files[] = {"src/canvas/ui/editor.c", "src/canvas/ui/settings.c"};
+        static const char address_to const copies[] = {"ui_round(ui, ui_dev(ui, ui_tab_left", "ui_fill(ui, x, y + height - edge, width, edge, primary)"};
         positive found = 0, read = 0;
 
         for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
