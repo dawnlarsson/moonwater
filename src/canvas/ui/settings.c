@@ -670,6 +670,9 @@ struct settings_map
         int drag;                               // the table's index of the screen being dragged, -1 none
         int grab_x, grab_y;                     // where on the screen the drag took hold, in table pixels
         int target_x, target_y;                 // where a screen dragged now would be let go at, snapped
+        b32 keys;                               // the keyboard is on the map (Up from the first Display row): its arrows choose and move a screen
+        b32 nudged;                             // a screen was last sent by a key to nudge_x, nudge_y, the table not caught up with it yet
+        int nudge_at, nudge_x, nudge_y;         // the screen that was sent, and where it was sent to
         int x, y, w, h;                         // the panel: its top left and size
         int field_x, field_y, field_w, field_h; // the screens' area, under the panel's top strip
         struct ui_control identify;             // the button on the strip
@@ -1428,11 +1431,14 @@ static int settings_map_at(int px, int py, const struct settings_screen address_
         return -1;
 }
 
-// The caption under the map, which says what the map does now: how to move a screen, that a drag is let go to place it, or
-// that there is nothing to move (no screen, or one screen, which has nothing to be moved against).
+// The caption under the map, which says what the map does now: how to move a screen, that a drag is let go to place it, that
+// the keys choose and move a screen while the map has them, or that there is nothing to move (no screen, or one screen,
+// which has nothing to be moved against).
 static const char address_to settings_map_hint(unsigned int count)
 {
-        return settings.map.drag >= 0 ? "Let go to place the screen" : !count ? "No screen is connected."
+        return settings.map.drag >= 0 ? "Let go to place the screen"
+               : settings.map.keys && count > 1 ? "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves."
+               : !count               ? "No screen is connected."
                : count == 1           ? "Only one screen is connected." : "Drag a screen to move it.";
 }
 
@@ -1463,6 +1469,15 @@ static void settings_map_draw(struct ui address_to ui)
                 ui_round(ui, x, y, width, height, radius, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u);
                 if ((int)at == settings.map.display)
                         ui_fill(ui, x, y, width, height, (ui_role(UI_PRIMARY) & 0x00ffffffu) | 0x40000000u);
+                // The chosen screen is outlined while the keys are on the map (the focus), in the primary colour.
+                if ((int)at == settings.map.display && settings.map.keys)
+                {
+                        int edge = ui_px(ui, 2);
+                        unsigned int primary = ui_role(UI_PRIMARY) | 0xff000000u;
+
+                        ui_fill(ui, x, y, width, edge, primary), ui_fill(ui, x, y + height - edge, width, edge, primary);
+                        ui_fill(ui, x, y, edge, height, primary), ui_fill(ui, x + width - edge, y, edge, height, primary);
+                }
                 settings_map_number(text, sizeof(text), 0, (long)number[at]);
                 ui_kit_text(ui, x + (width - ui_kit_measure(ui, (string_address)text, UI_TITLE_LARGE)) / 2,
                             ui_kit_baseline(ui, y + (height - ui_px(ui, ui_types[UI_TITLE_LARGE].line)) / 2, UI_TITLE_LARGE), (string_address)text,
@@ -3324,6 +3339,7 @@ static fn settings_group_choose(int group)
         if (group == before && !typed)
                 return;
         settings.group = group;
+        settings.map.keys = false;
         settings.feed_due = 0;
         settings_filter_clear();
         settings.list.scroll.scroll = 0;
@@ -3564,6 +3580,109 @@ static fn settings_card_key(const struct window_event address_to event)
 }
 
 // A key: false when it closes the window.
+// A screen written where it is put: the Rotation row's verb with its name and place (canvas display NAME place X Y), which a
+// drag's release and a key's step both send. Nothing is sent when the row or the screen is not there.
+static void settings_map_place_change(int at, int x, int y)
+{
+        int row = settings_output_row(SETTINGS_OUT_TURN);
+        char value[SETTINGS_TYPED];
+        positive length;
+
+        if (row < 0 || at < 0 || !settings.own.table || at >= (int)settings_map_count())
+                return;
+        length = settings_map_add(value, sizeof(value), 0, settings.own.table->output_name[at]);
+        length = settings_map_add(value, sizeof(value), length, " place ");
+        length = settings_map_number(value, sizeof(value), length, x);
+        length = settings_map_add(value, sizeof(value), length, " ");
+        settings_map_number(value, sizeof(value), length, y);
+        settings_change(row, value);
+}
+
+// The step a Shift and an arrow takes a screen by, in table pixels.
+#define SETTINGS_MAP_STEP 10
+
+/*
+        Where the chosen screen goes for a key's step (dx, dy steps of SETTINGS_MAP_STEP), snapped to a neighbour's edge as a
+        drag is, and answered as x and y. It starts from where it was last sent while the table has not caught up with that
+        (so a held key takes a step each time, not the same one); a screen sent to where the table already has it is no longer
+        held. Answers whether it moved.
+*/
+static b32 settings_map_stepped(int dx, int dy, int *x, int *y)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
+        int at = settings.map.display, base_x, base_y;
+
+        if (!count || at < 0 || at >= (int)count)
+                return false;
+        if (settings.map.nudged && (settings.map.nudge_at != at || (screens[at].x == settings.map.nudge_x && screens[at].y == settings.map.nudge_y)))
+                settings.map.nudged = false;
+        base_x = settings.map.nudged ? settings.map.nudge_x : screens[at].x;
+        base_y = settings.map.nudged ? settings.map.nudge_y : screens[at].y;
+        *x = base_x + dx * SETTINGS_MAP_STEP, *y = base_y + dy * SETTINGS_MAP_STEP;
+        settings_map_snap(screens, count, (unsigned int)at, x, y, COMPOSITOR_SNAP * (int)settings.own.table->scale);
+        if (*x == base_x && *y == base_y)
+                return false;
+        settings.map.nudged = true, settings.map.nudge_at = at, settings.map.nudge_x = *x, settings.map.nudge_y = *y;
+        return true;
+}
+
+// The map's keys, while it has them: the arrows choose a screen by its number (Left and Up the one before, Right the one
+// after, clamped), Shift with an arrow moves the chosen screen a step, Enter identifies the screens, and Down leaves the map
+// for the rows. Answers whether it took the key; any other key leaves the map and goes on to the rows, as Tab and Escape do.
+static b32 settings_map_key(const struct window_event address_to event)
+{
+        struct settings_screen screens[WINDOWS_OUTPUTS];
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
+        int at = settings.map.display, dx = 0, dy = 0, x, y, wanted;
+        b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
+
+        switch (event->a)
+        {
+        case SETTINGS_KEY_LEFT:
+                dx = -1;
+                break;
+        case SETTINGS_KEY_RIGHT:
+                dx = 1;
+                break;
+        case SETTINGS_KEY_UP:
+                dy = -1;
+                break;
+        case SETTINGS_KEY_DOWN:
+                dy = 1;
+                break;
+        case SETTINGS_KEY_ENTER:
+        case SETTINGS_KEY_ENTER_PAD:
+                settings_change(SETTINGS_JOB_IDENTIFY, "");
+                return true;
+        default:
+                settings.map.keys = false;
+                return false;
+        }
+        if (shift)
+        {
+                if (settings_map_stepped(dx, dy, &x, &y))
+                        settings_map_place_change(at, x, y);
+                settings_dirty();
+                return true;
+        }
+        if (event->a == SETTINGS_KEY_DOWN)
+        {
+                settings.map.keys = false;
+                settings_dirty();
+                return true;
+        }
+        if (count && at >= 0 && at < (int)count)
+        {
+                wanted = (int)number[at] + (event->a == SETTINGS_KEY_LEFT || event->a == SETTINGS_KEY_UP ? -1 : 1);
+                wanted = wanted < 1 ? 1 : wanted > (int)count ? (int)count : wanted;
+                if (settings_map_numbered(number, count, (unsigned int)wanted) >= 0)
+                        settings.map.display = settings_map_numbered(number, count, (unsigned int)wanted);
+        }
+        settings_dirty();
+        return true;
+}
+
 static b32 settings_key(const struct window_event address_to event)
 {
         if (!(event->flags & WINDOW_KEY_DOWN))
@@ -3614,6 +3733,13 @@ static b32 settings_key(const struct window_event address_to event)
                         return true;
         }
 
+        // The map has the keys while it has the focus (settings_map_key); what it does not take goes on to the rows below.
+        if (settings.map.keys)
+        {
+                if (settings_map_on() && settings.pane && settings_map_key(event))
+                        return true;
+                settings.map.keys = false;
+        }
         switch (event->a)
         {
         case SETTINGS_KEY_ESCAPE:
@@ -3631,6 +3757,14 @@ static b32 settings_key(const struct window_event address_to event)
         case SETTINGS_KEY_END:
         case SETTINGS_KEY_PAGE_UP:
         case SETTINGS_KEY_PAGE_DOWN:
+                // Up from the first row of the Display group goes up to the map above it, which has the keys then.
+                if (settings.pane && event->a == SETTINGS_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
+                    settings_map_count())
+                {
+                        settings.map.keys = true;
+                        settings_dirty();
+                        break;
+                }
                 // The kit's moves: a row at a time, a view, an end in the rows; a group, three, an end in the column.
                 if (settings.pane)
                 {
@@ -4209,6 +4343,7 @@ static b32 settings_map_press(int x, int y)
 
         if (x < settings.map.x || x >= settings.map.x + settings.map.w || y < settings.map.y || y >= settings.map.y + settings.map.h)
                 return false;
+        settings.map.keys = false; // a pointer has the map now, and its focus with it
         // ui_control_hit answers 0 for a hit on a button and -1 for a miss, so the test is that it hits, not that it answers.
         if (ui_control_hit(&settings.ui, &settings.map.identify, x, y) >= 0)
         {
@@ -4219,7 +4354,7 @@ static b32 settings_map_press(int x, int y)
         if ((at = count ? settings_map_at(x, y, screens, count) : -1) >= 0)
         {
                 settings_map_view_of(screens, count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &view);
-                settings.map.display = settings.map.drag = at;
+                settings.map.display = settings.map.drag = at, settings.map.nudged = false;
                 settings.map.grab_x = (int)(settings_map_table_x(&view, x) - screens[at].x);
                 settings.map.grab_y = (int)(settings_map_table_y(&view, y) - screens[at].y);
                 settings.map.target_x = screens[at].x, settings.map.target_y = screens[at].y;
@@ -4234,20 +4369,11 @@ static void settings_map_release(void)
 {
         struct settings_screen screens[WINDOWS_OUTPUTS];
         unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
-        int at = settings.map.drag, row = settings_output_row(SETTINGS_OUT_TURN);
-        char value[SETTINGS_TYPED];
-        positive length;
+        int at = settings.map.drag;
 
-        settings.map.drag = -1;
-        if (count && at >= 0 && at < (int)count && row >= 0 && (settings.map.target_x != screens[at].x || settings.map.target_y != screens[at].y))
-        {
-                length = settings_map_add(value, sizeof(value), 0, settings.own.table->output_name[at]);
-                length = settings_map_add(value, sizeof(value), length, " place ");
-                length = settings_map_number(value, sizeof(value), length, settings.map.target_x);
-                length = settings_map_add(value, sizeof(value), length, " ");
-                settings_map_number(value, sizeof(value), length, settings.map.target_y);
-                settings_change(row, value);
-        }
+        settings.map.drag = -1, settings.map.nudged = false;
+        if (count && at >= 0 && at < (int)count && (settings.map.target_x != screens[at].x || settings.map.target_y != screens[at].y))
+                settings_map_place_change(at, settings.map.target_x, settings.map.target_y);
         settings_dirty();
 }
 
@@ -4280,6 +4406,9 @@ static b32 settings_event(const struct window_event address_to event)
                         }
                 }
         }
+        // A press anywhere else is the pointer's, and the keys leave the map for it.
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
+                settings.map.keys = false;
         // The scrollbars take a mouse's motion, press and release on them (a finger drags the region itself).
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH) &&
             (event->type != WINDOW_EVENT_BUTTON || event->a == SETTINGS_BUTTON_LEFT) &&
@@ -4505,8 +4634,9 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 if (settings_map_on())
                         settings_map_draw(ui);
                 // A row typed in is a field on the page, not a band: its well is the only thing lit there.
-                settings.list.lit = (settings.pane || settings.filter_length) && settings.editing < 0;
-                settings.list.keys = settings.focused && settings.pane;
+                // The map has the keys while it is focused, so no row is lit or has the focus then.
+                settings.list.lit = (settings.pane || settings.filter_length) && settings.editing < 0 && !settings.map.keys;
+                settings.list.keys = settings.focused && settings.pane && !settings.map.keys;
                 ui_list_draw(ui, &settings.list);
         }
         if (settings.menu.owner >= 0 && settings_menu_place())

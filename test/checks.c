@@ -125227,6 +125227,68 @@ static fn check_display_section(void)
                 check("display section: a screen that lists no rate says so, in words", string_equals((string_address)row.value, (string_address) "The screen lists no rates"));
         }
 
+        // The keyboard on the map. The four screens of the 2 by 2 (index 0 bottom right, number 4; index 3 top left, number 1): Up
+        // from the Screen row goes to the map, the arrows choose a screen by its number (clamped), and Down goes back to the rows.
+        // A key's Shift step is checked on its own (settings_map_stepped), since a sent change would run the verb.
+        {
+                struct window_event key;
+
+                memory_zero(&table, sizeof(table));
+                table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+                table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
+                table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
+                table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
+                table.output_x[3] = 0, table.output_y[3] = 0, table.output_w[3] = 1920, table.output_h[3] = 1080;
+                memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
+                memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
+                settings.map.display = 0, settings.map.keys = false, settings.map.nudged = false, settings.map.drag = -1;
+                settings.pane = 1, settings.list.focus = screen_row, settings.editing = -1, settings.view = false;
+                settings.filter_length = 0, settings.menu.owner = -1;
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_UP, 0};
+                settings_key(&key);
+                check("display section: Up from the Screen row goes up to the map, which then has the keys", settings.map.keys && settings.list.focus == screen_row);
+                check("display section: the map's caption says what its keys do while it has them",
+                      string_equals((string_address)settings_map_hint(4), (string_address) "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves."));
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_LEFT, 0};
+                settings_key(&key);
+                check("display section: Left chooses the screen before it by number (number 4 to 3)", settings.map.keys && settings.map.display == 1);
+                settings_key(&key);
+                settings_key(&key);
+                settings_key(&key);
+                check("display section: Left stops at Screen 1 (the top left screen, index 3)", settings.map.keys && settings.map.display == 3);
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_RIGHT, 0};
+                settings_key(&key);
+                check("display section: Right chooses the screen after it by number (number 1 to 2)", settings.map.keys && settings.map.display == 2);
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_DOWN, 0};
+                settings_key(&key);
+                check("display section: Down leaves the map for the rows, the Screen row keeping the focus", !settings.map.keys && settings.pane == 1 && settings.list.focus == screen_row);
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, SETTINGS_KEY_TAB, 0};
+                settings_key(&key);
+                check("display section: Tab from the rows goes on to the column, as it does elsewhere", settings.pane == 0 && !settings.map.keys);
+                settings.pane = 1;
+        }
+
+        // A Shift and an arrow moves the chosen screen a step, from where it was sent while the table has not caught up, and from
+        // the table once it has: a single screen, with no neighbour to snap to.
+        {
+                int x, y;
+
+                memory_zero(&table, sizeof(table));
+                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+                table.output_x[0] = 5000, table.output_y[0] = 5000, table.output_w[0] = 1920, table.output_h[0] = 1080;
+                memory_copy(table.output_name[0], "DP-1", 5);
+                settings.map.display = 0, settings.map.keys = true, settings.map.nudged = false;
+                check("display section: a Shift and an arrow steps the chosen screen by a step", settings_map_stepped(1, 0, &x, &y) && x == 5010 && y == 5000);
+                check("display section: a held key steps from where the screen was sent, not from the table again", settings_map_stepped(1, 0, &x, &y) && x == 5020 && y == 5000);
+                table.output_x[0] = 5020;
+                check("display section: once the table has the place a key sent, the next step is from the table", settings_map_stepped(0, 1, &x, &y) && x == 5020 && y == 5010);
+                table.output_x[0] = 5000, table.output_y[0] = 5000, settings.map.nudged = false;
+                check("display section: a step that moves nothing is no move", !settings_map_stepped(0, 0, &x, &y));
+                settings.map.keys = false;
+                check("display section: with one screen the caption says so, though the keys are on the map", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
+        }
+
+        settings.pane = 0, settings.map.keys = false, settings.map.nudged = false;
         settings.own.table = saved;
         settings.map.display = -1;
 }
