@@ -36738,14 +36738,25 @@ ASM_FUNC(positive_to_string)
     // the count in a register instead means rebuilding the address out of the
     // base and the count on every byte, which is what this used to do.
     //
-    // Rolled to one byte a turn for the reason the arm64 block gives: bnez
-    // both continues the run and closes the loop, so the j an unrolled pair
-    // owes goes away. Five instructions a byte against six and a half, which
-    // is a run of 1024 in 5136 executed instructions against 6673.
+    // Four bytes a turn, each byte with its own exit at its own offset, so
+    // the pointer steps once for four bytes and the loop branch is the only
+    // branch it owes. Measured in qemu-user with the plugin count of executed
+    // instructions, not cycles, which are unmeasured here: a run of 64 bytes
+    // 301 instructions a call against 333 for the one-byte loop this replaces,
+    // which is about four and a half instructions a byte against five. A pair
+    // was measured as well and came out at 333, because a pair still spends
+    // the add and the loop branch once per two bytes.
     ASM_FUNC(string_span)
-    "mv a3, a0\n   lbu t1, 0(a0)\n   add t2, a1, t1\n   lbu t3, 0(t2)\n   beqz t3, 3f\n"
-    "1:  addi a0, a0, 1\n   lbu t1, 0(a0)\n   add t2, a1, t1\n   lbu t3, 0(t2)\n   bnez t3, 1b\n"
-    "3:  sub a0, a0, a3\n" ASM_RET
+    "mv a3, a0\n"
+    "1:  lbu t1, 0(a0)\n   add t2, a1, t1\n   lbu t3, 0(t2)\n   beqz t3, 7f\n"
+    "lbu t1, 1(a0)\n   add t2, a1, t1\n   lbu t3, 0(t2)\n   beqz t3, 8f\n"
+    "lbu t1, 2(a0)\n   add t2, a1, t1\n   lbu t3, 0(t2)\n   beqz t3, 9f\n"
+    "lbu t1, 3(a0)\n   add t2, a1, t1\n   lbu t3, 0(t2)\n   beqz t3, 10f\n"
+    "addi a0, a0, 4\n   j 1b\n"
+    "10: addi a0, a0, 1\n"
+    "9:  addi a0, a0, 1\n"
+    "8:  addi a0, a0, 1\n"
+    "7:  sub a0, a0, a3\n" ASM_RET
     ASM_END(string_span)
     // The same run with a fence in front of it. The pointer walks here as it
     // does in string_span above, so the fence has to become an address rather
