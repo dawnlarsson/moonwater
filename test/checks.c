@@ -125235,6 +125235,39 @@ static fn settings_end_look(struct settings_end_probe address_to p, int most)
                 p->returned++;
 }
 
+// The list of the group with the fewest rows, at every window height from 200 to 900: where its rows fit the view, it does not
+// scroll and shows no bar. The bottom pad under the last row is room for the last row when the rows overflow, not a scroll
+// of a list that fits.
+static fn settings_fit_check(void)
+{
+        int group = 0, fewest = 1 << 30, thumb_top = 0, thumb_length = 0, seen = 0;
+        b32 still = true;
+
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.menu.owner = -1, settings.view = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.list.hover = settings.list.down = -1;
+        for (int g = 0; g < settings_groups(); g++)
+        {
+                settings.group = g;
+                settings_refilter();
+                if (settings.list.count > 0 && settings.list.count < fewest)
+                        fewest = settings.list.count, group = g;
+        }
+        settings.group = group;
+        settings_refilter();
+        for (int height = 200; height <= 900; height += 8)
+        {
+                settings_size(SETTINGS_WIDTH, (unsigned int)height);
+                if (settings.list.content <= settings.list.scroll.view)
+                {
+                        seen++;
+                        still = still && ui_scroll_most(&settings.list.scroll) == 0 && !ui_scroll_thumb(&settings.ui, &settings.list.scroll, &thumb_top, &thumb_length);
+                }
+        }
+        string_format(log, "  settings fit: group %p, %p rows, fitting at %p window heights\n", (positive)group, (positive)fewest, (positive)seen);
+        check("settings list: a list whose rows fit its window does not scroll and shows no bar, at any window height", seen > 0 && still);
+}
+
 static fn settings_wheel_end_check(string_address name, positive gap, int notches)
 {
         struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
@@ -125834,6 +125867,8 @@ static fn check_settings_frames(string_address regular, string_address bold)
               settings_flick_check((string_address) "medium, 150 px above", 150, 25, 4));
         check("settings flick: a hard flick 100 px above the last row, let go past it, settles on it with no return",
               settings_flick_check((string_address) "hard, 100 px above", 100, 40, 6));
+        settings_size(SETTINGS_WIDTH, 300);
+        settings_fit_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_frames_gallery();
         string_format(log, "  settings frames: %p frames drawn and compared, at scales 1 and 2\n", settings_frames.frames);
@@ -130860,6 +130895,37 @@ static fn check_kit_slider_below(void)
               ui_slider_snap(&c, -2 * UI_ONE - UI_ONE / 3) == c.low);
 }
 
+// A list for the bounds checks: rows of one line each, in a window of h device pixels at the kit's scale.
+static void bounds_row(int id, struct ui_row address_to row)
+{
+        (void)id;
+        row->label = "Row";
+}
+
+static void bounds_list_make(const struct ui address_to ui, struct ui_list address_to l, int rows, int h)
+{
+        memory_zero(l, sizeof(*l));
+        l->count = rows, l->ids = rows, l->describe = bounds_row, l->empty = "", l->focus = -1, l->hover = l->down = -1;
+        for (int at = 0; at < rows; at++)
+                l->id[at] = (unsigned short)at;
+        ui_list_place(ui, l, 100 * ui->scale, 10 * ui->scale, 300 * ui->scale, h);
+        ui_list_layout(ui, l);
+}
+
+// Where a row is drawn: its top in device pixels, and its height. A stretch moves and sizes it; a list at rest puts it at its place.
+static int bounds_span(const struct ui address_to ui, const struct ui_list address_to l, int at, int address_to height)
+{
+#ifdef UI_LIST_STRETCH
+        int top = 0;
+
+        ui_list_row_span(ui, l, at, &top, height);
+        return top;
+#else
+        *height = ui_dev(ui, UI_ROW);
+        return ui_list_row_y(l, at);
+#endif
+}
+
 /*
         A control appears settled: a switch made off and then given its value on (as a settings row is, when the verb
         answers), tabs and radios given their chosen item, are drawn there at their first frame with nothing moving;
@@ -131337,6 +131403,53 @@ static fn check_kit_place(void)
                 check("kit glide: a pull past an end is limited and springs back to that end when let go, at either end", pulled && limited && sprang && bottom);
                 check("kit glide: a keyboard reveal glides to the row it shows, from where the region is, and a row in view is not moved",
                       revealed && !shown_again);
+        }
+
+        // A list that fits does not move: a wheel turn leaves its rows and its scroll where they are, and a finger's pull leaves its
+        // scroll at 0 and its first row put, and a list that scrolls shows its bar where one that fits hides it. Each is a frame at a
+        // time, as the kit's loop draws it.
+        {
+                static struct ui_list fits, tall;
+                int top = 0, height = 0, row2 = 0, first = 0, frame;
+                b32 still = true, kept = true, bar_fits, bar_tall;
+
+                ui_kit.now = 8000000000ll, ui_kit.busy = 0;
+                bounds_list_make(&ui, &fits, 3, 300 * ui.scale);
+                bounds_list_make(&ui, &tall, 40, 300 * ui.scale);
+                row2 = bounds_span(&ui, &fits, 2, &height);
+                first = bounds_span(&ui, &fits, 0, &height);
+                ui_scroll_wheel(&ui, &fits.scroll, -120);
+                ui_scroll_wheel(&ui, &fits.scroll, 120);
+                for (frame = 0; frame < 60; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &fits.scroll);
+                        still = still && fits.scroll.scroll == 0 && !fits.scroll.gliding && !fits.scroll.back.live &&
+                                bounds_span(&ui, &fits, 2, &height) == row2;
+                }
+                // A finger pulls a list that fits past its top, and lets go: its scroll stays 0 all the way, and its first row stays put.
+                ui_scroll_drag(&fits.scroll, -150 * ui.scale);
+                for (frame = 0; frame < 30; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &fits.scroll);
+                        kept = kept && fits.scroll.scroll == 0 && bounds_span(&ui, &fits, 0, &height) == first;
+                }
+                ui_scroll_let_go(&fits.scroll, 0, 0);
+                for (frame = 0; frame < 240 && (fits.scroll.gliding || fits.scroll.back.live); frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &fits.scroll);
+                        kept = kept && fits.scroll.scroll == 0 && bounds_span(&ui, &fits, 0, &height) == first;
+                }
+                kept = kept && bounds_span(&ui, &fits, 0, &height) == first;
+                bar_fits = ui_scroll_thumb(&ui, &fits.scroll, &top, &height);
+                bar_tall = ui_scroll_thumb(&ui, &tall.scroll, &top, &height);
+                check("kit list: a list that fits does not move under a wheel turn: its scroll and its rows stay where they are, frame by frame",
+                      still);
+                check("kit list: a finger's pull on a list that fits does not translate it: its scroll stays 0 and its first row stays put",
+                      kept);
+                check("kit list: the scroll bar shows on a list that scrolls and is hidden on one that fits", bar_tall && !bar_fits);
         }
 
         // Tabs stood on end: the pip starts on the chosen item, slides along y to another over .35s with the items it

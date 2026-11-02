@@ -1538,7 +1538,9 @@ static fn settings_layout(void)
                 ui_list_place(ui, &settings.list, settings.page.left, top, settings.page.right - settings.page.left, settings.page.bottom - top);
         }
         ui_list_layout(ui, &settings.list);
-        settings.list.scroll.content += ui_px(ui, SETTINGS_BOTTOM_PAD); // the last row scrolls clear of the bottom edge
+        // The last row scrolls clear of the bottom edge once the rows overflow the view: a list that fits has no pad to scroll by.
+        if (settings.list.scroll.content > settings.list.scroll.view)
+                settings.list.scroll.content += ui_px(ui, SETTINGS_BOTTOM_PAD);
         ui_scroll_clamp(&settings.list.scroll);
         // The card has the body's band and the whole width: the column is not shown with it.
         settings.card.x = settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;

@@ -5132,13 +5132,16 @@ static b64 ui_scroll_give(const struct ui_scroll address_to s, b64 past)
         return past < 0 ? -give : give;
 }
 
-// Where the region is drawn, in 256ths: where it is, or past an end while a finger holds it there.
+// Where the region is drawn, in 256ths: where it is, or past an end while a finger holds it there. A region that fits does not
+// move at all under a finger.
 static b64 ui_scroll_shown(const struct ui_scroll address_to s)
 {
         b64 most = ui_scroll_most256(s);
 
         if (!s->dragging)
                 return s->at;
+        if (!most)
+                return 0;
         if (s->at < 0)
                 return s->flung ? 0 : ui_scroll_give(s, s->at);
         return s->at > most ? (s->flung ? most : most + ui_scroll_give(s, s->at - most)) : s->at;
@@ -5270,10 +5273,15 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
         {
                 b64 edge = s->at < 0 ? 0 : most;
 
-                s->at = shown, s->aim = edge;
                 s->gliding = s->speed = 0;
-                // The kit's release spring takes the part past the end home: its amplitude is that part, in Q30 pixels.
-                ui_spring_go(&s->back, 0, (shown - edge) << 22);
+                if (!most)
+                        s->at = s->aim = 0; // a region that fits moved for nothing, so nothing springs back
+                else
+                {
+                        s->at = shown, s->aim = edge;
+                        // The kit's release spring takes the part past the end home: its amplitude is that part, in Q30 pixels.
+                        ui_spring_go(&s->back, 0, (shown - edge) << 22);
+                }
                 ui_scroll_show(s);
                 return;
         }
