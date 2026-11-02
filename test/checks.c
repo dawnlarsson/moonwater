@@ -132093,6 +132093,7 @@ static fn editor_close_check(struct ui address_to wui);
 static fn editor_tabs_check(struct ui address_to wui);
 static fn editor_disk_check(struct ui address_to wui);
 static fn editor_edge_check(struct ui address_to wui);
+static fn editor_readonly_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 
 /*
@@ -132506,6 +132507,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_tabs_check(&wui);
         editor_disk_check(&wui);
         editor_edge_check(&wui);
+        editor_readonly_check(&wui);
         field_check(&wui);
         ui_over_check();
         ui_edge_row_check();
@@ -134717,6 +134719,48 @@ static fn editor_edge_check(struct ui address_to wui)
         editor.count = 0;
         editor_open(null);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
+}
+
+/*
+        A read-only file (no write bit) is written over only by the second Ctrl+S, as a file changed on disk is: the first
+        says so and writes nothing, and the mode stays read-only once it is saved.
+*/
+static fn editor_readonly_check(struct ui address_to wui)
+{
+        char dir[48], path[96];
+        positive named = string_length(string_copy((string_address)dir, (string_address) "editor-ro."));
+        bipolar handle, length;
+        p8 got[32];
+
+        named += positive_into_string((string_address)dir + named, (positive)system_call(syscall(getpid)));
+        string_copy((string_address)dir + named, (string_address) ".tmp");
+        system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700);
+        string_copy(string_copy((string_address)path, (string_address)dir) + string_length((string_address)dir), (string_address) "/ro.c");
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0444);
+        system_write_all((b32)handle, "one\n", 4);
+        system_close(handle);
+        editor.ui = *wui;
+        editor.count = 0;
+        check("editor read-only: a read-only file opens", editor_open((string_address)path) && editor.count == 1);
+        doc_select_set(&editor_now()->view.doc, 0, 0);
+        doc_type(&editor_now()->view.doc, (const p8 address_to) "// ", 3);
+        editor_command(DOC_CMD_SAVE);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        length = handle >= 0 ? system_read_once((b32)handle, got, sizeof(got)) : -1;
+        if (handle >= 0)
+                system_close(handle);
+        check("editor read-only: the first Ctrl+S writes nothing over the read-only file", length == 4 && !memory_compare(got, "one\n", 4));
+        editor_command(DOC_CMD_SAVE);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        length = handle >= 0 ? system_read_once((b32)handle, got, sizeof(got)) : -1;
+        if (handle >= 0)
+                system_close(handle);
+        check("editor read-only: the second writes the editor's text, and the file stays read-only",
+              length == 7 && !memory_compare(got, "// one\n", 7) && (editor_now()->mode & 0777) == 0444);
+        editor.count = 0;
+        editor_open(null);
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200);
 }
 

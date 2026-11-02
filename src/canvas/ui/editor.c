@@ -307,17 +307,21 @@ static fn editor_close_tab_asked(void)
 }
 
 /*
-        Ctrl+S of a file changed on disk since it was read or saved: the first says so and writes nothing, so the other change
-        is not written over; the second, with no other key or press between, writes it.
+        Ctrl+S of a file changed on disk since it was read or saved, or of a read-only one: the first says so and writes
+        nothing, so the other change is not written over; the second, with no other key or press between, writes it.
 */
 static fn editor_save_asked(void)
 {
         struct editor_tab address_to tab = editor_now();
 
-        if (tab->changed_on_disk && editor.armed != DOC_CMD_SAVE)
+        // A file with no write bit is asked for the same way: the rename that saves would replace it without a word.
+        if ((tab->changed_on_disk || !(tab->mode & 0222)) && editor.armed != DOC_CMD_SAVE)
         {
                 editor.armed = DOC_CMD_SAVE;
-                string_copy_bounded((string_address)editor.status, (string_address) "changed on disk: Ctrl+S again writes over it, Ctrl+R reads it again", sizeof(editor.status));
+                string_copy_bounded((string_address)editor.status,
+                                    tab->changed_on_disk ? (string_address) "changed on disk: Ctrl+S again writes over it, Ctrl+R reads it again"
+                                                         : (string_address) "read-only: Ctrl+S again writes over it",
+                                    sizeof(editor.status));
                 return;
         }
         editor.armed = 0;
