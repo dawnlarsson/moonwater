@@ -58066,7 +58066,17 @@ __asm__(
 
     ASM_FUNC(memory_growth)
     "mov %rdi, %rax\n   cmp %rsi, %rax\n   jae 2f\n   test %rax, %rax\n   cmovz %rdx, %rax\n   test %rax, %rax\n   jz 3f\n"
-    "1:  cmp %rsi, %rax\n   jae 2f\n   add %rax, %rax\n   jnc 1b\n"
+    //
+    //       No doubling loop. The start and the want differ in their top bit by
+    //       s, and shifting the start left by s lands on the want's top bit: it
+    //       is the answer if it reaches the want, and if not, one more doubling
+    //       is, unless the want already has bit 63 -- then that doubling carries
+    //       out and the answer is zero, as the loop gave. bsr is baseline x86-64.
+    //
+    "cmp %rsi, %rax\n   jae 2f\n"
+    "add %rax, %rax\n   jc 3f\n   cmp %rsi, %rax\n   jae 2f\n"
+    "bsr %rsi, %r9\n   bsr %rax, %r8\n   mov %r9, %rcx\n   sub %r8, %rcx\n   shl %cl, %rax\n   cmp %rsi, %rax\n   jae 2f\n"
+    "cmp $63, %r9\n   je 3f\n   add %rax, %rax\n" ASM_RET
     "3:  xor %eax, %eax\n"
     "2:\n" ASM_RET
     ASM_END(memory_growth)

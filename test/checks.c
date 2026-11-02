@@ -37156,9 +37156,52 @@ static fn reserve_refused(void)
         memory_release(address_of held, address_of have, address_of used, 1);
 }
 
+/* The doubling loop memory_growth replaced: the answer it must still give on
+   every architecture, for any start, want and first. */
+static positive growth_loop(positive have, positive want, positive first)
+{
+        if (have >= want)
+                return have;
+        if (!have)
+                have = first;
+        if (!have)
+                return 0;
+        while (have < want) {
+                if (have >> (sizeof(positive) * 8 - 1))
+                        return 0;
+                have <<= 1;
+        }
+        return have;
+}
+
+static fn growth_matches_loop(void)
+{
+        static const positive edge[] = {
+                0, 1, 2, 3, 5, 16, 63, 64, 65, 1000, 4096, 1ul << 31, 1ul << 62,
+                (1ul << 62) + 1, 1ul << 63, (1ul << 63) + 1, positive_max - 1, positive_max,
+        };
+        positive mismatches = 0, state = 0x9e3779b97f4a7c15ul;
+        for (positive a = 0; a < sizeof edge / sizeof edge[0]; a++)
+                for (positive b = 0; b < sizeof edge / sizeof edge[0]; b++)
+                        for (positive c = 0; c < sizeof edge / sizeof edge[0]; c++)
+                                mismatches += memory_growth(edge[a], edge[b], edge[c]) !=
+                                              growth_loop(edge[a], edge[b], edge[c]);
+        for (positive i = 0; i < 100000; i++) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                positive have = state >> (state & 63);
+                positive want = (state * 0x2545f4914f6cdd1dul) >> ((state >> 8) & 63);
+                positive first = state >> ((state >> 16) & 63);
+                mismatches += memory_growth(have, want, first) != growth_loop(have, want, first);
+        }
+        check("growth matches the doubling loop it replaced", mismatches == 0);
+}
+
 b32 main(void)
 {
         reserve_boundaries();
+        growth_matches_loop();
         reserve_mapping(false);
         reserve_mapping(true);
         reserve_sparse();
