@@ -623,9 +623,11 @@ struct window_place
 // glass: the window is frosted glass, its buffer premultiplied ARGB over it.
 #define WINDOW_GLASS 1u
 // The glass column's other bits: the window has no close button (none is drawn over it, none is hit), and a press
-// anywhere but on it asks it to go, as the close button would (the launcher has both).
+// anywhere but on it asks it to go, as the close button would (the launcher has both). WINDOW_NO_TAB: the window has
+// no tab on the taskbar, as a popup has none (the identify overlays, which are on the screen for a few seconds only).
 #define WINDOW_NO_CLOSE 2u
 #define WINDOW_DISMISS 4u
+#define WINDOW_NO_TAB 8u
 
 struct windows
 {

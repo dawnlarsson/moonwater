@@ -2930,7 +2930,7 @@ static struct
                 goes to, and the ground it told its program. The scratch the blur is made in is shared.
         */
         unsigned int glassy[WINDOWS];
-        unsigned int asks[WINDOWS]; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS)
+        unsigned int asks[WINDOWS]; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS, WINDOW_NO_TAB)
         unsigned int *backdrop[WINDOWS], *tinted[WINDOWS], *composed[WINDOWS];
         unsigned int *boosted[WINDOWS]; // compositor_vivid of each backdrop cell, as the cell last was
         unsigned long glass_sum[WINDOWS][3]; // per channel, the sums of boosted over the blocks: the side's mean
@@ -3611,8 +3611,8 @@ static unsigned int compositor_windows(void)
         {
                 unsigned int place = count;
 
-                // A popup has no tab: it is its window's.
-                if (!compositor.showing[row] || compositor_popup_parent[row] >= 0 ||
+                // A popup has no tab: it is its window's. Nor has a window that asked for none (WINDOW_NO_TAB).
+                if (!compositor.showing[row] || compositor_popup_parent[row] >= 0 || (compositor.asks[row] & WINDOW_NO_TAB) ||
                     (bands > 1 && compositor_screen_of(row) != compositor.band_at))
                         continue;
                 while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])
@@ -8865,7 +8865,7 @@ static void compositor_take(int row)
                 compositor.lifted[row] = table->lift[row];
                 compositor.moved[row] = table->moved[row];
                 compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
-                compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS);
+                compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB);
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;

@@ -134840,6 +134840,50 @@ static fn editor_readonly_check(struct ui address_to wui)
 }
 
 /*
+        A window that asked for no tab (WINDOW_NO_TAB, the identify overlays') is not one of the windows the taskbar has a
+        tab for, and a window that asked for none is, shown beside it.
+*/
+static fn check_no_tab(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+        struct windows address_to table;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 1;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("no tab: the table is mapped", false);
+                return;
+        }
+        table = compositor.table;
+        table->x[1] = table->y[1] = 10;
+        table->width[1] = table->height[1] = 40;
+        glass_paint(1, 0, 0, 40, 40, 0x00ff00u, true);
+        table->x[2] = table->y[2] = 80;
+        table->width[2] = table->height[2] = 40;
+        table->glass[2] = WINDOW_GLASS | WINDOW_NO_TAB;
+        glass_paint(2, 0, 0, 40, 40, 0, true);
+        compositor_present();
+        check("no tab: the window that asked for none is shown, and has no tab; the other has one",
+              compositor.showing[1] && compositor.showing[2] && compositor_windows() == 1 && compositor.listed[0] == 1);
+
+        table->pid[1] = 1;
+        table->pid[2] = 2;
+        compositor_leave(2);
+        compositor_leave(1);
+        compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0, 0, 0);
+        if (compositor.blur)
+                compositor_call(syscall(munmap), (positive)compositor.blur, compositor.blur_bytes, 0, 0, 0, 0);
+        memory_zero(&compositor, sizeof(compositor));
+}
+
+/*
         The terminal's selection on the frame: what a drag marks is marked in the frame's cells (so the frames redraw
         it), its text is the lines' text with a line end between and the trailing blanks left off, and a rectangle takes
         its columns.
@@ -135146,6 +135190,7 @@ b32 main()
         check_land();
         check_glass();
         check_screen_numbers();
+        check_no_tab();
         check_compositor_partial();
         check_compositor_held();
         check_compositor_screens();
