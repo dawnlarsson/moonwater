@@ -136346,6 +136346,75 @@ static fn check_no_input_codes(void)
 }
 
 /*
+        No shape by hand: a window's corner radius, its gap, a finger's slop, a close button, a status dot and a
+        segmented tab's height are the kit's numbers (theme.h for the ones the compositor draws too, ui.c for the rest).
+        A window that #defines one of those names with a number of its own is the copy the kit replaced, so the scan
+        reads every #define in the window sources for a name of the kit's kinds with a digit where its value goes.
+*/
+static b32 shape_name(const char address_to name, positive length)
+{
+        static const char address_to const words[] = {"_RADIUS", "_GAP", "_SLOP", "_CLOSE", "_DOT", "_TAB_STRIP", "_TABS_H"};
+
+        for (positive i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+                if (memory_search((address_any)name, length, (address_any)words[i], string_length((string_address)words[i])))
+                        return true;
+        return false;
+}
+
+static fn check_no_shapes_by_hand(void)
+{
+        static const char address_to const files[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
+                                                      "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
+                                                      "src/canvas/ui/identify.c"};
+        positive found = 0, read = 0;
+
+        for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size);
+                const char address_to text = (const char address_to)bytes;
+
+                if (!bytes)
+                        continue;
+                read++;
+                for (positive at = 0; at < size;)
+                {
+                        positive line_end = at;
+
+                        while (line_end < size && text[line_end] != '\n')
+                                line_end++;
+                        if (line_end - at > 8 && memory_search((address_any)(text + at), 8, (address_any)"#define ", 8))
+                        {
+                                positive name = at + 8, stop = name;
+
+                                while (stop < line_end && text[stop] != ' ' && text[stop] != '\t')
+                                        stop++;
+                                if (shape_name(text + name, stop - name))
+                                {
+                                        positive value = stop;
+
+                                        while (value < line_end && (text[value] == ' ' || text[value] == '\t'))
+                                                value++;
+                                        if (value < line_end && text[value] >= '0' && text[value] <= '9')
+                                        {
+                                                found++;
+                                                string_format(log, "  shape by hand in %s\n", (string_address)files[f]);
+                                        }
+                                }
+                        }
+                        at = line_end + 1;
+                }
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: no shape by hand, the sources are not here\n");
+                return;
+        }
+        check("shapes: no window of Canvas keeps a radius, a gap, a slop, a close button, a dot or a tab height of its own",
+              read == sizeof(files) / sizeof(files[0]) && !found);
+}
+
+/*
         The kit's defaults, which every window takes and none keeps a copy of. A press again to confirm is the kit's
         (ui_confirm: the first press arms it, the next with nothing between fires it, another press or key drops it, and
         the same line says so in every app). A field is UI_FIELD_H high, the kit's touch target. A press outside a field
@@ -139256,6 +139325,7 @@ b32 main()
 #endif
         check_no_hand_typing();
         check_no_input_codes();
+        check_no_shapes_by_hand();
 #if MOONWATER_UI_ANY
         check_kit_defaults(&terminal.ui);
 #endif
