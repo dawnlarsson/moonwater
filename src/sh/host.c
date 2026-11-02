@@ -21240,7 +21240,7 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         unsigned int field;
         bool rotation, refresh, place;
         int value = 0, x = 0, y = 0, made;
-        bipolar got, handle, failed;
+        bipolar got, failed;
 
         if (count < 4)
                 return host_refuse(LOCALE_CANVAS_DISPLAY_USAGE);
@@ -21314,17 +21314,13 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
                                    "does not fit, so it is not changed\n");
         }
 
-        handle = system_open_at_mode(AT_FDCWD, (string_address)LOCALE_CANVAS_DISPLAYS,
-                                     O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
-        if (handle < 0)
-        {
-                host_release();
-                if (handle == -ELOOP)
-                        return host_refuse(LOCALE_CANVAS_DISPLAYS " is a link, so it is not changed\n");
-                return host_fail("canvas display", handle);
-        }
-        failed = system_write_all((b32)handle, out, (positive)made);
-        system_close(handle);
+        /*
+                Published by rename, as canvas arrange's is: the new bytes are written beside the file and renamed over it,
+                so the compositor, which reads this file as it is written, never finds it empty (a truncating open left it
+                so for as long as the write took). The file keeps the mode it has, as the truncate did, and a new one is
+                0644; a link is not followed (the read above refused one).
+        */
+        failed = host_publish_again((string_address)LOCALE_CANVAS_DISPLAYS, out, (positive)made, 0644, true, 0);
         host_release();
         if (failed < 0)
                 return host_fail("canvas display", failed);

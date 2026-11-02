@@ -42741,6 +42741,16 @@ def harness_host_writes(argv):
             line = text[:found.start()].count("\n") + 1
             failures.append("%s:%d %s opens for writing through a link" % (name, line, owner))
 
+    #   A state file truncated in place is read empty by anything that reads it while the write runs: the compositor
+    #   reads /root/canvas.displays on each write it hears of. No writer of these files opens with O_TRUNC; each one
+    #   publishes by rename (host_publish_again, host_write_file), so a reader sees the old bytes or the new, never none.
+    for name in ("src/sh/host.c", "src/moonwater/moonwater.c", "src/canvas/screen.c", "src/sh/net.c"):
+        text = (root / name).read_text()
+        for found in re.finditer(r"\bO_TRUNC\b", text):
+            line = text[:found.start()].count("\n") + 1
+            failures.append("%s:%d opens with O_TRUNC: a state file truncated in place is read empty while it is "
+                            "written; publish it by rename instead" % (name, line))
+
     host = (root / "src/sh/host.c").read_text()
     parent = r'''
 static bipolar host_write_file(string_address path, p8 address_to bytes,
