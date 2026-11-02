@@ -132104,6 +132104,275 @@ static fn check_kit_states(void)
 }
 
 /*
+        A theme turned while a control is moving: each kind of animation keeps its value across the turn. The frame after
+        the turn differs from the frame before by no more than the animation's own step (the largest frame-to-frame change
+        of the same animation run unturned, twice over, plus the theme's own step for a colour), no later frame moves away
+        from where the new theme rests, and the animation ends where a control placed fresh under the new theme ends. Each
+        kind runs three times over the same frames: unturned (its step), turned at TURN_AT (the turn), and fresh under the
+        new theme (the end). A spring overshoots by its nature, so it is held to its end and not to monotone.
+*/
+#define TURN_FRAMES 40
+#define TURN_AT 6
+#define TURN_SPAN 15
+#define TURN_KINDS 9 // 0 switch knob, 1 button hover layer, 2 switch hover scale, 3 switch label (a colour), 4 list row ripple, 5 slider slide, 6 tab pip, 7 button squish spring, 8 button press fill (a colour)
+
+static b32 turn_colour(int kind) { return kind == 3 || kind == 8; }
+
+// The largest change between two samples: a number in its own units, a colour as its largest channel's change.
+static b64 turn_gap(int kind, b64 a, b64 b)
+{
+        b64 gap = 0;
+
+        if (!turn_colour(kind))
+                return a > b ? a - b : b - a;
+        for (int shift = 0; shift < 32; shift += 8)
+        {
+                b64 x = (a >> shift) & 255, y = (b >> shift) & 255, d = x > y ? x - y : y - x;
+
+                gap = d > gap ? d : gap;
+        }
+        return gap;
+}
+
+// How far two samples may differ and still be the same value: rounding, in the sample's units.
+static b64 turn_eps(int kind) { return turn_colour(kind) ? 2 : UI_ONE / 1000; }
+
+// The first frame from which a run stays at its final value: when its animation has landed (TURN_FRAMES when it never does).
+static int turn_settled(int kind, const b64 values[TURN_FRAMES], b64 final)
+{
+        int at = TURN_FRAMES;
+
+        for (int k = TURN_FRAMES - 1; k >= 0 && turn_gap(kind, values[k], final) <= turn_eps(kind); k--)
+                at = k;
+        return at;
+}
+
+// The theme at once (the turn put at its end), then the theme's own motion again.
+static void turn_reset(unsigned int mode)
+{
+        ui_kit_theme(mode, UI_ACCENT_DAWN, 1);
+        ui_kit_theme(mode, UI_ACCENT_DAWN, 0);
+}
+
+static void turn_setup(int kind, struct ui_control address_to c)
+{
+        memory_zero(c, sizeof(*c));
+        switch (kind)
+        {
+        case 0:
+        case 2:
+        case 3: c->kind = UI_SWITCH, c->x = 20, c->y = 16, c->w = 300, c->h = 48, c->label = "Telemetry"; break;
+        case 1:
+        case 7:
+        case 8: c->kind = UI_BUTTON, c->variant = UI_BUTTON_PRIMARY, c->x = 20, c->y = 20, c->w = 160, c->h = 40, c->label = "Save"; break;
+        case 4: c->kind = UI_LIST_ROW, c->x = 20, c->y = 40, c->w = 300, c->h = 40, c->label = "Item"; break;
+        case 5:
+                c->kind = UI_SLIDER, c->x = 20, c->y = 100, c->w = 300, c->h = 88, c->label = "Level";
+                c->low = ui_q(0), c->high = ui_q(100), c->step = 0, c->value = ui_q(50);
+                break;
+        default:
+                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, c->x = 20, c->y = 100, c->count = 3;
+                c->items[0] = "All", c->items[1] = "Running", c->items[2] = "Stopped";
+                break;
+        }
+}
+
+// The frame-0 event each kind moves on: a press (held or let go), a hover, a spring let go.
+static void turn_act(int kind, struct ui address_to ui, struct ui_control address_to c)
+{
+        switch (kind)
+        {
+        case 0:
+        case 3:
+                ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, 300, 40, true, 0);
+                ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, 300, 40, false, 0);
+                break;
+        case 1:
+        case 2: ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, 60, 40, false, 0); break;
+        case 8: ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, 60, 40, true, 0); break; // held: the fill goes to its pressed mix
+        case 4: ui_list_row_press(ui, c, 100, 60); break; // a list row is not a live control: the app presses it
+        case 5:
+                ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, 260, 156, true, 0);
+                ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, 260, 156, false, 0);
+                break;
+        case 6:
+                ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, ui_tab_left(ui, c, 2) + 10, 110, true, 0);
+                ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, ui_tab_left(ui, c, 2) + 10, 110, false, 0);
+                break;
+        default:
+                ui_spring_go(&c->squish.x, UI_Q2(10), 0);
+                ui_spring_go(&c->squish.y, UI_Q2(10), 0);
+                break;
+        }
+}
+
+// The kind's value now, as drawn: a colour as 0xaarrggbb, a number as itself.
+static b64 turn_sample(int kind, struct ui_control address_to c)
+{
+        b64 cx, cy, radius, opacity;
+        b32 live = 0;
+
+        switch (kind)
+        {
+        case 0: return sweep_value(&c->extent);
+        case 1: return sweep_value(&c->layer);
+        case 2: return sweep_value(&c->scale);
+        case 3: return ui_tween_argb(sweep_value(&c->label_ink));
+        case 8: return ui_tween_argb(sweep_value(&c->fill));
+        case 4: return ui_ripple_at(&c->ripple[0], ui_kit.now, &cx, &cy, &radius, &opacity) ? radius : 0;
+        case 5: return ui_slide_value(&c->slide, ui_kit.now, &live);
+        case 6: return sweep_value(&c->pip_x);
+        default: return c->squish.x.value[0];
+        }
+}
+
+// One run of a kind over TURN_FRAMES frames of the kit's clock: the theme is mode, turned to turn_to at TURN_AT (-1: not turned).
+static void turn_run(struct ui address_to ui, int kind, unsigned int mode, int turn_to, b64 values[TURN_FRAMES])
+{
+        struct ui_control c;
+
+        turn_reset(mode);
+        turn_setup(kind, &c);
+        ui_control_start(&c);
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0;
+        ui_control_draw(ui, &c);
+        for (int k = 0; k < TURN_FRAMES; k++)
+        {
+                ui_kit.now += SWEEP_FRAME, ui_kit.busy = 0;
+                if (k == 0)
+                        turn_act(kind, ui, &c);
+                if (turn_to >= 0 && k == TURN_AT)
+                        ui_kit_theme((unsigned int)turn_to, UI_ACCENT_DAWN, 0);
+                ui_kit_turn();
+                ui_control_draw(ui, &c);
+                values[k] = turn_sample(kind, &c);
+        }
+}
+
+static fn check_kit_turn(void)
+{
+        static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        static b64 unturned[TURN_FRAMES], turned[TURN_FRAMES], fresh[TURN_FRAMES];
+        struct ui ui = terminal.ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        static const char *const names[TURN_KINDS] = {"the switch knob", "a button's hover layer", "a switch's hover scale",
+                                                      "a switch's label (a colour)", "a list row's ripple", "a slider's slide",
+                                                      "a tab's pip", "a button's squish spring", "a button's press fill (a colour)"};
+        b32 continuous = 1, ends = 1;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit turn: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
+        ui.regular = ui.bold = &face;
+
+        for (int kind = 0; kind < TURN_KINDS; kind++)
+        {
+                b64 step = 0, rate, worst = 0, same = 0, eps = turn_eps(kind), end_gap, gap_at_turn, last_distance = 0;
+                int settle_turned, settle_unturned;
+                b32 monotone = 1, kept;
+
+                turn_run(&ui, kind, UI_THEME_DARK, -1, unturned);
+                turn_run(&ui, kind, UI_THEME_DARK, UI_THEME_LIGHT, turned);
+                turn_run(&ui, kind, UI_THEME_LIGHT, -1, fresh);
+
+                // The animation's own step: the unturned run's largest change around the turn.
+                for (int k = TURN_AT - 3; k <= TURN_AT + TURN_SPAN; k++)
+                        if (k >= 1 && k < TURN_FRAMES)
+                        {
+                                b64 g = turn_gap(kind, unturned[k], unturned[k - 1]);
+
+                                step = g > step ? g : step;
+                        }
+                rate = step;
+                if (turn_colour(kind))
+                {
+                        // A colour resting on a role moves with the role over the turn's .2 s, so the theme's own step is its share too.
+                        struct ui_theme dark, light;
+                        b64 role_step;
+
+                        ui_theme_make(&dark, 1, UI_ACCENT_DAWN);
+                        ui_theme_make(&light, 0, UI_ACCENT_DAWN);
+                        role_step = turn_gap(kind, dark.role[UI_PRIMARY], light.role[UI_PRIMARY]) * SWEEP_FRAME / (200 * UI_MS);
+                        rate += 2 * role_step + 1;
+                }
+
+                // The frames after the turn: the largest change in them, the change at the turn, and the change to where it ends.
+                for (int k = TURN_AT; k <= TURN_AT + TURN_SPAN && k < TURN_FRAMES; k++)
+                {
+                        b64 g = turn_gap(kind, turned[k], turned[k - 1]);
+
+                        worst = g > worst ? g : worst;
+                }
+                gap_at_turn = turn_gap(kind, turned[TURN_AT], turned[TURN_AT - 1]);
+                end_gap = turn_gap(kind, turned[TURN_FRAMES - 1], fresh[TURN_FRAMES - 1]);
+
+                // A number does not depend on the theme: turned, it runs the very frames it runs unturned. A colour does, so it is
+                // held to its own step at the turn and after it.
+                for (int k = 0; k < TURN_FRAMES; k++)
+                {
+                        b64 g = turn_gap(kind, turned[k], unturned[k]);
+
+                        same = g > same ? g : same;
+                }
+                kept = turn_colour(kind) ? worst <= 2 * rate + eps && gap_at_turn <= 2 * rate + eps : same <= eps;
+
+                // A colour keeps its clock: the turn does not start its run again, so it lands when the unturned one does.
+                settle_turned = turn_settled(kind, turned, fresh[TURN_FRAMES - 1]);
+                settle_unturned = turn_settled(kind, unturned, unturned[TURN_FRAMES - 1]);
+                if (turn_colour(kind) && settle_turned > settle_unturned + 2)
+                        kept = 0;
+
+                // No overshoot: from the turn on, each frame is no further from where the new theme rests than the one before.
+                for (int k = TURN_AT; k < TURN_FRAMES; k++)
+                {
+                        b64 d = turn_gap(kind, turned[k], fresh[TURN_FRAMES - 1]);
+
+                        if (k > TURN_AT && d > last_distance + eps)
+                                monotone = 0;
+                        last_distance = d;
+                }
+                if (!kept)
+                        continuous = 0;
+                if (end_gap > eps || (kind != 7 && !monotone))
+                        ends = 0;
+                string_format(log, "  kit turn %s: step %p, at the turn %p, after it %p, against unturned %p, ends %p, settles at %p (unturned %p) (%s)\n", names[kind],
+                              (positive)rate, (positive)gap_at_turn, (positive)worst, (positive)same, (positive)end_gap, (positive)settle_turned,
+                              (positive)settle_unturned,
+                              kept && end_gap <= eps && (kind == 7 || monotone) ? "ok" : "FAIL");
+        }
+        check("kit turn: every kind keeps its value across a theme turn mid-flight, within twice its own step", continuous);
+        check("kit turn: every kind ends where a control fresh under the new theme ends, and does not overshoot", ends);
+
+        // A control placed for the first time under a turn starts at rest: its tweens are put at their state, and none moves.
+        {
+                struct ui_control s, b;
+                b32 rested;
+
+                turn_reset(UI_THEME_DARK);
+                ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
+                memory_zero(&s, sizeof(s));
+                s.kind = UI_SWITCH, s.on = 1, s.x = 20, s.y = 16, s.w = 300, s.h = 48, s.label = "Telemetry";
+                memory_zero(&b, sizeof(b));
+                b.kind = UI_BUTTON, b.variant = UI_BUTTON_PRIMARY, b.x = 20, b.y = 20, b.w = 160, b.h = 40, b.label = "Save";
+                ui_control_start(&s);
+                ui_control_start(&b);
+                ui_kit.now += SWEEP_FRAME, ui_kit.busy = 0;
+                ui_kit_turn();
+                ui_control_draw(&ui, &s);
+                ui_control_draw(&ui, &b);
+                rested = ui_tween_still(&s.extent) && sweep_value(&s.extent) == UI_ONE && ui_tween_still(&b.layer) &&
+                         sweep_value(&b.layer) == 0 && ui_tween_still(&b.fill) && ui_tween_argb(sweep_value(&b.fill)) == ui_kit.shown.role[UI_PRIMARY];
+                check("kit turn: a control placed for the first time under a turn starts at rest, its tweens put and none moving", rested);
+        }
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_DAWN, 0);
+}
+
+/*
         The control widgets' pointer: a finger reaches what it presses UI_TARGET each way (a tab strip 32 tall is pressed
         4 above and below it), a mouse does not; the slider's thumb rings where the hand hovers it; a value past the last
         step lands on that step, not past the range; a value fixed in place is placed, not faded; a progress bar's fill
@@ -136354,6 +136623,7 @@ b32 main()
         check_kit_place();
         check_kit_controls();
         check_kit_states();
+        check_kit_turn();
         check_kit_tab_ripple();
 #endif
 #if MOONWATER_UI_TASKBAR
