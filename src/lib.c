@@ -37703,10 +37703,14 @@ __asm__(
 
     "4:  mov     w3, w3\n   orr     x4, x3, x3, lsl #32\n"
 
-    "        cmp     x2, #2\n   b.lo    2f\n"
+    "        cmp     x2, #4\n   b.lo    1f\n"
 
-    "1:      ldr     x5, [x1], #8            // two pixels\n"
-    "        orr     x5, x5, x4\n   str     x5, [x0], #8\n   sub     x2, x2, #2\n   cmp     x2, #2\n   b.hs    1b\n"
+    "0:      ldp     x5, x6, [x1], #16       // four pixels\n"
+    "        orr     x5, x5, x4\n   orr     x6, x6, x4\n   stp     x5, x6, [x0], #16\n   sub     x2, x2, #4\n   cmp     x2, #4\n   b.hs    0b\n"
+
+    "1:      cmp     x2, #2\n   b.lo    2f\n"
+    "        ldr     x5, [x1], #8            // two pixels\n"
+    "        orr     x5, x5, x4\n   str     x5, [x0], #8\n   sub     x2, x2, #2\n"
 
     "2:      cbz     x2, 3f\n   ldr     w5, [x1]\n   orr     w5, w5, w3\n   str     w5, [x0]\n"
     "3:      " ASM_RET
