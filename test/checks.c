@@ -18146,8 +18146,9 @@ fn check_offsets_range()
         static p8 bytes[4096 + 64];
         p64 seed = 0x13198a2e03707344ull;
 #if X64
-        p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2;
-        positive tiers = 3;
+        p8 avx512 = cpu_has_avx512, vbmi2 = cpu_has_avx512_vbmi2, avx2 = cpu_has_avx2;
+        // AVX-512 with VBMI2, AVX-512 with dword packing, AVX2 without AVX-512, and SSE2.
+        positive tiers = 4;
 #else
         positive tiers = 1;
 #endif
@@ -18161,6 +18162,7 @@ fn check_offsets_range()
 #if X64
                 cpu_has_avx512 = tier < 2 ? avx512 : 0;
                 cpu_has_avx512_vbmi2 = tier == 1 ? 1 : vbmi2;
+                cpu_has_avx2 = tier == 3 ? 0 : avx2;
 #endif
                 for (positive r = 0; r < array_count(ranges); r++)
                         for (positive outside = 0; outside < 2; outside++)
@@ -18257,6 +18259,7 @@ fn check_offsets_range()
 #if X64
         cpu_has_avx512 = avx512;
         cpu_has_avx512_vbmi2 = vbmi2;
+        cpu_has_avx2 = avx2;
 #endif
 }
 

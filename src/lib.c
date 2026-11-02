@@ -5019,6 +5019,20 @@ __asm__(
     "shl $16, %r8d\n   or %r8d, %r11d\n   shl $32, %r11\n   or %r11, %rcx\n"
 #define OFFSETS_X64_STEP(D)                                                   \
     "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, " D "(%r8)\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n"
+//
+//      memory_offsets_between / _outside's SSE2 flags: a byte inside [low, low + width] when the byte less low is at most
+//      the width, which is pminub of it with the width and the byte less low equal to that; xmm1 is low and xmm2 the width,
+//      each in every byte. RANGE_X64_XMASK is OFFSETS_X64_XMASK with that flag, and then the outside flag (r12 all ones or
+//      nought) flips the mask. The byte loop it falls back to takes the flag as nought or one.
+//
+#define RANGE_X64_XFLAGS(SRC, MASK)                                           \
+    "movdqu " SRC ", %xmm3\n   psubb %xmm1, %xmm3\n   movdqa %xmm3, %xmm4\n   pminub %xmm2, %xmm4\n" \
+    "pcmpeqb %xmm4, %xmm3\n   pmovmskb %xmm3, " MASK "\n"
+#define RANGE_X64_XMASK(A, B, C, D)                                           \
+    RANGE_X64_XFLAGS(A, "%ecx") RANGE_X64_XFLAGS(B, "%r11d")                  \
+    "shl $16, %r11d\n   or %r11d, %ecx\n"                                       \
+    RANGE_X64_XFLAGS(C, "%r11d") RANGE_X64_XFLAGS(D, "%r8d")                  \
+    "shl $16, %r8d\n   or %r8d, %r11d\n   shl $32, %r11\n   or %r11, %rcx\n   xor %r12, %rcx\n"
 
 //
 //      memory_count_words's pieces. W is a 64-byte block's white space mask,
@@ -14778,7 +14792,7 @@ __asm__(
     //      a hit every 250 to 749 bytes 9,843 and 229. With AVX-512 and 256 offsets of room for 4096 bytes, hits
     //      every 8 to 27: 1,175 before, 441 now that the last kilobyte is not the byte loop's.
     //
-    ".Lmemory_offsets_range_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_range_x64_one\n"
+    ".Lmemory_offsets_range_x64_avx2:\n   cmpb $0, cpu_has_avx2(%rip)\n   je .Lmemory_offsets_range_x64_sse2\n"
     "vmovd %ecx, %xmm1\n   vpbroadcastb %xmm1, %ymm1\n   vmovd %r8d, %xmm2\n   vpbroadcastb %xmm2, %ymm2\n   neg %r12\n"
     ".balign 16\n.Lmemory_offsets_range_x64_a2_block:\n"
     "cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_a2_full\n   mov %rdx, %r11\n   sub %r10, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_range_x64_a2_tail\n"
@@ -14797,6 +14811,35 @@ __asm__(
     "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_range_x64_a2_slow\n   jmp .Lmemory_offsets_range_x64_a2_next\n"
     ".Lmemory_offsets_range_x64_a2_full:\n   vzeroupper\n   jmp .Lmemory_offsets_range_x64_leave\n"
     ".Lmemory_offsets_range_x64_a2_tail:\n   vmovd %xmm1, %ecx\n   movzbl %cl, %ecx\n   vmovd %xmm2, %r8d\n   movzbl %r8b, %r8d\n   neg %r12\n   vzeroupper\n   jmp .Lmemory_offsets_range_x64_one\n"
+    //      SSE2, for a machine without AVX2: memory_offsets_of_either's SSE2 body with RANGE_X64_XMASK for its flags. The
+    //      outside flag is kept as nought or one for the byte loop, and negated for the mask while the body runs.
+    ".Lmemory_offsets_range_x64_sse2:\n   neg %r12\n   movzbl %cl, %ecx\n   imul $0x01010101, %ecx, %ecx\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+    "movzbl %r8b, %r8d\n   imul $0x01010101, %r8d, %r8d\n   movd %r8d, %xmm2\n   pshufd $0, %xmm2, %xmm2\n"
+    ".balign 16\n.Lmemory_offsets_range_x64_sse2_block:\n"
+    "cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_sse2_full\n   mov %rdx, %r11\n   sub %r10, %r11\n   cmp $64, %r11\n   jb .Lmemory_offsets_range_x64_sse2_tail\n"
+    RANGE_X64_XMASK("(%rsi,%r10)", "16(%rsi,%r10)", "32(%rsi,%r10)", "48(%rsi,%r10)")
+    ".Lmemory_offsets_range_x64_sse2_found:\n   test %rcx, %rcx\n   jz .Lmemory_offsets_range_x64_sse2_next\n   mov %r9, %rbx\n   sub %rax, %rbx\n   cmp $64, %rbx\n   jb .Lmemory_offsets_range_x64_sse2_slow\n"
+    "popcnt %rcx, %r11\n   lea (%rdi,%rax,4), %r8\n   add %r11, %rax\n"
+    OFFSETS_X64_STEP("0") OFFSETS_X64_STEP("4") OFFSETS_X64_STEP("8") OFFSETS_X64_STEP("12")
+    OFFSETS_X64_STEP("16") OFFSETS_X64_STEP("20") OFFSETS_X64_STEP("24") OFFSETS_X64_STEP("28")
+    "cmp $8, %r11\n   jbe .Lmemory_offsets_range_x64_sse2_next\n   add $32, %r8\n"
+    OFFSETS_X64_STEP("0") OFFSETS_X64_STEP("4") OFFSETS_X64_STEP("8") OFFSETS_X64_STEP("12")
+    OFFSETS_X64_STEP("16") OFFSETS_X64_STEP("20") OFFSETS_X64_STEP("24") OFFSETS_X64_STEP("28")
+    "cmp $16, %r11\n   jbe .Lmemory_offsets_range_x64_sse2_next\n   add $32, %r8\n"
+    ".Lmemory_offsets_range_x64_sse2_more:\n   bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%r8)\n   lea -1(%rcx), %rbx\n   add $4, %r8\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_range_x64_sse2_more\n"
+    ".Lmemory_offsets_range_x64_sse2_next:\n   add $64, %r10\n   jmp .Lmemory_offsets_range_x64_sse2_block\n"
+    ".Lmemory_offsets_range_x64_sse2_slow:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_sse2_full\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_range_x64_sse2_slow\n   jmp .Lmemory_offsets_range_x64_sse2_next\n"
+    ".Lmemory_offsets_range_x64_sse2_tail:\n   test %r11, %r11\n   jz .Lmemory_offsets_range_x64_sse2_full\n   lea (%rsi,%r10), %r8\n   mov %r8d, %ebx\n   and $4095, %ebx\n   cmp $4032, %ebx\n   ja 1f\n"
+    "mov %r11d, %ecx\n   mov $1, %ebx\n   shl %cl, %rbx\n   dec %rbx  # the bytes inside the count\n"
+    RANGE_X64_XMASK("(%r8)", "16(%r8)", "32(%r8)", "48(%r8)") "and %rbx, %rcx\n   jmp .Lmemory_offsets_range_x64_sse2_sparse\n"
+    "1:  cmp $64, %rdx\n   jb .Lmemory_offsets_range_x64_sse2_bytes\n   lea -64(%rsi,%rdx), %r8\n   mov $64, %ecx\n   sub %r11d, %ecx\n   mov $-1, %rbx\n   shl %cl, %rbx  # the bytes not yet asked\n"
+    RANGE_X64_XMASK("(%r8)", "16(%r8)", "32(%r8)", "48(%r8)") "and %rbx, %rcx\n   lea -64(%rdx), %r10\n"
+    ".Lmemory_offsets_range_x64_sse2_sparse:\n   test %rcx, %rcx\n   jz .Lmemory_offsets_range_x64_sse2_full\n"
+    ".Lmemory_offsets_range_x64_sse2_last:\n   cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_sse2_full\n"
+    "bsf %rcx, %rbx\n   add %r10, %rbx\n   mov %ebx, (%rdi,%rax,4)\n   inc %rax\n   lea -1(%rcx), %rbx\n   and %rbx, %rcx\n   jnz .Lmemory_offsets_range_x64_sse2_last\n   jmp .Lmemory_offsets_range_x64_sse2_full\n"
+    ".Lmemory_offsets_range_x64_sse2_bytes:\n   movd %xmm1, %ecx\n   movzbl %cl, %ecx\n   movd %xmm2, %r8d\n   movzbl %r8b, %r8d\n   neg %r12\n   jmp .Lmemory_offsets_range_x64_one\n"
+    ".Lmemory_offsets_range_x64_sse2_full:\n   jmp .Lmemory_offsets_range_x64_leave\n"
 #endif
     ".balign 16\n.Lmemory_offsets_range_x64_one:\n"
     "cmp %rdx, %r10\n   jae .Lmemory_offsets_range_x64_leave\n   cmp %r9, %rax\n   jae .Lmemory_offsets_range_x64_leave\n"
