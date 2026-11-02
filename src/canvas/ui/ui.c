@@ -3307,8 +3307,8 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                                 c->item_scale[item].ease = &linear;
                 }
                 rest = ui_kit_tween(&c->item_scale[item]);
-                clip = ui_box_transform((struct ui_box){rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), rx + rw + ui_q8(ui, 24), ry + rh + ui_q8(ui, 8), 0, 0},
-                                        row_sx, row_sy, rx + rw / 2, oy, row_tx, row_ty);
+                // The ripple is cut to the row it is on, the box the hover is drawn on: not an outset of it, and not moved with the press.
+                clip = (struct ui_box){rx, ry, rx + rw, ry + rh, 0, 0};
                 // The rest circle: scale(rest) about its middle, inside the bars' scaleY(dom) scale(hover) about the origin.
                 if (rest > 0)
                 {
@@ -3333,7 +3333,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                 {
                         struct ui_place place = {row_sx, row_sy, rx + rw / 2, oy, row_tx, row_ty};
 
-                        ui_kit_ripples(ui, c, rx - ui_q8(ui, 24), ry - ui_q8(ui, 8), &place, &clip, ui_role(UI_PRIMARY));
+                        ui_kit_ripples(ui, c, rx, ry, &place, &clip, ui_role(UI_PRIMARY));
                 }
         }
         ui_kit.busy |= live;
@@ -4839,8 +4839,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                                 ui_list_row_press(ui, c, x, y);
                         }
                         else if (c->kind == UI_RADIOS)
-                                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x - 24), ui_dev(ui, ui_radio_row_y(c, hit) - 8), ui_dev(ui, c->w + 48),
-                                                    ui_dev(ui, c->h + 16), 0);
+                                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, ui_radio_row_y(c, hit)), ui_dev(ui, c->w), ui_dev(ui, c->h), 0);
                         else if (c->kind == UI_INPUT)
                                 c->focused = 1;
                         else if (c->kind == UI_SLIDER)
