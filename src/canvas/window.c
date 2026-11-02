@@ -324,6 +324,13 @@ static inline unsigned int window_cell_colour(unsigned int index)
 #define WINDOW_CELL_HANDLE_START 2048u
 #define WINDOW_CELL_HANDLE_END 4096u
 
+/* Which colours a program set. Without INK_SET the ink is the theme's default ink, and without PAPER_SET the paper is the
+   theme's default paper: the index is then not looked at. SWAP is a cell written in reverse video, where the defaults trade
+   places, so an unset ink is the theme's paper. The index is what a program asked for when its bit is set, and 0 or 7 when not. */
+#define WINDOW_CELL_INK_SET 8192u
+#define WINDOW_CELL_PAPER_SET 16384u
+#define WINDOW_CELL_SWAP 32768u
+
 /* The program writes this; the compositor reads it. A terminal that has
    asked for mouse tracking sets WINDOW_WANT_POINTER so clicks, drags and
    the wheel reach its key ring instead of only moving the desktop. */

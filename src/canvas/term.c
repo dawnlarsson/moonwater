@@ -198,7 +198,13 @@ static PURE unsigned char ink_drawn()
 */
 static PURE positive blank_cell_word()
 {
-        return BLANK_CELL_WORD | (positive)paper << 40;
+        return BLANK_CELL_WORD | (positive)paper << 40 | (positive)(style & WINDOW_CELL_PAPER_SET) << 48;
+}
+
+/* Whether the paper in force is one a program set (SGR 40 to 47, 48 or 100 to 107), black or not: the default paper is none. */
+static PURE b32 paper_set()
+{
+        return (style & WINDOW_CELL_PAPER_SET) != 0;
 }
 
 /* Erase in the colours in force, so a program can clear a coloured panel. */
@@ -258,7 +264,7 @@ static fn row_blank(unsigned int r)
 {
         // A line given out blank takes the background in force, the way an
         // erase does: nano scrolls and inserts its blue title bar's rows.
-        if (paper)
+        if (paper_set())
         {
                 cells_clear(r, 0, COLUMNS);
                 address_to row_length(r) = COLUMNS;
@@ -415,7 +421,7 @@ static fn __attribute__((__noinline__)) alternate_scroll(unsigned int count)
 
         touch_all();
 
-        if (paper)
+        if (paper_set())
                 for (unsigned int r = ROWS - count; r < ROWS; r++)
                         row_blank(r);
 }
@@ -450,7 +456,7 @@ static fn scroll_up(unsigned int count)
         for (unsigned int n = count; n; n--)
                 ring_scroll();
 
-        if (paper)
+        if (paper_set())
                 for (unsigned int r = ROWS - count; r < ROWS; r++)
                         row_blank(r);
 }
@@ -573,13 +579,25 @@ static inline INLINE fn column_held(void)
                 column = COLUMNS - 1;
 }
 
+// The flags a cell written now takes from the pen: the ones a program set, which trade places in reverse video
+// along with the colours, and SWAP, which is what makes the defaults trade places too.
+static PURE unsigned short cell_flags()
+{
+        unsigned short rest = style & ~(WINDOW_CELL_INK_SET | WINDOW_CELL_PAPER_SET);
+
+        if (!reverse)
+                return style;
+        return (unsigned short)(rest | (style & WINDOW_CELL_INK_SET ? WINDOW_CELL_PAPER_SET : 0) |
+                                (style & WINDOW_CELL_PAPER_SET ? WINDOW_CELL_INK_SET : 0) | WINDOW_CELL_SWAP);
+}
+
 // A cell's colours and flags where BLANK_CELL_WORD lays them out, above the
 // character.
 static PURE positive cell_attribute()
 {
         return ((positive)(reverse ? paper : ink_drawn()) << 32) |
                ((positive)(reverse ? ink_drawn() : paper) << 40) |
-               ((positive)style << 48);
+               ((positive)cell_flags() << 48);
 }
 
 static fn put_cells(unsigned int character, unsigned int width)
@@ -616,13 +634,13 @@ static fn put_cells(unsigned int character, unsigned int width)
         cell->character = character;
         cell->ink = reverse ? paper : ink_drawn();
         cell->paper = reverse ? ink_drawn() : paper;
-        cell->flags = style;
+        cell->flags = cell_flags();
 
         if (width == 2)
         {
                 cell->flags |= WINDOW_CELL_WIDE;
                 cell[1] = cell[0];
-                cell[1].flags = (unsigned short)(style | WINDOW_CELL_WIDE_RIGHT);
+                cell[1].flags = (unsigned short)(cell_flags() | WINDOW_CELL_WIDE_RIGHT);
         }
 
         last_character = character;
@@ -1014,7 +1032,7 @@ static fn osc_finish(b32 bell)
 static fn erase(unsigned int from_row, unsigned int from_column,
                 unsigned int to_row, unsigned int to_column)
 {
-        b32 coloured = paper != 0;
+        b32 coloured = paper_set();
         unsigned int r;
 
         for (r = from_row; r <= to_row && r < ROWS; r++)
@@ -1266,25 +1284,49 @@ static fn sgr()
                         }
                 }
                 else if (p >= 30 && p <= 37)
+                {
                         ink = (unsigned char)(p - 30);
+                        style = (unsigned short)(style | WINDOW_CELL_INK_SET);
+                }
                 else if (p == 38)
+                {
                         took = sgr_extended(i, took, address_of ink);
+                        style = (unsigned short)(style | WINDOW_CELL_INK_SET);
+                }
                 else if (p == 39)
+                {
                         ink = 7;
+                        style = (unsigned short)(style & ~WINDOW_CELL_INK_SET);
+                }
                 else if (p >= 40 && p <= 47)
+                {
                         paper = (unsigned char)(p - 40);
+                        style = (unsigned short)(style | WINDOW_CELL_PAPER_SET);
+                }
                 else if (p == 48)
+                {
                         took = sgr_extended(i, took, address_of paper);
+                        style = (unsigned short)(style | WINDOW_CELL_PAPER_SET);
+                }
                 else if (p == 49)
+                {
                         paper = 0;
+                        style = (unsigned short)(style & ~WINDOW_CELL_PAPER_SET);
+                }
                 // The underline's own colour, spelled the way 38 is, and with
                 // nowhere to go.
                 else if (p == 58)
                         took = sgr_extended(i, took, address_of unused);
                 else if (p >= 90 && p <= 97)
+                {
                         ink = (unsigned char)(8 + (p - 90));
+                        style = (unsigned short)(style | WINDOW_CELL_INK_SET);
+                }
                 else if (p >= 100 && p <= 107)
+                {
                         paper = (unsigned char)(8 + (p - 100));
+                        style = (unsigned short)(style | WINDOW_CELL_PAPER_SET);
+                }
 
                 i += took;
         }
@@ -1748,7 +1790,7 @@ static fn csi_final(unsigned int final)
 
                 // In colour the line is drawn to the edge, and what DCH pulls
                 // in at the right margin is that colour.
-                if (paper && column < COLUMNS)
+                if (paper_set() && column < COLUMNS)
                         reach(row, COLUMNS);
 
                 length = row_length(row);
@@ -1764,7 +1806,7 @@ static fn csi_final(unsigned int final)
                             (positive)(last - column - gone) *
                                 sizeof(struct window_cell));
 
-                if (paper)
+                if (paper_set())
                         cells_clear(row, last - gone, gone);
                 else
                         address_to length = last - gone;
@@ -2777,19 +2819,30 @@ static fn term_bytes(const p8 address_to bytes, positive count)
         }
 }
 
+/* A block cursor's cell with its colours the other way round: the ink and the paper trade places with the bits that say which
+   the program set, and SWAP flips, so a default trades places too. Done twice it is the cell it was. */
+static fn cell_turn(struct window_cell address_to cell)
+{
+        unsigned int was = cell->ink;
+        unsigned short flags = cell->flags;
+
+        cell->ink = cell->paper;
+        cell->paper = (unsigned char)was;
+        cell->flags = (unsigned short)((flags & ~(WINDOW_CELL_INK_SET | WINDOW_CELL_PAPER_SET | WINDOW_CELL_SWAP)) |
+                                       (flags & WINDOW_CELL_PAPER_SET ? WINDOW_CELL_INK_SET : 0) |
+                                       (flags & WINDOW_CELL_INK_SET ? WINDOW_CELL_PAPER_SET : 0) |
+                                       (flags & WINDOW_CELL_SWAP ? 0 : WINDOW_CELL_SWAP));
+}
+
 static fn cursor_hide()
 {
         if (!shown)
                 return;
 
         struct window_cell address_to cell = row_cells(shown_row) + shown_column;
-        unsigned char was = cell->ink;
 
         if (shown_block)
-        {
-                cell->ink = cell->paper;
-                cell->paper = was;
-        }
+                cell_turn(cell);
         else
                 cell->flags &= (unsigned short)~shown_marks;
 
@@ -2805,7 +2858,6 @@ static fn SPARE cursor_show()
         // last row that is one cell past the grid.
         unsigned int at = column < COLUMNS ? column : COLUMNS - 1;
         struct window_cell address_to cell;
-        unsigned char was;
 
         // Showing is a state transition, not a colour toggle. In particular,
         // a synchronous resize commit and the ordinary loop tail can both
@@ -2817,7 +2869,6 @@ static fn SPARE cursor_show()
         reach(row, at + 1);
 
         cell = row_cells(row) + at;
-        was = cell->ink;
 
         // A block is the cell with its colours the other way round. An
         // underline or a bar is a mark added to the cell, and hiding takes
@@ -2825,10 +2876,7 @@ static fn SPARE cursor_show()
         shown_block = cursor_shape < 3;
 
         if (shown_block)
-        {
-                cell->ink = cell->paper;
-                cell->paper = was;
-        }
+                cell_turn(cell);
         else
         {
                 unsigned short mark = cursor_shape >= 5 ? WINDOW_CELL_BAR
