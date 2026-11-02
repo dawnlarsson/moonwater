@@ -23955,7 +23955,11 @@ __asm__(
     //       and rshrn for the division by 255; a pixel at a time after. The
     //       x86_64 block carries the contract.
     ASM_FUNC(memory_glass_over_u32)
+    //  Sixteen pixels a turn from x3 of sixteen up, out of line: the alpha of each pixel by a tbl through v6 (the
+    //  byte indices that spread byte 3 over its pixel's four bytes), and the grain at fixed offsets from x4, since x5
+    //  is a multiple of sixteen there. Fewer pixels fall through to the four-pixel turn, which multiplies by v7 as before.
     "cbz x3, 9f\n   mov x5, #0\n   mov w6, #0x0101\n   movk w6, #0x0101, lsl #16\n   dup v7.4s, w6\n"
+    "cmp x3, #16\n   b.hs 5f\n"
     "2:  cmp x3, #4\n   b.lo 3f\n   and x6, x5, #15\n   add x6, x4, x6, lsl #2\n"
     "ldr q0, [x2], #16\n   ldr q1, [x6]\n   uqadd v0.16b, v0.16b, v1.16b\n   ldr q1, [x6, #256]\n   uqsub v0.16b, v0.16b, v1.16b\n"
     "ldr q1, [x1], #16\n   ushr v2.4s, v1.4s, #24\n   mul v2.4s, v2.4s, v7.4s\n   mvn v2.16b, v2.16b\n"
@@ -23968,6 +23972,25 @@ __asm__(
     "umull v3.8h, v0.8b, v2.8b\n   ursra v3.8h, v3.8h, #8\n   rshrn v3.8b, v3.8h, #8\n   uqadd v3.8b, v3.8b, v1.8b\n   str s3, [x0], #4\n"
     "add x5, x5, #1\n   sub x3, x3, #1\n   b 3b\n"
     "9:  " ASM_RET
+    "5:  mov w6, #0x03030303\n   mov w7, #0x07070707\n   mov w8, #0x0b0b\n   movk w8, #0x0b0b, lsl #16\n   mov w9, #0x0f0f0f0f\n"
+    "ins v6.s[0], w6\n   ins v6.s[1], w7\n   ins v6.s[2], w8\n   ins v6.s[3], w9\n"
+    "6:  ldr q0, [x2], #16\n   ldr q1, [x4]\n   uqadd v0.16b, v0.16b, v1.16b\n   ldr q1, [x4, #256]\n   uqsub v0.16b, v0.16b, v1.16b\n"
+    "ldr q1, [x1], #16\n   tbl v2.16b, {v1.16b}, v6.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v0.8b, v2.8b\n   umull2 v4.8h, v0.16b, v2.16b\n   ursra v3.8h, v3.8h, #8\n   ursra v4.8h, v4.8h, #8\n"
+    "rshrn v3.8b, v3.8h, #8\n   rshrn2 v3.16b, v4.8h, #8\n   uqadd v3.16b, v3.16b, v1.16b\n   str q3, [x0], #16\n"
+    "ldr q0, [x2], #16\n   ldr q1, [x4, #16]\n   uqadd v0.16b, v0.16b, v1.16b\n   ldr q1, [x4, #272]\n   uqsub v0.16b, v0.16b, v1.16b\n"
+    "ldr q1, [x1], #16\n   tbl v2.16b, {v1.16b}, v6.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v0.8b, v2.8b\n   umull2 v4.8h, v0.16b, v2.16b\n   ursra v3.8h, v3.8h, #8\n   ursra v4.8h, v4.8h, #8\n"
+    "rshrn v3.8b, v3.8h, #8\n   rshrn2 v3.16b, v4.8h, #8\n   uqadd v3.16b, v3.16b, v1.16b\n   str q3, [x0], #16\n"
+    "ldr q0, [x2], #16\n   ldr q1, [x4, #32]\n   uqadd v0.16b, v0.16b, v1.16b\n   ldr q1, [x4, #288]\n   uqsub v0.16b, v0.16b, v1.16b\n"
+    "ldr q1, [x1], #16\n   tbl v2.16b, {v1.16b}, v6.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v0.8b, v2.8b\n   umull2 v4.8h, v0.16b, v2.16b\n   ursra v3.8h, v3.8h, #8\n   ursra v4.8h, v4.8h, #8\n"
+    "rshrn v3.8b, v3.8h, #8\n   rshrn2 v3.16b, v4.8h, #8\n   uqadd v3.16b, v3.16b, v1.16b\n   str q3, [x0], #16\n"
+    "ldr q0, [x2], #16\n   ldr q1, [x4, #48]\n   uqadd v0.16b, v0.16b, v1.16b\n   ldr q1, [x4, #304]\n   uqsub v0.16b, v0.16b, v1.16b\n"
+    "ldr q1, [x1], #16\n   tbl v2.16b, {v1.16b}, v6.16b\n   mvn v2.16b, v2.16b\n"
+    "umull v3.8h, v0.8b, v2.8b\n   umull2 v4.8h, v0.16b, v2.16b\n   ursra v3.8h, v3.8h, #8\n   ursra v4.8h, v4.8h, #8\n"
+    "rshrn v3.8b, v3.8h, #8\n   rshrn2 v3.16b, v4.8h, #8\n   uqadd v3.16b, v3.16b, v1.16b\n   str q3, [x0], #16\n"
+    "add x5, x5, #16\n   sub x3, x3, #16\n   cmp x3, #16\n   b.hs 6b\n   b 2b\n"
     ASM_END(memory_glass_over_u32)
 #endif
 

@@ -115075,6 +115075,37 @@ static fn check_glass_routines()
                 check("glass routines: halving is the mean of each two by two, rows rounded up and columns down, nothing past it touched", halved);
                 check("glass routines: halving in place at the same pitch is halving apart", in_place);
                 check("glass routines: doubling is three quarters of a pixel and a quarter of its neighbour each way, rounded up and down", doubled);
+                // Every count to 300 at every alignment to 63 words, each start in the grain (the alignment's low four
+                // bits), against glass_over_reference: the same picture and ground the sweep above makes.
+                {
+                        static p32 glass_picture[400], glass_ground[400], glass_into[400], glass_made[400];
+                        bool glassy = true;
+
+                        for (positive count = 0; count <= 300; count++)
+                                for (positive at = 0; at < 64; at++)
+                                {
+                                        p32 address_to picture = glass_picture + at, address_to ground = glass_ground + at;
+
+                                        for (positive i = 0; i < count; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                picture[i] = (p32)(state >> 32);
+                                                p32 alpha = (i % 5 == 0) ? 0 : (i % 7 == 0) ? 255 : picture[i] >> 24;
+                                                p32 made = alpha << 24;
+                                                for (p32 shift = 0; shift < 24; shift += 8)
+                                                        made |= (((picture[i] >> shift & 255) * alpha) / 255) << shift;
+                                                picture[i] = made;
+                                                ground[i] = (p32)(state >> 8) & 0xffffffu;
+                                        }
+                                        memory_fill(glass_into, 0x5a, sizeof(glass_into));
+                                        memory_fill(glass_made, 0x5a, sizeof(glass_made));
+                                        glass_over_reference(glass_made + at, picture, ground, count, grain + (at & 15));
+                                        VECTOR_FIRST_CALL(tier == 0);
+                                        memory_glass_over_u32(glass_into + at, picture, ground, count, grain + (at & 15));
+                                        glassy = glassy && !memory_compare(glass_into, glass_made, sizeof(glass_into));
+                                }
+                        check("glass routines: every count to 300 at every alignment to 63 words, each start in the grain, is the reference", glassy);
+                }
                 check("glass routines: a premultiplied picture over a ground with its grain, every colour rounded", laid);
 #if X64
         }
