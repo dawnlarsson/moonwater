@@ -129988,6 +129988,383 @@ static fn check_kit_tab_ripple(void)
 }
 
 /*
+        Kit states: every animated control and region driven through its states by the pointer, the wheel and the
+        clock, each frame drawn as the frame loop draws it. Each state must reach its rest and report idle there,
+        and stay idle when drawn again, within SWEEP_BUDGET frames (ten seconds at 60 Hz).
+*/
+#define SWEEP_FRAME 16666667ll // a display period at 60 Hz, ns
+#define SWEEP_BUDGET 600
+
+// One frame of a control, drawn as the loop draws it (the theme's turn, then the control). True while it asks for another.
+static b32 sweep_frame(struct ui address_to ui, struct ui_control address_to c)
+{
+        ui_kit.now += SWEEP_FRAME, ui_kit.busy = 0;
+        ui_kit_turn();
+        ui_control_draw(ui, c);
+        return ui_kit.busy != 0;
+}
+
+// Frames until a control asks for no more: how many, or -1 while it still asks at the budget.
+static int sweep_settle(struct ui address_to ui, struct ui_control address_to c)
+{
+        for (int frame = 1; frame <= SWEEP_BUDGET; frame++)
+                if (!sweep_frame(ui, c))
+                        return frame;
+        return -1;
+}
+
+// One frame of a scrolling region: its glide, then its bar.
+static b32 sweep_scroll_frame(struct ui address_to ui, struct ui_scroll address_to s)
+{
+        ui_kit.now += SWEEP_FRAME, ui_kit.busy = 0;
+        ui_scroll_glide(ui, s);
+        ui_scroll_draw(ui, s);
+        return ui_kit.busy != 0;
+}
+
+static int sweep_settle_scroll(struct ui address_to ui, struct ui_scroll address_to s)
+{
+        for (int frame = 1; frame <= SWEEP_BUDGET; frame++)
+                if (!sweep_scroll_frame(ui, s))
+                        return frame;
+        return -1;
+}
+
+// A tween's value at the kit's clock, without marking the frame busy.
+static b64 sweep_value(struct ui_tween address_to t)
+{
+        b32 live = 0;
+
+        return ui_tween_at(t, ui_kit.now, &live);
+}
+
+static fn check_kit_states(void)
+{
+        static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        struct ui ui = terminal.ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit states: the face loads", false);
+                return;
+        }
+        ui.pixels = pixels, ui.pitch = 600, ui.width = 600, ui.height = 300, ui.top = 0, ui.bottom = 300, ui.scale = 1;
+        ui.scratch = scratch, ui.scratch_width = 600, ui.band_top = ui.band_bottom = 0, ui.mono = null;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = 7000000000ll;
+
+        // A button entered and left: its state layer goes to rest, and the frame is idle after it.
+        {
+                struct ui_control b;
+                int frames;
+                b32 entered, left, idle_after;
+
+                memory_zero(&b, sizeof(b));
+                b.kind = UI_BUTTON, b.variant = UI_BUTTON_PRIMARY, b.x = 20, b.y = 20, b.w = 160, b.h = 40, b.label = "Save";
+                ui_control_start(&b);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &b);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_MOTION, 60, 40, false, 0);
+                entered = b.hover && sweep_settle(&ui, &b) > 0 && sweep_value(&b.layer) == UI_Q2(6);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_MOTION, 400, 250, false, 0);
+                frames = sweep_settle(&ui, &b);
+                left = !b.hover && frames > 0 && sweep_value(&b.layer) == 0;
+                idle_after = !sweep_frame(&ui, &b) && !sweep_frame(&ui, &b);
+                check("kit states: a button entered and left by the pointer rests in its layer, hovered then not, and is idle",
+                      entered && left && idle_after);
+        }
+
+        // A button pressed, dragged off it and let go off it: the release is where the pointer is, so it is not hovered.
+        {
+                struct ui_control b;
+                int frames;
+
+                memory_zero(&b, sizeof(b));
+                b.kind = UI_BUTTON, b.variant = UI_BUTTON_PRIMARY, b.x = 20, b.y = 20, b.w = 160, b.h = 40, b.label = "Save";
+                ui_control_start(&b);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &b);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_BUTTON, 60, 40, true, 0);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_MOTION, 400, 250, false, 0);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_BUTTON, 400, 250, false, 0);
+                frames = sweep_settle(&ui, &b);
+                check("kit states: a press dragged off a button and let go off it is not hovered, and settles idle",
+                      frames > 0 && !b.hover && !b.down && sweep_value(&b.layer) == 0);
+        }
+
+        // A press let go where it went down: its ripple runs out and the frame goes idle.
+        {
+                struct ui_control b;
+                int frames;
+
+                memory_zero(&b, sizeof(b));
+                b.kind = UI_BUTTON, b.variant = UI_BUTTON_OUTLINED, b.x = 20, b.y = 20, b.w = 160, b.h = 40, b.label = "Save";
+                ui_control_start(&b);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &b);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_BUTTON, 60, 40, true, 0);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_BUTTON, 60, 40, false, 0);
+                frames = sweep_settle(&ui, &b);
+                check("kit states: a press and release in place runs its ripple out and settles idle, still hovered",
+                      frames > 0 && b.hover && !b.down && !b.ripple[0].live);
+        }
+
+        // A second press while the first is still held (no release came for it): the first is let go, and the frame settles.
+        {
+                struct ui_control pair[2];
+                int frames;
+
+                memory_zero(&pair, sizeof(pair));
+                for (int k = 0; k < 2; k++)
+                {
+                        pair[k].kind = UI_BUTTON, pair[k].variant = UI_BUTTON_PRIMARY, pair[k].x = 20, pair[k].y = 20 + 80 * k;
+                        pair[k].w = 160, pair[k].h = 40, pair[k].label = "Save";
+                        ui_control_start(&pair[k]);
+                }
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &pair[0]), ui_control_draw(&ui, &pair[1]);
+                ui_kit_pointer(&ui, pair, 2, WINDOW_EVENT_BUTTON, 60, 40, true, 0);
+                ui_kit_pointer(&ui, pair, 2, WINDOW_EVENT_BUTTON, 60, 120, true, 0);
+                ui_kit_pointer(&ui, pair, 2, WINDOW_EVENT_BUTTON, 60, 120, false, 0);
+                frames = sweep_settle(&ui, &pair[0]);
+                check("kit states: a press with no release before a second press is let go, and its frame settles idle",
+                      frames > 0 && !pair[0].down && !pair[0].ripple[0].live);
+        }
+
+        // A switch dragged 30 pixels (under the 100 that flips it) while the kit settles under the drag: it does not flip.
+        {
+                struct ui_control sw;
+                b32 stayed;
+
+                memory_zero(&sw, sizeof(sw));
+                sw.kind = UI_SWITCH, sw.x = 20, sw.y = 10, sw.w = 300, sw.h = 48, sw.label = "Telemetry";
+                ui_control_start(&sw);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &sw);
+                ui_kit_pointer(&ui, &sw, 1, WINDOW_EVENT_BUTTON, 60, 30, true, 0);
+                ui_kit_pointer(&ui, &sw, 1, WINDOW_EVENT_MOTION, 90, 30, false, 0);
+                ui_kit_settle();
+                sweep_frame(&ui, &sw);
+                ui_kit_pointer(&ui, &sw, 1, WINDOW_EVENT_BUTTON, 90, 30, false, 0);
+                stayed = !sw.on;
+                check("kit states: a switch dragged short of its flip, with the kit settled mid-drag, stays as it was",
+                      stayed && sweep_settle(&ui, &sw) > 0);
+        }
+
+        // A switch pressed and let go: it turns on, its bars settle at full, and the frame goes idle.
+        {
+                struct ui_control sw;
+                int frames;
+
+                memory_zero(&sw, sizeof(sw));
+                sw.kind = UI_SWITCH, sw.x = 20, sw.y = 10, sw.w = 300, sw.h = 48, sw.label = "Telemetry";
+                ui_control_start(&sw);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &sw);
+                ui_kit_pointer(&ui, &sw, 1, WINDOW_EVENT_BUTTON, 60, 30, true, 0);
+                ui_kit_pointer(&ui, &sw, 1, WINDOW_EVENT_BUTTON, 60, 30, false, 0);
+                frames = sweep_settle(&ui, &sw);
+                check("kit states: a switch tapped turns on, its bars settle at full, and the frame is idle",
+                      frames > 0 && sw.on && sweep_value(&sw.extent) == UI_ONE);
+        }
+
+        // A slider pressed, dragged and let go: its spot fades to nothing and the frame goes idle.
+        {
+                struct ui_control sl;
+                int frames;
+
+                memory_zero(&sl, sizeof(sl));
+                sl.kind = UI_SLIDER, sl.x = 20, sl.y = 100, sl.w = 300, sl.h = 88, sl.label = "Level";
+                sl.low = ui_q(0), sl.high = ui_q(100), sl.step = 0, sl.value = ui_q(50);
+                ui_control_start(&sl);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &sl);
+                ui_kit_pointer(&ui, &sl, 1, WINDOW_EVENT_BUTTON, 170, 156, true, 0);
+                ui_kit_pointer(&ui, &sl, 1, WINDOW_EVENT_MOTION, 230, 156, false, 0);
+                ui_kit_pointer(&ui, &sl, 1, WINDOW_EVENT_BUTTON, 230, 156, false, 0);
+                frames = sweep_settle(&ui, &sl);
+                check("kit states: a slider dragged and let go fades its spot and settles idle",
+                      frames > 0 && !sl.down && !sl.sliding && sweep_value(&sl.spot) == 0);
+        }
+
+        // A slider clicked well away from its value slides there, lands, and goes idle; it is not left sliding.
+        {
+                struct ui_control sl;
+                int frames;
+
+                memory_zero(&sl, sizeof(sl));
+                sl.kind = UI_SLIDER, sl.x = 20, sl.y = 100, sl.w = 300, sl.h = 88, sl.label = "Level";
+                sl.low = ui_q(0), sl.high = ui_q(100), sl.step = 0, sl.value = ui_q(50);
+                ui_control_start(&sl);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &sl);
+                ui_kit_pointer(&ui, &sl, 1, WINDOW_EVENT_BUTTON, 260, 156, true, 0);
+                ui_kit_pointer(&ui, &sl, 1, WINDOW_EVENT_BUTTON, 260, 156, false, 0);
+                frames = sweep_settle(&ui, &sl);
+                check("kit states: a slider clicked away from its value slides there, lands, and settles idle",
+                      frames > 0 && !sl.sliding && sl.value > ui_q(60) && !sl.slide.landed);
+        }
+
+        // Scroll: a second wheel notch during a glide carries on from where it is and aims two rows down.
+        {
+                struct ui_scroll glide;
+                int frames;
+
+                memory_zero(&glide, sizeof(glide));
+                glide.x = 100, glide.y = 10, glide.height = 200, glide.content = 1000, glide.view = 200;
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_scroll_wheel(&ui, &glide, -120);
+                for (int k = 0; k < 2; k++)
+                        sweep_scroll_frame(&ui, &glide);
+                ui_scroll_wheel(&ui, &glide, -120);
+                frames = sweep_settle_scroll(&ui, &glide);
+                check("kit states: a second notch during a glide carries on to two rows and goes idle there",
+                      frames > 0 && !glide.gliding && glide.scroll == 2 * UI_ROW && glide.at == glide.aim);
+        }
+
+        // Tabs: a tap on the third tab moves the pip to it and settles there.
+        {
+                struct ui_control tabs;
+                int frames;
+
+                memory_zero(&tabs, sizeof(tabs));
+                tabs.kind = UI_TABS, tabs.variant = UI_TABS_SEGMENTED, tabs.x = 20, tabs.y = 100, tabs.count = 3;
+                tabs.items[0] = "All", tabs.items[1] = "Running", tabs.items[2] = "Stopped";
+                ui_control_start(&tabs);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &tabs);
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, ui_tab_left(&ui, &tabs, 2) + 10, 110, true, 0);
+                ui_kit_pointer(&ui, &tabs, 1, WINDOW_EVENT_BUTTON, ui_tab_left(&ui, &tabs, 2) + 10, 110, false, 0);
+                frames = sweep_settle(&ui, &tabs);
+                check("kit states: a tab tapped moves the pip to it and settles idle there",
+                      frames > 0 && tabs.at == 2 && sweep_value(&tabs.pip_x) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x));
+        }
+
+        // A list row entered, left: its layer returns to rest.
+        {
+                struct ui_control row;
+                int frames;
+
+                memory_zero(&row, sizeof(row));
+                row.kind = UI_LIST_ROW, row.x = 20, row.y = 40, row.w = 300, row.h = 40, row.label = "Item";
+                ui_control_start(&row);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &row);
+                ui_kit_pointer(&ui, &row, 1, WINDOW_EVENT_MOTION, 100, 60, false, 0);
+                sweep_settle(&ui, &row);
+                ui_kit_pointer(&ui, &row, 1, WINDOW_EVENT_MOTION, 500, 280, false, 0);
+                frames = sweep_settle(&ui, &row);
+                check("kit states: a list row entered and left rests in no layer and is idle",
+                      frames > 0 && !row.hover && sweep_value(&row.layer) == 0);
+        }
+
+        // A theme turn under a hovered button: it reaches the new colours and is idle; the turn is not left running.
+        {
+                struct ui_control b;
+                int frames;
+                b32 turned;
+
+                memory_zero(&b, sizeof(b));
+                b.kind = UI_BUTTON, b.variant = UI_BUTTON_PRIMARY, b.x = 20, b.y = 20, b.w = 160, b.h = 40, b.label = "Save";
+                ui_control_start(&b);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &b);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_MOTION, 60, 40, false, 0);
+                sweep_settle(&ui, &b);
+                ui_kit_theme(UI_THEME_LIGHT, 0xffffffu, 0);
+                frames = sweep_settle(&ui, &b);
+                turned = ui_kit.shown.role[UI_SURFACE] == ui_kit.to.role[UI_SURFACE] && ui_tween_still(&ui_kit.turn);
+                check("kit states: a theme turn under a hovered button ends in the new colours and is idle", frames > 0 && turned);
+                ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+                sweep_settle(&ui, &b);
+        }
+
+        // A kit settle while a hover is still fading in: the control is placed at its state, with nothing moving.
+        {
+                struct ui_control b;
+                b32 placed_still;
+
+                memory_zero(&b, sizeof(b));
+                b.kind = UI_BUTTON, b.variant = UI_BUTTON_PRIMARY, b.x = 20, b.y = 20, b.w = 160, b.h = 40, b.label = "Save";
+                ui_control_start(&b);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_control_draw(&ui, &b);
+                ui_kit_pointer(&ui, &b, 1, WINDOW_EVENT_MOTION, 60, 40, false, 0);
+                sweep_frame(&ui, &b);
+                ui_kit_settle();
+                placed_still = !sweep_frame(&ui, &b) && sweep_value(&b.layer) == UI_Q2(6);
+                check("kit states: a settle with a hover fading in places the button at its state, nothing moving", placed_still);
+        }
+
+        // Scroll: a wheel notch glides to its aim and the region goes idle there.
+        {
+                struct ui_scroll glide;
+                int frames;
+
+                memory_zero(&glide, sizeof(glide));
+                glide.x = 100, glide.y = 10, glide.height = 200, glide.content = 1000, glide.view = 200;
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_scroll_wheel(&ui, &glide, -120);
+                frames = sweep_settle_scroll(&ui, &glide);
+                check("kit states: a wheel notch glides to its row and the region goes idle there",
+                      frames > 0 && !glide.gliding && !glide.back.live && glide.scroll == UI_ROW && glide.at == glide.aim);
+        }
+
+        // Scroll: a throw carries the region on from its speed and stops where it aims, idle.
+        {
+                struct ui_scroll throw_;
+                int frames;
+
+                memory_zero(&throw_, sizeof(throw_));
+                throw_.x = 100, throw_.y = 10, throw_.height = 200, throw_.content = 1000, throw_.view = 200;
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_scroll_drag(&throw_, 80);
+                ui_scroll_let_go(&throw_, 1, 3000);
+                frames = sweep_settle_scroll(&ui, &throw_);
+                check("kit states: a throw glides on from its speed, stops at its aim and goes idle",
+                      frames > 0 && !throw_.gliding && !throw_.dragging && !throw_.back.live && throw_.scroll > 80 && throw_.scroll < 200);
+        }
+
+        // Scroll: the hand comes onto the thumb and leaves it; the bar goes lit and back, and the frame is idle after each.
+        {
+                struct ui_scroll bar;
+                int lit, unlit;
+                b32 hovered;
+
+                memory_zero(&bar, sizeof(bar));
+                bar.x = 100, bar.y = 10, bar.height = 200, bar.content = 1000, bar.view = 200;
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                ui_scroll_draw(&ui, &bar);
+                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 105, 20, false, 0);
+                hovered = bar.hover;
+                lit = sweep_settle_scroll(&ui, &bar);
+                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 300, 200, false, 0);
+                unlit = sweep_settle_scroll(&ui, &bar);
+                check("kit states: a bar hovered and left goes lit and back, and is idle after each",
+                      hovered && lit > 0 && !bar.hover && unlit > 0);
+        }
+
+        // Scroll: a region's content shrinks under it at its end: it is held at the new end, and idle.
+        {
+                struct ui_scroll clamp;
+                int frames;
+
+                memory_zero(&clamp, sizeof(clamp));
+                clamp.x = 100, clamp.y = 10, clamp.height = 200, clamp.content = 1000, clamp.view = 200;
+                ui_scroll_set(&clamp, 800);
+                clamp.content = 500;
+                ui_scroll_clamp(&clamp);
+                frames = sweep_settle_scroll(&ui, &clamp);
+                check("kit states: a region whose content shrinks under it is held at its new end, and is idle",
+                      frames > 0 && clamp.scroll == 300 && !clamp.gliding && clamp.at == clamp.aim);
+        }
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+}
+
+/*
         The control widgets' pointer: a finger reaches what it presses UI_TARGET each way (a tab strip 32 tall is pressed
         4 above and below it), a mouse does not; the slider's thumb rings where the hand hovers it; a value past the last
         step lands on that step, not past the range; a value fixed in place is placed, not faded; a progress bar's fill
@@ -133406,6 +133783,7 @@ b32 main()
         check_kit_slider_below();
         check_kit_place();
         check_kit_controls();
+        check_kit_states();
         check_kit_tab_ripple();
 #endif
 #if MOONWATER_UI_TASKBAR
