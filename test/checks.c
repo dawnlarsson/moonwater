@@ -6036,9 +6036,11 @@ static fn say_attribute(string_address text)
         say_byte('\n');
 }
 
+/* The style and shape bits of a cell. Which of its colours a program set, and whether the defaults trade places, are the colours'
+   records and say nothing of the style: they are left out. */
 static fn say_flags(string_address text)
 {
-        say_number(fixture_cell(text)->flags);
+        say_number(fixture_cell(text)->flags & ~(WINDOW_CELL_INK_SET | WINDOW_CELL_PAPER_SET | WINDOW_CELL_SWAP));
         say_byte('\n');
 }
 
