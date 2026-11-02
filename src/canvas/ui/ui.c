@@ -61,6 +61,7 @@ struct ui
         font_face face_mono;
         b32 opaque;                     // a window of the kit's surface, not glass: cleared to the theme's surface
         int scratch_scale;              // the scale ui_scratch_fit mapped the scratch at, 0 for a scratch the caller gave
+        b32 glass;                      // a glass window (WINDOW_GLASS): its pieces are the ground's inks, ui_text_colour and ui_well
 };
 
 /*
@@ -1671,6 +1672,28 @@ static fn ui_kit_settle(void)
 static inline unsigned int ui_role(int role)
 {
         return ui_kit.shown.role[role];
+}
+
+/*
+        A glass window (ui->glass, set from WINDOW_GLASS) is what is under it, so its pieces are drawn in its ground's inks
+        (ui_inks), not in the surface's roles: its text is the ink that stands out from the tint, and a well, a selection
+        or a row's highlight is that ink laid over the glass at a low alpha. Every other window keeps its roles, and every
+        helper gives the role it always gave there.
+*/
+// A text colour for a role, straight with alpha 255: the ink for on-surface text, the quiet ink for its variant.
+static unsigned int ui_text_colour(const struct ui address_to ui, int role)
+{
+        if (!ui->glass)
+                return ui_role(role);
+        return 0xff000000u | (role == UI_ON_SURFACE_VARIANT ? ui->quiet : ui->ink) & 0xffffffu;
+}
+
+// A surface piece's colour: its role in an opaque window; in a glass one, the ink at percent (straight, as ui_kit_fill takes it).
+static unsigned int ui_well(const struct ui address_to ui, int role, unsigned int percent)
+{
+        if (!ui->glass)
+                return ui_role(role);
+        return ui_mix(0xff000000u | (ui->ink & 0xffffffu), percent, 0);
 }
 
 // The window's surface, opaque: what a kit window is cleared to.
@@ -3968,7 +3991,8 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                 c->field_start = 0;
         if (c->field_start)
                 ui_kit.busy = 1;
-        for (int k = 2; k >= 0; k--)
+        // A glass field is flat: no shadow and no ring round it, so nothing is drawn past its edge.
+        for (int k = 2; k >= 0 && !ui->glass; k--)
         {
                 b32 x = (b32)((now[k * 5] * ui->scale) >> 22), y = (b32)((now[k * 5 + 1] * ui->scale) >> 22);
                 b32 blur = (b32)((now[k * 5 + 2] * ui->scale) >> 22), spread = (b32)((now[k * 5 + 3] * ui->scale) >> 22);
@@ -3985,10 +4009,12 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                 else
                         ui_kit_shadow(ui, &face, x, y, blur, spread, colour);
         }
-        ui_kit_colour_to(&c->fill, c->focused ? ui_mix(ui_role(UI_ACCENT_BRIGHT), 4, ui_role(UI_SURFACE_HIGH)) : ui_role(UI_SURFACE_HIGH), 180, &ui_ease);
+        ui_kit_colour_to(&c->fill, !ui->glass ? (c->focused ? ui_mix(ui_role(UI_ACCENT_BRIGHT), 4, ui_role(UI_SURFACE_HIGH)) : ui_role(UI_SURFACE_HIGH))
+                                             : ui_well(ui, UI_SURFACE_HIGH, c->focused ? 24 : 16), 180, &ui_ease);
         fill = ui_kit_colour(&c->fill);
         ui_kit_fill(ui, &face, fill, null);
-        // The light on its top edge: the face less itself a pixel down, inside it.
+        // The light on its top edge: the face less itself a pixel down, inside it (none on a glass field).
+        if (!ui->glass)
         {
                 struct ui_box low = face;
 
@@ -4024,7 +4050,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                 ui_text_field_draw(ui, c, ui_dev(ui, c->x + 14), ui_dev(ui, c->x + c->w - 14), fy, fy + ui_dev(ui, tall));
         else if (c->items[0])
                 ui_run_in(ui, (const font_face address_to const[]){ui->regular, ui->regular}, ui_dev(ui, c->x + 14), baseline,
-                          (string_address)c->items[0], 15, ui_role(UI_ON_SURFACE) & 0xffffffu, 92, ui_dev(ui, c->x + 14),
+                          (string_address)c->items[0], 15, ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu, 92, ui_dev(ui, c->x + 14),
                           ui_dev(ui, c->x + c->w - 14), 0);
 }
 
@@ -4362,7 +4388,7 @@ static fn ui_list_row_draw(struct ui address_to ui, struct ui_control address_to
         row = (struct ui_box){ui_q8(ui, x), ui_q8(ui, y), ui_q8(ui, x + w), ui_q8(ui, y + h), 0, 0};
         ui_kit_layer_to(c, c->disabled);
         layer = ui_kit_layer(c);
-        ui_kit_layer_fill(ui, &row, ui_role(UI_ON_SURFACE), layer);
+        ui_kit_layer_fill(ui, &row, ui_text_colour(ui, UI_ON_SURFACE), layer);
         ui_kit_ripples(ui, c, row.x0, row.y0, &place, &row, ui_role(UI_PRIMARY));
 }
 
@@ -5480,12 +5506,16 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
         struct ui_box face = ui_box_of(ui, 0, 0, ui_q(m->width / ui->scale), ui_q(m->height / ui->scale), ui_q(8));
         int y = UI_MENU_PAD * ui->scale, row = ui_popmenu_row(ui, m);
 
-        ui_kit_fill(ui, &face, ui_role(UI_SURFACE_CONTAINER), null);
-        ui_kit_outline(ui, &face, ui->scale, ui_role(UI_OUTLINE_VARIANT));
+        // A glass menu has no face and no outline: what is under it is the face, and its inks are the ground's (flat).
+        if (!ui->glass)
+        {
+                ui_kit_fill(ui, &face, ui_role(UI_SURFACE_CONTAINER), null);
+                ui_kit_outline(ui, &face, ui->scale, ui_role(UI_OUTLINE_VARIANT));
+        }
         for (int at = m->top; at < m->count && y < m->height - UI_MENU_PAD * ui->scale; at++)
         {
                 const struct ui_menu_item address_to item = &m->items[at];
-                unsigned int ink = ui_role(UI_ON_SURFACE);
+                unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE);
                 p8 shown[96];
                 p32 mnemonic;
                 int baseline = y + (row - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
@@ -5494,7 +5524,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 if (item->flags & UI_MENU_SEPARATOR)
                 {
                         ui_fill(ui, UI_MENU_PAD * ui->scale, y + UI_MENU_PAD * ui->scale, m->width - 2 * UI_MENU_PAD * ui->scale, ui->scale,
-                                ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 255));
+                                ui_tone(ui->glass ? ui->ink & 0xffffffu : ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, ui->glass ? 40 : 255));
                         y += (2 * UI_MENU_PAD + 1) * ui->scale;
                         continue;
                 }
@@ -5503,11 +5533,11 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         struct ui_box lit = ui_box_of(ui, ui_q(UI_MENU_PAD), ui_q(y / ui->scale), ui_q((m->width - 2 * UI_MENU_PAD * ui->scale) / ui->scale),
                                                       ui_q(row / ui->scale), ui_q(6));
 
-                        ui_kit_fill(ui, &lit, ui_role(UI_SELECTION), null);
+                        ui_kit_fill(ui, &lit, ui_well(ui, UI_SELECTION, 40), null);
                 }
                 ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
                 if (item->flags & UI_MENU_HEADER)
-                        ui_kit_text(ui, (UI_MENU_PAD + 12) * ui->scale, baseline, shown, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+                        ui_kit_text(ui, (UI_MENU_PAD + 12) * ui->scale, baseline, shown, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
                 else
                         ui_kit_text(ui, (UI_MENU_PAD + 30) * ui->scale, baseline, shown, UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
                 if ((item->flags & (UI_MENU_CHECK | UI_MENU_RADIO)) && (item->flags & UI_MENU_ON))
@@ -5522,7 +5552,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 if (item->keys)
                         ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale - ui_kit_measure(ui, (string_address)item->keys, UI_BODY_MEDIUM), baseline,
                                     (string_address)item->keys, UI_BODY_MEDIUM,
-                                    (alpha << 24) | (ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu), 0);
+                                    (alpha << 24) | (ui_text_colour(ui, UI_ON_SURFACE_VARIANT) & 0xffffffu), 0);
                 if (item->flags & UI_MENU_SUBMENU)
                         ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale, baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
                                     (alpha << 24) | (ink & 0xffffffu), 0);
@@ -6241,7 +6271,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         struct ui_row row;
         int x = l->x, w = l->w, height = ui_dev(ui, UI_ROW), inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10);
         int right = x + w - inset, text_left = x + inset, baseline, wide = 0, label_room;
-        unsigned int ink = ui_role(UI_ON_SURFACE), quiet = ui_role(UI_ON_SURFACE_VARIANT);
+        unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null;
         char cut[UI_CUT_TEXT];
         // Whether any of its rows may be written, with room for a run's rows round its line.
@@ -6256,8 +6286,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 struct ui_box box = {(x + ui_dev(ui, 3)) * 256, (y + ui_dev(ui, 2)) * 256, (x + w - ui_dev(ui, 3)) * 256,
                                      (y + height - ui_dev(ui, 2)) * 256, ui_q8(ui, 6), ui_q8(ui, 6)};
 
-                ui_kit_fill(ui, &box, ui_role(UI_SECONDARY_CONTAINER), null);
-                if (l->keys)
+                ui_kit_fill(ui, &box, ui_well(ui, UI_SECONDARY_CONTAINER, 36), null);
+                if (l->keys && !ui->glass)
                         ui_kit_outline(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY));
         }
         // The row's own control: a switch is its row's (the kit's switch is a row), any other row the list's row.
@@ -6346,7 +6376,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 room = row.kind == UI_ROW_CHOICE ? room - ui_dev(ui, 16) : room;
                 shown = ui_fit(ui, (string_address)row.value, UI_BODY_MEDIUM, room < ui_dev(ui, 24) ? ui_dev(ui, 24) : room, cut, sizeof(cut));
                 width = ui_kit_measure(ui, shown, UI_BODY_MEDIUM);
-                ui_kit_text(ui, right - width, baseline, shown, UI_BODY_MEDIUM, row.kind != UI_ROW_PLAIN && !row.dim ? ui_role(UI_ON_SURFACE) : quiet, 0);
+                ui_kit_text(ui, right - width, baseline, shown, UI_BODY_MEDIUM, row.kind != UI_ROW_PLAIN && !row.dim ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0);
                 if (row.kind == UI_ROW_STEP)
                         ui_kit_text(ui, right - width - ui_dev(ui, 8) - marks, baseline, (string_address) "\xe2\x80\xb9", UI_LABEL_LARGE, quiet, 0);
                 right -= width + (marks ? marks + ui_dev(ui, 8) : 0) + gap;
@@ -6357,7 +6387,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
 
                 if (right - width > text_left + wide + gap)
                         ui_kit_text(ui, right - width, ui_kit_baseline(ui, y + (height - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM), (string_address)row.note,
-                                    UI_LABEL_MEDIUM, row.mark ? ui_role(UI_ON_SURFACE) : quiet, 0);
+                                    UI_LABEL_MEDIUM, row.mark ? ui_text_colour(ui, UI_ON_SURFACE) : quiet, 0);
         }
 }
 
@@ -6371,7 +6401,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         ui->bottom = l->y + l->h;
         if (!l->count && l->empty)
                 ui_kit_text(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, l->y + (row_height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM),
-                            (string_address)l->empty, UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+                            (string_address)l->empty, UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
         for (int at = 0; at < l->count; at++)
         {
                 int y = ui_list_row_y(l, at);
@@ -6382,7 +6412,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 
                         ui_list_describe(l, l->id[at], &row);
                         ui_kit_text(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
-                                    (string_address)row.header, UI_TITLE_SMALL, ui_role(UI_ON_SURFACE_VARIANT), 0);
+                                    (string_address)row.header, UI_TITLE_SMALL, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
                 }
                 if (y + row_height > l->y && y < l->y + l->h)
                         ui_list_row(ui, l, l->id[at], y);
@@ -7166,6 +7196,7 @@ static int ui_app_run(struct ui_app address_to app)
         ui_inks(app->ui, *app->ground ? *app->ground : 0x101012u);
         // A window that is not glass is the kit's surface, and its inks are the surface's.
         app->ui->opaque = !(app->glass & WINDOW_GLASS);
+        app->ui->glass = (app->glass & WINDOW_GLASS) != 0;
         ui_kit_inks(app->ui);
         *app->focused = false;
         status = app->open();
@@ -8548,7 +8579,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                             int y, int baseline, unsigned int ground)
 {
         int origin = t->left - (int)t->scroll_x;
-        unsigned int selection = ui_role(UI_SELECTION), text = ui_role(UI_ON_SURFACE);
+        unsigned int selection = ui_well(ui, UI_SELECTION, 40), text = ui_text_colour(ui, UI_ON_SURFACE);
         static struct doc_token tokens[512];
         positive token_count = t->mode == UI_TEXT_CODE ? doc_tokens(&t->doc, line, tokens, 512) : 0;
 
@@ -8749,7 +8780,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         }
         if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
         {
-                unsigned int text = ui_role(UI_ON_SURFACE);
+                unsigned int text = ui_text_colour(ui, UI_ON_SURFACE);
 
                 ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, t->left, t->top + m.baseline, (string_address)t->placeholder,
                           t->size + t->zoom, text & 0xffffffu, 92, t->left, t->right, 0);
@@ -8857,7 +8888,7 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
                 ui_text_wake(t);
         t->focused = c->focused;
         t->placeholder = c->items[0];
-        ui_text_draw(ui, t, left, top, right - left, bottom - top, ui_role(UI_SURFACE_HIGH) & 0xffffffu);
+        ui_text_draw(ui, t, left, top, right - left, bottom - top, ui->glass ? 0 : ui_role(UI_SURFACE_HIGH) & 0xffffffu);
         // The hand reaches it anywhere in its well, its padding as well as its text.
         t->well_left = ui_dev(ui, c->x), t->well_right = ui_dev(ui, c->x + c->w);
 }
