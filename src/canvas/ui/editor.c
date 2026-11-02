@@ -523,11 +523,11 @@ static fn editor_tabs_draw(struct ui address_to ui, int height)
 
         editor_tabs_layout(ui);
         ui_control_draw(ui, c);
-        // The dot is the kit's, the size and the inset the kit's badge and tab name (UI_DOT, UI_DOT_IN in ui.c).
+        // The dot is the kit's badge dot (ui_kit_dot), its inset the kit's UI_DOT_IN from the tab's right edge.
         for (int at = 0; at < editor.count; at++)
                 if (doc_dirty(&editor.tabs[at].view.doc))
-                        ui_round(ui, ui_dev(ui, ui_tab_left(ui, c, at) + ui_tab_width(ui, c, at)) - ui_px(ui, UI_DOT_IN), height / 2 - ui_px(ui, UI_DOT / 2),
-                                 ui_px(ui, UI_DOT), ui_px(ui, UI_DOT), ui_px(ui, UI_DOT / 2), ui_role(UI_ON_SURFACE) | 0xff000000u);
+                        ui_kit_dot(ui, ui_dev(ui, ui_tab_left(ui, c, at) + ui_tab_width(ui, c, at)) - ui_px(ui, UI_DOT_IN), height / 2 - ui_px(ui, UI_DOT / 2),
+                                   ui_role(UI_ON_SURFACE) | 0xff000000u);
 }
 
 /*

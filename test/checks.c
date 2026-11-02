@@ -137264,6 +137264,39 @@ static fn check_no_shapes_by_hand(void)
 }
 
 /*
+        No element by hand: an element the kit draws (a badge's dot, a focus outline) is drawn by the kit's function
+        and not by a window's own copy of its calls. The scan reads the windows' sources for each copy this line removed.
+*/
+static fn check_no_element_by_hand(void)
+{
+        static const char address_to const files[] = {"src/canvas/ui/editor.c"};
+        static const char address_to const copies[] = {"ui_round(ui, ui_dev(ui, ui_tab_left"};
+        positive found = 0, read = 0;
+
+        for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size);
+
+                if (!bytes)
+                        continue;
+                read++;
+                for (positive i = 0; i < sizeof(copies) / sizeof(copies[0]); i++)
+                        if (memory_search((address_any)bytes, size, (address_any)copies[i], string_length((string_address)copies[i])))
+                        {
+                                found++;
+                                string_format(log, "  element by hand in %s: %s\n", (string_address)files[f], (string_address)copies[i]);
+                        }
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: no element by hand, the sources are not here\n");
+                return;
+        }
+        check("elements: no window of Canvas draws a kit element by hand: the tab's dot is the kit's", read == sizeof(files) / sizeof(files[0]) && !found);
+}
+
+/*
         The kit's defaults, which every window takes and none keeps a copy of. A press again to confirm is the kit's
         (ui_confirm: the first press arms it, the next with nothing between fires it, another press or key drops it, and
         the same line says so in every app). A field is UI_FIELD_H high, the kit's touch target. A press outside a field
@@ -140180,6 +140213,7 @@ b32 main()
         check_one_cut();
         check_no_input_codes();
         check_no_shapes_by_hand();
+        check_no_element_by_hand();
 #if MOONWATER_UI_ANY
         check_kit_defaults(&terminal.ui);
 #endif

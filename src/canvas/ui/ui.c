@@ -4291,6 +4291,14 @@ static fn ui_progress_draw(struct ui address_to ui, struct ui_control address_to
 */
 #define UI_DOT 6     // a status dot's width: a badge's, and a tab's in the editor (which takes it from here)
 #define UI_DOT_IN 12 // a tab's dot in from the tab's right edge
+
+// A status dot, UI_DOT across, its top left at a device point, in one colour: a badge's, and an editor tab's.
+static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb)
+{
+        ui_kit_fill(ui, &(struct ui_box){x * 256, y * 256, (x + ui_px(ui, UI_DOT)) * 256, (y + ui_px(ui, UI_DOT)) * 256, ui_px(ui, UI_DOT / 2) * 256,
+                                         ui_px(ui, UI_DOT / 2) * 256}, argb, null);
+}
+
 static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         int role = c->role, width = ui_kit_measure(ui, (string_address)c->label, UI_LABEL_MEDIUM), dot = c->on ? 2 * UI_DOT : 0;
@@ -4308,8 +4316,7 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
         if (role < 0)
                 ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         if (dot)
-                ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 9), ui_q8(ui, c->y + 8), ui_q8(ui, c->x + 9 + UI_DOT), ui_q8(ui, c->y + 8 + UI_DOT), ui_q8(ui, UI_DOT / 2), ui_q8(ui, UI_DOT / 2)},
-                            ink, null);
+                ui_kit_dot(ui, ui_dev(ui, c->x + 9), ui_dev(ui, c->y + 8), ink);
         ui_control_label(ui, c, 9 + dot, 3, UI_LABEL_MEDIUM, ink);
 }
 
