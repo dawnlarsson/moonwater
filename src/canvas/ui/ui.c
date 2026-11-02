@@ -1555,10 +1555,16 @@ static b32 ui_box_span(const struct ui_box address_to box, b32 y, b32 address_to
         return 1;
 }
 
-// A span's cover added into a line, from pixel first (the line's 0), weight lines of it.
+/*
+        A span's cover added into a line, from pixel first (the line's 0), weight lines of it. The line holds first
+        differences, not covers: a pixel's cover is the running sum of the entries up to it (the callers take that sum
+        as they read the row), so a span is at most four entries however wide. The running sums are the covers the
+        per-pixel adds made, modulo 2^16, for every span, since each cover is a difference of covers and the wrap is the
+        same. An entry at width (past the row) is never read, so it is not written.
+*/
 static fn ui_line_add(unsigned short address_to line, b32 first, b32 width, b32 left, b32 right, b32 weight)
 {
-        b32 p0, p1;
+        b32 p0, p1, a, b;
 
         left -= first * 256;
         right -= first * 256;
@@ -1570,13 +1576,22 @@ static fn ui_line_add(unsigned short address_to line, b32 first, b32 width, b32 
         p1 = (right - 1) >> 8;
         if (p0 == p1)
         {
-                line[p0] += (unsigned short)((right - left) * weight);
+                b = (right - left) * weight;
+                line[p0] += (unsigned short)b;
+                if (p0 + 1 < width)
+                        line[p0 + 1] += (unsigned short)-b;
                 return;
         }
-        line[p0] += (unsigned short)((256 - (left & 255)) * weight);
-        for (b32 p = p0 + 1; p < p1; p++)
-                line[p] += (unsigned short)(256 * weight);
-        line[p1] += (unsigned short)((right - p1 * 256) * weight);
+        // Covers: a at p0, 256 * weight through the middle, b at p1. Steps: a at p0, then to the middle (or to b), then
+        // from the middle to b, and back to nothing past p1.
+        a = (256 - (left & 255)) * weight;
+        b = (right - p1 * 256) * weight;
+        line[p0] += (unsigned short)a;
+        line[p0 + 1] += (unsigned short)((p1 == p0 + 1 ? b : 256 * weight) - a);
+        if (p1 >= p0 + 2)
+                line[p1] += (unsigned short)(b - 256 * weight);
+        if (p1 + 1 < width)
+                line[p1 + 1] += (unsigned short)-b;
 }
 
 // The cover of a box over the row y of pixels, into line from pixel first, width wide: false when none.
@@ -2068,11 +2083,14 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
                 // The box itself is not shadowed: its cover is taken out of the shadow's.
                 ui_box_row(box, y, ui_kit_line, first, width);
                 row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
-                for (b32 x = 0; x < width; x++)
+                for (b32 x = 0, run = 0; x < width; x++)
                 {
                         unsigned int cover = (unsigned int)(((p64)ui_kit_clip[x] * vertical) >> 20); // to UI_FULL (4096)
-                        unsigned int inside = ui_kit_line[x];
+                        unsigned int inside;
 
+                        // ui_kit_line holds first differences (ui_line_add): the running sum is the box's cover here.
+                        run = (unsigned short)(run + ui_kit_line[x]);
+                        inside = run;
                         ui_kit_line[x] = 0;
                         cover = inside >= UI_FULL ? 0 : cover * (UI_FULL - inside) / UI_FULL;
                         if (cover)
@@ -3380,10 +3398,14 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                                 continue;
                         ui_box_row(&face, y, ui_kit_line, first, width);
                         ui_box_row(&low, y, ui_kit_clip, first, width);
-                        for (b32 x = 0; x < width; x++)
+                        for (b32 x = 0, face_run = 0, low_run = 0; x < width; x++)
                         {
-                                int cover = (int)ui_kit_line[x] - (int)ui_kit_clip[x];
+                                int cover;
 
+                                // Both rows hold first differences (ui_line_add): the running sums are the covers.
+                                face_run = (unsigned short)(face_run + ui_kit_line[x]);
+                                low_run = (unsigned short)(low_run + ui_kit_clip[x]);
+                                cover = (int)face_run - (int)low_run;
                                 ui_kit_line[x] = ui_kit_clip[x] = 0;
                                 if (cover > 0 && first + x >= 0 && first + x < ui->width)
                                 {
