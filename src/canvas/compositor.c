@@ -2806,9 +2806,11 @@ struct compositor_poll
 #define COMPOSITOR_TOUCH_WHEEL 48
 /*
         The prediction a frame ahead, per class: the mouse, a touch screen's fingers, and a tablet or pen. A class's newest two
-        places give its velocity; the place it is shown at (the mouse's cursor) or delivered at (a finger or a pen, to the
-        windows it reaches) is its newest place led by that velocity over one frame, and no further than the cap. A class
-        with no new place for a frame is back on its newest place, so a stop is not carried past the cap.
+        places give its velocity; the pointer is its real place (compositor.real_x, real_y) led by that velocity over one frame,
+        no further than the cap, and held on a screen. The pointer is where every consumer of motion reads it (the cursor, the
+        windows told a motion, drags, hovers, snaps), so the lead lives at the root of input; a press or a release is handled at
+        the real place (compositor.at_real), so a click lands where the hand was. A class with no new place for a frame is back
+        on its real place, so a stop is not carried past the cap.
 */
 #define COMPOSITOR_PREDICT_MOUSE 0
 #define COMPOSITOR_PREDICT_TOUCH 1
@@ -2826,6 +2828,9 @@ struct compositor_predict
         positive last;      // when the newest was reported (a new place, not a repeat of one)
         int lead_x, lead_y; // how far ahead of the newest place it is shown or delivered; 0 for none
 };
+static void compositor_pointer_sync(void);
+static void compositor_pointer_shown(void);
+
 // How long a finger's mark fades once it is up.
 #define COMPOSITOR_SPOT_FADE_NS 1000000000ull
 #define COMPOSITOR_STEP 20
@@ -3119,6 +3124,13 @@ static struct
         // The prediction a frame ahead, per class (COMPOSITOR_PREDICT_*), and the classes `moonwater canvas predict` turned off.
         struct compositor_predict predict[COMPOSITOR_PREDICTS];
         unsigned char predict_off[COMPOSITOR_PREDICTS];
+        // Where the hand is, before its lead (real_x, real_y), and the class that moved the pointer last (owner). The pointer
+        // itself (pointer_x, pointer_y) is where that is led to, and every consumer of motion reads it; at_real is set while a
+        // press is handled, so a press is at the real place.
+        int real_x, real_y;
+        int shown_x, shown_y; // the pointer as compositor_pointer_shown last set it: a pointer set anywhere else is the real place
+        unsigned int owner;
+        unsigned int at_real;
         int touching;
         /*
                 The marks of the fingers (`moonwater canvas touch on`, spots_on), one a slot of the touch screen being
@@ -6604,11 +6616,12 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
         const int (*now)[4] = compositor_screens(&now_count);
         int nowhere = -2147483647 - 1;
 
+        compositor_pointer_sync();
         compositor_preview(COMPOSITOR_NONE);
         compositor.drag = compositor.resize = COMPOSITOR_NONE;
         for (int row = -1; row < WINDOWS; row++)
         {
-                int x = row < 0 ? compositor.pointer_x : compositor.x[row], y = row < 0 ? compositor.pointer_y : compositor.y[row];
+                int x = row < 0 ? compositor.real_x : compositor.x[row], y = row < 0 ? compositor.real_y : compositor.y[row];
                 int w = row < 0 ? 1 : (int)compositor.w[row], h = row < 0 ? 1 : (int)compositor.h[row], from, to = 0;
 
                 if (row >= 0 && !compositor.showing[row])
@@ -6620,7 +6633,7 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
                 if (from < 0 || !memory_compare(was[from], now[to], sizeof(was[from])))
                         ;
                 else if (row < 0)
-                        compositor_screen_carry(was[from], now[to], &compositor.pointer_x, &compositor.pointer_y, 1, 1);
+                        compositor_screen_carry(was[from], now[to], &compositor.real_x, &compositor.real_y, 1, 1);
                 else
                 {
                         int sx = compositor.saved_x[row], sy = compositor.saved_y[row];
@@ -6645,9 +6658,10 @@ static void compositor_space_carry(const int (*was)[4], const char (*names)[WIND
                 else if (row >= 0)
                         compositor_place(row, compositor.x[row], compositor.y[row]);
         }
-        compositor_screen_keep_point(now, now_count, nowhere, nowhere, &compositor.pointer_x, &compositor.pointer_y);
-        compositor.kept_x = compositor.pointer_x;
-        compositor.kept_y = compositor.pointer_y;
+        compositor_screen_keep_point(now, now_count, nowhere, nowhere, &compositor.real_x, &compositor.real_y);
+        compositor.kept_x = compositor.real_x;
+        compositor.kept_y = compositor.real_y;
+        compositor_pointer_shown();
         // A window on a screen that stayed whose band moved (the primary is another now) follows its room.
         compositor_room_follow();
 }
@@ -7142,15 +7156,15 @@ static void compositor_cursor_start(void)
         compositor.cursor.handle[1] = dumb[1].handle;
 }
 
-// Where the pointer is drawn: the mouse's lead over the pointer. A finger or a pen is the pointer already, led (predict).
+// Where the pointer is drawn: the pointer, which is already where it will be (compositor_pointer_shown).
 static int compositor_drawn_x(void)
 {
-        return compositor.pointer_x + compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x;
+        return compositor.pointer_x;
 }
 
 static int compositor_drawn_y(void)
 {
-        return compositor.pointer_y + compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_y;
+        return compositor.pointer_y;
 }
 
 static void compositor_cursor_move(void)
@@ -10885,12 +10899,47 @@ static void compositor_pointer_clamp(void)
         const int (*screens)[4] = compositor_screens(&count);
         int nowhere = -2147483647 - 1;
 
+        compositor_pointer_sync();
         compositor_screen_keep_point(screens, count, compositor.absolute ? nowhere : compositor.kept_x,
-                                     compositor.absolute ? nowhere : compositor.kept_y, &compositor.pointer_x,
-                                     &compositor.pointer_y);
-        compositor.kept_x = compositor.pointer_x;
-        compositor.kept_y = compositor.pointer_y;
+                                     compositor.absolute ? nowhere : compositor.kept_y, &compositor.real_x,
+                                     &compositor.real_y);
+        compositor.kept_x = compositor.real_x;
+        compositor.kept_y = compositor.real_y;
         compositor.absolute = 0;
+        compositor_pointer_shown();
+}
+
+/*
+        The pointer is the real place led to where it will be (the lead of the class that owns it, see predict), and held on a
+        screen. A press is handled at the real place, so while it is (at_real) there is no lead.
+*/
+// A pointer set from outside the prediction (a warp, a screen's change, a caller that writes the pointer) is the real place,
+// and the lead it had is over. Done before the hand moves again, so a report counts from where the pointer was put.
+static void compositor_pointer_sync(void)
+{
+        struct compositor_predict *track = &compositor.predict[compositor.owner];
+
+        if (compositor.pointer_x != compositor.shown_x || compositor.pointer_y != compositor.shown_y)
+        {
+                compositor.real_x = compositor.pointer_x, compositor.real_y = compositor.pointer_y;
+                track->lead_x = track->lead_y = 0;
+        }
+}
+
+static void compositor_pointer_shown(void)
+{
+        struct compositor_predict *track = &compositor.predict[compositor.owner];
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int lead_x, lead_y;
+
+        lead_x = compositor.at_real ? 0 : track->lead_x;
+        lead_y = compositor.at_real ? 0 : track->lead_y;
+        compositor.pointer_x = compositor.real_x + lead_x;
+        compositor.pointer_y = compositor.real_y + lead_y;
+        compositor_screen_keep_point(screens, count, compositor.real_x, compositor.real_y, &compositor.pointer_x,
+                                     &compositor.pointer_y);
+        compositor.shown_x = compositor.pointer_x, compositor.shown_y = compositor.pointer_y;
 }
 
 // Whether a movement of the hand is a shake that finds the pointer: `moonwater canvas cursor shake off` says none is.
@@ -11179,9 +11228,30 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 compositor_remember(resized >= 0 ? resized : dragged);
 }
 
+// A release is at the real place too (see compositor_press): a mouse's button let go where the hand is.
 static void compositor_release(unsigned int code, int snap)
 {
+        int real;
+
+        compositor_pointer_sync();
+        real = !compositor.at_real && !compositor.touching && compositor.owner == COMPOSITOR_PREDICT_MOUSE;
+        if (!real)
+        {
+                compositor_release_as(code, snap, 0);
+                return;
+        }
+        {
+                int led_x = compositor.pointer_x, led_y = compositor.pointer_y;
+
+                compositor.at_real = 1;
+                compositor_pointer_shown();
+                if (compositor.pointer_x != led_x || compositor.pointer_y != led_y)
+                        compositor_motion();
+        }
         compositor_release_as(code, snap, 0);
+        compositor.at_real = 0;
+        compositor_pointer_shown();
+        compositor_cursor_move();
 }
 
 /*
@@ -11464,7 +11534,40 @@ static void compositor_button(unsigned int code, int down)
         Any press or release of a button, from the mouse or a finger: the minimise button's first, which takes its
         press and release alone, and then the window's (compositor_button).
 */
+static void compositor_press_at(unsigned int code, int down);
+
+/*
+        A button of the mouse is handled at the hand's real place, presses and releases alike, whatever the pointer is led to:
+        a click lands where the hand was. A finger's or a pen's press is at its led place, as it always was.
+*/
 static void compositor_press(unsigned int code, int down)
+{
+        int real;
+
+        compositor_pointer_sync();
+        real = !compositor.at_real && !compositor.touching && compositor.owner == COMPOSITOR_PREDICT_MOUSE;
+        if (!real)
+        {
+                compositor_press_at(code, down);
+                return;
+        }
+        // The window under the press is told the motion to the real place before the button, as each report was told before
+        // the change: a button carries no place of its own, only the last motion's. A pointer that is not led is told already.
+        {
+                int led_x = compositor.pointer_x, led_y = compositor.pointer_y;
+
+                compositor.at_real = 1;
+                compositor_pointer_shown();
+                if (compositor.pointer_x != led_x || compositor.pointer_y != led_y)
+                        compositor_motion();
+        }
+        compositor_press_at(code, down);
+        compositor.at_real = 0;
+        compositor_pointer_shown();
+        compositor_cursor_move();
+}
+
+static void compositor_press_at(unsigned int code, int down)
 {
         if (down && code == COMPOSITOR_BTN_LEFT && compositor.assist_armed)
         {
@@ -11579,11 +11682,10 @@ static void compositor_predict_lead(const struct compositor_predict *track, int 
 
 // A class reported the place x, y at now. A place it repeats is no new one, and its lead stays as it was. The place it is
 // shown or delivered at is x, y led by the lead, held on a screen (compositor_screen_keep_point, from x, y).
-static void compositor_predict_sample(unsigned int cls, int x, int y, positive now, int *shown_x, int *shown_y)
+// The lead is the raw one (compositor_predict_lead); where it is shown is held on a screen by compositor_pointer_shown.
+static void compositor_predict_sample(unsigned int cls, int x, int y, positive now)
 {
         struct compositor_predict *track = &compositor.predict[cls];
-        unsigned int count;
-        const int (*screens)[4] = compositor_screens(&count);
 
         if (!track->count || track->x[track->count - 1] != x || track->y[track->count - 1] != y)
         {
@@ -11601,51 +11703,56 @@ static void compositor_predict_sample(unsigned int cls, int x, int y, positive n
                         compositor_predict_lead(track, &lead_x, &lead_y);
                 track->lead_x = lead_x, track->lead_y = lead_y;
         }
-        *shown_x = x + track->lead_x;
-        *shown_y = y + track->lead_y;
-        compositor_screen_keep_point(screens, count, x, y, shown_x, shown_y);
-        track->lead_x = *shown_x - x;
-        track->lead_y = *shown_y - y;
 }
 
-// The mouse moved to the pointer: its cursor is drawn led by its lead. Its clicks and hovers stay at the pointer.
+// The mouse moved: its real place is sampled, and the pointer is drawn and told where it will be (compositor_pointer_shown).
 static void compositor_predict_mouse(positive now)
 {
-        int shown_x, shown_y;
-
-        compositor_predict_sample(COMPOSITOR_PREDICT_MOUSE, compositor.pointer_x, compositor.pointer_y, now, &shown_x, &shown_y);
+        compositor.owner = COMPOSITOR_PREDICT_MOUSE;
+        compositor_predict_sample(COMPOSITOR_PREDICT_MOUSE, compositor.real_x, compositor.real_y, now);
+        compositor_pointer_shown();
 }
 
-// A finger or a pen is at x, y: the pointer is where it will be, so that is where the windows it reaches are told. The mouse
-// has no lead while the finger or the pen is the pointer.
+// A finger or a pen is at x, y: it is the hand's real place, and the pointer is where it will be, so that is where the windows
+// it reaches are told. The mouse has no lead while the finger or the pen is the pointer.
 static void compositor_predict_place(unsigned int cls, int x, int y, positive now)
 {
-        int shown_x, shown_y;
-
-        compositor_predict_sample(cls, x, y, now, &shown_x, &shown_y);
+        compositor_pointer_sync();
+        compositor.owner = cls;
+        compositor.real_x = x, compositor.real_y = y;
+        compositor_predict_sample(cls, x, y, now);
         compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x = compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_y = 0;
-        compositor.pointer_x = shown_x;
-        compositor.pointer_y = shown_y;
+        compositor_pointer_shown();
 }
 
-// A class's lead is over (a touch lifted, a pen out of range, a stop, or its setting turned off). The mouse's cursor is drawn at
-// its pointer again; a finger or a pen goes back to its newest place, and the windows are told where that is.
+// A class's lead is over (a touch lifted, a pen out of range, a stop, or its setting turned off). A mouse's pointer goes back to
+// its real place, and the windows are told when it moved; a finger or a pen goes back to its newest place, and the windows are told
+// where that is.
 static void compositor_predict_clear(unsigned int cls)
 {
         struct compositor_predict *track = &compositor.predict[cls];
+        int moved_x, moved_y;
 
+        compositor_pointer_sync();
+        moved_x = compositor.pointer_x, moved_y = compositor.pointer_y;
         if (!track->lead_x && !track->lead_y)
                 return;
         track->lead_x = track->lead_y = 0;
         if (cls == COMPOSITOR_PREDICT_MOUSE)
         {
-                compositor_cursor_move();
+                if (compositor.owner != COMPOSITOR_PREDICT_MOUSE)
+                        return;
+                compositor_pointer_shown();
+                if (compositor.pointer_x != moved_x || compositor.pointer_y != moved_y)
+                        compositor_motion();
                 return;
         }
-        compositor.pointer_x = track->x[track->count - 1];
-        compositor.pointer_y = track->y[track->count - 1];
-        compositor.kept_x = compositor.pointer_x;
-        compositor.kept_y = compositor.pointer_y;
+        compositor.owner = cls;
+        compositor.real_x = track->x[track->count - 1];
+        compositor.real_y = track->y[track->count - 1];
+        compositor.kept_x = compositor.real_x;
+        compositor.kept_y = compositor.real_y;
+        compositor_pointer_shown();
         compositor.touching = cls == COMPOSITOR_PREDICT_TOUCH;
         compositor_motion();
         compositor.touching = 0;
@@ -11714,14 +11821,15 @@ static int compositor_report(positive now)
 {
         int moved = 0;
 
+        compositor_pointer_sync();
         if (compositor.tablet_have)
         {
                 if (compositor.tablet_have & 1)
-                        compositor.pointer_x = compositor.tablet_x;
+                        compositor.real_x = compositor.tablet_x;
                 if (compositor.tablet_have & 2)
-                        compositor.pointer_y = compositor.tablet_y;
+                        compositor.real_y = compositor.tablet_y;
                 compositor.tablet_have = 0;
-                compositor_predict_place(COMPOSITOR_PREDICT_PEN, compositor.pointer_x, compositor.pointer_y, now);
+                compositor_predict_place(COMPOSITOR_PREDICT_PEN, compositor.real_x, compositor.real_y, now);
                 compositor.absolute = 1;
                 moved = 1;
         }
@@ -11734,8 +11842,8 @@ static int compositor_report(positive now)
                 gain = compositor_gain_wanted(compositor_gain_of(dx, dy, now - compositor.stamp), compositor.flat,
                                               compositor.sensitivity);
                 compositor.stamp = now;
-                compositor.pointer_x += compositor_accel(dx, &compositor.accel_x, gain);
-                compositor.pointer_y += compositor_accel(dy, &compositor.accel_y, gain);
+                compositor.real_x += compositor_accel(dx, &compositor.accel_x, gain);
+                compositor.real_y += compositor_accel(dy, &compositor.accel_y, gain);
                 compositor_predict_mouse(now);
                 moved = 1;
         }
@@ -12053,8 +12161,8 @@ static void compositor_touch_button(unsigned int code, int down)
 static void compositor_touch_motion(int x, int y, positive now)
 {
         compositor_predict_place(COMPOSITOR_PREDICT_TOUCH, x, y, now);
-        compositor.kept_x = compositor.pointer_x;
-        compositor.kept_y = compositor.pointer_y;
+        compositor.kept_x = compositor.real_x;
+        compositor.kept_y = compositor.real_y;
         compositor.touching = 1;
         compositor_motion();
         compositor.touching = 0;
@@ -13110,8 +13218,10 @@ static b32 compositor_main()
                 int x, y, width, height;
 
                 compositor_output_rect(0, &x, &y, &width, &height);
-                compositor.pointer_x = compositor.kept_x = x + width / 2;
-                compositor.pointer_y = compositor.kept_y = y + height / 2;
+                compositor.real_x = compositor.kept_x = x + width / 2;
+                compositor.real_y = compositor.kept_y = y + height / 2;
+                compositor.owner = COMPOSITOR_PREDICT_MOUSE;
+                compositor_pointer_shown();
         }
         compositor_look_read();
         compositor_input_settings_read();
