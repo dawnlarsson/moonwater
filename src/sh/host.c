@@ -24814,9 +24814,13 @@ static b32 host_settings_window(string_address address_to arguments, positive co
         string_address words[8];
         positive pid = 0, length, at = 0, used = 0;
         bipolar handle, got = 0;
+        b32 displays_window;
 
         // moonwater settings gallery: the same window on the kit's gallery, every control of it, to see them move.
-        return_if(count != 2 && (count != 3 || !string_equals(arguments[2], (string_address) "gallery")), host_usage());
+        // moonwater settings displays: the displays window (the screens as a field to drag, and their rows), a program of its own.
+        return_if(count != 2 && (count != 3 || (!string_equals(arguments[2], (string_address) "gallery") &&
+                                                !string_equals(arguments[2], (string_address) "displays"))), host_usage());
+        displays_window = count == 3 && string_equals(arguments[2], (string_address) "displays");
 
         pid = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
         return_if(!pid || system_call_2(syscall(kill), pid, 0) != 0 ||
@@ -24862,7 +24866,7 @@ static b32 host_settings_window(string_address address_to arguments, positive co
                 }
         }
 
-        words[used++] = (string_address) "/settings";
+        words[used++] = displays_window ? (string_address) "/displays" : (string_address) "/settings";
         words[used++] = (string_address) "-f";
         words[used++] = face;
         if (string_compare(bold, face) && system_access_at(AT_FDCWD, bold, 4) == 0)
@@ -24870,7 +24874,7 @@ static b32 host_settings_window(string_address address_to arguments, positive co
                 words[used++] = (string_address) "-b";
                 words[used++] = bold;
         }
-        if (count == 3)
+        if (count == 3 && !displays_window)
                 words[used++] = (string_address) "-g";
         words[used] = null;
 

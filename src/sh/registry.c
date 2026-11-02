@@ -236,8 +236,12 @@ static const struct settings_row settings_rows[] = {
                       .standard = "16", .unit = "MiB", .low = 1, .high = 16, .need = "how Canvas draws",
                       .usage = "canvas clipboard limit [MIB|default]",
                       .help = "the most one copy may be, 1 to 16 MiB [16]"),
-    //  The Display group: the screens' modes and where they are, and the backlight (which a machine may lack).
-    {"Display", "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null,
+    //  The Display group: the screens (the Displays window, which the row opens: its read is canvas's first line), their modes
+    //  and where they are, and the backlight (which a machine may lack).
+    {"Display", "Screens: drag into place, rotation and refresh (Enter opens the Displays window)", SETTINGS_ACTION, 0, SETTINGS_LINE,
+     {"canvas"}, "", null, {"settings", "displays"}, null, 0, null,
+     .usage = "settings displays", .help = "the screens as a field to drag into place, with each one's rotation and refresh"},
+    {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0, null,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
     //  A special row (host.c locale_canvas_arrange) whose file the compositor watches: the words are screens' names.
     {null, "Screens left to right (names, NAME@X,Y, NAME@off)", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT,
