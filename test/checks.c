@@ -121837,6 +121837,37 @@ static void check_compositor_preview_fade(void)
 }
 
 /*
+        A window dragged under the grid is over it: the grid's tints are the wallpaper's, and the window being moved is not
+        tinted where the grid's row lies across it.
+*/
+static void check_compositor_grid_drag(void)
+{
+    const unsigned int picture = 0xc06020u;
+
+    if (!layout_table_map(256))
+    {
+        check("grid drag: the table is mapped", false);
+        return;
+    }
+    layout_setup(256, 1);
+    compositor.table->motion = 1;
+    assist_fresh();
+    compositor.showing[3] = 0;
+    layout_show(2, 100, 40, 60, 60);
+    layout_paint(2, picture);
+    screens_hand(120, 50, 1);
+    screens_hand(120, 4, 0);
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    check("grid drag: the grid is up while the window is held over the top, and the window is moved with the hand",
+          compositor.grid_on && compositor.drag == 2 && compositor.y[2] < 25);
+    check("grid drag: the window being moved is over the grid, not tinted by it where the row lies across it",
+          (layout_pixels[12 * 256 + 130] & 0xffffffu) == (picture & 0xffffffu));
+    screens_hand(120, 4, -1);
+    compositor.press = COMPOSITOR_NONE;
+}
+
+/*
         The snap assist and the grid fade: a thumbnail comes up from the wallpaper (its picture veiled) and is the picture at the
         end of COMPOSITOR_SNAP_FADE_NS, and goes out from the picture to the wallpaper; a grid tile has the window's line and
         corners in the snap's colour, the line outside the tile where the wallpaper is.
@@ -121909,9 +121940,10 @@ static void check_compositor_overlay_fade(void)
     compositor_damage(0, 0, 256, 256);
     compositor_present();
     border_at = layout_pixels[12 * 256 + 27] & 0xffffffu;
+    /* The line's corner arc runs from (27, 3) to (35, -1)-ish: (29, 1) is on it, and (31, 3) is inside the tile. */
     check("overlay fade: the grid's tile has the snap's line round it, its corner is rounded, and inside the corner is the tile",
           compositor.grid_on && border_at == (compositor_snap_ink() & 0xffffffu) && (layout_pixels[27] & 0xffffffu) != (compositor_snap_ink() & 0xffffffu) &&
-              (layout_pixels[1 * 256 + 29] & 0xffffffu) != (compositor_snap_ink() & 0xffffffu));
+              (layout_pixels[3 * 256 + 31] & 0xffffffu) != (compositor_snap_ink() & 0xffffffu));
     screens_hand(127, 4, -1);
     compositor.press = COMPOSITOR_NONE;
     compositor.table->motion = 0;
@@ -138032,6 +138064,7 @@ b32 main()
         check_compositor_glide();
         check_compositor_preview_fade();
         check_compositor_overlay_fade();
+        check_compositor_grid_drag();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();

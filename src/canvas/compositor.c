@@ -5902,6 +5902,18 @@ static void compositor_present(void)
                                                   compositor.assist_rect[thumb][2], compositor.assist_rect[thumb][3]);
                 }
                 count += compositor_overlays(frames, count);
+                // The window held is over the grid: its frame is drawn again above the grid's tints, so the grid lies under it.
+                if (compositor.grid_on && compositor.drag >= 0 && count < COMPOSITOR_FRAMES)
+                        for (unsigned int at = 0; at < windows; at++)
+                                if (rows[at] == compositor.drag)
+                                {
+                                        frames[count] = frames[at];
+                                        // Its tint is drawn once, under it: the copy is the window only.
+                                        memory_zero(frames[count].preview, sizeof(frames[count].preview));
+                                        memory_zero(frames[count].mark, sizeof(frames[count].mark));
+                                        count++;
+                                        break;
+                                }
         }
 
         // The close buttons' means, now the glass and the band are made: where a change reaches a box.
