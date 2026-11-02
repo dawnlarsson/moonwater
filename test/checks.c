@@ -132308,6 +132308,37 @@ static fn check_kit_place(void)
                       revealed && !shown_again);
         }
 
+        // The wheel (canvas wheel smooth): with the wheel smooth a notch glides to its row over several frames and no frame jumps a
+        // row; with it off a notch is one row at once.
+        {
+                struct ui_scroll smooth = {.x = 100, .y = 10, .height = 200, .content = 1000, .view = 200};
+                int row = UI_ROW * ui.scale, frames_between = 0, jump = 0, last = 0, frame;
+                b32 glides = false, once = false;
+
+                ui_kit.now = 8000000000ll, ui_kit.busy = 0, ui_kit.wheel_off = 0;
+                ui_kit.wheel_clock = 30000000000ll;
+                ui_scroll_wheel(&ui, &smooth, -120);
+                for (frame = 0; frame < 60; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.wheel_clock += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &smooth);
+                        frames_between += smooth.scroll > 0 && smooth.scroll < row;
+                        jump = smooth.scroll - last > jump ? smooth.scroll - last : jump;
+                        last = smooth.scroll;
+                }
+                glides = frames_between >= 3 && jump < row / 2 && smooth.scroll == row && !smooth.gliding;
+
+                ui_kit.wheel_off = 1;
+                ui_scroll_set(&smooth, 0);
+                ui_scroll_wheel(&ui, &smooth, -120);
+                once = smooth.scroll == row && !smooth.gliding && !smooth.back.live;
+                ui_kit.wheel_off = 0;
+
+                ui_kit.wheel_clock = 0;
+                check("kit wheel: with the wheel smooth a notch glides to its row over several frames with no frame jumping a row, and off a notch is one row at once",
+                      glides && once);
+        }
+
         // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
         // leaves its rows and its scroll where they are, and a finger's pull leaves its scroll at 0 and its first row put (the
         // pull stretches it from the edge it is pulled past, under UI_LIST_STRETCH). A list that scrolls keeps its scroll at its
@@ -132876,10 +132907,14 @@ static fn check_kit_states(void)
                 memory_zero(&glide, sizeof(glide));
                 glide.x = 100, glide.y = 10, glide.height = 200, glide.content = 1000, glide.view = 200;
                 ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                // The two notches are a slow turn apart (300 ms on the wheel's clock): a fast pair travels further (ui_wheel_rate).
+                ui_kit.wheel_clock = 40000000000ll;
                 ui_scroll_wheel(&ui, &glide, -120);
                 for (int k = 0; k < 2; k++)
                         sweep_scroll_frame(&ui, &glide);
+                ui_kit.wheel_clock += 300000000ll;
                 ui_scroll_wheel(&ui, &glide, -120);
+                ui_kit.wheel_clock = 0;
                 frames = sweep_settle_scroll(&ui, &glide);
                 check("kit states: a second notch during a glide carries on to two rows and goes idle there",
                       frames > 0 && !glide.gliding && glide.scroll == 2 * UI_ROW && glide.at == glide.aim);

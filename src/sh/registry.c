@@ -113,6 +113,7 @@
 #define SETTING_THEME_PATH "/root/canvas.theme"
 #define SETTING_ACCENT_PATH "/root/canvas.theme.accent"
 #define SETTING_MOTION_PATH "/root/canvas.motion"
+#define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"
 
 struct settings_row
 {
@@ -207,6 +208,12 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "motion is full or reduced, not %s\n",
                       .usage = "canvas motion [full|reduced]",
                       .help = "reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]"),
+    //  The wheel's glide (ui_scroll_wheel, every region the wheel turns): on, a notch glides to its row over a short time and a
+    //  fast spin travels further; off, a notch moves a whole row at once.
+    SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas wheel smooth [on|off]",
+                      .help = "a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]"),
     SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
                       .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",

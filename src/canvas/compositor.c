@@ -7418,10 +7418,23 @@ static unsigned int compositor_tab_target(b32 lit)
         return compositor_chrome_now()->roles.role[lit ? UI_PRIMARY : UI_SURFACE] & 0xffffffu;
 }
 
+static bool compositor_setting_kept(const char *path, const char *word, long *value);
+
+// The wheel's glide (ui_scroll_wheel), as the table keeps it: a change knocks every window, as a theme change does.
+static void compositor_wheel_publish(unsigned int off)
+{
+        struct windows *table = compositor.table;
+
+        if (!table || table->wheel_off == off)
+                return;
+        table->wheel_off = off;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+}
+
 static void compositor_theme_read(void)
 {
         char word[16];
-        long accent = -1;
+        long accent = -1, smooth = 0;
         unsigned int motion;
 
         compositor_word(SETTING_THEME_PATH, word, sizeof(word));
@@ -7433,6 +7446,9 @@ static void compositor_theme_read(void)
                 accent = window_colour_parse((string_address)word);
         compositor_word(SETTING_MOTION_PATH, word, sizeof(word));
         motion = string_equals((string_address)word, (string_address) "reduced");
+        compositor_word(SETTING_WHEEL_SMOOTH_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_WHEEL_SMOOTH_PATH, word, &smooth);
+        compositor_wheel_publish(smooth != 0);
         // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
                              accent < 0 ? 0xffffffu : (unsigned int)accent, motion);

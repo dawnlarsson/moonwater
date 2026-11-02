@@ -1660,6 +1660,8 @@ static struct ui_kit
         struct ui_theme shown, from, to;
         struct ui_tween turn;              // 0 to UI_ONE while the theme turns
         unsigned int mode, accent, motion; // UI_THEME_LIGHT or _DARK, 0xrrggbb, 0 full or 1 reduced
+        unsigned int wheel_off;            // 1 when a notch of the wheel moves a row at once (canvas wheel smooth off), 0 the glide
+        b64 wheel_clock;                   // a test's clock for the wheel's rate, ns; 0 the monotonic clock
         unsigned int themed;               // the table's theme count as last taken
         b64 now;                           // the frame's time, ns
         b64 drawn;                         // the last frame's time: the next is a display period after it
@@ -4946,6 +4948,7 @@ struct ui_scroll
         b32 bounds;
         int edge, scale;
         int reach;                 // how far down the region's rows are drawn, device pixels, when past its track (a list's pad); 0 for its height
+        b64 notch;                 // when the region last took a notch of the wheel, ns
 };
 
 // A list stretches past its bounds (ui_list_row_span): a pull past an end, and a wheel turn at one, scale its rows in the scroll axis.
@@ -5444,19 +5447,28 @@ static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll addre
         return true;
 }
 
+// The wheel's clock: a test's, when it has one, else the monotonic clock the notches arrive on.
+static b64 ui_wheel_clock(void)
+{
+        return ui_kit.wheel_clock ? ui_kit.wheel_clock : (b64)clock_monotonic_nanoseconds();
+}
+
 // A turn of the wheel, in the 120ths of a notch the compositor sends: what is under a step is kept for the next turn.
-// A notch is a row (a unit, where there are them), and its distance is added to the glide's speed as well as its aim.
+// A notch is a row (a unit, where there are them), and its distance is added to the glide's speed as well as its aim. With the
+// wheel smooth off (ui_kit.wheel_off) a notch is one row at once: no glide.
 static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll address_to s, int delta)
 {
         long total = (long)s->wheel + (long)delta * (s->unit > 0 ? 1 : UI_ROW * ui->scale);
         int steps = (int)(total / 120);
-        b64 base, aim;
+        b64 base, aim, now, unit = s->unit > 0 ? s->unit : 1;
 
         s->wheel = (int)(total - (long)steps * 120);
         if (!steps)
                 return false;
+        now = ui_wheel_clock();
+        s->notch = now;
         base = s->gliding || s->back.live ? s->aim : s->dragging ? s->at : (b64)s->scroll << 8;
-        aim = base - (b64)steps * (s->unit > 0 ? s->unit : 1) * UI_SCROLL_SCALE;
+        aim = base - (b64)steps * unit * UI_SCROLL_SCALE;
         if (ui_scroll_fit(s, aim) == base)
         {
                 // A turn at the end of a region that scrolls stretches it briefly from that end, and does not move it: a region that
@@ -5472,6 +5484,10 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
                 return true;
         }
         aim = ui_scroll_fit(s, aim);
+        if (ui_kit.wheel_off)
+                return ui_scroll_set(s, (int)(aim >> 8));
+        if (aim == base)
+                return false;
         if (s->dragging)
                 s->dragging = 0, s->speed = 0;
         ui_scroll_rest(s);
@@ -6030,7 +6046,10 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         // own loop still turns to it after, as ever), and a turn under way is taken to its end: the terminal's menu
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
+        {
+                ui_kit.wheel_off = table->wheel_off ? 1 : 0;
                 ui_kit_theme(table->theme, table->accent, table->motion);
+        }
         ui_kit.shown = ui_kit.to;
         ui_popup_look(p, table, parent_ui);
         p->shown = -1;
@@ -7547,6 +7566,7 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0;
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], app->title, WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
@@ -7608,6 +7628,7 @@ static int ui_app_run(struct ui_app address_to app)
                 if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
                 {
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
+                        ui_kit.wheel_off = table->wheel_off ? 1 : 0;
                         ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_kit_inks(app->ui);
                         ui_app_changed(app);

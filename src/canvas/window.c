@@ -725,8 +725,11 @@ struct windows
                 theme accent` and `canvas motion` keep it -- theme 0 light or 1 dark (auto is worked out to one of
                 them by the clock), accent 0xrrggbb, motion 0 full or 1 reduced. themed counts up each time any
                 of them changes, and every window is knocked, so a window takes a new theme without a restart.
+                wheel_off is 1 when `moonwater canvas wheel smooth off` keeps it: a notch of the wheel then moves a whole row
+                at once, with no glide (ui_scroll_wheel), and themed counts it too.
         */
         unsigned int theme, accent, motion, themed;
+        unsigned int wheel_off;
 
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING
