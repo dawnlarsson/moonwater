@@ -83,7 +83,7 @@ static int taskbar_vertical(unsigned int position)
 // The band: along the edge its position names, COMPOSITOR_PANEL logical pixels thick.
 static void taskbar_band(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 {
-        int thick = COMPOSITOR_PANEL * view->scale;
+        int thick = COMPOSITOR_PANEL * view->scale / 100;
 
         switch (view->position)
         {
@@ -142,9 +142,9 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->thick = lay->vertical ? lay->bw : lay->bh;
         lay->length = lay->vertical ? lay->bh : lay->bw;
         lay->origin = lay->vertical ? lay->by : lay->bx;
-        lay->gap = UI_GAP1 * view->scale; // the kit's gap between pieces that go together: the tabs of a row
-        lay->inset = 3 * view->scale;
-        lay->high = lay->thick - 3 * view->scale;
+        lay->gap = UI_GAP1 * view->scale / 100; // the kit's gap between pieces that go together: the tabs of a row
+        lay->inset = 3 * view->scale / 100;
+        lay->high = lay->thick - 3 * view->scale / 100;
         lay->count = (int)view->count;
         lay->lengths = view->lengths;
         lay->tray = taskbar_tray(lay->high);
@@ -242,7 +242,7 @@ static int taskbar_slot(const struct taskbar_view *view, int which, int *x, int 
 */
 static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, int reach)
 {
-        int half = reach ? 2 * view->scale : 0;
+        int half = reach ? 2 * view->scale / 100 : 0;
 
         for (int which = -2; which < (int)view->count; which++)
         {
@@ -918,7 +918,9 @@ static int taskbar_stale(void)
 // The memory the band's pixels and its glass take at most, for any position at this output and scale.
 static void taskbar_bytes(int width, int height, int scale, unsigned long *band, unsigned long *glass)
 {
-        int thick = COMPOSITOR_PANEL * scale, across = COMPOSITOR_GLASS_ACROSS * scale, down = COMPOSITOR_GLASS_DOWN * scale;
+        // The scale is percent: whole device pixels of a logical one, rounded up, so these bound what is drawn.
+        int px = (scale + 99) / 100;
+        int thick = COMPOSITOR_PANEL * px, across = COMPOSITOR_GLASS_ACROSS * px, down = COMPOSITOR_GLASS_DOWN * px;
         long along = width > height ? width : height;
         long wide = (long)(width + 2 * across) * (long)(thick + 2 * down);
         long tall = (long)(thick + 2 * across) * (long)(height + 2 * down);

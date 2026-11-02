@@ -117724,7 +117724,7 @@ static fn check_take(void)
         memory_zero(&compositor, sizeof(compositor));
         compositor.table = &table;
         compositor.width = compositor.height = 256;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         table.width[2] = table.height[2] = 16;
@@ -117770,7 +117770,7 @@ static fn check_land_setup(struct windows address_to table, unsigned int motion)
         memory_zero(table, sizeof(*table));
         compositor.table = table;
         compositor.width = compositor.height = 512;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         table->width[2] = 200;
@@ -117920,7 +117920,7 @@ static void check_compositor_partial(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = made;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -118003,7 +118003,7 @@ static void check_compositor_held(void)
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.direct_row = compositor.plane_row = compositor.flip_row = -1;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     static unsigned int made[GLASS_SIDE * GLASS_SIDE];
     compositor.scanout = made;
@@ -118092,7 +118092,7 @@ static void check_compositor_screens(void)
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
     compositor.width = SCREENS_W;
     compositor.height = SCREENS_H;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = scanout;
     compositor.scanout_pitch = SCREENS_W * 4;
@@ -118337,9 +118337,9 @@ static void check_compositor_preview(void)
         window[at] = 0xc06020u;
     for (unsigned int at = 0; at < 8 * 8; at++)
         over[at] = 0x204080u;
-    frames[0] = (struct compositor_frame){.x = 10, .y = 4, .width = 16, .height = 8, .scale = 1, .pixels = window, .pitch = 16,
+    frames[0] = (struct compositor_frame){.x = 10, .y = 4, .width = 16, .height = 8, .scale = 100, .pixels = window, .pitch = 16,
                                           .preview = {0, 0, 32, 20}, .preview_ink = ink};
-    frames[1] = (struct compositor_frame){.x = 0, .y = 0, .width = 8, .height = 8, .scale = 1, .pixels = over, .pitch = 8};
+    frames[1] = (struct compositor_frame){.x = 0, .y = 0, .width = 8, .height = 8, .scale = 100, .pixels = over, .pitch = 8};
     for (int y = 0; y < 40; y++)
         for (int x = 0; x < 64; x++)
         {
@@ -118439,11 +118439,11 @@ static void check_compositor_preview_held(void)
             const int line = config == 2 ? 0 : 4, x = 20, y = 12, w = 40, h = 30;
             unsigned long before;
 
-            frames[0] = (struct compositor_frame){.x = 0, .y = 0, .width = HELD_W, .height = HELD_H, .scale = 1, .pixels = wall, .pitch = HELD_W};
-            frames[1] = (struct compositor_frame){.x = x, .y = y, .width = w, .height = h, .scale = 1, .pixels = window, .pitch = 40,
+            frames[0] = (struct compositor_frame){.x = 0, .y = 0, .width = HELD_W, .height = HELD_H, .scale = 100, .pixels = wall, .pitch = HELD_W};
+            frames[1] = (struct compositor_frame){.x = x, .y = y, .width = w, .height = h, .scale = 100, .pixels = window, .pitch = 40,
                                                   .radius = config == 2 ? 0 : 10, .line = line, .edge = 0x335577u,
                                                   .square = config == 1 ? 15 : 0, .preview = {0, 0, 48, 32}, .preview_ink = ink};
-            frames[2] = (struct compositor_frame){.x = 30, .y = 20, .width = 12, .height = 10, .scale = 1, .pixels = above, .pitch = 12};
+            frames[2] = (struct compositor_frame){.x = 30, .y = 20, .width = 12, .height = 10, .scale = 100, .pixels = above, .pitch = 12};
             memory_copy(plain, frames, sizeof(frames));
             plain[1].preview[2] = 0;
 
@@ -118508,7 +118508,7 @@ static void check_compositor_preview_held(void)
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
         compositor.width = HELD_OUT_W;
         compositor.height = HELD_OUT_H;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.card = -1;
         compositor.scanout = scanout;
         compositor.scanout_pitch = HELD_OUT_W * 4;
@@ -118629,7 +118629,7 @@ static void check_compositor_shared(void)
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
     compositor.width = SHARED_W;
     compositor.height = SHARED_H;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = scanout;
     compositor.scanout_pitch = SHARED_W * 4;
@@ -118682,7 +118682,7 @@ static void check_compositor_shared(void)
               compositor.x[2] + (int)compositor.w[2] == compositor.x[3] && compositor.x[3] + (int)compositor.w[3] == SHARED_W);
     screens_hand(4, SHARED_H / 2, 0);
     check("shared: dragged past the least a window is, the left one stops at it and the right keeps its far edge",
-          compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
+          compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale / 100 && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
               compositor.x[3] + (int)compositor.w[3] == SHARED_W);
     screens_hand(4, SHARED_H / 2, -1);
     check("shared: let go, the resize ends and the indicator goes",
@@ -118760,13 +118760,13 @@ static void check_compositor_shared(void)
     screens_hand(4, SHARED_H / 2, 0);
     shared_answer(2), shared_answer(3);
     check("shared answered: dragged to the least, the left stops at the least and the right keeps its far edge",
-          compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
+          compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale / 100 && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
               compositor.x[3] + (int)compositor.w[3] == SHARED_W);
     screens_hand(4, SHARED_H / 2, -1);
     shared_answer(2), shared_answer(3);
     check("shared answered: let go and answered, both keep the sizes they were let go at and still meet",
           compositor.resize == COMPOSITOR_NONE && compositor.shared_row == COMPOSITOR_NONE &&
-              compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
+              compositor.w[2] == WINDOW_MIN_WIDTH * compositor.scale / 100 && compositor.x[2] + (int)compositor.w[2] == compositor.x[3] &&
               compositor.x[3] + (int)compositor.w[3] == SHARED_W);
 }
 
@@ -118786,7 +118786,7 @@ static void check_compositor_cycle(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -118865,7 +118865,7 @@ static void check_taskbar_tray(void)
     memory_zero(&compositor, sizeof(compositor));
     compositor.width = 2560;
     compositor.height = 1440;
-    compositor.scale = 1;
+    compositor.scale = 100;
     taskbar_settings_set("bottom", "primary", "battery none\n");
     taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
     check("tray format: the standard is the tray as it always was", !taskbar.tray_custom);
@@ -118911,7 +118911,7 @@ static void check_taskbar_geometry(void)
         memory_zero(&compositor, sizeof(compositor));
         compositor.width = 2560;
         compositor.height = 1440;
-        compositor.scale = 1;
+        compositor.scale = 100;
         taskbar_settings_set(positions[at], "primary", "battery none\n");
         view = compositor_taskbar_view();
         taskbar_band(&view, &x, &y, &w, &h);
@@ -118930,7 +118930,7 @@ static void check_taskbar_geometry(void)
     memory_zero(&compositor, sizeof(compositor));
     compositor.width = 2560;
     compositor.height = 1440;
-    compositor.scale = 1;
+    compositor.scale = 100;
     {
         struct battery_state state;
         int present;
@@ -118999,7 +118999,7 @@ static struct taskbar_view band_view(unsigned int position, const char *const *t
     memory_zero(band_pixels, sizeof(band_pixels));
     view.width = BAND_W;
     view.height = BAND_H;
-    view.scale = 1;
+    view.scale = 100;
     view.position = position;
     view.pixels = band_pixels;
     view.band_bytes = sizeof(band_pixels);
@@ -119293,7 +119293,7 @@ static void check_compositor_look(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -119407,7 +119407,7 @@ static void check_compositor_look(void)
         check("look: a dark arrow's outline is white and its fill black", edge == 4 * 46 && fill == 4 * 55 && other == 0);
     }
 
-    compositor.scale = 2;
+    compositor.scale = 200;
     check("look: the pointer is the desktop's scale with no size", compositor_cursor_scale() == 2);
     compositor.cursor.size = 1;
     check("look: and the size that was asked when there is one", compositor_cursor_scale() == 1);
@@ -119441,7 +119441,7 @@ static void check_compositor_dismiss(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -119527,7 +119527,7 @@ static void check_compositor_popup(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -119602,7 +119602,7 @@ static void check_compositor_popup_press(b32 touch)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -119696,7 +119696,7 @@ static void check_popup_ground_steady(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -119785,7 +119785,7 @@ static void check_popup_reopen(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -119930,7 +119930,7 @@ static void check_compositor_popup_grip(b32 touch)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -120004,7 +120004,7 @@ static void check_compositor_popup_holds(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -120072,7 +120072,7 @@ static void check_compositor_glass_popup(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -120134,7 +120134,7 @@ static void check_compositor_tray(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -120218,7 +120218,7 @@ static void check_compositor_hover(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -120276,7 +120276,7 @@ static struct windows address_to predict_setup(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -120776,7 +120776,7 @@ static void check_compositor_chrome(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -120823,7 +120823,7 @@ static void check_compositor_minimise(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -121090,7 +121090,7 @@ static void check_compositor_lifecycle(void)
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -121225,7 +121225,7 @@ static void check_compositor_lifecycle_seam(void)
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
     compositor.width = SCREENS_W;
     compositor.height = SCREENS_H;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = scanout;
     compositor.scanout_pitch = SCREENS_W * 4;
@@ -121320,7 +121320,7 @@ static void check_compositor_lifecycle_more(void)
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -121533,7 +121533,7 @@ static void check_compositor_asked(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -121578,7 +121578,7 @@ static void check_compositor_tiling(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -121666,7 +121666,7 @@ static void layout_setup(int side, int scale)
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.shared_row = compositor.mark_row = compositor.preview_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = (unsigned int)side;
-    compositor.scale = scale;
+    compositor.scale = scale * 100;
     compositor.card = -1;
     compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
     compositor.scanout = layout_pixels;
@@ -121919,7 +121919,7 @@ static void check_compositor_seam(void)
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
         compositor.width = SCREENS_W;
         compositor.height = SCREENS_H;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.card = -1;
         compositor.scanout = scanout;
         compositor.scanout_pitch = SCREENS_W * 4;
@@ -122621,7 +122621,7 @@ static void check_compositor_wheel(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.hold = -1;
     compositor.holds = ~0ul;
@@ -122917,7 +122917,7 @@ static void check_compositor_lit(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.scanout = screen;
     compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -123299,7 +123299,7 @@ static void check_touch_path(struct ui address_to wui)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.hold = -1;
     compositor.holds = ~0ul;
@@ -123370,7 +123370,7 @@ static void check_touch_path(struct ui address_to wui)
     ui_begin(wui, wui->pixels, wui->pitch, wui->width, wui->height);
     ui_text_draw(wui, &t, 20, 60, 190, 44, 0);
     ex = touch_path_x(wui, &t, 16);
-    knob = t.top + t.line_height + 6 * compositor.scale;
+    knob = t.top + t.line_height + 6 * compositor.scale / 100;
     check("touch path: the end of the selection has a handle, a knob in the accent under its line",
           (wui->pixels[(positive)knob * wui->pitch + (positive)ex] & 0xffffffu) == accent);
     touch_one(TOUCH_PATH_LEFT + ex, TOUCH_PATH_TOP + knob, false);
@@ -123419,7 +123419,7 @@ static void scroll_setup(int touch)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.hold = -1;
     compositor.holds = ~0ul;
@@ -123685,7 +123685,7 @@ static void check_compositor_touch(void)
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
     compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
     compositor.width = compositor.height = GLASS_SIDE;
-    compositor.scale = 1;
+    compositor.scale = 100;
     compositor.card = -1;
     compositor.hold = -1;
     compositor.holds = ~0ul;
@@ -124041,7 +124041,7 @@ static fn check_compositor_place(void)
                 memory_zero(&compositor, sizeof(compositor));
                 compositor.width = 2560;
                 compositor.height = 1440;
-                compositor.scale = 1;
+                compositor.scale = 100;
                 taskbar_settings_set(sides[side], "primary", "battery none\n");
                 view = compositor_taskbar_view();
                 taskbar_band(&view, &band[0], &band[1], &band[2], &band[3]);
@@ -124134,7 +124134,7 @@ static fn check_compositor_place(void)
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.card = -1;
         compositor.scanout = screen;
         compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -124328,7 +124328,7 @@ static fn check_compositor_remember(void)
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.card = -1;
         compositor.scanout = screen;
         compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -124453,7 +124453,7 @@ static void check_glass_lift(void)
                                 compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
                                 compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
                                 compositor.width = compositor.height = GLASS_SIDE;
-                                compositor.scale = 1;
+                                compositor.scale = 100;
                                 compositor.card = -1;
                                 compositor.scanout = screen;
                                 compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -124518,7 +124518,7 @@ static fn check_glass(void)
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.card = -1;
         compositor.scanout = screen;
         compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -137427,7 +137427,7 @@ static fn check_glass_pieces(string_address regular)
                 unsigned int was = compositor.arranged[4];
                 b32 glassy = compositor.glassy[4];
 
-                compositor.scale = 1;
+                compositor.scale = 100;
                 compositor.arranged[4] = COMPOSITOR_FLOATING;
                 compositor.glassy[4] = 0;
                 kit_ok = compositor_line(4) == COMPOSITOR_LINE;
@@ -139899,7 +139899,7 @@ static fn check_no_tab(void)
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.card = -1;
         compositor.scanout = screen;
         compositor.scanout_pitch = GLASS_SIDE * 4;
@@ -140150,7 +140150,7 @@ static fn check_identify_frame(void)
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
         compositor.width = compositor.height = GLASS_SIDE;
-        compositor.scale = 1;
+        compositor.scale = 100;
         compositor.card = -1;
         compositor.scanout = screen;
         compositor.scanout_pitch = GLASS_SIDE * 4;

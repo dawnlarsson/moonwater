@@ -132,6 +132,14 @@ struct compositor_target
         unsigned int *scratch; // where the scene draws a round corner's square; none is the one of its own
 };
 
+// A scale in percent as the whole device pixels of one logical pixel, never less than one.
+static int compositor_px1(int percent)
+{
+        int px = (percent + 50) / 100;
+
+        return px < 1 ? 1 : px;
+}
+
 /*
         One thing to draw. A window is its buffer and nothing around it; the
         panel is a band with a mark a window, one byte each:
@@ -179,7 +187,7 @@ struct compositor_frame
 */
 static int compositor_close_box(const struct compositor_frame *frame, int *x, int *y, int *side)
 {
-        int box = UI_CLOSE * frame->scale, in = UI_CLOSE_IN * frame->scale;
+        int box = UI_CLOSE * frame->scale / 100, in = UI_CLOSE_IN * frame->scale / 100;
 
         if (!frame->close || frame->builtin || frame->width < box + 2 * in + 4 * box || frame->height < box + 2 * in)
                 return 0;
@@ -272,7 +280,7 @@ static unsigned int compositor_picture_at(const struct compositor_frame *frame, 
 */
 static int compositor_minimize_box(const struct compositor_frame *frame, int *x, int *y, int *side)
 {
-        int bx, by, box, in = UI_CLOSE_IN * frame->scale;
+        int bx, by, box, in = UI_CLOSE_IN * frame->scale / 100;
 
         if (!compositor_close_box(frame, &bx, &by, &box) || frame->width < 2 * box + 3 * in + 4 * box)
                 return 0;
@@ -290,11 +298,11 @@ static int compositor_minimize_box(const struct compositor_frame *frame, int *x,
 */
 static void compositor_minimize_draw(const struct compositor_target *t, const struct compositor_frame *frame)
 {
-        int mx, my, side, in = COMPOSITOR_MINIMIZE_IN * frame->scale;
+        int mx, my, side, in = COMPOSITOR_MINIMIZE_IN * frame->scale / 100;
 
         if (!compositor_minimize_box(frame, &mx, &my, &side))
                 return;
-        compositor_fill(t, mx + in, my + side / 2 - frame->scale, side - 2 * in, 2 * frame->scale,
+        compositor_fill(t, mx + in, my + side / 2 - compositor_px1(frame->scale), side - 2 * in, 2 * compositor_px1(frame->scale),
                         window_contrast(frame->close_mean));
 }
 
@@ -498,19 +506,19 @@ static void compositor_close_ready(const struct compositor_frame *frame)
         int bx, by, side;
 
         if (!compositor_close_box(frame, &bx, &by, &side) || side > COMPOSITOR_CLOSE_MOST ||
-            (compositor_close_cover.side == side && compositor_close_cover.half == frame->scale))
+            (compositor_close_cover.side == side && compositor_close_cover.half == compositor_px1(frame->scale)))
                 return;
         for (int y = 0; y < side; y++)
                 for (int x = 0; x < side; x++)
                 {
                         unsigned int halo, cross;
 
-                        compositor_close_sample(side, frame->scale, x, y, &halo, &cross);
+                        compositor_close_sample(side, compositor_px1(frame->scale), x, y, &halo, &cross);
                         compositor_close_cover.halo[y * side + x] = (unsigned char)halo;
                         compositor_close_cover.cross[y * side + x] = (unsigned char)cross;
                 }
         compositor_close_cover.side = side;
-        compositor_close_cover.half = frame->scale;
+        compositor_close_cover.half = compositor_px1(frame->scale);
 }
 
 /*
@@ -541,7 +549,7 @@ static void compositor_close_draw(const struct compositor_target *t, const struc
                 return;
 
         unsigned int mean = frame->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : compositor_ink_shadow();
-        int half = frame->scale; // half the X's stroke
+        int half = compositor_px1(frame->scale); // half the X's stroke
         int made = compositor_close_cover.side == side && compositor_close_cover.half == half;
         const unsigned int *picture = compositor_scaled(frame) ? 0 : frame->pixels;
 
@@ -607,7 +615,7 @@ static void compositor_lit_line(const struct compositor_target *t, const struct 
 {
         unsigned int lit = frame->lit & COMPOSITOR_LIT_ALL ? 15u : frame->lit;
         int across = lit & (COMPOSITOR_LIT_LEFT | COMPOSITOR_LIT_RIGHT), down = lit & (COMPOSITOR_LIT_TOP | COMPOSITOR_LIT_BOTTOM);
-        int corner = across && down && !(frame->lit & COMPOSITOR_LIT_ALL), reach = COMPOSITOR_LIT_REACH * frame->scale;
+        int corner = across && down && !(frame->lit & COMPOSITOR_LIT_ALL), reach = COMPOSITOR_LIT_REACH * frame->scale / 100;
         int wide = ow - 2 * r, tall = oh - 2 * r;
         int seg_w = corner && reach < wide ? reach : wide, seg_h = corner && reach < tall ? reach : tall;
         int from_x = corner && (lit & COMPOSITOR_LIT_RIGHT) ? ox + ow - r - seg_w : ox + r;
@@ -852,7 +860,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
                 tabs[count].width = width;
                 tabs[count].height = height;
                 tabs[count].slot = which;
-                tabs[count].radius = UI_RADIUS * band->scale;
+                tabs[count].radius = UI_RADIUS * band->scale / 100;
                 tabs[count].line = 0;
                 tabs[count].square = taskbar_square(band->position);
                 if (!band->builtin)
@@ -1387,14 +1395,14 @@ static void compositor_corner_masks_ready(const struct compositor_frame *frames,
 // The radius of a mark at a scale, in device pixels: no more than the masks are made for.
 static int compositor_spot_radius(int scale)
 {
-        int radius = COMPOSITOR_SPOT * (scale < 1 ? 1 : scale);
+        int radius = COMPOSITOR_SPOT * compositor_px1(scale);
 
         return radius > COMPOSITOR_MASK_MOST ? COMPOSITOR_MASK_MOST : radius;
 }
 
 static void compositor_spot_draw(const struct compositor_target *t, int cx, int cy, int scale, unsigned int alpha)
 {
-        int radius = compositor_spot_radius(scale), ring = scale < 1 ? 1 : scale, inner = radius - ring;
+        int radius = compositor_spot_radius(scale), ring = compositor_px1(scale), inner = radius - ring;
         int x1 = cx - radius > t->x1 ? cx - radius : t->x1, y1 = cy - radius > t->y1 ? cy - radius : t->y1;
         int x2 = cx + radius < t->x2 ? cx + radius : t->x2, y2 = cy + radius < t->y2 ? cy + radius : t->y2;
         unsigned int fill = COMPOSITOR_SPOT_FILL * alpha / 255, edge = COMPOSITOR_SPOT_RING * alpha / 255;
@@ -3566,7 +3574,7 @@ static int compositor_visible(int row)
 // meets the output's edges with none, and square. Glass has the same line and corners: it is what is under it, inside them.
 static int compositor_line(int row)
 {
-        return compositor.arranged[row] == COMPOSITOR_FLOATING ? COMPOSITOR_LINE * compositor.scale : 0;
+        return compositor.arranged[row] == COMPOSITOR_FLOATING ? COMPOSITOR_LINE * compositor.scale / 100 : 0;
 }
 
 // The line a window is drawn with: a floating window's, and a tile's (a half or a quarter reads as a window, the same
@@ -3575,7 +3583,7 @@ static int compositor_line(int row)
 static int compositor_frame_line(int row)
 {
         return compositor.arranged[row] == COMPOSITOR_MAXIMIZED || compositor.arranged[row] == COMPOSITOR_ROOM
-                   ? 0 : COMPOSITOR_LINE * compositor.scale;
+                   ? 0 : COMPOSITOR_LINE * compositor.scale / 100;
 }
 
 /*
@@ -3780,7 +3788,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
                                            (int)compositor.h[row], compositor.scale, compositor_pixels(row),
                                            (unsigned long)compositor_stride(), 0, null, 0,
-                                           line ? UI_RADIUS * compositor.scale : 0, line,
+                                           line ? UI_RADIUS * compositor.scale / 100 : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         compositor_land_frame(row, frame);
@@ -4005,7 +4013,7 @@ static int compositor_glass_reach(int logical)
 {
         int reach = 1;
 
-        while (reach * 2 <= logical * compositor.scale)
+        while (reach * 2 <= logical * compositor.scale / 100)
                 reach *= 2;
         return reach;
 }
@@ -5701,7 +5709,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         bottom = frame->y + frame->height - radius;
         if (compositor_close_box(frame, &bx, &by, &side))
                 top = by + side > top ? by + side : top;
-        if (bottom - top < 64 * compositor.scale)
+        if (bottom - top < 64 * compositor.scale / 100)
                 return *why = 8, -1;
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
 
@@ -7059,7 +7067,7 @@ static b32 compositor_card_open(void)
 // when it did not, three times that while it is shaken large.
 static int compositor_cursor_scale(void)
 {
-        int base = compositor.cursor.size ? compositor.cursor.size : compositor.scale;
+        int base = compositor.cursor.size ? compositor.cursor.size : compositor_px1(compositor.scale);
 
         return compositor.cursor.magnified ? 3 * base : base;
 }
@@ -8308,12 +8316,12 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
                 return 0;
         // A finger's are wider (COMPOSITOR_TOUCH_GRIP), its corners further along each edge, and its top a pointer's.
         int touch = compositor.touching;
-        int grip = (touch ? COMPOSITOR_TOUCH_GRIP : COMPOSITOR_GRIP) * compositor.scale + compositor_line(row);
-        int in = (touch ? COMPOSITOR_TOUCH_GRIP_IN : COMPOSITOR_GRIP_IN) * compositor.scale;
+        int grip = (touch ? COMPOSITOR_TOUCH_GRIP : COMPOSITOR_GRIP) * compositor.scale / 100 + compositor_line(row);
+        int in = (touch ? COMPOSITOR_TOUCH_GRIP_IN : COMPOSITOR_GRIP_IN) * compositor.scale / 100;
         int x2 = compositor.x[row] + (int)compositor.w[row], y2 = compositor.y[row] + (int)compositor.h[row];
         unsigned int edges = compositor_edges_at(x, y, compositor.x[row], compositor.y[row], x2, y2, grip, in,
-                                                 COMPOSITOR_GRIP_IN * compositor.scale,
-                                                 touch ? COMPOSITOR_TOUCH_CORNER * compositor.scale : 0);
+                                                 COMPOSITOR_GRIP_IN * compositor.scale / 100,
+                                                 touch ? COMPOSITOR_TOUCH_CORNER * compositor.scale / 100 : 0);
 
         if (!edges)
                 return 0;
@@ -8341,7 +8349,7 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
 static int compositor_band_hit(int x, int y)
 {
         int hit = TASKBAR_HIT_NONE, bands = compositor_bands();
-        int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale : 0;
+        int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale / 100 : 0;
 
         for (compositor.band_at = 0; compositor.band_at < bands && hit == TASKBAR_HIT_NONE; compositor.band_at++)
         {
@@ -8398,7 +8406,7 @@ static void compositor_place(int row, int x, int y)
         const int (*screens)[4] = compositor_screens(&count);
 
         compositor_screen_keep_window(screens, count, &x, &y, (int)compositor.w[row], (int)compositor.h[row],
-                                      compositor_line(row), COMPOSITOR_GRAB * compositor.scale);
+                                      compositor_line(row), COMPOSITOR_GRAB * compositor.scale / 100);
         compositor_put(row, x, y);
 }
 
@@ -8411,10 +8419,10 @@ static void compositor_want(int row, int width, int height)
 {
         int x = compositor.x[row], y = compositor.y[row];
 
-        width = width < WINDOW_MIN_WIDTH * compositor.scale ? WINDOW_MIN_WIDTH * compositor.scale
+        width = width < WINDOW_MIN_WIDTH * compositor.scale / 100 ? WINDOW_MIN_WIDTH * compositor.scale / 100
                 : width > compositor_most_width()           ? compositor_most_width()
                                                             : width;
-        height = height < WINDOW_MIN_HEIGHT * compositor.scale ? WINDOW_MIN_HEIGHT * compositor.scale
+        height = height < WINDOW_MIN_HEIGHT * compositor.scale / 100 ? WINDOW_MIN_HEIGHT * compositor.scale / 100
                  : height > compositor_most_height()           ? compositor_most_height()
                                                                : height;
         compositor.table->want_width[row] = (unsigned int)width;
@@ -8488,7 +8496,7 @@ static int compositor_shared_pair(int row, unsigned int edge, int *lo, int *hi)
 // The indicator's rectangle across the edge between lo and hi (vertical: one that runs down): its middle half.
 static void compositor_shared_strip(int lo, int hi, int vertical, int *rect)
 {
-        int s = COMPOSITOR_SHARED_MARK * compositor.scale;
+        int s = COMPOSITOR_SHARED_MARK * compositor.scale / 100;
 
         if (vertical)
         {
@@ -8609,7 +8617,7 @@ static int compositor_shared_begin(int row, unsigned int edge)
 static void compositor_shared_move(void)
 {
         int lo = compositor.shared_lo, hi = compositor.shared_hi, vertical = compositor.shared_vertical;
-        int least = (vertical ? WINDOW_MIN_WIDTH : WINDOW_MIN_HEIGHT) * compositor.scale;
+        int least = (vertical ? WINDOW_MIN_WIDTH : WINDOW_MIN_HEIGHT) * compositor.scale / 100;
         int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(lo);
         int lo_size = compositor.shared_size[0], hi_size = compositor.shared_size[1];
         int d = vertical ? compositor.pointer_x - compositor.press_x : compositor.pointer_y - compositor.press_y;
@@ -8816,7 +8824,7 @@ static unsigned int compositor_occupied(int row, int screen)
 */
 static void compositor_grid_tile(const int *screen, unsigned int at, int *tile)
 {
-        int gap = COMPOSITOR_GRID_GAP * compositor.scale, width = screen[2] / 10, row = COMPOSITOR_GRID_TILES * width + (COMPOSITOR_GRID_TILES - 1) * gap;
+        int gap = COMPOSITOR_GRID_GAP * compositor.scale / 100, width = screen[2] / 10, row = COMPOSITOR_GRID_TILES * width + (COMPOSITOR_GRID_TILES - 1) * gap;
 
         tile[0] = screen[0] + (screen[2] - row) / 2 + (int)at * (width + gap);
         tile[1] = screen[1];
@@ -8827,7 +8835,7 @@ static void compositor_grid_tile(const int *screen, unsigned int at, int *tile)
 // Whether a pointer at x, y on screen is in the top band that brings the grid up.
 static int compositor_grid_band(const int *screen, int x, int y)
 {
-        return x >= screen[0] && x < screen[0] + screen[2] && y >= screen[1] && y - screen[1] < COMPOSITOR_SNAP * compositor.scale;
+        return x >= screen[0] && x < screen[0] + screen[2] && y >= screen[1] && y - screen[1] < COMPOSITOR_SNAP * compositor.scale / 100;
 }
 
 // Whether a pointer at x, y on screen is in the row of the grid's tiles, which stays up once it is (compositor_overlays_drag).
@@ -8900,7 +8908,7 @@ static unsigned int compositor_zones(unsigned int free, unsigned int *zones)
 // window's picture as large as its cell takes, centred in it.
 static void compositor_assist_place(const int *zone, unsigned int at, unsigned int of, int w, int h, int *rect)
 {
-        int margin = COMPOSITOR_GRID_GAP * compositor.scale, cols = 1, rows, cell_w, cell_h, fit_w, fit_h;
+        int margin = COMPOSITOR_GRID_GAP * compositor.scale / 100, cols = 1, rows, cell_w, cell_h, fit_w, fit_h;
 
         while (cols * cols < (int)of)
                 cols++;
@@ -9042,7 +9050,7 @@ static int compositor_overlay_boxes(int boxes[COMPOSITOR_ASSIST_MAX + 1][4])
         for (int thumb = 0; shown && thumb < compositor.assist_count; thumb++)
         {
                 const int *rect = compositor.assist_rect[thumb];
-                int line = COMPOSITOR_LINE * compositor.scale;
+                int line = COMPOSITOR_LINE * compositor.scale / 100;
 
                 boxes[n][0] = rect[0] - line, boxes[n][1] = rect[1] - line;
                 boxes[n][2] = rect[2] + 2 * line, boxes[n][3] = rect[3] + 2 * line;
@@ -9054,9 +9062,9 @@ static int compositor_overlay_boxes(int boxes[COMPOSITOR_ASSIST_MAX + 1][4])
 
                 compositor_grid_tile(screen, 0, first);
                 compositor_grid_tile(screen, COMPOSITOR_GRID_TILES - 1, last);
-                boxes[n][0] = first[0] - COMPOSITOR_LINE * compositor.scale, boxes[n][1] = screen[1] - COMPOSITOR_LINE * compositor.scale;
-                boxes[n][2] = last[0] + last[2] - first[0] + 2 * COMPOSITOR_LINE * compositor.scale;
-                boxes[n][3] = first[3] + 2 * COMPOSITOR_LINE * compositor.scale;
+                boxes[n][0] = first[0] - COMPOSITOR_LINE * compositor.scale / 100, boxes[n][1] = screen[1] - COMPOSITOR_LINE * compositor.scale / 100;
+                boxes[n][2] = last[0] + last[2] - first[0] + 2 * COMPOSITOR_LINE * compositor.scale / 100;
+                boxes[n][3] = first[3] + 2 * COMPOSITOR_LINE * compositor.scale / 100;
                 n++;
         }
         return n;
@@ -9094,14 +9102,14 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
         for (int thumb = 0; shown && thumb < compositor.assist_count; thumb++)
         {
                 const int *rect = compositor.assist_rect[thumb];
-                int row = (int)compositor.assist_rows[thumb], line = COMPOSITOR_LINE * compositor.scale;
+                int row = (int)compositor.assist_rows[thumb], line = COMPOSITOR_LINE * compositor.scale / 100;
                 struct compositor_frame *picture = &frames[at + added], *veil = &frames[at + added + 1];
 
                 compositor_frame_of(row, picture);
                 picture->x = rect[0], picture->y = rect[1];
                 picture->width = rect[2], picture->height = rect[3];
                 picture->source_w = (int)compositor.w[row], picture->source_h = (int)compositor.h[row];
-                picture->radius = UI_RADIUS * compositor.scale, picture->line = line;
+                picture->radius = UI_RADIUS * compositor.scale / 100, picture->line = line;
                 picture->edge = compositor_snap_edge(percent);
                 picture->close = 0;
                 picture->lit = 0;
@@ -9120,7 +9128,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
         if (shown && compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
         {
                 const int *screen = screens[compositor.grid_screen];
-                unsigned int line = COMPOSITOR_LINE * compositor.scale;
+                unsigned int line = COMPOSITOR_LINE * compositor.scale / 100;
 
                 for (unsigned int tile = 0; tile < COMPOSITOR_GRID_TILES; tile++)
                 {
@@ -9137,7 +9145,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                         border->scale = compositor.scale;
                         border->x = box[0], border->y = box[1];
                         border->width = box[2], border->height = box[3];
-                        border->radius = UI_RADIUS * compositor.scale, border->line = (int)line;
+                        border->radius = UI_RADIUS * compositor.scale / 100, border->line = (int)line;
                         border->edge = compositor_snap_edge(percent);
                         added += 2;
                 }
@@ -9256,7 +9264,7 @@ static void compositor_float(int row)
 */
 static void compositor_float_for_drag(int row)
 {
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
         int width = (int)compositor.saved_w[row] < least_w ? least_w : (int)compositor.saved_w[row];
         int height = (int)compositor.saved_h[row] < least_h ? least_h : (int)compositor.saved_h[row];
         int grab = (int)((long)(compositor.pointer_x - compositor.x[row]) * width /
@@ -9287,7 +9295,7 @@ static void compositor_float_for_drag(int row)
 */
 static void compositor_first_place(int row, int *x, int *y)
 {
-        int step = COMPOSITOR_STEP * compositor.scale;
+        int step = COMPOSITOR_STEP * compositor.scale / 100;
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
         int on = compositor_screen_at(screens, count, *x, *y);
@@ -9645,7 +9653,7 @@ static void compositor_remember(int row)
 static int compositor_recall(int row, const int (*screens)[4], unsigned int count)
 {
         char names[WINDOW_PLACE_SCREENS][WINDOWS_NAME];
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale, found, x, y;
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100, found, x, y;
         unsigned int on, width, height;
         struct places places;
 
@@ -9682,7 +9690,7 @@ static int compositor_recall(int row, const int (*screens)[4], unsigned int coun
 static void compositor_first_put(int row, int x, int y)
 {
         int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
         unsigned int count = place_screens(screens), on, how, fills;
         struct window_place place;
 
@@ -9732,7 +9740,7 @@ static void compositor_first_put(int row, int x, int y)
 static void compositor_move(int row)
 {
         int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
-        int least_w = WINDOW_MIN_WIDTH * compositor.scale, least_h = WINDOW_MIN_HEIGHT * compositor.scale;
+        int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
         unsigned int count = place_screens(screens), from, on, fills;
         char name[WINDOWS_NAME];
         struct window_place place;
@@ -11116,8 +11124,8 @@ static unsigned int compositor_snap(const int *box, unsigned int *touch, int *sc
         if (at < 0 || compositor_screen_cover(screens[at], box[0], box[1], box[2], box[3]) <= 0)
                 return COMPOSITOR_FLOATING;
         free = compositor_snap_free(screens, count, box, at);
-        return compositor_snap_rule(box, screens[at], free, compositor.snap_held, COMPOSITOR_SNAP_EDGE * compositor.scale,
-                                    COMPOSITOR_SNAP_CORNER * compositor.scale, touch);
+        return compositor_snap_rule(box, screens[at], free, compositor.snap_held, COMPOSITOR_SNAP_EDGE * compositor.scale / 100,
+                                    COMPOSITOR_SNAP_CORNER * compositor.scale / 100, touch);
 }
 
 // The rectangle a window dragged is where the hand has it, before placement keeps it on its screen (compositor_place
@@ -11295,7 +11303,7 @@ static int compositor_on_close(int row, int x, int y)
                 return 0;
         if (!compositor.touching)
                 return x >= bx && x < bx + side && y >= by && y < by + side;
-        reach = COMPOSITOR_TOUCH_CLOSE * compositor.scale;
+        reach = COMPOSITOR_TOUCH_CLOSE * compositor.scale / 100;
         return x >= bx + side / 2 - reach && x < bx + side / 2 + reach && y >= compositor.y[row] &&
                y < by + side / 2 + reach && x < compositor.x[row] + (int)compositor.w[row];
 }
@@ -11503,7 +11511,7 @@ static void compositor_button(unsigned int code, int down)
                 top = !alt && code == COMPOSITOR_BTN_LEFT && compositor.pointer_x >= compositor.x[under] &&
                       compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
                       compositor.pointer_y >= compositor.y[under] &&
-                      compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale;
+                      compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100;
 
                 if (top && compositor_on_close(under, compositor.pointer_x, compositor.pointer_y))
                 {
@@ -11687,7 +11695,7 @@ static positive compositor_predict_period(void)
 static void compositor_predict_lead(struct compositor_predict *track)
 {
         const long long fx = COMPOSITOR_PREDICT_FX, period = (long long)compositor_predict_period() / 1000;
-        const long long cap = (long long)COMPOSITOR_PREDICT_CAP * compositor.scale * fx;
+        const long long cap = (long long)COMPOSITOR_PREDICT_CAP * compositor.scale / 100 * fx;
         long long tn = (long long)track->when[track->count - 1], St = 0, Stt = 0, Sx = 0, Stx = 0, Sy = 0, Sty = 0, m, i0, i, n;
         long long denom, lead_x, lead_y, net, path, g, w, span, speed, ws, length2, length, limit, step;
 
@@ -12124,7 +12132,7 @@ static void compositor_spots_ready(void)
         int radius = compositor_spot_radius(compositor.scale);
 
         compositor_corner_mask(radius);
-        compositor_corner_mask(radius - (compositor.scale < 1 ? 1 : compositor.scale));
+        compositor_corner_mask(radius - compositor_px1(compositor.scale));
 }
 
 // The marks over a target the scene was composed into and may be read (a slice of a scene composed apart).
@@ -12393,7 +12401,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                         // Moved past the slop it is the pointer's motion, a window's drag or edge, from where it is now.
                         compositor_touch_point(at, first, &x, &y);
                         if (!touch->moved &&
-                            compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale))
+                            compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale / 100))
                         {
                                 touch->moved = 1;
                                 touch->closing = COMPOSITOR_NONE;
@@ -12414,7 +12422,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                 else if (count >= 2)
                 {
                         int one = screen->id[touch->first] >= 0 ? touch->first : other, mid_x, mid_y;
-                        int per = COMPOSITOR_TOUCH_WHEEL * compositor.scale;
+                        int per = COMPOSITOR_TOUCH_WHEEL * compositor.scale / 100;
 
                         compositor_touch_fingers(at, one, &other);
                         compositor_touch_point(at, one, &x, &y);
@@ -12428,7 +12436,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                                 touch->mid_x = mid_x, touch->mid_y = mid_y;
                         }
                         else if (touch->two_moved ||
-                                 compositor_past_slop(touch->mid_x, touch->mid_y, mid_x, mid_y, UI_SLOP * compositor.scale))
+                                 compositor_past_slop(touch->mid_x, touch->mid_y, mid_x, mid_y, UI_SLOP * compositor.scale / 100))
                         {
                                 // What is under them follows them: fingers down are the wheel up, to the right it left.
                                 long down = (long)touch->left_y + (long)(mid_y - touch->mid_y) * 120;
@@ -12464,7 +12472,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                 // Held, then moved on: the pointer follows the finger as it does before a hold, so what it drags (a selection)
                 // follows it too. Nothing is pressed; the press was taken back when the hold came.
                 compositor_touch_point(at, touch->first, &x, &y);
-                if (!touch->moved && compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale))
+                if (!touch->moved && compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale / 100))
                         touch->moved = 1;
                 if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
                         compositor_touch_motion(x, y, now);
@@ -12830,7 +12838,7 @@ static int compositor_table(void)
         compositor.table->output_width = (unsigned int)compositor_most_width();
         compositor.table->output_height = (unsigned int)compositor_most_height();
         compositor.table->stride = (unsigned int)compositor_stride();
-        compositor.table->scale = (unsigned int)compositor.scale * 100; // the kit draws in percent of the logical size
+        compositor.table->scale = (unsigned int)compositor.scale; // the kit draws in percent of the logical size
         compositor.table->period = (unsigned int)compositor.period;
         compositor.table->focus = WINDOWS;
         compositor.table->refused = compositor.memfd_failed;
@@ -12994,14 +13002,14 @@ static int compositor_scale_read(void)
 {
         struct canvas_control control = {0};
         b32 spark = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
-        int scale = 1;
+        int scale = 100;
 
         if (spark < 0)
                 return scale;
 
         if (system_control(spark, SPARK_IOCTL_CANVAS, address_of control) == 0 &&
             control.scale >= 1 && control.scale <= SPARK_CANVAS_SCALE_MOST)
-                scale = (int)control.scale;
+                scale = (int)control.scale * 100;
 
         system_close(spark);
         return scale;
@@ -13256,7 +13264,7 @@ static b32 compositor_main()
                 if (compositor_option(option, 't'))
                         taskbar_position_default(TASKBAR_TOP);
                 else if (at + 1 < program_argument_count() && compositor_option(option, 's'))
-                        compositor.scale = (int)compositor_number(program_argument(++at), 0);
+                        compositor.scale = (int)compositor_number(program_argument(++at), 0) * 100;
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'f'))
                         font = program_argument(++at);
                 else if (at + 2 < program_argument_count() && compositor_option(option, 'H'))
@@ -13278,8 +13286,8 @@ static b32 compositor_main()
         }
 
         compositor_keys_read();
-        if (compositor.scale < 1 || compositor.scale > SPARK_CANVAS_SCALE_MOST)
-                compositor.scale = headless ? 1 : compositor_scale_read();
+        if (compositor.scale < 25 || compositor.scale > 800)
+                compositor.scale = headless ? 100 : compositor_scale_read();
         if (!headless && !compositor.layout_given)
                 compositor_layout_read();
 
