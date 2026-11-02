@@ -122968,6 +122968,82 @@ static unsigned long touch_buttons(int row, unsigned int head)
         return made;
 }
 
+/*
+        A finger's window touches an edge, and its preview holds while the finger is down. A finger is led (the window is drawn
+        where the finger is going), and a frame with no new sample takes the lead away again (compositor_predict_clear), so the
+        window's rectangle changes between samples by the lead. The snap is the finger's own rectangle, so the preview is on
+        from the sample the finger touches the edge and stays on at every sample and between them.
+*/
+/*
+        One observation of the snap preview, after a report or a clear: whether it is on, and whether its rectangle changed from
+        the last one on. A preview that goes off after it was on is lost; one whose rectangle changes is counted.
+*/
+static void snap_note(int *seen, int *last, int *changes, int *lost)
+{
+    int on = compositor.preview[2] > 0;
+
+    if (on && *seen && memory_compare(last, compositor.preview, sizeof(compositor.preview[0]) * 4))
+        (*changes)++;
+    if (!on && *seen)
+        (*lost)++;
+    if (on)
+    {
+        memory_copy(last, compositor.preview, sizeof(compositor.preview[0]) * 4);
+        *seen = 1;
+    }
+}
+
+static void check_compositor_touch_hold(void)
+{
+    int lost = 0, changes = 0, sampled = 0, seen = 0, last[4] = {0, 0, 0, 0};
+
+    snap_fresh();
+    if (system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK))
+    {
+        check("touch hold: the input pipe is made", false);
+        return;
+    }
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    compositor.touchscreen[0] = 1;
+    compositor.screen_touch[0] = (struct compositor_touch_screen){0};
+    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
+    compositor.screen_touch[0].slots = 1;
+    compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1024;
+    touch_clock = 1000000;
+    touch_down = 0;
+    touch_one(80, 80, false);
+    check("touch hold: a finger down on a window's top starts its drag", compositor.drag == 1);
+
+    /* Up to the top edge: the window's top touches, and the maximized target shows. */
+    for (int y = 80; y >= 20; y -= 2)
+    {
+        touch_one(80, y, false);
+        touch_clock += 8000;
+        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+    }
+    check("touch hold: a finger up to the top edge shows the maximized target", compositor.preview_row == 1 && compositor.preview[2] == 256);
+
+    /* Along the top toward the corner: the target is the quarter once the window's left is near the corner, and that
+       changes once as the finger moves on. Each report takes the lead off again between reports; a target that flips
+       back and forth between them is the flicker. */
+    for (int x = 80; x >= 30; x -= 2)
+    {
+        touch_one(x, 20, false);
+        sampled = 1;
+        snap_note(&seen, last, &changes, &lost);
+        touch_clock += 8000;
+        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+        snap_note(&seen, last, &changes, &lost);
+    }
+    check("touch hold: sliding along the top, the target is held while the finger is down, and it changes only once, to the quarter",
+          sampled && seen && lost == 0 && changes <= 1 && compositor.preview[2] == 128 && compositor.preview[0] == 0);
+    touch_one(30, 20, true);
+    check("touch hold: the finger lifted takes the quarter it held", compositor.arranged[1] == COMPOSITOR_TOP_LEFT);
+    compositor.table->motion = 0;
+}
+
 static void check_compositor_touch(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -139459,6 +139535,7 @@ b32 main()
         check_compositor_glide();
         check_compositor_preview_at_once();
         check_compositor_snap_trigger();
+        check_compositor_touch_hold();
         check_compositor_overlay_fade();
         check_compositor_grid_drag();
         check_compositor_wheel();
