@@ -5807,6 +5807,14 @@ typedef struct
 } tls_anchor;
 
 #include "anchors.inc"
+#ifndef XZ_IN
+/* The suffix list is decoded with the xz decoder, which the shell unit
+   includes before this file; a unit that builds net.c alone gets the same
+   core here (xz.c has no guard, so only one of the two may bring it in). */
+#define XZ_CORE_ONLY
+#include "../sh/xz.c"
+#undef XZ_CORE_ONLY
+#endif
 #include "suffixes.inc"
 
 /* Intermediate CA keys that are known to be compromised, as the SHA-256 of the
@@ -6961,6 +6969,77 @@ static COLD bool tls_suffix_in(const char address_to list, positive size,
         return false;
 }
 
+/* The front-coded text is stored xz-compressed (suffixes.inc) and decoded
+   into the heap by a helper thread that the TLS handshake starts, so the
+   decode overlaps the server's flight. The name check takes the gate, decodes
+   the text if nobody has, and reads it: a check that comes first waits for
+   the helper, and runs the decode itself only when no helper exists. A decode
+   that fails leaves the state at 2, and every wildcard is then refused. */
+static const char address_to tls_suffix_text;
+static b32 tls_suffix_state;
+static b32 tls_suffix_started;
+static b32 net_filter_installed;
+static lock tls_suffix_gate;
+
+static COLD bool tls_suffix_decode(void)
+{
+        char address_to text = (char address_to)memory_checked(TLS_SUFFIX_TEXT + 1);
+
+        if (!text)
+                return false;
+        if (xz_inflate_mem((p8 address_to)tls_public_suffix_xz,
+                           sizeof tls_public_suffix_xz, (p8 address_to)text,
+                           TLS_SUFFIX_TEXT) != TLS_SUFFIX_TEXT)
+        {
+                memory_free((address_any)text, TLS_SUFFIX_TEXT + 1);
+                return false;
+        }
+        /* The walk stops at a NUL, as the array's own terminator did. */
+        text[TLS_SUFFIX_TEXT] = 0;
+        tls_suffix_text = text;
+        return true;
+}
+
+static COLD fn tls_suffix_fill(void)
+{
+        lock_take(address_of tls_suffix_gate);
+        if (!atomic_load(address_of tls_suffix_state))
+                atomic_exchange(address_of tls_suffix_state,
+                                tls_suffix_decode() ? 1 : 2);
+        lock_release(address_of tls_suffix_gate);
+}
+
+static fn tls_suffix_job(address_any context, positive index)
+{
+        (void)context;
+        (void)index;
+        tls_suffix_fill();
+}
+
+static COLD bool tls_suffix_wait(void)
+{
+        if (!atomic_load(address_of tls_suffix_state))
+        {
+                /* Under a net filter no thread was started, and the filter
+                   allows neither gettid nor clone: join nothing. */
+                if (!atomic_load(address_of net_filter_installed))
+                        parallel_beside_wait();
+                tls_suffix_fill();
+        }
+        return atomic_load(address_of tls_suffix_state) == 1;
+}
+
+/* Started by the first wildcard dNSName a certificate carries (the SAN walk),
+   so a connection without one never decodes. No helper under a net filter:
+   the seccomp allowlist has no clone, and the decode then runs in the name
+   check, synchronously. */
+static COLD fn tls_suffix_start(void)
+{
+        if (!atomic_load(address_of net_filter_installed) &&
+            atomic_compare_exchange(address_of tls_suffix_started, 0, 1))
+                parallel_beside(tls_suffix_job, null);
+}
+
 static COLD bool tls_public_suffix(const p8 address_to name, positive length)
 {
         p8 key[256];
@@ -6978,6 +7057,8 @@ static COLD bool tls_public_suffix(const p8 address_to name, positive length)
 
         if (length >= sizeof key)
                 return false;
+        if (!tls_suffix_wait())
+                return true;
         while (label)
         {
                 positive start = label;
@@ -7007,11 +7088,11 @@ static COLD bool tls_public_suffix(const p8 address_to name, positive length)
         while (low < high)
         {
                 positive middle = low + (high - low) / 2;
-                const char address_to run = tls_public_suffixes +
+                const char address_to run = tls_suffix_text +
                                             tls_public_suffix_runs[middle] + 1;
                 positive run_top = memory_span_without_byte(
                     (address_any)run, '.',
-                    sizeof tls_public_suffixes - tls_public_suffix_runs[middle] - 1);
+                    TLS_SUFFIX_TEXT - tls_public_suffix_runs[middle] - 1);
                 b32 order = memory_compare(run, key, run_top < top ? run_top : top);
 
                 if (!order && run_top == top)
@@ -7032,7 +7113,7 @@ static COLD bool tls_public_suffix(const p8 address_to name, positive length)
            more than matched bytes with it is too and is passed over, and
            the first entry above the key, or the next run, ends the
            search. */
-        table = tls_public_suffixes + tls_public_suffix_runs[low];
+        table = tls_suffix_text + tls_public_suffix_runs[low];
         do
         {
                 positive shared = (positive)(*table++ - 'A');
@@ -7259,6 +7340,10 @@ static COLD bool tls_parse_san(p8 address_to value, positive length,
                 if (tag == 0x88 &&
                     !tls_oid_content_der(value + at, name_stop - at))
                         return false;
+                /* A wildcard is the only name that reads the suffix list:
+                   start its decode now, before the names are matched. */
+                if (tag == 0x82 && name_stop - at > 2 && value[at] == '*')
+                        tls_suffix_start();
                 if (host && tls_general_name_match(host, tag, value + at,
                                                    name_stop - at))
                         found = true;
@@ -16323,10 +16408,13 @@ static COLD bool net_filter_install(net_filter address_to filter)
                 p16 count;
                 net_filter_step address_to steps;
         } program = {(p16)filter->used, filter->steps};
+        bool installed = filter->used <= NET_FILTER_STEPS &&
+                         system_call_3(syscall(seccomp), SECCOMP_SET_MODE_FILTER, 0,
+                                       (positive)address_of program) == 0;
 
-        return filter->used <= NET_FILTER_STEPS &&
-               system_call_3(syscall(seccomp), SECCOMP_SET_MODE_FILTER, 0,
-                             (positive)address_of program) == 0;
+        if (installed)
+                atomic_exchange(address_of net_filter_installed, 1);
+        return installed;
 }
 
 /*
