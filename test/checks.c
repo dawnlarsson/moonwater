@@ -131538,13 +131538,20 @@ static fn check_kit_place(void)
                       revealed && !shown_again);
         }
 
-        // A list that fits does not move: a wheel turn leaves its rows and its scroll where they are, and a finger's pull leaves its
-        // scroll at 0 and its first row put, and a list that scrolls shows its bar where one that fits hides it. Each is a frame at a
-        // time, as the kit's loop draws it.
+        // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
+        // leaves its rows and its scroll where they are, and a finger's pull leaves its scroll at 0 and its first row put (the
+        // pull stretches it from the edge it is pulled past, under UI_LIST_STRETCH). A list that scrolls keeps its scroll at its
+        // end under a pull and stretches in its scroll axis only, rising with the pull; released, the stretch springs back to
+        // scale 1 with no overshoot. A wheel turn at its bottom stretches it briefly and returns, and the bar shows only while
+        // the list scrolls. Each is a frame at a time, as the kit's loop draws it.
         {
                 static struct ui_list fits, tall;
-                int top = 0, height = 0, row2 = 0, first = 0, frame;
-                b32 still = true, kept = true, bar_fits, bar_tall;
+                int top = 0, height = 0, row2 = 0, first = 0, most, frame;
+                b64 stretch = 0, last = 0, lowest = 0, peaks[3] = {0, 0, 0}, wheel_peak = 0;
+                b32 still = true, kept = true, bar_fits, bar_tall, rose = true, eased = true, settled = false, shown = true;
+                b32 wheel_moved, wheel_brief = false, wheel_back = false, rows_scaled = true;
+                b32 stretch_fits = false, stretch_tall = false, pulled_edge = false, wheel_edge = false;
+                int edge = 0;
 
                 ui_kit.now = 8000000000ll, ui_kit.busy = 0;
                 bounds_list_make(&ui, &fits, 3, 300 * ui.scale);
@@ -131568,6 +131575,9 @@ static fn check_kit_place(void)
                         ui_scroll_glide(&ui, &fits.scroll);
                         kept = kept && fits.scroll.scroll == 0 && bounds_span(&ui, &fits, 0, &height) == first;
                 }
+#ifdef UI_LIST_STRETCH
+                stretch_fits = ui_scroll_stretched(&fits.scroll, &edge) > 0 && edge < 0;
+#endif
                 ui_scroll_let_go(&fits.scroll, 0, 0);
                 for (frame = 0; frame < 240 && (fits.scroll.gliding || fits.scroll.back.live); frame++)
                 {
@@ -131577,12 +131587,93 @@ static fn check_kit_place(void)
                 }
                 kept = kept && bounds_span(&ui, &fits, 0, &height) == first;
                 bar_fits = ui_scroll_thumb(&ui, &fits.scroll, &top, &height);
+
+                // A list that scrolls: a pull past its end keeps its scroll at the end and stretches its rows in their scroll axis.
+                most = ui_scroll_most(&tall.scroll);
                 bar_tall = ui_scroll_thumb(&ui, &tall.scroll, &top, &height);
+                for (int k = 0; k < 3; k++)
+                {
+                        ui_scroll_set(&tall.scroll, most);
+                        ui_scroll_drag(&tall.scroll, (40 * (k + 1)) * ui.scale);
+#ifdef UI_LIST_STRETCH
+                        peaks[k] = ui_scroll_stretched(&tall.scroll, &edge);
+                        pulled_edge = pulled_edge || edge > 0;
+#endif
+                        shown = shown && tall.scroll.scroll == most;
+                }
+                ui_scroll_set(&tall.scroll, most);
+                ui_scroll_drag(&tall.scroll, 120 * ui.scale);
+#ifdef UI_LIST_STRETCH
+                stretch = ui_scroll_stretched(&tall.scroll, &edge);
+                stretch_tall = stretch > 0 && edge > 0;
+                for (int at = 0; at < 40; at++)
+                {
+                        int drawn = 0, want = ui_dev(&ui, UI_ROW);
+
+                        bounds_span(&ui, &tall, at, &drawn);
+                        want = (int)(((b64)want * (UI_ONE + stretch)) >> 30);
+                        rows_scaled = rows_scaled && drawn - want <= 1 && want - drawn <= 1;
+                }
+#endif
+                ui_scroll_let_go(&tall.scroll, 0, 0);
+                last = stretch;
+                for (frame = 0; frame < 240 && (tall.scroll.gliding || tall.scroll.back.live); frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &tall.scroll);
+#ifdef UI_LIST_STRETCH
+                        stretch = ui_scroll_stretched(&tall.scroll, &edge);
+                        eased = eased && stretch <= last;
+                        lowest = stretch < lowest ? stretch : lowest;
+                        last = stretch;
+#endif
+                        shown = shown && tall.scroll.scroll == most;
+                }
+#ifdef UI_LIST_STRETCH
+                settled = last == 0 && !tall.scroll.back.live && tall.scroll.scroll == most && lowest >= 0;
+                rose = peaks[0] > 0 && peaks[0] < peaks[1] && peaks[1] < peaks[2];
+#endif
+
+                // A wheel turn at the bottom: no move, a brief stretch from the bottom edge, and back to rest within half a second.
+                ui_scroll_set(&tall.scroll, most);
+                wheel_moved = ui_scroll_wheel(&ui, &tall.scroll, -120);
+                for (frame = 0; frame < 60; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &tall.scroll);
+#ifdef UI_LIST_STRETCH
+                        stretch = ui_scroll_stretched(&tall.scroll, &edge);
+                        wheel_peak = stretch > wheel_peak ? stretch : wheel_peak;
+                        wheel_edge = wheel_edge || (stretch > 0 && edge > 0);
+                        if (frame == 29)
+                                wheel_back = stretch == 0 && !tall.scroll.back.live;
+#endif
+                        shown = shown && tall.scroll.scroll == most;
+                }
+                wheel_brief = wheel_peak > 0 && wheel_edge && wheel_back;
                 check("kit list: a list that fits does not move under a wheel turn: its scroll and its rows stay where they are, frame by frame",
                       still);
                 check("kit list: a finger's pull on a list that fits does not translate it: its scroll stays 0 and its first row stays put",
                       kept);
+#ifdef UI_LIST_STRETCH
+                check("kit list: a list that fits stretches under a finger's pull from the edge it is pulled past, in its scroll axis", stretch_fits);
+#else
+                check("kit list: a list that fits stretches under a finger's pull from the edge it is pulled past, in its scroll axis", false);
+#endif
                 check("kit list: the scroll bar shows on a list that scrolls and is hidden on one that fits", bar_tall && !bar_fits);
+#ifdef UI_LIST_STRETCH
+                check("kit list: a pull past the end of a list that scrolls keeps its scroll at the end and stretches its rows in the scroll axis only",
+                      shown && stretch_tall && pulled_edge && rows_scaled);
+                check("kit list: the stretch rises with the pull (40, 80 and 120 pixels) and never falls as it does", rose);
+                check("kit list: released, the stretch springs back to scale 1 without overshoot, and the list is at rest", settled && eased);
+                check("kit list: a wheel turn at the bottom of a list that scrolls stretches it briefly, from that edge, and back, with no move",
+                      wheel_brief && shown && wheel_moved);
+#else
+                check("kit list: a pull past the end of a list that scrolls keeps its scroll at the end and stretches its rows in the scroll axis only", false);
+                check("kit list: the stretch rises with the pull (40, 80 and 120 pixels) and never falls as it does", false);
+                check("kit list: released, the stretch springs back to scale 1 without overshoot, and the list is at rest", false);
+                check("kit list: a wheel turn at the bottom of a list that scrolls stretches it briefly, from that edge, and back, with no move", false);
+#endif
         }
 
         // Tabs stood on end: the pip starts on the chosen item, slides along y to another over .35s with the items it

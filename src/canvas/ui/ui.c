@@ -4940,7 +4940,15 @@ struct ui_scroll
         struct ui_spring back;
         struct ui_tween ink, grow; // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
         int inset;                 // logical pixels from the region's top the track may not reach into (UI_SCROLL_INSET); 0 for none
+        // A list's bounds (UI_LIST_STRETCH): a pull past an end stretches the rows in the scroll axis, from the edge it is
+        // pulled past, and the position stays at the end; edge is the end the spring takes home (-1 top, 1 bottom). A region
+        // that fits does not move under a finger unless it is bounded. scale is the kit's, for the pull's size in logical pixels.
+        b32 bounds;
+        int edge, scale;
 };
+
+// A list stretches past its bounds (ui_list_row_span): a pull past an end, and a wheel turn at one, scale its rows in the scroll axis.
+#define UI_LIST_STRETCH 1
 
 /*
         The track's top and height (device pixels): the region's, from its top to its end, except that it starts below its
@@ -5152,19 +5160,63 @@ static b64 ui_scroll_give(const struct ui_scroll address_to s, b64 past)
         return past < 0 ? -give : give;
 }
 
-// Where the region is drawn, in 256ths: where it is, or past an end while a finger holds it there. A region that fits does not
-// move at all under a finger.
+// Where the region is drawn, in 256ths: where it is, or past an end while a finger holds it there. A bounded region stays at
+// its end (the pull is its stretch); a region that fits does not move at all.
 static b64 ui_scroll_shown(const struct ui_scroll address_to s)
 {
         b64 most = ui_scroll_most256(s);
 
         if (!s->dragging)
                 return s->at;
+        if (s->bounds)
+                return s->at < 0 ? 0 : s->at > most ? most : s->at;
         if (!most)
                 return 0;
         if (s->at < 0)
                 return s->flung ? 0 : ui_scroll_give(s, s->at);
         return s->at > most ? (s->flung ? most : most + ui_scroll_give(s, s->at - most)) : s->at;
+}
+
+// The stretch a pull of past (256ths of a device pixel) makes: the kit's squash curve of it over 400 logical pixels, as the
+// squish's is (Q30 less one). A scale that rises with the pull and flattens as it grows.
+static b64 ui_scroll_pull(const struct ui_scroll address_to s, b64 past)
+{
+        b64 z = past < 0 ? 0 : past > (1ll << 24) ? (1ll << 24) : past;
+
+        z = (z << 22) / (s->scale > 0 ? s->scale : 1) / 400;
+        return ui_squash_curve(z);
+}
+
+// A bounded region's stretch now, Q30 less one, and the edge it is stretched from (-1 top, 1 bottom, 0 none): a finger's pull
+// past an end (none while it flings, which clamps), else the release's spring taking it home. The spring does not overshoot:
+// its amplitude is the pull and its decay is faster than its ring, so it runs down to rest from the pull's side.
+static b64 ui_scroll_stretched(const struct ui_scroll address_to s, int address_to edge)
+{
+        b64 most = ui_scroll_most256(s);
+
+        *edge = 0;
+        if (!s->bounds)
+                return 0;
+        if (s->dragging)
+        {
+                if (s->flung)
+                        return 0;
+                if (s->at < 0)
+                {
+                        *edge = -1;
+                        return ui_scroll_pull(s, -s->at);
+                }
+                if (s->at > most)
+                {
+                        *edge = 1;
+                        return ui_scroll_pull(s, s->at - most);
+                }
+                return 0;
+        }
+        if (!s->back.live)
+                return 0;
+        *edge = s->edge;
+        return s->back.value[0];
 }
 
 // The drawn position, in whole device pixels, from where it is.
@@ -5265,7 +5317,7 @@ static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
         }
         s->at += (b64)pixels * UI_SCROLL_SCALE;
         ui_scroll_show(s);
-        return s->scroll != before;
+        return s->scroll != before || s->bounds; // a bounded region's pull is a stretch, drawn whatever the scroll does
 }
 
 // A finger on the region: whatever was moving it stops where it is drawn, and the drag takes it from there.
@@ -5282,11 +5334,13 @@ static void ui_scroll_stop(struct ui_scroll address_to s)
 // The finger let go: a pull springs back to the end it is past, and a throw glides on from where it is (speed in pixels a second).
 static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long speed)
 {
-        b64 most = ui_scroll_most256(s), shown;
+        b64 most = ui_scroll_most256(s), shown, pulled;
+        int from = 0;
 
         if (!s->dragging)
                 return;
         shown = ui_scroll_shown(s);
+        pulled = ui_scroll_stretched(s, &from);
         s->dragging = 0;
         s->stamp = 0;
         if (s->at < 0 || s->at > most)
@@ -5294,8 +5348,15 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
                 b64 edge = s->at < 0 ? 0 : most;
 
                 s->gliding = s->speed = 0;
-                if (!most)
-                        s->at = s->aim = 0; // a region that fits moved for nothing, so nothing springs back
+                if (s->bounds)
+                {
+                        // The stretch springs home from the pull, and the position is the end it was pulled past.
+                        s->at = s->aim = edge, s->edge = from;
+                        if (pulled)
+                                ui_spring_go(&s->back, pulled, 0);
+                }
+                else if (!most)
+                        s->at = s->aim = 0; // a region that fits moved for nothing: nothing springs
                 else
                 {
                         s->at = shown, s->aim = edge;
@@ -5379,9 +5440,22 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
         if (!steps)
                 return false;
         base = s->gliding || s->back.live ? s->aim : s->dragging ? s->at : (b64)s->scroll << 8;
-        aim = ui_scroll_fit(s, base - (b64)steps * (s->unit > 0 ? s->unit : 1) * UI_SCROLL_SCALE);
-        if (aim == base)
-                return false;
+        aim = base - (b64)steps * (s->unit > 0 ? s->unit : 1) * UI_SCROLL_SCALE;
+        if (ui_scroll_fit(s, aim) == base)
+        {
+                // A turn at the end of a region that scrolls stretches it briefly from that end, and does not move it: a region that
+                // fits, or a turn past the end it is at, does nothing.
+                b64 most = ui_scroll_most256(s);
+                int side = aim < 0 ? -1 : aim > most ? 1 : 0;
+
+                if (!s->bounds || !most || !side || (side < 0 ? base != 0 : base != most))
+                        return false;
+                s->dragging = 0, s->gliding = 0, s->speed = s->stamp = 0;
+                s->at = s->aim = base, s->edge = side;
+                ui_spring_go(&s->back, ui_scroll_pull(s, (b64)UI_ROW * ui->scale * UI_SCROLL_SCALE), 0);
+                return true;
+        }
+        aim = ui_scroll_fit(s, aim);
         if (s->dragging)
                 s->dragging = 0, s->speed = 0;
         ui_scroll_rest(s);
@@ -6234,6 +6308,7 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
         l->scroll.x = x + w + (ui_dev(ui, UI_PAD) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
         l->scroll.y = y, l->scroll.height = h, l->scroll.view = h;
         l->scroll.content = l->content;
+        l->scroll.bounds = 1, l->scroll.scale = ui->scale;
         ui_scroll_clamp(&l->scroll);
 }
 
@@ -6250,6 +6325,27 @@ static int ui_list_at(const struct ui_list address_to l, int id)
 static int ui_list_row_y(const struct ui_list address_to l, int at)
 {
         return l->y + l->top[at] - l->scroll.scroll;
+}
+
+/*
+        Where a row is drawn, in device pixels: its top and its height. At rest that is its place and a row's height. A pull past
+        an end of the list stretches it in the scroll axis from the edge it is pulled past (ui_scroll_stretched): the rows keep
+        their places from that edge, their tops and bottoms scaled about it by the stretch, and the row's text is set in the
+        middle of the stretched row (the kit's stretch of a label).
+*/
+static void ui_list_row_span(const struct ui address_to ui, const struct ui_list address_to l, int at, int address_to top, int address_to height)
+{
+        int row = ui_dev(ui, UI_ROW), y = ui_list_row_y(l, at), edge = 0, pivot, drawn_end;
+        b64 scale = UI_ONE + ui_scroll_stretched(&l->scroll, &edge);
+
+        *top = y, *height = row;
+        if (!edge)
+                return;
+        // The edge pulled past: the list's top, or where its drawn rows end (the view's bottom once it scrolls).
+        drawn_end = l->scroll.content - l->scroll.scroll;
+        pivot = edge < 0 ? l->y : l->y + (drawn_end < l->h ? drawn_end : l->h);
+        *top = pivot + (int)ui_qmul(y - pivot, scale);
+        *height = (pivot + (int)ui_qmul(y + row - pivot, scale)) - *top;
 }
 
 static fn ui_list_damage(const struct ui address_to ui, const struct ui_list address_to l, int id)
@@ -6392,10 +6488,10 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
         the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch),
         the label at the left cut to leave its value a third of the row, and the value as its kind says at the right.
 */
-static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y)
+static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
-        int x = l->x, w = l->w, height = ui_dev(ui, UI_ROW), inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10);
+        int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10);
         int right = x + w - inset, text_left = x + inset, baseline, wide = 0, label_room;
         unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null;
@@ -6534,8 +6630,9 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                             (string_address)l->empty, UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
         for (int at = 0; at < l->count; at++)
         {
-                int y = ui_list_row_y(l, at);
+                int y, height;
 
+                ui_list_row_span(ui, l, at, &y, &height);
                 if ((l->starts[at] & UI_LIST_HEADED) && y > l->y && y - ui_dev(ui, UI_SECTION) < l->y + l->h)
                 {
                         struct ui_row row;
@@ -6544,8 +6641,8 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         ui_kit_text(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
                                     (string_address)row.header, UI_TITLE_SMALL, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
                 }
-                if (y + row_height > l->y && y < l->y + l->h)
-                        ui_list_row(ui, l, l->id[at], y);
+                if (y + height > l->y && y < l->y + l->h)
+                        ui_list_row(ui, l, l->id[at], y, height);
         }
         ui_scroll_draw(ui, &l->scroll);
 }
@@ -6894,12 +6991,11 @@ static b32 ui_finger_move(const struct ui address_to ui, struct ui_finger addres
         }
         if (f->press.dragged && f->region)
         {
-                int before = f->region->scroll, moved = ui_drag_follow(&f->drag, y, clock_monotonic_nanoseconds());
+                int moved = ui_drag_follow(&f->drag, y, clock_monotonic_nanoseconds());
 
                 // A finger moving at a throw's speed is flinging: it is not pulling, so the region does not give past an end.
                 f->region->flung = f->drag.speed >= UI_DRAG_THROW || f->drag.speed <= -UI_DRAG_THROW;
-                ui_scroll_drag(f->region, -moved);
-                changed |= f->region->scroll != before;
+                changed |= ui_scroll_drag(f->region, -moved);
         }
         return changed;
 }
