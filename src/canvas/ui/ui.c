@@ -4945,6 +4945,7 @@ struct ui_scroll
         // that fits does not move under a finger unless it is bounded. scale is the kit's, for the pull's size in logical pixels.
         b32 bounds;
         int edge, scale;
+        int reach;                 // how far down the region's rows are drawn, device pixels, when past its track (a list's pad); 0 for its height
 };
 
 // A list stretches past its bounds (ui_list_row_span): a pull past an end, and a wheel turn at one, scale its rows in the scroll axis.
@@ -5414,7 +5415,7 @@ static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll addre
         {
                 // A row that overlaps the region paints up to a row past either end (a switch's knob at its foot), so the band
                 // is the region and a row each way: what a frame that moved it must draw again.
-                int pad = ui_dev(ui, UI_ROW), top = s->y - pad, bottom = s->y + s->height + pad;
+                int pad = ui_dev(ui, UI_ROW), top = s->y - pad, bottom = s->y + (s->reach > s->height ? s->reach : s->height) + pad;
 
                 top = top < 0 ? 0 : top;
                 if (ui_kit.damage_bottom <= ui_kit.damage_top)
@@ -6308,7 +6309,7 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
         l->scroll.x = x + w + (ui_dev(ui, UI_PAD) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
         l->scroll.y = y, l->scroll.height = h, l->scroll.view = h;
         l->scroll.content = l->content;
-        l->scroll.bounds = 1, l->scroll.scale = ui->scale;
+        l->scroll.bounds = 1, l->scroll.scale = ui->scale, l->scroll.reach = h;
         ui_scroll_clamp(&l->scroll);
 }
 
@@ -6343,7 +6344,7 @@ static void ui_list_row_span(const struct ui address_to ui, const struct ui_list
                 return;
         // The edge pulled past: the list's top, or where its drawn rows end (the view's bottom once it scrolls).
         drawn_end = l->scroll.content - l->scroll.scroll;
-        pivot = edge < 0 ? l->y : l->y + (drawn_end < l->h ? drawn_end : l->h);
+        pivot = edge < 0 ? l->y : l->y + (drawn_end < l->scroll.view ? drawn_end : l->scroll.view);
         *top = pivot + (int)ui_qmul(y - pivot, scale);
         *height = (pivot + (int)ui_qmul(y + row - pivot, scale)) - *top;
 }
@@ -6413,7 +6414,7 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
 // Up, Down, Home, End, Page Up and Page Down in a list (a page is a view of rows less one): true when the key was one.
 static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to l, int key, b32 address_to moved)
 {
-        int page = l->h / ui_dev(ui, UI_ROW) - 1, by;
+        int page = l->scroll.view / ui_dev(ui, UI_ROW) - 1, by;
 
         page = page < 1 ? 1 : page;
         switch (key)

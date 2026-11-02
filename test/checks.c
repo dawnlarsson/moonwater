@@ -125955,6 +125955,91 @@ static fn settings_fit_check(void)
         check("settings list: a list whose rows fit its window does not scroll and shows no bar, at any window height", seen > 0 && still);
 }
 
+// The settings list's scroll ends at its rows: its maximum is the rows minus the view, to the pixel, however it is reached (a wheel
+// turned down past the end, the bar paged down to it, a finger pulled far past it and let go), and the pad is clear space beneath
+// the list, between its bottom edge and the window's, not scroll distance.
+static fn settings_end_check(void)
+{
+        int group = 0, best = -1, expected = 0, track_top = 0, track_height = 0, last = 0;
+        b32 wheel_ok = true, bar_ok = true, finger_ok = true, clear_ok = true, rows_ok = true;
+
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.menu.owner = -1, settings.view = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, settings.confirm = 0;
+        settings.list.hover = settings.list.down = -1;
+        for (int g = 0; g < settings_groups(); g++)
+        {
+                settings.group = g;
+                settings_refilter();
+                if (settings.list.count > best)
+                        best = settings.list.count, group = g;
+        }
+        settings.group = group;
+        settings_refilter();
+        last = settings.list.count - 1;
+        for (int scale = 1; scale <= 2; scale++)
+        {
+                int x, y, bar_x, bar_y;
+
+                settings.ui.scale = scale;
+                ui_kit_settle();
+                settings_size(SETTINGS_WIDTH * scale, 300 * scale);
+                expected = settings.list.content - settings.list.scroll.view;
+                rows_ok = rows_ok && expected > 0 && ui_scroll_most(&settings.list.scroll) == expected && settings.list.scroll.content == settings.list.content;
+                clear_ok = clear_ok && settings.height - (settings.list.y + settings.list.scroll.view) == ui_px(&settings.ui, SETTINGS_BOTTOM_PAD) &&
+                           settings.list.top[last] + ui_dev(&settings.ui, UI_ROW) - expected <= settings.list.scroll.view;
+                x = settings.list.x + settings.list.w / 2, y = settings.list.y + settings.list.scroll.view / 2;
+
+                // The wheel: notches down, a frame between each, until it settles past the end.
+                settings_scroll_to(0);
+                settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
+                settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
+                for (int k = 0; k < 400; k++)
+                {
+                        settings_frames_event(WINDOW_EVENT_WHEEL, 0, -120, 0);
+                        settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
+                }
+                settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
+                wheel_ok = wheel_ok && settings.list.scroll.scroll == expected && !settings.list.scroll.gliding && !settings.list.scroll.back.live;
+
+                // The bar: presses on its track below the thumb, each pages a view, until it reaches the end.
+                settings_scroll_to(0);
+                settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
+                ui_scroll_track(&settings.ui, &settings.list.scroll, &track_top, &track_height);
+                bar_x = settings.list.scroll.x + UI_SCROLL_WIDTH * scale / 2;
+                bar_y = track_top + track_height - 2 * scale;
+                for (int k = 0; k < 100; k++)
+                {
+                        settings_frames_event(WINDOW_EVENT_MOTION, 0, bar_x, bar_y);
+                        settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0);
+                        settings_frames_event(WINDOW_EVENT_BUTTON, 0, SETTINGS_BUTTON_LEFT, 0);
+                        settings_frames_until(settings_frames.now + 500 * SETTINGS_FRAMES_MS);
+                }
+                settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
+                bar_ok = bar_ok && settings.list.scroll.scroll == expected && !settings.list.scroll.held;
+
+                // A finger: down on the list, dragged up past the end in steps, and let go; the list settles at the end.
+                settings_scroll_to(0);
+                settings_frames_until(settings_frames.now + 1000 * SETTINGS_FRAMES_MS);
+                settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
+                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+                for (int k = 0; k < 60; k++)
+                {
+                        y -= 40 * scale;
+                        settings_frames_event(WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y);
+                        settings_frames_until(settings_frames.now + 16 * SETTINGS_FRAMES_MS);
+                }
+                settings_frames_event(WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, SETTINGS_BUTTON_LEFT, 0);
+                settings_frames_until(settings_frames.now + 3000 * SETTINGS_FRAMES_MS);
+                finger_ok = finger_ok && settings.list.scroll.scroll == expected && !settings.list.scroll.back.live;
+                string_format(log, "  settings end (scale %p): rows %p, view %p, maximum %p, wheel and bar at %p\n", (positive)scale,
+                              (positive)settings.list.content, (positive)settings.list.scroll.view, (positive)expected, (positive)settings.list.scroll.scroll);
+        }
+        check("settings list: the rows are the scroll's content, and its maximum is the rows minus the view to the pixel", rows_ok);
+        check("settings list: a wheel turned down to the end, the bar paged to it and a finger pulled past it and let go each stop at that maximum",
+              wheel_ok && bar_ok && finger_ok);
+        check("settings list: the pad is clear space under the list's view, and the last row ends inside the view at the end", clear_ok);
+}
+
 static fn settings_wheel_end_check(string_address name, positive gap, int notches)
 {
         struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
@@ -126556,6 +126641,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
               settings_flick_check((string_address) "hard, 100 px above", 100, 40, 6));
         settings_size(SETTINGS_WIDTH, 300);
         settings_fit_check();
+        settings_end_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_frames_gallery();
         string_format(log, "  settings frames: %p frames drawn and compared, at scales 1 and 2\n", settings_frames.frames);

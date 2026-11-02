@@ -1533,16 +1533,17 @@ static fn settings_layout(void)
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
         settings.page.bottom = settings.height; // the content runs to the window's bottom edge
         {
-                int top = settings.page.top;
+                int top = settings.page.top, room;
 
                 if (settings_map_on())
                         settings_map_place(), top += settings_map_height();
                 ui_list_place(ui, &settings.list, settings.page.left, top, settings.page.right - settings.page.left, settings.page.bottom - top);
+                // The rows are drawn to the window's bottom edge, and scroll in a view that stops SETTINGS_BOTTOM_PAD above it: the
+                // pad is clear space under the list, not scroll distance, so the scroll ends at rows minus view.
+                room = settings.page.bottom - top - ui_px(ui, SETTINGS_BOTTOM_PAD);
+                settings.list.scroll.view = settings.list.scroll.height = room > ui_px(ui, UI_ROW) ? room : settings.page.bottom - top;
         }
         ui_list_layout(ui, &settings.list);
-        // The last row scrolls clear of the bottom edge once the rows overflow the view: a list that fits has no pad to scroll by.
-        if (settings.list.scroll.content > settings.list.scroll.view)
-                settings.list.scroll.content += ui_px(ui, SETTINGS_BOTTOM_PAD);
         ui_scroll_clamp(&settings.list.scroll);
         // The card has the body's band and the whole width: the column is not shown with it.
         settings.card.x = settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
