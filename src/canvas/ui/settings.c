@@ -2714,9 +2714,11 @@ static fn settings_edit_commit(void)
                         settings_edit_end();
                 return;
         }
+        // What the field opened on is kept as it was: a value that changed under the field is not written back over with it.
         if (!length)
                 settings_say((string_address) "nothing typed: the value is kept");
-        else if (!string_equals((string_address)typed + start, (string_address)settings.value[settings.editing]))
+        else if (!string_equals((string_address)typed + start, (string_address)settings.edit_from) &&
+                 !string_equals((string_address)typed + start, (string_address)settings.value[settings.editing]))
                 settings_change(settings.editing, typed + start);
         settings_edit_end();
 }

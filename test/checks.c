@@ -123490,7 +123490,10 @@ static fn check_settings(string_address regular, string_address bold)
                 settings_hold(zone, "Europe/Stockholm");
                 settings_press(SETTINGS_KEY_ENTER);
                 check("settings: a field typed to what it is sends nothing", settings.queued == 0 && settings.editing < 0);
-                settings_hold(zone, "Europe/Berlin");
+                // Opened on what the value is (nothing to start from), then typed to Berlin: that is what the field holds.
+                settings_hold(zone, "");
+                for (const char address_to letter = "Europe/Berlin"; *letter; letter++)
+                        settings_type_code((unsigned int)*letter);
                 settings_press(SETTINGS_KEY_ENTER);
                 check("settings: and a field typed to another is a change to it", settings.queued == 1 && settings.queue[0].row == zone &&
                           string_equals((string_address)settings.queue[0].value, (string_address) "Europe/Berlin"));
