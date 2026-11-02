@@ -1207,6 +1207,20 @@ static const struct windows_display *windows_display_of(const struct windows_dis
         return 0;
 }
 
+/*
+        The mode a screen is driven at for a rate the displays file asks for: the first of its modes (count of them, each
+        its width, height and rate in modes[i][0..2], in the order the screen lists them) that is width by height at hz.
+        Answers its index, or count when the screen lists none, and the screen keeps the mode it has.
+*/
+static unsigned int windows_mode_at(const unsigned int (*modes)[3], unsigned int count, unsigned int width,
+                                    unsigned int height, unsigned int hz)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (modes[at][0] == width && modes[at][1] == height && modes[at][2] == hz)
+                        return at;
+        return count;
+}
+
 // Appends text (length bytes) to into at *at, bounded by room with its NUL; 0 when it does not fit.
 static int windows_put(char *into, unsigned int room, unsigned int *at, const char *text, unsigned int length)
 {
@@ -1287,7 +1301,7 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
         arrangement it has.
 */
 // The next word of text from *start, whose bounds come back in start and end; 0 when there is none.
-static int windows_word_next(const char *text, unsigned int *start, unsigned int *end)
+static int windows_word_next(const char *text, unsigned int *start, unsigned int *stop)
 {
         unsigned int at = *start;
 
@@ -1298,7 +1312,7 @@ static int windows_word_next(const char *text, unsigned int *start, unsigned int
         *start = at;
         while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
                 at++;
-        *end = at;
+        *stop = at;
         return 1;
 }
 
@@ -1328,20 +1342,20 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
 {
         unsigned int at = 0, named[WINDOWS_OUTPUTS] = {0}, used[WINDOWS_DISPLAYS] = {0};
         const char *base = windows_arrange_valid(arrangement) ? arrangement : "";
-        unsigned int start, end, name, screen;
+        unsigned int start, stop, name, screen;
         int how, x, y;
 
         if (!room || count > WINDOWS_OUTPUTS || listed > WINDOWS_DISPLAYS)
                 return 0;
         into[0] = 0;
         // What the arrangement names: its screens, and the first display of each of its names.
-        for (start = 0; windows_word_next(base, &start, &end); start = end)
+        for (start = 0; windows_word_next(base, &start, &stop); start = stop)
         {
                 const struct windows_display *display;
 
-                if (end - start == 7 && windows_name_is("default", base + start, 7))
+                if (stop - start == 7 && windows_name_is("default", base + start, 7))
                         continue;
-                windows_arrange_word(base + start, end - start, &name, &how, &x, &y);
+                windows_arrange_word(base + start, stop - start, &name, &how, &x, &y);
                 screen = windows_screen_of(names, count, base + start, name);
                 if (screen)
                         named[screen - 1] = 1;
@@ -1363,13 +1377,13 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
                         named[screen - 1] = 1;
         }
         // The arrangement's words, a placed display's own word in place of its word where it has one.
-        for (start = 0; windows_word_next(base, &start, &end); start = end)
+        for (start = 0; windows_word_next(base, &start, &stop); start = stop)
         {
                 const struct windows_display *display;
 
-                if (end - start == 7 && windows_name_is("default", base + start, 7))
+                if (stop - start == 7 && windows_name_is("default", base + start, 7))
                         continue;
-                windows_arrange_word(base + start, end - start, &name, &how, &x, &y);
+                windows_arrange_word(base + start, stop - start, &name, &how, &x, &y);
                 display = how == WINDOWS_PLACE_OFF ? 0 : windows_display_of(list, listed, base + start, name);
                 if (display && display->placed)
                 {
@@ -1378,7 +1392,7 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
                             !windows_put_number(into, room, &at, display->y) || !windows_put(into, room, &at, " ", 1))
                                 return 0;
                 }
-                else if (!windows_put(into, room, &at, base + start, end - start) || !windows_put(into, room, &at, " ", 1))
+                else if (!windows_put(into, room, &at, base + start, stop - start) || !windows_put(into, room, &at, " ", 1))
                         return 0;
         }
         // The card screens the arrangement does not name, in the card's order.

@@ -5642,6 +5642,39 @@ static unsigned int compositor_said(char *line, unsigned int at, const char *tex
 }
 
 /*
+        The mode a screen is driven at for the rate its displays line asks for: the first mode it lists at the size it
+        has now and that rate (windows_mode_at), in mode. A rate no mode of the screen has keeps the mode it has, and
+        the kernel log says so. A screen with no line, or a preferred rate, keeps its mode.
+*/
+static void compositor_refresh_pick(const char *name, unsigned int count, const struct compositor_mode *modes,
+                                    struct compositor_mode *mode)
+{
+        const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
+                                                                   windows_name_length(name));
+        unsigned int rates[128][3], at;
+        char line[160];
+        unsigned int length;
+
+        if (!display || !display->refresh)
+                return;
+        for (at = 0; at < count && at < 128; at++)
+                rates[at][0] = modes[at].hdisplay, rates[at][1] = modes[at].vdisplay, rates[at][2] = modes[at].vrefresh;
+        at = windows_mode_at(rates, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay, display->refresh);
+        if (at < count && at < 128)
+        {
+                *mode = modes[at];
+                return;
+        }
+        length = compositor_said(line, 0, "compositor: canvas.displays: no mode of ");
+        length = compositor_said(line, length, name);
+        length = compositor_said(line, length, " at ");
+        length += positive_into_string((p8 *)line + length, display->refresh);
+        length = compositor_said(line, length, " Hz, kept the mode it has");
+        line[length] = 0;
+        compositor_kmsg((string_address)line, 0, (string_address) "");
+}
+
+/*
         What the card has connected: each connector that says it is connected
         and lists a mode, in the card's order, with its name, the crtc that
         drives it now and the mode that crtc is at (Canvas's: current), or the
@@ -5747,6 +5780,9 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                         if (system_control(compositor.card, COMPOSITOR_GETENCODER, address_of encoder) == 0)
                                 found->possible[n] |= encoder.possible_crtcs;
                 }
+                // The rate the displays file asks for: the mode of this size at it that the screen lists, or the mode it has.
+                if (listed)
+                        compositor_refresh_pick(found->name[n], probe.mode_count, modes, &found->mode[n]);
                 if (!found->current[n] && !listed)
                         continue;
                 found->size[n][0] = found->mode[n].hdisplay;

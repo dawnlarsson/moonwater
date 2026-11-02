@@ -139750,6 +139750,12 @@ static void check_compositor_displays(void) {
     made=windows_arrange_pinned("Virtual-2@x",names,2,list,1,pinned,sizeof(pinned));
     co_check(made&&!strcmp(pinned,"Virtual-2 Virtual-1@0,0"));
     co_check(windows_arrange_pinned("Virtual-2 Virtual-1",names,2,list,1,pinned,4)==0);
+    /* The refresh: the first mode of the screen at its size and rate; a rate it does not list is none. */
+    { static const unsigned int modes[3][3]={{1920,1080,60},{1920,1080,50},{1280,720,60}};
+      co_check(windows_mode_at(modes,3,1920,1080,50)==1);
+      co_check(windows_mode_at(modes,3,1920,1080,60)==0);
+      co_check(windows_mode_at(modes,3,1280,720,50)==3);
+      co_check(windows_mode_at(modes,3,1280,1024,60)==3); }
 }
 
 static void check_compositor_outputs(void) {
