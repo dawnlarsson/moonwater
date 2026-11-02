@@ -5111,6 +5111,7 @@ static b32 ui_scroll_moving(const struct ui_scroll address_to s)
 
 // The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth.
 static int ui_scroll_map(const struct ui_scroll address_to s, int y);
+static int ui_scroll_track_map(const struct ui_scroll address_to s, int y);
 
 static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll address_to s, int top, int length, struct ui_box address_to thumb)
 {
@@ -5120,7 +5121,7 @@ static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll addres
 
         // The thumb's ends go where a stretch draws the track's: the same map as the items, in the same axis and by the same spring.
         thumb->x0 = (b32)(centre - r), thumb->x1 = (b32)(centre + r);
-        thumb->y0 = (b32)(ui_scroll_map(s, top + border) * 256), thumb->y1 = (b32)(ui_scroll_map(s, top + length - border) * 256);
+        thumb->y0 = (b32)(ui_scroll_track_map(s, top + border) * 256), thumb->y1 = (b32)(ui_scroll_track_map(s, top + length - border) * 256);
         thumb->rx = thumb->ry = (b32)r;
 }
 
@@ -5130,7 +5131,7 @@ static fn ui_scroll_mark(const struct ui address_to ui, const struct ui_scroll a
         int top, height, bottom;
 
         ui_scroll_track(ui, s, &top, &height);
-        bottom = ui_scroll_map(s, top + height), top = ui_scroll_map(s, top);
+        bottom = ui_scroll_track_map(s, top + height), top = ui_scroll_track_map(s, top);
         if (ui_kit.damage_bottom <= ui_kit.damage_top)
                 ui_kit.damage_top = top, ui_kit.damage_bottom = bottom;
         else
@@ -6654,6 +6655,21 @@ static int ui_scroll_map(const struct ui_scroll address_to s, int y)
         if (!edge)
                 return y;
         // The edge pulled past: the region's top, or where its drawn items end (the view's bottom once it scrolls).
+        drawn_end = s->content - s->scroll;
+        pivot = edge < 0 ? s->y : s->y + (drawn_end < s->view ? drawn_end : s->view);
+        return pivot + (int)ui_qmul(y - pivot, scale);
+}
+
+// A y of the track, and of the thumb in it, as a stretch draws it: the track shrinks toward the wall it is pushed against, its end
+// at that wall fixed and its far end moved toward the wall by the stretch, as a body squashes against a wall. The thumb's ends go
+// through the same map, so the thumb follows the track. At rest it is y.
+static int ui_scroll_track_map(const struct ui_scroll address_to s, int y)
+{
+        int edge = 0, pivot, drawn_end;
+        b64 scale = UI_ONE - ui_scroll_stretched(s, &edge);
+
+        if (!edge)
+                return y;
         drawn_end = s->content - s->scroll;
         pivot = edge < 0 ? s->y : s->y + (drawn_end < s->view ? drawn_end : s->view);
         return pivot + (int)ui_qmul(y - pivot, scale);

@@ -133711,6 +133711,54 @@ static fn check_kit_place(void)
                       short_list.scroll == most_short && peak_short == most_short && monotone && !short_list.gliding);
         }
 
+        // A scroll track squashes toward the wall it is pushed against: pulled past the top, its top stays at the top and its length
+        // shrinks; pulled past the bottom, its bottom stays at the bottom and it shrinks; the thumb's ends go the same way; released,
+        // the track is its full length again.
+        {
+                static struct ui_scroll bar;
+                struct ui_box thumb_box;
+                int track_top = 0, track_height = 0, most, frame, thumb_top = 0, thumb_length = 0;
+                b32 shrank_top = false, shrank_bottom = false, thumb_follows = false, full_again = false;
+
+                ui_kit.now = 9800000000ll, ui_kit.busy = 0;
+                memory_zero(&bar, sizeof(bar));
+                bar.x = 100, bar.y = 10, bar.height = bar.view = 200, bar.content = 1000, bar.bounds = 1, bar.scale = 1;
+                most = ui_scroll_most(&bar);
+                ui_scroll_track(&ui, &bar, &track_top, &track_height);
+                ui_scroll_set(&bar, 0);
+                ui_scroll_drag(&bar, -150);
+#ifdef UI_LIST_STRETCH
+                shrank_top = ui_scroll_track_map(&bar, track_top) == track_top &&
+                             ui_scroll_track_map(&bar, track_top + track_height) < track_top + track_height;
+#endif
+                ui_scroll_set(&bar, most);
+                ui_scroll_drag(&bar, 150);
+#ifdef UI_LIST_STRETCH
+                shrank_bottom = ui_scroll_track_map(&bar, track_top + track_height) == track_top + track_height &&
+                                ui_scroll_track_map(&bar, track_top) > track_top;
+                ui_scroll_thumb(&ui, &bar, &thumb_top, &thumb_length);
+                ui_scroll_box(&ui, &bar, thumb_top, thumb_length, &thumb_box);
+                thumb_follows = thumb_box.y0 == (b32)(ui_scroll_track_map(&bar, thumb_top + 3) * 256) &&
+                                thumb_box.y1 == (b32)(ui_scroll_track_map(&bar, thumb_top + thumb_length - 3) * 256) &&
+                                thumb_box.y0 > (b32)((thumb_top + 3) * 256);
+#endif
+                ui_scroll_drag(&bar, 0);
+                ui_scroll_let_go(&bar, 0, 0);
+                for (frame = 0; frame < 300 && (bar.gliding || bar.back.live); frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &bar);
+                }
+#ifdef UI_LIST_STRETCH
+                full_again = ui_scroll_track_map(&bar, track_top) == track_top &&
+                             ui_scroll_track_map(&bar, track_top + track_height) == track_top + track_height && bar.scroll == most;
+#endif
+                check("kit track: pulled past the top the track stays at the top and shortens; pulled past the bottom it stays at the bottom and shortens",
+                      shrank_top && shrank_bottom);
+                check("kit track: the thumb's ends follow the track's squash, and released the track is its full length again",
+                      thumb_follows && full_again);
+        }
+
         // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
         // leaves its rows and its scroll where they are, and a finger's pull leaves its scroll at 0 and its first row put (the
         // pull stretches it from the edge it is pulled past, under UI_LIST_STRETCH). A list that scrolls keeps its scroll at its
