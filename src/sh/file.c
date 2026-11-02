@@ -900,6 +900,141 @@ static bool file_same_spelled(string_address source, string_address destination)
 }
 
 /*
+        THE IDENTITY TABLE: the (device, inode) pairs a walk has met, each with
+        the name it was met under where the caller keeps one. Open addressed,
+        and grown before it is half full, so a lookup stays constant time.
+        `start` is the first size; `cap` and `names_cap`, when set, are the most
+        pairs and name bytes the table takes, and past them a visit is refused
+        (-2) for the caller to decide. A clear forgets every pair and name.
+*/
+typedef struct
+{
+        p64 inode;
+        p64 device;
+        positive name_at;
+        bool used;
+} identity_slot;
+
+typedef struct
+{
+        identity_slot address_to slots;
+        positive room;
+        positive have;
+        p8 address_to names;
+        positive names_room;
+        positive names_fill;
+} identity_table;
+
+#define IDENTITY_START 1024
+
+static positive identity_hash(p64 inode, p64 device)
+{
+        p64 mix = inode * 0x9e3779b97f4a7c15ull ^ device;
+
+        return (positive)(mix ^ (mix >> 29));
+}
+
+/* The slot a pair is in, or the empty one it would take. The room is not zero. */
+static identity_slot address_to identity_place(identity_table address_to t, p64 inode,
+                                               p64 device)
+{
+        positive mask = t->room - 1;
+        positive at = identity_hash(inode, device) & mask;
+
+        while (t->slots[at].used &&
+               (t->slots[at].inode != inode || t->slots[at].device != device))
+                at = (at + 1) & mask;
+        return t->slots + at;
+}
+
+static identity_slot address_to identity_find(identity_table address_to t, p64 inode,
+                                              p64 device)
+{
+        if (!t->room)
+                return null;
+        identity_slot address_to slot = identity_place(t, inode, device);
+        return slot->used ? slot : null;
+}
+
+static bool identity_grow(identity_table address_to t)
+{
+        positive larger = t->room ? t->room * 2 : IDENTITY_START;
+        identity_slot address_to fresh = memory_take_zeroed(larger, sizeof(identity_slot));
+        identity_slot address_to old = t->slots;
+        positive old_room = t->room;
+
+        if (!fresh)
+                return false;
+        t->slots = fresh;
+        t->room = larger;
+        for (positive at = 0; at < old_room; at++)
+                if (old[at].used)
+                        *identity_place(t, old[at].inode, old[at].device) = old[at];
+        if (old)
+                memory_give(old);
+        return true;
+}
+
+/* 1 when the pair is in the table already, 0 when it was added (with its name
+   if one is given), -1 when it cannot be, -2 when a cap refuses it. */
+static bipolar identity_visit(identity_table address_to t, p64 inode, p64 device,
+                              string_address name, positive cap, positive names_cap)
+{
+        positive length = name ? string_length(name) : 0;
+
+        if (t->room && identity_place(t, inode, device)->used)
+                return 1;
+        if (cap && t->have >= cap)
+                return -2;
+        if (name)
+        {
+                if (names_cap && t->names_fill + length + 1 > names_cap)
+                        return -2;
+                if (!shell_array_room(t->names, t->names_room, t->names_fill + length + 1))
+                        return -1;
+        }
+        if (t->have + 1 > t->room / 2 && !identity_grow(t))
+                return -1;
+
+        identity_slot address_to slot = identity_place(t, inode, device);
+
+        slot->used = true;
+        slot->inode = inode;
+        slot->device = device;
+        slot->name_at = t->names_fill;
+        if (name)
+        {
+                memory_copy(t->names + t->names_fill, name, length + 1);
+                t->names_fill += length + 1;
+        }
+        t->have++;
+        return 0;
+}
+
+static bipolar identity_visit_facts(identity_table address_to t, file_facts address_to facts,
+                                    string_address name, positive cap, positive names_cap)
+{
+        return identity_visit(t, facts->inode,
+                              file_device_key(facts->device_major, facts->device_minor), name,
+                              cap, names_cap);
+}
+
+static identity_slot address_to identity_find_facts(identity_table address_to t,
+                                                    file_facts address_to facts)
+{
+        return identity_find(t, facts->inode,
+                             file_device_key(facts->device_major, facts->device_minor));
+}
+
+static fn identity_clear(identity_table address_to t)
+{
+        if (t->room)
+                memory_fill(t->slots, 0, t->room * sizeof(identity_slot));
+        t->have = 0;
+        t->names_fill = 0;
+}
+
+/*
         GNU's dest_info: what this run has already put in a target directory
         under the names given on the command line, by name and identity, so
         that a later operand landing on the same name -- mv a/f b/f c, cp -r
@@ -9659,12 +9794,6 @@ typedef struct
         p64 device;
 } file_identity;
 
-typedef struct
-{
-        file_identity address_to slots;
-        positive room;
-        positive have;
-} file_identity_set;
 
 
 static p8 ls_host[FILE_NAME_MAX];
@@ -12875,72 +13004,9 @@ static bool ls_add(bipolar directory, string_address path, string_address shown,
 static fn ls_directory(string_address path, bool heading, positive depth,
                        bool named);
 
-/*
-        A set of (device, inode) identities, open addressed and grown before
-        it is half full, so a repeated lookup stays constant-time with no
-        ceiling on the files it holds. An inode of zero is not one the kernel
-        hands out, so it is what an unused slot holds.
-*/
-static bipolar file_identity_seen(file_identity_set address_to set,
-                                  file_facts address_to facts)
-{
-        if (!set->room || set->have + 1 >= set->room / 2)
-        {
-                positive room = set->room ? set->room << 1 : 64;
-                file_identity address_to made =
-                    room > set->room && room <= positive_max / sizeof(file_identity)
-                        ? (file_identity address_to)memory_checked(room * sizeof(file_identity))
-                        : null;
 
-                if (!made)
-                        return -ERROR_NO_MEMORY;
 
-                memory_fill(made, 0, room * sizeof(file_identity));
 
-                for (positive i = 0; i < set->room; i++)
-                {
-                        positive at = (positive)(set->slots[i].inode * 1099511628211u +
-                                                 set->slots[i].device);
-
-                        if (!set->slots[i].inode)
-                                continue;
-                        while (made[at & (room - 1)].inode)
-                                at++;
-                        made[at & (room - 1)] = set->slots[i];
-                }
-
-                if (set->slots)
-                        memory_free(set->slots, set->room * sizeof(file_identity));
-
-                set->slots = made;
-                set->room = room;
-        }
-
-        p64 device = file_device_key(facts->device_major, facts->device_minor);
-        positive at = (positive)(facts->inode * 1099511628211u + device);
-
-        for (;; at++)
-        {
-                file_identity address_to slot = set->slots + (at & (set->room - 1));
-
-                if (!slot->inode)
-                {
-                        address_to slot = (file_identity){facts->inode, device};
-                        set->have++;
-                        return 0;
-                }
-
-                if (slot->inode == facts->inode && slot->device == device)
-                        return 1;
-        }
-}
-
-static fn file_identity_set_clear(file_identity_set address_to set)
-{
-        if (set->room)
-                memory_fill(set->slots, 0, set->room * sizeof(file_identity));
-        set->have = 0;
-}
 
 /*
         The directories -R is inside of, outermost first: GNU's active_dir_set,
@@ -19907,7 +19973,7 @@ static positive du_exclude_room;
 static positive du_exclude_have;
 
 
-static file_identity_set du_seen;
+static identity_table du_seen;
 static bool du_seen_broken;
 static bool du_depth_broken;
 static p8 du_unit_option;
@@ -20382,7 +20448,7 @@ static bool du_tree_seen(p32 major, p32 minor, p64 inode, p32 links, bool direct
         facts.device_minor = minor;
         facts.inode = inode;
 
-        bipolar seen = file_identity_seen(address_of du_seen, address_of facts);
+        bipolar seen = identity_visit_facts(address_of du_seen, address_of facts, null, 0, 0);
 
         if (seen < 0)
         {
@@ -21078,7 +21144,7 @@ static b32 file_du()
         du_unit = 1024;
         du_maximum = positive_max;
         du_exclude_have = 0;
-        file_identity_set_clear(address_of du_seen);
+        identity_clear(address_of du_seen);
         du_seen_broken = false;
         du_depth_broken = false;
         du_unit_option = 0;

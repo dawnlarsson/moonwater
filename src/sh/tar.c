@@ -1165,20 +1165,7 @@ static positive tar_pax_body_room;
 #define TAR_SEEN_LIMIT ((positive)1 << 22)
 #define TAR_SEEN_NAMES_LIMIT ((positive)1 << 30)
 
-typedef struct
-{
-        p64 inode;
-        p64 device;
-        positive name_at;
-        bool used;
-} tar_seen_file;
-
-static tar_seen_file address_to tar_seen;
-static positive tar_seen_slots;
-static p8 address_to tar_seen_names;
-static positive tar_seen_names_room;
-static positive tar_seen_used;
-static positive tar_seen_fill;
+static identity_table tar_seen_table;
 
 /* A member's name as GNU tar quotes it: C's escapes for the controls it
    has letters for, three octal digits for any other control or byte past
@@ -2492,10 +2479,7 @@ static fn tar_reset(void)
         tar_at = 0;
         tar_blocks_taken = 0;
         tar_stream_taken = 0;
-        tar_seen_used = 0;
-        tar_seen_fill = 0;
-        if (tar_seen)
-                memory_fill(tar_seen, 0, tar_seen_slots * sizeof(*tar_seen));
+        identity_clear(address_of tar_seen_table);
         tar_decoder = null;
         tar_encoder = null;
         tar_output_known = false;
@@ -6259,84 +6243,24 @@ static bipolar tar_put_facts(bipolar handle, string_address name, p8 type,
         return 1;
 }
 
-static positive tar_seen_hash(file_facts address_to facts)
-{
-        p64 mix = facts->inode * 0x9e3779b97f4a7c15ull ^
-                  file_device_key(facts->device_major, facts->device_minor);
 
-        return (positive)(mix ^ (mix >> 29));
-}
 
 static string_address tar_seen_name(file_facts address_to facts)
 {
-        positive slot;
+        identity_slot address_to slot;
 
-        if (facts->hard_links < 2 || !tar_seen_slots)
+        if (facts->hard_links < 2)
                 return null;
-        slot = tar_seen_hash(facts) & (tar_seen_slots - 1);
-        while (tar_seen[slot].used)
-        {
-                if (tar_seen[slot].inode == facts->inode &&
-                    tar_seen[slot].device ==
-                        file_device_key(facts->device_major, facts->device_minor))
-                        return (string_address)(tar_seen_names + tar_seen[slot].name_at);
-                slot = (slot + 1) & (tar_seen_slots - 1);
-        }
-        return null;
+        slot = identity_find_facts(address_of tar_seen_table, facts);
+        return slot ? (string_address)(tar_seen_table.names + slot->name_at) : null;
 }
 
 static fn tar_seen_store(file_facts address_to facts, string_address member)
 {
-        positive length;
-        positive slot;
-
-        if (facts->hard_links < 2 || tar_seen_used >= TAR_SEEN_LIMIT)
+        if (facts->hard_links < 2 || string_length(member) >= TAR_PATH)
                 return;
-
-        length = string_length(member);
-        if (length >= TAR_PATH || tar_seen_fill + length + 1 > TAR_SEEN_NAMES_LIMIT ||
-            !shell_array_room(tar_seen_names, tar_seen_names_room,
-                              tar_seen_fill + length + 1))
-                return;
-        if (tar_seen_used + 1 > tar_seen_slots / 2)
-        {
-                positive larger = tar_seen_slots ? tar_seen_slots * 2 : 1024;
-                tar_seen_file address_to old = tar_seen;
-                positive old_slots = tar_seen_slots;
-                tar_seen_file address_to fresh = memory_take_zeroed(larger, sizeof(*fresh));
-
-                if (!fresh)
-                        return;
-                for (positive at = 0; at < old_slots; at++)
-                        if (old[at].used)
-                        {
-                                file_facts moved;
-
-                                moved.inode = old[at].inode;
-                                moved.device_major = (p32)(old[at].device >> 32);
-                                moved.device_minor = (p32)old[at].device;
-                                positive place = tar_seen_hash(address_of moved) & (larger - 1);
-
-                                while (fresh[place].used)
-                                        place = (place + 1) & (larger - 1);
-                                fresh[place] = old[at];
-                        }
-                if (old)
-                        memory_give(old);
-                tar_seen = fresh;
-                tar_seen_slots = larger;
-        }
-        slot = tar_seen_hash(facts) & (tar_seen_slots - 1);
-        while (tar_seen[slot].used)
-                slot = (slot + 1) & (tar_seen_slots - 1);
-        tar_seen[slot].used = true;
-        tar_seen[slot].inode = facts->inode;
-        tar_seen[slot].device =
-            file_device_key(facts->device_major, facts->device_minor);
-        tar_seen[slot].name_at = tar_seen_fill;
-        memory_copy(tar_seen_names + tar_seen_fill, member, length + 1);
-        tar_seen_fill += length + 1;
-        tar_seen_used += 1;
+        identity_visit_facts(address_of tar_seen_table, facts, member, TAR_SEEN_LIMIT,
+                             TAR_SEEN_NAMES_LIMIT);
 }
 
 /*
