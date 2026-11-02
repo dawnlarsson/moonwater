@@ -18290,13 +18290,21 @@ ASM_FUNC(positive_to_string)
     ".Lbipolar_into_negative:\n   movb $45, (%rdi)\n   inc %rdi\n   neg %rsi\n   mov $1, %r11d\n   jmp positive_into_core\n"
     ASM_END(bipolar_into)
     ASM_FUNC(bipolar_into_string)
-    "mov $2, %r11d\n   jmp bipolar_into_core\n"
+    "cmp $9999, %rsi\n   jg .Lbipolar_into_string_wide\n   test %rsi, %rsi\n   js bipolar_into_core\n"
+    "cmp $99, %rsi\n   ja .Lbipolar_into_string_four\n   lea digit_pairs(%rip), %r8\n   cmp $10, %rsi\n   jae .Lbipolar_into_string_two\n"
+    "movzbl 1(%r8,%rsi,2), %eax\n   mov %al, (%rdi)\n   movb $0, 1(%rdi)\n   mov $1, %eax\n" ASM_RET
+    ".Lbipolar_into_string_two:\n   movzwl (%r8,%rsi,2), %eax\n   mov %ax, (%rdi)\n   movb $0, 2(%rdi)\n   mov $2, %eax\n" ASM_RET
+    ".Lbipolar_into_string_four:\n   lea digit_pairs(%rip), %r8\n   mov %esi, %eax\n   imul $5243, %eax, %edx\n   shr $19, %edx\n"
+    "imul $100, %edx, %ecx\n   sub %ecx, %eax\n   cmp $10, %edx\n   jae .Lbipolar_into_string_four_pairs\n   movzbl 1(%r8,%rdx,2), %ecx\n   mov %cl, (%rdi)\n"
+    "movzwl (%r8,%rax,2), %eax\n   mov %ax, 1(%rdi)\n   movb $0, 3(%rdi)\n   mov $3, %eax\n" ASM_RET
+    ".Lbipolar_into_string_four_pairs:\n   movzwl (%r8,%rdx,2), %ecx\n   mov %cx, (%rdi)\n   movzwl (%r8,%rax,2), %eax\n   mov %ax, 2(%rdi)\n   movb $0, 4(%rdi)\n   mov $4, %eax\n" ASM_RET
+    ".Lbipolar_into_string_wide:\n   mov $2, %r11d\n   jmp positive_into_core\n"
     ASM_END(bipolar_into_string)
     ASM_FUNC(positive_into)
     "xor %r11d, %r11d\n   jmp positive_into_core\n"
     ASM_END(positive_into)
     ASM_LOCAL_FUNC(bipolar_into_core)
-    "test %rsi, %rsi\n   jns positive_into_core\n   movb $45, (%rdi)\n   inc %rdi\n   neg %rsi\n   or $1, %r11d\n   jmp positive_into_core\n"
+    "movb $45, (%rdi)\n   inc %rdi\n   neg %rsi\n   mov $3, %r11d\n   jmp positive_into_core\n"
     ASM_LOCAL_END(bipolar_into_core)
     ASM_LOCAL_FUNC(positive_into_core)
     "cmp $99, %rsi\n   ja .Lpositive_into_four\n   lea digit_pairs(%rip), %r8\n   cmp $10, %rsi\n   jae 1f\n   movzbl 1(%r8,%rsi,2), %eax\n   mov %al, (%rdi)\n   mov $1, %eax\n"
