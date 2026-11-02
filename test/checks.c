@@ -119194,6 +119194,70 @@ static void check_compositor_asked(void)
           compositor.showing[2] && compositor.focus == 2 && table->focus == 2);
 }
 
+/*
+        Super with Left or Right puts the window with the keys on the half of its screen at that side, Super with Up fills
+        the screen, and Super with Down gives back the rectangle it had. Shift with Super is no tiling, and a chord the
+        machine script binds is its own: the window stays where it is.
+*/
+static void check_compositor_tiling(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    int half = GLASS_SIDE / 2;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("tiling: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50, table->y[1] = 30, table->width[1] = 120, table->height[1] = 80;
+    table->asked[1] = 1;
+    glass_paint(1, 0, 0, 120, 80, 0x404040u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    compositor_focus(1);
+    compositor.input_count = 1;
+    compositor.held[0] = CK_HELD_LSUPER;
+
+    compositor_key(0, CK_KEY_LEFT, 1, 0);
+    check("tiling: Super and Left puts the window with the keys on the left half of its screen",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.x[1] == 0 && compositor.y[1] == 0 &&
+              table->want_width[1] == (unsigned int)half);
+    compositor_key(0, CK_KEY_RIGHT, 1, 0);
+    check("tiling: Super and Right puts it on the right half, its left edge at the middle",
+          compositor.arranged[1] == COMPOSITOR_RIGHT && compositor.x[1] == half && table->want_width[1] == (unsigned int)half);
+    compositor_key(0, CK_KEY_UP, 1, 0);
+    check("tiling: Super and Up fills the screen", compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor.x[1] == 0 &&
+                                                       table->want_width[1] == GLASS_SIDE && table->want_height[1] == GLASS_SIDE);
+    compositor_key(0, CK_KEY_DOWN, 1, 0);
+    check("tiling: Super and Down gives back the rectangle the window had before it was tiled",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50 && compositor.y[1] == 30 &&
+              table->want_width[1] == 120 && table->want_height[1] == 80);
+
+    compositor.held[0] = CK_HELD_LSUPER | CK_HELD_LSHIFT;
+    compositor_key(0, CK_KEY_LEFT, 1, 0);
+    check("tiling: Shift with Super and Left is no tiling", compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50);
+    compositor.held[0] = CK_HELD_LSUPER;
+
+    compositor_keys.count = 1;
+    compositor_keys.code[0] = CK_KEY_LEFT;
+    compositor_keys.modifiers[0] = WINDOW_KEY_SUPER;
+    string_copy((string_address)compositor_keys.chord[0], (string_address) "key_super_left");
+    compositor_key(0, CK_KEY_LEFT, 1, 0);
+    check("tiling: a chord the machine script binds is the script's, and the window does not move",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50);
+    compositor_keys.count = 0;
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -132256,6 +132320,7 @@ b32 main()
         check_compositor_chrome();
         check_compositor_minimise();
         check_compositor_asked();
+        check_compositor_tiling();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();

@@ -1316,6 +1316,10 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
 #define CK_KEY_TAB 15
 #define CK_KEY_F4 62
 #define CK_KEY_F9 67
+#define CK_KEY_UP 103
+#define CK_KEY_LEFT 105
+#define CK_KEY_RIGHT 106
+#define CK_KEY_DOWN 108
 #define CK_ACUTE 0xB4u
 #define CK_GRAVE '`'
 #define CK_DIAERESIS 0xA8u
@@ -9246,6 +9250,34 @@ static unsigned int compositor_modifiers(void)
         which Canvas hears for itself and acts on. The rest make characters, one event each, for the window that has
         the keys; with none, a key gives them to the topmost.
 */
+/*
+        The tiling chords, built in: Super with Left or Right puts the window with the keys on the half of its screen at
+        that side, Super with Up fills the screen, and Super with Down gives back the rectangle it had before it was put
+        on one (compositor_float). They are the arrangements a drag's snap makes (compositor_arrange, compositor_screen_part),
+        so a window tiled by a key and one let go at an edge are the same rectangle. A chord the machine script binds never
+        gets here (compositor_key runs the script's first), so a user's binding of the same keys takes them.
+*/
+static void compositor_tile_chord(unsigned int code)
+{
+        int row = compositor.focus;
+        unsigned int how;
+
+        if (row < 0 || !compositor_visible(row) || compositor.cycle)
+                return;
+        switch (code)
+        {
+        case CK_KEY_LEFT: how = COMPOSITOR_LEFT; break;
+        case CK_KEY_RIGHT: how = COMPOSITOR_RIGHT; break;
+        case CK_KEY_UP: how = COMPOSITOR_MAXIMIZED; break;
+        case CK_KEY_DOWN:
+                compositor_float(row);
+                return;
+        default:
+                return;
+        }
+        compositor_arrange(row, how);
+}
+
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
@@ -9301,6 +9333,15 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                                 compositor_key_fire(at);
                         return;
                 }
+
+        // Super alone with an arrow (or Down): the tiling chords, which the script's bindings above have had first say.
+        if ((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) == WINDOW_KEY_SUPER &&
+            (code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP || code == CK_KEY_DOWN))
+        {
+                if (value == 1)
+                        compositor_tile_chord(code);
+                return;
+        }
 
         if (((chord & ~WINDOW_KEY_SHIFT) == (WINDOW_KEY_ALT | WINDOW_KEY_CONTROL) && code == CK_KEY_BACKSPACE) ||
             ((modifiers & WINDOW_KEY_ALT) && compositor.cycle))
