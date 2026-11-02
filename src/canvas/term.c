@@ -182,13 +182,15 @@ static inline INLINE unsigned int slot_after(unsigned int slot, unsigned int cou
 #define BLANK_CELL_WORD ((positive)' ' | ((positive)7 << 32))
 
 /*
-        Bold draws the first eight inks in their bright spellings. It is done
-        when a cell is written rather than to the ink itself, so SGR 22 takes
-        the bold off without taking a bright colour chosen as one with it.
+        Bold draws the first eight inks the program set in their bright
+        spellings. It is done when a cell is written rather than to the ink
+        itself, so SGR 22 takes the bold off without taking a bright colour
+        chosen as one with it. The theme's default ink is not one of them: it
+        is the one ink that stays what the theme says, bold or not.
 */
 static PURE unsigned char ink_drawn()
 {
-        return (style & WINDOW_CELL_BOLD) && ink < 8 ? (unsigned char)(ink | 8) : ink;
+        return (style & WINDOW_CELL_BOLD) && ink < 8 && (style & WINDOW_CELL_INK_SET) ? (unsigned char)(ink | 8) : ink;
 }
 
 /*

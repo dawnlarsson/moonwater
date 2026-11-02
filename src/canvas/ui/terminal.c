@@ -183,6 +183,8 @@ static struct
         b32 modes_fresh, title_owed;
         // Per buffer: the top margin was drawn over by what the compositor wrote, and is drawn again.
         b32 margin_spoiled[2];
+        // The theme's default ink and paper the pictures were drawn in: a turn of the theme draws them whole again.
+        unsigned int painted_ink, painted_paper;
 
         /*
                 The loop, as the runner's hooks see it. dirty: a picture is due. changed: the cells changed since the
@@ -215,6 +217,33 @@ static unsigned int terminal_colour[256];
 static unsigned int terminal_palette(unsigned int index)
 {
         return terminal_colour[index & 255];
+}
+
+// The theme's default ink and paper, as 0xrrggbb: the roles the kit sets text and surfaces in, light or dark. A cell the program
+// did not colour is drawn in them, and in reverse video the two trade places.
+static unsigned int terminal_default_ink(void)
+{
+        return ui_role(UI_ON_SURFACE) & 0xffffffu;
+}
+
+static unsigned int terminal_default_paper(void)
+{
+        return ui_role(UI_SURFACE) & 0xffffffu;
+}
+
+// The ink and the paper a cell is drawn in: the palette's where the program set the colour, the theme's where it did not.
+static unsigned int terminal_ink_of(const struct window_cell address_to cell)
+{
+        if (cell->flags & WINDOW_CELL_INK_SET)
+                return terminal_colour[cell->ink];
+        return cell->flags & WINDOW_CELL_SWAP ? terminal_default_paper() : terminal_default_ink();
+}
+
+static unsigned int terminal_paper_of(const struct window_cell address_to cell)
+{
+        if (cell->flags & WINDOW_CELL_PAPER_SET)
+                return terminal_colour[cell->paper];
+        return cell->flags & WINDOW_CELL_SWAP ? terminal_default_ink() : terminal_default_paper();
 }
 
 /* ---- the view: which cells are on the screen ---- */
@@ -763,11 +792,11 @@ static unsigned int terminal_plain_scan(const struct window_cell address_to now,
                         break;
                 if (old && *(const terminal_word address_to)cell == *(const terminal_word address_to)(old + at + n))
                         break;
-                if (terminal_colour[cell->paper] != run->paper)
+                if (terminal_paper_of(cell) != run->paper)
                         break;
                 if (cell->character > ' ')
                 {
-                        if (!codes || terminal_colour[cell->ink] != run->ink || (cell->flags & TERMINAL_STYLE_BITS) != run->bits)
+                        if (!codes || terminal_ink_of(cell) != run->ink || (cell->flags & TERMINAL_STYLE_BITS) != run->bits)
                                 break;
                         codes[n] = cell->character;
                 }
@@ -821,8 +850,8 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
         for (unsigned int at = first; at < last; at++)
         {
                 const struct window_cell address_to cell = now + at;
-                unsigned int ink = terminal_colour[cell->ink];
-                unsigned int paper = terminal_colour[cell->paper];
+                unsigned int ink = terminal_ink_of(cell);
+                unsigned int paper = terminal_paper_of(cell);
 
                 // A selected cell lies on the theme's selection colour, which is a tint over its own paper, blended as the kit
                 // blends its fills (the paper is the program's, the tint the kit's; the alpha stays as the buffer's, 0).
@@ -970,7 +999,7 @@ static unsigned int terminal_ground(const struct window_cell address_to frame, u
 {
         unsigned int at = row * COLUMNS + column;
 
-        return terminal_colour[at == terminal.cursor_at ? frame[at].ink : frame[at].paper];
+        return at == terminal.cursor_at ? terminal_ink_of(frame + at) : terminal_paper_of(frame + at);
 }
 
 static void terminal_band(unsigned int row, unsigned int address_to top, unsigned int address_to height)
@@ -1221,6 +1250,23 @@ static void terminal_cells_draw(struct terminal_banding address_to banding, posi
 }
 
 /*
+        The theme's default ink and paper are what a picture's default cells are drawn in, so a picture drawn in the other pair
+        is not a picture of these cells. When the pair has changed (a theme turned, which the kit does a frame at a time) both
+        buffers are taken back, and the next frames draw every cell whole. The cells are the same, so the text, the cursor and
+        the selection stay where they were.
+*/
+static void terminal_paint_theme(void)
+{
+        unsigned int ink = terminal_default_ink(), paper = terminal_default_paper();
+
+        if (ink == terminal.painted_ink && paper == terminal.painted_paper)
+                return;
+        terminal.valid[0] = terminal.valid[1] = 0;
+        terminal.painted_ink = ink;
+        terminal.painted_paper = paper;
+}
+
+/*
         One frame: the cells that differ drawn into the free buffer, what
         the compositor has to read again named, and the picture shown.
         False when there is no buffer to draw into yet, and nothing was done.
@@ -1240,6 +1286,7 @@ static b32 terminal_frame(void)
         int x1 = 0x7fffffff, y1 = 0x7fffffff, x2 = 0, y2 = 0;
         b32 bar, bar_told, any, right = false, turning;
 
+        terminal_paint_theme();
         if (slot < 0)
                 return false;
 
