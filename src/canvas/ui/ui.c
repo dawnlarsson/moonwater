@@ -4135,7 +4135,7 @@ static fn ui_control_place(struct ui_control address_to c)
         c->sliding = 0;
         c->slide.landed = 0;
         c->bend = c->bend_target = 0;
-        c->moved = 0;
+        c->moved = c->down ? c->moved : 0; // a drag under way is still a drag: its release says whether it flips
         c->shadow_to[0][4] = 0; // a field's shadows are put at its state
         c->field_start = 0;
         c->placed = ui_kit.epoch;
