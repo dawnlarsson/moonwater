@@ -356,7 +356,9 @@
 
         release closes a descriptor the engine is done with: a pool's once
         the pool and its buffers are gone, and a queued one at the client's
-        disconnect or the stop. The engine never closes one itself.
+        disconnect or the stop. The engine never closes one itself. pool says
+        whether a descriptor is a shared-memory file of at least the size given
+        (zero or more) or not (negative), before the engine takes it.
 */
 struct shell_rect
 {
@@ -409,6 +411,7 @@ struct shell_sink
         int (*query)(void *context, int row, struct shell_facts *facts);
         int (*picture)(void *context, int row, long fd, long offset, long width, long height, long stride);
         void (*release)(void *context, long fd);
+        int (*pool)(void *context, long fd, long size);
 };
 
 /*
@@ -582,7 +585,7 @@ static inline int shell_sink_ok(const struct shell_sink *sink)
         return sink && sink->open && sink->key && sink->pointer && sink->damage &&
                sink->place && sink->size && sink->minimize && sink->maximize &&
                sink->fullscreen && sink->stack && sink->activate && sink->close &&
-               sink->title && sink->layer && sink->query && sink->picture && sink->release;
+               sink->title && sink->layer && sink->query && sink->picture && sink->release && sink->pool;
 }
 
 /*
@@ -1236,6 +1239,7 @@ static inline int shell_xwayland_stop(struct shell_side *side)
 #define WAYLAND_SEAT_POINTER 1UL
 #define WAYLAND_SEAT_KEYBOARD 2UL
 #define WAYLAND_KEYBOARD_XKB_V1 1UL
+#define WAYLAND_SHM_ERR_INVALID_FD 2L
 
 /*
         wl_display.error codes: the object does not exist, the request does
@@ -2234,9 +2238,10 @@ static int surface_request(long client, struct wayland_client *c, long index, lo
         shell with the pool's descriptor. A pool outlives its object while a
         buffer made from it still lives.
 */
-static int shm_request(long client, struct wayland_client *c, struct wire_arg *args)
+static int shm_request(long client, struct wayland_client *c, long shm, struct wire_arg *args)
 {
         long pool, index;
+        int status;
 
         (void)client;
         if (args[2].number < 1 || args[2].number > SHELL_BUFFER_BYTES_MAX)
@@ -2248,6 +2253,9 @@ static int shm_request(long client, struct wayland_client *c, struct wire_arg *a
         pool = wire_free_pool(c);
         if (pool < 0)
                 return SHELL_ENOSPC;
+        status = wayland.side.sink->pool(wayland.side.sink->context, args[1].fd, args[2].number);
+        if (status < 0)
+                return wire_fail(c, c->objects[shm].id, WAYLAND_SHM_ERR_INVALID_FD, "not a shared memory file of that size");
         c->pools[pool].live = 1;
         c->pools[pool].fd = args[1].fd;
         c->pools[pool].size = args[2].number;
@@ -2313,6 +2321,8 @@ static int pool_request(long client, struct wayland_client *c, long index, long 
         case 2:
                 if (args[0].number < pool->size || args[0].number > SHELL_BUFFER_BYTES_MAX)
                         return wire_fail(c, object->id, WAYLAND_ERR_METHOD, "pool resize out of range");
+                if (wayland.side.sink->pool(wayland.side.sink->context, pool->fd, args[0].number) < 0)
+                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "pool past its file");
                 pool->size = args[0].number;
                 return SHELL_OK;
         default:
@@ -2603,7 +2613,7 @@ static int wire_request(long client, struct wayland_client *c, long index, long 
                 status = region_request(c, index, opcode, args);
                 break;
         case W_SHM:
-                status = shm_request(client, c, args);
+                status = shm_request(client, c, index, args);
                 break;
         case W_SHM_POOL:
                 status = pool_request(client, c, index, opcode, args);

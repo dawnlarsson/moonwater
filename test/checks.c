@@ -142362,6 +142362,14 @@ static void hook_release(void *context, long fd)
         (void)fd;
 }
 
+static int hook_pool(void *context, long fd, long size)
+{
+        (void)context;
+        (void)fd;
+        (void)size;
+        return 0;
+}
+
 static int hook_picture(void *context, int row, long fd, long offset, long width, long height, long stride)
 {
         (void)fd;
@@ -142391,6 +142399,7 @@ static const struct shell_sink hook_sink = {
         .query = hook_query,
         .picture = hook_picture,
         .release = hook_release,
+        .pool = hook_pool,
 };
 
 static unsigned int hook_checks, hook_failures;
@@ -142520,6 +142529,9 @@ static void hook_battery(const struct hook_side *h)
         HOOK_REFUSED(state, h->start(&partial));
         partial = hook_sink;
         partial.release = 0;
+        HOOK_REFUSED(state, h->start(&partial));
+        partial = hook_sink;
+        partial.pool = 0;
         HOOK_REFUSED(state, h->start(&partial));
         status = h->start(&hook_sink);
         HOOK_CHECK(status == SHELL_OK);
@@ -142886,6 +142898,8 @@ int main(void)
 #endif
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -143063,6 +143077,44 @@ static void wire_release(void *context, long fd)
         close((int)fd);
 }
 
+/*
+        The sink's check of a pool's descriptor: a regular file at least as
+        large as the pool. A device, a pipe or a shorter file is refused.
+*/
+static int wire_pool(void *context, long fd, long size)
+{
+        struct stat st;
+
+        (void)context;
+        if (fstat((int)fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < size)
+                return SHELL_EINVAL;
+        return SHELL_OK;
+}
+
+/*
+        A descriptor for a regular file of the size given: the test's stand-in
+        for a shared-memory file, a temporary file taken as a descriptor of its
+        own and resized. The caller owns the descriptor.
+*/
+static long wire_file(long size)
+{
+        FILE *f = tmpfile();
+        int fd;
+
+        if (!f)
+                return -1;
+        fd = dup(fileno(f));
+        fclose(f);
+        if (fd < 0)
+                return -1;
+        if (ftruncate(fd, (off_t)size) != 0)
+        {
+                close(fd);
+                return -1;
+        }
+        return fd;
+}
+
 static const struct shell_sink wire_sink_full = {
         .context = 0,
         .open = wire_open,
@@ -143082,6 +143134,7 @@ static const struct shell_sink wire_sink_full = {
         .query = wire_query,
         .picture = wire_picture,
         .release = wire_release,
+        .pool = wire_pool,
 };
 
 /*
@@ -143511,7 +143564,7 @@ static void wire_object_checks(void)
         WIRE_CHECK(client >= 0);
         if (client < 0)
                 return;
-        fds[0] = open("/dev/null", O_RDONLY);
+        fds[0] = wire_file(4096);
 
         wb_begin(&m, WAYLAND_DISPLAY, 1);
         wb_u(&m, 2);
@@ -143819,7 +143872,7 @@ static void wire_teardown_checks(void)
                 unsigned int titled = wire_seen.titled;
                 long n;
 
-                fds[0] = fileno(tmpfile());
+                fds[0] = wire_file(1024);
                 WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 5) == 0);
                 wire_take(client, objects, ops, 80);
                 wb_begin(&m, 5, 0);
@@ -143968,7 +144021,7 @@ static void wire_descriptor_checks(void)
         wire_take(client, wire_many_objects, wire_many_ops, 1024);
 
         /* a pool destroyed with no buffer releases its descriptor. */
-        fd = open("/dev/null", O_RDONLY);
+        fd = wire_file(1024);
         fds[0] = fd;
         wb_begin(&m, 3, 0);
         wb_u(&m, 4);
@@ -143981,7 +144034,7 @@ static void wire_descriptor_checks(void)
         WIRE_CHECK(!wire_fd_open(fd));
 
         /* a pool destroyed with a buffer keeps its descriptor until the buffer goes. */
-        fd = open("/dev/null", O_RDONLY);
+        fd = wire_file(1024);
         fds[0] = fd;
         wb_begin(&m, 3, 0);
         wb_u(&m, 5);
@@ -144193,6 +144246,82 @@ static void wire_backpressure_checks(void)
         WIRE_CHECK(wayland_client_disconnect(client) == 0);
 }
 
+/*
+        Pools. The sink checks a pool's descriptor before the shim takes it: a
+        regular file at least as large as the pool. A character device, or a
+        file smaller than the pool, is refused with wl_shm.error.invalid_fd on
+        the wl_shm object, and the pool does not exist. A resize past the file
+        is refused on the pool; a resize within it is taken.
+*/
+static void wire_pool_checks(void)
+{
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+        long fds[1];
+        long client, n;
+        int status;
+
+        for (int kind = 0; kind < 2; kind++)
+        {
+                client = wayland_client_connect();
+                WIRE_CHECK(client >= 0);
+                if (client < 0)
+                        return;
+                wb_begin(&m, WAYLAND_DISPLAY, 1);
+                wb_u(&m, 2);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wire_take(client, objects, ops, 80);
+                WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
+                wire_take(client, objects, ops, 80);
+                fds[0] = kind == 0 ? open("/dev/null", O_RDONLY) : wire_file(512);
+                wb_begin(&m, 3, 0);
+                wb_u(&m, 4);
+                wb_u(&m, 1024);
+                n = wb_end(&m);
+                wire_snap(client);
+                status = wayland_feed(client, m.b, n, fds, 1);
+                WIRE_CHECK(status == SHELL_EINVAL);
+                WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
+                WIRE_CHECK(objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
+                WIRE_CHECK(wire_word_at(8) == 3 && wire_word_at(12) == 2);
+                WIRE_CHECK(wire_of_type(&wayland.clients[client], 4, W_SHM_POOL) < 0);
+                WIRE_CHECK(wayland.clients[client].fd_count == wire_before.fd_count + 1);
+                WIRE_CHECK(wayland_client_disconnect(client) == 0);
+                WIRE_CHECK(!wire_fd_open(fds[0]));
+        }
+
+        /* a regular file of the pool's size is taken; a resize past the file is refused, one within it is taken. */
+        client = wayland_client_connect();
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
+        wire_take(client, objects, ops, 80);
+        fds[0] = wire_file(1024);
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 4);
+        wb_u(&m, 1024);
+        n = wb_end(&m);
+        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
+        WIRE_CHECK(wire_of_type(&wayland.clients[client], 4, W_SHM_POOL) >= 0);
+        wb_begin(&m, 4, 2);
+        wb_u(&m, 2048);
+        wire_snap(client);
+        WIRE_CHECK(wire_feed_build(client, &m) == SHELL_EINVAL);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
+        WIRE_CHECK(objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
+        WIRE_CHECK(wire_word_at(8) == 4 && wire_word_at(12) == 3);
+        WIRE_CHECK(wayland.clients[client].pools[wayland.clients[client].objects[wire_object_index(&wayland.clients[client], 4)].slot].size == 1024);
+        wb_begin(&m, 4, 2);
+        wb_u(&m, 1024);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -144207,6 +144336,7 @@ int main(void)
         wire_frame_checks();
         wire_role_checks();
         wire_backpressure_checks();
+        wire_pool_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;
@@ -144244,6 +144374,7 @@ int main(void)
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -144408,6 +144539,16 @@ static void e2e_release(void *context, long fd)
         close((int)fd);
 }
 
+static int e2e_pool(void *context, long fd, long size)
+{
+        struct stat st;
+
+        (void)context;
+        if (fstat((int)fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < size)
+                return SHELL_EINVAL;
+        return SHELL_OK;
+}
+
 static const struct shell_sink e2e_sink = {
         .context = 0,
         .open = e2e_open,
@@ -144427,6 +144568,7 @@ static const struct shell_sink e2e_sink = {
         .query = e2e_query,
         .picture = e2e_picture_copy,
         .release = e2e_release,
+        .pool = e2e_pool,
 };
 
 /*
