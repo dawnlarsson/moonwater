@@ -2981,9 +2981,9 @@ static long terminal_tick(long timeout, long address_to other)
 {
         b32 was = terminal.dirty, again = false;
         long hold = terminal.hold_timeout;
+        long kit = timeout;
         positive now;
 
-        (void)timeout;
         terminal.hold_timeout = -1;
 
         if (terminal.phase == TERMINAL_RUNNING && terminal.gone)
@@ -3028,9 +3028,13 @@ static long terminal_tick(long timeout, long address_to other)
         if (touched_bottom > touched_top)
                 terminal.changed = true;
 
-        timeout = -1;
+        // The kit's own wait comes first: a theme turn in flight asks for its next frame a period on, and a frame the kit could
+        // not draw is asked again. The terminal's waits below are taken as the least of these, never in place of them.
+        timeout = kit;
         if (synchronized_output)
         {
+                long sync;
+
                 now = clock_monotonic_nanoseconds();
                 terminal.sync_since = terminal.sync_held ? terminal.sync_since : now;
                 terminal.sync_held = true;
@@ -3041,7 +3045,10 @@ static long terminal_tick(long timeout, long address_to other)
                         terminal.changed = true;
                 }
                 else
-                        timeout = (long)(TERMINAL_SYNC_NANOSECONDS - (now - terminal.sync_since));
+                {
+                        sync = (long)(TERMINAL_SYNC_NANOSECONDS - (now - terminal.sync_since));
+                        timeout = timeout < 0 || sync < timeout ? sync : timeout;
+                }
         }
         else
                 terminal.sync_held = false;
