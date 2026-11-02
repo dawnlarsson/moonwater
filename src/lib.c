@@ -13232,6 +13232,7 @@ __asm__(
     "test %r8, %r8\n   jz 9f\n   test %r9, %r9\n   jz 9f\n   push %rbx\n   shl $2, %rsi\n   shl $2, %rcx\n"
     "pcmpeqd %xmm7, %xmm7\n"
     "1:  mov %rdx, %r10\n   lea (%rdx,%rcx), %r11\n   mov %rdi, %rax\n   mov %r8, %rbx\n"
+    ASM_WIDER("cpu_has_avx512", "15f")
     ASM_WIDER("cpu_has_avx2", "5f")
     "2:  cmp $4, %rbx\n   jb 3f\n"
     "movdqu (%r10), %xmm0\n   movdqu 16(%r10), %xmm1\n   movdqu (%r11), %xmm2\n   movdqu 16(%r11), %xmm3\n"
@@ -13252,6 +13253,22 @@ __asm__(
     "vpermq $0xd8, %ymm2, %ymm2\n   vmovdqu %ymm2, (%rax)\n"
     "add $64, %r10\n   add $64, %r11\n   add $32, %rax\n   sub $8, %rbx\n   jmp 11b\n"
     "6:  vzeroupper\n   jmp 2b\n"
+    //  Sixteen out a turn with AVX-512, thirty two of each row in: the AVX2 steps on zmm. The even and odd pixels come out
+    //  in lane order (four pixels a lane), which one vpermd puts right: out k is at lane (k mod 8) / 2, and at the upper
+    //  pair of that lane when k is eight or more. Fewer than sixteen left go to the AVX2 loop at 5.
+#ifndef KERNEL_MODE
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Lhalve_u32_x64_order:\n   .long 0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15\n"
+    ".popsection\n"
+#endif
+    "15: vpternlogd $0xff, %zmm7, %zmm7, %zmm7\n   vmovdqu32 .Lhalve_u32_x64_order(%rip), %zmm8\n"
+    "16: cmp $16, %rbx\n   jb 5b\n"
+    "vmovdqu64 (%r10), %zmm0\n   vmovdqu64 64(%r10), %zmm1\n   vpavgb (%r11), %zmm0, %zmm0\n   vpavgb 64(%r11), %zmm1, %zmm1\n"
+    "vshufps $0x88, %zmm1, %zmm0, %zmm2\n   vshufps $0xdd, %zmm1, %zmm0, %zmm3\n"
+    "vpxord %zmm7, %zmm2, %zmm2\n   vpxord %zmm7, %zmm3, %zmm3\n"
+    "vpavgb %zmm3, %zmm2, %zmm2\n   vpxord %zmm7, %zmm2, %zmm2\n"
+    "vpermd %zmm2, %zmm8, %zmm2\n   vmovdqu64 %zmm2, (%rax)\n"
+    "add $128, %r10\n   add $128, %r11\n   add $64, %rax\n   sub $16, %rbx\n   jmp 16b\n"
     ASM_END(memory_halve_u32)
 
     //
