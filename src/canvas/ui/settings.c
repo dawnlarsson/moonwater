@@ -4866,7 +4866,7 @@ static long settings_tick(long timeout, long address_to other)
                 if (!settings_gallery.on)
                         t->focused = settings.focused;
                 if (t->doc.selections)
-                        timeout = ui_text_timeout(t, timeout, now, &redraw);
+                        timeout = ui_text_timeout(&settings.ui, t, timeout, now, &redraw);
                 if (redraw)
                         settings_changed(t->well_top, t->well_bottom);
         }

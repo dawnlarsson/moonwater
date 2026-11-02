@@ -123385,6 +123385,293 @@ static void check_touch_path(struct ui address_to wui)
     ui_text_close(&t);
 }
 
+/*
+        Auto-scroll of a text selection, end to end as a window gets it: a mouse held down in a text surface and dragged past
+        its visible bounds, and a finger that has held a word and drags it past the bounds. The window's events come from the
+        compositor (its grab for a mouse, its finger reports), are drained from the window's queue into the widget the way the
+        app's loop does, and the app's tick steps the scroll 16 ms at a time. A code view scrolls up or down past its box; a
+        field (the find bar, the kit's fields, the settings' fields) scrolls left or right past its box.
+*/
+#define SCROLL_LEFT 20
+#define SCROLL_TOP 20
+#define SCROLL_CODE_LEFT 10
+#define SCROLL_CODE_TOP 30
+#define SCROLL_CODE_WIDTH 210
+#define SCROLL_CODE_HEIGHT 150
+#define SCROLL_FIELD_LEFT 10
+#define SCROLL_FIELD_TOP 60
+#define SCROLL_FIELD_WIDTH 200
+#define SCROLL_FIELD_HEIGHT 44
+#define SCROLL_LINE 8 // bytes a line of the code view's text takes: "line NN\n"
+
+struct scroll_answer
+{
+    int top, before, scroll, moved;
+    p64 start, finish;
+};
+
+static void scroll_setup(int touch)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.hold = -1;
+    compositor.holds = ~0ul;
+    compositor.told_row = COMPOSITOR_NONE;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    glass_table_map();
+    system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK);
+    table = compositor.table;
+    table->x[1] = SCROLL_LEFT, table->y[1] = SCROLL_TOP, table->width[1] = 230, table->height[1] = 200;
+    glass_paint(1, 0, 0, 230, 200, 0x404040u, true);
+    compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+    compositor_present();
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    touch_clock = 1000000;
+    touch_down = 0;
+    if (touch)
+    {
+        compositor.touchscreen[0] = 1;
+        compositor.screen_touch[0] = (struct compositor_touch_screen){0};
+        for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+            compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
+        compositor.screen_touch[0].slots = 1;
+        compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1020;
+    }
+    compositor.pointer_x = 60;
+    compositor.pointer_y = 70;
+}
+
+// The mouse's place, in desktop pixels, kept and real: no lead and no clamp.
+static void scroll_point(int x, int y)
+{
+    compositor.kept_x = compositor.real_x = x;
+    compositor.kept_y = compositor.real_y = y;
+    compositor.pointer_x = x;
+    compositor.pointer_y = y;
+}
+
+// The window's queue drained into the widget as the app's loop drains it: a motion's place is kept for the presses after it;
+// a field takes the event through ui_field_event, a code view through ui_text_event.
+static void scroll_drain(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, int *px, int *py, int field)
+{
+    struct window_event event;
+
+    while (windows_event(own, &event))
+    {
+        if (event.type == WINDOW_EVENT_MOTION)
+            *px = event.a, *py = event.b;
+        if (field)
+            ui_field_event(wui, t, null, &event, *px, *py);
+        else
+            ui_text_event(wui, t, &event, *px, *py);
+    }
+}
+
+// The app's tick, 16 ms at a time for 200 ms from now.
+static void scroll_ticks(struct ui address_to wui, struct ui_text address_to t, positive now)
+{
+    b32 redraw = false;
+
+    for (int step = 0; step <= 12; step++)
+        ui_text_autoscroll(wui, t, now + (positive)step * 16000000ull, &redraw);
+}
+
+static void scroll_code(struct ui address_to wui, struct ui_text address_to t, int top)
+{
+    static char text[40 * SCROLL_LINE];
+    positive length = 0;
+
+    for (int n = 0; n < 40; n++)
+    {
+        text[length++] = 'l', text[length++] = 'i', text[length++] = 'n', text[length++] = 'e', text[length++] = ' ';
+        text[length++] = (char)('0' + n / 10), text[length++] = (char)('0' + n % 10), text[length++] = '\n';
+    }
+    ui_text_open(t, UI_TEXT_CODE, (const p8 address_to)text, length, ui_text_keymap());
+    t->focused = true;
+    t->top_line = (p64)top;
+    t->dragging = false;
+    t->scroll_past = 0;
+    t->scroll_at = 0;
+    ui_text_draw(wui, t, SCROLL_CODE_LEFT, SCROLL_CODE_TOP, SCROLL_CODE_WIDTH, SCROLL_CODE_HEIGHT, 0);
+}
+
+static void scroll_field(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, b32 at_end)
+{
+    const char address_to text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau";
+    p64 length = (p64)string_length((string_address)text);
+
+    ui_field_open(t, own, text);
+    t->focused = true;
+    doc_select_set(&t->doc, at_end ? length : 0, at_end ? length : 0);
+    t->dragging = false;
+    t->scroll_past = 0;
+    t->scroll_at = 0;
+    ui_text_draw(wui, t, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
+}
+
+static void scroll_answer_of(struct ui_text address_to t, struct scroll_answer address_to a)
+{
+    a->top = (int)t->top_line;
+    a->scroll = (int)t->scroll_x;
+    a->start = doc_sel_start(&t->doc.selections[t->doc.primary]);
+    a->finish = doc_sel_end(&t->doc.selections[t->doc.primary]);
+}
+
+// A code view, a mouse: the press on the third row, the drag to target_y (window-local, perhaps off the window), the ticks, the lift.
+static void scroll_code_mouse(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, int target_y,
+                              struct scroll_answer address_to a)
+{
+    int px = 0, py = 0, row, x = SCROLL_CODE_LEFT + 40;
+    positive now = 1000000000ull;
+
+    scroll_code(wui, t, 10);
+    row = t->top + 2 * t->line_height + t->line_height / 2;
+    scroll_point(SCROLL_LEFT + x, SCROLL_TOP + row);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    scroll_drain(wui, t, own, &px, &py, 0);
+    scroll_point(SCROLL_LEFT + x, SCROLL_TOP + target_y);
+    compositor_motion();
+    scroll_drain(wui, t, own, &px, &py, 0);
+    scroll_ticks(wui, t, now);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    scroll_drain(wui, t, own, &px, &py, 0);
+    scroll_answer_of(t, a);
+    ui_text_close(t);
+}
+
+// A code view, a finger: it lands on the third row, is held for the long press (its word selected), and drags to target_y.
+static void scroll_code_touch(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, int target_y,
+                              struct scroll_answer address_to a)
+{
+    int px = 0, py = 0, row, x = SCROLL_CODE_LEFT + 40;
+    positive now = 1000000000ull;
+
+    scroll_code(wui, t, 10);
+    row = t->top + 2 * t->line_height + t->line_height / 2;
+    touch_one(SCROLL_LEFT + x, SCROLL_TOP + row, false);
+    scroll_drain(wui, t, own, &px, &py, 0);
+    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    scroll_drain(wui, t, own, &px, &py, 0);
+    touch_one(SCROLL_LEFT + x, SCROLL_TOP + target_y, false);
+    scroll_drain(wui, t, own, &px, &py, 0);
+    scroll_ticks(wui, t, now);
+    touch_one(SCROLL_LEFT + x, SCROLL_TOP + target_y, true);
+    scroll_drain(wui, t, own, &px, &py, 0);
+    scroll_answer_of(t, a);
+    ui_text_close(t);
+}
+
+// A field, a mouse: the press 40 px into the box, the drag to target_x (window-local), the ticks, the lift.
+static void scroll_field_mouse(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, b32 at_end,
+                               int target_x, struct scroll_answer address_to a)
+{
+    int px = 0, py = 0, y = SCROLL_FIELD_TOP + SCROLL_FIELD_HEIGHT / 2, x = SCROLL_FIELD_LEFT + 40;
+    positive now = 1000000000ull;
+
+    scroll_field(wui, t, own, at_end);
+    a->before = (int)t->scroll_x;
+    scroll_point(SCROLL_LEFT + x, SCROLL_TOP + y);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    scroll_point(SCROLL_LEFT + target_x, SCROLL_TOP + y);
+    compositor_motion();
+    scroll_drain(wui, t, own, &px, &py, 1);
+    a->moved = (int)t->scroll_x;
+    scroll_ticks(wui, t, now);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    scroll_answer_of(t, a);
+    ui_text_close(t);
+}
+
+// A field, a finger: held on the box for the long press (its word selected), dragged to target_x, lifted.
+static void scroll_field_touch(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, b32 at_end,
+                               int target_x, struct scroll_answer address_to a)
+{
+    int px = 0, py = 0, y = SCROLL_FIELD_TOP + SCROLL_FIELD_HEIGHT / 2, x = SCROLL_FIELD_LEFT + 40;
+    positive now = 1000000000ull;
+
+    scroll_field(wui, t, own, at_end);
+    a->before = (int)t->scroll_x;
+    touch_one(SCROLL_LEFT + x, SCROLL_TOP + y, false);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    touch_one(SCROLL_LEFT + target_x, SCROLL_TOP + y, false);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    a->moved = (int)t->scroll_x;
+    scroll_ticks(wui, t, now);
+    touch_one(SCROLL_LEFT + target_x, SCROLL_TOP + y, true);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    scroll_answer_of(t, a);
+    ui_text_close(t);
+}
+
+static void check_select_scroll(struct ui address_to wui)
+{
+    static struct ui_text view;
+    static struct window_row own;
+    struct scroll_answer a;
+
+    /* Code view, mouse: up past the box (inside the window), up past the window, down past the box, down past the window. */
+    scroll_setup(0);
+    own.table = compositor.table, own.row = 1, own.door = -1;
+    scroll_code_mouse(wui, &view, &own, SCROLL_CODE_TOP - 25, &a);
+    check("scroll: a mouse held above a code view's top edge scrolls it up, and the selection follows the text",
+          a.top < 10 && a.start / SCROLL_LINE == (p64)a.top);
+    scroll_code_mouse(wui, &view, &own, -15, &a);
+    check("scroll: a mouse held above the window scrolls a code view up as well", a.top < 10 && a.start / SCROLL_LINE == (p64)a.top);
+    scroll_code_mouse(wui, &view, &own, SCROLL_CODE_TOP + SCROLL_CODE_HEIGHT + 25, &a);
+    check("scroll: a mouse held below a code view's bottom edge scrolls it down, and the selection follows",
+          a.top > 10 && a.finish / SCROLL_LINE >= (p64)a.top);
+    scroll_code_mouse(wui, &view, &own, 215, &a);
+    check("scroll: a mouse held below the window scrolls a code view down as well", a.top > 10 && a.finish / SCROLL_LINE >= (p64)a.top);
+
+    /* Code view, finger: the same four, the finger held for its word first. */
+    scroll_setup(1);
+    own.table = compositor.table, own.row = 1, own.door = -1;
+    scroll_code_touch(wui, &view, &own, SCROLL_CODE_TOP - 25, &a);
+    check("scroll: a finger held above a code view's top edge scrolls it up", a.top < 10 && a.start / SCROLL_LINE == (p64)a.top);
+    scroll_code_touch(wui, &view, &own, -15, &a);
+    check("scroll: a finger held above the window scrolls a code view up as well", a.top < 10 && a.start / SCROLL_LINE == (p64)a.top);
+    scroll_code_touch(wui, &view, &own, SCROLL_CODE_TOP + SCROLL_CODE_HEIGHT + 25, &a);
+    check("scroll: a finger held below a code view's bottom edge scrolls it down", a.top > 10 && a.finish / SCROLL_LINE >= (p64)a.top);
+    scroll_code_touch(wui, &view, &own, 215, &a);
+    check("scroll: a finger held below the window scrolls a code view down as well", a.top > 10 && a.finish / SCROLL_LINE >= (p64)a.top);
+
+    /* A field (the find bar, the kit's fields, the settings' fields), mouse: right past its box, left past its box. */
+    scroll_setup(0);
+    own.table = compositor.table, own.row = 1, own.door = -1;
+    scroll_field_mouse(wui, &view, &own, 0, 220, &a);
+    check("scroll: a mouse held past a field's right edge scrolls it right, the selection growing", a.scroll > a.before && a.finish > 5);
+    check("scroll: and the motion does not jump the field: the tick moves it a step at a time", a.moved == a.before);
+    scroll_field_mouse(wui, &view, &own, 0, 220, &a);
+    check("scroll: and it keeps scrolling while the mouse is held past the edge", a.scroll > a.moved);
+    scroll_field_mouse(wui, &view, &own, 1, 3, &a);
+    check("scroll: a mouse held past a field's left edge scrolls it left", a.scroll < a.before && a.start < a.finish);
+    check("scroll: and it keeps scrolling while held there, a step at a time", a.scroll < a.moved);
+    check("scroll: and the motion does not jump the field left either", a.moved == a.before);
+
+    /* A field, finger: the same two, the finger held on the field for its word first. */
+    scroll_setup(1);
+    own.table = compositor.table, own.row = 1, own.door = -1;
+    scroll_field_touch(wui, &view, &own, 0, 220, &a);
+    check("scroll: a finger held past a field's right edge scrolls it right", a.scroll > a.before && a.finish > 5);
+    check("scroll: and the finger's motion does not jump the field either", a.moved == a.before);
+    check("scroll: and it keeps scrolling while the finger is held past the edge", a.scroll > a.moved);
+    scroll_field_touch(wui, &view, &own, 1, 3, &a);
+    check("scroll: a finger held past a field's left edge scrolls it left", a.scroll < a.before && a.start < a.finish);
+}
+
 static void check_compositor_touch(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -136958,6 +137245,7 @@ static fn field_check(struct ui address_to wui)
         touch_hold_check(wui, &t);
         touch_scroll_check(wui);
         check_touch_path(wui);
+        check_select_scroll(wui);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {

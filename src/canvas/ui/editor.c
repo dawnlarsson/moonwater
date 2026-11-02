@@ -756,19 +756,21 @@ static fn editor_size(unsigned int width, unsigned int height)
 // The caret's blink and a thrown finger's scroll: the next frame they need, and none for an idle window.
 static long editor_tick(long timeout, long address_to other)
 {
-        positive now = clock_monotonic_nanoseconds(), scroll;
+        positive now = clock_monotonic_nanoseconds();
         b32 redraw = false;
         struct ui_text address_to view = editor.find.focused ? &editor.find : &editor_now()->view;
 
         (void)other;
         if (editor_now()->view.kinetic.flying && ui_text_fling(&editor_now()->view, now))
                 redraw = true, timeout = UI_DRAG_FRAME_NS;
-        timeout = ui_text_timeout(view, timeout, now, &redraw);
-        scroll = ui_text_autoscroll(&editor.ui, &editor_now()->view, now, &redraw);
+        timeout = ui_text_timeout(&editor.ui, view, timeout, now, &redraw);
+        // The code view's drag past its edges scrolls it, and the find bar's past its sides scrolls the bar (ui_text_timeout).
+        if (view != &editor_now()->view)
+                timeout = ui_text_timeout(&editor.ui, &editor_now()->view, timeout, now, &redraw);
+        if (editor.finding && view != &editor.find)
+                timeout = ui_text_timeout(&editor.ui, &editor.find, timeout, now, &redraw);
         if (redraw)
                 editor.dirty = true;
-        if (scroll && (timeout < 0 || (long)(scroll - now) < timeout))
-                timeout = (long)(scroll - now);
         return timeout;
 }
 
