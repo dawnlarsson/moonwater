@@ -13292,6 +13292,7 @@ __asm__(
     "shl $2, %rsi\n   shl $2, %rcx\n   pcmpeqd %xmm7, %xmm7\n"
     "1:  mov %rdx, %r10\n   mov %rdx, %r11\n   sub %rcx, %r11\n   lea (%rdx,%rcx), %r12\n   mov %rdi, %rax\n   lea (%rdi,%rsi), %rbx\n"
     "mov %r8, %r13\n"
+    ASM_WIDER("cpu_has_avx512", "40f")
     ASM_WIDER("cpu_has_avx2", "5f")
     "2:  cmp $4, %r13\n   jb 3f\n   mov %r11, %r14\n   call 7f\n   movdqu %xmm0, (%rax)\n   movdqu %xmm3, 16(%rax)\n"
     "mov %r12, %r14\n   call 7f\n   movdqu %xmm0, (%rbx)\n   movdqu %xmm3, 16(%rbx)\n"
@@ -13334,6 +13335,30 @@ __asm__(
     "vpxor %ymm7, %ymm0, %ymm0\n   vpxor %ymm7, %ymm2, %ymm2\n"
     "vpunpckldq %ymm2, %ymm0, %ymm4\n   vpunpckhdq %ymm2, %ymm0, %ymm5\n"
     "vperm2i128 $0x20, %ymm5, %ymm4, %ymm0\n   vperm2i128 $0x31, %ymm5, %ymm4, %ymm3\n" ASM_RET
+    //  Sixteen source pixels a turn with AVX-512, each row's pair of outputs (32 pixels) from the same steps on zmm: the
+    //  left and right results of the sixteen are in zmm0 and zmm2, and one vpermi2d each puts them in order, out 0 to 15
+    //  in zmm9 and 16 to 31 in zmm10, the index held per row at 40. Fewer than sixteen left go to the AVX2 loop at 5.
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Ldouble_u32_x64_low:\n   .long 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23\n"
+    ".Ldouble_u32_x64_high:\n   .long 8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31\n"
+    ".popsection\n"
+    "40: vpternlogd $0xff, %zmm7, %zmm7, %zmm7\n   vmovdqu32 .Ldouble_u32_x64_low(%rip), %zmm13\n"
+    "   vmovdqu32 .Ldouble_u32_x64_high(%rip), %zmm14\n"
+    "41: cmp $16, %r13\n   jb 5b\n"
+    "mov %r11, %r14\n   call 42f\n   vmovdqu64 %zmm9, (%rax)\n   vmovdqu64 %zmm10, 64(%rax)\n"
+    "mov %r12, %r14\n   call 42f\n   vmovdqu64 %zmm9, (%rbx)\n   vmovdqu64 %zmm10, 64(%rbx)\n"
+    "add $64, %r10\n   add $64, %r11\n   add $64, %r12\n   add $128, %rax\n   add $128, %rbx\n   sub $16, %r13\n   jmp 41b\n"
+    "42: vmovdqu64 -4(%r10), %zmm0\n   vpavgb -4(%r14), %zmm0, %zmm3\n   vmovdqu64 (%r10), %zmm1\n   vpavgb (%r14), %zmm1, %zmm4\n"
+    "vmovdqu64 4(%r10), %zmm2\n   vpavgb 4(%r14), %zmm2, %zmm5\n"
+    "vpxord %zmm7, %zmm0, %zmm0\n   vpxord %zmm7, %zmm1, %zmm1\n   vpxord %zmm7, %zmm2, %zmm2\n"
+    "vpxord %zmm7, %zmm3, %zmm3\n   vpxord %zmm7, %zmm4, %zmm4\n   vpxord %zmm7, %zmm5, %zmm5\n"
+    "vpavgb %zmm0, %zmm3, %zmm3\n   vpavgb %zmm1, %zmm4, %zmm4\n   vpavgb %zmm2, %zmm5, %zmm5\n"
+    "vpxord %zmm7, %zmm3, %zmm3\n   vpxord %zmm7, %zmm4, %zmm4\n   vpxord %zmm7, %zmm5, %zmm5\n"
+    "vpavgb %zmm3, %zmm4, %zmm0\n   vpavgb %zmm5, %zmm4, %zmm2\n   vpxord %zmm7, %zmm4, %zmm8\n"
+    "vpxord %zmm7, %zmm0, %zmm0\n   vpxord %zmm7, %zmm2, %zmm2\n   vpavgb %zmm8, %zmm0, %zmm0\n   vpavgb %zmm8, %zmm2, %zmm2\n"
+    "vpxord %zmm7, %zmm0, %zmm0\n   vpxord %zmm7, %zmm2, %zmm2\n"
+    "vmovdqa64 %zmm13, %zmm9\n   vpermi2d %zmm2, %zmm0, %zmm9\n"
+    "vmovdqa64 %zmm14, %zmm10\n   vpermi2d %zmm2, %zmm0, %zmm10\n" ASM_RET
     ASM_END(memory_double_u32)
 
     //
