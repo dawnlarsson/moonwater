@@ -114839,6 +114839,38 @@ static fn check_glass_routines()
                                         laid = laid && !memory_compare(into, want, count * 4);
                                 }
                         }
+                // Every width to 300 at every alignment to 63 words, two rows, apart and in place, against the
+                // reference: the rows, and the words around them, which the reference's bounds hold still.
+                {
+                        static p32 swept_from[2800], swept_copy[2800], swept_into[1000], swept_want[1000];
+                        bool wide = true;
+
+                        for (positive width = 0; width <= 300; width++)
+                                for (positive at = 0; at < 64; at++)
+                                {
+                                        positive pitch = 2 * width + 5, into_pitch = width + 3;
+                                        positive span = 4 * pitch + 64, ispan = 2 * into_pitch + 64;
+
+                                        for (positive i = 0; i < span; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                swept_from[i] = (p32)(state >> 16);
+                                        }
+                                        memory_fill(swept_into, 0x5a, ispan * 4);
+                                        memory_fill(swept_want, 0x5a, ispan * 4);
+                                        glass_halve_reference(swept_want + at, into_pitch, swept_from + at, pitch, width, 2);
+                                        VECTOR_FIRST_CALL(tier == 0);
+                                        memory_halve_u32(swept_into + at, into_pitch, swept_from + at, pitch, width, 2);
+                                        wide = wide && !memory_compare(swept_into, swept_want, ispan * 4);
+
+                                        memory_copy(swept_copy, swept_from, span * 4);
+                                        glass_halve_reference(swept_copy + at, pitch, swept_copy + at, pitch, width, 2);
+                                        VECTOR_FIRST_CALL(tier == 0);
+                                        memory_halve_u32(swept_from + at, pitch, swept_from + at, pitch, width, 2);
+                                        wide = wide && !memory_compare(swept_from, swept_copy, span * 4);
+                                }
+                        check("glass routines: halving every width to 300 at every alignment to 63 words, apart and in place, is the reference", wide);
+                }
                 check("glass routines: halving is the mean of each two by two, rows rounded up and columns down, nothing past it touched", halved);
                 check("glass routines: halving in place at the same pitch is halving apart", in_place);
                 check("glass routines: doubling is three quarters of a pixel and a quarter of its neighbour each way, rounded up and down", doubled);

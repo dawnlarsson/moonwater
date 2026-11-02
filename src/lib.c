@@ -23836,7 +23836,7 @@ __asm__(
     //       contract.
     ASM_FUNC(memory_halve_u32)
     "cbz x4, 9f\n   cbz x5, 9f\n   lsl x1, x1, #2\n   lsl x3, x3, #2\n"
-    "1:  mov x6, x2\n   add x7, x2, x3\n   mov x8, x0\n   mov x9, x4\n"
+    "1:  mov x6, x2\n   add x7, x2, x3\n   mov x8, x0\n   mov x9, x4\n   cmp x9, #8\n   b.hs 5f\n"
     "2:  cmp x9, #4\n   b.lo 3f\n   ld2 {v0.4s, v1.4s}, [x6], #32\n   ld2 {v2.4s, v3.4s}, [x7], #32\n"
     "urhadd v0.16b, v0.16b, v2.16b\n   urhadd v1.16b, v1.16b, v3.16b\n   uhadd v0.16b, v0.16b, v1.16b\n   str q0, [x8], #16\n"
     "sub x9, x9, #4\n   b 2b\n"
@@ -23845,6 +23845,12 @@ __asm__(
     "sub x9, x9, #1\n   b 3b\n"
     "4:  add x0, x0, x1\n   add x2, x2, x3, lsl #1\n   subs x5, x5, #1\n   b.ne 1b\n"
     "9:  " ASM_RET
+    //  Eight pixels a turn, out of line so a row under eight takes the four-pixel loop at its first branch.
+    "5:  ld2 {v0.4s, v1.4s}, [x6], #32\n   ld2 {v4.4s, v5.4s}, [x6], #32\n"
+    "ld2 {v2.4s, v3.4s}, [x7], #32\n   ld2 {v6.4s, v7.4s}, [x7], #32\n"
+    "urhadd v0.16b, v0.16b, v2.16b\n   urhadd v1.16b, v1.16b, v3.16b\n   urhadd v4.16b, v4.16b, v6.16b\n   urhadd v5.16b, v5.16b, v7.16b\n"
+    "uhadd v0.16b, v0.16b, v1.16b\n   uhadd v4.16b, v4.16b, v5.16b\n   str q0, [x8], #16\n   str q4, [x8], #16\n"
+    "sub x9, x9, #8\n   cmp x9, #8\n   b.hs 5b\n   b 2b\n"
     ASM_END(memory_halve_u32)
 
     //       memory_double_u32: four pixels of from a turn, urhadd for the
