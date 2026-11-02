@@ -10575,6 +10575,7 @@ test(set_scans_empty_arguments) {
 test(set_scans_widths_alignments) {
         static p8 buffer[16 + 300 + 8];
         static const p8 sets[][4] = {" \t\n", "a"};
+        positive state = 0x9E3779B97F4A7C15ul;
 
         for (positive which = 0; which < sizeof(sets) / sizeof(sets[0]); which++)
         {
@@ -10583,7 +10584,8 @@ test(set_scans_widths_alignments) {
                         for (positive size = 0; size <= 300; size++)
                         {
                                 p8 *at = buffer + align;
-                                positive run = next() % (size + 1);
+                                XORSHIFT64(state);
+                                positive run = state % (size + 1);
                                 positive length = string_length((string_address)sets[which]);
 
                                 for (positive i = 0; i < size; i++)
