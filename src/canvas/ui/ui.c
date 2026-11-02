@@ -2809,6 +2809,27 @@ static inline fn ui_kit_number_to(struct ui_tween address_to t, b64 value, int m
 }
 
 /*
+        A control's state layer: the ink laid over its face at .06 hovered, .10 pressed and none otherwise (none while off),
+        eased over .2s. ui_kit_layer_to sets its target, ui_kit_layer is its percentage now (0 for none), and
+        ui_kit_layer_fill lays the ink over a box when there is one.
+*/
+static inline fn ui_kit_layer_to(struct ui_control address_to c, b32 off)
+{
+        ui_kit_number_to(&c->layer, off ? 0 : c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
+}
+
+static inline unsigned int ui_kit_layer(struct ui_control address_to c)
+{
+        return (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
+}
+
+static inline fn ui_kit_layer_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int ink, unsigned int layer)
+{
+        if (layer)
+                ui_kit_fill(ui, box, ui_mix(ink, layer, 0), null);
+}
+
+/*
         The ripples of a control in a colour: measured from the top left of
         their clip box (the control's box and the margin round it, x0, y0 in
         device 256ths, as laid out), drawn through the control's transform
@@ -2914,7 +2935,7 @@ static fn ui_button_targets(struct ui_control address_to c)
         }
         ui_kit_colour_to(&c->fill, fill, 200, &ui_ease);
         ui_kit_colour_to(&c->ink, ink, 200, &ui_ease);
-        ui_kit_number_to(&c->layer, c->disabled ? 0 : c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
+        ui_kit_layer_to(c, c->disabled);
 }
 
 // The transform a control is drawn with this frame: scale less one and nudge (device 256ths), about its middle.
@@ -2946,14 +2967,13 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         ui_button_targets(c);
         fill = ui_kit_colour(&c->fill);
         ink = ui_kit_colour(&c->ink);
-        layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
+        layer = ui_kit_layer(c);
         ui_kit_press_transform(ui, c, 1, &sx, &sy, &tx, &ty);
         face = ui_box_transform(face, sx, sy, ox, oy, tx, ty);
         ui_kit_fill(ui, &face, fill, null);
         if (c->variant == UI_BUTTON_OUTLINED && !c->disabled)
                 ui_kit_outline(ui, &face, ui_q8(ui, 1), ui_role(c->focused ? UI_PRIMARY : c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
-        if (layer)
-                ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
+        ui_kit_layer_fill(ui, &face, ink, layer);
         {
                 struct ui_place place = {sx, sy, ox, oy, tx, ty};
 
@@ -2994,7 +3014,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         ui_kit_number_to(&c->scale, c->down ? UI_Q2(110) : c->hover ? UI_Q2(105) : UI_ONE, 150, &ui_ease);
         // A switch's state layer over its row, as a list row's (ui_list_row_draw): the ink at .06 hovered, .10 pressed, .2s.
         if (c->kind == UI_SWITCH)
-                ui_kit_number_to(&c->layer, c->disabled ? 0 : c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
+                ui_kit_layer_to(c, c->disabled);
         if (!c->moved)
                 ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
         label = ui_kit_colour(&c->label_ink);
@@ -3029,10 +3049,7 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         }
         if (c->kind == UI_SWITCH)
         {
-                unsigned int layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
-
-                if (layer)
-                        ui_kit_fill(ui, &clip, ui_mix(ui_role(UI_ON_SURFACE), layer, 0), null);
+                ui_kit_layer_fill(ui, &clip, ui_role(UI_ON_SURFACE), ui_kit_layer(c));
         }
         if (rest_w > 0)
                 ui_kit_fill(ui, &rest, ui_role(UI_CONTROL_OFF), null);
@@ -3497,10 +3514,9 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 // The state layer and the ripple: a tab is a button.
                 if (c->item == item)
                 {
-                        ui_kit_number_to(&c->layer, c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
-                        layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
-                        if (layer)
-                                ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
+                        ui_kit_layer_to(c, 0);
+                        layer = ui_kit_layer(c);
+                        ui_kit_layer_fill(ui, &face, ink, layer);
                         {
                                 struct ui_place place = {dom, UI_ONE, anchor, 0, 0, 0};
                                 struct ui_box pill = ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2);
@@ -3583,10 +3599,9 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                         struct ui_place place = {UI_ONE, dom, 0, anchor, 0, 0};
                         unsigned int layer;
 
-                        ui_kit_number_to(&c->layer, c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
-                        layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
-                        if (layer)
-                                ui_kit_fill(ui, &face, ui_mix(ink, layer, 0), null);
+                        ui_kit_layer_to(c, 0);
+                        layer = ui_kit_layer(c);
+                        ui_kit_layer_fill(ui, &face, ink, layer);
                         {
                                 b64 radius = ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8);
                                 struct ui_box pill = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), radius);
@@ -4131,10 +4146,9 @@ static fn ui_list_row_draw(struct ui address_to ui, struct ui_control address_to
 
         ui_control_row(c, &x, &y, &w, &h);
         row = (struct ui_box){ui_q8(ui, x), ui_q8(ui, y), ui_q8(ui, x + w), ui_q8(ui, y + h), 0, 0};
-        ui_kit_number_to(&c->layer, c->disabled ? 0 : c->down ? UI_Q2(10) : c->hover ? UI_Q2(6) : 0, 200, &ui_ease);
-        layer = (unsigned int)((ui_kit_tween(&c->layer) * 100 + UI_HALF) >> UI_Q);
-        if (layer)
-                ui_kit_fill(ui, &row, ui_mix(ui_role(UI_ON_SURFACE), layer, 0), null);
+        ui_kit_layer_to(c, c->disabled);
+        layer = ui_kit_layer(c);
+        ui_kit_layer_fill(ui, &row, ui_role(UI_ON_SURFACE), layer);
         ui_kit_ripples(ui, c, row.x0, row.y0, &place, &row, ui_role(UI_PRIMARY));
 }
 
