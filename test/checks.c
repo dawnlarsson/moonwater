@@ -121719,6 +121719,63 @@ static void check_compositor_snap_closing(void)
           !compositor.assist_armed && !compositor.assist_on && compositor.assist_count == 0);
 }
 
+/*
+        A window arranged or floated glides from the rectangle it had to the one it has: at its first present it is where it
+        was, in the middle of COMPOSITOR_GLIDE_NS it is between the two, and at the end of it it is at the rectangle exactly,
+        and the glide is over (so the loop is idle). Reduced motion snaps: no glide at all, and the rectangle at once.
+*/
+static void check_compositor_glide(void)
+{
+    struct compositor_frame frame;
+    positive now;
+    int was_x, was_w, mid_x, mid_w;
+
+    if (!layout_table_map(256))
+    {
+        check("glide: the table is mapped", false);
+        return;
+    }
+    layout_setup(256, 1);
+    compositor.table->motion = 0;
+    layout_show(1, 40, 40, 100, 100); /* not under the least a window is, which a floated window is never asked for */
+    compositor.stack[0] = 1, compositor.stacked = 1;
+
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    compositor_frame_of(1, &frame);
+    was_x = frame.x, was_w = frame.width;
+    check("glide: an arranged window starts from the rectangle it had, and is drawn there at its first present",
+          compositor.glide[1] && compositor.glide_from[1][0] == 40 && compositor.glide_from[1][2] == 100 && was_x == 40 && was_w == 100);
+
+    now = clock_monotonic_nanoseconds();
+    compositor.glide_at[1] = now - COMPOSITOR_GLIDE_NS / 2;
+    compositor_frame_of(1, &frame);
+    mid_x = frame.x, mid_w = frame.width;
+    check("glide: half way through it is between the two rectangles, moving from 40 toward 0 and growing from 100 toward 128",
+          mid_x > 0 && mid_x < 40 && mid_w > 100 && mid_w < 128);
+
+    compositor.glide_at[1] = now - COMPOSITOR_GLIDE_NS - 1;
+    compositor_glide_keep();
+    compositor_frame_of(1, &frame);
+    check("glide: at its end it is at the rectangle it has, exactly, and the glide is over",
+          !compositor.glide[1] && frame.x == 0 && frame.y == 0 && frame.width == 128 && frame.height == 256);
+
+    compositor_float(1);
+    compositor_frame_of(1, &frame);
+    check("glide: floated back, it glides from the tile to its own rectangle, starting on the tile",
+          compositor.glide[1] && frame.x == 0 && frame.width == 128);
+    compositor.glide_at[1] = now - COMPOSITOR_GLIDE_NS - 1;
+    compositor_glide_keep();
+    compositor_frame_of(1, &frame);
+    check("glide: floated back, it ends on its own rectangle exactly", !compositor.glide[1] && frame.x == 40 && frame.width == 100);
+
+    compositor.table->motion = 1;
+    compositor_arrange(1, COMPOSITOR_RIGHT);
+    compositor_frame_of(1, &frame);
+    check("glide: reduced motion snaps: no glide, and the window is at its rectangle at once",
+          !compositor.glide[1] && frame.x == 128 && frame.width == 128);
+    compositor.table->motion = 0;
+}
+
 static void check_compositor_wheel(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -137831,6 +137888,7 @@ b32 main()
         check_compositor_tile_line();
         check_compositor_snap_cover();
         check_compositor_snap_closing();
+        check_compositor_glide();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
         check_compositor_touch();
