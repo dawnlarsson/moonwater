@@ -125201,6 +125201,32 @@ static fn check_display_section(void)
                 settings.map.display = settings.map.drag = -1;
         }
 
+        // The empty states, read plainly: no screen, one screen (its rows are words, not menus), one rate, and no rate at all.
+        {
+                struct ui_row row;
+
+                memory_zero(&table, sizeof(table));
+                settings.map.display = -1;
+                check("display section: with no screen the map's caption says so", string_equals((string_address)settings_map_hint(0), (string_address) "No screen is connected."));
+                memory_zero(&row, sizeof(row));
+                settings_describe_output(screen_row, &row);
+                check("display section: with no screen the Screen row says so, in words", string_equals((string_address)row.value, (string_address) "No screen is connected"));
+                table.outputs = 1, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+                table.output_w[0] = 1920, table.output_h[0] = 1080, table.output_rates[0] = 1, table.output_hz[0][0] = 60, table.output_now[0] = 60;
+                memory_copy(table.output_name[0], "DP-1", 5);
+                check("display section: with one screen the map's caption says so", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
+                memory_zero(&row, sizeof(row));
+                settings_describe_output(screen_row, &row);
+                check("display section: with one screen the Screen row is words, not a menu", row.kind == UI_ROW_PLAIN && string_equals((string_address)row.value, (string_address) "Screen 1: DP-1"));
+                memory_zero(&row, sizeof(row));
+                settings_describe_output(refresh_row, &row);
+                check("display section: a screen with one rate shows it in words, not a menu", row.kind == UI_ROW_PLAIN && string_equals((string_address)row.value, (string_address) "60 Hz (recommended)"));
+                table.output_rates[0] = 0;
+                memory_zero(&row, sizeof(row));
+                settings_describe_output(refresh_row, &row);
+                check("display section: a screen that lists no rate says so, in words", string_equals((string_address)row.value, (string_address) "The screen lists no rates"));
+        }
+
         settings.own.table = saved;
         settings.map.display = -1;
 }

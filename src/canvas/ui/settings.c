@@ -1428,8 +1428,16 @@ static int settings_map_at(int px, int py, const struct settings_screen address_
         return -1;
 }
 
+// The caption under the map, which says what the map does now: how to move a screen, that a drag is let go to place it, or
+// that there is nothing to move (no screen, or one screen, which has nothing to be moved against).
+static const char address_to settings_map_hint(unsigned int count)
+{
+        return settings.map.drag >= 0 ? "Let go to place the screen" : !count ? "No screen is connected."
+               : count == 1           ? "Only one screen is connected." : "Drag a screen to move it.";
+}
+
 // The panel, its screens drawn to fit it (a drag shows the screen where it would be let go), each one's number, and the
-// caption under the panel. Nothing is drawn but the panel's words when the table lists no screen.
+// caption under the panel (settings_map_hint). With no screen the panel is empty and the caption says why.
 static void settings_map_draw(struct ui address_to ui)
 {
         struct settings_screen screens[WINDOWS_OUTPUTS];
@@ -1437,12 +1445,9 @@ static void settings_map_draw(struct ui address_to ui)
         unsigned int count = settings_map_load(screens, number);
         int radius = ui_px(ui, SETTINGS_MAP_RADIUS), pad = ui_px(ui, UI_INSET), line = ui_px(ui, ui_types[UI_LABEL_MEDIUM].line);
         int caption = settings.map.y + settings.map.h + ui_px(ui, SETTINGS_MAP_GAP);
-        const char address_to hint = settings.map.drag >= 0 ? "Let go to place the screen" : "Drag a screen to move it.";
+        const char address_to hint = settings_map_hint(count);
 
         ui_round(ui, settings.map.x, settings.map.y, settings.map.w, settings.map.h, radius, ui_role(UI_SURFACE_LOW) | 0xff000000u);
-        if (!count)
-                ui_kit_text(ui, settings.map.field_x + pad, ui_kit_baseline(ui, settings.map.field_y + pad, UI_LABEL_MEDIUM), (string_address) "No screens",
-                            UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
         for (unsigned int at = 0; count && at < count; at++)
         {
                 struct settings_map_view view;
@@ -1486,7 +1491,7 @@ static fn settings_layout(void)
                 settings.list.damaged = settings_changed;
                 settings.list.empty = "Nothing matches what is typed";
                 settings.list.hover = settings.list.down = -1;
-        settings.map.display = settings.map.drag = -1;
+                settings.map.display = settings.map.drag = -1;
                 for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
                 {
                         if (k)
@@ -2968,14 +2973,17 @@ static void settings_describe_output(int id, struct ui_row address_to row)
         }
         if (chosen < 0)
         {
-                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "No screens";
+                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "No screen is connected";
                 return;
         }
+        // A screen with no rate to choose says so, and a screen with one rate has nothing to choose either: a word, not a menu.
         if (output == SETTINGS_OUT_REFRESH && !settings_rates_of(chosen))
         {
-                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "Not changeable";
+                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "The screen lists no rates";
                 return;
         }
+        if ((output == SETTINGS_OUT_REFRESH && settings_rates_of(chosen) == 1) || (output == SETTINGS_OUT_SCREEN && settings_map_count() == 1))
+                row->kind = UI_ROW_PLAIN;
         row->value = settings_row_text(id, chosen);
 }
 
