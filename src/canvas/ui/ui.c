@@ -1611,7 +1611,11 @@ static b64 ui_slide_land(struct ui_slide address_to s, b64 now, b32 address_to l
 
 #include "theme.h"
 
-#define UI_READABLE 450 // the kit's threshold for text on a ground: WCAG's 4.5:1, in hundredths (ui_contrast, theme.h)
+/*
+        The kit's threshold for text on a glass ground, in hundredths (ui_contrast, theme.h): WCAG's 4.5:1 and 0.2 more, kept
+        for the compositor's grain, which moves a glass ground up to three levels a pixel (a 4.5:1 fill came out at 4.46:1).
+*/
+#define UI_READABLE 470
 #define UI_GLASS_GROUND 0x101012u // a glass window's ground before the compositor has tinted one: a dark glass's
 
 /*
@@ -1715,8 +1719,8 @@ static unsigned int ui_text_colour(const struct ui address_to ui, int role)
 /*
         A glass well's percent: the most of the ink that can be laid over the ground and still have the ink stand out
         UI_READABLE from what the well comes to. The ink is what the well's text is drawn in (ui_text_colour), so a well
-        is never darker than that allows; a dark glass at its brightest (92 a channel) takes an 8% well, a light one at its
-        dimmest (180) 31%, and the
+        is never darker than that allows; a dark glass at its brightest (92 a channel) takes a 6% well, a light one at its
+        dimmest (180) 29%, and the
         glass at 0 is the ink's own contrast, which always passes. Monotone in percent, so a search finds the most.
 */
 static unsigned int ui_glass_well(const struct ui address_to ui, unsigned int percent)
@@ -5601,7 +5605,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 if (item->keys)
                         ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale - ui_kit_measure(ui, (string_address)item->keys, UI_BODY_MEDIUM), baseline,
                                     (string_address)item->keys, UI_BODY_MEDIUM,
-                                    (alpha << 24) | (ui_text_colour(ui, UI_ON_SURFACE_VARIANT) & 0xffffffu), 0);
+                                    (alpha << 24) | ((ui->glass && at == m->hot ? ink : ui_text_colour(ui, UI_ON_SURFACE_VARIANT)) & 0xffffffu), 0);
                 if (item->flags & UI_MENU_SUBMENU)
                         ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale, baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
                                     (alpha << 24) | (ink & 0xffffffu), 0);
@@ -6360,6 +6364,10 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ui_kit_fill(ui, &box, ui_well(ui, UI_SECONDARY_CONTAINER, 36), null);
                 if (l->keys && !ui->glass)
                         ui_kit_outline(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY));
+                // A glass row the keys are on is lit by a well of the ink, and the quiet ink stands out from the glass only:
+                // its quiet words are the ink too, which stands out from the well (ui_glass_well).
+                if (ui->glass)
+                        quiet = ink;
         }
         // The row's own control: a switch is its row's (the kit's switch is a row), any other row the list's row.
         if (own)

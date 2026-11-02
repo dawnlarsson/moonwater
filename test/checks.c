@@ -119198,9 +119198,10 @@ static void check_compositor_look(void)
 
     /*
         The glass's text, every side and every mean the compositor can tint a glass window to (steps of 15 in each
-        channel): the ink, the quiet ink and the ink on each glass well stand out 4.5:1 (the kit's readable threshold,
-        450 in hundredths) from the ground. Before the fix the quiet ink fell to 3.5:1 on the dark glass at its brightest
-        and 4.1:1 on the light glass at its dimmest, and the ink on a 40% well to 2.5:1 on the dark and 3.8:1 on the light.
+        channel): the ink, the quiet ink and the ink on each glass well stand out UI_READABLE (4.7:1: the kit's 4.5:1 with
+        a margin for the compositor's grain) from the ground. Before the fix the quiet ink fell to 3.5:1 on the dark glass at
+        its brightest and 4.1:1 on the light glass at its dimmest, and the ink on a 40% well to 2.5:1 on the dark and 3.8:1
+        on the light.
     */
     {
         static const unsigned int percents[] = {16, 24, 36, 40};
@@ -119218,17 +119219,17 @@ static void check_compositor_look(void)
 
                         ui_inks(&probe, ground);
                         tried++;
-                        short_ink += ui_contrast(probe.ink, ground) < 450;
-                        short_quiet += ui_contrast(probe.quiet, ground) < 450;
+                        short_ink += ui_contrast(probe.ink, ground) < UI_READABLE;
+                        short_quiet += ui_contrast(probe.quiet, ground) < UI_READABLE;
                         for (unsigned int k = 0; k < sizeof(percents) / sizeof(percents[0]); k++)
                         {
                             unsigned int well = ui_well(&probe, UI_SECONDARY_CONTAINER, percents[k]);
                             unsigned int alpha = (well >> 24) + ((well >> 24) >> 7);
 
-                            short_well += ui_contrast(probe.ink, window_mix(ground, probe.ink, alpha)) < 450;
+                            short_well += ui_contrast(probe.ink, window_mix(ground, probe.ink, alpha)) < UI_READABLE;
                         }
                     }
-        check("look: on glass the ink, the quiet ink and the ink on each well stand out 4.5:1 from the ground at every tint",
+        check("look: on glass the ink, the quiet ink and the ink on each well stand out UI_READABLE from the ground at every tint",
               tried > 0 && short_ink == 0 && short_quiet == 0 && short_well == 0);
     }
 
