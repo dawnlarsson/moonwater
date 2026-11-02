@@ -119521,6 +119521,80 @@ static void check_compositor_popup_press(b32 touch)
 }
 
 /*
+        A menu is not resized. Just outside its left edge, where a window's grip is (a pointer's, and a finger's wider one), the
+        menu's edge is no grip and no resize: the edge answers no resize and shows no indicator, and a press there asks the
+        menu to go and goes no further, to the window beneath, which takes neither the press nor the focus.
+*/
+static void check_compositor_popup_grip(b32 touch)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    int tab = COMPOSITOR_NONE;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 1;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("popup grip: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+
+    // A menu of row 3 for row 1 at 10 pixels in from the window's top left: on the screen 60 to 120 by 40 to 80.
+    table->popup_parent[3] = 2;
+    table->popup_x[3] = 10;
+    table->popup_y[3] = 10;
+    table->popup_w[3] = 0;
+    table->popup_h[3] = 0;
+    table->popup_flags[3] = WINDOW_POPUP_POINT;
+    table->width[3] = 60;
+    table->height[3] = 40;
+    table->glass[3] = WINDOW_NO_CLOSE;
+    glass_paint(3, 0, 0, 60, 40, 0x303030, true);
+    compositor_present();
+
+    // The band just outside the menu's left edge, inside window 1: a finger's grip reaches further out than a pointer's.
+    compositor.touching = touch;
+    compositor.pointer_x = touch ? 52 : 57;
+    compositor.pointer_y = 60;
+    if (touch)
+        check("popup grip: a finger just outside a menu's edge is no grip of it",
+              compositor_edge_zone(3, compositor.pointer_x, compositor.pointer_y) == 0);
+    else
+        check("popup grip: a pointer just outside a menu's edge is no grip of it",
+              compositor_edge_zone(3, compositor.pointer_x, compositor.pointer_y) == 0);
+    check("popup grip: what is there is the window beneath's picture, not the menu's",
+          compositor_under(compositor.pointer_x, compositor.pointer_y, &tab) == 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    if (touch)
+        check("popup grip: a finger there asks the menu to go", (table->state[3] & WINDOW_CLOSING) != 0);
+    else
+        check("popup grip: a press there asks the menu to go", (table->state[3] & WINDOW_CLOSING) != 0);
+    check("popup grip: and it is no resize of the window beneath, nor a grab or a focus change",
+          compositor.resize < 0 && compositor.grab == COMPOSITOR_NONE && compositor.focus == 1 && compositor.lit_edges == 0);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor.touching = 0;
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+}
+
+/*
         A glass menu is composed as glass (compositor_glass_pass): where its picture is clear it shows what is under it, tinted
         and blurred, and where it is drawn it is its own colour. A menu's edge has no line: the window beneath is what is
         outside it.
@@ -135993,6 +136067,8 @@ b32 main()
         check_compositor_popup();
         check_compositor_popup_press(0);
         check_compositor_popup_press(1);
+        check_compositor_popup_grip(0);
+        check_compositor_popup_grip(1);
         check_compositor_glass_popup();
         check_compositor_tray();
         check_compositor_place();

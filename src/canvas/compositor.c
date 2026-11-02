@@ -7923,6 +7923,10 @@ static int compositor_screen_of(int row)
 // and past it -- and which edges.
 static unsigned int compositor_edge_zone(int row, int x, int y)
 {
+        // A menu is not resized: its edges are no grip, for a pointer or a finger, and draw no indicator (none of
+        // what is outside it is the menu's to take).
+        if (compositor_popup_parent[row] >= 0)
+                return 0;
         // A finger's are wider (COMPOSITOR_TOUCH_GRIP), its corners further along each edge, and its top a pointer's.
         int touch = compositor.touching;
         int grip = (touch ? COMPOSITOR_TOUCH_GRIP : COMPOSITOR_GRIP) * compositor.scale + compositor_line(row);
@@ -8078,7 +8082,8 @@ static int compositor_meets(int row, unsigned int edge)
         {
                 int ox = compositor.x[other], oy = compositor.y[other], ow = (int)compositor.w[other], oh = (int)compositor.h[other];
 
-                if (other == row || !compositor_visible(other))
+                // A menu is no window of the edge it lies against: nothing is shared with it.
+                if (other == row || !compositor_visible(other) || compositor_popup_parent[other] >= 0)
                         continue;
                 if (vertical ? oy != y || oh != h : ox != x || ow != w)
                         continue;
