@@ -4313,7 +4313,10 @@ static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb)
 static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         int role = c->role, width = ui_kit_measure(ui, (string_address)c->label, UI_LABEL_MEDIUM), dot = c->on ? 2 * UI_DOT : 0;
-        unsigned int fill = role == UI_PRIMARY ? ui_role(UI_PRIMARY_CONTAINER) : role < 0 ? 0 : ui_role(role + 1);
+        // A role's container is the next role, except the error's: its on-colour is laid before its container (role + 2).
+        unsigned int fill = role == UI_PRIMARY ? ui_role(UI_PRIMARY_CONTAINER)
+                            : role < 0         ? 0
+                                               : ui_role(role == UI_ERROR ? UI_ERROR_CONTAINER : role + 1);
         unsigned int ink = role == UI_PRIMARY ? ui_role(UI_ON_PRIMARY_CONTAINER) : role < 0 ? ui_role(UI_ON_SURFACE_VARIANT) : ui_role(role);
         struct ui_box box;
 
@@ -4444,8 +4447,10 @@ static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to 
 static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         int role = c->role;
-        unsigned int fill = role ? ui_role(role == UI_PRIMARY ? UI_PRIMARY_CONTAINER : role + 1) : ui_role(UI_SURFACE_LOW);
-        unsigned int ink = role ? ui_role(role == UI_PRIMARY ? UI_ON_PRIMARY_CONTAINER : role + 2) : ui_role(UI_ON_SURFACE_VARIANT);
+        unsigned int fill = role ? ui_role(role == UI_PRIMARY ? UI_PRIMARY_CONTAINER : role == UI_ERROR ? UI_ERROR_CONTAINER : role + 1)
+                                 : ui_role(UI_SURFACE_LOW);
+        unsigned int ink = role ? ui_role(role == UI_PRIMARY ? UI_ON_PRIMARY_CONTAINER : role == UI_ERROR ? UI_ON_ERROR_CONTAINER : role + 2)
+                                : ui_role(UI_ON_SURFACE_VARIANT);
         unsigned int line = role ? ui_mix(ui_role(role), 28, ui_role(UI_OUTLINE_VARIANT)) : ui_role(UI_OUTLINE_VARIANT);
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(14));
 
