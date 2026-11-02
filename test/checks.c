@@ -141130,6 +141130,110 @@ static void check_compositor_displays(void) {
       co_check(quarter[2][1]==3&&quarter[0][0]==0&&quarter[0][1]==0&&quarter[1][0]==0&&quarter[1][1]==0&&quarter[2][0]==0); }
 }
 
+/* The `canvas display` verb's work on the displays file: each word judged as the reader judges its field, and a run of
+   changes to one file, each keeping every other line as it was, changing only the named field, dropping a screen left
+   with nothing set, and reading back to the same settings. */
+static void check_compositor_display_verb(void) {
+    static const char start[]="HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 x=-10 y=20 rotation=180\nbad_name x=1 y=2\n";
+    struct windows_display change, list[WINDOWS_DISPLAYS];
+    char file[1024], next[1024], big[1024], few[10];
+    size_t size = 0;
+    int value, made;
+    unsigned int n;
+
+    /* The words: rotation 0, 90, 180 or 270 and no other; refresh preferred or 1 to 1000 (0 is no rate); a place to 32768 either way. */
+    co_check(windows_display_value(WINDOWS_DISPLAY_ROTATION,"90",2,&value)&&value==90);
+    co_check(windows_display_value(WINDOWS_DISPLAY_ROTATION,"0",1,&value)&&value==0);
+    co_check(!windows_display_value(WINDOWS_DISPLAY_ROTATION,"45",2,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_ROTATION,"left",4,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_ROTATION,"-90",3,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_ROTATION,"",0,&value));
+    co_check(windows_display_value(WINDOWS_DISPLAY_REFRESH,"preferred",9,&value)&&value==0);
+    co_check(windows_display_value(WINDOWS_DISPLAY_REFRESH,"60",2,&value)&&value==60);
+    co_check(windows_display_value(WINDOWS_DISPLAY_REFRESH,"1000",4,&value)&&value==1000);
+    co_check(!windows_display_value(WINDOWS_DISPLAY_REFRESH,"0",1,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_REFRESH,"1001",4,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_REFRESH,"Preferred",9,&value));
+    co_check(windows_display_value(WINDOWS_DISPLAY_X,"-32768",6,&value)&&value==-32768);
+    co_check(!windows_display_value(WINDOWS_DISPLAY_X,"32769",5,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_Y,"4x",2,&value));
+    co_check(!windows_display_value(WINDOWS_DISPLAY_Y,"",0,&value));
+
+    /* Virtual-1, which the file does not have, is turned to 270: its line comes last, every other line is as it was. */
+    memset(&change,0,sizeof(change));
+    change.rotation=270;
+    made=windows_displays_set(file,sizeof(file),start,"Virtual-1",WINDOWS_DISPLAY_ROTATION,&change);
+    co_check(made>0&&made==(int)strlen(file)&&!strcmp(file,"HDMI-A-1 rotation=90 refresh=60\n\nVirtual-2 x=-10 y=20 rotation=180\nbad_name x=1 y=2\nVirtual-1 rotation=270 refresh=preferred\n"));
+
+    /* HDMI-A-1 goes to its preferred rate: its rotation stays, and its line stays where it was. */
+    memset(&change,0,sizeof(change));
+    made=windows_displays_set(next,sizeof(next),file,"HDMI-A-1",WINDOWS_DISPLAY_REFRESH,&change);
+    co_check(made>0&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=preferred\n\nVirtual-2 x=-10 y=20 rotation=180\nbad_name x=1 y=2\nVirtual-1 rotation=270 refresh=preferred\n"));
+    strcpy(file,next);
+
+    /* Virtual-2 is placed at 5,6: its turn stays, and both of its place's numbers are written. */
+    memset(&change,0,sizeof(change));
+    change.x=5; change.y=6;
+    made=windows_displays_set(next,sizeof(next),file,"Virtual-2",WINDOWS_DISPLAY_X|WINDOWS_DISPLAY_Y,&change);
+    co_check(made>0&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=preferred\n\nVirtual-2 rotation=180 refresh=preferred x=5 y=6\nbad_name x=1 y=2\nVirtual-1 rotation=270 refresh=preferred\n"));
+    strcpy(file,next);
+
+    /* Virtual-1 turned back to 0 with nothing else set is a screen with nothing set: its line goes. */
+    memset(&change,0,sizeof(change));
+    made=windows_displays_set(next,sizeof(next),file,"Virtual-1",WINDOWS_DISPLAY_ROTATION,&change);
+    co_check(made>0&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=preferred\n\nVirtual-2 rotation=180 refresh=preferred x=5 y=6\nbad_name x=1 y=2\n"));
+    strcpy(file,next);
+
+    /* Virtual-2 turned to 90 keeps its place. */
+    memset(&change,0,sizeof(change));
+    change.rotation=90;
+    made=windows_displays_set(next,sizeof(next),file,"Virtual-2",WINDOWS_DISPLAY_ROTATION,&change);
+    co_check(made>0&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=preferred\n\nVirtual-2 rotation=90 refresh=preferred x=5 y=6\nbad_name x=1 y=2\n"));
+    strcpy(file,next);
+
+    /* HDMI-A-1 turned to 180 in the file that has its refresh at 60 keeps the 60. */
+    memset(&change,0,sizeof(change));
+    change.rotation=180;
+    made=windows_displays_set(next,sizeof(next),start,"HDMI-A-1",WINDOWS_DISPLAY_ROTATION,&change);
+    co_check(made>0&&!strcmp(next,"HDMI-A-1 rotation=180 refresh=60\n\nVirtual-2 x=-10 y=20 rotation=180\nbad_name x=1 y=2\n"));
+
+    /* Read back, the file gives the same settings, and a write of them is the lines that have a setting. */
+    n=windows_displays_read(file,list,WINDOWS_DISPLAYS);
+    co_check(n==3&&!strcmp(list[0].name,"HDMI-A-1")&&list[0].rotation==90&&list[0].refresh==0&&!list[0].placed&&list[0].bad==0);
+    co_check(!strcmp(list[1].name,"Virtual-2")&&list[1].rotation==90&&list[1].refresh==0&&list[1].placed&&list[1].x==5&&list[1].y==6&&list[1].bad==0);
+    co_check(list[2].name[0]==0&&list[2].bad==WINDOWS_DISPLAY_NAME);
+    made=windows_displays_write(next,sizeof(next),list,n);
+    co_check(made>0&&!strcmp(next,"HDMI-A-1 rotation=90 refresh=preferred\nVirtual-2 rotation=90 refresh=preferred x=5 y=6\n"));
+
+    /* A name that is no connector's, a room too small, and a file of 32 screens without the one named are refused. */
+    memset(&change,0,sizeof(change));
+    change.rotation=180;
+    co_check(windows_displays_set(next,sizeof(next),file,"",WINDOWS_DISPLAY_ROTATION,&change)==-1);
+    co_check(windows_displays_set(next,sizeof(next),file,"Virtual-1@",WINDOWS_DISPLAY_ROTATION,&change)==-1);
+    co_check(windows_displays_set(next,sizeof(next),file,"ABCDEFGHIJKLMNOP",WINDOWS_DISPLAY_ROTATION,&change)==-1);
+    co_check(windows_displays_set(few,sizeof(few),file,"Virtual-2",WINDOWS_DISPLAY_ROTATION,&change)==-1);
+    for (int each = 0; each < WINDOWS_DISPLAYS; each++)
+        size += (size_t)snprintf(big + size, sizeof(big) - size, "S-%d rotation=90\n", each);
+    co_check(windows_displays_set(next,sizeof(next),big,"Virtual-9",WINDOWS_DISPLAY_ROTATION,&change)==-1);
+    made=windows_displays_set(next,sizeof(next),big,"S-5",WINDOWS_DISPLAY_ROTATION,&change);
+    co_check(made>0&&strstr(next,"S-4 rotation=90\nS-5 rotation=180 refresh=preferred\nS-6 rotation=90\n")!=0&&!strstr(next,"S-5 rotation=90"));
+
+    /* An empty file takes a setting as its only line, and a default write of an empty file is no line at all. */
+    memset(&change,0,sizeof(change));
+    change.rotation=90;
+    made=windows_displays_set(next,sizeof(next),"","Virtual-1",WINDOWS_DISPLAY_ROTATION,&change);
+    co_check(made>0&&!strcmp(next,"Virtual-1 rotation=90 refresh=preferred\n"));
+    memset(&change,0,sizeof(change));
+    made=windows_displays_set(next,sizeof(next),"","Virtual-1",WINDOWS_DISPLAY_ROTATION,&change);
+    co_check(made==0&&next[0]==0);
+
+    /* A screen given twice: the first line takes the change, the later one goes, and the other lines are as they were. */
+    memset(&change,0,sizeof(change));
+    change.refresh=60;
+    made=windows_displays_set(next,sizeof(next),"eDP-1 rotation=90\nVirtual-2 x=0 y=0\neDP-1 rotation=180\n","eDP-1",WINDOWS_DISPLAY_REFRESH,&change);
+    co_check(made>0&&!strcmp(next,"eDP-1 rotation=90 refresh=60\nVirtual-2 x=0 y=0\n"));
+}
+
 static void check_compositor_outputs(void) {
     char name[WINDOWS_OUTPUT_NAME];
     int rects[WINDOWS_OUTPUTS][4];
@@ -141595,6 +141699,7 @@ int main(void) {
     check_compositor_pointer();
     check_compositor_outputs();
     check_compositor_displays();
+    check_compositor_display_verb();
     check_compositor_scene();
     check_compositor_touch_backend();
     printf("  canvas-cells %u of %u\n",checks,checks);

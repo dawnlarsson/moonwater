@@ -1387,6 +1387,107 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
 }
 
 /*
+        A word a `canvas display` gives one field of a screen, judged as windows_displays_read judges that field of the
+        file: rotation is 0, 90, 180 or 270; refresh is preferred (into is 0) or a whole number of Hz from 1 to
+        WINDOWS_DISPLAY_HZ; a place's X or Y is a whole number within WINDOWS_PLACE_MOST. Answers whether it is one.
+*/
+static int windows_display_value(unsigned int field, const char *word, unsigned int length, int *into)
+{
+        int value = 0;
+
+        if (field == WINDOWS_DISPLAY_REFRESH && length == 9 && windows_name_is("preferred", word, 9))
+        {
+                *into = 0;
+                return 1;
+        }
+        if (field == WINDOWS_DISPLAY_ROTATION)
+        {
+                if (!windows_display_number(word, length, 0, 3, &value) ||
+                    (value != 0 && value != 90 && value != 180 && value != 270))
+                        return 0;
+        }
+        else if (field == WINDOWS_DISPLAY_REFRESH)
+        {
+                if (!windows_display_number(word, length, 0, 4, &value) || value < 1 || value > (int)WINDOWS_DISPLAY_HZ)
+                        return 0;
+        }
+        else if (!windows_display_number(word, length, 1, 6, &value) || value > WINDOWS_PLACE_MOST ||
+                 value < -WINDOWS_PLACE_MOST)
+                return 0;
+        *into = value;
+        return 1;
+}
+
+/*
+        The displays file (text, NUL-ended) with one screen's setting changed. field is the bit it changes:
+        WINDOWS_DISPLAY_ROTATION, WINDOWS_DISPLAY_REFRESH, or X and Y together for the place, and change holds the new
+        value in its rotation, refresh, or x and y. The screen keeps its other fields: its line is the one
+        windows_displays_read takes for it, changed and written by windows_displays_write, so a screen the file did not
+        have gets a line of that field alone. Every other line is copied as it is, with a newline where the file had
+        none, and a later line of the same screen is dropped, as the reader takes only the first. A screen left with
+        nothing set has no line. Answers the bytes written into (NUL-ended), or -1 when name is not a connector's, the
+        file names more screens than the reader holds without this one, or the bytes do not fit.
+*/
+static int windows_displays_set(char *into, unsigned int room, const char *text, const char *name, unsigned int field,
+                                const struct windows_display *change)
+{
+        struct windows_display list[WINDOWS_DISPLAYS], screen;
+        const struct windows_display *found;
+        unsigned int name_length = 0, count, made, at = 0, start = 0, done = 0;
+        char line[128];
+
+        if (!room)
+                return -1;
+        into[0] = 0;
+        screen = (struct windows_display){0};
+        while (name_length < WINDOWS_OUTPUT_NAME && name[name_length])
+                name_length++;
+        if (!windows_display_name(name, name_length, screen.name))
+                return -1;
+        count = windows_displays_read(text, list, WINDOWS_DISPLAYS);
+        found = windows_display_of(list, count, name, name_length);
+        if (!found && count == WINDOWS_DISPLAYS)
+                return -1;
+        if (found)
+                screen = *found;
+        screen.bad = 0;
+        if (field & WINDOWS_DISPLAY_ROTATION)
+                screen.rotation = change->rotation;
+        if (field & WINDOWS_DISPLAY_REFRESH)
+                screen.refresh = change->refresh;
+        if (field & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y))
+                screen.placed = 1, screen.x = change->x, screen.y = change->y;
+        made = windows_displays_write(line, sizeof(line), &screen, 1);
+
+        while (text[start])
+        {
+                unsigned int stop = start, word, word_end;
+
+                while (text[stop] && text[stop] != '\n')
+                        stop++;
+                word = start;
+                while (word < stop && (text[word] == ' ' || text[word] == '\t'))
+                        word++;
+                word_end = word;
+                while (word_end < stop && text[word_end] != ' ' && text[word_end] != '\t')
+                        word_end++;
+                if (word_end - word == name_length && windows_name_is(name, text + word, name_length))
+                {
+                        if (!done && made && !windows_put(into, room, &at, line, made))
+                                return -1;
+                        done = 1;
+                }
+                else if (!windows_put(into, room, &at, text + start, stop - start) ||
+                         !windows_put(into, room, &at, "\n", 1))
+                        return -1;
+                start = stop + (text[stop] == '\n');
+        }
+        if (!done && made && !windows_put(into, room, &at, line, made))
+                return -1;
+        return (int)at;
+}
+
+/*
         The arrangement the compositor lays, with each display's place put in
         it. The arrangement's words stay as they are, except that a placed
         display's word (NAME@X,Y) takes the display's place where the

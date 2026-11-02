@@ -5438,6 +5438,7 @@ static b32 locale_canvas_setting(string_address address_to arguments, positive c
 static b32 locale_canvas_cursor(string_address address_to arguments, positive count);
 static b32 locale_canvas_windows(string_address address_to arguments, positive count);
 static b32 locale_canvas_arrange(string_address address_to arguments, positive count);
+static b32 locale_canvas_display(string_address address_to arguments, positive count);
 
 /*
         Canvas off: every window closes and the console is the text one. What `moonwater desktop off` does after it has
@@ -5530,6 +5531,7 @@ static b32 host_canvas_on(void)
 }
 
 /* moonwater canvas [scale [N|auto]|modes [largest|preferred]|arrange [NAME[@X,Y|@off]...|default]|
+   display NAME rotation DEGREES|refresh HZ|preferred|place X Y|
    background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
@@ -5547,6 +5549,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return locale_canvas_windows(arguments, count);
         if (count >= 3 && string_equals(arguments[2], "arrange"))
                 return locale_canvas_arrange(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "display"))
+                return locale_canvas_display(arguments, count);
 
         return_if(count > 3, host_usage());
 
@@ -21211,6 +21215,129 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         if (failed < 0)
                 return host_fail("canvas arrange", failed);
         return locale_canvas_arrange_status();
+}
+
+#define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred or NAME place X Y\n"
+#define LOCALE_CANVAS_DISPLAYS SETTING_CANVAS_DISPLAYS_PATH
+
+/*
+        moonwater canvas display NAME rotation DEGREES, NAME refresh HZ|preferred or NAME place X Y: one screen's setting
+        in /root/canvas.displays, which the compositor watches and applies as the file is written. DEGREES is 0, 90, 180
+        or 270; HZ is a whole number from 1 to 1000, or preferred for the screen's own rate; X and Y are whole numbers of
+        pixels, as canvas arrange's places are. NAME is the connector's (Virtual-1, HDMI-A-1, eDP-1). Only that field of
+        that screen changes, and every other line of the file is kept as it is (windows_displays_set). The words are
+        judged before root is asked for, as canvas arrange's are; the file is read and written under the settings lock.
+*/
+static b32 locale_canvas_display(string_address address_to arguments, positive count)
+{
+        struct windows_display change;
+        char name[WINDOWS_OUTPUT_NAME], out[4096];
+        p8 text[4096];
+        unsigned int field;
+        bool rotation, refresh, place;
+        int value = 0, x = 0, y = 0, made;
+        bipolar got, handle, failed;
+
+        if (count < 4)
+                return host_refuse(LOCALE_CANVAS_DISPLAY_USAGE);
+        rotation = count == 6 && string_equals(arguments[4], "rotation");
+        refresh = count == 6 && string_equals(arguments[4], "refresh");
+        place = count == 7 && string_equals(arguments[4], "place");
+        if (!rotation && !refresh && !place)
+                return host_refuse(LOCALE_CANVAS_DISPLAY_USAGE);
+        if (!windows_display_name((const char *)arguments[3], string_length(arguments[3]), name))
+                return host_refuse("\"%s\" is not a screen's name: letters, digits and dashes, 1 to %p bytes "
+                                   "(Virtual-1, HDMI-A-1, eDP-1)\n", arguments[3], (positive)(WINDOWS_OUTPUT_NAME - 1));
+
+        memory_zero(address_of change, sizeof(change));
+        if (rotation)
+        {
+                if (!windows_display_value(WINDOWS_DISPLAY_ROTATION, (const char *)arguments[5],
+                                           string_length(arguments[5]), &value))
+                        return host_refuse("rotation is 0, 90, 180 or 270 degrees, not %s\n", arguments[5]);
+                change.rotation = (unsigned int)value;
+                field = WINDOWS_DISPLAY_ROTATION;
+        }
+        else if (refresh)
+        {
+                if (!windows_display_value(WINDOWS_DISPLAY_REFRESH, (const char *)arguments[5],
+                                           string_length(arguments[5]), &value))
+                        return host_refuse("refresh is preferred, the screen's own rate, or a whole number of Hz "
+                                           "from 1 to 1000, not %s\n", arguments[5]);
+                change.refresh = (unsigned int)value;
+                field = WINDOWS_DISPLAY_REFRESH;
+        }
+        else
+        {
+                if (!windows_display_value(WINDOWS_DISPLAY_X, (const char *)arguments[5], string_length(arguments[5]), &x) ||
+                    !windows_display_value(WINDOWS_DISPLAY_Y, (const char *)arguments[6], string_length(arguments[6]), &y))
+                        return host_refuse("place is two whole numbers of pixels, X and Y, from -%p to %p, not %s %s\n",
+                                           (positive)WINDOWS_PLACE_MOST, (positive)WINDOWS_PLACE_MOST,
+                                           arguments[5], arguments[6]);
+                change.x = x, change.y = y;
+                field = WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y;
+        }
+        if (!bowl_is_root())
+                return host_refuse("setting how a screen is drawn needs root (CAP_SYS_ADMIN)\n");
+
+        host_state_ready();
+        if (!host_acquire())
+                return 1;
+        got = host_read_state(LOCALE_CANVAS_DISPLAYS, text, sizeof(text));
+        if (got == -ENOENT)
+                text[0] = end;
+        else if (got == -ELOOP)
+        {
+                host_release();
+                return host_refuse(LOCALE_CANVAS_DISPLAYS " is a link, so it is not changed\n");
+        }
+        else if (got < 0)
+        {
+                host_release();
+                return host_fail("canvas display", got);
+        }
+        else if (got >= (bipolar)sizeof(text) - 1)
+        {
+                host_release();
+                return host_refuse(LOCALE_CANVAS_DISPLAYS " is too long to change here, so it is not changed\n");
+        }
+
+        made = windows_displays_set(out, sizeof(out), (const char *)text, name, field, &change);
+        if (made < 0)
+        {
+                host_release();
+                return host_refuse(LOCALE_CANVAS_DISPLAYS " names more screens than Canvas reads, or the change "
+                                   "does not fit, so it is not changed\n");
+        }
+
+        handle = system_open_at_mode(AT_FDCWD, (string_address)LOCALE_CANVAS_DISPLAYS,
+                                     O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (handle < 0)
+        {
+                host_release();
+                if (handle == -ELOOP)
+                        return host_refuse(LOCALE_CANVAS_DISPLAYS " is a link, so it is not changed\n");
+                return host_fail("canvas display", handle);
+        }
+        failed = system_write_all((b32)handle, out, (positive)made);
+        system_close(handle);
+        host_release();
+        if (failed < 0)
+                return host_fail("canvas display", failed);
+
+        if (rotation)
+                host_say(log, host_label "%s is turned to %p degrees, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                         (string_address)name, (positive)change.rotation);
+        else if (refresh && change.refresh)
+                host_say(log, host_label "%s refreshes at %p Hz, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                         (string_address)name, (positive)change.refresh);
+        else if (refresh)
+                host_say(log, host_label "%s refreshes at its preferred rate, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                         (string_address)name);
+        else
+                host_say(log, host_label "%s is placed at %b,%b, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                         (string_address)name, (bipolar)x, (bipolar)y);
+        return 0;
 }
 
 /*
