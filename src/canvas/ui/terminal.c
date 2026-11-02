@@ -206,8 +206,7 @@ static struct
         // A finger's long press selected it (terminal_hold): its ends are drawn as handles, and the press is still held
         // (touch_select) or was (touch_held, until the lift that ends it).
         b32 select_touch, touch_select, touch_held;
-        positive click_at;
-        unsigned int click_row, click_column;
+        struct ui_click click;     // the kit's click count: a double click and a triple, as a field's
         int clicks;
 } terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1};
 
@@ -1947,7 +1946,6 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
 #define TERMINAL_SELECT_CHARS 0
 #define TERMINAL_SELECT_WORDS 1
 #define TERMINAL_SELECT_LINES 2
-#define TERMINAL_CLICKS_NS 400000000ull
 
 // The line and column of the ring under a cell of the grid (row and column on the screen), as terminal_build lays them.
 static b32 terminal_place_at(unsigned int row, unsigned int column, unsigned int address_to line_out, unsigned int address_to column_out)
@@ -2244,14 +2242,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                 if (row >= ROWS || column >= COLUMNS)
                         return false;
                 terminal_place_at(row, column, &line, &at);
-                {
-                        positive now = clock_monotonic_nanoseconds();
-                        b32 again = now - terminal.click_at < TERMINAL_CLICKS_NS && terminal.click_row == row &&
-                                    (terminal.click_column > column ? terminal.click_column - column : column - terminal.click_column) <= 1;
-
-                        terminal.clicks = again ? terminal.clicks % 3 + 1 : 1;
-                        terminal.click_at = now, terminal.click_row = row, terminal.click_column = column;
-                }
+                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, clock_monotonic_nanoseconds(), terminal.pointer_x, terminal.pointer_y);
                 if (shift && terminal.selecting && terminal.clicks == 1)
                 {
                         terminal.select_active_line = line, terminal.select_active_column = at;
