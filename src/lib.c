@@ -20257,7 +20257,30 @@ __asm__(
     "and w1, w1, #0xff\n   cbz x2, .Lmemory_last_arm64_none\n   add x3, x0, x2\n"
 #ifndef KERNEL_MODE
     "cmp x2, #16\n   b.lo .Lmemory_last_arm64_tail\n   dup v0.16b, w1\n"
+    //
+    //       The last sixteen bytes first, as the loop below takes them, so a match there costs what it did;
+    //       the quad is asked for only when sixty four bytes are still left after that.
+    //
+    ".Lmemory_last_arm64_first:\n   sub x3, x3, #16\n   sub x2, x2, #16\n   ldr q1, [x3]\n   cmeq v1.16b, v1.16b, v0.16b\n"
+    "umaxv b2, v1.16b\n   umov w4, v2.b[0]\n   cbnz w4, .Lmemory_last_arm64_refine16\n"
+    "cmp x2, #16\n   b.lo .Lmemory_last_arm64_tail\n   cmp x2, #64\n   b.lo .Lmemory_last_arm64_vector\n   b .Lmemory_last_arm64_quad\n"
+    //
+    //       Four vectors a turn from the top while sixty four bytes are left, one test for all four as
+    //       NEON_FOUR does it for the forward scans: sixteen bytes a turn was a load, a compare, an across
+    //       lanes maximum and a move for every sixteen, and the first of those was all that memory_last_of
+    //       on 4 KiB waited on. A hit is walked from its highest vector down, and refined with the sixteen
+    //       byte path below, which takes the compare in v1 and its base in x3.
+    //
+    ".Lmemory_last_arm64_quad:\n   sub x3, x3, #64\n   sub x2, x2, #64\n   ld1 {v1.16b-v4.16b}, [x3]\n"
+    "cmeq v1.16b, v1.16b, v0.16b\n   cmeq v2.16b, v2.16b, v0.16b\n   cmeq v3.16b, v3.16b, v0.16b\n   cmeq v4.16b, v4.16b, v0.16b\n"
+    "orr v5.16b, v1.16b, v2.16b\n   orr v6.16b, v3.16b, v4.16b\n   orr v5.16b, v5.16b, v6.16b\n   umaxp v5.4s, v5.4s, v5.4s\n   fmov x4, d5\n"
+    "cbnz x4, .Lmemory_last_arm64_quad_hit\n   cmp x2, #64\n   b.hs .Lmemory_last_arm64_quad\n   cmp x2, #16\n   b.hs .Lmemory_last_arm64_vector\n   b .Lmemory_last_arm64_tail\n"
     ".Lmemory_last_arm64_vector:\n   sub x3, x3, #16\n   sub x2, x2, #16\n   ldr q1, [x3]\n   cmeq v1.16b, v1.16b, v0.16b\n"
+    "umaxv b2, v1.16b\n   umov w4, v2.b[0]\n   cbnz w4, .Lmemory_last_arm64_refine16\n   cmp x2, #16\n   b.hs .Lmemory_last_arm64_vector\n   b .Lmemory_last_arm64_tail\n"
+    ".Lmemory_last_arm64_quad_hit:\n   umaxp v6.4s, v4.4s, v4.4s\n   fmov x4, d6\n   cbz x4, 1f\n   add x3, x3, #48\n   mov v1.16b, v4.16b\n   b .Lmemory_last_arm64_refine16\n"
+    "1:  umaxp v6.4s, v3.4s, v3.4s\n   fmov x4, d6\n   cbz x4, 2f\n   add x3, x3, #32\n   mov v1.16b, v3.16b\n   b .Lmemory_last_arm64_refine16\n"
+    "2:  umaxp v6.4s, v2.4s, v2.4s\n   fmov x4, d6\n   cbz x4, 3f\n   add x3, x3, #16\n   mov v1.16b, v2.16b\n   b .Lmemory_last_arm64_refine16\n"
+    "3:  b .Lmemory_last_arm64_refine16\n"
     "umaxv b2, v1.16b\n   umov w4, v2.b[0]\n   cbnz w4, .Lmemory_last_arm64_refine16\n   cmp x2, #16\n   b.hs .Lmemory_last_arm64_vector\n   b .Lmemory_last_arm64_tail\n"
     //
     //       Which lane matched, out of the compare that is already in v1,
