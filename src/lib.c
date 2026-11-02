@@ -20924,11 +20924,28 @@ __asm__(
     ASM_END(memory_fill_u32)
 
     ASM_FUNC(memory_fill_u64_aligned)
+#ifdef KERNEL_MODE
     "cmp x1, #4\n   b.lo 2f\n"
     "1:  stp x2, x2, [x0], #16\n   stp x2, x2, [x0], #16\n   sub x1, x1, #4\n   cmp x1, #4\n   b.hs 1b\n"
     "2:  tbz x1, #1, 3f\n   stp x2, x2, [x0], #16\n"
     "3:  tbz x1, #0, 4f\n   str x2, [x0]\n"
     "4:  " ASM_RET
+#else
+    //       Userspace only, the same shape as memory_fill_u32 with eight byte
+    //       elements: a q register holds two of them, a turn is sixty four
+    //       bytes, and spans under sixteen elements overlap their stores at
+    //       both ends. The kernel build keeps the integer form above.
+    "dup v0.2d, x2\n   cmp x1, #16\n   b.hs 6f\n   add x3, x0, x1, lsl #3\n   cmp x1, #8\n   b.hi 8f\n   cmp x1, #4\n   b.lo 4f\n"
+    "stp q0, q0, [x0]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "4:  cbz x1, 5f\n   cmp x1, #2\n   b.lo 7f\n   str q0, [x0]\n   stur q0, [x3, #-16]\n"
+    "5:  " ASM_RET
+    "7:  str d0, [x0]\n" ASM_RET
+    "8:  add x3, x0, x1, lsl #3\n   cmp x1, #16\n   b.lo 9f\n   mov x4, x0\n"
+    "1:  stp q0, q0, [x4], #32\n   stp q0, q0, [x4], #32\n   sub x1, x1, #8\n   cmp x1, #8\n   b.hs 1b\n"
+    "stp q0, q0, [x3, #-64]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "9:  stp q0, q0, [x0]\n   stp q0, q0, [x0, #32]\n   stp q0, q0, [x3, #-64]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "6:  add x3, x0, x1, lsl #3\n   b 8b\n"
+#endif
     ASM_END(memory_fill_u64_aligned)
 
     //       memset32 and memset64 in the kernel's argument order.  Why they
@@ -20938,19 +20955,50 @@ __asm__(
     //       stays the destination the caller gets back, and the value
     //       arrives in w1, whose top half AAPCS64 leaves unspecified.
     ASM_FUNC(memory_fill_32)
+#ifdef KERNEL_MODE
     "mov w1, w1\n   orr x3, x1, x1, lsl #32\n   mov x4, x0\n   cmp x2, #4\n   b.lo 2f\n"
     "1:  stp x3, x3, [x4], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 1b\n"
     "2:  tbz x2, #1, 3f\n   str x3, [x4], #8\n"
     "3:  tbz x2, #0, 4f\n   str w1, [x4]\n"
     "4:  " ASM_RET
+#else
+    //       Userspace only: memory_fill_u32's vector shape. The destination
+    //       answers as it did before, since x0 is never written here; the
+    //       cursor for the loop is x4.
+    "dup v0.4s, w1\n   cmp x2, #16\n   b.hs 6f\n   add x3, x0, x2, lsl #2\n   cmp x2, #8\n   b.hi 8f\n   cmp x2, #4\n   b.lo 4f\n"
+    "str q0, [x0]\n   stur q0, [x3, #-16]\n" ASM_RET
+    "4:  cbz x2, 5f\n   cmp x2, #2\n   b.lo 7f\n   str d0, [x0]\n   stur s0, [x3, #-4]\n"
+    "5:  " ASM_RET
+    "7:  str s0, [x0]\n" ASM_RET
+    "8:  add x3, x0, x2, lsl #2\n   cmp x2, #16\n   b.lo 9f\n   mov x4, x0\n"
+    "1:  stp q0, q0, [x4], #32\n   stp q0, q0, [x4], #32\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 1b\n"
+    "stp q0, q0, [x3, #-64]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "9:  stp q0, q0, [x0]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "6:  add x3, x0, x2, lsl #2\n   b 8b\n"
+#endif
     ASM_END(memory_fill_32)
 
     ASM_FUNC(memory_fill_64)
+#ifdef KERNEL_MODE
     "mov x4, x0\n   cmp x2, #4\n   b.lo 2f\n"
     "1:  stp x1, x1, [x4], #16\n   stp x1, x1, [x4], #16\n   sub x2, x2, #4\n   cmp x2, #4\n   b.hs 1b\n"
     "2:  tbz x2, #1, 3f\n   stp x1, x1, [x4], #16\n"
     "3:  tbz x2, #0, 4f\n   str x1, [x4]\n"
     "4:  " ASM_RET
+#else
+    //       Userspace only: memory_fill_u64_aligned's shape with the value in
+    //       x1 and the count in x2, answering with the destination in x0.
+    "dup v0.2d, x1\n   cmp x2, #16\n   b.hs 6f\n   add x3, x0, x2, lsl #3\n   cmp x2, #8\n   b.hi 8f\n   cmp x2, #4\n   b.lo 4f\n"
+    "stp q0, q0, [x0]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "4:  cbz x2, 5f\n   cmp x2, #2\n   b.lo 7f\n   str q0, [x0]\n   stur q0, [x3, #-16]\n"
+    "5:  " ASM_RET
+    "7:  str d0, [x0]\n" ASM_RET
+    "8:  add x3, x0, x2, lsl #3\n   cmp x2, #16\n   b.lo 9f\n   mov x4, x0\n"
+    "1:  stp q0, q0, [x4], #32\n   stp q0, q0, [x4], #32\n   sub x2, x2, #8\n   cmp x2, #8\n   b.hs 1b\n"
+    "stp q0, q0, [x3, #-64]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "9:  stp q0, q0, [x0]\n   stp q0, q0, [x0, #32]\n   stp q0, q0, [x3, #-64]\n   stp q0, q0, [x3, #-32]\n" ASM_RET
+    "6:  add x3, x0, x2, lsl #3\n   b 8b\n"
+#endif
     ASM_END(memory_fill_64)
 
     // Same exact in-place contract as x86_64.  Userspace has baseline NEON:
