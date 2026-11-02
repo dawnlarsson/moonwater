@@ -2594,15 +2594,17 @@ static int wire_dispatch(long client, struct wayland_client *c, const unsigned c
         is a framing error: the stream has no message boundary left to find,
         so the client is dead, and every later call is refused (EINVAL) until
         it disconnects. A message that fails in its dispatch is refused and
-        its bytes are consumed. The descriptors are queued first, so a
-        message that needs one finds it. Messages that completed earlier in
-        the same call are not undone by a later refusal: the caller disconnects
-        the client, which is what a refusal means.
+        its bytes are consumed; the messages after it in the same call are
+        still read, so the stream stays in step, and the call returns the first
+        refusal. The descriptors are queued first, so a message that needs one
+        finds it. Messages that completed are not undone by a refusal: the
+        caller disconnects the client, which is what a refusal means.
 */
 int wayland_feed(long client, const unsigned char *bytes, long length, const long *fds, long count)
 {
         struct wayland_client *c;
         long taken = 0;
+        int refused = SHELL_OK;
 
         if (!wayland.side.running || !shell_client_live(&wayland.side, client))
                 return SHELL_EINVAL;
@@ -2646,11 +2648,11 @@ int wayland_feed(long client, const unsigned char *bytes, long length, const lon
                         int status = wire_dispatch(client, c, c->in, c->in_length);
 
                         c->in_length = 0;
-                        if (status < 0)
-                                return status;
+                        if (status < 0 && refused == SHELL_OK)
+                                refused = status;
                 }
         }
-        return SHELL_OK;
+        return refused;
 }
 
 /*

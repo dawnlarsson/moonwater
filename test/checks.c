@@ -143385,6 +143385,35 @@ static void wire_refusal_checks(void)
         }
         WIRE_CHECK(wayland_client_disconnect(client) == 0);
 
+        /* a refused message costs nothing after it: the good sync behind a refused one in the same
+           read is answered, and the call returns the refusal. */
+        client = wayland_client_connect();
+        {
+                struct wire_build bad, good;
+                unsigned char both[128];
+                unsigned long objects[8], ops[8];
+                long first, second, events;
+                int status;
+
+                wb_begin(&bad, WAYLAND_DISPLAY, 0);
+                wb_u(&bad, 3);
+                wb_u(&bad, 4);
+                first = wb_end(&bad);
+                wb_begin(&good, WAYLAND_DISPLAY, 0);
+                wb_u(&good, 5);
+                second = wb_end(&good);
+                memcpy(both, bad.b, (size_t)first);
+                memcpy(both + first, good.b, (size_t)second);
+                status = wayland_feed(client, both, first + second, 0, 0);
+                WIRE_CHECK(status < 0);
+                events = wire_take(client, objects, ops, 8);
+                WIRE_CHECK(events == 3);
+                WIRE_CHECK(events == 3 && objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
+                WIRE_CHECK(events == 3 && objects[1] == 5 && ops[1] == 0);
+                WIRE_CHECK(events == 3 && objects[2] == WAYLAND_DISPLAY && ops[2] == 1);
+        }
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+
         /* a message split in four, one byte at a time, lands exactly once. */
         client = wayland_client_connect();
         wb_begin(&m, WAYLAND_DISPLAY, 0);
