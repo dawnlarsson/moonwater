@@ -3476,6 +3476,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
 
                 low.y0 += ui_q8(ui, 1);
                 low.y1 += ui_q8(ui, 1);
+                unsigned int highlight = ui_mix(ui_role(UI_HIGHLIGHT), 90, 0);
                 for (b32 y = face.y0 >> 8; y < (face.y0 >> 8) + ui_dev(ui, 6); y++)
                 {
                         b32 width = ui_dev(ui, c->w), first = face.x0 >> 8;
@@ -3497,7 +3498,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                                 {
                                         unsigned int address_to at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)(first + x);
 
-                                        *at = ui_over(ui_premultiplied(ui_mix(ui_role(UI_HIGHLIGHT), 90, 0), (unsigned int)cover), *at);
+                                        *at = ui_over(ui_premultiplied(highlight, (unsigned int)cover), *at);
                                 }
                         }
                 }
