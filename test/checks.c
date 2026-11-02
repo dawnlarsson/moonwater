@@ -141878,6 +141878,16 @@ static int hook_query(void *context, int row, struct shell_facts *facts)
         return hook_answer(context, row);
 }
 
+static int hook_picture(void *context, int row, long fd, long offset, long width, long height, long stride)
+{
+        (void)fd;
+        (void)offset;
+        (void)width;
+        (void)height;
+        (void)stride;
+        return hook_answer(context, row);
+}
+
 static const struct shell_sink hook_sink = {
         .context = &hook_probe_state,
         .open = hook_open,
@@ -141895,6 +141905,7 @@ static const struct shell_sink hook_sink = {
         .title = hook_title,
         .layer = hook_layer,
         .query = hook_query,
+        .picture = hook_picture,
 };
 
 static unsigned int hook_checks, hook_failures;
@@ -142440,6 +142451,32 @@ static unsigned int wire_checks_run, wire_failures;
                 } \
         } while (0)
 
+/*
+        What the sink was asked, for the object checks: how many windows were
+        opened, damaged and closed, the last row, and the last title.
+*/
+static struct wire_seen
+{
+        unsigned int opened, damaged, titled, closed, pictures;
+        int row;
+        char title[64];
+        long title_length;
+        long picture_fd, picture_offset, picture_width, picture_height, picture_stride;
+} wire_seen;
+
+static int wire_picture(void *context, int row, long fd, long offset, long width, long height, long stride)
+{
+        (void)context;
+        wire_seen.pictures++;
+        wire_seen.row = row;
+        wire_seen.picture_fd = fd;
+        wire_seen.picture_offset = offset;
+        wire_seen.picture_width = width;
+        wire_seen.picture_height = height;
+        wire_seen.picture_stride = stride;
+        return 0;
+}
+
 static int wire_open(void *context, long client, long role)
 {
         static int next_row = 3;
@@ -142447,6 +142484,8 @@ static int wire_open(void *context, long client, long role)
         (void)context;
         (void)client;
         (void)role;
+        wire_seen.opened++;
+        wire_seen.row = next_row;
         return next_row++;
 }
 
@@ -142468,7 +142507,9 @@ static int wire_pointer(void *context, long client, long x, long y, long buttons
 }
 static int wire_damage(void *context, int row, const struct shell_rect *rect)
 {
-        (void)context; (void)row; (void)rect;
+        (void)context; (void)rect;
+        wire_seen.damaged++;
+        wire_seen.row = row;
         return 0;
 }
 static int wire_place(void *context, int row, long x, long y, long screen)
@@ -142498,12 +142539,20 @@ static int wire_activate(void *context, int row)
 }
 static int wire_close(void *context, int row)
 {
-        (void)context; (void)row;
+        (void)context;
+        wire_seen.closed++;
+        wire_seen.row = row;
         return 0;
 }
 static int wire_title(void *context, int row, const char *text, long length)
 {
-        (void)context; (void)row; (void)text; (void)length;
+        (void)context;
+        wire_seen.titled++;
+        wire_seen.row = row;
+        wire_seen.title_length = length;
+        for (long i = 0; i < length && i < 63; i++)
+                wire_seen.title[i] = text[i];
+        wire_seen.title[length < 63 ? length : 63] = 0;
         return 0;
 }
 static int wire_layer(void *context, int row, const struct shell_layer *layer)
@@ -142534,6 +142583,7 @@ static const struct shell_sink wire_sink_full = {
         .title = wire_title,
         .layer = wire_layer,
         .query = wire_query,
+        .picture = wire_picture,
 };
 
 /*
@@ -142873,10 +142923,266 @@ static void wire_lifecycle_checks(void)
         WIRE_CHECK(wayland_stop() == 0);
 }
 
+/*
+        The objects, end to end through the wire: the globals bound, a surface
+        and its toplevel, a shared-memory pool and a buffer on it, a commit that
+        shows the buffer, a frame callback, the keymap and the pointer, and the
+        teardown. Each step's events are read back from the output the take
+        returns. Each refusal changes nothing the shell or the objects hold.
+*/
+static unsigned long wire_word_at(long at)
+{
+        return wire_get(wire_out + at);
+}
+
+static int wire_bind(long client, unsigned long name, const char *interface, unsigned long version, unsigned long id)
+{
+        struct wire_build m;
+
+        wb_begin(&m, 2, 0);
+        wb_u(&m, name);
+        wb_s(&m, interface);
+        wb_u(&m, version);
+        wb_u(&m, id);
+        return wire_feed_build(client, &m);
+}
+
+static void wire_object_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+        unsigned long serial;
+        long events, keymap = 0;
+        long fds[1] = {7};
+        int status;
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == WAYLAND_GLOBALS);
+
+        /* the globals: shm sends its two formats, seat its capabilities and name,
+           output its geometry, mode, scale and done; compositor and xdg send nothing. */
+        WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2 && objects[0] == 3 && objects[1] == 3);
+        WIRE_CHECK(wire_word_at(8) == 0 && wire_word_at(20) == 1);
+        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 4) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 5) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        WIRE_CHECK(wire_bind(client, 4, "wl_seat", 5, 6) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2 && objects[0] == 6 && ops[0] == 0 && ops[1] == 1);
+        WIRE_CHECK(wire_bind(client, 3, "wl_output", 3, 7) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 4 && ops[0] == 0 && ops[1] == 1 && ops[2] == 3 && ops[3] == 2);
+
+        /* a surface, then its xdg surface, then its toplevel: the toplevel and the xdg surface each configure. */
+        wb_begin(&m, 4, 0);
+        wb_u(&m, 8);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_of_type(&wayland.clients[client], 8, W_SURFACE) >= 0);
+        wb_begin(&m, 5, 2);
+        wb_u(&m, 9);
+        wb_u(&m, 8);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_of_type(&wayland.clients[client], 9, W_XDG_SURFACE) >= 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        wb_begin(&m, 9, 1);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2 && objects[0] == 10 && ops[0] == 0 && objects[1] == 9 && ops[1] == 0);
+        serial = wire_word_at(28);
+        WIRE_CHECK(serial != 0);
+        WIRE_CHECK(wire_seen.opened == 1 && wire_seen.row == 3);
+        WIRE_CHECK(wire_word_at(8) == (unsigned long)wayland.screen_width);
+        WIRE_CHECK(wire_word_at(12) == (unsigned long)wayland.screen_height);
+
+        /* an ack must name the serial that was sent: a stale one is refused, the right one accepted. */
+        wb_begin(&m, 9, 4);
+        wb_u(&m, serial + 1);
+        wire_refused(client, "stale configure serial", wb_end(&m), m.b);
+        wb_begin(&m, 9, 4);
+        wb_u(&m, serial);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+
+        /* the title and the app id reach the sink; a title with a control byte does not. */
+        wb_begin(&m, 10, 2);
+        wb_s(&m, "Canvas test");
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_seen.titled == 1 && wire_seen.title_length == 11);
+        WIRE_CHECK(memcmp(wire_seen.title, "Canvas test", 11) == 0);
+        wb_begin(&m, 10, 3);
+        wb_s(&m, "org.moonwater.test");
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 10, 2);
+        wb_s(&m, "a\x01" "b");
+        wire_refused(client, "title with a control byte", wb_end(&m), m.b);
+        WIRE_CHECK(wire_seen.titled == 1);
+
+        /* a shared-memory pool from the descriptor, and a buffer in it, within the pool's size. */
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 11);
+        wb_u(&m, 2048);
+        WIRE_CHECK(wayland_feed(client, m.b, wb_end(&m), fds, 1) == 0);
+        WIRE_CHECK(wire_of_type(&wayland.clients[client], 11, W_SHM_POOL) >= 0);
+        wb_begin(&m, 11, 0);
+        wb_u(&m, 12);
+        wb_u(&m, 0);
+        wb_u(&m, 16);
+        wb_u(&m, 16);
+        wb_u(&m, 64);
+        wb_u(&m, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_of_type(&wayland.clients[client], 12, W_BUFFER) >= 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+
+        /* a buffer with an unknown format, or one that runs past the pool, is refused. */
+        wb_begin(&m, 11, 0);
+        wb_u(&m, 13);
+        wb_u(&m, 0);
+        wb_u(&m, 16);
+        wb_u(&m, 16);
+        wb_u(&m, 64);
+        wb_u(&m, 2);
+        wire_refused(client, "format not offered", wb_end(&m), m.b);
+        wb_begin(&m, 11, 0);
+        wb_u(&m, 13);
+        wb_u(&m, 2000);
+        wb_u(&m, 16);
+        wb_u(&m, 16);
+        wb_u(&m, 64);
+        wb_u(&m, 0);
+        wire_refused(client, "buffer past the pool", wb_end(&m), m.b);
+
+        /* attach takes a buffer and nothing else; a commit of the attached buffer is one damage to the shell,
+           then the release, the output entry once, and the frame callback's done and delete. */
+        wb_begin(&m, 8, 1);
+        wb_u(&m, 6);
+        wb_u(&m, 0);
+        wb_u(&m, 0);
+        wire_refused(client, "attach a seat as a buffer", wb_end(&m), m.b);
+        wb_begin(&m, 8, 1);
+        wb_u(&m, 12);
+        wb_u(&m, 0);
+        wb_u(&m, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 8, 2);
+        wb_u(&m, 0);
+        wb_u(&m, 0);
+        wb_u(&m, 16);
+        wb_u(&m, 16);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 8, 3);
+        wb_u(&m, 13);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 8, 6);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 4);
+        WIRE_CHECK(events == 4 && objects[0] == 12 && ops[0] == 0);
+        WIRE_CHECK(events == 4 && objects[1] == 8 && ops[1] == 0 && wire_word_at(16) == 7);
+        WIRE_CHECK(events == 4 && objects[2] == 13 && ops[2] == 0);
+        WIRE_CHECK(events == 4 && objects[3] == WAYLAND_DISPLAY && ops[3] == 1);
+        WIRE_CHECK(wire_seen.damaged == 1 && wire_seen.row == 3);
+        WIRE_CHECK(wire_seen.pictures == 1 && wire_seen.picture_fd == 7 && wire_seen.picture_offset == 0);
+        WIRE_CHECK(wire_seen.picture_width == 16 && wire_seen.picture_height == 16 && wire_seen.picture_stride == 64);
+
+        /* a second commit without a frame releases the buffer again and shows nothing new. */
+        wb_begin(&m, 8, 6);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 1 && objects[0] == 12 && ops[0] == 0);
+        WIRE_CHECK(wire_seen.damaged == 2);
+
+        /* destroying the buffer clears the surface's attachment: a commit then shows nothing. */
+        wb_begin(&m, 12, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        wb_begin(&m, 8, 6);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        WIRE_CHECK(wire_seen.damaged == 2);
+
+        /* the keyboard's keymap: one event, the keymap's format and size, and one descriptor for the take. */
+        wb_begin(&m, 6, 1);
+        wb_u(&m, 14);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wayland_take_output(client, wire_out, WAYLAND_OUT_MAX, &keymap) == 16);
+        WIRE_CHECK(keymap == 1);
+        WIRE_CHECK(wire_word_at(0) == 14 && wire_word_at(8) == 1 && wire_word_at(12) == 64);
+
+        /* the pointer, and its release, which takes the object away. */
+        wb_begin(&m, 6, 0);
+        wb_u(&m, 15);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_of_type(&wayland.clients[client], 15, W_POINTER) >= 0);
+        wb_begin(&m, 15, 1);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_of_type(&wayland.clients[client], 15, W_POINTER) < 0);
+
+        /* input from Canvas: nothing reaches a window without the focus; with it, the enter, the pointer's
+           motion, button and frame, the key and its modifiers, and the leave when the focus goes. */
+        wb_begin(&m, 6, 0);
+        wb_u(&m, 15);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        WIRE_CHECK(wayland_deliver_pointer(3, 1, 2, 1, 0) == SHELL_EINVAL);
+        WIRE_CHECK(wayland_focus(9, 1) == SHELL_ENOENT);
+        WIRE_CHECK(wayland_focus(3, 1) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2);
+        WIRE_CHECK(events == 2 && ((objects[0] == 14 && ops[0] == 1) || (objects[0] == 15 && ops[0] == 0)));
+        WIRE_CHECK(events == 2 && ((objects[1] == 14 && ops[1] == 1) || (objects[1] == 15 && ops[1] == 0)));
+        WIRE_CHECK(wayland_focus(3, 1) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        WIRE_CHECK(wayland_deliver_pointer(3, 10, 20, 1, 1000) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 3 && objects[0] == 15 && ops[0] == 2 && objects[1] == 15 && ops[1] == 3);
+        WIRE_CHECK(events == 3 && ops[2] == 5);
+        WIRE_CHECK(wire_word_at(8) == 1000 && wire_word_at(12) == 10 * 256 && wire_word_at(16) == 20 * 256);
+        WIRE_CHECK(wire_word_at(36) == 0x110 && wire_word_at(40) == 1);
+        WIRE_CHECK(wayland_deliver_key(3, 30, 1, 4, 1000) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2 && objects[0] == 14 && ops[0] == 3 && objects[1] == 14 && ops[1] == 4);
+        WIRE_CHECK(wire_word_at(16) == 30 && wire_word_at(20) == 1 && wire_word_at(12) == 1000);
+        WIRE_CHECK(wayland_deliver_key(7, 30, 1, 0, 0) == SHELL_EINVAL);
+        WIRE_CHECK(wayland_deliver_pointer(3, 1, 2, 1 | 0x40, 0) == SHELL_EINVAL);
+        WIRE_CHECK(wayland_focus(3, 0) == 0);
+        events = wire_take(client, objects, ops, 80);
+        WIRE_CHECK(events == 2 && ((ops[0] == 1 && objects[0] == 15) || (ops[0] == 2 && objects[0] == 14)));
+        WIRE_CHECK(wayland_deliver_pointer(3, 1, 2, 1, 0) == SHELL_EINVAL);
+
+        /* teardown: the toplevel closes its window; the xdg surface, the surface and the pool go. */
+        wb_begin(&m, 10, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_seen.closed == 1);
+        wb_begin(&m, 9, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 8, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 11, 1);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wayland.clients[client].pools[0].live == 0);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+        status = wayland_feed(client, m.b, 8, 0, 0);
+        WIRE_CHECK(status == SHELL_EINVAL);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
+        WIRE_CHECK(wayland_output(1024, 768) == 0);
+        WIRE_CHECK(wayland_keymap(64) == 0);
         wire_good_objects_check();
+        wire_object_checks();
         wire_refusal_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
@@ -142887,7 +143193,7 @@ int main(void)
 #ifdef CHECK_hooks_off
 /*
         With both switches off every hook is an inline no-op that answers
-        SHELL_EOPNOTSUPP. This program calls all 46 and must see that answer
+        SHELL_EOPNOTSUPP. This program calls all 51 and must see that answer
         from each one. The object it compiles to defines no hook symbol, and
         test/run's hooks lane proves that with nm on that object: the program
         is built with -c, and no wayland_, x11_ or xwayland_ name is defined.
@@ -142938,7 +143244,12 @@ struct shell_layer;
         H(int, wayland_window_query, (long client, long surface, struct shell_facts *facts), ((void)client, (void)surface, (void)facts)) \
         H(int, wayland_layer_surface, (long client, long surface, const struct shell_layer *layer), ((void)client, (void)surface, (void)layer)) \
         H(int, wayland_feed, (long client, const unsigned char *bytes, long length, const long *fds, long count), ((void)client, (void)bytes, (void)length, (void)fds, (void)count)) \
-        H(int, wayland_take_output, (long client, unsigned char *into, long room, long *keymap), ((void)client, (void)into, (void)room, (void)keymap))
+        H(int, wayland_take_output, (long client, unsigned char *into, long room, long *keymap), ((void)client, (void)into, (void)room, (void)keymap)) \
+        H(int, wayland_output, (long width, long height), ((void)width, (void)height)) \
+        H(int, wayland_keymap, (long size), ((void)size)) \
+        H(int, wayland_focus, (long row, long on), ((void)row, (void)on)) \
+        H(int, wayland_deliver_pointer, (long row, long x, long y, long buttons, long time), ((void)row, (void)x, (void)y, (void)buttons, (void)time)) \
+        H(int, wayland_deliver_key, (long row, long code, long pressed, long mods, long time), ((void)row, (void)code, (void)pressed, (void)mods, (void)time))
 
 #define OFF_X11_HOOKS(H) \
         H(int, x11_start, (const struct shell_sink *sink), ((void)sink)) \
@@ -143004,6 +143315,11 @@ int main(void)
         HOOK_OFF(wayland_layer_surface(0, 0, 0));
         HOOK_OFF(wayland_feed(0, 0, 0, 0, 0));
         HOOK_OFF(wayland_take_output(0, 0, 0, 0));
+        HOOK_OFF(wayland_output(1024, 768));
+        HOOK_OFF(wayland_keymap(64));
+        HOOK_OFF(wayland_focus(3, 1));
+        HOOK_OFF(wayland_deliver_pointer(3, 1, 2, 1, 0));
+        HOOK_OFF(wayland_deliver_key(3, 30, 1, 0, 0));
         HOOK_OFF(x11_start(0));
         HOOK_OFF(x11_stop());
         HOOK_OFF(x11_client_connect());
@@ -143029,7 +143345,7 @@ int main(void)
         HOOK_OFF(xwayland_stop());
 #undef HOOK_OFF
         printf("CHECK_hooks_off: %u of %u hooks answer SHELL_EOPNOTSUPP\n", refused, total);
-        return refused == total && total == 46 ? 0 : 1;
+        return refused == total && total == 51 ? 0 : 1;
 }
 #endif /* CHECK_hooks_off */
 

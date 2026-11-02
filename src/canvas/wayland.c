@@ -403,6 +403,7 @@ struct shell_sink
         int (*title)(void *context, int row, const char *text, long length);
         int (*layer)(void *context, int row, const struct shell_layer *layer);
         int (*query)(void *context, int row, struct shell_facts *facts);
+        int (*picture)(void *context, int row, long fd, long offset, long width, long height, long stride);
 };
 
 /*
@@ -576,7 +577,7 @@ static inline int shell_sink_ok(const struct shell_sink *sink)
         return sink && sink->open && sink->key && sink->pointer && sink->damage &&
                sink->place && sink->size && sink->minimize && sink->maximize &&
                sink->fullscreen && sink->stack && sink->activate && sink->close &&
-               sink->title && sink->layer && sink->query;
+               sink->title && sink->layer && sink->query && sink->picture;
 }
 
 /*
@@ -791,6 +792,43 @@ static inline int shell_buffer_offer(struct shell_side *side, long client, const
         }
         return SHELL_ENOSPC;
 }
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+/*
+        A picture: the bytes of a buffer, in its pool at offset, become a
+        window's picture. The engine checks the window and the buffer belong to
+        the client, and the offset is within the cap; the sink copies the
+        pixels from the descriptor, which the engine never reads.
+*/
+static inline int shell_picture(struct shell_side *side, long client, long surface, long buffer, long offset)
+{
+        struct shell_surface *window = shell_window(side, client, surface);
+        struct shell_buffer_record *pixels = shell_buffer_of(side, client, buffer);
+
+        if (!window || !pixels)
+                return SHELL_EINVAL;
+        if (offset < 0 || offset > SHELL_BUFFER_BYTES_MAX)
+                return SHELL_EINVAL;
+        if (window->state & SHELL_STATE_CLOSING)
+                return SHELL_EBUSY;
+        return side->sink->picture(side->sink->context, (int)window->row, pixels->fd, offset, pixels->width,
+                                   pixels->height, pixels->stride);
+}
+
+/*
+        A buffer the client has destroyed. Its slot is free again; a surface
+        that still names it is the caller's to clear.
+*/
+static inline int shell_buffer_drop(struct shell_side *side, long client, long buffer)
+{
+        struct shell_buffer_record *record = shell_buffer_of(side, client, buffer);
+
+        if (!record)
+                return SHELL_EINVAL;
+        record->live = 0;
+        return SHELL_OK;
+}
+#endif /* CONFIG_MOONWATER_WAYLAND */
 
 /*
         Drawing: a rectangle of a buffer that a toplevel or a layer surface
@@ -1141,6 +1179,18 @@ static inline int shell_xwayland_stop(struct shell_side *side)
 #define WAYLAND_ARGS 6
 #define WAYLAND_ID_MAX 0xfeffffffUL
 #define WAYLAND_DISPLAY 1UL
+#define WAYLAND_POOLS 8
+#define WAYLAND_KEYMAP_MAX (1L << 20)
+
+/*
+        The wl_shm formats a client names by number (ARGB8888 is 0, XRGB8888 is
+        1), the seat capabilities, and the keyboard keymap format.
+*/
+#define WAYLAND_SHM_ARGB 0UL
+#define WAYLAND_SHM_XRGB 1UL
+#define WAYLAND_SEAT_POINTER 1UL
+#define WAYLAND_SEAT_KEYBOARD 2UL
+#define WAYLAND_KEYBOARD_XKB_V1 1UL
 
 /*
         wl_display.error codes: the object does not exist, the request does
@@ -1173,7 +1223,8 @@ enum wayland_type
         W_OUTPUT,
         W_SEAT,
         W_POINTER,
-        W_KEYBOARD
+        W_KEYBOARD,
+        W_REGION
 };
 
 /*
@@ -1201,6 +1252,30 @@ struct wayland_object
 {
         unsigned long id;
         long type;
+        long slot;
+        long pool;
+        long offset;
+        long width, height, stride, format;
+        unsigned long attached;
+        unsigned long surface;
+        unsigned long configure;
+        long role;
+        long entered;
+        long state;
+        long focus;
+};
+
+/*
+        A pool is a descriptor and the size the client gave it. It lives while
+        its object does, or while a buffer made from it still does.
+*/
+struct wayland_pool
+{
+        long live;
+        long fd;
+        long size;
+        long refs;
+        long gone;
 };
 
 struct wayland_client
@@ -1209,21 +1284,31 @@ struct wayland_client
         long in_length;
         unsigned char out[WAYLAND_OUT_MAX];
         long out_length;
+        long out_keymap;
         long fds[WAYLAND_FDS];
         long fd_count;
         unsigned long serial;
         struct wayland_object objects[WAYLAND_OBJECTS];
+        struct wayland_pool pools[WAYLAND_POOLS];
 };
 
 /*
-        The one state this file has: the shell engine's side, and one record
-        per client. Every hook below is a call into shell.h's engine with the
-        side, so the engine's rules hold for this struct and no other.
+        The one state this file has: the shell engine's side, one record per
+        client, and what Canvas said about the one screen and the keymap. Every
+        hook below is a call into shell.h's engine with the side, so the
+        engine's rules hold for this struct and no other.
 */
 struct wayland_state
 {
         struct shell_side side;
         struct wayland_client clients[SHELL_CLIENTS];
+        long screen_width;
+        long screen_height;
+        long keymap_size;
+        long focused;
+        long focus_row;
+        long focus_client;
+        long focus_slot;
 };
 
 static struct wayland_state wayland;
@@ -1489,21 +1574,46 @@ static long wire_object_new(struct wayland_client *c, unsigned long id, long typ
         for (long i = 0; i < WAYLAND_OBJECTS; i++)
                 if (c->objects[i].type == W_NONE)
                 {
-                        c->objects[i].id = id;
-                        c->objects[i].type = type;
+                        struct wayland_object *o = &c->objects[i];
+
+                        o->id = id;
+                        o->type = type;
+                        o->slot = -1;
+                        o->pool = -1;
+                        o->offset = 0;
+                        o->width = 0;
+                        o->height = 0;
+                        o->stride = 0;
+                        o->format = 0;
+                        o->attached = 0;
+                        o->surface = 0;
+                        o->configure = 0;
+                        o->role = 0;
+                        o->entered = 0;
+                        o->state = 0;
+                        o->focus = 0;
                         return i;
                 }
         return -1;
+}
+
+static void wire_object_remove(struct wayland_client *c, long index)
+{
+        c->objects[index].type = W_NONE;
+        c->objects[index].id = 0;
 }
 
 static void wire_reset(struct wayland_client *c)
 {
         c->in_length = 0;
         c->out_length = 0;
+        c->out_keymap = 0;
         c->fd_count = 0;
         c->serial = 0;
         for (long i = 0; i < WAYLAND_OBJECTS; i++)
-                c->objects[i].type = W_NONE;
+                wire_object_remove(c, i);
+        for (long i = 0; i < WAYLAND_POOLS; i++)
+                c->pools[i].live = 0;
 }
 
 static void wire_drop_fds(struct wayland_client *c, long count)
@@ -1525,21 +1635,147 @@ static int wire_name_is(const unsigned char *text, long length, const char *name
 
 /*
         The signature of each request, by the type of its object and its
-        opcode. A request with no entry here is refused. Requests are added
-        with their handlers below.
+        opcode, in the letters wire_args reads (u, i, o, n, s, a, h). A request
+        with no entry is refused. An object with no requests (a callback) has
+        none here, so a request on one is refused.
 */
 static const char *wire_signature(long type, long opcode)
 {
         switch (type)
         {
         case W_DISPLAY:
-                if (opcode == 0 || opcode == 1)
-                        return "n";
-                return 0;
+                return opcode == 0 || opcode == 1 ? "n" : 0;
         case W_REGISTRY:
+                return opcode == 0 ? "usun" : 0;
+        case W_COMPOSITOR:
+                return opcode == 0 || opcode == 1 ? "n" : 0;
+        case W_SURFACE:
+                switch (opcode)
+                {
+                case 0:
+                case 6:
+                        return "";
+                case 1:
+                        return "oii";
+                case 2:
+                case 9:
+                        return "iiii";
+                case 3:
+                        return "n";
+                case 4:
+                case 5:
+                        return "o";
+                case 7:
+                case 8:
+                        return "i";
+                case 10:
+                        return "ii";
+                default:
+                        return 0;
+                }
+        case W_REGION:
                 if (opcode == 0)
-                        return "usun";
-                return 0;
+                        return "";
+                return opcode == 1 || opcode == 2 ? "iiii" : 0;
+        case W_SHM:
+                return opcode == 0 ? "nhi" : 0;
+        case W_SHM_POOL:
+                switch (opcode)
+                {
+                case 0:
+                        return "niiiiu";
+                case 1:
+                        return "";
+                case 2:
+                        return "i";
+                default:
+                        return 0;
+                }
+        case W_BUFFER:
+                return opcode == 0 ? "" : 0;
+        case W_XDG_WM_BASE:
+                switch (opcode)
+                {
+                case 0:
+                        return "";
+                case 1:
+                        return "n";
+                case 2:
+                        return "no";
+                case 3:
+                        return "u";
+                default:
+                        return 0;
+                }
+        case W_XDG_SURFACE:
+                switch (opcode)
+                {
+                case 0:
+                        return "";
+                case 1:
+                        return "n";
+                case 2:
+                        return "noo";
+                case 3:
+                        return "iiii";
+                case 4:
+                        return "u";
+                default:
+                        return 0;
+                }
+        case W_XDG_TOPLEVEL:
+                switch (opcode)
+                {
+                case 0:
+                case 9:
+                case 10:
+                case 12:
+                case 13:
+                        return "";
+                case 1:
+                case 11:
+                        return "o";
+                case 2:
+                case 3:
+                        return "s";
+                case 4:
+                        return "ouii";
+                case 5:
+                        return "ou";
+                case 6:
+                        return "ouu";
+                case 7:
+                case 8:
+                        return "ii";
+                default:
+                        return 0;
+                }
+        case W_OUTPUT:
+                return opcode == 0 ? "" : 0;
+        case W_SEAT:
+                switch (opcode)
+                {
+                case 0:
+                case 1:
+                case 2:
+                        return "n";
+                case 3:
+                        return "";
+                default:
+                        return 0;
+                }
+        case W_POINTER:
+                switch (opcode)
+                {
+                case 0:
+                        return "uoii";
+                case 1:
+                        return "";
+                default:
+                        return 0;
+                }
+        case W_KEYBOARD:
+                return opcode == 0 ? "" : 0;
         default:
                 return 0;
         }
@@ -1562,6 +1798,76 @@ static void registry_global(struct wayland_client *c, unsigned long registry, lo
 }
 
 /*
+        Helpers the handlers share. An object is found by its id and its type.
+        A record is free when its type is none. A refusal queues one
+        wl_display.error naming the object and returns the status given: the
+        protocol's error when the client asked for something wrong, the
+        shell's or the sink's status when they refused.
+*/
+static int wire_fail_with(struct wayland_client *c, unsigned long object, unsigned long code, const char *text, int status)
+{
+        struct wire_out w;
+
+        event_begin(&w, WAYLAND_DISPLAY, 0);
+        event_word(&w, object);
+        event_word(&w, code);
+        event_text(&w, text);
+        event_send(c, &w);
+        return status;
+}
+
+static long wire_of_type(const struct wayland_client *c, unsigned long id, long type)
+{
+        long index = wire_object_index(c, id);
+
+        return index >= 0 && c->objects[index].type == type ? index : -1;
+}
+
+static long wire_first_of(const struct wayland_client *c, long type)
+{
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == type)
+                        return i;
+        return -1;
+}
+
+static long wire_free_record(const struct wayland_client *c)
+{
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_NONE)
+                        return i;
+        return -1;
+}
+
+static long wire_free_pool(const struct wayland_client *c)
+{
+        for (long i = 0; i < WAYLAND_POOLS; i++)
+                if (!c->pools[i].live)
+                        return i;
+        return -1;
+}
+
+static long wire_free_surface(void)
+{
+        for (long i = 0; i < SHELL_SURFACES; i++)
+                if (!wayland.side.surfaces[i].live)
+                        return i;
+        return -1;
+}
+
+/*
+        Whether an object of a type exists, and, for a child, whether it names
+        the surface given (zero names any surface).
+*/
+static int wire_has_child(const struct wayland_client *c, long type, unsigned long surface)
+{
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == type && (surface == 0 || c->objects[i].surface == surface))
+                        return 1;
+        return 0;
+}
+
+/*
         The display's requests. sync answers at once with the callback's done
         event and a delete_id for it, so the callback never becomes an object.
         get_registry makes the registry and advertises every global.
@@ -1570,8 +1876,6 @@ static int display_request(struct wayland_client *c, long opcode, struct wire_ar
 {
         struct wire_out w;
 
-        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
-                return SHELL_ENOSPC;
         if (!wire_id_free(c, args[0].id))
                 return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
         if (opcode == 0)
@@ -1594,20 +1898,80 @@ static int display_request(struct wayland_client *c, long opcode, struct wire_ar
 }
 
 /*
+        The events a global sends when it is bound: the two shared-memory
+        formats; the one screen's geometry and mode, then scale and done from
+        version two; the seat's capabilities, and its name from version two.
+*/
+static void shm_formats(struct wayland_client *c, unsigned long id)
+{
+        struct wire_out w;
+
+        event_begin(&w, id, 0);
+        event_word(&w, WAYLAND_SHM_ARGB);
+        event_send(c, &w);
+        event_begin(&w, id, 0);
+        event_word(&w, WAYLAND_SHM_XRGB);
+        event_send(c, &w);
+}
+
+static void output_events(struct wayland_client *c, unsigned long id, long version)
+{
+        struct wire_out w;
+
+        event_begin(&w, id, 0);
+        event_word(&w, 0);
+        event_word(&w, 0);
+        event_word(&w, 0);
+        event_word(&w, 0);
+        event_word(&w, 0);
+        event_text(&w, "Moonwater");
+        event_text(&w, "Canvas");
+        event_word(&w, 0);
+        event_send(c, &w);
+        event_begin(&w, id, 1);
+        event_word(&w, 3);
+        event_word(&w, (unsigned long)wayland.screen_width);
+        event_word(&w, (unsigned long)wayland.screen_height);
+        event_word(&w, 60000);
+        event_send(c, &w);
+        if (version >= 2)
+        {
+                event_begin(&w, id, 3);
+                event_word(&w, 1);
+                event_send(c, &w);
+                event_begin(&w, id, 2);
+                event_send(c, &w);
+        }
+}
+
+static void seat_events(struct wayland_client *c, unsigned long id, long version)
+{
+        struct wire_out w;
+
+        event_begin(&w, id, 0);
+        event_word(&w, WAYLAND_SEAT_POINTER | WAYLAND_SEAT_KEYBOARD);
+        event_send(c, &w);
+        if (version >= 2)
+        {
+                event_begin(&w, id, 1);
+                event_text(&w, "seat0");
+                event_send(c, &w);
+        }
+}
+
+/*
         wl_registry.bind: a global named by its number, the interface named
-        exactly, a version from one to the highest, and a new id. The object
-        it makes has the global's type. The arguments are all checked before
-        the object is made.
+        exactly, a version from one to the highest, and a new id. The output
+        is bound only once Canvas has said what screen it is. Everything is
+        checked before the object is made, and the events follow it.
 */
 static int registry_request(struct wayland_client *c, long opcode, struct wire_arg *args)
 {
         const struct wayland_global *global;
-        long name;
+        long name, index;
 
         if (opcode != 0)
                 return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_METHOD, "no such request");
-        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
-                return SHELL_ENOSPC;
         name = args[0].number;
         if (name < 1 || name > WAYLAND_GLOBALS)
                 return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_IMPLEMENTATION, "no such global");
@@ -1618,30 +1982,526 @@ static int registry_request(struct wayland_client *c, long opcode, struct wire_a
                 return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_IMPLEMENTATION, "no such version");
         if (!wire_id_free(c, args[3].id))
                 return wire_fail(c, args[3].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
-        if (wire_object_new(c, args[3].id, global->type) < 0)
+        if (global->type == W_OUTPUT && !wayland.screen_width)
+                return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_IMPLEMENTATION, "no output yet");
+        index = wire_object_new(c, args[3].id, global->type);
+        if (index < 0)
+                return SHELL_ENOSPC;
+        switch (global->type)
+        {
+        case W_SHM:
+                shm_formats(c, args[3].id);
+                break;
+        case W_OUTPUT:
+                output_events(c, args[3].id, args[2].number);
+                break;
+        case W_SEAT:
+                seat_events(c, args[3].id, args[2].number);
+                break;
+        default:
+                break;
+        }
+        return SHELL_OK;
+}
+
+/*
+        wl_compositor: create_surface makes a surface with no role yet, and
+        create_region makes a region, which the surface's input and opaque
+        requests may name and which otherwise has no effect here.
+*/
+static int compositor_request(struct wayland_client *c, long opcode, struct wire_arg *args)
+{
+        if (!wire_id_free(c, args[0].id))
+                return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+        if (wire_object_new(c, args[0].id, opcode == 0 ? W_SURFACE : W_REGION) < 0)
                 return SHELL_ENOSPC;
         return SHELL_OK;
+}
+
+static int region_request(struct wayland_client *c, long index, long opcode, struct wire_arg *args)
+{
+        if (opcode == 0)
+        {
+                wire_object_remove(c, index);
+                return SHELL_OK;
+        }
+        if (args[2].number < 0 || args[3].number < 0)
+                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "negative region size");
+        return SHELL_OK;
+}
+
+/*
+        A commit shows the attached buffer: the shell gets its rectangle as a
+        damage, and only then is anything done for the client. The buffer is
+        released at once, since the picture is no longer read from it; the
+        frame callbacks the surface holds are answered after that.
+*/
+static int surface_commit(long client, struct wayland_client *c, long index)
+{
+        struct wayland_object *surface = &c->objects[index];
+        struct wire_out w;
+        long buffer = -1;
+        long output, i;
+        int status;
+
+        if (surface->attached)
+        {
+                buffer = wire_of_type(c, surface->attached, W_BUFFER);
+                if (buffer < 0)
+                        return wire_fail(c, surface->id, WAYLAND_ERR_IMPLEMENTATION, "attached buffer is gone");
+        }
+        if (buffer >= 0 && surface->slot >= 0)
+        {
+                struct shell_rect rect;
+
+                status = shell_picture(&wayland.side, client, surface->slot, c->objects[buffer].slot,
+                                       c->objects[buffer].offset);
+                if (status < 0)
+                        return wire_fail_with(c, surface->id, WAYLAND_ERR_IMPLEMENTATION, "window refused the picture", status);
+                rect.x = 0;
+                rect.y = 0;
+                rect.width = c->objects[buffer].width;
+                rect.height = c->objects[buffer].height;
+                status = shell_damage(&wayland.side, client, surface->slot, c->objects[buffer].slot, &rect);
+                if (status < 0)
+                        return wire_fail_with(c, surface->id, WAYLAND_ERR_IMPLEMENTATION, "window refused the picture", status);
+        }
+        if (buffer >= 0)
+        {
+                event_begin(&w, c->objects[buffer].id, 0);
+                event_send(c, &w);
+        }
+        output = wire_first_of(c, W_OUTPUT);
+        if (!surface->entered && output >= 0)
+        {
+                event_begin(&w, surface->id, 0);
+                event_word(&w, c->objects[output].id);
+                event_send(c, &w);
+                surface->entered = 1;
+        }
+        for (i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_CALLBACK && c->objects[i].surface == surface->id)
+                {
+                        unsigned long serial = ++c->serial;
+
+                        event_begin(&w, c->objects[i].id, 0);
+                        event_word(&w, serial);
+                        event_send(c, &w);
+                        event_begin(&w, WAYLAND_DISPLAY, 1);
+                        event_word(&w, c->objects[i].id);
+                        event_send(c, &w);
+                        wire_object_remove(c, i);
+                }
+        return SHELL_OK;
+}
+
+static int surface_request(long client, struct wayland_client *c, long index, long opcode, struct wire_arg *args)
+{
+        struct wayland_object *surface = &c->objects[index];
+        long i;
+
+        switch (opcode)
+        {
+        case 0:
+                if (surface->role)
+                        return wire_fail(c, surface->id, WAYLAND_ERR_METHOD, "role object still attached");
+                for (i = 0; i < WAYLAND_OBJECTS; i++)
+                        if (c->objects[i].type == W_CALLBACK && c->objects[i].surface == surface->id)
+                                wire_object_remove(c, i);
+                wire_object_remove(c, index);
+                return SHELL_OK;
+        case 1:
+                if (args[0].id && wire_of_type(c, args[0].id, W_BUFFER) < 0)
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "not a buffer");
+                surface->attached = args[0].id;
+                return SHELL_OK;
+        case 2:
+        case 9:
+                if (args[2].number < 0 || args[3].number < 0)
+                        return wire_fail(c, surface->id, WAYLAND_ERR_METHOD, "negative damage");
+                return SHELL_OK;
+        case 3:
+                if (!wire_id_free(c, args[0].id))
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+                i = wire_object_new(c, args[0].id, W_CALLBACK);
+                if (i < 0)
+                        return SHELL_ENOSPC;
+                c->objects[i].surface = surface->id;
+                return SHELL_OK;
+        case 4:
+        case 5:
+                if (args[0].id && wire_of_type(c, args[0].id, W_REGION) < 0)
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "not a region");
+                return SHELL_OK;
+        case 6:
+                return surface_commit(client, c, index);
+        case 7:
+                if (args[0].number < 0 || args[0].number > 7)
+                        return wire_fail(c, surface->id, WAYLAND_ERR_METHOD, "no such transform");
+                return SHELL_OK;
+        case 8:
+                if (args[0].number != 1)
+                        return wire_fail(c, surface->id, WAYLAND_ERR_IMPLEMENTATION, "buffer scale other than one is not built");
+                return SHELL_OK;
+        case 10:
+                return SHELL_OK;
+        default:
+                return wire_fail(c, surface->id, WAYLAND_ERR_METHOD, "no such request");
+        }
+}
+
+/*
+        wl_shm and its pools. A pool holds the bytes of a descriptor the client
+        sent; a buffer is a rectangle of those bytes, and it is offered to the
+        shell with the pool's descriptor. A pool outlives its object while a
+        buffer made from it still lives.
+*/
+static int shm_request(long client, struct wayland_client *c, struct wire_arg *args)
+{
+        long pool, index;
+
+        (void)client;
+        if (args[2].number < 1 || args[2].number > SHELL_BUFFER_BYTES_MAX)
+                return wire_fail(c, WAYLAND_DISPLAY, WAYLAND_ERR_METHOD, "pool size out of range");
+        if (!wire_id_free(c, args[0].id))
+                return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+        if (wire_free_record(c) < 0)
+                return SHELL_ENOSPC;
+        pool = wire_free_pool(c);
+        if (pool < 0)
+                return SHELL_ENOSPC;
+        c->pools[pool].live = 1;
+        c->pools[pool].fd = args[1].fd;
+        c->pools[pool].size = args[2].number;
+        c->pools[pool].refs = 0;
+        c->pools[pool].gone = 0;
+        index = wire_object_new(c, args[0].id, W_SHM_POOL);
+        c->objects[index].slot = pool;
+        return SHELL_OK;
+}
+
+static int pool_request(long client, struct wayland_client *c, long index, long opcode, struct wire_arg *args)
+{
+        struct wayland_object *object = &c->objects[index];
+        struct wayland_pool *pool = &c->pools[object->slot];
+        struct shell_buffer buffer;
+        long bytes, format, made, made_index;
+
+        switch (opcode)
+        {
+        case 0:
+                if (args[5].number == 0)
+                        format = SHELL_FORMAT_ARGB8888;
+                else if (args[5].number == 1)
+                        format = SHELL_FORMAT_XRGB8888;
+                else
+                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "format not offered");
+                buffer.kind = SHELL_BUFFER_SHM;
+                buffer.format = format;
+                buffer.fd = pool->fd;
+                buffer.width = args[2].number;
+                buffer.height = args[3].number;
+                buffer.stride = args[4].number;
+                if (!shell_buffer_ok(&buffer))
+                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "buffer geometry");
+                if (args[1].number < 0 || args[1].number > pool->size)
+                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "buffer past the pool");
+                bytes = buffer.stride * buffer.height;
+                if (bytes > pool->size - args[1].number)
+                        return wire_fail(c, object->id, WAYLAND_ERR_IMPLEMENTATION, "buffer past the pool");
+                if (!wire_id_free(c, args[0].id))
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+                if (wire_free_record(c) < 0)
+                        return SHELL_ENOSPC;
+                made = shell_buffer_offer(&wayland.side, client, &buffer);
+                if (made < 0)
+                        return wire_fail_with(c, object->id, WAYLAND_ERR_NOMEM, "no buffer left", (int)made);
+                made_index = wire_object_new(c, args[0].id, W_BUFFER);
+                c->objects[made_index].slot = made;
+                c->objects[made_index].pool = object->slot;
+                c->objects[made_index].offset = args[1].number;
+                c->objects[made_index].width = buffer.width;
+                c->objects[made_index].height = buffer.height;
+                c->objects[made_index].stride = buffer.stride;
+                c->objects[made_index].format = format;
+                pool->refs++;
+                return SHELL_OK;
+        case 1:
+                pool->gone = 1;
+                if (pool->refs == 0)
+                        pool->live = 0;
+                wire_object_remove(c, index);
+                return SHELL_OK;
+        case 2:
+                if (args[0].number < pool->size || args[0].number > SHELL_BUFFER_BYTES_MAX)
+                        return wire_fail(c, object->id, WAYLAND_ERR_METHOD, "pool resize out of range");
+                pool->size = args[0].number;
+                return SHELL_OK;
+        default:
+                return wire_fail(c, object->id, WAYLAND_ERR_METHOD, "no such request");
+        }
+}
+
+/*
+        wl_buffer.destroy. The shell's record of the buffer is dropped, every
+        surface that shows it stops showing it, and the pool's count of live
+        buffers falls.
+*/
+static int buffer_request(long client, struct wayland_client *c, long index)
+{
+        struct wayland_object *object = &c->objects[index];
+        struct wayland_pool *pool = &c->pools[object->pool];
+        long i;
+
+        if (object->slot >= 0)
+                shell_buffer_drop(&wayland.side, client, object->slot);
+        pool->refs--;
+        if (pool->refs == 0 && pool->gone)
+                pool->live = 0;
+        for (i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_SURFACE && c->objects[i].attached == object->id)
+                        c->objects[i].attached = 0;
+        wire_object_remove(c, index);
+        return SHELL_OK;
+}
+
+/*
+        xdg_wm_base and xdg_surface. A surface takes a role once: an xdg
+        surface marks it, and a toplevel claims a shell slot for it through
+        the role hook, which asks the sink for a window row. The configure a
+        new toplevel gets carries the screen's size, and the client's ack must
+        name the serial that was sent.
+*/
+static int xdg_wm_base_request(struct wayland_client *c, long index, long opcode, struct wire_arg *args)
+{
+        long surface, made;
+
+        switch (opcode)
+        {
+        case 0:
+                if (wire_has_child(c, W_XDG_SURFACE, 0))
+                        return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "surfaces still exist");
+                wire_object_remove(c, index);
+                return SHELL_OK;
+        case 1:
+                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_IMPLEMENTATION, "positioners are not built");
+        case 2:
+                surface = wire_of_type(c, args[1].id, W_SURFACE);
+                if (surface < 0)
+                        return wire_fail(c, args[1].id, WAYLAND_ERR_OBJECT, "not a surface");
+                if (c->objects[surface].role)
+                        return wire_fail(c, args[1].id, WAYLAND_ERR_METHOD, "surface has a role");
+                if (!wire_id_free(c, args[0].id))
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+                if (wire_free_record(c) < 0)
+                        return SHELL_ENOSPC;
+                made = wire_object_new(c, args[0].id, W_XDG_SURFACE);
+                c->objects[made].surface = args[1].id;
+                c->objects[surface].role = 1;
+                return SHELL_OK;
+        case 3:
+                return SHELL_OK;
+        default:
+                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "no such request");
+        }
+}
+
+static int xdg_surface_request(long client, struct wayland_client *c, long index, long opcode, struct wire_arg *args)
+{
+        struct wayland_object *xdg = &c->objects[index];
+        long surface = wire_of_type(c, xdg->surface, W_SURFACE);
+        long slot, made;
+        unsigned long serial;
+        struct wire_out w;
+        int status;
+
+        switch (opcode)
+        {
+        case 0:
+                if (wire_has_child(c, W_XDG_TOPLEVEL, xdg->surface))
+                        return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "toplevel still attached");
+                if (surface >= 0)
+                        c->objects[surface].role = 0;
+                wire_object_remove(c, index);
+                return SHELL_OK;
+        case 1:
+                if (surface < 0 || c->objects[surface].slot >= 0)
+                        return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "surface already has a toplevel");
+                if (!wire_id_free(c, args[0].id))
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+                if (wire_free_record(c) < 0)
+                        return SHELL_ENOSPC;
+                slot = wire_free_surface();
+                if (slot < 0)
+                        return wire_fail_with(c, xdg->id, WAYLAND_ERR_NOMEM, "no window left", SHELL_ENOSPC);
+                status = shell_role(&wayland.side, client, slot, SHELL_ROLE_TOPLEVEL);
+                if (status < 0)
+                        return wire_fail_with(c, xdg->id, WAYLAND_ERR_IMPLEMENTATION, "window refused", status);
+                c->objects[surface].slot = slot;
+                made = wire_object_new(c, args[0].id, W_XDG_TOPLEVEL);
+                c->objects[made].surface = xdg->surface;
+                serial = ++c->serial;
+                c->objects[index].configure = serial;
+                event_begin(&w, args[0].id, 0);
+                event_word(&w, (unsigned long)wayland.screen_width);
+                event_word(&w, (unsigned long)wayland.screen_height);
+                event_word(&w, 0);
+                event_send(c, &w);
+                event_begin(&w, xdg->id, 0);
+                event_word(&w, serial);
+                event_send(c, &w);
+                return SHELL_OK;
+        case 2:
+                return wire_fail(c, xdg->id, WAYLAND_ERR_IMPLEMENTATION, "popups are not built");
+        case 3:
+                return SHELL_OK;
+        case 4:
+                if (xdg->configure == 0 || args[0].id != xdg->configure)
+                        return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "serial is not the last configure");
+                return SHELL_OK;
+        default:
+                return wire_fail(c, xdg->id, WAYLAND_ERR_METHOD, "no such request");
+        }
+}
+
+static int wire_unfocus(void);
+
+/*
+        xdg_toplevel. Its requests reach the shell's window hooks through the
+        shell slot its surface holds. A request the window does not act on
+        (its size limits, its parent, an interactive move or resize, the
+        window menu) is accepted and does nothing, which is what a window
+        with no such controls does.
+*/
+static int toplevel_request(long client, struct wayland_client *c, long index, long opcode, struct wire_arg *args)
+{
+        struct wayland_object *toplevel = &c->objects[index];
+        long surface = wire_of_type(c, toplevel->surface, W_SURFACE);
+        long slot;
+        int status = SHELL_OK;
+
+        if (surface < 0 || c->objects[surface].slot < 0)
+                return wire_fail(c, toplevel->id, WAYLAND_ERR_IMPLEMENTATION, "toplevel has no window");
+        slot = c->objects[surface].slot;
+        switch (opcode)
+        {
+        case 0:
+                status = shell_window_close(&wayland.side, client, slot);
+                if (status < 0)
+                        return wire_fail_with(c, toplevel->id, WAYLAND_ERR_IMPLEMENTATION, "window refused close", status);
+                if (wayland.focused && wayland.focus_client == client && wayland.focus_slot == slot)
+                        wire_unfocus();
+                c->objects[surface].slot = -1;
+                c->objects[surface].role = 0;
+                wire_object_remove(c, index);
+                return SHELL_OK;
+        case 1:
+                if (args[0].id && wire_of_type(c, args[0].id, W_XDG_TOPLEVEL) < 0)
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "not a toplevel");
+                return SHELL_OK;
+        case 2:
+                status = shell_window_title(&wayland.side, client, slot, (const char *)args[0].text, args[0].length);
+                break;
+        case 3:
+                status = shell_window_app_id(&wayland.side, client, slot, (const char *)args[0].text, args[0].length);
+                break;
+        case 4:
+        case 5:
+        case 6:
+                return SHELL_OK;
+        case 7:
+        case 8:
+                if (args[0].number < 0 || args[1].number < 0)
+                        return wire_fail(c, toplevel->id, WAYLAND_ERR_METHOD, "negative size");
+                return SHELL_OK;
+        case 9:
+                status = shell_window_maximize(&wayland.side, client, slot, 1);
+                break;
+        case 10:
+                status = shell_window_maximize(&wayland.side, client, slot, 0);
+                break;
+        case 11:
+                status = shell_window_fullscreen(&wayland.side, client, slot, 1);
+                break;
+        case 12:
+                status = shell_window_fullscreen(&wayland.side, client, slot, 0);
+                break;
+        case 13:
+                status = shell_window_minimize(&wayland.side, client, slot, 1);
+                break;
+        default:
+                return wire_fail(c, toplevel->id, WAYLAND_ERR_METHOD, "no such request");
+        }
+        if (status < 0)
+                return wire_fail_with(c, toplevel->id, WAYLAND_ERR_IMPLEMENTATION, "window refused", status);
+        return SHELL_OK;
+}
+
+/*
+        wl_seat: get_pointer and get_keyboard make the objects, and the
+        keyboard is sent the keymap Canvas gave with wayland_keymap, as an
+        event whose descriptor travels beside the bytes; the take counts them
+        so the caller sends the descriptor each time. Touch is not built.
+*/
+static int seat_request(struct wayland_client *c, long index, long opcode, struct wire_arg *args)
+{
+        struct wire_out w;
+
+        switch (opcode)
+        {
+        case 0:
+        case 1:
+                if (opcode == 1 && wayland.keymap_size == 0)
+                        return wire_fail(c, c->objects[index].id, WAYLAND_ERR_IMPLEMENTATION, "no keymap yet");
+                if (!wire_id_free(c, args[0].id))
+                        return wire_fail(c, args[0].id, WAYLAND_ERR_OBJECT, "id in use or out of range");
+                if (wire_free_record(c) < 0)
+                        return SHELL_ENOSPC;
+                wire_object_new(c, args[0].id, opcode == 0 ? W_POINTER : W_KEYBOARD);
+                if (opcode == 1)
+                {
+                        event_begin(&w, args[0].id, 0);
+                        event_word(&w, WAYLAND_KEYBOARD_XKB_V1);
+                        event_word(&w, (unsigned long)wayland.keymap_size);
+                        if (event_send(c, &w) == SHELL_OK)
+                                c->out_keymap++;
+                }
+                return SHELL_OK;
+        case 2:
+                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_IMPLEMENTATION, "touch is not built");
+        case 3:
+                wire_object_remove(c, index);
+                return SHELL_OK;
+        default:
+                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "no such request");
+        }
 }
 
 /*
         One request, from the object it names to the handler. The size and the
         object were checked by the caller; this reads the arguments, checks
-        them against the signature and runs the handler. The descriptors a
-        successful request used are taken off the queue only then.
+        them against the signature and runs the handler. The output queue is
+        checked first, so a request that answers always has room to. The
+        descriptors a successful request used are taken off the queue only
+        then.
 */
-static int wire_request(struct wayland_client *c, long index, long opcode, struct wire_reader *r)
+static int wire_request(long client, struct wayland_client *c, long index, long opcode, struct wire_reader *r)
 {
-        const char *signature = wire_signature(c->objects[index].type, opcode);
+        long type = c->objects[index].type;
+        unsigned long id = c->objects[index].id;
+        const char *signature = wire_signature(type, opcode);
         struct wire_arg args[WAYLAND_ARGS];
         long count = 0;
         long needed = 0;
         int status;
 
         if (!signature)
-                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "no such request");
+                return wire_fail(c, id, WAYLAND_ERR_METHOD, "no such request");
+        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
         if (!wire_args(c, signature, r, args, &count, &needed))
-                return wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "arguments do not match");
-        switch (c->objects[index].type)
+                return wire_fail(c, id, WAYLAND_ERR_METHOD, "arguments do not match");
+        switch (type)
         {
         case W_DISPLAY:
                 status = display_request(c, opcode, args);
@@ -1649,8 +2509,56 @@ static int wire_request(struct wayland_client *c, long index, long opcode, struc
         case W_REGISTRY:
                 status = registry_request(c, opcode, args);
                 break;
+        case W_COMPOSITOR:
+                status = compositor_request(c, opcode, args);
+                break;
+        case W_SURFACE:
+                status = surface_request(client, c, index, opcode, args);
+                break;
+        case W_REGION:
+                status = region_request(c, index, opcode, args);
+                break;
+        case W_SHM:
+                status = shm_request(client, c, args);
+                break;
+        case W_SHM_POOL:
+                status = pool_request(client, c, index, opcode, args);
+                break;
+        case W_BUFFER:
+                status = buffer_request(client, c, index);
+                break;
+        case W_XDG_WM_BASE:
+                status = xdg_wm_base_request(c, index, opcode, args);
+                break;
+        case W_XDG_SURFACE:
+                status = xdg_surface_request(client, c, index, opcode, args);
+                break;
+        case W_XDG_TOPLEVEL:
+                status = toplevel_request(client, c, index, opcode, args);
+                break;
+        case W_OUTPUT:
+                wire_object_remove(c, index);
+                status = SHELL_OK;
+                break;
+        case W_SEAT:
+                status = seat_request(c, index, opcode, args);
+                break;
+        case W_POINTER:
+                if (opcode == 0 && args[1].id && wire_of_type(c, args[1].id, W_SURFACE) < 0)
+                        status = wire_fail(c, id, WAYLAND_ERR_OBJECT, "not a surface");
+                else
+                {
+                        if (opcode == 1)
+                                wire_object_remove(c, index);
+                        status = SHELL_OK;
+                }
+                break;
+        case W_KEYBOARD:
+                wire_object_remove(c, index);
+                status = SHELL_OK;
+                break;
         default:
-                status = wire_fail(c, c->objects[index].id, WAYLAND_ERR_METHOD, "no such request");
+                status = wire_fail(c, id, WAYLAND_ERR_METHOD, "no such request");
                 break;
         }
         if (status >= 0 && needed)
@@ -1663,7 +2571,7 @@ static int wire_request(struct wayland_client *c, long index, long opcode, struc
         when its header was read. An object that is not in the table is a
         protocol error.
 */
-static int wire_dispatch(struct wayland_client *c, const unsigned char *message, long size)
+static int wire_dispatch(long client, struct wayland_client *c, const unsigned char *message, long size)
 {
         unsigned long object = wire_get(message);
         long opcode = (long)(wire_get(message + 4) & 0xffffUL);
@@ -1674,7 +2582,7 @@ static int wire_dispatch(struct wayland_client *c, const unsigned char *message,
                 return wire_fail(c, object, WAYLAND_ERR_OBJECT, "no such object");
         reader.at = message + WAYLAND_HEADER;
         reader.left = size - WAYLAND_HEADER;
-        return wire_request(c, index, opcode, &reader);
+        return wire_request(client, c, index, opcode, &reader);
 }
 
 /*
@@ -1725,7 +2633,7 @@ int wayland_feed(long client, const unsigned char *bytes, long length, const lon
                 }
                 if (c->in_length >= WAYLAND_HEADER && c->in_length == (long)(wire_get(c->in + 4) >> 16))
                 {
-                        int status = wire_dispatch(c, c->in, c->in_length);
+                        int status = wire_dispatch(client, c, c->in, c->in_length);
 
                         c->in_length = 0;
                         if (status < 0)
@@ -1754,10 +2662,243 @@ int wayland_take_output(long client, unsigned char *into, long room, long *keyma
                 return SHELL_ENOSPC;
         for (long i = 0; i < c->out_length; i++)
                 into[i] = c->out[i];
-        *keymap = 0;
+        *keymap = c->out_keymap;
+        c->out_keymap = 0;
         room = c->out_length;
         c->out_length = 0;
         return (int)room;
+}
+
+/*
+        What Canvas tells the shim about the one screen and the keymap. The
+        screen is advertised to a client as its one mode; until Canvas says
+        what it is, the output is not bound. The keymap is the size of the
+        keymap text Canvas holds; its descriptor is the caller's, and the take
+        says how many keymap events need one.
+*/
+int wayland_output(long width, long height)
+{
+        if (!shell_size_ok(width) || !shell_size_ok(height))
+                return SHELL_EINVAL;
+        wayland.screen_width = width;
+        wayland.screen_height = height;
+        return SHELL_OK;
+}
+
+int wayland_keymap(long size)
+{
+        if (size < 1 || size > WAYLAND_KEYMAP_MAX)
+                return SHELL_EINVAL;
+        wayland.keymap_size = size;
+        return SHELL_OK;
+}
+
+/*
+        Input from Canvas. Canvas decides which window has the focus; the shim
+        sends that window's client the enter and the leave, and the pointer and
+        keyboard events, to every pointer and keyboard the client holds. A
+        window without the focus gets nothing, and a delivery to any row but
+        the focused one is refused. The coordinates are the window's own, in
+        pixels; the times are milliseconds from Canvas's clock.
+*/
+static long wire_row_slot(long row, long *client)
+{
+        for (long i = 0; i < SHELL_SURFACES; i++)
+        {
+                struct shell_surface *record = &wayland.side.surfaces[i];
+
+                if (record->live && record->role == SHELL_ROLE_TOPLEVEL && record->row == row)
+                {
+                        *client = record->client;
+                        return i;
+                }
+        }
+        return -1;
+}
+
+static long wire_surface_of_slot(const struct wayland_client *c, long slot)
+{
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_SURFACE && c->objects[i].slot == slot)
+                        return i;
+        return -1;
+}
+
+/*
+        Enter or leave for a surface, to each pointer and keyboard of the
+        client. An enter names the pointer's place as zero, which the motion
+        that follows corrects; a keyboard enter names no keys held.
+*/
+static void wire_focus_send(struct wayland_client *c, long slot, int enter)
+{
+        long surface = wire_surface_of_slot(c, slot);
+        struct wire_out w;
+
+        if (surface < 0)
+                return;
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+        {
+                struct wayland_object *o = &c->objects[i];
+                unsigned long serial;
+
+                if (o->type != W_POINTER && o->type != W_KEYBOARD)
+                        continue;
+                serial = ++c->serial;
+                event_begin(&w, o->id, o->type == W_POINTER ? (enter ? 0 : 1) : (enter ? 1 : 2));
+                event_word(&w, serial);
+                event_word(&w, c->objects[surface].id);
+                if (enter && o->type == W_POINTER)
+                {
+                        event_word(&w, 0);
+                        event_word(&w, 0);
+                }
+                if (enter && o->type == W_KEYBOARD)
+                        event_word(&w, 0);
+                event_send(c, &w);
+                o->focus = enter;
+                o->state = 0;
+        }
+}
+
+static int wire_unfocus(void)
+{
+        struct wayland_client *c = &wayland.clients[wayland.focus_client];
+
+        wire_focus_send(c, wayland.focus_slot, 0);
+        wayland.focused = 0;
+        return SHELL_OK;
+}
+
+/*
+        Canvas gives a window the focus, or takes it away. A new focus leaves
+        the old window's client first; both clients need room, which is checked
+        before anything changes.
+*/
+int wayland_focus(long row, long on)
+{
+        long client = -1;
+        long slot;
+
+        if (!wayland.side.running || !shell_on_ok(on))
+                return SHELL_EINVAL;
+        if (!on)
+        {
+                if (!wayland.focused || wayland.focus_row != row)
+                        return SHELL_OK;
+                if (wayland.clients[wayland.focus_client].out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                        return SHELL_ENOSPC;
+                return wire_unfocus();
+        }
+        slot = wire_row_slot(row, &client);
+        if (slot < 0)
+                return SHELL_ENOENT;
+        if (wayland.focused && wayland.focus_row == row)
+                return SHELL_OK;
+        if (wayland.clients[client].out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        if (wayland.focused && wayland.clients[wayland.focus_client].out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        if (wayland.focused)
+                wire_unfocus();
+        wire_focus_send(&wayland.clients[client], slot, 1);
+        wayland.focused = 1;
+        wayland.focus_row = row;
+        wayland.focus_client = client;
+        wayland.focus_slot = slot;
+        return SHELL_OK;
+}
+
+/*
+        The button bits of a pointer, in the order the evdev codes of the
+        buttons run: left, right, middle, side and extra.
+*/
+#define WAYLAND_BTN_LEFT 0x110UL
+
+int wayland_deliver_pointer(long row, long x, long y, long buttons, long time)
+{
+        struct wayland_client *c;
+
+        if (!wayland.side.running || !wayland.focused || wayland.focus_row != row)
+                return SHELL_EINVAL;
+        if (x < -SHELL_DIMENSION_MAX || x > SHELL_DIMENSION_MAX || y < -SHELL_DIMENSION_MAX || y > SHELL_DIMENSION_MAX)
+                return SHELL_EINVAL;
+        if (buttons < 0 || (buttons & ~SHELL_BUTTONS_MASK) || time < 0)
+                return SHELL_EINVAL;
+        c = &wayland.clients[wayland.focus_client];
+        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+        {
+                struct wayland_object *o = &c->objects[i];
+                struct wire_out w;
+
+                if (o->type != W_POINTER || !o->focus)
+                        continue;
+                event_begin(&w, o->id, 2);
+                event_word(&w, (unsigned long)time);
+                event_word(&w, (unsigned long)(x * 256));
+                event_word(&w, (unsigned long)(y * 256));
+                event_send(c, &w);
+                for (long bit = 0; bit < 5; bit++)
+                {
+                        long was = (o->state >> bit) & 1;
+                        long now = (buttons >> bit) & 1;
+
+                        if (was == now)
+                                continue;
+                        event_begin(&w, o->id, 3);
+                        event_word(&w, ++c->serial);
+                        event_word(&w, (unsigned long)time);
+                        event_word(&w, WAYLAND_BTN_LEFT + (unsigned long)bit);
+                        event_word(&w, (unsigned long)now);
+                        event_send(c, &w);
+                }
+                o->state = buttons;
+                event_begin(&w, o->id, 5);
+                event_send(c, &w);
+        }
+        return SHELL_OK;
+}
+
+int wayland_deliver_key(long row, long code, long pressed, long mods, long time)
+{
+        struct wayland_client *c;
+
+        if (!wayland.side.running || !wayland.focused || wayland.focus_row != row)
+                return SHELL_EINVAL;
+        if (code < 1 || code > SHELL_KEY_MAX || !shell_on_ok(pressed))
+                return SHELL_EINVAL;
+        if (mods < 0 || mods > 0xffffL || time < 0)
+                return SHELL_EINVAL;
+        c = &wayland.clients[wayland.focus_client];
+        if (c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+        {
+                struct wayland_object *o = &c->objects[i];
+                struct wire_out w;
+
+                if (o->type != W_KEYBOARD || !o->focus)
+                        continue;
+                event_begin(&w, o->id, 3);
+                event_word(&w, ++c->serial);
+                event_word(&w, (unsigned long)time);
+                event_word(&w, (unsigned long)code);
+                event_word(&w, (unsigned long)pressed);
+                event_send(c, &w);
+                if (o->state != mods)
+                {
+                        event_begin(&w, o->id, 4);
+                        event_word(&w, ++c->serial);
+                        event_word(&w, (unsigned long)mods);
+                        event_word(&w, 0);
+                        event_word(&w, 0);
+                        event_word(&w, 0);
+                        event_send(c, &w);
+                        o->state = mods;
+                }
+        }
+        return SHELL_OK;
 }
 
 /*
@@ -1771,6 +2912,7 @@ int wayland_start(const struct shell_sink *sink)
 
         if (status < 0)
                 return status;
+        wayland.focused = 0;
         for (long i = 0; i < SHELL_CLIENTS; i++)
                 wire_reset(&wayland.clients[i]);
         return status;
@@ -1782,6 +2924,7 @@ int wayland_stop(void)
 
         if (status < 0)
                 return status;
+        wayland.focused = 0;
         for (long i = 0; i < SHELL_CLIENTS; i++)
                 wire_reset(&wayland.clients[i]);
         return status;
@@ -1811,6 +2954,8 @@ int wayland_client_disconnect(long client)
 
         if (status < 0)
                 return status;
+        if (wayland.focused && wayland.focus_client == client)
+                wayland.focused = 0;
         wire_reset(&wayland.clients[client]);
         return status;
 }
