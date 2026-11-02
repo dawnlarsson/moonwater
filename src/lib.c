@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        427 routines (403 public, 24 local), 417 of them on all three and 10 local to one.
+        428 routines (404 public, 24 local), 418 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -226,6 +226,7 @@
           memory_copy_changed_u32        public  yes     yes     yes
           memory_copy_end                public  yes     yes     yes
           memory_copy_match              public  yes     yes     yes
+          memory_copy_rect_u32           public  yes     yes     yes
           memory_copy_source_first       public  yes     yes     yes
           memory_copy_until              public  yes     yes     yes
           memory_count                   public  yes     yes     yes
@@ -14954,7 +14955,7 @@ __asm__(
     "vmovdqu64 -128(%rsi,%rdx), %zmm6\n   vmovdqu64 -64(%rsi,%rdx), %zmm7\n   vmovdqu64 %zmm0, (%rdi)\n"
     "vmovdqu64 %zmm1, 64(%rdi)\n   vmovdqu64 %zmm2, 128(%rdi)\n   vmovdqu64 %zmm3, 192(%rdi)\n   vmovdqu64 %zmm4, -256(%rdi,%rdx)\n"
     "vmovdqu64 %zmm5, -192(%rdi,%rdx)\n   vmovdqu64 %zmm6, -128(%rdi,%rdx)\n   vmovdqu64 %zmm7, -64(%rdi,%rdx)\n   vzeroupper\n" ASM_RET
-    "0:  lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu64 -256(%r11), %zmm4\n   vmovdqu64 -192(%r11), %zmm5\n"
+    ".Lmemory_copy_apart_zmm:\n0:  lea (%rdi,%rdx), %r8\n   lea (%rsi,%rdx), %r11\n   vmovdqu64 -256(%r11), %zmm4\n   vmovdqu64 -192(%r11), %zmm5\n"
     "vmovdqu64 -128(%r11), %zmm6\n   vmovdqu64 -64(%r11), %zmm7\n   vmovdqu64 (%rsi), %zmm8\n"
     "mov %rdi, %r9\n   lea 64(%rdi), %r10\n   and $-64, %r10\n   sub %r9, %r10\n   add %r10, %rsi\n   lea (%rdi,%r10), %rdi\n"
     "lea -256(%r8), %rcx\n   sub %rdi, %rcx\n   and $-256, %rcx\n   add $256, %rcx\n"
@@ -15075,6 +15076,39 @@ __asm__(
     "0:  test %rdx, %rdx\n   jz 8f\n   movzbl (%rsi), %r9d\n   mov %r9b, (%rdi)\n"
     "8:\n" ASM_RET
     ASM_END(memory_copy)
+
+    //
+    //       memory_copy_rect_u32 -- rdi into, rsi into_stride in words, rdx from, rcx from_stride in words, r8 width
+    //       in words, r9 height. The rows are one call: the rectangle's extent is
+    //       checked once, and when the two rectangles are apart every row is the
+    //       copy memory_copy_apart makes -- on AVX-512 a row of more than 512
+    //       bytes goes straight into the zmm body, so no row pays a dispatch,
+    //       a call or a feature test. When the extents meet, each row is
+    //       memory_copy in row order, which is what the caller did row by row.
+    //       Kernel builds keep the calls: the zmm body is userspace only.
+    //
+    ASM_FUNC(memory_copy_rect_u32)
+    "test %r8, %r8\n   jz 8f\n   test %r9, %r9\n   jz 8f\n"
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   push %rbp\n"
+    "shl $2, %rsi\n   shl $2, %rcx\n   shl $2, %r8\n"
+    "lea -1(%r9), %rax\n   imul %rsi, %rax\n   lea (%rdi,%rax), %r10\n   add %r8, %r10\n"
+    "lea -1(%r9), %rax\n   imul %rcx, %rax\n   lea (%rdx,%rax), %r11\n   add %r8, %r11\n"
+    "mov %rdi, %r12\n   mov %rdx, %r13\n   mov %r9, %rbx\n   mov %rsi, %r14\n   mov %rcx, %r15\n   mov %r8, %rbp\n"
+    "cmp %rdx, %r10\n   jbe 1f\n   cmp %rdi, %r11\n   jbe 1f\n"
+    "2:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   call memory_copy\n"
+    "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 2b\n   jmp 7f\n"
+    "1:\n"
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx512", "3f")
+    "cmp $512, %rbp\n   jbe 3f\n"
+    "4:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   mov %r12, %rax\n   call .Lmemory_copy_apart_zmm\n"
+    "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 4b\n   jmp 7f\n"
+    )
+    "3:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %rbp, %rdx\n   call memory_copy_apart\n"
+    "   add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 3b\n"
+    "7:  pop %rbp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    "8:  " ASM_RET
+    ASM_END(memory_copy_rect_u32)
 
     /* Deflate primary-table decode. job (88 bytes): bits, bit count <64,
        input cursor/limit, output cursor/limit, valid history before output,
@@ -24344,7 +24378,7 @@ __asm__(
     "2:  cmp x2, #256\n   b.hi 5f\n   ldp q0, q1, [x1]\n   ldp q2, q3, [x1, #32]\n   ldp q4, q5, [x1, #64]\n   ldp q6, q7, [x1, #96]\n   ldp q16, q17, [x5,  #-128]\n"
     "ldp q18, q19, [x5,  #-96]\n   ldp q20, q21, [x5,  #-64]\n   ldp q22, q23, [x5,  #-32]\n   stp q0, q1, [x0]\n   stp q2, q3, [x0, #32]\n   stp q4, q5, [x0, #64]\n"
     "stp q6, q7, [x0, #96]\n   stp q16, q17, [x4,  #-128]\n   stp q18, q19, [x4,  #-96]\n   stp q20, q21, [x4,  #-64]\n   stp q22, q23, [x4,  #-32]\n   mov x0, x3\n   ret\n"
-    "5:  ldp q4, q5, [x1]\n   ldp q6, q7, [x1, #32]\n   ldp q16, q17, [x5,  #-64]\n   ldp q18, q19, [x5,  #-32]\n   add x6, x0, #64\n   bic x6, x6, #63\n"
+    ".Lmemory_copy_apart_arm64_big:\n5:  ldp q4, q5, [x1]\n   ldp q6, q7, [x1, #32]\n   ldp q16, q17, [x5,  #-64]\n   ldp q18, q19, [x5,  #-32]\n   add x6, x0, #64\n   bic x6, x6, #63\n"
     "sub x7, x6, x0\n   add x8, x1, x7\n   sub x9, x4, #64\n"
     "1:  ldp q0, q1, [x8]\n   ldp q2, q3, [x8, #32]\n   stp q0, q1, [x6]\n   stp q2, q3, [x6, #32]\n   add x6, x6, #64\n   add x8, x8, #64\n"
     "cmp x6, x9\n   b.ls 1b\n   stp q16, q17, [x4,  #-64]\n   stp q18, q19, [x4,  #-32]\n   stp q4, q5, [x0]\n   stp q6, q7, [x0, #32]\n   mov x0, x3\n" ASM_RET
@@ -24415,6 +24449,36 @@ __asm__(
     "3:  stp q16, q17, [x4,  #-64]\n   stp q18, q19, [x4,  #-32]\n   stp q4, q5, [x0]\n   stp q6, q7, [x0, #32]\n" ASM_RET
 #endif
     ASM_END(memory_copy)
+
+    //
+    //       memory_copy_rect_u32 -- x0 into, x1 into_stride in words, x2 from, x3 from_stride in words, x4 width in
+    //       words, x5 height. The rows are one call. When the two rectangles are apart each row is the copy
+    //       memory_copy_apart makes, and a row of more than 256 bytes enters that copy's body directly, so a row pays
+    //       neither a call nor the size dispatch. When the extents meet each row is memory_copy, in row order. The
+    //       x86_64 block carries the contract. Kernel builds call memory_copy_apart and memory_copy per row.
+    //
+    ASM_FUNC(memory_copy_rect_u32)
+    "cbz x4, 8f\n   cbz x5, 8f\n"
+    "stp x19, x20, [sp, #-96]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n   stp x25, x26, [sp, #48]\n"
+    "stp x27, x28, [sp, #64]\n   stp x29, x30, [sp, #80]\n"
+    "lsl x1, x1, #2\n   lsl x3, x3, #2\n   lsl x4, x4, #2\n   sub x6, x5, #1\n"
+    "madd x7, x6, x1, x4\n   add x8, x0, x7\n   madd x9, x6, x3, x4\n   add x10, x2, x9\n"
+    "cmp x8, x2\n   b.ls 1f\n   cmp x10, x0\n   b.ls 1f\n"
+    "mov x19, x0\n   mov x20, x2\n   mov x21, x5\n   mov x22, x1\n   mov x23, x3\n   mov x24, x4\n"
+    "2:  mov x0, x19\n   mov x1, x20\n   mov x2, x24\n   bl memory_copy\n"
+    "add x19, x19, x22\n   add x20, x20, x23\n   subs x21, x21, #1\n   b.ne 2b\n   b 7f\n"
+    "1:  mov x19, x0\n   mov x20, x2\n   mov x21, x5\n   mov x22, x1\n   mov x23, x3\n   mov x24, x4\n"
+    "3:  cmp x24, #256\n   b.ls 4f\n"
+#ifndef KERNEL_MODE
+    "mov x0, x19\n   mov x1, x20\n   mov x2, x24\n   mov x3, x19\n   add x4, x19, x24\n   add x5, x20, x24\n"
+    "bl .Lmemory_copy_apart_arm64_big\n   b 5f\n"
+#endif
+    "4:  mov x0, x19\n   mov x1, x20\n   mov x2, x24\n   bl memory_copy_apart\n"
+    "5:  add x19, x19, x22\n   add x20, x20, x23\n   subs x21, x21, #1\n   b.ne 3b\n"
+    "7:  ldp x19, x20, [sp]\n   ldp x21, x22, [sp, #16]\n   ldp x23, x24, [sp, #32]\n   ldp x25, x26, [sp, #48]\n"
+    "ldp x27, x28, [sp, #64]\n   ldp x29, x30, [sp, #80]\n   add sp, sp, #96\n"
+    "8:  " ASM_RET
+    ASM_END(memory_copy_rect_u32)
 
     /* See the x86_64 body. */
     /* See the x86_64 range encoder contract. */
@@ -33909,6 +33973,44 @@ __asm__(
     ".Lmemory_copy_rv_back_tail_end:\n   .option pop\n"
     "j 9b\n"
     ASM_END(memory_copy)
+
+    //
+    //       memory_copy_rect_u32 -- a0 into, a1 into_stride in words, a2 from, a3 from_stride in words, a4 width in
+    //       words, a5 height. A row is memory_copy_apart's copy. Once V is known to be there, a row of 32 bytes or
+    //       more is the vector loop of memory_copy_apart entered directly, with no alignment walk and no dispatch
+    //       per row; until then, and for a shorter row, the row is that call, which is also what asks for V. When
+    //       the extents meet, each row is memory_copy, in row order. The x86_64 block carries the contract. Kernel
+    //       builds have no V, so they keep the calls.
+    //
+    ASM_FUNC(memory_copy_rect_u32)
+    "beqz a4, 8f\n   beqz a5, 8f\n"
+    "addi sp, sp, -64\n   sd ra, 56(sp)\n   sd s1, 0(sp)\n   sd s2, 8(sp)\n   sd s3, 16(sp)\n   sd s4, 24(sp)\n   sd s5, 32(sp)\n   sd s6, 40(sp)\n"
+    "slli a1, a1, 2\n   slli a3, a3, 2\n   slli a4, a4, 2\n   addi t0, a5, -1\n"
+    "mul t1, t0, a1\n   add t1, t1, a4\n   add t2, a0, t1\n"
+    "mul t1, t0, a3\n   add t1, t1, a4\n   add t3, a2, t1\n"
+    "bleu t2, a2, 1f\n   bleu t3, a0, 1f\n"
+    "mv s1, a0\n   mv s2, a2\n   mv s3, a5\n   mv s4, a1\n   mv s5, a3\n   mv s6, a4\n"
+    "2:  mv a0, s1\n   mv a1, s2\n   mv a2, s6\n   call memory_copy\n"
+    "add s1, s1, s4\n   add s2, s2, s5\n   addi s3, s3, -1\n   bnez s3, 2b\n   j 7f\n"
+    "1:  mv s1, a0\n   mv s2, a2\n   mv s3, a5\n   mv s4, a1\n   mv s5, a3\n   mv s6, a4\n"
+#if !defined(KERNEL_MODE) && defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "3:  li t4, 32\n   bltu s6, t4, 4f\n"
+    ".Lmemory_copy_rect_rv_ask:\n   auipc t3, %pcrel_hi(cpu_has_vector)\n   lbu t3, %pcrel_lo(.Lmemory_copy_rect_rv_ask)(t3)\n"
+    "addi t5, t3, -1\n   beqz t5, 4f\n   beqz t3, 4f\n"
+    "mv t1, s6\n   mv t2, s2\n   mv t5, s1\n"
+    ".option push\n   .option arch, +v\n"
+    "10: vsetvli t0, t1, e8, m8, ta, ma\n   vle8.v v8, (t2)\n   vse8.v v8, (t5)\n   add t2, t2, t0\n   add t5, t5, t0\n   sub t1, t1, t0\n   bnez t1, 10b\n"
+    ".option pop\n"
+    "j 5f\n"
+#else
+    "3:\n"
+#endif
+    "4:  mv a0, s1\n   mv a1, s2\n   mv a2, s6\n   call memory_copy_apart\n"
+    "5:  add s1, s1, s4\n   add s2, s2, s5\n   addi s3, s3, -1\n   bnez s3, 3b\n"
+    "7:  ld ra, 56(sp)\n   ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   ld s4, 24(sp)\n   ld s5, 32(sp)\n   ld s6, 40(sp)\n"
+    "addi sp, sp, 64\n"
+    "8:  " ASM_RET
+    ASM_END(memory_copy_rect_u32)
 
     /* See the x86_64 body. Unaligned loads go through bytes: no unaligned ld. */
     /* See the x86_64 range encoder contract. */
@@ -45201,6 +45303,11 @@ fn memory_tint_u32(p32 address_to into, const p32 address_to from, positive coun
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);
+// height rows of width 32-bit words copied from from to into, each row from_stride or into_stride words after the
+// last, the way memory_copy would copy them one row at a time. A zero width or height touches nothing. Overlapping
+// rectangles are copied row by row in order, as memory_copy copies them.
+fn memory_copy_rect_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
+                        positive width, positive height);
 // count 32-bit words of from copied to into and to mirror wherever they differ from mirror, in 64-byte chunks from
 // the front, the count's rest past its last whole chunk being one more: a chunk whose words all equal mirror's is
 // stored to neither. Answers how many chunks were stored. into is only written, never read (a card's memory, where

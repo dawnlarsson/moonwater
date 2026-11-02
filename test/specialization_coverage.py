@@ -375,6 +375,9 @@ cover('folds_already', 'length', 'fast_argmax_f32',
       'greedy decoding hands it the logits of one step, a vocabulary wide; the '
       'length is the model\'s and a literal would remove one compare from a '
       'scan of thousands')
+cover('folds_already', 'width', 'memory_copy_rect_u32',
+      'compositor_blit hands it the visible width of a span, which the damage sets at run time; no reachable call '
+      'site passes a literal, and the height is the same kind of value')
 cover('folds_already', 'count', 'memory_first_differs_u32',
       'ui_run_in hands it the rest of a row of scratch paper from the column '
       'it has reached, a length the run sets at run time (its width less the '

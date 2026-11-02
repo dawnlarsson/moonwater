@@ -322,6 +322,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_ranged', 'memory_copy_apart__room
       'paired timing against the memory_copy_apart its callers had, over the lines '
       'of src/lib.c into a buffer nothing reads and one read at once, and at fixed '
       '40 and 76 bytes, with AVX2 and SSE2')
+cover('direct_benchmark', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_u32',
+      'paired timing against the row loop compositor_blit had, one memory_copy a row, over a window 1160 words wide '
+      'with rows 2560 apart, a sliver of 40 words, a band of 300 and a row of 96, with AVX-512 and without, '
+      'NEON, and V and scalar on riscv64')
 cover('direct_benchmark', 'test/checks.c#BENCH_first_differs', 'memory_first_differs_u32',
       'paired timing against the word loop ui_run_in had, over rows of paper '
       'ended by a difference after one, three, twelve, sixty and three hundred '

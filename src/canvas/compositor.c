@@ -191,13 +191,11 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
         int x2 = x + width < t->x2 ? x + width : t->x2;
         int y2 = y + height < t->y2 ? y + height : t->y2;
 
-        if (x2 <= x1)
+        if (x2 <= x1 || y2 <= y1)
                 return;
-
-        for (int row = y1; row < y2; row++)
-                memory_copy(t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox),
-                            source + (unsigned long)(row - y) * pitch + (unsigned long)(x1 - x),
-                            (unsigned long)(x2 - x1) * 4);
+        memory_copy_rect_u32(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
+                             source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
+                             (unsigned long)(x2 - x1), (unsigned long)(y2 - y1));
 }
 
 /*
