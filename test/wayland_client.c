@@ -45,6 +45,7 @@ static unsigned char in[8192];
 static long in_length;
 static struct event queue[QUEUE];
 static long queued;
+static unsigned long output_width, output_height;
 
 /*
         The pixel every picture carries: opaque, with three channels that vary
@@ -183,6 +184,12 @@ static void read_more(void)
                 e->op = word(in + 4) & 0xffff;
                 e->n = (long)size - 8;
                 memcpy(e->body, in + 8, (size_t)e->n);
+                if (e->object == 1 && e->op == 0)
+                {
+                        fprintf(stderr, "wayland client: the shim refused object %lu with code %lu\n",
+                                word(e->body), word(e->body + 4));
+                        exit(1);
+                }
                 memmove(in, in + size, (size_t)(in_length - (long)size));
                 in_length -= (long)size;
         }
@@ -192,6 +199,16 @@ static void read_more(void)
         Waits for an event of an object and opcode, in order, and takes it off
         the queue. Events of other kinds stay queued for a later wait.
 */
+static long queued_count(unsigned long object, unsigned long op)
+{
+        long n = 0;
+
+        for (long i = 0; i < queued; i++)
+                if (queue[i].object == object && queue[i].op == op)
+                        n++;
+        return n;
+}
+
 static struct event *wait_event(unsigned long object, unsigned long op)
 {
         for (;;)
@@ -271,20 +288,32 @@ int main(void)
         begin(&r, 2, 0); u(&r, (unsigned long)got_seat); s(&r, "wl_seat"); u(&r, 5); u(&r, seat); send_request(&r, -1);
         begin(&r, 2, 0); u(&r, (unsigned long)got_output); s(&r, "wl_output"); u(&r, 3); u(&r, output); send_request(&r, -1);
 
-        /* what the binds send back: two shm formats, the seat's capabilities, the output's done. */
+        /* what the binds send back: two shm formats, the seat's capabilities, the output's geometry, mode,
+           scale and done. The mode is sent once, and it is the screen the shim was told. */
         wait_event(shm, 0);
         wait_event(shm, 0);
         e = wait_event(seat, 0);
         if (word(e->body) == 0)
                 fail("seat has no capabilities");
+        wait_event(output, 0);
+        e = wait_event(output, 1);
+        output_width = word(e->body + 4);
+        output_height = word(e->body + 8);
+        if (output_width != 1024 || output_height != 768)
+                fail("the output's mode is not the screen Canvas gave");
+        wait_event(output, 3);
         wait_event(output, 2);
+        if (queued_count(output, 1) != 0)
+                fail("the output sent its mode more than once");
 
         /* the pointer, then the surface, its xdg surface and its toplevel; the toplevel configures with a size. */
         begin(&r, seat, 0); u(&r, pointer); send_request(&r, -1);
         begin(&r, compositor, 0); u(&r, 9); send_request(&r, -1);
         begin(&r, xdg, 2); u(&r, 10); u(&r, 9); send_request(&r, -1);
         begin(&r, 10, 1); u(&r, 11); send_request(&r, -1);
-        wait_event(11, 0);
+        e = wait_event(11, 0);
+        if (word(e->body) != output_width || word(e->body + 4) != output_height)
+                fail("the window's configure size is not the output's mode");
         e = wait_event(10, 0);
         serial = word(e->body);
         begin(&r, 10, 4); u(&r, serial); send_request(&r, -1);
@@ -322,6 +351,8 @@ int main(void)
 
         /* the pointer: the shim's enter when the window takes the focus, then a motion at 100,50 and a button. */
         e = wait_event(pointer, 0);
+        if (word(e->body + 4) != 9)
+                fail("the pointer's enter names another surface");
         e = wait_event(pointer, 2);
         if (word(e->body + 4) != 100 * 256 || word(e->body + 8) != 50 * 256)
                 fail("pointer motion has the wrong place");
@@ -329,6 +360,11 @@ int main(void)
         if (word(e->body + 8) != 0x110 || word(e->body + 12) != 1)
                 fail("pointer button has the wrong button or state");
         wait_event(pointer, 5);
+
+        /* a last sync: every event before it has arrived, and no protocol error has (read_more exits on one). */
+        begin(&r, 1, 0); u(&r, 20); send_request(&r, -1);
+        wait_event(20, 0);
+        wait_event(1, 1);
 
         (void)shm_fd;
         printf("wayland client: window shown, pointer delivered\n");
