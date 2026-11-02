@@ -54500,7 +54500,13 @@ __asm__(
     // members and the terminator cleared. Its 4 byte case is a tie within
     // noise (six runs, 0.97 to 1.17 of the bit form, median 0.99), and its 16
     // byte case is 1.5 times faster in all six.
+    //
+    // The kernel build keeps the bit form above: the table is filled with q
+    // registers here, and a kernel may not touch the vector registers outside a
+    // bracketed section (memory_fill_u32 keeps its general-register form for
+    // the same reason).
     ASM_FUNC(string_span_of_set)
+#ifndef KERNEL_MODE
     "sub sp, sp, #256\n   movi v0.16b, #0\n"
     "stp q0, q0, [sp]\n   stp q0, q0, [sp, #32]\n   stp q0, q0, [sp, #64]\n   stp q0, q0, [sp, #96]\n"
     "stp q0, q0, [sp, #128]\n   stp q0, q0, [sp, #160]\n   stp q0, q0, [sp, #192]\n   stp q0, q0, [sp, #224]\n"
@@ -54512,9 +54518,17 @@ __asm__(
     "sub x0, x0, #1\n   b 9f\n"
     "7:  sub x0, x0, #1\n"
     "9:  sub x0, x0, x2\n   add sp, sp, #256\n" ASM_RET
+#else
+    "sub sp, sp, #32\n   stp xzr, xzr, [sp]\n   stp xzr, xzr, [sp, #16]\n   mov x4, #1\n   mov x2, xzr\n   ldrb w3, [x1]\n   cbz w3, 2f\n"
+    "1:  ubfx x5, x3, #6, #2\n   lsl x6, x4, x3\n   ldr x7, [sp, x5, lsl #3]\n   orr x7, x7, x6\n   str x7, [sp, x5, lsl #3]\n   ldrb w3, [x1, #1]!\n   cbnz w3, 1b\n"
+    "2:  b 4f\n"
+    "3:  add x2, x2, #1\n"
+    "4:  ldrb w3, [x0, x2]\n   ubfx x5, x3, #6, #2\n   ldr x7, [sp, x5, lsl #3]\n   lsr x7, x7, x3\n   tbnz w7, #0, 3b\n   mov x0, x2\n   add sp, sp, #32\n" ASM_RET
+#endif
     ASM_END(string_span_of_set)
 
     ASM_FUNC(string_span_without_set)
+#ifndef KERNEL_MODE
     "sub sp, sp, #256\n   movi v0.16b, #1\n"
     "stp q0, q0, [sp]\n   stp q0, q0, [sp, #32]\n   stp q0, q0, [sp, #64]\n   stp q0, q0, [sp, #96]\n"
     "stp q0, q0, [sp, #128]\n   stp q0, q0, [sp, #160]\n   stp q0, q0, [sp, #192]\n   stp q0, q0, [sp, #224]\n"
@@ -54526,6 +54540,13 @@ __asm__(
     "sub x0, x0, #1\n   b 9f\n"
     "7:  sub x0, x0, #1\n"
     "9:  sub x0, x0, x2\n   add sp, sp, #256\n" ASM_RET
+#else
+    "sub sp, sp, #32\n   mov x4, #1\n   stp x4, xzr, [sp]\n   stp xzr, xzr, [sp, #16]\n   mov x2, xzr\n   ldrb w3, [x1]\n   cbz w3, 2f\n"
+    "1:  ubfx x5, x3, #6, #2\n   lsl x6, x4, x3\n   ldr x7, [sp, x5, lsl #3]\n   orr x7, x7, x6\n   str x7, [sp, x5, lsl #3]\n   ldrb w3, [x1, #1]!\n   cbnz w3, 1b\n"
+    "2:  b 4f\n"
+    "3:  add x2, x2, #1\n"
+    "4:  ldrb w3, [x0, x2]\n   ubfx x5, x3, #6, #2\n   ldr x7, [sp, x5, lsl #3]\n   lsr x7, x7, x3\n   tbz w7, #0, 3b\n   mov x0, x2\n   add sp, sp, #32\n" ASM_RET
+#endif
     ASM_END(string_span_without_set)
 
     // w3 still holds the byte that stopped the walk, so csel turns "it was the
