@@ -8479,6 +8479,7 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
 }
 
 static void compositor_float(int row);
+static unsigned int compositor_region_cells(unsigned int how);
 
 /*
         The cells a tile fills, one bit a quarter: top left 1, top right 2, bottom left 4, bottom right 8. A half is two of
@@ -8519,7 +8520,7 @@ static unsigned int compositor_cells_tile(unsigned int cells)
 */
 static void compositor_tile_others(int row, unsigned int how, int screen)
 {
-        unsigned int count, taken = compositor_tile_cells(how);
+        unsigned int count, taken = compositor_region_cells(how);
         const int (*screens)[4] = compositor_screens(&count);
 
         for (int other = 0; other < WINDOWS; other++)
@@ -8904,7 +8905,8 @@ static void compositor_arrange_on(int row, unsigned int how, int on)
         screen = on >= 0 && (unsigned int)on < count ? on : compositor_screen_of(row);
         compositor_screen_part(screens[screen], how, part);
         compositor_arrange_rect(row, how, part);
-        if (compositor_tile_cells(how))
+        // A maximized window covers every tile on its screen, so they float back as a half that a half covers does.
+        if (compositor_region_cells(how))
                 compositor_tile_others(row, how, screen);
 }
 

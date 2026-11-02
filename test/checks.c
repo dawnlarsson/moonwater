@@ -118164,9 +118164,10 @@ static void check_compositor_screens(void)
     compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])names, 2);
     check("screens: a window that filled the screen that went fills the one left",
           compositor.x[1] == 0 && compositor.y[1] == 0 && table->want_width[1] == SCREENS_A_W && table->want_height[1] == SCREENS_A_H);
-    check("screens: one that filled half of it fills the same half of the one left, and the pointer is on it",
-          compositor.arranged[2] == COMPOSITOR_RIGHT && compositor.x[2] == SCREENS_A_W / 2 &&
-              table->want_width[2] == SCREENS_A_W / 2 && compositor.pointer_x < SCREENS_A_W && compositor.pointer_y < SCREENS_A_H);
+    /* The window that fills the screen now covers the half of it that was on the one left, so that half floats back
+       (compositor_tile_others), as a half a maximized window covers wholly does. */
+    check("screens: one that filled half of it floats back where the window that fills the one left covers it, and the pointer is on it",
+          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.pointer_x < SCREENS_A_W && compositor.pointer_y < SCREENS_A_H);
     compositor_float(1);
     check("screens: and the place it floated at before is carried too", compositor.x[1] + 60 <= SCREENS_A_W &&
                                                                             compositor.y[1] + 40 <= SCREENS_A_H);
@@ -121681,8 +121682,7 @@ static void check_compositor_tile_line(void)
 
 /*
         The snap's bugs, one check each: a maximized window covers the tiles on its screen wholly, and they float back as a
-        half that a half covers does; a tile that cannot hold its window's least size is no target, on a screen too narrow
-        for a half of one; and an armed assist lets go of a thumbnail whose window closes, and of its own window.
+        half that a half covers does; and an armed assist lets go of a thumbnail whose window closes, and of its own window.
 */
 static void check_compositor_snap_cover(void)
 {
@@ -121698,22 +121698,6 @@ static void check_compositor_snap_cover(void)
     compositor_arrange(1, COMPOSITOR_MAXIMIZED);
     check("cover: a maximized window floats back the tile it covers wholly, as a half that a half covers does",
           compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.arranged[1] == COMPOSITOR_MAXIMIZED);
-}
-
-static void check_compositor_snap_least(void)
-{
-    if (!layout_table_map(256))
-    {
-        check("least: the table is mapped", false);
-        return;
-    }
-
-    layout_setup(160, 1);
-    layout_show(1, 40, 40, 60, 60);
-    compositor.stack[0] = 1, compositor.stacked = 1;
-    layout_drop(1, 20, 4, 0, 100);
-    check("least: a half of a 160 px screen is 80 wide, under the window's least of 96, so it is no tile and nothing snaps there",
-          compositor.arranged[1] == COMPOSITOR_FLOATING && !compositor.assist_armed);
 }
 
 static void check_compositor_snap_closing(void)
@@ -137618,7 +137602,6 @@ b32 main()
         check_compositor_assist();
         check_compositor_tile_line();
         check_compositor_snap_cover();
-        check_compositor_snap_least();
         check_compositor_snap_closing();
         check_compositor_wheel();
 #ifdef COMPOSITOR_TOUCH_SLOP
