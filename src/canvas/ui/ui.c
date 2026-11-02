@@ -4447,6 +4447,7 @@ struct ui_scroll
         // (dragging): what is drawn is the rubber band's share of that. back is the spring that takes a pull home.
         b64 at, aim, speed, stamp, tau;
         b32 gliding, dragging;
+        b32 flung;                   // the finger is moving fast: a pull past an end gives nothing while it does (a flick clamps)
         struct ui_spring back;
         struct ui_tween ink, grow; // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
 };
@@ -4648,8 +4649,8 @@ static b64 ui_scroll_shown(const struct ui_scroll address_to s)
         if (!s->dragging)
                 return s->at;
         if (s->at < 0)
-                return ui_scroll_give(s, s->at);
-        return s->at > most ? most + ui_scroll_give(s, s->at - most) : s->at;
+                return s->flung ? 0 : ui_scroll_give(s, s->at);
+        return s->at > most ? (s->flung ? most : most + ui_scroll_give(s, s->at - most)) : s->at;
 }
 
 // The drawn position, in whole device pixels, from where it is.
@@ -6297,7 +6298,7 @@ static fn ui_finger_down(struct ui_finger address_to f, int x, int y, int target
         ui_drag_stop(&f->drag);
         f->region = region;
         if (region)
-                region->left = 0, ui_scroll_stop(region);
+                region->left = 0, region->flung = 0, ui_scroll_stop(region);
         ui_press_begin(&f->press, x, y, target, true);
 }
 
@@ -6315,9 +6316,11 @@ static b32 ui_finger_move(const struct ui address_to ui, struct ui_finger addres
         }
         if (f->press.dragged && f->region)
         {
-                int before = f->region->scroll;
+                int before = f->region->scroll, moved = ui_drag_follow(&f->drag, y, clock_monotonic_nanoseconds());
 
-                ui_scroll_drag(f->region, -ui_drag_follow(&f->drag, y, clock_monotonic_nanoseconds()));
+                // A finger moving at a throw's speed is flinging: it is not pulling, so the region does not give past an end.
+                f->region->flung = f->drag.speed >= UI_DRAG_THROW || f->drag.speed <= -UI_DRAG_THROW;
+                ui_scroll_drag(f->region, -moved);
                 changed |= f->region->scroll != before;
         }
         return changed;

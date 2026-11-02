@@ -123616,7 +123616,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         string_format(log, "  settings flick (%s): %p rows, last row at %p, drawn past it by %b at most, moved back %p frames, rest at %p\n",
                       name, (positive)settings.list.count, (positive)most, (bipolar)p.peak, (positive)p.returned,
                       (positive)settings.list.scroll.scroll);
-        return p.returned == 0 && settings.list.scroll.scroll == most && !settings.list.scroll.back.live;
+        return p.peak <= 0 && p.returned == 0 && settings.list.scroll.scroll == most && !settings.list.scroll.back.live;
 }
 
 static fn check_settings_frames(string_address regular, string_address bold)
