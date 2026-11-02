@@ -1037,6 +1037,15 @@ static inline b32 font_ceiling(b32 fixed)
         return (b32)(((b64)fixed + 0xffff) >> 16);
 }
 
+//      The monospace cell's width alone, as font_metrics_at gives it: the
+//      pen starts a run with this and needs no other metric from it.
+static inline b32 font_cell_width(const font_face address_to face, p32 size)
+{
+        b32 width = (font_fixed(face, face->em_advance, size) + 0x8000) >> 16;
+
+        return width < 1 ? 1 : width;
+}
+
 font_metrics font_metrics_at(const font_face address_to face, p32 size)
 {
         font_metrics metrics = {

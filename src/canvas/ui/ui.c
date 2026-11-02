@@ -366,7 +366,7 @@ struct ui_pen
 static void ui_pen_start(const font_face address_to const address_to faces, p32 em, struct ui_pen address_to pen)
 {
         pen->reach = 0;
-        pen->cell = (b64)font_metrics_at(faces[0], em).cell_width << 16;
+        pen->cell = (b64)font_cell_width(faces[0], em) << 16;
         pen->glyph = 0;
         pen->face = FONT_DRAWN;
 }
