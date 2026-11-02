@@ -4450,15 +4450,31 @@ struct ui_scroll
         b32 flung;                   // the finger is moving fast: a pull past an end gives nothing while it does (a flick clamps)
         struct ui_spring back;
         struct ui_tween ink, grow; // the thumb's ink and its growth across the track: the kit's tweens to lit or unlit
+        int inset;                 // logical pixels from the region's top the track may not reach into (UI_SCROLL_INSET); 0 for none
 };
+
+/*
+        The track's top and height (device pixels): the region's, from its top to its end, except that it starts below its
+        inset: a window's close button is there, so a window's bar reaches the window's bottom and no higher than that.
+*/
+#define UI_SCROLL_INSET 1
+#define UI_CLOSE_BOTTOM 19 // a window's close button ends this many logical pixels from its top (compositor.c's disc)
+static void ui_scroll_track(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to height)
+{
+        int inset = s->inset * ui->scale, bottom = s->y + s->height;
+
+        *top = s->y > inset ? s->y : inset;
+        *height = bottom > *top ? bottom - *top : 0;
+}
 
 // The thumb's top and length (device pixels); false when everything shows and there is no bar. A held thumb is drawn at its
 // target, the pointer's or a wheel turn's glide aim, while a glide runs to it, and otherwise where the scroll is: a bar whose
 // aim was never set is not drawn at it, and nothing lags the hand.
 static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to length)
 {
-        int track = s->height, least = UI_SCROLL_LEAST * ui->scale, rest = s->content - s->view, scroll;
+        int track, at, least = UI_SCROLL_LEAST * ui->scale, rest = s->content - s->view, scroll;
 
+        ui_scroll_track(ui, s, &at, &track);
         if (s->content <= s->view || s->view <= 0 || track <= 0)
                 return 0;
         *length = (int)((b64)track * s->view / s->content);
@@ -4466,7 +4482,7 @@ static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll
         // The aim in 256ths, rounded as ui_scroll_show rounds it.
         scroll = s->held && s->gliding ? (int)((s->aim + 128) >> 8) : s->scroll;
         scroll = scroll < 0 ? 0 : scroll > rest ? rest : scroll;
-        *top = s->y + (int)((b64)(track - *length) * scroll / rest);
+        *top = at + (int)((b64)(track - *length) * scroll / rest);
         return 1;
 }
 
@@ -4498,10 +4514,12 @@ static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll addres
 }
 
 // The track's rows are drawn again next frame, as a moving control's are.
-static fn ui_scroll_mark(const struct ui_scroll address_to s)
+static fn ui_scroll_mark(const struct ui address_to ui, const struct ui_scroll address_to s)
 {
-        int top = s->y < 0 ? 0 : s->y, bottom = s->y + s->height;
+        int top, height, bottom;
 
+        ui_scroll_track(ui, s, &top, &height);
+        bottom = top + height;
         if (ui_kit.damage_bottom <= ui_kit.damage_top)
                 ui_kit.damage_top = top, ui_kit.damage_bottom = bottom;
         else
@@ -4525,7 +4543,7 @@ static fn ui_scroll_draw(struct ui address_to ui, struct ui_scroll address_to s)
         ink = ui_kit_colour(&s->ink);
         ui_scroll_box(ui, s, top, length, &thumb);
         if (ui_scroll_moving(s))
-                ui_scroll_mark(s);
+                ui_scroll_mark(ui, s);
         ui_kit_fill(ui, &thumb, ink, null);
 }
 
@@ -4535,7 +4553,10 @@ static fn ui_scroll_draw(struct ui address_to ui, struct ui_scroll address_to s)
 */
 static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll address_to s, int x, int y, b32 touch)
 {
-        return ui_hit(ui, touch, x, y, s->x, s->y, UI_SCROLL_WIDTH * ui->scale, s->height);
+        int top, height;
+
+        ui_scroll_track(ui, s, &top, &height);
+        return ui_hit(ui, touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale, height);
 }
 
 /*
@@ -4546,19 +4567,20 @@ static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll
 */
 static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down, b32 touch)
 {
-        int top, length, rest = s->content - s->view;
+        int top, length, at, track, rest = s->content - s->view;
         b32 bar = ui_scroll_thumb(ui, s, &top, &length);
         b32 on_track = bar && ui_scroll_reach(ui, s, x, y, touch);
         b32 on_thumb = on_track && ui_hit(ui, touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale, length);
 
+        ui_scroll_track(ui, s, &at, &track);
         if (type == WINDOW_EVENT_MOTION)
         {
                 s->hover = on_thumb;
                 if (!s->held || !bar)
                         return -1;
-                if (s->height - length <= 0)
+                if (track - length <= 0)
                         return s->scroll;
-                return (int)((b64)(y - s->grab - s->y) * rest / (s->height - length));
+                return (int)((b64)(y - s->grab - at) * rest / (track - length));
         }
         if (type != WINDOW_EVENT_BUTTON)
                 return -1;

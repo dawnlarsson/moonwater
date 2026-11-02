@@ -3292,6 +3292,7 @@ static fn settings_gallery_place(void)
         struct ui_scroll address_to s = &settings_gallery.scroll;
 
         s->x = settings.width - ui_px(&settings.ui, UI_SCROLL_WIDTH), s->y = 0, s->height = s->view = settings.height;
+        s->inset = UI_CLOSE_BOTTOM; // the window's close button is at its top right: the bar starts below it
         s->content = ui_px(&settings.ui, SETTINGS_GALLERY_H);
         ui_scroll_clamp(s);
 }

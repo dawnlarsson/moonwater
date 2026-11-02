@@ -129056,6 +129056,32 @@ static fn check_kit_place(void)
                 check("kit scrollbar: the thumb is drawn 4 wide inside its 10, and nothing else", drawn);
         }
 
+        // A track that starts below an inset (a window's close button at its top): the track is the region from the inset to its
+        // end, so the thumb never reaches into the button, a press there is not the bar's, and a bar at the end of its content
+        // reaches the region's bottom.
+        {
+#ifdef UI_SCROLL_INSET
+                struct ui_scroll capped = {100, 0, 200, 1000, 200, 800, false, false, 0};
+                int top = 0, length = 0, inset = UI_CLOSE_BOTTOM * ui.scale;
+                b32 starts, ends, pressed;
+
+                capped.inset = UI_CLOSE_BOTTOM;
+                starts = ui_scroll_thumb(&ui, &capped, &top, &length) && top + length == 200 && length == 36;
+                capped.scroll = 0;
+                starts = starts && ui_scroll_thumb(&ui, &capped, &top, &length) && top == inset;
+                capped.scroll = 800;
+                ends = ui_scroll_thumb(&ui, &capped, &top, &length) && top + length == 200 && top >= inset;
+                pressed = !ui_scroll_reach(&ui, &capped, 104, 10, 0) && ui_scroll_reach(&ui, &capped, 104, 30, 0) &&
+                          ui_scroll_pointer(&ui, &capped, WINDOW_EVENT_BUTTON, 104, 10, true, 0) == -1 && !capped.held;
+                check("kit scrollbar: a track with an inset starts at the inset and reaches the region's bottom at the end of its content",
+                      starts && ends);
+                check("kit scrollbar: a press in the inset is not the bar's, and the track below it is", pressed);
+#else
+                check("kit scrollbar: a track with an inset starts at the inset and reaches the region's bottom at the end of its content", false);
+                check("kit scrollbar: a press in the inset is not the bar's, and the track below it is", false);
+#endif
+        }
+
         // A dragged thumb is at the pointer on the frame the pointer moved it, with no glide. A wheel turn while it is held
         // starts a glide, and the thumb is drawn at that glide's target (the place the region is going), not where it is.
         {
