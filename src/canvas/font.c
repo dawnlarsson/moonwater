@@ -4715,6 +4715,9 @@ static inline INLINE font_bitmap font_cached(font_engine address_to e, const fon
 */
 static p16 font_to_linear[256];
 static p16 font_to_srgb[4096];
+//      The sRGB byte of every linear light value, font_srgb's answer as one
+//      table: the library's mix looks a channel's light up here.
+static p8 font_srgb_bytes[65536];
 
 static inline p32 font_srgb(p32 light)
 {
@@ -4772,6 +4775,12 @@ static fn font_tables()
         }
         for (s = 0; s < 256; s++)
                 font_to_linear[s] = (p16)(font_srgb_to_linear(s / 255.0) * 65535 + 0.5);
+        for (p32 lin = 0; lin < 65536; lin++)
+        {
+                p32 word = font_to_srgb[lin >> 4];
+
+                font_srgb_bytes[lin] = (p8)((word & 255) + ((lin & 15) >= (word >> 8)));
+        }
         __atomic_store_n(&made, 2, __ATOMIC_RELEASE);
 }
 
@@ -4982,17 +4991,10 @@ static fn font_blend(font_engine address_to e, const font_target address_to targ
                 }
                 return;
         }
-        for (positive r = 0; r < height; r++)
-        {
-                const p8 address_to row = from + r * glyph.stride;
-                p32 address_to ground = into + r * stride;
-
-                for (positive c = 0; c < width; c++)
-                {
-                        if (row[c])
-                                ground[c] = font_mix(e, ground[c], colour, e->ramp[row[c]]);
-                }
-        }
+        //      Each covered pixel is font_mix of itself and the colour: the library
+        //      lays the rows with the same weight and tables (memory_mix_u32_rect).
+        memory_mix_u32_rect(into, stride, from, glyph.stride, width, height, colour, e->linear ? e->plain : 64,
+                            e->ramp, font_to_linear, font_srgb_bytes);
 }
 
 /*

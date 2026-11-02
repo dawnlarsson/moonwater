@@ -360,6 +360,10 @@ cover('folds_already', 'width', 'memory_blend_u32_rect',
       'the text engine hands it a glyph clipped to its target; widths and '
       'heights come from the glyph at run time, so no reachable call site '
       'passes a literal')
+cover('folds_already', 'weight', 'memory_mix_u32_rect',
+      'the text engine hands it a glyph on a ground it does not know, with the '
+      'colour and the weight of its state at run time; widths and heights come '
+      'from the glyph, so no reachable call site passes a literal')
 cover('folds_already', 'width', 'memory_fill_u32_rect',
       'the text engine hands it the parts of a cell its glyph leaves; their '
       'sizes come from the grid and the glyph at run time')

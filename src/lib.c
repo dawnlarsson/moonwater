@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        431 routines (407 public, 24 local), 421 of them on all three and 10 local to one.
+        432 routines (408 public, 24 local), 422 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -266,6 +266,7 @@
           memory_into_spelled            public  yes     yes     yes
           memory_last_of                 public  yes     yes     yes
           memory_last_of_either          public  yes     yes     yes
+          memory_mix_u32_rect            public  yes     yes     yes
           memory_mix_u32_row             public  yes     yes     yes
           memory_nth_last_of             public  yes     yes     yes
           memory_nth_of                  public  yes     yes     yes
@@ -14131,6 +14132,66 @@ __asm__(
     ".Lblend_x64_done:\n   mov %r8, %rax\n   imul %r9, %rax\n"
     ".Lblend_x64_out:\n   pop %r13\n   pop %r12\n   pop %rbx\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
+
+    //
+    //       memory_mix_u32_rect -- coverage laid over pixels whose ground is
+    //       not known: rdi into, rsi into_stride in words, rdx from, rcx
+    //       from_stride, r8 width, r9 height, and on the stack, after the
+    //       return address, the colour, the weight, the ramp, the linear table
+    //       and the sRGB table. A nonzero byte makes its pixel font_mix of the
+    //       pixel and the colour by ramp[byte]: each channel mixed in linear
+    //       light, taken back to sRGB, and mixed with the plain mix of the bytes
+    //       by weight of 64. The zero byte leaves the pixel, and a ramp of 0 or
+    //       255 takes the pixel's low 24 bits or the colour as font_mix does.
+    //       Division by 255 is a multiply by 0x808081 and a shift of 31, exact
+    //       for every sum the mix makes (checked over the whole range). A weight
+    //       of zero, which dark text has, skips the plain mix: the channel is
+    //       the sRGB byte of its linear mix.
+    //
+    //       One pixel at a time. An eight-pixel body with AVX2 gathers, the
+    //       partial turns at a row's end masked, was measured on a 9950X core:
+    //       55% fewer instructions a frame of UI text than the C and 40% more
+    //       cycles, the gathers and those partial turns costing more than the
+    //       arithmetic they saved.
+    //
+    #define MIX_X64_CHANNEL(S, LF, F, N) \
+    "mov %r11d, %r9d\n   shr $" #S ", %r9d\n   movzbl %r9b, %r9d\n" \
+    "movzwl (%rbx,%r9,2), %ecx\n   imul %r8d, %ecx\n" \
+    "mov " #LF "(%rsp), %r9d\n   imul %eax, %r9d\n   add %r9d, %ecx\n   add $127, %ecx\n" \
+    "imul $8421505, %rcx, %rcx\n   shr $31, %rcx\n" \
+    "movzbl (%rbp,%rcx), %r9d\n" \
+    "cmpl $0, 28(%rsp)\n   je .Lmix_dark" #N "\n" \
+    "mov %r11d, %r12d\n   shr $" #S ", %r12d\n   movzbl %r12b, %r12d\n   imul %r8d, %r12d\n" \
+    "mov " #F "(%rsp), %esi\n   imul %eax, %esi\n   add %esi, %r12d\n   add $127, %r12d\n" \
+    "imul $8421505, %r12, %r12\n   shr $31, %r12\n" \
+    "mov 28(%rsp), %esi\n   imul %esi, %r12d\n   mov $64, %ecx\n   sub %esi, %ecx\n   imul %ecx, %r9d\n" \
+    "add %r12d, %r9d\n   add $32, %r9d\n   shr $6, %r9d\n" \
+    ".Lmix_dark" #N ":\n" \
+    "shl $" #S ", %r9d\n   or %r9d, %r10d\n"
+    ASM_FUNC(memory_mix_u32_rect)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $64, %rsp\n"
+    "test %r8, %r8\n   jz 9f\n   test %r9, %r9\n   jz 9f\n"
+    "mov 120(%rsp), %eax\n   and $0xffffff, %eax\n   mov 128(%rsp), %r10d\n   mov %r10d, 28(%rsp)\n"
+    "mov 136(%rsp), %r15\n   mov 144(%rsp), %rbx\n   mov 152(%rsp), %rbp\n"
+    "movzbl %al, %r11d\n   mov %r11d, 0(%rsp)\n   movzwl (%rbx,%r11,2), %r11d\n   mov %r11d, 16(%rsp)\n"
+    "mov %eax, %r11d\n   shr $8, %r11d\n   movzbl %r11b, %r11d\n   mov %r11d, 4(%rsp)\n   movzwl (%rbx,%r11,2), %r11d\n   mov %r11d, 20(%rsp)\n"
+    "mov %eax, %r11d\n   shr $16, %r11d\n   mov %r11d, 8(%rsp)\n   movzwl (%rbx,%r11,2), %r11d\n   mov %r11d, 24(%rsp)\n"
+    "shl $2, %rsi\n   mov %rsi, 32(%rsp)\n   mov %rcx, 40(%rsp)\n   mov %r8, 48(%rsp)\n   mov %r9, 56(%rsp)\n"
+    "1:  xor %r14d, %r14d\n"
+    "2:  movzbl (%rdx,%r14), %eax\n   test %eax, %eax\n   jz 4f\n"
+    "   movzbl (%r15,%rax), %eax\n   mov (%rdi,%r14,4), %r11d\n   test %eax, %eax\n   jz 5f\n   cmp $255, %eax\n   je 6f\n"
+    "   mov $255, %r8d\n   sub %eax, %r8d\n   xor %r10d, %r10d\n"
+    MIX_X64_CHANNEL(0, 16, 0, 0)
+    MIX_X64_CHANNEL(8, 20, 4, 1)
+    MIX_X64_CHANNEL(16, 24, 8, 2)
+    "   mov %r10d, (%rdi,%r14,4)\n   jmp 4f\n"
+    "5:  and $0xffffff, %r11d\n   mov %r11d, (%rdi,%r14,4)\n   jmp 4f\n"
+    "6:  mov 120(%rsp), %r11d\n   and $0xffffff, %r11d\n   mov %r11d, (%rdi,%r14,4)\n"
+    "4:  inc %r14\n   cmp 48(%rsp), %r14\n   jb 2b\n"
+    "   add 32(%rsp), %rdi\n   add 40(%rsp), %rdx\n   decq 56(%rsp)\n   jnz 1b\n"
+    "9:  add $64, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_mix_u32_rect)
+#undef MIX_X64_CHANNEL
 #undef TR32_X64_LOOKUP
 
     //
@@ -24651,6 +24712,51 @@ __asm__(
     "9:  " ASM_RET
     ASM_END(memory_fill_u32_rect)
 
+    //       memory_mix_u32_rect: x0 into, x1 into_stride in words, x2 from,
+    //       x3 from_stride, x4 width, x5 height, w6 colour, w7 weight, and on
+    //       the stack the ramp, the linear table and the sRGB table. The same
+    //       arithmetic as the x86_64 block, a pixel at a time: a channel is a
+    //       load and a multiply-add for each of its two mixes, umull by
+    //       0x808081 for the division by 255 (exact for every sum), and one
+    //       byte load for the sRGB lookup. The colour's channels and their
+    //       linear values sit in the frame, and 64 - weight in x22.
+    #define MIX_A64_CHANNEL(S, LF, F, N) \
+    "ubfx w16, w14, #" #S ", #8\n   ldrh w16, [x9, w16, uxtw #1]\n   mul w16, w16, w13\n" \
+    "ldr w17, [sp, #" #LF "]\n   madd w16, w17, w12, w16\n   add w16, w16, #127\n" \
+    "umull x16, w16, w21\n   lsr x16, x16, #31\n" \
+    "ldrb w17, [x10, w16, uxtw]\n" \
+    "cbz w7, " #N "f\n" \
+    "ubfx w19, w14, #" #S ", #8\n   mul w19, w19, w13\n" \
+    "ldr w20, [sp, #" #F "]\n   madd w19, w20, w12, w19\n   add w19, w19, #127\n" \
+    "umull x19, w19, w21\n   lsr x19, x19, #31\n" \
+    "mul w19, w19, w7\n   madd w17, w17, w22, w19\n" \
+    "add w17, w17, #32\n   lsr w17, w17, #6\n" \
+    #N ":\n" \
+    "orr w15, w15, w17, lsl #" #S "\n"
+    ASM_FUNC(memory_mix_u32_rect)
+    "stp x19, x20, [sp, #-80]!\n   stp x21, x22, [sp, #16]\n"
+    "ldr x8, [sp, #80]\n   ldr x9, [sp, #88]\n   ldr x10, [sp, #96]\n"
+    "cbz x4, 9f\n   cbz x5, 9f\n   lsl x1, x1, #2\n"
+    "and w6, w6, #0xffffff\n   movz w21, #0x8081\n   movk w21, #0x80, lsl #16\n   mov w22, #64\n   sub w22, w22, w7\n"
+    "and w16, w6, #255\n   str w16, [sp, #32]\n   ldrh w17, [x9, w16, uxtw #1]\n   str w17, [sp, #44]\n"
+    "ubfx w16, w6, #8, #8\n   str w16, [sp, #36]\n   ldrh w17, [x9, w16, uxtw #1]\n   str w17, [sp, #48]\n"
+    "ubfx w16, w6, #16, #8\n   str w16, [sp, #40]\n   ldrh w17, [x9, w16, uxtw #1]\n   str w17, [sp, #52]\n"
+    "1:  mov x11, xzr\n"
+    "2:  ldrb w12, [x2, x11]\n   cbz w12, 4f\n"
+    "   ldrb w12, [x8, w12, uxtw]\n   ldr w14, [x0, x11, lsl #2]\n   cbz w12, 5f\n   cmp w12, #255\n   b.eq 6f\n"
+    "   mov w13, #255\n   sub w13, w13, w12\n   mov w15, wzr\n"
+    MIX_A64_CHANNEL(0, 44, 32, 17)
+    MIX_A64_CHANNEL(8, 48, 36, 18)
+    MIX_A64_CHANNEL(16, 52, 40, 19)
+    "   str w15, [x0, x11, lsl #2]\n   b 4f\n"
+    "5:  and w14, w14, #0xffffff\n   str w14, [x0, x11, lsl #2]\n   b 4f\n"
+    "6:  and w14, w6, #0xffffff\n   str w14, [x0, x11, lsl #2]\n"
+    "4:  add x11, x11, #1\n   cmp x11, x4\n   b.lo 2b\n"
+    "   add x0, x0, x1\n   add x2, x2, x3\n   subs x5, x5, #1\n   b.ne 1b\n"
+    "9:  ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #80\n" ASM_RET
+    ASM_END(memory_mix_u32_rect)
+#undef MIX_A64_CHANNEL
+
     //       memory_first_differs_u32: x0 words, x1 count, w2 value; answers
     //       in x0 the index of the first word that is not value, or count.
     //       NEON: sixteen words a turn in four q loads, cmeq against value
@@ -33926,6 +34032,50 @@ __asm__(
     "4:  add a0, a0, a1\n   addi a3, a3, -1\n   bnez a3, 6b\n"
     "9:  " ASM_RET
     ASM_END(memory_fill_u32_rect)
+
+    //       memory_mix_u32_rect: a0 into, a1 into_stride in words, a2 from,
+    //       a3 from_stride, a4 width, a5 height, a6 colour, a7 weight, and on
+    //       the stack the ramp, the linear table and the sRGB table. The same
+    //       arithmetic as the x86_64 block, a pixel at a time, RV64GC with no V:
+    //       the division by 255 is a multiply by 0x808081 and a shift of 31,
+    //       exact for every sum the mix makes.
+    #define MIX_RV_CHANNEL(S, LF, F) \
+    "srli t0, s7, " #S "\n   andi t0, t0, 255\n   slli t0, t0, 1\n   add t0, s1, t0\n   lhu t0, 0(t0)\n   mul t0, t0, s6\n" \
+    "lw t1, " #LF "(sp)\n   mul t1, t1, s5\n   add t0, t0, t1\n   addi t0, t0, 127\n   mul t0, t0, s3\n   srli t0, t0, 31\n" \
+    "add t1, s2, t0\n   lbu t1, 0(t1)\n" \
+    "beqz a7, .Lmix_dark" #S "\n" \
+    "srli t0, s7, " #S "\n   andi t0, t0, 255\n   mul t0, t0, s6\n" \
+    "lw t2, " #F "(sp)\n   mul t2, t2, s5\n   add t0, t0, t2\n   addi t0, t0, 127\n   mul t0, t0, s3\n   srli t0, t0, 31\n" \
+    "mul t0, t0, a7\n   li t2, 64\n   sub t2, t2, a7\n   mul t2, t1, t2\n   add t0, t0, t2\n   addi t0, t0, 32\n   srli t0, t0, 6\n" \
+    "j .Lmix_done" #S "\n" \
+    ".Lmix_dark" #S ":\n   mv t0, t1\n" \
+    ".Lmix_done" #S ":\n" \
+    "slli t0, t0, " #S "\n   or s8, s8, t0\n"
+    ASM_FUNC(memory_mix_u32_rect)
+    "addi sp, sp, -112\n   sd s0, 0(sp)\n   sd s1, 8(sp)\n   sd s2, 16(sp)\n   sd s3, 24(sp)\n   sd s4, 32(sp)\n"
+    "sd s5, 40(sp)\n   sd s6, 48(sp)\n   sd s7, 56(sp)\n   sd s8, 64(sp)\n"
+    "ld s0, 112(sp)\n   ld s1, 120(sp)\n   ld s2, 128(sp)\n"
+    "beqz a4, 9f\n   beqz a5, 9f\n   slli a1, a1, 2\n   li s3, 8421505\n   li t5, 0xffffff\n   and a6, a6, t5\n"
+    "andi t0, a6, 255\n   sw t0, 80(sp)\n   slli t1, t0, 1\n   add t1, s1, t1\n   lhu t1, 0(t1)\n   sw t1, 92(sp)\n"
+    "srli t0, a6, 8\n   andi t0, t0, 255\n   sw t0, 84(sp)\n   slli t1, t0, 1\n   add t1, s1, t1\n   lhu t1, 0(t1)\n   sw t1, 96(sp)\n"
+    "srli t0, a6, 16\n   andi t0, t0, 255\n   sw t0, 88(sp)\n   slli t1, t0, 1\n   add t1, s1, t1\n   lhu t1, 0(t1)\n   sw t1, 100(sp)\n"
+    "1:  li s4, 0\n"
+    "2:  add t0, a2, s4\n   lbu t0, 0(t0)\n   beqz t0, 4f\n"
+    "   add t1, s0, t0\n   lbu s5, 0(t1)\n   slli t2, s4, 2\n   add t2, a0, t2\n   lw s7, 0(t2)\n"
+    "   beqz s5, 5f\n   li t3, 255\n   beq s5, t3, 6f\n"
+    "   li s6, 255\n   sub s6, s6, s5\n   li s8, 0\n"
+    MIX_RV_CHANNEL(0, 92, 80)
+    MIX_RV_CHANNEL(8, 96, 84)
+    MIX_RV_CHANNEL(16, 100, 88)
+    "   slli t2, s4, 2\n   add t2, a0, t2\n   sw s8, 0(t2)\n   j 4f\n"
+    "5:  li t0, 0xffffff\n   and s7, s7, t0\n   slli t2, s4, 2\n   add t2, a0, t2\n   sw s7, 0(t2)\n   j 4f\n"
+    "6:  and t0, a6, t5\n   slli t2, s4, 2\n   add t2, a0, t2\n   sw t0, 0(t2)\n"
+    "4:  addi s4, s4, 1\n   bltu s4, a4, 2b\n"
+    "   add a0, a0, a1\n   add a2, a2, a3\n   addi a5, a5, -1\n   bnez a5, 1b\n"
+    "9:  ld s0, 0(sp)\n   ld s1, 8(sp)\n   ld s2, 16(sp)\n   ld s3, 24(sp)\n   ld s4, 32(sp)\n   ld s5, 40(sp)\n"
+    "   ld s6, 48(sp)\n   ld s7, 56(sp)\n   ld s8, 64(sp)\n   addi sp, sp, 112\n" ASM_RET
+    ASM_END(memory_mix_u32_rect)
+#undef MIX_RV_CHANNEL
 
     //       memory_first_differs_u32: a0 words, a1 count, a2 value; answers
     //       in a0 the index of the first word that is not value, or count.
@@ -46230,6 +46380,14 @@ fn memory_mix_u32_row(p32 address_to into, const p32 address_to ink, const p8 ad
 // height rows of width 32-bit words, into_stride words apart, set to value:
 // a cell's ground, a panel's. A zero width or height touches nothing.
 fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive width, positive height, p32 value);
+// height rows of width coverage bytes laid over 32-bit pixels whose ground is not known: each pixel under a nonzero
+// byte becomes font_mix of the pixel and colour (its low 24 bits) by ramp[byte], with the tables linear (256 words:
+// a sRGB byte's linear light) and srgb (65536 bytes: a linear light's sRGB byte) and weight from 0 to 64, the plain
+// mix's share in 64ths. A zero ramp entry leaves the pixel's low 24 bits, a full one the colour's; a zero byte leaves
+// the pixel alone. Nothing past a row is read or written, and a zero width or height touches nothing.
+fn memory_mix_u32_rect(p32 address_to into, positive into_stride, const p8 address_to from, positive from_stride,
+                       positive width, positive height, p32 colour, p32 weight, const p8 address_to ramp,
+                       const p16 address_to linear, const p8 address_to srgb);
 // height rows of width 32-bit words copied from from to into, each row from_stride or into_stride words after the
 // last, the way memory_copy would copy them one row at a time. A zero width or height touches nothing. Overlapping
 // rectangles are copied row by row in order, as memory_copy copies them.

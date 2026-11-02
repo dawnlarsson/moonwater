@@ -261,6 +261,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_translate_rect', 'memory_translat
 cover('direct_benchmark', 'test/checks.c#BENCH_blend_rect', 'memory_blend_u32_rect',
       'paired former-C/assembly timing over glyphs of UI text and a 4K heading '
       'laid on a known ground, both x86-64 bodies')
+cover('direct_benchmark', 'test/checks.c#BENCH_mix_rect', 'memory_mix_u32_rect',
+      'paired font_mix-loop/assembly timing over glyphs of UI text and a 4K heading '
+      'laid on an unknown ground, dark and light text')
 cover('direct_benchmark', 'test/checks.c#BENCH_average_ahead', 'memory_average_ahead',
       'paired former-C/assembly timing over the compositor glass, a pass across '
       'at a pixel and its doubles and down at a row and its doubles, all three x86-64 bodies')

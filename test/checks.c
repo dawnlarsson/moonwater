@@ -114850,6 +114850,82 @@ static fn check_blend()
 }
 
 /*
+        memory_mix_u32_rect against font_mix, the loop it replaces in font_blend
+        on an unknown ground: every weight from 0 to 64, every coverage byte
+        (the ramp a random table with the ends and a few values forced),
+        grounds and colours random with their top bytes set, widths to 40 and
+        a few wide ones, two strides, heights to 2, a zero byte in four and
+        the others covered, the gap after each row and the bytes past the
+        span untouched, and guard pages at both ends of the source and the
+        pixels.
+*/
+static fn check_text_mix(font_engine address_to e)
+{
+        static const positive wide[] = {127, 128, 129, 255, 256, 257, 300};
+        static p32 want[3 * 4096];
+        static p8 ramp[256];
+        p8 address_to source = memory(4 * 4096);
+        p32 address_to into = memory(4 * 4096);
+        p64 state = 0x243f6a8885a308d3ull;
+        bool guarded = source && into &&
+                       system_call_3(syscall(mprotect), (positive)(source + 3 * 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+        bool linear = e->linear;
+        b32 plain = e->plain;
+
+        check("mix: guard pages", guarded);
+        if (!guarded)
+                return;
+        for (p32 i = 0; i < 256; i++)
+        {
+                XORSHIFT64(state);
+                ramp[i] = (p8)(state >> 16);
+        }
+        ramp[0] = 0, ramp[1] = 255, ramp[2] = 1, ramp[3] = 254, ramp[255] = 128;
+        e->linear = true;
+        bool fine = true;
+        for (p32 weight = 0; weight <= 64; weight++)
+        {
+                for (positive w = 0; w <= 40 + sizeof(wide) / sizeof(wide[0]) - 1; w++)
+                        for (positive width = w <= 40 ? w : wide[w - 41], height = 0; height <= 2; height++)
+                                for (positive shape = 0; shape < 4; shape++)
+                                {
+                                        positive gap = shape & 1 ? 0 : 37, stride = width + gap;
+                                        positive span = height ? (height - 1) * stride + width : 0;
+                                        p8 address_to from = source + 3 * 4096 - span;
+                                        p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - span;
+                                        p32 colour = (p32)(state >> 20) & 0xffffff;
+
+                                        XORSHIFT64(state);
+                                        colour = shape & 2 ? colour | (p32)(state >> 40) << 24 : colour;
+                                        e->plain = weight;
+                                        for (positive i = 0; i < span; i++)
+                                        {
+                                                XORSHIFT64(state);
+                                                from[i] = state & 3 ? (p8)(state >> 8) : 0;
+                                                to[i] = (p32)(state >> 32);
+                                                want[i] = to[i];
+                                        }
+                                        for (positive r = 0; r < height; r++)
+                                                for (positive c = 0; c < width; c++)
+                                                {
+                                                        p8 cover = from[r * stride + c];
+
+                                                        if (cover)
+                                                                want[r * stride + c] =
+                                                                    font_mix(e, want[r * stride + c], colour, ramp[cover]);
+                                                }
+                                        memory_mix_u32_rect(to, stride, from, stride, width, height, colour, weight, ramp,
+                                                            font_to_linear, font_srgb_bytes);
+                                        fine = fine && !memory_compare(to, want, span * 4);
+                                }
+        }
+        check("mix: every pixel font_mix's answer, every weight, the rest untouched", fine);
+        e->linear = linear;
+        e->plain = plain;
+}
+
+/*
         memory_average_ahead against the byte loop it is: every count to 300
         and a few long ones, distances of a byte to a glass row's three and
         a half pages, the last byte it reads against a page that faults and
@@ -116658,6 +116734,7 @@ b32 main()
         check_translate();
         check_translate_planes();
         check_blend();
+        check_text_mix(&engine);
         check_average_ahead();
         check_glass_routines();
         check_glass_tiers();
@@ -145829,6 +145906,114 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_blend_rect */
+
+#ifdef BENCH_mix_rect
+/* memory_mix_u32_rect against the loop it replaced in font_blend on an
+   unknown ground: glyphs of UI text at 13, 24 and 48 px (8 by 13, 14 by 24,
+   28 by 48) and a 4K heading (120 by 200), each row two strokes of ink in
+   air, laid on a ground in a 3840-pixel frame that stays in cache, for dark
+   text (weight 0) and light text (weight 32). The former loop is font_mix. */
+#include "../src/lib.util.c"
+#include "../src/canvas/font.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static font_engine engine;
+static p8 atlas[1024 * 1024];
+static p8 glyph[256 * 200];
+static p32 frame[3840 * 220], frame_c[3840 * 220];
+static const p32 ink = 0x202020;
+static p32 weight;
+
+__attribute__((noinline, noclone)) static positive former_mix(p32 address_to into, positive stride,
+                                                              const p8 address_to from, positive from_stride,
+                                                              positive width, positive height)
+{
+        for (positive r = 0; r < height; r++)
+                for (positive c = 0; c < width; c++)
+                {
+                        p32 cover = from[r * from_stride + c];
+
+                        if (cover)
+                                into[r * stride + c] = font_mix(&engine, into[r * stride + c], ink, engine.ramp[cover]);
+                }
+        return width * height;
+}
+
+//      Sixteen glyphs along a line, each laid on ground the turn before it.
+static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        p64 took = 0;
+
+        for (positive round = 0; round < rounds; round++)
+        {
+                for (positive r = 0; r < height; r++)
+                        memory_fill_u32(frame + r * 3840, 16 * width, 0x203040);
+                p64 start = get_cpu_time();
+                for (positive g = 0; g < 16; g++)
+                        if (assembly)
+                                memory_mix_u32_rect(frame + g * width, 3840, glyph, 256, width, height, ink, weight,
+                                                    engine.ramp, font_to_linear, font_srgb_bytes);
+                        else
+                                former_mix(frame + g * width, 3840, glyph, 256, width, height);
+                took += get_cpu_time() - start;
+        }
+        return took;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{8, 13}, {14, 24}, {28, 48}, {120, 200}};
+        static const p32 weights[] = {0, 32};
+        p64 seed = 0x9e3779b97f4a7c15ULL;
+
+        //      Each row two strokes, a fifth of the row wide each, at random
+        //      places: runs of ink and air as a glyph's rows have them.
+        for (positive r = 0; r < 200; r++)
+                for (positive k = 0; k < 2; k++)
+                {
+                        XORSHIFT64(seed);
+                        for (positive w = 0; w < 4; w++)
+                        {
+                                positive width = w == 0 ? 8 : w == 1 ? 14 : w == 2 ? 28 : 120;
+                                positive at = (positive)(seed >> (8 * w)) % width, run = width / 5 + 1;
+
+                                for (positive c = at; c < at + run && c < width; c++)
+                                        glyph[r * 256 + c] = (p8)(seed >> 40 | 1);
+                        }
+                }
+        font_start(&engine, atlas, 1024, 1024);
+        font_ramp(&engine, ink, FONT_UNKNOWN, 64);
+        for (positive i = 0; i < sizeof(weights) / sizeof(weights[0]); i++)
+        {
+                weight = engine.plain = weights[i];
+                for (positive row = 0; row < sizeof(shapes) / sizeof(shapes[0]); row++)
+                {
+                        positive width = shapes[row][0], height = shapes[row][1];
+                        positive ratios[TRIES];
+                        positive rounds = 400000 / (width * height * 16) + 1;
+
+                        memory_fill_u32(frame, sizeof(frame) / 4, 0x203040);
+                        memory_fill_u32(frame_c, sizeof(frame_c) / 4, 0x203040);
+                        memory_mix_u32_rect(frame, 3840, glyph, 256, width, height, ink, weight, engine.ramp,
+                                            font_to_linear, font_srgb_bytes);
+                        former_mix(frame_c, 3840, glyph, 256, width, height);
+                        if (memory_compare(frame, frame_c, sizeof(frame)))
+                                return 1;
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, width, height, rounds);
+                        string_format(log, "memory_mix_u32_rect %p by %p weight %p: paired median ASM/C %p.", width,
+                                      height, (positive)weight, ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_mix_rect */
 
 #ifdef BENCH_fill_rect
 /* memory_fill_u32_rect against the loop it replaced in font_cell, a
