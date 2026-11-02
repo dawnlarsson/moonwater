@@ -363,6 +363,9 @@ cover('folds_already', 'width', 'memory_blend_u32_rect',
 cover('folds_already', 'width', 'memory_fill_u32_rect',
       'the text engine hands it the parts of a cell its glyph leaves; their '
       'sizes come from the grid and the glyph at run time')
+cover('folds_already', 'count', 'memory_over_tone_u32',
+      'the kit hands it a run of a line or a row of a box: its length is the '
+      'layout at run time, and the tone is the theme, so no literal reaches it')
 cover('folds_already', 'count', 'fused_residual_add_f32',
       'a training step hands it a whole activation, batch by context by '
       'width: thousands to millions of floats a call, where a literal count '

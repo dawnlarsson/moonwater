@@ -231,13 +231,9 @@ static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, 
                                              (positive)(x2 - x), (positive)(y2 - y), tone);
                 return;
         }
-        for (int row = y; row < y2; row++)
-                for (int column = x; column < x2; column++)
-                {
-                        unsigned int address_to at = ui->pixels + (unsigned long)row * ui->pitch + (unsigned long)column;
-
-                        address_to at = ui_over(tone, address_to at);
-                }
+        if (x2 > x)
+                for (int row = y; row < y2; row++)
+                        memory_over_tone_u32(ui->pixels + (unsigned long)row * ui->pitch + (unsigned long)x, (positive)(x2 - x), tone);
 }
 
 /*
@@ -2028,12 +2024,9 @@ static inline fn ui_kit_put(unsigned int address_to row, b32 x, unsigned int cov
 
 /*
         A run of pixels laid over with one premultiplied tone, which is what ui_over gives each of them: an opaque tone
-        is the library's fill, and any other the library's over (memory_glass_over_u32, its grain none) of a line of
-        the tone. A short run is done a pixel at a time, where a call costs more than its pixels.
+        is the library's fill, and any other the library's run over (memory_over_tone_u32, the ui_over of one tone at
+        every pixel of the run).
 */
-static unsigned int ui_kit_tones[UI_KIT_LINE];
-static const unsigned int ui_kit_grainless[80];
-
 static fn ui_kit_run(unsigned int address_to row, b32 count, unsigned int tone)
 {
         if (count <= 0 || !(tone >> 24))
@@ -2043,14 +2036,7 @@ static fn ui_kit_run(unsigned int address_to row, b32 count, unsigned int tone)
                 memory_fill_u32(row, (positive)count, tone);
                 return;
         }
-        if (count < 8)
-        {
-                for (b32 x = 0; x < count; x++)
-                        row[x] = ui_over(tone, row[x]);
-                return;
-        }
-        memory_fill_u32(ui_kit_tones, (positive)count, tone);
-        memory_glass_over_u32(row, ui_kit_tones, row, (positive)count, ui_kit_grainless);
+        memory_over_tone_u32(row, (positive)count, tone);
 }
 
 // The tone of a colour at a cover, as ui_kit_put lays it: a colour wholly over is itself, opaque or premultiplied.

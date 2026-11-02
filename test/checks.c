@@ -116063,6 +116063,92 @@ static fn check_first_differs(void)
 }
 
 /*
+        memory_over_tone_u32 against ui.c's ui_over, one tone over a run: every alpha from 0 to 255 with colours at most
+        their alpha (premultiplied) and at any value, runs of 0 to 1000 pixels, the run ending at a page that faults and the
+        words before it held to a canary; each x86_64 tier (SSE2, AVX2, AVX-512) and the first arm64 and riscv64 call.
+*/
+static unsigned int over_tone_seed = 0x2545f491u;
+
+static unsigned int over_tone_next(void)
+{
+        over_tone_seed = over_tone_seed * 1664525u + 1013904223u;
+        return over_tone_seed >> 8;
+}
+
+static p32 over_tone_reference(p32 tone, p32 under)
+{
+        p32 rest = 255 - (tone >> 24), out = 0;
+
+        if (!(tone >> 24))
+                return under;
+        for (int shift = 0; shift < 32; shift += 8)
+        {
+                p32 x = (under >> shift & 255) * rest + 127;
+                p32 channel = (tone >> shift & 255) + ((x + 1 + (x >> 8)) >> 8);
+
+                out |= (channel > 255 ? 255 : channel) << shift;
+        }
+        return out;
+}
+
+static fn check_over_tone()
+{
+        static const positive counts[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 1000};
+        p32 address_to into = memory(4 * 4096);
+        bool guarded = into && system_call_3(syscall(mprotect), (positive)((p8 address_to)into + 3 * 4096), 4096, 0) == 0;
+
+        check("over tone: a guard page", guarded);
+        if (!guarded)
+                return;
+#if X64
+        p8 wide_on = cpu_has_avx512, narrow_on = cpu_has_avx2;
+        for (p32 tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 2 ? wide_on : 0;
+                cpu_has_avx2 = tier >= 1 ? narrow_on : 0;
+#endif
+                bool fine = true;
+                for (p32 alpha = 0; alpha < 256; alpha++)
+                        for (p32 trial = 0; trial < 6; trial++)
+                                for (positive k = 0; k < sizeof counts / sizeof counts[0]; k++)
+                                {
+                                        p32 colour = 0;
+                                        p32 address_to to = (p32 address_to)((p8 address_to)into + 3 * 4096) - counts[k];
+                                        positive count = counts[k];
+                                        p32 tone;
+
+                                        for (int c = 0; c < 3; c++)
+                                        {
+                                                p32 channel = trial == 2 ? 255 : trial == 3 ? 0 : over_tone_next() & 255;
+
+                                                if (trial < 2 && channel > alpha)
+                                                        channel = over_tone_next() % (alpha + 1);
+                                                colour = colour << 8 | channel;
+                                        }
+                                        tone = alpha << 24 | colour;
+                                        for (positive i = 0; i < count + 16; i++)
+                                                to[(b64)i - 16] = i < 16 ? 0xdeadbeef : over_tone_next();
+                                        {
+                                                p32 want[1100];
+
+                                                for (positive i = 0; i < count; i++)
+                                                        want[i] = over_tone_reference(tone, to[i]);
+                                                memory_over_tone_u32(to, count, tone);
+                                                for (positive i = 0; i < count; i++)
+                                                        fine = fine && to[i] == want[i];
+                                                for (positive i = 0; i < 16; i++)
+                                                        fine = fine && to[(b64)i - 16] == 0xdeadbeef;
+                                        }
+                                }
+                check("over tone: every word of the run, nothing before it", fine);
+#if X64
+        }
+        cpu_has_avx512 = wide_on;
+        cpu_has_avx2 = narrow_on;
+#endif
+}
+
+/*
         memory_sweep_coverage against the loop it replaces in font_raster:
         every count from 0 to 80 and runs of 127 to 1000, cells sparse as an
         outline leaves them and dense, sums that run past full both ways and
@@ -116579,6 +116665,7 @@ b32 main()
         check_tint();
         check_mix();
         check_fill_rect();
+        check_over_tone();
         check_copy_rect();
         check_resample_rect();
         check_copy_changed();
@@ -145528,6 +145615,76 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_fill_rect */
+
+#ifdef BENCH_over_tone
+/*
+        memory_over_tone_u32 against the loop it replaced in ui_kit_run and ui_fill: ui_over, one tone laid over each
+        pixel of a run, at runs of 8, 64 and 1024 pixels, in the machine's own tier of each body (x86_64 with what the
+        CPU has, arm64 and riscv64 as they are built). The minimum of nine paired runs, in thousandths of the C loop.
+*/
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+
+static p32 over_frame[4096];
+
+__attribute__((noinline, noclone)) static fn former_over(p32 address_to into, positive count, p32 tone)
+{
+        for (positive i = 0; i < count; i++)
+                into[i] = over_tone_reference(tone, into[i]);
+}
+
+static p64 run_over(bool assembly, positive count, positive rounds)
+{
+        p64 start = get_cpu_time();
+
+        for (positive round = 0; round < rounds; round++)
+                for (positive row = 0; row < 16; row++)
+                {
+                        p32 address_to into = over_frame + row * count % (4096 - count);
+
+                        if (assembly)
+                                memory_over_tone_u32(into, count, 0x80402010u + (p32)round);
+                        else
+                                former_over(into, count, 0x80402010u + (p32)round);
+                }
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive shapes[] = {8, 64, 1024};
+
+        for (positive k = 0; k < sizeof(shapes) / sizeof(shapes[0]); k++)
+        {
+                positive count = shapes[k], rounds = 400000 / count + 1;
+                p64 best_asm = ~(p64)0, best_c = ~(p64)0;
+
+                for (positive t = 0; t < TRIES; t++)
+                {
+                        p64 a, c;
+
+                        for (positive i = 0; i < 4096; i++)
+                                over_frame[i] = 0x203040u + i * 2654435761u;
+                        a = run_over(true, count, rounds);
+                        for (positive i = 0; i < 4096; i++)
+                                over_frame[i] = 0x203040u + i * 2654435761u;
+                        c = run_over(false, count, rounds);
+                        if (a < best_asm)
+                                best_asm = a;
+                        if (c < best_c)
+                                best_c = c;
+                }
+                string_format(log, "memory_over_tone_u32 %p pixels: ASM/C %p per mille\n", count,
+                              (positive)(best_asm * 1000 / best_c));
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_over_tone */
 
 #ifdef BENCH_train
 /* The training and inference block against the compiler: the C loop each

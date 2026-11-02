@@ -283,6 +283,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect
 cover('direct_benchmark', 'test/checks.c#BENCH_resample', 'memory_resample_u32_rect',
       'paired timing against resample_reference, the walk compositor_blit_scaled made, over a landing of a 1000 by 600 '
       'picture at 96%, 98% and 100%, with AVX-512, with AVX2 and with neither; the scalar walk on arm64 and riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_over_tone', 'memory_over_tone_u32',
+      'paired timing against the ui_over loop it replaced in ui_kit_run and ui_fill, '
+      'one tone over runs of 8, 64 and 1024 pixels, in the tier each machine has')
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fused_residual_add_f32',
       'paired timing against the C loop at -O3 for the same instruction set, '
       'over 2048, 65536 and 2097152 floats (L1, L2, L3), every x86-64 body')

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        430 routines (406 public, 24 local), 420 of them on all three and 10 local to one.
+        431 routines (407 public, 24 local), 421 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -279,6 +279,7 @@
           memory_offsets_of_either       public  yes     yes     yes
           memory_offsets_outside         public  yes     yes     yes
           memory_offsets_range_x64       local   yes     --      --
+          memory_over_tone_u32           public  yes     yes     yes
           memory_paste_lines__room_64    public  yes     yes     yes
           memory_release                 public  yes     yes     yes
           memory_resample_u32_rect       public  yes     yes     yes
@@ -14133,6 +14134,71 @@ __asm__(
 #undef TR32_X64_LOOKUP
 
     //
+    //       memory_over_tone_u32 -- rdi into, rsi count, edx tone: each of
+    //       count pixels laid over by one premultiplied tone, the ui_over the
+    //       kit makes of a run of one colour. A tone of alpha zero changes
+    //       nothing; otherwise each channel is the tone's plus the pixel's
+    //       times 255 - alpha over 255, rounded as ui_div255 rounds, and
+    //       clamped at 255 by the one saturating pack. Sixteen pixels a turn
+    //       in zmm with AVX-512BW, eight in ymm with AVX2, four in xmm without,
+    //       the 16-bit lanes in each; a pixel at a time for the last three. The
+    //       alpha test and the rest are the run's, not the pixel's, so the body
+    //       has no branch but the loop's. Against the ui_over loop it replaced,
+    //       instructions a pixel: zmm 8, 4, 2, 1, 1 at runs of 8, 16, 64, 256 and
+    //       1024 pixels, against the glass path's 12, 6, 3, 2, 2 on the same
+    //       machine; ymm 8, 5, 3, 3, 2 against its 11, 8, 5, 4, 4; xmm 11 to 6
+    //       against the C loop's 45 (9950X, gcc). The x86_64 block carries the
+    //       contract.
+    //
+    ASM_FUNC(memory_over_tone_u32)
+    "mov %edx, %eax\n   shr $24, %eax\n   jz 9f\n   test %rsi, %rsi\n   jz 9f\n"
+    "mov $255, %ecx\n   sub %eax, %ecx\n   movd %ecx, %xmm4\n   pshuflw $0, %xmm4, %xmm4\n   punpcklqdq %xmm4, %xmm4\n"
+    "pxor %xmm7, %xmm7\n   movd %edx, %xmm5\n   punpcklbw %xmm7, %xmm5\n   punpcklqdq %xmm5, %xmm5\n"
+    "mov $0x007f007f, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
+    "mov $0x00010001, %eax\n   movd %eax, %xmm8\n   pshufd $0, %xmm8, %xmm8\n"
+    ASM_WIDER("cpu_has_avx512", "6f")
+    ASM_NARROW("cpu_has_avx2", "5f")
+    //  Eight pixels a turn in ymm, the pack's dwords put back in order by vpermd.
+    "7: cmp $8, %rsi\n   jb 5f\n"
+    "vpbroadcastw %xmm4, %ymm4\n   vpbroadcastq %xmm5, %ymm5\n   vpbroadcastd %xmm6, %ymm6\n   vpbroadcastd %xmm8, %ymm8\n"
+    "vmovdqu .Lover_perm8(%rip), %ymm9\n"
+    "11: vpmovzxbw (%rdi), %ymm1\n   vpmovzxbw 16(%rdi), %ymm2\n"
+    "vpmullw %ymm4, %ymm1, %ymm1\n   vpmullw %ymm4, %ymm2, %ymm2\n   vpaddw %ymm6, %ymm1, %ymm1\n   vpaddw %ymm6, %ymm2, %ymm2\n"
+    "vpsrlw $8, %ymm1, %ymm3\n   vpaddw %ymm3, %ymm1, %ymm1\n   vpaddw %ymm8, %ymm1, %ymm1\n   vpsrlw $8, %ymm1, %ymm1\n"
+    "vpsrlw $8, %ymm2, %ymm3\n   vpaddw %ymm3, %ymm2, %ymm2\n   vpaddw %ymm8, %ymm2, %ymm2\n   vpsrlw $8, %ymm2, %ymm2\n"
+    "vpaddw %ymm5, %ymm1, %ymm1\n   vpaddw %ymm5, %ymm2, %ymm2\n   vpackuswb %ymm2, %ymm1, %ymm1\n   vpermd %ymm1, %ymm9, %ymm1\n"
+    "vmovdqu %ymm1, (%rdi)\n   add $32, %rdi\n   sub $8, %rsi\n   cmp $8, %rsi\n   jae 11b\n   vzeroupper\n"
+    //  Four pixels a turn in xmm, the last three a pixel at a time.
+    "5: cmp $4, %rsi\n   jb 2f\n"
+    "1: movdqu (%rdi), %xmm0\n   movdqa %xmm0, %xmm1\n   punpcklbw %xmm7, %xmm0\n   punpckhbw %xmm7, %xmm1\n"
+    "pmullw %xmm4, %xmm0\n   pmullw %xmm4, %xmm1\n   paddw %xmm6, %xmm0\n   paddw %xmm6, %xmm1\n"
+    "movdqa %xmm0, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm0\n   paddw %xmm8, %xmm0\n   psrlw $8, %xmm0\n"
+    "movdqa %xmm1, %xmm3\n   psrlw $8, %xmm3\n   paddw %xmm3, %xmm1\n   paddw %xmm8, %xmm1\n   psrlw $8, %xmm1\n"
+    "paddw %xmm5, %xmm0\n   paddw %xmm5, %xmm1\n   packuswb %xmm1, %xmm0\n   movdqu %xmm0, (%rdi)\n"
+    "add $16, %rdi\n   sub $4, %rsi\n   cmp $4, %rsi\n   jae 1b\n"
+    "2: test %rsi, %rsi\n   jz 9f\n"
+    "3: movd (%rdi), %xmm0\n   punpcklbw %xmm7, %xmm0\n   pmullw %xmm4, %xmm0\n   paddw %xmm6, %xmm0\n"
+    "movdqa %xmm0, %xmm2\n   psrlw $8, %xmm2\n   paddw %xmm2, %xmm0\n   paddw %xmm8, %xmm0\n   psrlw $8, %xmm0\n"
+    "paddw %xmm5, %xmm0\n   packuswb %xmm0, %xmm0\n   movd %xmm0, (%rdi)\n"
+    "add $4, %rdi\n   dec %rsi\n   jnz 3b\n"
+    "9: " ASM_RET
+    //  Sixteen pixels a turn in zmm (AVX-512BW): two loads of 32 bytes, the same chain, and the pack's dwords put back
+    //  in order by vpermd. What is under sixteen goes on to the ymm turn.
+    "6: cmp $16, %rsi\n   jb 7b\n"
+    "vpbroadcastw %xmm4, %zmm4\n   vpbroadcastq %xmm5, %zmm5\n   vpbroadcastd %xmm6, %zmm6\n   vpbroadcastd %xmm8, %zmm8\n"
+    "vmovdqu32 .Lover_perm16(%rip), %zmm9\n"
+    "10: vpmovzxbw (%rdi), %zmm1\n   vpmovzxbw 32(%rdi), %zmm2\n"
+    "vpmullw %zmm4, %zmm1, %zmm1\n   vpmullw %zmm4, %zmm2, %zmm2\n   vpaddw %zmm6, %zmm1, %zmm1\n   vpaddw %zmm6, %zmm2, %zmm2\n"
+    "vpsrlw $8, %zmm1, %zmm3\n   vpaddw %zmm3, %zmm1, %zmm1\n   vpaddw %zmm8, %zmm1, %zmm1\n   vpsrlw $8, %zmm1, %zmm1\n"
+    "vpsrlw $8, %zmm2, %zmm3\n   vpaddw %zmm3, %zmm2, %zmm2\n   vpaddw %zmm8, %zmm2, %zmm2\n   vpsrlw $8, %zmm2, %zmm2\n"
+    "vpaddw %zmm5, %zmm1, %zmm1\n   vpaddw %zmm5, %zmm2, %zmm2\n   vpackuswb %zmm2, %zmm1, %zmm1\n   vpermd %zmm1, %zmm9, %zmm1\n"
+    "vmovdqu32 %zmm1, (%rdi)\n   add $64, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae 10b\n   vzeroupper\n   jmp 7b\n"
+    ".pushsection .rodata\n   .balign 64\n"
+    ".Lover_perm16: .long 0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15\n"
+    ".Lover_perm8: .long 0, 1, 4, 5, 2, 3, 6, 7\n   .popsection\n"
+    ASM_END(memory_over_tone_u32)
+
+    //
     //       memory_fill_u32_rect -- rdi into, rsi into_stride in words, rdx
     //       width, rcx height, r8d value. A row of 16 or fewer is one masked
     //       store with AVX-512 and two overlapping ones from 4 words up
@@ -24533,6 +24599,31 @@ __asm__(
     "7:  madd x0, x8, x4, x9\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
 
+    //       memory_over_tone_u32: x0 into, x1 count, w2 tone, the contract
+    //       of the x86_64 block. Four pixels a turn: the bytes widened to
+    //       8h, multiplied by 255 - alpha, the ui_div255 rounding in three
+    //       adds and a shift, the tone added and the two halves packed back
+    //       with sqxtun, which clamps the way the x86_64 pack does. The tone
+    //       is widened once and held in v5; the rest in v4.
+    //
+    ASM_FUNC(memory_over_tone_u32)
+    "lsr w3, w2, #24\n   cbz w3, 9f\n   cbz x1, 9f\n   mov w4, #255\n   sub w4, w4, w3\n   dup v4.8h, w4\n"
+    "fmov s5, w2\n   uxtl v5.8h, v5.8b\n   mov v5.d[1], v5.d[0]\n   movi v6.8h, #127\n   movi v7.8h, #1\n"
+    "cmp x1, #4\n   b.lo 2f\n"
+    "1: ldr q0, [x0]\n   uxtl v1.8h, v0.8b\n   uxtl2 v2.8h, v0.16b\n   mul v1.8h, v1.8h, v4.8h\n   mul v2.8h, v2.8h, v4.8h\n"
+    "add v1.8h, v1.8h, v6.8h\n   add v2.8h, v2.8h, v6.8h\n"
+    "ushr v3.8h, v1.8h, #8\n   add v1.8h, v1.8h, v3.8h\n   add v1.8h, v1.8h, v7.8h\n   ushr v1.8h, v1.8h, #8\n"
+    "ushr v3.8h, v2.8h, #8\n   add v2.8h, v2.8h, v3.8h\n   add v2.8h, v2.8h, v7.8h\n   ushr v2.8h, v2.8h, #8\n"
+    "add v1.8h, v1.8h, v5.8h\n   add v2.8h, v2.8h, v5.8h\n   sqxtun v1.8b, v1.8h\n   sqxtun2 v1.16b, v2.8h\n"
+    "str q1, [x0], #16\n   sub x1, x1, #4\n   cmp x1, #4\n   b.hs 1b\n"
+    "2: cbz x1, 9f\n"
+    "3: ldr s0, [x0]\n   uxtl v1.8h, v0.8b\n   mul v1.8h, v1.8h, v4.8h\n   add v1.8h, v1.8h, v6.8h\n"
+    "ushr v3.8h, v1.8h, #8\n   add v1.8h, v1.8h, v3.8h\n   add v1.8h, v1.8h, v7.8h\n   ushr v1.8h, v1.8h, #8\n"
+    "add v1.8h, v1.8h, v5.8h\n   sqxtun v1.8b, v1.8h\n   str s1, [x0], #4\n   subs x1, x1, #1\n   b.ne 3b\n"
+    "9: " ASM_RET
+    ASM_END(memory_over_tone_u32)
+
+    //
     //       memory_fill_u32_rect: a row of four to eight words is two
     //       overlapping 16-byte stores, to twelve a 32 and a 16, to sixteen
     //       two 32s, each the first and the last of the row with nothing
@@ -33786,6 +33877,32 @@ __asm__(
     "8:  mul a0, a4, a5\n   ret\n"
     "9:  mul a0, t4, a4\n   add a0, a0, t1\n   sub a0, a0, a2\n" ASM_RET
     ASM_END(memory_blend_u32_rect)
+
+    //       memory_over_tone_u32: a0 into, a1 count, a2 tone, the contract of
+    //       the x86_64 block, a word at a time in SWAR: the pixel's red and
+    //       blue in 16-bit lanes beside its green and alpha in the next four
+    //       lanes of one register, so one multiply by 255 - alpha, the
+    //       ui_div255 rounding and the tone's add cover all four channels. A
+    //       lane past 255 is clamped the long way, which premultiplied tones
+    //       never reach, and is branched over. No Zbb: the repack is masks
+    //       and shifts.
+    //
+    ASM_FUNC(memory_over_tone_u32)
+    "slli a2, a2, 32\n   srli a2, a2, 32\n   srli t0, a2, 24\n   beqz t0, 9f\n   beqz a1, 9f\n"
+    "li t1, 255\n   sub t1, t1, t0\n"
+    "li t5, 0x00ff00ff\n   li t6, 0x00ff00ff00ff00ff\n   li a6, 0x0001000100010001\n   li a4, 0x007f007f007f007f\n"
+    "and t2, a2, t5\n   srli t3, a2, 8\n   and t3, t3, t5\n   slli t3, t3, 32\n   or t2, t2, t3\n"
+    "2: lwu a5, 0(a0)\n"
+    "and t3, a5, t5\n   srli t4, a5, 8\n   and t4, t4, t5\n   slli t4, t4, 32\n   or t3, t3, t4\n"
+    "mul t3, t3, t1\n   add t3, t3, a4\n"
+    "srli t4, t3, 8\n   and t4, t4, t6\n   add t3, t3, t4\n   add t3, t3, a6\n   srli t3, t3, 8\n   and t3, t3, t6\n"
+    "add t3, t3, t2\n"
+    "srli t4, t3, 8\n   and t4, t4, a6\n   beqz t4, 3f\n"
+    "and t3, t3, t6\n   slli t0, t4, 8\n   sub t0, t0, t4\n   or t3, t3, t0\n"
+    "3: srli t4, t3, 32\n   and t4, t4, t5\n   slli t4, t4, 8\n   and t3, t3, t5\n   or t3, t3, t4\n   sw t3, 0(a0)\n"
+    "addi a0, a0, 4\n   addi a1, a1, -1\n   bnez a1, 2b\n"
+    "9: " ASM_RET
+    ASM_END(memory_over_tone_u32)
 
     //       memory_fill_u32_rect: with V, vmv.v.x once and vse32 as many words
     //       as a register group holds; without, four sw a turn on a moving
@@ -46066,6 +46183,11 @@ positive memory_blend_u32_rect(p32 address_to into, positive into_stride,
                                const p8 address_to from, positive from_stride,
                                positive width, positive height,
                                const p32 address_to table);
+// count pixels of into, each laid over by one tone (0xaarrggbb): the ui_over of a run of one colour. A tone of alpha 0
+// changes nothing; otherwise each channel is the tone's plus the pixel's times (255 - alpha) / 255, rounded as ui_div255
+// rounds, clamped at 255. A premultiplied tone (each colour at most its alpha) is the case the kit makes. Nothing past
+// the count is touched.
+fn memory_over_tone_u32(p32 address_to into, positive count, p32 tone);
 // The index of the first of count 32-bit words that is not value, or count when every word is value. A zero count
 // answers zero and reads nothing; only the count's words are read, so a run that ends at a page's end is safe.
 positive memory_first_differs_u32(const unsigned int address_to words, positive count, unsigned int value);
