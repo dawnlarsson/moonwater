@@ -2178,7 +2178,14 @@ static int surface_request(long client, struct wayland_client *c, long index, lo
                         return wire_fail(c, surface->id, WAYLAND_ERR_METHOD, "role object still attached");
                 for (i = 0; i < WAYLAND_OBJECTS; i++)
                         if (c->objects[i].type == W_CALLBACK && c->objects[i].surface == surface->id)
+                        {
+                                struct wire_out w;
+
+                                event_begin(&w, WAYLAND_DISPLAY, 1);
+                                event_word(&w, c->objects[i].id);
+                                event_send(c, &w);
                                 wire_object_remove(c, i);
+                        }
                 wire_object_remove(c, index);
                 return SHELL_OK;
         case 1:

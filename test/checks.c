@@ -144046,6 +144046,54 @@ static void wire_descriptor_checks(void)
         }
 }
 
+/*
+        Frame callbacks. A frame is answered once, by the next commit of its
+        surface: done, then delete_id for its id. Until a commit it is not
+        answered. A surface destroyed with a frame still waiting never answers
+        it, and the client is told the callback's id is gone (delete_id), so
+        the id is free for it to reuse.
+*/
+static void wire_frame_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 4);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 4, 3);
+        wb_u(&m, 5);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        wb_begin(&m, 4, 6);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 2);
+        WIRE_CHECK(objects[0] == 5 && ops[0] == 0);
+        WIRE_CHECK(objects[1] == WAYLAND_DISPLAY && ops[1] == 1);
+        WIRE_CHECK(wire_word_at(20) == 5);
+
+        /* a frame on a surface destroyed before its commit: no done, and a delete_id for the callback. */
+        wb_begin(&m, 4, 3);
+        wb_u(&m, 6);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
+        wb_begin(&m, 4, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
+        WIRE_CHECK(objects[0] == WAYLAND_DISPLAY && ops[0] == 1);
+        WIRE_CHECK(wire_word_at(8) == 6);
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -144057,6 +144105,7 @@ int main(void)
         wire_teardown_checks();
         wire_pointer_room_checks();
         wire_descriptor_checks();
+        wire_frame_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;
