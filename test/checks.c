@@ -134119,6 +134119,7 @@ b32 main()
                         struct ui menu_ui = launcher.ui;
 
                         memory_zero(&menu, sizeof(menu));
+                        menu.pressed = -1;
                         ui_popmenu_add(&menu, "Copy", "Ctrl+C", 0, 1);
                         ui_popmenu_add(&menu, "Paste", "Ctrl+V", 0, 2);
                         ui_popmenu_add(&menu, "", null, UI_MENU_SEPARATOR, 0);
@@ -135271,7 +135272,7 @@ static fn check_glass_pieces(string_address regular)
         ui_popmenu_add(&menu, "Paste", "Ctrl+V", 0, 2);
         ui_popmenu_add(&menu, "", null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(&menu, "Select all", null, 0, 3);
-        menu.hot = 1;
+        menu.hot = 1, menu.pressed = -1;
         menu_ui = ui;
         menu_ui.opaque = 0, menu_ui.glass = 1;
         ui_popmenu_size(&menu_ui, &menu, 0);
@@ -136432,6 +136433,7 @@ static p32 menu_next(p32 below)
 static fn menu_defaults_items(struct ui address_to wui, struct ui_popmenu address_to m)
 {
         memory_zero(m, sizeof(*m));
+        m->pressed = -1;
         ui_popmenu_add(m, "Copy", null, 0, 1);
         ui_popmenu_add(m, "Paste", null, 0, 2);
         ui_popmenu_add(m, "Select all", null, 0, 3);
@@ -136482,6 +136484,7 @@ static fn menu_defaults_check(struct ui address_to wui)
         }
         // A menu of twenty items shown five high has the kit's bar down its right, and nothing else there.
         memory_zero(&m, sizeof(m));
+        m.pressed = -1;
         for (int at = 0; at < 20; at++)
                 ui_popmenu_add(&m, "Item", null, 0, at + 1);
         ui_popmenu_size(wui, &m, 5 * row + 2 * pad);
@@ -136492,6 +136495,10 @@ static fn menu_defaults_check(struct ui address_to wui)
                 glass.glass = 1;
                 memory_zero((void address_to)pixels, 600 * 900 * 4);
                 ui_begin(&glass, picture, 600, m.width, m.height);
+                ui_popmenu_draw(&glass, &m);
+                // The bar's ink eases in from clear, so it is drawn again once it has settled.
+                ui_kit.now += 2000000000ll;
+                memory_zero((void address_to)pixels, 600 * 900 * 4);
                 ui_popmenu_draw(&glass, &m);
                 for (int yy = 0; yy < m.height; yy++)
                         for (int xx = m.width - 8 * wui->scale; xx < m.width; xx++)

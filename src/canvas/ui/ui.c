@@ -5547,19 +5547,26 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
         ui->scratch_scale = ui->scale;
 }
 
-/* ---- menus: a popup surface and the list in it ---- */
+/* ---- menus: one set of defaults, a popup surface and the list in it ---- */
 
 /*
-        A menu is a popup row of its own (window.c's popup columns), so it reaches past its window's edges and the
-        compositor places it, flipping it where the screen ends. Its items are labels with an optional accelerator's
-        text, a mnemonic marked with & (the letter typed chooses it), check and radio marks, separators, section
-        headers and disabled items; a submenu item is answered UI_MENU_OPEN, for the app to open another popup against
-        the item with WINDOW_POPUP_RIGHT (the hover delay and the pointer's safe triangle toward it are not built yet).
-        The keys while it is open: Up and Down (Home and End) move over what can be chosen, Enter and Space choose,
-        Right answers a submenu's item and Left closes, Escape closes, letters jump to the first item they
-        start (a mnemonic chooses). Rows are 28 logical pixels, 44 when a finger opened it; a menu taller than its
-        screen scrolls with the wheel and the keys. Colours are the kit's: the surface container, the selection's
-        layer for the item under the hand, the outline between groups.
+        Every menu of the kit is one of these, and these are its defaults, all in logical pixels (ui_menu_sizes gives them
+        in device pixels, and every size of a menu is read from there): a row of 28, a finger's row of 44, the face's pad of
+        6 at top and bottom, a label in from the left by 30, no narrower than 140, a margin of 8 from a window's edge, and a
+        highlight's corner of 6.
+
+        A menu is a popup row of its own (window.c's popup columns), so it reaches past its window's edges and the compositor
+        places it, flipping it where the screen ends. It is glass, a temporary overlay: no face and no outline, its inks are
+        the ground's. Its items are labels with an optional accelerator's text, a mnemonic marked with & (the letter typed
+        chooses it), check and radio marks, separators, section headers and disabled items; a submenu item is answered
+        UI_MENU_OPEN, for the app to open another popup against the item (WINDOW_POPUP_RIGHT).
+
+        A menu chooses on a release, as a button does: a press on an item shows it pressed, and the release chooses it when it
+        is over that same item. A press released anywhere else chooses nothing. The hot item (the hand's or the keys') is lit.
+        A menu whose items do not all show has the kit's bar down its right, which a held thumb drags and a press on the
+        track pages; the wheel turns it a row. The keys while it is open: Up and Down (wrapping), Home, End, Page Up and Page
+        Down move the hot item over what can be chosen; Enter and Space choose; Right answers a submenu's item and Left and
+        Escape close; a letter chooses a mnemonic, else goes to the first item the letters typed so far start.
 */
 #define UI_MENU_ITEMS 40
 #define UI_MENU_SEPARATOR 1u
@@ -5572,7 +5579,25 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 #define UI_MENU_ROW 28
 #define UI_MENU_TOUCH_ROW 44
 #define UI_MENU_PAD 6
-#define UI_MENU_HOVER_NS 300000000ull
+#define UI_MENU_INSET 30
+#define UI_MENU_LEAST 140
+#define UI_MENU_MARGIN 8
+#define UI_MENU_RADIUS 6
+#define UI_MENU_DEFAULTS 1 // the kit has these menus' one set of defaults (test/checks.c's menu_defaults_check)
+
+struct ui_menu_sizes
+{
+        int row, pad, inset, least, margin, radius; // device pixels
+};
+
+// Every menu's size, from the one place its numbers are: the mouse's row, or a finger's (touch).
+static struct ui_menu_sizes ui_menu_sizes(const struct ui address_to ui, b32 touch)
+{
+        struct ui_menu_sizes sizes = {ui_dev(ui, touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW), ui_dev(ui, UI_MENU_PAD), ui_dev(ui, UI_MENU_INSET),
+                                      ui_dev(ui, UI_MENU_LEAST), ui_dev(ui, UI_MENU_MARGIN), ui_dev(ui, UI_MENU_RADIUS)};
+
+        return sizes;
+}
 
 struct ui_menu_item
 {
@@ -5585,8 +5610,10 @@ struct ui_popmenu
 {
         struct ui_menu_item items[UI_MENU_ITEMS];
         int count, hot, top, rows_shown;
-        b32 touch, pressed;
+        b32 touch;
+        int pressed;                 // the item a press went down on, -1 none
         int width, height;
+        struct ui_scroll scroll;     // the kit's bar: its track down the right, its scroll the top item's offset (in pixels)
         char typed[16];
         int typed_length;
         positive typed_at;
@@ -5605,7 +5632,23 @@ static b32 ui_popmenu_choosable(const struct ui_popmenu address_to m, int at)
 
 static int ui_popmenu_row(const struct ui address_to ui, const struct ui_popmenu address_to m)
 {
-        return (m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW) * ui->scale;
+        return ui_menu_sizes(ui, m->touch).row;
+}
+
+// The height of an item: a separator is a thin rule between two pads, every other item is a row.
+static int ui_popmenu_tall(const struct ui address_to ui, const struct ui_popmenu address_to m, int at)
+{
+        return m->items[at].flags & UI_MENU_SEPARATOR ? (2 * UI_MENU_PAD + 1) * ui->scale : ui_popmenu_row(ui, m);
+}
+
+// Where item at starts, in device pixels from the top of the pad (the pad is not counted).
+static int ui_popmenu_offset(const struct ui address_to ui, const struct ui_popmenu address_to m, int at)
+{
+        int y = 0;
+
+        for (int k = 0; k < at && k < m->count; k++)
+                y += ui_popmenu_tall(ui, m, k);
+        return y;
 }
 
 // A label as drawn: its & left out (and && one &).
@@ -5632,7 +5675,8 @@ static positive ui_popmenu_shown(const char address_to label, p8 address_to into
 // How big the menu is drawn (device pixels), and how many rows show in at most limit pixels of height.
 static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to m, int limit)
 {
-        int widest = 0, height = 2 * UI_MENU_PAD * ui->scale;
+        struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
+        int widest = 0, height = 2 * sizes.pad;
 
         for (int at = 0; at < m->count; at++)
         {
@@ -5642,7 +5686,7 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
 
                 if (m->items[at].flags & UI_MENU_SEPARATOR)
                 {
-                        height += (2 * UI_MENU_PAD + 1) * ui->scale;
+                        height += ui_popmenu_tall(ui, m, at);
                         continue;
                 }
                 ui_popmenu_shown(m->items[at].label, shown, sizeof(shown), &mnemonic);
@@ -5650,70 +5694,87 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
                 widest = wide > widest ? wide : widest;
                 height += ui_popmenu_row(ui, m);
         }
-        m->width = widest + 2 * (UI_MENU_PAD + 30) * ui->scale;
+        m->width = widest + 2 * (sizes.inset + sizes.pad);
+        m->width = m->width < sizes.least ? sizes.least : m->width;
         m->height = limit > 0 && height > limit ? limit : height;
-        m->rows_shown = (m->height - 2 * UI_MENU_PAD * ui->scale) / ui_popmenu_row(ui, m);
+        m->rows_shown = (m->height - 2 * sizes.pad) / sizes.row;
+        m->scroll.content = height - 2 * sizes.pad;
+        m->scroll.view = m->height - 2 * sizes.pad;
+        m->scroll.x = m->width - ui_dev(ui, UI_SCROLL_WIDTH), m->scroll.y = sizes.pad, m->scroll.height = m->height - 2 * sizes.pad;
+        m->scroll.unit = 0;
+        m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
+        m->scroll.held = m->scroll.hover = 0;
 }
 
 // The item at y (device pixels from the menu's top), or -1. A row that starts in the bottom padding is not drawn (the draw
 // stops there), so the padding under the last row drawn is no item.
 static int ui_popmenu_at(const struct ui address_to ui, const struct ui_popmenu address_to m, int y)
 {
-        int top = UI_MENU_PAD * ui->scale;
+        int top = ui_menu_sizes(ui, m->touch).pad;
 
         for (int at = m->top; at < m->count; at++)
         {
-                int tall = m->items[at].flags & UI_MENU_SEPARATOR ? (2 * UI_MENU_PAD + 1) * ui->scale : ui_popmenu_row(ui, m);
+                int tall = ui_popmenu_tall(ui, m, at);
 
                 if (y >= top && y < top + tall)
-                        return (m->items[at].flags & UI_MENU_SEPARATOR) || top >= m->height - UI_MENU_PAD * ui->scale ? -1 : at;
+                        return (m->items[at].flags & UI_MENU_SEPARATOR) || top >= m->height - ui_menu_sizes(ui, m->touch).pad ? -1 : at;
                 top += tall;
         }
         return -1;
 }
 
+// The first item the bar's scroll puts at the top: the last whose top is at or above it.
+static fn ui_popmenu_sync(const struct ui address_to ui, struct ui_popmenu address_to m)
+{
+        m->top = 0;
+        for (int at = 1; at < m->count && ui_popmenu_offset(ui, m, at) <= m->scroll.scroll; at++)
+                m->top = at;
+}
+
+// A highlight of a row: the kit's layer, rounded at the menu's corner, in the colour given.
+static fn ui_popmenu_lit(struct ui address_to ui, const struct ui_popmenu address_to m, int y, unsigned int colour)
+{
+        struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
+        struct ui_box lit = ui_box_of(ui, ui_q(UI_MENU_PAD), ui_q(y / ui->scale), ui_q((m->width - 2 * UI_MENU_PAD * ui->scale) / ui->scale),
+                                      ui_q(sizes.row / ui->scale), ui_q(sizes.radius / ui->scale));
+
+        ui_kit_fill(ui, &lit, colour, null);
+}
+
 static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
 {
-        struct ui_box face = ui_box_of(ui, 0, 0, ui_q(m->width / ui->scale), ui_q(m->height / ui->scale), ui_q(8));
-        int y = UI_MENU_PAD * ui->scale, row = ui_popmenu_row(ui, m);
+        struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
+        int y = sizes.pad;
 
-        // A glass menu has no face and no outline: what is under it is the face, and its inks are the ground's (flat).
-        if (!ui->glass)
-        {
-                ui_kit_fill(ui, &face, ui_role(UI_SURFACE_CONTAINER), null);
-                ui_kit_outline(ui, &face, ui->scale, ui_role(UI_OUTLINE_VARIANT));
-        }
-        for (int at = m->top; at < m->count && y < m->height - UI_MENU_PAD * ui->scale; at++)
+        m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
+        for (int at = m->top; at < m->count && y < m->height - sizes.pad; at++)
         {
                 const struct ui_menu_item address_to item = &m->items[at];
                 unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE);
                 p8 shown[96];
                 p32 mnemonic;
-                int baseline = y + (row - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
+                int baseline = y + (sizes.row - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
                 unsigned int alpha = item->flags & UI_MENU_DISABLED ? 97 : 255;
 
                 if (item->flags & UI_MENU_SEPARATOR)
                 {
-                        ui_fill(ui, UI_MENU_PAD * ui->scale, y + UI_MENU_PAD * ui->scale, m->width - 2 * UI_MENU_PAD * ui->scale, ui->scale,
-                                ui_tone(ui->glass ? ui->ink & 0xffffffu : ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, ui->glass ? 40 : 255));
-                        y += (2 * UI_MENU_PAD + 1) * ui->scale;
+                        ui_fill(ui, sizes.pad, y + sizes.pad, m->width - 2 * sizes.pad, ui->scale,
+                                ui_tone(ui->ink & 0xffffffu, 40));
+                        y += ui_popmenu_tall(ui, m, at);
                         continue;
                 }
-                if (at == m->hot && ui_popmenu_choosable(m, at))
-                {
-                        struct ui_box lit = ui_box_of(ui, ui_q(UI_MENU_PAD), ui_q(y / ui->scale), ui_q((m->width - 2 * UI_MENU_PAD * ui->scale) / ui->scale),
-                                                      ui_q(row / ui->scale), ui_q(6));
-
-                        ui_kit_fill(ui, &lit, ui_well(ui, UI_SELECTION, 40), null);
-                }
+                if (ui_popmenu_choosable(m, at) && at == m->pressed)
+                        ui_popmenu_lit(ui, m, y, ui_mix(ui_role(UI_ON_SURFACE), 10, 0));
+                if (ui_popmenu_choosable(m, at) && at == m->hot)
+                        ui_popmenu_lit(ui, m, y, ui_well(ui, UI_SELECTION, 40));
                 ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
                 if (item->flags & UI_MENU_HEADER)
                         ui_kit_text(ui, (UI_MENU_PAD + 12) * ui->scale, baseline, shown, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
                 else
-                        ui_kit_text(ui, (UI_MENU_PAD + 30) * ui->scale, baseline, shown, UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
+                        ui_kit_text(ui, sizes.pad + sizes.inset, baseline, shown, UI_BODY_MEDIUM, (alpha << 24) | (ink & 0xffffffu), 0);
                 if ((item->flags & (UI_MENU_CHECK | UI_MENU_RADIO)) && (item->flags & UI_MENU_ON))
                 {
-                        int cx = (UI_MENU_PAD + 15) * ui->scale, cy = y + row / 2;
+                        int cx = (UI_MENU_PAD + 15) * ui->scale, cy = y + sizes.row / 2;
 
                         if (item->flags & UI_MENU_RADIO)
                                 ui_round(ui, cx - 3 * ui->scale, cy - 3 * ui->scale, 6 * ui->scale, 6 * ui->scale, 3 * ui->scale, ui_tone(ink & 0xffffffu, alpha));
@@ -5727,8 +5788,10 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 if (item->flags & UI_MENU_SUBMENU)
                         ui_kit_text(ui, m->width - (UI_MENU_PAD + 14) * ui->scale, baseline, (string_address) "\xe2\x80\xba", UI_BODY_MEDIUM,
                                     (alpha << 24) | (ink & 0xffffffu), 0);
-                y += row;
+                y += sizes.row;
         }
+        if (m->scroll.content > m->scroll.view)
+                ui_scroll_draw(ui, &m->scroll);
 }
 
 // The hot item moved by step over what can be chosen (wrapping), the view following it. With none hot (-1) Down takes the
@@ -5750,10 +5813,32 @@ static fn ui_popmenu_step(struct ui_popmenu address_to m, int step)
                 m->top = m->hot - m->rows_shown + 1;
 }
 
+// A page of the keys: the hot item moves by the rows that show, to the first or last that can be chosen when it runs out.
+static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
+{
+        int by = m->rows_shown > 0 ? m->rows_shown : 1;
+
+        for (int k = 0; k < by; k++)
+                ui_popmenu_step(m, step);
+}
+
 /*
-        An event of the menu's row: the id of the item chosen, UI_MENU_NOTHING, UI_MENU_GONE (Escape, Left at the top,
-        the compositor asking it to go), or UI_MENU_OPEN for a submenu's item (its id in hot's item). x and y are the
-        menu's own device pixels.
+        The menu's bar, when it has one: a motion, a press or a release on it is its (a held thumb follows the hand, a press on
+        the track pages it). True when it took the event, and the menu's top follows its scroll.
+*/
+static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu address_to m, int type, int x, int y, b32 down)
+{
+        if (m->scroll.content <= m->scroll.view && !m->scroll.held)
+                return false;
+        if (ui_scroll_pointer(ui, &m->scroll, type, x, y, down, m->touch) < 0)
+                return false;
+        ui_popmenu_sync(ui, m);
+        return true;
+}
+
+/*
+        An event of the menu's row: the id of the item chosen, UI_MENU_NOTHING, UI_MENU_GONE (Escape, Left, the compositor
+        asking it to go), or UI_MENU_OPEN for a submenu's item (its id in hot's item). x and y are the menu's own device pixels.
 */
 #define UI_MENU_NOTHING (-1)
 #define UI_MENU_GONE (-2)
@@ -5771,6 +5856,8 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 case 108: ui_popmenu_step(m, 1); return UI_MENU_NOTHING;
                 case 102: m->hot = m->count - 1; ui_popmenu_step(m, 1); return UI_MENU_NOTHING;
                 case 107: m->hot = 0; ui_popmenu_step(m, -1); return UI_MENU_NOTHING;
+                case 104: ui_popmenu_page(m, -1); return UI_MENU_NOTHING;
+                case 109: ui_popmenu_page(m, 1); return UI_MENU_NOTHING;
                 case 1: case 105: return UI_MENU_GONE;
                 case 106:
                         return ui_popmenu_choosable(m, m->hot) && (m->items[m->hot].flags & UI_MENU_SUBMENU) ? UI_MENU_OPEN : UI_MENU_NOTHING;
@@ -5819,32 +5906,37 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         {
                 int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1;
 
-                m->hot = at;
+                if (!ui_popmenu_bar(ui, m, WINDOW_EVENT_MOTION, x, y, false))
+                        m->hot = at;
                 return UI_MENU_NOTHING;
         }
         if (event->type == WINDOW_EVENT_WHEEL && !event->b)
         {
                 m->top += event->a < 0 ? 1 : -1;
                 m->top = m->top < 0 ? 0 : m->top > m->count - m->rows_shown ? (m->count - m->rows_shown > 0 ? m->count - m->rows_shown : 0) : m->top;
+                m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
                 return UI_MENU_NOTHING;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
         {
-                int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1;
+                int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1, was = m->pressed;
 
                 m->touch |= (event->flags & WINDOW_KEY_TOUCH) != 0;
                 if (event->flags & WINDOW_KEY_DOWN)
                 {
-                        m->pressed = true;
+                        if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, true))
+                                return UI_MENU_NOTHING;
+                        m->pressed = at;
                         m->hot = at;
                         return UI_MENU_NOTHING;
                 }
-                // A release on an item chooses it: after a press on it, or at the end of a drag from the button that
-                // opened the menu (press, drag, release).
-                if (event->flags & WINDOW_KEY_CANCEL)
+                if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, false))
                         return UI_MENU_NOTHING;
-                if (ui_popmenu_choosable(m, at))
-                        return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
+                // The release chooses an item only where its press went down, and a press that went down on none chooses nothing.
+                m->pressed = -1;
+                if ((event->flags & WINDOW_KEY_CANCEL) || at != was || !ui_popmenu_choosable(m, at))
+                        return UI_MENU_NOTHING;
+                return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
         }
         return UI_MENU_NOTHING;
 }
@@ -5901,8 +5993,23 @@ static fn ui_popup_present(struct ui_popup address_to p)
 static void ui_popup_look(struct ui_popup address_to p, struct windows address_to table, const struct ui address_to parent_ui)
 {
         unsigned int ground = table->ground[p->own.row];
+        struct ui own = p->ui;
 
         p->ui = *parent_ui;
+        // The menu's own scratch line, mapped once and kept (the parent's is not the menu's to share).
+        p->ui.scratch = own.scratch, p->ui.scratch_width = own.scratch_width, p->ui.scratch_scale = own.scratch_scale;
+        // A parent whose faces are not the kit's (the terminal's own) gets the kit's regular face here, loaded once.
+        if (!p->ui.regular)
+        {
+                static font_face face;
+                static int state;
+
+                if (!state)
+                        state = ui_face_load(&face, (string_address)UI_FONT_REGULAR) ? 1 : -1;
+                if (state > 0)
+                        p->ui.regular = p->ui.bold = &face;
+        }
+        ui_scratch_fit(&p->ui, 640u * (unsigned int)p->ui.scale);
         p->ui.opaque = false, p->ui.glass = true;
         ui_inks(&p->ui, ground ? ground : parent_ui->ground ? parent_ui->ground : UI_GLASS_GROUND);
         table->glass[p->own.row] = UI_POPUP_GLASS;
@@ -5930,6 +6037,7 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         p->pending = false;
         p->menu.touch = touch;
         p->menu.hot = -1;
+        p->menu.pressed = -1;
         p->menu.top = 0;
         windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
         ui_popmenu_size(&p->ui, &p->menu, screen_h);
@@ -6047,7 +6155,6 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_SECTION_GAP 10    // under its last row
 #define UI_ROW_FIELD_W 220   // a field in a row: at most this wide, and at least the least
 #define UI_ROW_FIELD_LEAST 100
-#define UI_MENU_LEAST 140    // the narrowest a choice's menu is (its rows and pad are the menus', UI_MENU_ROW and UI_MENU_PAD)
 #define UI_LINE 20           // a line of a page of text: body-medium's line
 #define UI_LINES_PAD 10
 
@@ -6955,7 +7062,7 @@ static fn ui_menu_draw(struct ui address_to ui, struct ui_menu address_to m)
         list->count = 0;
         for (int at = 0; at < m->count; at++)
                 ui_popmenu_add(list, m->word[at], null, UI_MENU_RADIO | (at == m->current ? UI_MENU_ON : 0), at);
-        list->hot = m->at, list->top = ui_menu_top(ui, m), list->rows_shown = m->shown;
+        list->hot = m->at, list->top = ui_menu_top(ui, m), list->rows_shown = m->shown, list->pressed = -1;
         list->width = m->w, list->height = m->h, list->touch = m->touch;
         sub.pixels = ui->pixels + (unsigned long)m->y * ui->pitch + (unsigned long)m->x;
         sub.width = m->w, sub.height = m->h;
