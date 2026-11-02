@@ -40,6 +40,9 @@ static struct identify
         positive until;        // the monotonic clock's time the window goes at
 } identify;
 
+// The number is one digit: a screen limit past nine would need a wider text here and in identify_paint.
+_Static_assert(WINDOWS_OUTPUTS <= 9, "identify draws one digit per screen");
+
 // The number a screen is shown with: windows_screen_numbers' for the screen windows_output names by index (the primary's
 // when the list has no such screen), so it is the number the window is put on.
 static unsigned int identify_number(const struct windows address_to table, unsigned int screen)
