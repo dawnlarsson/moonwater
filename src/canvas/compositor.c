@@ -350,13 +350,28 @@ static int compositor_radius(const struct compositor_frame *frame)
         return radius < 0 ? 0 : radius > COMPOSITOR_RADIUS_MOST ? COMPOSITOR_RADIUS_MOST : radius;
 }
 
+/*
+        Each channel of ground and ink mixed by cover (0 the ground, 255 the ink): (ground * (255 - cover) + ink * cover + 127)
+        / 255, rounded down, the top byte of either left out. The ends are the colours themselves: at a cover of none the sum
+        is 255 * ground + 127, whose quotient is the ground, and at all of it the ink's. Between, the three
+        channels are worked in one word, sixteen bits a lane: a lane's sum is at most 255 * 255 + 127, so none carries
+        into the next, and the division is (x + 1 + (x >> 8)) >> 8 in every lane, exact for every sum up to 65534.
+*/
 static unsigned int compositor_mix(unsigned int ground, unsigned int ink, unsigned int cover)
 {
-        unsigned int out = 0;
+        const unsigned long long low = 0xff00ff00ffull, one = 0x100010001ull;
+        unsigned long long g, i, x;
 
-        for (unsigned int shift = 0; shift < 24; shift += 8)
-                out |= (((ground >> shift & 255) * (255 - cover) + (ink >> shift & 255) * cover + 127) / 255) << shift;
-        return out;
+        if (cover == 0)
+                return ground & 0xffffffu;
+        if (cover >= 255)
+                return ink & 0xffffffu;
+        g = (ground & 0xffu) | (unsigned long long)(ground & 0xff00u) << 8 | (unsigned long long)(ground & 0xff0000u) << 16;
+        i = (ink & 0xffu) | (unsigned long long)(ink & 0xff00u) << 8 | (unsigned long long)(ink & 0xff0000u) << 16;
+        x = g * (255 - cover) + i * cover + 127 * one;
+        x += one + ((x >> 8) & low);
+        x = (x >> 8) & low;
+        return (unsigned int)((x & 0xff) | (x >> 8 & 0xff00) | (x >> 16 & 0xff0000));
 }
 
 // A target drawn on through a clip of its own: the rectangle, and what of it the target allows.
