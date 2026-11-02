@@ -124221,6 +124221,71 @@ static b32 settings_turned(int row, const char address_to want)
         return turned;
 }
 
+/*
+        The settings window at its edges. A value that changed under a field opened on it, and Enter in that field with
+        nothing typed, keeps the new value: the field's own text is what was kept, and it is not sent back over the change.
+        A filter that matches no row lists none, and Enter or Space in it changes no row that is not shown. A row that
+        filters out while it has the focus is not the focus, and a value typed to its full length is kept whole.
+*/
+static fn check_settings_edges(void)
+{
+        int zone = settings_row_named("Time zone"), wired = settings_row_named("Wired");
+
+        settings.ui.scale = 1;
+        settings.width = SETTINGS_WIDTH;
+        settings.height = SETTINGS_HEIGHT;
+        settings.pane = 1;
+        settings.editing = -1;
+        settings.menu.owner = -1;
+        settings.view = 0;
+        settings.child = 1;
+        settings.job = 0;
+        settings.job_sets = false;
+        settings.queued = 0;
+        settings.confirm = 0;
+        settings.group = settings_group_of(zone);
+        settings_refilter();
+        settings.list.focus = zone;
+        settings.state[zone] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Oslo", SETTINGS_VALUE);
+
+        settings_activate(zone, 1);
+        check("settings edge: Enter on a plain value opens its field", settings.editing == zone);
+        string_copy_bounded((string_address)settings.value[zone], (string_address) "Europe/Paris", SETTINGS_VALUE);
+        settings_press(SETTINGS_KEY_ENTER);
+        check("settings edge: Enter in a field nothing was typed in sends nothing, and the value that changed under it stays",
+              settings.queued == 0 && settings.editing < 0 && string_equals((string_address)settings.value[zone], (string_address) "Europe/Paris"));
+        settings.queued = 0;
+
+        settings_hold(zone, "");
+        for (positive at = 0; at < SETTINGS_VALUE + 40; at++)
+                settings_type_code('a' + (unsigned int)(at % 26));
+        settings_press(SETTINGS_KEY_ENTER);
+        check("settings edge: a value typed past its length is kept at its length, sent whole",
+              settings.queued == 1 && settings.queue[0].row == zone && string_length((string_address)settings.queue[0].value) == SETTINGS_VALUE - 1);
+        settings.queued = 0;
+
+        settings.state[wired] = SETTINGS_READ;
+        string_copy_bounded((string_address)settings.value[wired], (string_address) "off", SETTINGS_VALUE);
+        settings.list.focus = wired;
+        for (positive at = 0; at < 4; at++)
+                settings_type_code('q');
+        check("settings edge: a filter that matches no row lists none", settings.list.count == 0);
+        check("settings edge: a focus on a row that filtered out is not kept", settings.list.count == 0 || settings_pos(settings.list.focus) >= 0);
+        settings_press(SETTINGS_KEY_ENTER);
+        settings_press(SETTINGS_KEY_SPACE);
+        check("settings edge: Enter and Space in an empty list change no row, shown or not",
+              settings.queued == 0 && string_equals((string_address)settings.value[wired], (string_address) "off"));
+        settings_press(SETTINGS_KEY_ESCAPE);
+
+        settings.editing = -1;
+        settings.queued = 0;
+        settings.child = 0;
+        settings.filter_length = 0;
+        settings.filter[0] = 0;
+        settings_refilter();
+}
+
 static fn check_settings_keys(void)
 {
         int wired = settings_row_named("Wired"), at = 0, below = 0;
@@ -125013,6 +125078,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         ui_inks(&settings.ui, 0x101012u);
         ui_kit_inks(&settings.ui);
         ui_kit_settle();
+        check_settings_edges();
         settings.shown = -1;
         settings.focused = 1;
         settings.change_all = settings.stale_all[0] = settings.stale_all[1] = true;
