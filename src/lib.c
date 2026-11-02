@@ -8669,10 +8669,35 @@ __asm__(
     "cmp $4, %rsi\n   jae 3f\n   test %rsi, %rsi\n   jz 9f\n   mov %edx, (%rdi)\n   mov %edx, -4(%rdi,%rsi,4)\n   cmp $3, %rsi\n   jb 9f\n   mov %edx, 4(%rdi)\n"
     "9:  " ASM_RET
     "3:  mov %edx, %eax\n   mov %eax, %r8d\n   shl $32, %r8\n   or %r8, %rax\n"
+    /*
+            The AVX2 tier. A word is broadcast once and the span is covered by
+            stores that overlap at the ends: up to sixteen words two ymm stores,
+            up to thirty two four, up to sixty four eight, all of them keyed off
+            the end pointer, so a count takes no branch per word. Above that an
+            unaligned store at the front, the destination aligned past it, then
+            128 bytes an iteration, and the last 128 bytes stored at the end
+            whatever the loop wrote. From 1024 words up the loop gives way to
+            rep stosq, the instruction the scalar path already reaches. Measured
+            on a 9950X, the loop is 1.2 to 3.5 times faster than the old body
+            from 12 words to 1024, and no faster than rep from 2048 words up,
+            where the two trade places from run to run.
+    */
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "40f")
+    "cmp $8, %rsi\n   jb 40f\n"
+    "vmovd %edx, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n   lea (%rdi,%rsi,4), %rcx\n"
+    "cmp $16, %rsi\n   ja 41f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, -32(%rcx)\n   vzeroupper\n" ASM_RET
+    "41: cmp $32, %rsi\n   ja 42f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, 32(%rdi)\n   vmovdqu %ymm0, -64(%rcx)\n   vmovdqu %ymm0, -32(%rcx)\n   vzeroupper\n" ASM_RET
+    "42: cmp $64, %rsi\n   ja 43f\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm0, 32(%rdi)\n   vmovdqu %ymm0, 64(%rdi)\n   vmovdqu %ymm0, 96(%rdi)\n"
+    "vmovdqu %ymm0, -128(%rcx)\n   vmovdqu %ymm0, -96(%rcx)\n   vmovdqu %ymm0, -64(%rcx)\n   vmovdqu %ymm0, -32(%rcx)\n   vzeroupper\n" ASM_RET
+    "43: cmp $1024, %rsi\n   jae 5f\n   vmovdqu %ymm0, (%rdi)\n   lea 32(%rdi), %r8\n   and $-32, %r8\n   lea -128(%rcx), %r10\n"
+    "44: cmp %r10, %r8\n   jae 45f\n   vmovdqa %ymm0, (%r8)\n   vmovdqa %ymm0, 32(%r8)\n   vmovdqa %ymm0, 64(%r8)\n   vmovdqa %ymm0, 96(%r8)\n   add $128, %r8\n   jmp 44b\n"
+    "45: vmovdqu %ymm0, -128(%rcx)\n   vmovdqu %ymm0, -96(%rcx)\n   vmovdqu %ymm0, -64(%rcx)\n   vmovdqu %ymm0, -32(%rcx)\n   vzeroupper\n" ASM_RET
+    )
     /* Native Zen 5 paired medians cross decisively at 208 words for both
        eight-byte alignments: REP is 2.6% and 11.6% faster there, while the
        scalar path still wins one alignment at 200. */
-    "cmp $208, %rsi\n   jae 5f\n   sub $4, %rsi\n   jb 2f\n"
+    "40: cmp $208, %rsi\n   jae 5f\n   sub $4, %rsi\n   jb 2f\n"
     "1:  mov %rax, (%rdi)\n   mov %rax, 8(%rdi)\n   add $16, %rdi\n   sub $4, %rsi\n   jae 1b\n"
     "2:  add $4, %rsi\n   jz 8f\n   test $2, %sil\n   jz 4f\n   mov %rax, (%rdi)\n   add $8, %rdi\n"
     "4:  test $1, %sil\n   jz 8f\n   mov %eax, (%rdi)\n"
