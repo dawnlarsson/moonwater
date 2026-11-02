@@ -38016,7 +38016,9 @@ __asm__(
 
     "4:      andi    t2, a1, 7\n   bnez    t2, 5f\n"
 
-    "1:      ld      t2, 0(a1)\n   or      t2, t2, t0\n   sd      t2, 0(a0)\n   addi    a1, a1, 8\n   addi    a0, a0, 8\n   addi    a2, a2, -2\n   bge     a2, t1, 1b\n"
+    "        li      t3, 4\n   blt     a2, t3, 1f\n"
+    "0:      ld      t2, 0(a1)\n   ld      t4, 8(a1)\n   or      t2, t2, t0\n   or      t4, t4, t0\n   sd      t2, 0(a0)\n   sd      t4, 8(a0)\n   addi    a1, a1, 16\n   addi    a0, a0, 16\n   addi    a2, a2, -4\n   bge     a2, t3, 0b\n"
+    "1:      blt     a2, t1, 2f\n   ld      t2, 0(a1)\n   or      t2, t2, t0\n   sd      t2, 0(a0)\n   addi    a1, a1, 8\n   addi    a0, a0, 8\n   addi    a2, a2, -2\n"
 
     "2:      beqz    a2, 3f\n   lw      t2, 0(a1)\n   or      t2, t2, a3\n   sw      t2, 0(a0)\n"
     "3:      " ASM_RET
