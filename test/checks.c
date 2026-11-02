@@ -134520,6 +134520,34 @@ static fn editor_disk_check(struct ui address_to wui)
 }
 
 /*
+        windows_screen_numbers (window.c) on a table of three screens listed out of order: the primary on the right, a
+        screen on the left below the top one, and the top left one. The numbers follow the left edges and then the top
+        edges, so the top left screen is 1, the one below it 2 and the primary 3. A table that lists no screen, or more
+        than the table can hold, is one screen numbered 1.
+*/
+static fn check_screen_numbers(void)
+{
+        static struct windows table;
+        unsigned int number[WINDOWS_OUTPUTS], count;
+
+        memory_zero(&table, sizeof(table));
+        table.outputs = 3;
+        table.output_x[0] = 1920, table.output_y[0] = 0;
+        table.output_x[1] = 0, table.output_y[1] = 540;
+        table.output_x[2] = 0, table.output_y[2] = 0;
+        count = windows_screen_numbers(&table, number);
+        check("identify: three screens are counted as three", count == 3);
+        check("identify: the screens are numbered left to right, then top to bottom (the primary on the right is 3)",
+              number[0] == 3 && number[1] == 2 && number[2] == 1);
+        table.outputs = 0;
+        count = windows_screen_numbers(&table, number);
+        check("identify: a table that lists no screen is one screen, numbered 1", count == 1 && number[0] == 1);
+        table.outputs = WINDOWS_OUTPUTS + 1;
+        count = windows_screen_numbers(&table, number);
+        check("identify: a list past what the table holds is one screen, numbered 1", count == 1 && number[0] == 1);
+}
+
+/*
         The terminal's selection on the frame: what a drag marks is marked in the frame's cells (so the frames redraw
         it), its text is the lines' text with a line end between and the trailing blanks left off, and a rectangle takes
         its columns.
@@ -134766,6 +134794,7 @@ b32 main()
         check_take();
         check_land();
         check_glass();
+        check_screen_numbers();
         check_compositor_partial();
         check_compositor_held();
         check_compositor_screens();

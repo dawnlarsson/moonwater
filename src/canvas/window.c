@@ -2309,6 +2309,44 @@ static unsigned int windows_output(const struct windows *table, unsigned int ind
 }
 
 /*
+        The identify numbers of the screens the table lists: number[i] is screen i's, from 1, in the order of the screens'
+        left edges and, where those are level, of their top edges (left to right, top to bottom), and a screen level with
+        another in both is numbered by its place in the list. Answers the count, which is windows_output's: one screen
+        numbered 1 where the table lists none or more than WINDOWS_OUTPUTS. The edges are copied once, so the numbers are
+        a permutation of 1 to the count whatever the compositor writes meanwhile.
+*/
+static unsigned int windows_screen_numbers(const struct windows *table, unsigned int number[WINDOWS_OUTPUTS])
+{
+        unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
+        int left[WINDOWS_OUTPUTS], top[WINDOWS_OUTPUTS];
+
+        if (!count || count > WINDOWS_OUTPUTS)
+        {
+                number[0] = 1;
+                return 1;
+        }
+        for (unsigned int at = 0; at < count; at++)
+        {
+                left[at] = table->output_x[at];
+                top[at] = table->output_y[at];
+        }
+        for (unsigned int at = 0; at < count; at++)
+        {
+                unsigned int rank = 1;
+
+                for (unsigned int other = 0; other < count; other++)
+                {
+                        b32 first = left[other] < left[at] || (left[other] == left[at] && top[other] < top[at]) ||
+                                    (left[other] == left[at] && top[other] == top[at] && other < at);
+
+                        rank += first;
+                }
+                number[at] = rank;
+        }
+        return count;
+}
+
+/*
         Where windows were last put by the hand, by their names: what the compositor keeps across boots in a file
         of /root (registry.c's SETTING_WINDOWS_PLACES_PATH), written when a drag or a resize ends and read when a
         window of a name opens, and what `moonwater canvas windows` reads and its forget empties. One line a
