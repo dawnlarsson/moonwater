@@ -2829,6 +2829,12 @@ static inline fn ui_kit_layer_fill(struct ui address_to ui, const struct ui_box 
                 ui_kit_fill(ui, box, ui_mix(ink, layer, 0), null);
 }
 
+// A control's label, unstroked, its x dx and its line's top dy logical pixels from the control's corner, in a type and ink.
+static inline fn ui_control_label(struct ui address_to ui, const struct ui_control address_to c, int dx, int dy, int type, unsigned int ink)
+{
+        ui_kit_text(ui, ui_dev(ui, c->x + dx), ui_kit_baseline(ui, ui_dev(ui, c->y + dy), type), (string_address)c->label, type, ink, 0);
+}
+
 /*
         The ripples of a control in a colour: measured from the top left of
         their clip box (the control's box and the margin round it, x0, y0 in
@@ -3723,8 +3729,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
 
         // The label above (a bare field has none).
         if (!bare && c->label)
-                ui_kit_text(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), UI_BODY_LARGE), (string_address)c->label, UI_BODY_LARGE,
-                            ui_role(UI_ON_SURFACE), 0);
+                ui_control_label(ui, c, 0, 0, UI_BODY_LARGE, ui_role(UI_ON_SURFACE));
         // The shadows move as one transition (.18s --ease), from wherever they are when the state changes.
         ui_field_shadows(state, want);
         p = c->field_start ? ui_bezier_at(&ui_ease, ui_progress(ui_kit.now - c->field_start, 180 * UI_MS)) : UI_ONE;
@@ -3866,8 +3871,7 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
         if (dot)
                 ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x + 9), ui_q8(ui, c->y + 8), ui_q8(ui, c->x + 15), ui_q8(ui, c->y + 14), ui_q8(ui, 3), ui_q8(ui, 3)},
                             ink, null);
-        ui_kit_text(ui, ui_dev(ui, c->x + 9 + dot), ui_kit_baseline(ui, ui_dev(ui, c->y + 3), UI_LABEL_MEDIUM), (string_address)c->label,
-                    UI_LABEL_MEDIUM, ink, 0);
+        ui_control_label(ui, c, 9 + dot, 3, UI_LABEL_MEDIUM, ink);
 }
 
 static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -3881,7 +3885,7 @@ static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(26), ui_q(6));
         ui_kit_fill(ui, &box, ui_role(UI_SURFACE_LOW), null);
         ui_kit_outline(ui, &box, ui_q8(ui, 1), c->on ? ui_mix(ui_role(UI_PRIMARY), 35, ui_role(UI_OUTLINE_VARIANT)) : ui_role(UI_OUTLINE_VARIANT));
-        ui_kit_text(ui, ui_dev(ui, c->x + 10), ui_kit_baseline(ui, ui_dev(ui, c->y + 5), UI_MONO), (string_address)c->label, UI_MONO, ink, 0);
+        ui_control_label(ui, c, 10, 5, UI_MONO, ink);
 }
 
 static fn ui_avatar_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -3971,8 +3975,7 @@ static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to 
                 ui_kit_outline(ui, &outer, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
                 if (c->label)
                 {
-                        ui_kit_text(ui, ui_dev(ui, c->x + 24), ui_kit_baseline(ui, ui_dev(ui, c->y + 24), UI_TITLE_LARGE), (string_address)c->label,
-                                    UI_TITLE_LARGE, ui_role(UI_ON_SURFACE), 0);
+                        ui_control_label(ui, c, 24, 24, UI_TITLE_LARGE, ui_role(UI_ON_SURFACE));
                         ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y + 68), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + 69), 0, 0},
                                     ui_role(UI_OUTLINE_VARIANT), null);
                 }
@@ -3991,8 +3994,7 @@ static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to 
 
         ui_kit_fill(ui, &box, fill, null);
         ui_kit_outline(ui, &box, ui_q8(ui, 1), line);
-        ui_kit_text(ui, ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14), UI_LABEL_LARGE), (string_address)c->label,
-                    UI_LABEL_LARGE, role ? ink : ui_role(UI_ON_SURFACE), 0);
+        ui_control_label(ui, c, 16, 14, UI_LABEL_LARGE, role ? ink : ui_role(UI_ON_SURFACE));
         if (c->text[0])
                 ui_kit_text(ui, ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14 + 24), UI_BODY_MEDIUM), (string_address)c->text,
                             UI_BODY_MEDIUM, ink, 0);
@@ -4007,8 +4009,7 @@ static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit_fill(ui, &head, ui_role(UI_SURFACE_LOW), &box);
         ui_kit_fill(ui, &(struct ui_box){head.x0, head.y1 - ui_q8(ui, 1), head.x1, head.y1, 0, 0}, ui_role(UI_OUTLINE_VARIANT), null);
         ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
-        ui_kit_text(ui, ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 10), UI_MONO), (string_address)c->label, UI_MONO,
-                    ui_role(UI_ON_SURFACE_VARIANT), 0);
+        ui_control_label(ui, c, 14, 10, UI_MONO, ui_role(UI_ON_SURFACE_VARIANT));
         for (int k = 0; k < c->count; k++)
                 ui_kit_text(ui, ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 37 + 14 + k * 21), UI_CODE), (string_address)c->items[k],
                             UI_CODE, ui_role(UI_ON_SURFACE), 0);
