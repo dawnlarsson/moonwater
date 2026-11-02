@@ -4378,7 +4378,7 @@ static fn ui_avatar_draw(struct ui address_to ui, struct ui_control address_to c
         ui_kit_fill(ui, &box, ui_role(UI_SURFACE_HIGHEST), null);
         width = ui_run_in(ui, faces, 0, 0, (string_address)c->label, t->size, 0, 0, 0, ui->width, 0);
         ui_run_in(ui, faces, ui_dev(ui, c->x) + (ui_dev(ui, size) - width) / 2, ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, size) - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM),
-                  (string_address)c->label, t->size, ui_role(UI_ON_SURFACE) & 0xffffffu, 255, 0, ui->width, 0);
+                  (string_address)c->label, t->size, ui_role(UI_ON_SURFACE) & 0xffffffu, 255, ui_dev(ui, c->x), ui_dev(ui, c->x + size), 0);
         if (c->on)
         {
                 struct ui_box ring = ui_box_of(ui, ui_q(c->x + size - 8 - 2), ui_q(c->y + size - 8 - 2), ui_q(13), ui_q(13), ui_q(7));
@@ -4493,8 +4493,8 @@ static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         ui_control_label(ui, c, 14, 10, UI_MONO, ui_role(UI_ON_SURFACE_VARIANT));
         for (int k = 0; k < c->count; k++)
-                ui_kit_text(ui, ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 37 + 14 + k * 21), UI_CODE), (string_address)c->items[k],
-                            UI_CODE, ui_role(UI_ON_SURFACE), 0);
+                ui_kit_text_clip(ui, ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 37 + 14 + k * 21), UI_CODE),
+                                 (string_address)c->items[k], UI_CODE, ui_role(UI_ON_SURFACE), 0, ui_dev(ui, c->x + c->w));
 }
 
 static fn ui_kbd_draw(struct ui address_to ui, struct ui_control address_to c)
