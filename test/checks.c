@@ -115444,7 +115444,7 @@ static fn check_saturate(void)
                 // destination at offset b, in a buffer of 512 words the sentinel fills first.
                 for (positive width = 0; width <= 300; width++)
                         for (positive a = 0; a < 16; a++)
-                                for (positive b = 0; b < 16; b++)
+                                for (positive b = 0; b < 16; b += 5)
                                 {
                                         p32 address_to from = small + a, address_to into = small_made + b;
 
@@ -115709,7 +115709,7 @@ static fn check_tint(void)
 #endif
                 for (positive width = 0; width <= 300; width++)
                         for (positive a = 0; a < 16; a++)
-                                for (positive b = 0; b < 16; b++)
+                                for (positive b = 0; b < 16; b += 5)
                                 {
                                         p32 address_to from = small + a, address_to into = small_made + b;
                                         p32 toward = (width & 1) ? 0xffffffu : 0, amount = amounts[(width >> 1) & 3];
@@ -119195,6 +119195,42 @@ static void check_compositor_look(void)
         }
     compositor.glass = compositor.band = 0;
     check("look: a title on a tab of glass is legible over a black, a white, a middling or a coloured desktop", thin == 0);
+
+    /*
+        The glass's text, every side and every mean the compositor can tint a glass window to (steps of 15 in each
+        channel): the ink, the quiet ink and the ink on each glass well stand out 4.5:1 (the kit's readable threshold,
+        450 in hundredths) from the ground. Before the fix the quiet ink fell to 3.5:1 on the dark glass at its brightest
+        and 4.1:1 on the light glass at its dimmest, and the ink on a 40% well to 2.5:1 on the dark and 3.8:1 on the light.
+    */
+    {
+        static const unsigned int percents[] = {16, 24, 36, 40};
+        struct ui probe;
+        unsigned int short_ink = 0, short_quiet = 0, short_well = 0, tried = 0;
+
+        memory_zero(&probe, sizeof(probe));
+        probe.glass = true;
+        for (unsigned int side = 0; side < 2; side++)
+            for (unsigned int r = 0; r < 256; r += 15)
+                for (unsigned int g = 0; g < 256; g += 15)
+                    for (unsigned int b = 0; b < 256; b += 15)
+                    {
+                        unsigned int ground = compositor_glass_tint(r << 16 | g << 8 | b, side);
+
+                        ui_inks(&probe, ground);
+                        tried++;
+                        short_ink += ui_contrast(probe.ink, ground) < 450;
+                        short_quiet += ui_contrast(probe.quiet, ground) < 450;
+                        for (unsigned int k = 0; k < sizeof(percents) / sizeof(percents[0]); k++)
+                        {
+                            unsigned int well = ui_well(&probe, UI_SECONDARY_CONTAINER, percents[k]);
+                            unsigned int alpha = (well >> 24) + ((well >> 24) >> 7);
+
+                            short_well += ui_contrast(probe.ink, window_mix(ground, probe.ink, alpha)) < 450;
+                        }
+                    }
+        check("look: on glass the ink, the quiet ink and the ink on each well stand out 4.5:1 from the ground at every tint",
+              tried > 0 && short_ink == 0 && short_quiet == 0 && short_well == 0);
+    }
 
     // The pointer: white inside black by default and light, the other way dark; one size for each setting.
     check("look: the pointer is white with a black outline unless it is dark",

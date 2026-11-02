@@ -117,16 +117,6 @@ static struct ui_ramp address_to ui_ramp_for(unsigned int colour, unsigned int a
         return ramp;
 }
 
-// The inks for a ground: what the compositor says the glass came to.
-static fn ui_inks(struct ui address_to ui, unsigned int ground)
-{
-        ui->ground = ground & 0xffffffu;
-        ui->ink = window_contrast(ui->ground);
-        ui->quiet = window_mix(ui->ground, ui->ink, 176);
-        ui->lit = ui_tone(ui->ink, 36);
-        ui->ring = ui_tone(ui->ink, 190);
-}
-
 /*
         One premultiplied pixel over another, the blend every piece of the kit lays on the picture. On x86-64 and arm64 it
         is one out-of-line body of assembly, ui_over_body, which the callers reach through this inline wrapper. The C
@@ -1621,6 +1611,39 @@ static b64 ui_slide_land(struct ui_slide address_to s, b64 now, b32 address_to l
 
 #include "theme.h"
 
+#define UI_READABLE 450 // the kit's threshold for text on a ground: WCAG's 4.5:1, in hundredths (ui_contrast, theme.h)
+
+/*
+        The quiet ink on a glass ground: the ground mixed toward the ink from 176 of 256, or further toward it, the least
+        that stands out UI_READABLE from the ground. The ink is the most the kit's rule gives (window_contrast), so it
+        always does; the quiet one does not on the glass's ends, a dark glass at its brightest or a light one at its dimmest.
+*/
+static unsigned int ui_glass_quiet(unsigned int ground, unsigned int ink)
+{
+        unsigned int low = 176, high = 256;
+
+        while (low < high)
+        {
+                unsigned int mid = (low + high) / 2;
+
+                if (ui_contrast(window_mix(ground, ink, mid), ground) >= UI_READABLE)
+                        high = mid;
+                else
+                        low = mid + 1;
+        }
+        return window_mix(ground, ink, low);
+}
+
+// The inks for a ground: what the compositor says the glass came to.
+static fn ui_inks(struct ui address_to ui, unsigned int ground)
+{
+        ui->ground = ground & 0xffffffu;
+        ui->ink = window_contrast(ui->ground);
+        ui->quiet = ui_glass_quiet(ui->ground, ui->ink);
+        ui->lit = ui_tone(ui->ink, 36);
+        ui->ring = ui_tone(ui->ink, 190);
+}
+
 /*
         What one process draws with: the theme as the table last said it and
         the colours shown this frame, and the frame's clock. A frame sets
@@ -1688,12 +1711,37 @@ static unsigned int ui_text_colour(const struct ui address_to ui, int role)
         return 0xff000000u | (role == UI_ON_SURFACE_VARIANT ? ui->quiet : ui->ink) & 0xffffffu;
 }
 
-// A surface piece's colour: its role in an opaque window; in a glass one, the ink at percent (straight, as ui_kit_fill takes it).
+/*
+        A glass well's percent: the most of the ink that can be laid over the ground and still have the ink stand out
+        UI_READABLE from what the well comes to. The ink is what the well's text is drawn in (ui_text_colour), so a well
+        is never darker than that allows; a dark glass at its brightest (92 a channel) takes an 8% well, a light one at its
+        dimmest (180) 31%, and the
+        glass at 0 is the ink's own contrast, which always passes. Monotone in percent, so a search finds the most.
+*/
+static unsigned int ui_glass_well(const struct ui address_to ui, unsigned int percent)
+{
+        unsigned int ink = ui->ink & 0xffffffu, low = 0, high = percent;
+
+        while (low < high)
+        {
+                unsigned int mid = (low + high + 1) / 2, alpha = ui_mix(0xff000000u | ink, mid, 0) >> 24;
+
+                // The blend ui_tone makes of the well's alpha, the same figures the well is drawn with.
+                if (ui_contrast(ink, window_mix(ui->ground, ink, alpha + (alpha >> 7))) >= UI_READABLE)
+                        low = mid;
+                else
+                        high = mid - 1;
+        }
+        return low;
+}
+
+// A surface piece's colour: its role in an opaque window; in a glass one, the ink at percent (straight, as ui_kit_fill takes it),
+// at most the percent ui_glass_well allows.
 static unsigned int ui_well(const struct ui address_to ui, int role, unsigned int percent)
 {
         if (!ui->glass)
                 return ui_role(role);
-        return ui_mix(0xff000000u | (ui->ink & 0xffffffu), percent, 0);
+        return ui_mix(0xff000000u | (ui->ink & 0xffffffu), ui_glass_well(ui, percent), 0);
 }
 
 // The window's surface, opaque: what a kit window is cleared to.
