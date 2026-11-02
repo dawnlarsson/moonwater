@@ -122969,6 +122969,114 @@ static unsigned long touch_buttons(int row, unsigned int head)
 }
 
 /*
+        A snap sequence's drawn frames. After each present the scanout is what a full recompose of the scene is: nothing stale
+        is left by a damage rectangle that was not drawn, a tint that is gone, a thumbnail that came up or a grid that went
+        down. And every pixel that changed from the frame before lies in the window's old and new rectangles, the preview's old
+        and new rectangles, or a thumbnail the assist shows (each 2 px grown for its line). Nothing else on the screen changes.
+        Run at the motion the table asks for and at reduced motion, where the overlays do not fade.
+*/
+static unsigned int snap_stale_pixels(void)
+{
+    static unsigned int reference[LAYOUT_SIDE * LAYOUT_SIDE];
+    unsigned int *live = compositor.scanout, pitch = compositor.scanout_pitch / 4, stale = 0;
+
+    compositor.scanout = reference;
+    compositor_damage(0, 0, (int)compositor.width, (int)compositor.height);
+    compositor_present();
+    compositor.scanout = live;
+    for (unsigned int y = 0; y < compositor.height; y++)
+        for (unsigned int x = 0; x < compositor.width; x++)
+            stale += (live[y * pitch + x] & 0xffffffu) != (reference[y * pitch + x] & 0xffffffu);
+    return stale;
+}
+
+static int snap_rect_holds(const int *rect, int x, int y)
+{
+    return rect[2] > 0 && x >= rect[0] - 2 && x < rect[0] + rect[2] + 2 && y >= rect[1] - 2 && y < rect[1] + rect[3] + 2;
+}
+
+static void snap_window_rect(int row, int *rect)
+{
+    rect[0] = (int)compositor.x[row], rect[1] = (int)compositor.y[row];
+    rect[2] = (int)compositor.w[row], rect[3] = (int)compositor.h[row];
+}
+
+// The thumbnails the snap assist shows, copied: what a step may change besides the window and the preview.
+static void snap_thumbs_copy(int (*into)[4], int *count)
+{
+    *count = compositor.assist_count;
+    for (int thumb = 0; thumb < compositor.assist_count; thumb++)
+        memory_copy(into[thumb], compositor.assist_rect[thumb], sizeof(into[thumb]));
+}
+
+// Whether a pixel is in one of the thumbnails copied (a thumbnail before the step or after it).
+static int snap_thumb_holds(const int (*thumbs)[4], int count, int x, int y)
+{
+    for (int thumb = 0; thumb < count; thumb++)
+        if (snap_rect_holds(thumbs[thumb], x, y))
+            return 1;
+    return 0;
+}
+
+static void check_compositor_snap_frames(void)
+{
+    static unsigned int before[LAYOUT_SIDE * LAYOUT_SIDE];
+    static const int path[][2] = {{20, 60}, {0, 60}, {0, 0}, {100, 100}, {156, 60}, {100, 176}, {60, 60}, {0, 0}, {156, 0}};
+    unsigned int stale = 0, outside = 0, pitch = 0;
+    int steps = 0, let_go_clean = 0;
+
+    if (!layout_table_map(256))
+    {
+        check("snap frames: the table is mapped", false);
+        return;
+    }
+    for (int motion = 0; motion < 2; motion++)
+    {
+        int prev_window[4], prev_preview[4], window[4], preview[4], prev_thumbs[WINDOWS][4], thumbs[WINDOWS][4], prev_count, count;
+
+        snap_fresh();
+        compositor.table->motion = (unsigned int)motion;
+        layout_show(2, 150, 150, 80, 60);
+        layout_paint(1, 0x406080u);
+        layout_paint(2, 0x804020u);
+        compositor_damage(0, 0, 256, 256);
+        compositor_present();
+        pitch = compositor.scanout_pitch / 4;
+        for (unsigned int at = 0; at < sizeof(path) / sizeof(path[0]); at++)
+        {
+            memory_copy(before, layout_pixels, sizeof(before));
+            snap_window_rect(1, prev_window);
+            memory_copy(prev_preview, compositor.preview, sizeof(prev_preview));
+            snap_thumbs_copy(prev_thumbs, &prev_count);
+            snap_hand(1, path[at][0], path[at][1], 50, 40);
+            compositor_present();
+            stale += snap_stale_pixels();
+            snap_window_rect(1, window);
+            memory_copy(preview, compositor.preview, sizeof(preview));
+            snap_thumbs_copy(thumbs, &count);
+            for (unsigned int y = 0; y < 256; y++)
+                for (unsigned int x = 0; x < 256; x++)
+                    if ((layout_pixels[y * pitch + x] & 0xffffffu) != (before[y * pitch + x] & 0xffffffu) &&
+                        !snap_rect_holds(prev_window, (int)x, (int)y) && !snap_rect_holds(window, (int)x, (int)y) &&
+                        !snap_rect_holds(prev_preview, (int)x, (int)y) && !snap_rect_holds(preview, (int)x, (int)y) &&
+                        !snap_thumb_holds(prev_thumbs, prev_count, (int)x, (int)y) && !snap_thumb_holds(thumbs, count, (int)x, (int)y))
+                        outside++;
+            steps++;
+        }
+        snap_let_go(156, 0, 50, 40);
+        compositor_present();
+        stale += snap_stale_pixels();
+        let_go_clean = let_go_clean || (compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE);
+    }
+    check("snap frames: every frame of a drag, at the table's motion and at reduced motion, is the full recompose of the scene",
+          stale == 0);
+    check("snap frames: each frame changes only the window, the preview, a thumbnail the assist shows, and their old places",
+          outside == 0);
+    check("snap frames: the sequences ran, and each let go left no preview", steps == 18 && let_go_clean);
+    compositor.table->motion = 0;
+}
+
+/*
         A finger's window touches an edge, and its preview holds while the finger is down. A finger is led (the window is drawn
         where the finger is going), and a frame with no new sample takes the lead away again (compositor_predict_clear), so the
         window's rectangle changes between samples by the lead. The snap is the finger's own rectangle, so the preview is on
@@ -140001,6 +140109,7 @@ b32 main()
         check_compositor_preview_at_once();
         check_compositor_snap_trigger();
         check_compositor_touch_hold();
+        check_compositor_snap_frames();
         check_compositor_overlay_fade();
         check_compositor_grid_drag();
         check_compositor_wheel();
