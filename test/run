@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang hooks"
 
 describe()
 {
@@ -256,6 +256,7 @@ describe()
         ranged)   echo "the call-site entries (__max_N, __room_N) on every body of three machines against pages that fault, and every call site naming one under the checked build" ;;
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
+        hooks)    echo "the Canvas Wayland and X11 hook files: built with and without their switches, refusals checked against their state, no hook symbol when off" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
@@ -6370,6 +6371,64 @@ case $startup_outcome in
 esac
 
 [ "$failed" = 0 ]
+)
+
+#       The Canvas hook files, wayland.c and x11.c, and their switches. With
+#       both switches on, each file builds on its own under gcc and clang with
+#       -Wall -Wextra -Werror, and CHECK_shell's battery of refusals passes
+#       against each side. With both off, CHECK_hooks_off calls all 44 hooks
+#       and sees SHELL_EOPNOTSUPP from each, and the object it compiles to
+#       defines no hook symbol: nm reads that object. With the switch off
+#       wayland.c refuses to build, which is what keeps the Makefile honest.
+#       checks.c has a stray /* at line 19527 that predates these hooks, so
+#       the checks.c compiles here drop -Wcomment and keep everything else.
+lane_hooks()
+(
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+        hooks_status=0
+        hooks_compilers=${CC:-gcc}
+        command -v clang > /dev/null 2>&1 && hooks_compilers="$hooks_compilers clang"
+
+        hooks_row()
+        {
+                hooks_name=$1
+                shift
+                if "$@" > "$work/$hooks_name.out" 2>&1; then
+                        tally "hooks-$hooks_name" 1 1
+                else
+                        tally "hooks-$hooks_name" 0 1
+                        hooks_status=1
+                        note "hooks $hooks_name failed:"
+                        tail -n 8 "$work/$hooks_name.out" | sed 's/^/    /'
+                fi
+        }
+
+        for hooks_cc in $hooks_compilers; do
+                hooks_warn="-std=gnu11 -O2 -Wall -Wextra -Werror"
+                hooks_tests="-Wno-comment"
+                hooks_row "wayland-on-$hooks_cc" $hooks_cc $hooks_warn -DCONFIG_MOONWATER_WAYLAND \
+                        -c src/canvas/wayland.c -o "$work/wayland-on.o"
+                hooks_row "x11-on-$hooks_cc" $hooks_cc $hooks_warn -DCONFIG_MOONWATER_X11 \
+                        -c src/canvas/x11.c -o "$work/x11-on.o"
+                hooks_row "shell-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
+                        -DCHECK_shell -DCONFIG_MOONWATER_WAYLAND -DCONFIG_MOONWATER_X11 \
+                        test/checks.c -o '$work/shell-$hooks_cc' && '$work/shell-$hooks_cc'"
+                hooks_row "off-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
+                        -DCHECK_hooks_off test/checks.c -o '$work/off-$hooks_cc' && '$work/off-$hooks_cc'"
+                hooks_row "off-object-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
+                        -DCHECK_hooks_off -c test/checks.c -o '$work/off-$hooks_cc.o' && \
+                        ! nm -g '$work/off-$hooks_cc.o' | grep -E ' [A-Za-z] _?(wayland|x11|xwayland)_'"
+                if $hooks_cc $hooks_warn -c src/canvas/wayland.c -o "$work/wayland-off.o" 2> /dev/null; then
+                        tally "hooks-wayland-off-refused-$hooks_cc" 0 1
+                        hooks_status=1
+                        note "hooks: wayland.c built without its switch"
+                else
+                        tally "hooks-wayland-off-refused-$hooks_cc" 1 1
+                fi
+        done
+
+        [ "$hooks_status" = 0 ]
 )
 
 #       The crcs and the hash cores, whose riscv64 floor bodies also run

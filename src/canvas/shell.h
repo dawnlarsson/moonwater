@@ -855,6 +855,8 @@ static inline int shell_layer_strut(struct shell_side *side, long client, long s
 
         if (edge < SHELL_EDGE_TOP || edge >= SHELL_EDGE_COUNT)
                 return SHELL_EINVAL;
+        if (!shell_span_ok(size))
+                return SHELL_EINVAL;
         layer.layer = SHELL_LAYER_TOP;
         layer.anchor = 1L << edge;
         layer.keyboard = SHELL_KEYBOARD_NONE;

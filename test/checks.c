@@ -140674,6 +140674,723 @@ int main(void) {
 }
 #endif /* CHECK_canvas_cells */
 
+#ifdef CHECK_shell
+/*
+        The Wayland and X11 hooks with both switches on, against the state they keep. Each hook is called with the
+        values a client may not send -- a zero, a negative, a value past its cap, a string with a control byte, a
+        surface another client holds, a sink that is not complete -- and must answer negative, leave its side's whole
+        state byte for byte as it was, and leave the sink uncalled. A refusal that comes from the sink is checked
+        for the state alone. Each hook is also called with a good value and must accept it, so the refusals are not
+        all the file does. The Wayland layer surface, the X strut and XWayland are checked after the shared battery.
+
+            gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_shell -DCONFIG_MOONWATER_WAYLAND -DCONFIG_MOONWATER_X11 test/checks.c
+*/
+#if !defined(CONFIG_MOONWATER_WAYLAND) || !defined(CONFIG_MOONWATER_X11)
+#error "CHECK_shell builds both hook files: define CONFIG_MOONWATER_WAYLAND and CONFIG_MOONWATER_X11"
+#endif
+#include <stdio.h>
+#include <string.h>
+#include "../src/canvas/wayland.c"
+#include "../src/canvas/x11.c"
+
+struct hook_probe
+{
+        unsigned int calls;
+        int refuse;
+        int next_row;
+};
+
+static struct hook_probe hook_probe_state = {0, 0, 3};
+
+static int hook_answer(void *context, int row)
+{
+        struct hook_probe *probe = context;
+
+        (void)row;
+        probe->calls++;
+        return probe->refuse ? SHELL_EINVAL : SHELL_OK;
+}
+
+static int hook_open(void *context, long client, long role)
+{
+        struct hook_probe *probe = context;
+
+        (void)client;
+        (void)role;
+        probe->calls++;
+        if (probe->refuse)
+                return SHELL_EINVAL;
+        return probe->next_row++;
+}
+
+static int hook_key(void *context, long client, long code, long pressed)
+{
+        (void)client;
+        (void)code;
+        (void)pressed;
+        return hook_answer(context, -1);
+}
+
+static int hook_pointer(void *context, long client, long x, long y, long buttons)
+{
+        (void)client;
+        (void)x;
+        (void)y;
+        (void)buttons;
+        return hook_answer(context, -1);
+}
+
+static int hook_damage(void *context, int row, const struct shell_rect *rect)
+{
+        (void)rect;
+        return hook_answer(context, row);
+}
+
+static int hook_place(void *context, int row, long x, long y, long screen)
+{
+        (void)x;
+        (void)y;
+        (void)screen;
+        return hook_answer(context, row);
+}
+
+static int hook_size(void *context, int row, long width, long height)
+{
+        (void)width;
+        (void)height;
+        return hook_answer(context, row);
+}
+
+static int hook_minimize(void *context, int row, long on)
+{
+        (void)on;
+        return hook_answer(context, row);
+}
+
+static int hook_maximize(void *context, int row, long on)
+{
+        (void)on;
+        return hook_answer(context, row);
+}
+
+static int hook_fullscreen(void *context, int row, long on)
+{
+        (void)on;
+        return hook_answer(context, row);
+}
+
+static int hook_stack(void *context, int row, long layer)
+{
+        (void)layer;
+        return hook_answer(context, row);
+}
+
+static int hook_activate(void *context, int row)
+{
+        return hook_answer(context, row);
+}
+
+static int hook_close(void *context, int row)
+{
+        return hook_answer(context, row);
+}
+
+static int hook_title(void *context, int row, const char *text, long length)
+{
+        (void)text;
+        (void)length;
+        return hook_answer(context, row);
+}
+
+static int hook_layer(void *context, int row, const struct shell_layer *layer)
+{
+        (void)layer;
+        return hook_answer(context, row);
+}
+
+static int hook_query(void *context, int row, struct shell_facts *facts)
+{
+        facts->x = 5;
+        facts->y = 6;
+        facts->width = 96;
+        facts->height = 48;
+        facts->z = 2;
+        return hook_answer(context, row);
+}
+
+static const struct shell_sink hook_sink = {
+        .context = &hook_probe_state,
+        .open = hook_open,
+        .key = hook_key,
+        .pointer = hook_pointer,
+        .damage = hook_damage,
+        .place = hook_place,
+        .size = hook_size,
+        .minimize = hook_minimize,
+        .maximize = hook_maximize,
+        .fullscreen = hook_fullscreen,
+        .stack = hook_stack,
+        .activate = hook_activate,
+        .close = hook_close,
+        .title = hook_title,
+        .layer = hook_layer,
+        .query = hook_query,
+};
+
+static unsigned int hook_checks, hook_failures;
+static struct shell_side hook_before;
+static unsigned int hook_calls_before;
+
+#define HOOK_CHECK(condition) \
+        do { \
+                hook_checks++; \
+                if (!(condition)) \
+                { \
+                        hook_failures++; \
+                        printf("  FAIL line %d: %s\n", __LINE__, #condition); \
+                } \
+        } while (0)
+
+#define HOOK_SNAPSHOT(state) \
+        (memcpy(&hook_before, (state), sizeof hook_before), hook_calls_before = hook_probe_state.calls)
+
+/*
+        A call that must be refused by the engine: negative, the state as it
+        was, and the sink not called at all.
+*/
+#define HOOK_REFUSED(state, call) \
+        do { \
+                int hook_status; \
+                HOOK_SNAPSHOT(state); \
+                hook_status = (call); \
+                if (hook_status >= 0) \
+                        printf("  ACCEPTED, want refused: %s = %d\n", #call, hook_status); \
+                HOOK_CHECK(hook_status < 0); \
+                HOOK_CHECK(memcmp(&hook_before, (state), sizeof hook_before) == 0); \
+                if (hook_probe_state.calls != hook_calls_before) \
+                        printf("  sink called, want not: %s\n", #call); \
+                HOOK_CHECK(hook_probe_state.calls == hook_calls_before); \
+        } while (0)
+
+/*
+        A call the sink refuses: negative, and the state as it was. The sink is
+        called, which is the point of the case.
+*/
+#define HOOK_REFUSED_BY_SINK(state, call) \
+        do { \
+                int hook_status; \
+                HOOK_SNAPSHOT(state); \
+                hook_status = (call); \
+                HOOK_CHECK(hook_status < 0); \
+                HOOK_CHECK(memcmp(&hook_before, (state), sizeof hook_before) == 0); \
+        } while (0)
+
+struct hook_side
+{
+        struct shell_side *state;
+        int (*start)(const struct shell_sink *sink);
+        int (*stop)(void);
+        int (*connect)(void);
+        int (*disconnect)(long client);
+        int (*role)(long client, long surface, long role);
+        int (*buffer)(long client, const struct shell_buffer *buffer);
+        int (*damage)(long client, long surface, long buffer, const struct shell_rect *rect);
+        int (*key)(long client, long code, long pressed);
+        int (*pointer)(long client, long x, long y, long buttons);
+        int (*place)(long client, long surface, long x, long y, long screen);
+        int (*size)(long client, long surface, long width, long height);
+        int (*minimize)(long client, long surface, long on);
+        int (*maximize)(long client, long surface, long on);
+        int (*fullscreen)(long client, long surface, long on);
+        int (*stack)(long client, long surface, long layer);
+        int (*activate)(long client, long surface);
+        int (*close)(long client, long surface);
+        int (*title)(long client, long surface, const char *text, long length);
+        int (*app_id)(long client, long surface, const char *text, long length);
+        int (*query)(long client, long surface, struct shell_facts *facts);
+        long toplevel, popup, first_bad_role;
+};
+
+static const struct hook_side hook_wayland = {
+        &wayland, wayland_start, wayland_stop, wayland_client_connect, wayland_client_disconnect,
+        wayland_role, wayland_buffer_offer, wayland_damage, wayland_input_key, wayland_input_pointer,
+        wayland_window_place, wayland_window_size, wayland_window_minimize, wayland_window_maximize,
+        wayland_window_fullscreen, wayland_window_stack, wayland_window_activate, wayland_window_close,
+        wayland_window_title, wayland_window_app_id, wayland_window_query,
+        SHELL_ROLE_TOPLEVEL, SHELL_ROLE_POPUP, 6,
+};
+
+static const struct hook_side hook_x11 = {
+        &x11, x11_start, x11_stop, x11_client_connect, x11_client_disconnect,
+        x11_window_role, x11_buffer_offer, x11_damage, x11_input_key, x11_input_pointer,
+        x11_window_place, x11_window_size, x11_window_minimize, x11_window_maximize,
+        x11_window_fullscreen, x11_window_stack, x11_window_activate, x11_window_close,
+        x11_window_title, x11_window_app_id, x11_window_query,
+        X11_TYPE_NORMAL, X11_TYPE_MENU, X11_TYPE_COUNT,
+};
+
+/*
+        The battery one side answers. The order is the lifecycle: refusals
+        before a start, the start and its refusals, clients, buffers, roles,
+        then every window request on the windows those roles made, then
+        disconnect and stop.
+*/
+static void hook_battery(const struct hook_side *h)
+{
+        struct shell_buffer good = {SHELL_BUFFER_SHM, SHELL_FORMAT_ARGB8888, 9, 64, 64, 256};
+        struct shell_buffer bad;
+        struct shell_rect rect = {0, 0, 64, 64};
+        struct shell_rect bad_rect;
+        struct shell_facts facts;
+        struct shell_sink partial = hook_sink;
+        struct shell_side *state = h->state;
+        char long_text[SHELL_TITLE_MAX + 2];
+        int status;
+        long i;
+
+        memset(long_text, 'a', sizeof long_text - 1);
+        long_text[sizeof long_text - 1] = 0;
+
+        /* Before a start nothing is accepted, and the sink is not called. */
+        HOOK_REFUSED(state, h->connect());
+        HOOK_REFUSED(state, h->role(0, 0, h->toplevel));
+        HOOK_REFUSED(state, h->buffer(0, &good));
+        HOOK_REFUSED(state, h->key(0, 30, 1));
+        HOOK_REFUSED(state, h->place(0, 0, 1, 2, 0));
+        HOOK_REFUSED(state, h->stop());
+        HOOK_REFUSED(state, h->disconnect(0));
+        HOOK_REFUSED(state, h->start(0));
+        partial.query = 0;
+        HOOK_REFUSED(state, h->start(&partial));
+        status = h->start(&hook_sink);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, h->start(&hook_sink));
+
+        /* Clients: a number outside the table, or one not connected, is refused; the table fills and then refuses. */
+        HOOK_REFUSED(state, h->disconnect(-1));
+        HOOK_REFUSED(state, h->disconnect(SHELL_CLIENTS));
+        HOOK_REFUSED(state, h->disconnect(5));
+        status = h->connect();
+        HOOK_CHECK(status == 0);
+        status = h->connect();
+        HOOK_CHECK(status == 1);
+        for (i = 2; i < SHELL_CLIENTS; i++)
+                HOOK_CHECK(h->connect() == (int)i);
+        HOOK_REFUSED(state, h->connect());
+        for (i = 2; i < SHELL_CLIENTS; i++)
+                HOOK_CHECK(h->disconnect(i) == SHELL_OK);
+
+        /* Buffers: every field at its bound and past it. A buffer that is not shm or dma-buf, or has no format or no descriptor, is out. */
+        HOOK_REFUSED(state, h->buffer(0, 0));
+        HOOK_REFUSED(state, h->buffer(-1, &good));
+        HOOK_REFUSED(state, h->buffer(5, &good));
+        bad = good; bad.kind = 0;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.kind = 3;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.format = 0;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.fd = -1;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.fd = SHELL_FD_MAX;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.width = 0;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.width = SHELL_DIMENSION_MAX + 1;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.height = 0;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.height = SHELL_DIMENSION_MAX + 1;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.stride = 0;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.stride = 255;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.stride = 258;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.stride = SHELL_STRIDE_MAX + 4;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        bad = good; bad.width = SHELL_DIMENSION_MAX; bad.height = SHELL_DIMENSION_MAX; bad.stride = SHELL_STRIDE_MAX;
+        HOOK_REFUSED(state, h->buffer(0, &bad));
+        status = h->buffer(0, &good);
+        HOOK_CHECK(status == 0);
+        status = h->buffer(1, &good);
+        HOOK_CHECK(status == 1);
+        status = h->connect();
+        HOOK_CHECK(status == 2);
+
+        /* Roles: a slot out of range, a role that is not one, a client not connected, a sink that refuses, and a second claim. */
+        HOOK_REFUSED(state, h->role(0, -1, h->toplevel));
+        HOOK_REFUSED(state, h->role(0, SHELL_SURFACES, h->toplevel));
+        HOOK_REFUSED(state, h->role(0, 0, -1));
+        HOOK_REFUSED(state, h->role(0, 0, h->first_bad_role));
+        HOOK_REFUSED(state, h->role(7, 0, h->toplevel));
+        hook_probe_state.refuse = 1;
+        HOOK_REFUSED_BY_SINK(state, h->role(0, 0, h->toplevel));
+        hook_probe_state.refuse = 0;
+        status = h->role(0, 0, h->toplevel);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, h->role(0, 0, h->popup));
+        HOOK_REFUSED(state, h->role(1, 0, h->toplevel));
+        status = h->role(0, 1, h->popup);
+        HOOK_CHECK(status == SHELL_OK);
+        status = h->role(1, 2, h->toplevel);
+        HOOK_CHECK(status == SHELL_OK);
+
+        /* Damage: inside the buffer, on a surface that has a row, owned by the client. */
+        HOOK_REFUSED(state, h->damage(0, 0, 0, 0));
+        bad_rect = rect; bad_rect.x = -1;
+        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
+        bad_rect = rect; bad_rect.y = -1;
+        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
+        bad_rect = rect; bad_rect.width = 0;
+        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
+        bad_rect = rect; bad_rect.height = 0;
+        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
+        bad_rect = rect; bad_rect.x = 1;
+        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
+        bad_rect = rect; bad_rect.height = 65;
+        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
+        bad_rect = rect; bad_rect.width = SHELL_DIMENSION_MAX + 1;
+        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
+        HOOK_REFUSED(state, h->damage(0, 1, 0, &rect));
+        HOOK_REFUSED(state, h->damage(0, 0, 1, &rect));
+        HOOK_REFUSED(state, h->damage(0, -1, 0, &rect));
+        HOOK_REFUSED(state, h->damage(0, 0, -1, &rect));
+        HOOK_REFUSED(state, h->damage(0, 0, SHELL_BUFFERS, &rect));
+        status = h->damage(0, 0, 0, &rect);
+        HOOK_CHECK(status == SHELL_OK);
+
+        /* Input: a key in range with a state the three reports can take, and a pointer inside the cap. */
+        HOOK_REFUSED(state, h->key(-1, 30, 1));
+        HOOK_REFUSED(state, h->key(0, 0, 1));
+        HOOK_REFUSED(state, h->key(0, SHELL_KEY_MAX + 1, 1));
+        HOOK_REFUSED(state, h->key(0, 30, 3));
+        HOOK_REFUSED(state, h->key(0, 30, -1));
+        status = h->key(0, 30, 1);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, h->pointer(0, SHELL_COORD_MAX + 1, 0, 0));
+        HOOK_REFUSED(state, h->pointer(0, 0, -SHELL_COORD_MAX - 1, 0));
+        HOOK_REFUSED(state, h->pointer(0, 0, 0, 0x20));
+        HOOK_REFUSED(state, h->pointer(0, 0, 0, -1));
+        HOOK_REFUSED(state, h->pointer(7, 0, 0, 1));
+        status = h->pointer(0, 10, 20, 1);
+        HOOK_CHECK(status == SHELL_OK);
+
+        /* Window placement: a screen the table has, a position inside the cap, a toplevel of this client. */
+        HOOK_REFUSED(state, h->place(0, 0, 1, 2, SHELL_SCREENS));
+        HOOK_REFUSED(state, h->place(0, 0, 1, 2, -1));
+        HOOK_REFUSED(state, h->place(0, 0, SHELL_COORD_MAX + 1, 2, 0));
+        HOOK_REFUSED(state, h->place(0, 1, 1, 2, 0));
+        HOOK_REFUSED(state, h->place(1, 0, 1, 2, 0));
+        status = h->place(0, 0, 10, 20, 0);
+        HOOK_CHECK(status == SHELL_OK);
+
+        /* Size: both sides at least one and at most the cap. */
+        HOOK_REFUSED(state, h->size(0, 0, 0, 48));
+        HOOK_REFUSED(state, h->size(0, 0, 96, 0));
+        HOOK_REFUSED(state, h->size(0, 0, SHELL_DIMENSION_MAX + 1, 48));
+        status = h->size(0, 0, 96, 48);
+        HOOK_CHECK(status == SHELL_OK);
+
+        /* The state requests: on is 0 or 1 and nothing else; an accepted one sets its bit, and an unset clears it. */
+        HOOK_REFUSED(state, h->minimize(0, 0, 2));
+        HOOK_REFUSED(state, h->minimize(0, 0, -1));
+        status = h->minimize(0, 0, 1);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_MINIMIZED));
+        status = h->minimize(0, 0, 0);
+        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & SHELL_STATE_MINIMIZED));
+        HOOK_REFUSED(state, h->maximize(0, 0, 2));
+        status = h->maximize(0, 0, 1);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_MAXIMIZED));
+        status = h->maximize(0, 0, 0);
+        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & SHELL_STATE_MAXIMIZED));
+        HOOK_REFUSED(state, h->fullscreen(0, 0, -1));
+        status = h->fullscreen(0, 0, 1);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_FULLSCREEN));
+        status = h->fullscreen(0, 0, 0);
+        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & SHELL_STATE_FULLSCREEN));
+        HOOK_REFUSED(state, h->stack(0, 0, 2));
+        HOOK_REFUSED(state, h->stack(0, 0, -2));
+        status = h->stack(0, 0, 1);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_ABOVE));
+        status = h->stack(0, 0, -1);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_BELOW) &&
+                   !(state->surfaces[0].state & SHELL_STATE_ABOVE));
+        status = h->stack(0, 0, 0);
+        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & (SHELL_STATE_ABOVE | SHELL_STATE_BELOW)));
+
+        /* Activation: a toplevel of this client; one window holds the keys at a time. */
+        HOOK_REFUSED(state, h->activate(0, 1));
+        HOOK_REFUSED(state, h->activate(0, SHELL_SURFACES));
+        HOOK_REFUSED(state, h->activate(1, 0));
+        status = h->activate(0, 0);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_ACTIVE));
+        status = h->activate(1, 2);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[2].state & SHELL_STATE_ACTIVE) &&
+                   !(state->surfaces[0].state & SHELL_STATE_ACTIVE));
+
+        /* Titles and app ids: a length and no control byte, a NUL included; a zero length clears. */
+        HOOK_REFUSED(state, h->title(0, 0, 0, 1));
+        HOOK_REFUSED(state, h->title(0, 0, long_text, SHELL_TITLE_MAX + 1));
+        HOOK_REFUSED(state, h->title(0, 0, "a\0b", 3));
+        HOOK_REFUSED(state, h->title(0, 0, "\x1f", 1));
+        HOOK_REFUSED(state, h->title(0, 0, "a\x7f", 2));
+        HOOK_REFUSED(state, h->title(0, 0, "a", -1));
+        HOOK_REFUSED(state, h->title(0, 1, "a", 1));
+        status = h->title(0, 0, "hi", 2);
+        HOOK_CHECK(status == SHELL_OK);
+        status = h->title(0, 0, 0, 0);
+        HOOK_CHECK(status == SHELL_OK && state->surfaces[0].title_length == 0);
+        status = h->title(0, 0, "hi", 2);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, h->app_id(0, 0, 0, 1));
+        HOOK_REFUSED(state, h->app_id(0, 0, long_text, SHELL_APP_ID_MAX + 1));
+        HOOK_REFUSED(state, h->app_id(0, 0, "a\n", 2));
+        status = h->app_id(0, 0, "x", 1);
+        HOOK_CHECK(status == SHELL_OK);
+
+        /* The read side: a facts pointer, a toplevel of this client, and the title it just set. */
+        HOOK_REFUSED(state, h->query(0, 0, 0));
+        HOOK_REFUSED(state, h->query(0, 1, &facts));
+        status = h->query(0, 0, &facts);
+        HOOK_CHECK(status == SHELL_OK && facts.x == 5 && facts.y == 6 && facts.width == 96 && facts.height == 48);
+        HOOK_CHECK(facts.title_length == 2 && memcmp(facts.title, "hi", 2) == 0);
+        HOOK_CHECK(facts.app_id_length == 1 && facts.app_id[0] == 'x');
+        HOOK_CHECK(!(facts.state & SHELL_STATE_ACTIVE));
+
+        /* Closing: one request is accepted and then nothing else is, from that window. A sink that refuses changes nothing. */
+        hook_probe_state.refuse = 1;
+        HOOK_REFUSED_BY_SINK(state, h->close(1, 2));
+        hook_probe_state.refuse = 0;
+        status = h->close(0, 0);
+        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_CLOSING));
+        HOOK_REFUSED(state, h->close(0, 0));
+        HOOK_REFUSED(state, h->place(0, 0, 1, 2, 0));
+        HOOK_REFUSED(state, h->size(0, 0, 96, 48));
+        HOOK_REFUSED(state, h->minimize(0, 0, 1));
+        HOOK_REFUSED(state, h->title(0, 0, "x", 1));
+        HOOK_REFUSED(state, h->activate(0, 0));
+        status = h->close(1, 2);
+        HOOK_CHECK(status == SHELL_OK);
+
+        /* Disconnect: the client's windows close and its records go, so its numbers mean nothing afterwards. */
+        status = h->disconnect(1);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, h->place(1, 2, 1, 2, 0));
+        HOOK_REFUSED(state, h->buffer(1, &good));
+        HOOK_REFUSED(state, h->disconnect(1));
+
+        /* Stop: the windows are closed through the sink, and every later call is refused. */
+        status = h->stop();
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, h->stop());
+        HOOK_REFUSED(state, h->connect());
+        HOOK_REFUSED(state, h->key(0, 30, 1));
+}
+
+/*
+        The Wayland layer surface: a panel's layer, anchor, exclusive zone,
+        size and margins. A surface that is not a layer surface, and a layer
+        that asks for room on no edge, are refused.
+*/
+static void wayland_layer_battery(void)
+{
+        struct shell_layer good = {SHELL_LAYER_TOP, SHELL_ANCHOR_TOP, SHELL_KEYBOARD_NONE, 30, 0, 30, {0, 0, 0, 0}};
+        struct shell_layer bad;
+        struct shell_side *state = &wayland;
+        int status;
+
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &good));
+        status = wayland_start(&hook_sink);
+        HOOK_CHECK(status == SHELL_OK);
+        status = wayland_client_connect();
+        HOOK_CHECK(status == 0);
+        status = wayland_role(0, 1, SHELL_ROLE_LAYER);
+        HOOK_CHECK(status == SHELL_OK);
+        status = wayland_role(0, 0, SHELL_ROLE_TOPLEVEL);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, 0));
+        bad = good; bad.layer = 4;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.layer = -1;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.anchor = 16;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.keyboard = 3;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.width = SHELL_DIMENSION_MAX + 1;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.margin[2] = -SHELL_DIMENSION_MAX - 1;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.exclusive = -2;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.anchor = 0; bad.exclusive = 5;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        bad = good; bad.anchor = SHELL_ANCHOR_TOP | SHELL_ANCHOR_LEFT; bad.exclusive = 5;
+        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
+        status = wayland_layer_surface(0, 1, &good);
+        HOOK_CHECK(status == SHELL_OK);
+        status = wayland_layer_surface(0, 1, &good);
+        HOOK_CHECK(status == SHELL_OK);
+        status = wayland_stop();
+        HOOK_CHECK(status == SHELL_OK);
+}
+
+/*
+        The X strut: a dock is a layer surface, and its strut reserves a size on
+        one edge. A toplevel cannot strut, and an edge outside the four cannot.
+        A window type past the last is refused before it is a role at all.
+*/
+static void x11_strut_battery(void)
+{
+        struct shell_side *state = &x11;
+        int status;
+
+        status = x11_start(&hook_sink);
+        HOOK_CHECK(status == SHELL_OK);
+        status = x11_client_connect();
+        HOOK_CHECK(status == 0);
+        status = x11_window_role(0, 1, X11_TYPE_DOCK);
+        HOOK_CHECK(status == SHELL_OK);
+        status = x11_window_role(0, 2, X11_TYPE_NORMAL);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, x11_window_role(0, 3, X11_TYPE_COUNT));
+        HOOK_REFUSED(state, x11_window_role(0, 3, -1));
+        HOOK_REFUSED(state, x11_window_strut(0, 1, -1, 24));
+        HOOK_REFUSED(state, x11_window_strut(0, 1, SHELL_EDGE_COUNT, 24));
+        HOOK_REFUSED(state, x11_window_strut(0, 1, SHELL_EDGE_TOP, -1));
+        HOOK_REFUSED(state, x11_window_strut(0, 1, SHELL_EDGE_TOP, SHELL_DIMENSION_MAX + 1));
+        HOOK_REFUSED(state, x11_window_strut(0, 2, SHELL_EDGE_TOP, 24));
+        status = x11_window_strut(0, 1, SHELL_EDGE_TOP, 24);
+        HOOK_CHECK(status == SHELL_OK);
+        status = x11_window_strut(0, 1, SHELL_EDGE_BOTTOM, 0);
+        HOOK_CHECK(status == SHELL_OK);
+        status = x11_stop();
+        HOOK_CHECK(status == SHELL_OK);
+}
+
+/*
+        XWayland's lifecycle: it needs the X side up, is started once, and
+        stops once. Stopping the X side takes XWayland with it.
+*/
+static void xwayland_battery(void)
+{
+        struct shell_side *state = &x11;
+        int status;
+
+        HOOK_REFUSED(state, xwayland_start());
+        status = x11_start(&hook_sink);
+        HOOK_CHECK(status == SHELL_OK);
+        HOOK_REFUSED(state, xwayland_stop());
+        status = xwayland_start();
+        HOOK_CHECK(status == SHELL_OK && state->xwayland == 1);
+        HOOK_REFUSED(state, xwayland_start());
+        status = xwayland_stop();
+        HOOK_CHECK(status == SHELL_OK && state->xwayland == 0);
+        HOOK_REFUSED(state, xwayland_stop());
+        status = xwayland_start();
+        HOOK_CHECK(status == SHELL_OK);
+        status = x11_stop();
+        HOOK_CHECK(status == SHELL_OK && state->xwayland == 0);
+        HOOK_REFUSED(state, xwayland_stop());
+}
+
+int main(void)
+{
+        hook_battery(&hook_wayland);
+        hook_battery(&hook_x11);
+        wayland_layer_battery();
+        x11_strut_battery();
+        xwayland_battery();
+        printf("CHECK_shell: %u checks, %u failures\n", hook_checks, hook_failures);
+        return hook_failures != 0;
+}
+#endif /* CHECK_shell */
+
+#ifdef CHECK_hooks_off
+/*
+        With both switches off every hook is an inline no-op that answers
+        SHELL_EOPNOTSUPP. This program calls all 44 and must see that answer
+        from each one. The object it compiles to defines no hook symbol, and
+        test/run's hooks lane proves that with nm on that object: the program
+        is built with -c, and no wayland_, x11_ or xwayland_ name is defined.
+
+            gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_hooks_off test/checks.c
+*/
+#if defined(CONFIG_MOONWATER_WAYLAND) || defined(CONFIG_MOONWATER_X11)
+#error "CHECK_hooks_off is the build with both switches off; do not define CONFIG_MOONWATER_WAYLAND or CONFIG_MOONWATER_X11"
+#endif
+#include <stdio.h>
+#include "../src/canvas/wayland.h"
+#include "../src/canvas/x11.h"
+
+int main(void)
+{
+        struct shell_sink sink = {0};
+        struct shell_buffer buffer = {0};
+        struct shell_rect rect = {0, 0, 1, 1};
+        struct shell_facts facts = {0};
+        struct shell_layer layer = {0};
+        unsigned int refused = 0, total = 0;
+
+#define HOOK_OFF(call) \
+        do { \
+                total++; \
+                refused += (call) == SHELL_EOPNOTSUPP; \
+        } while (0)
+
+        HOOK_OFF(wayland_start(&sink));
+        HOOK_OFF(wayland_stop());
+        HOOK_OFF(wayland_client_connect());
+        HOOK_OFF(wayland_client_disconnect(0));
+        HOOK_OFF(wayland_role(0, 0, 1));
+        HOOK_OFF(wayland_buffer_offer(0, &buffer));
+        HOOK_OFF(wayland_damage(0, 0, 0, &rect));
+        HOOK_OFF(wayland_input_key(0, 30, 1));
+        HOOK_OFF(wayland_input_pointer(0, 1, 2, 1));
+        HOOK_OFF(wayland_window_place(0, 0, 1, 2, 0));
+        HOOK_OFF(wayland_window_size(0, 0, 96, 48));
+        HOOK_OFF(wayland_window_minimize(0, 0, 1));
+        HOOK_OFF(wayland_window_maximize(0, 0, 1));
+        HOOK_OFF(wayland_window_fullscreen(0, 0, 1));
+        HOOK_OFF(wayland_window_stack(0, 0, 1));
+        HOOK_OFF(wayland_window_activate(0, 0));
+        HOOK_OFF(wayland_window_close(0, 0));
+        HOOK_OFF(wayland_window_title(0, 0, "t", 1));
+        HOOK_OFF(wayland_window_app_id(0, 0, "a", 1));
+        HOOK_OFF(wayland_window_query(0, 0, &facts));
+        HOOK_OFF(wayland_layer_surface(0, 0, &layer));
+        HOOK_OFF(x11_start(&sink));
+        HOOK_OFF(x11_stop());
+        HOOK_OFF(x11_client_connect());
+        HOOK_OFF(x11_client_disconnect(0));
+        HOOK_OFF(x11_window_role(0, 0, X11_TYPE_NORMAL));
+        HOOK_OFF(x11_buffer_offer(0, &buffer));
+        HOOK_OFF(x11_damage(0, 0, 0, &rect));
+        HOOK_OFF(x11_input_key(0, 30, 1));
+        HOOK_OFF(x11_input_pointer(0, 1, 2, 1));
+        HOOK_OFF(x11_window_place(0, 0, 1, 2, 0));
+        HOOK_OFF(x11_window_size(0, 0, 96, 48));
+        HOOK_OFF(x11_window_minimize(0, 0, 1));
+        HOOK_OFF(x11_window_maximize(0, 0, 1));
+        HOOK_OFF(x11_window_fullscreen(0, 0, 1));
+        HOOK_OFF(x11_window_stack(0, 0, 1));
+        HOOK_OFF(x11_window_activate(0, 0));
+        HOOK_OFF(x11_window_close(0, 0));
+        HOOK_OFF(x11_window_title(0, 0, "t", 1));
+        HOOK_OFF(x11_window_app_id(0, 0, "a", 1));
+        HOOK_OFF(x11_window_query(0, 0, &facts));
+        HOOK_OFF(x11_window_strut(0, 0, 0, 24));
+        HOOK_OFF(xwayland_start());
+        HOOK_OFF(xwayland_stop());
+#undef HOOK_OFF
+        printf("CHECK_hooks_off: %u of %u hooks answer SHELL_EOPNOTSUPP\n", refused, total);
+        return refused == total && total == 44 ? 0 : 1;
+}
+#endif /* CHECK_hooks_off */
+
+
 #ifdef CHECK_stdio_buffer
 #include <stdio.h>
 #include <stdio_ext.h>

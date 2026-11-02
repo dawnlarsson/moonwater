@@ -36,7 +36,7 @@
         descriptor. A hook must not trust the parser to have bounded them. Each
         hook checks each argument against the caps in shell.h before it reads
         or writes its own state, and a rejected call leaves that state exactly
-        as it was (CHECK_wayland compares the whole struct before and after).
+        as it was (CHECK_shell compares the whole struct before and after).
 
         A client may be any program the user runs, including one in a bowl.
         This file does not tell them apart and does not try: it grants a client
