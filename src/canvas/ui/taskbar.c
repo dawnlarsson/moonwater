@@ -342,7 +342,11 @@ static unsigned int taskbar_square(unsigned int position)
         return position == TASKBAR_TOP ? 1 | 2 : position == TASKBAR_LEFT ? 1 | 4 : position == TASKBAR_RIGHT ? 2 | 8 : 4 | 8;
 }
 
-// One line of text in the band, at band-local x, y of its rectangle, in the tab's colour for ground and cut off at its edge.
+static positive taskbar_fit(const struct taskbar_view *view, const font_face address_to const address_to faces,
+                            const char *text, p32 em, int room, char *fitted, positive capacity);
+
+// One line of text in the band, at band-local x, y of its rectangle, in the tab's colour for ground. What is wider than the
+// tab is cut to fit it with dots after it, as a side band's is, and not at the tab's edge in the middle of a letter.
 static void taskbar_text_line(const struct taskbar_view *view, int bx, int by, int bw, int x, int y, int width,
                               int height, const char *text, unsigned int ink, unsigned int ground)
 {
@@ -352,9 +356,15 @@ static void taskbar_text_line(const struct taskbar_view *view, int bx, int by, i
         font_target here = {view->pixels + (long)(y - by) * bw + (x - bx), (positive)bw, width, height};
         unsigned int scratch[1] = {0};
         font_target nowhere = {scratch, 1, 1, 1};
+        char fitted[WINDOWS_TITLE + 4];
         positive length = string_length((string_address)text);
         int pad;
 
+        if ((int)(font_extent(view->engine, faces, 1, (const p8 address_to)text, length, em, 0) >> 16) > width)
+        {
+                length = taskbar_fit(view, faces, text, em, width, fitted, sizeof(fitted));
+                text = fitted;
+        }
         // How wide the run is, before it is put anywhere.
         pad = (width - (int)(font_draw(view->engine, faces, 1, (const p8 address_to)text, length, em, 0,
                                        &nowhere, 0, 0, ink, ground) >> 16)) / 2;

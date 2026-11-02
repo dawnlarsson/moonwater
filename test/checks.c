@@ -119007,6 +119007,28 @@ static void check_taskbar_text(string_address face_path)
         return;
     }
     font_start(&band_engine, band_atlas, 128, 128);
+    // A title too long for its tab is cut with dots after it on a bottom or top band, as on a side band: no letter is
+    // cut in half at the tab's edge. The same tab drawn with the title fitted beforehand is the same bytes.
+    {
+        static unsigned int slot_long[200 * 20], slot_fit[200 * 20];
+        static const char title[] = "AVATAR To Wa: a title too long";
+        struct taskbar_view view = band_view(TASKBAR_BOTTOM, null);
+        const font_face address_to faces[1] = {view.face};
+        p32 em = (p32)(20 * 11 / 20) << 6;
+        char fitted[WINDOWS_TITLE + 4];
+        positive n = taskbar_fit(&view, faces, title, em, 60, fitted, sizeof(fitted));
+        bipolar same = 1;
+
+        fitted[n] = 0;
+        view.pixels = slot_long;
+        taskbar_text_line(&view, 0, 0, 200, 0, 0, 60, 20, title, 0xffffffu, 0x202020u);
+        view.pixels = slot_fit;
+        taskbar_text_line(&view, 0, 0, 200, 0, 0, 60, 20, fitted, 0xffffffu, 0x202020u);
+        for (int at = 0; at < 200 * 20; at++)
+            same &= slot_long[at] == slot_fit[at];
+        check("taskbar text: a bottom band's title too long for its tab is cut with dots, as a side band's is",
+              n < sizeof(title) - 1 && same);
+    }
     // The band is drawn in the standard theme, as the compositor draws it: dark, with white, the table themed.
     static struct windows standard_table;
     struct windows address_to kept_table = compositor.table;
