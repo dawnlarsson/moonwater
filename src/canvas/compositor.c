@@ -11856,7 +11856,8 @@ static void compositor_predict_expire(positive now)
                         compositor_predict_clear(cls);
 }
 
-// `moonwater canvas predict mouse|touch`, read with the other settings the compositor takes at once. Touch and pen are one row.
+// A class's prediction turned on or off, read with the other settings the compositor takes at once. The mouse is always
+// predicted, so only touch and pen have a setting (`moonwater canvas predict touch`): the one row, for both.
 static void compositor_predict_set(unsigned int cls, int on)
 {
         compositor.predict_off[cls] = (unsigned char)!on;
@@ -11868,15 +11869,11 @@ static void compositor_predict_read(void)
 {
         char word[16];
         long value;
-        int mouse, touch;
+        int touch;
 
-        compositor_word(SETTING_PREDICT_MOUSE_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_PREDICT_MOUSE_PATH, word, &value);
-        mouse = value == 0;
         compositor_word(SETTING_PREDICT_TOUCH_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_PREDICT_TOUCH_PATH, word, &value);
         touch = value == 0;
-        compositor_predict_set(COMPOSITOR_PREDICT_MOUSE, mouse);
         compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, touch);
         compositor_predict_set(COMPOSITOR_PREDICT_PEN, touch);
 }

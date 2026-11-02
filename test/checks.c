@@ -120187,7 +120187,7 @@ static void check_compositor_hover(void)
         The prediction a frame ahead (compositor.c's predict). The mouse's cursor is drawn at its pointer led by one frame of its
         last two places' motion, no further than the cap, and its clicks are where the pointer is; a finger or a pen is delivered
         where it will be. A stopped hand is back on its newest place once a frame has gone by; a lifted finger, or a pen out of
-        range, has no lead; and each class honours its own row.
+        range, has no lead; and touch and pen honour their row (the mouse is always predicted).
 */
 static struct windows address_to predict_setup(void)
 {
@@ -120311,16 +120311,11 @@ static void check_compositor_predict(void)
     compositor_predict_clear(COMPOSITOR_PREDICT_PEN);
     check("predict: a pen out of range drops its lead at once", compositor.pointer_x == 62 && compositor.predict[COMPOSITOR_PREDICT_PEN].lead_x == 0);
 
-    /* Each class honours its own row: the mouse off leaves touch led, and touch off leaves the mouse led. */
+    /* The touch row: off leaves a finger on its last place, and the mouse is led all the same (it has no row). */
     memory_zero(compositor.predict, sizeof(compositor.predict));
-    compositor_predict_set(COMPOSITOR_PREDICT_MOUSE, 0);
-    predict_mouse_to(106, 50, t0 + 500 * ms);
-    predict_mouse_to(108, 50, t0 + 510 * ms);
-    check("predict: with the mouse off the mouse is drawn on its pointer", compositor.cursor.x == 108 && compositor.pointer_x == 108);
     compositor_touch_motion(200, 60, t0 + 520 * ms);
     compositor_touch_motion(202, 60, t0 + 530 * ms);
-    check("predict: with the mouse off a finger is still led", compositor.pointer_x == 205);
-    compositor_predict_set(COMPOSITOR_PREDICT_MOUSE, 1);
+    check("predict: a finger is led while its row is on", compositor.pointer_x == 205);
     compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, 0);
     compositor_touch_motion(204, 60, t0 + 540 * ms);
     check("predict: with touch off a finger is not led", compositor.pointer_x == 204 && compositor.predict[COMPOSITOR_PREDICT_TOUCH].lead_x == 0);
@@ -120330,15 +120325,10 @@ static void check_compositor_predict(void)
     compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, 1);
     memory_zero(compositor.predict, sizeof(compositor.predict));
 
-    /* The two rows: live to the compositor, on by default, and off is the word that turns them off. */
+    /* The touch row: live to the compositor, on by default, and off is the word that turns it off. The mouse has no row. */
     {
-        const struct settings_row address_to mouse = setting_by_path((string_address)SETTING_PREDICT_MOUSE_PATH);
         const struct settings_row address_to touch = setting_by_path((string_address)SETTING_PREDICT_TOUCH_PATH);
 
-        check("predict: the mouse's row is a live switch, on by default, that a word of off turns off",
-              mouse && mouse->kind == SETTINGS_SWITCH && mouse->live == SETTING_LIVE_COMPOSITOR && mouse->how == SETTING_PLAIN &&
-                  string_equals((string_address)mouse->standard, (string_address)"on") && !setting_kept(mouse, (string_address)"", &value) &&
-                  value == 0 && setting_kept(mouse, (string_address)"off", &value) && value == 1);
         check("predict: the touch row is a live switch, on by default, that a word of off turns off",
               touch && touch->kind == SETTINGS_SWITCH && touch->live == SETTING_LIVE_COMPOSITOR && touch->how == SETTING_PLAIN &&
                   string_equals((string_address)touch->standard, (string_address)"on") && !setting_kept(touch, (string_address)"", &value) &&
