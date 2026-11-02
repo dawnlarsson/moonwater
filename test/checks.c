@@ -125097,6 +125097,26 @@ static fn check_display_section(void)
         check("display section: the map is on for the Display group and off for another", settings_map_on() && settings.group == settings_group_of(screen_row));
         settings_map_place();
         check("display section: the map's panel is placed at the top of the page", settings.map.y == 100 && settings.map.h > 0 && settings.map.field_h > 0);
+        // The Screen dropdown counts the screens in the same reading order as identify does: a 2 by 2 arrangement, listed bottom
+        // right first, is Screen 1 top left, Screen 2 top right, Screen 3 bottom left and Screen 4 bottom right.
+        memory_zero(&table, sizeof(table));
+        table.outputs = 4, table.output_width = 1920, table.output_height = 1080, table.scale = 1;
+        table.output_x[0] = 1920, table.output_y[0] = 1080, table.output_w[0] = 1920, table.output_h[0] = 1080;
+        table.output_x[1] = 0, table.output_y[1] = 1080, table.output_w[1] = 1920, table.output_h[1] = 1080;
+        table.output_x[2] = 1920, table.output_y[2] = 0, table.output_w[2] = 1920, table.output_h[2] = 1080;
+        table.output_x[3] = 0, table.output_y[3] = 0, table.output_w[3] = 1920, table.output_h[3] = 1080;
+        memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
+        memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
+        settings.map.display = -1;
+        check("display section: the Screen dropdown of a 2 by 2 arrangement reads top left first, then top right, bottom left and bottom right",
+              settings_options(&settings_rows[screen_row]) == 4 && settings_choice(&settings_rows[screen_row], 0, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "Screen 1: DP-1") &&
+                  settings_choice(&settings_rows[screen_row], 1, text, sizeof(text)) && string_equals((string_address)text, (string_address) "Screen 2: DP-2") &&
+                  settings_choice(&settings_rows[screen_row], 2, text, sizeof(text)) && string_equals((string_address)text, (string_address) "Screen 3: DP-3") &&
+                  settings_choice(&settings_rows[screen_row], 3, text, sizeof(text)) && string_equals((string_address)text, (string_address) "Screen 4: DP-4"));
+        check("display section: the map's numbers and the dropdown's are the same screens (Screen 2 is DP-2, top right)",
+              windows_screen_numbers(&table, number) == 4 && number[2] == 2 && number[1] == 3 && number[3] == 1 && number[0] == 4);
+
         settings.own.table = saved;
         settings.map.display = -1;
 }
@@ -134654,9 +134674,11 @@ static fn editor_disk_check(struct ui address_to wui)
 
 /*
         windows_screen_numbers (window.c) on a table of three screens listed out of order: the primary on the right, a
-        screen on the left below the top one, and the top left one. The numbers follow the left edges and then the top
-        edges, so the top left screen is 1, the one below it 2 and the primary 3. A table that lists no screen, or more
-        than the table can hold, is one screen numbered 1.
+        screen on the left below the top one, and the top left one. The numbers are reading order, the top edges first and
+        then the left edges, so the top left screen is 1, the primary on the right is 2 and the one below the top left
+        is 3. The 2 by 2 arrangement is listed bottom right first: its numbers are top left 1, top right 2, bottom left 3
+        and bottom right 4, which is the order a person reads it in. A table that lists no screen, or more than the table
+        can hold, is one screen numbered 1.
 */
 static fn check_screen_numbers(void)
 {
@@ -134670,8 +134692,20 @@ static fn check_screen_numbers(void)
         table.output_x[2] = 0, table.output_y[2] = 0;
         count = windows_screen_numbers(&table, number);
         check("identify: three screens are counted as three", count == 3);
-        check("identify: the screens are numbered left to right, then top to bottom (the primary on the right is 3)",
-              number[0] == 3 && number[1] == 2 && number[2] == 1);
+        check("identify: the screens are numbered in reading order, top edge then left edge (the primary on the right is 2)",
+              number[0] == 2 && number[1] == 3 && number[2] == 1);
+
+        // A 2 by 2 arrangement, listed bottom right, bottom left, top right, top left.
+        memory_zero(&table, sizeof(table));
+        table.outputs = 4;
+        table.output_x[0] = 1920, table.output_y[0] = 1080;
+        table.output_x[1] = 0, table.output_y[1] = 1080;
+        table.output_x[2] = 1920, table.output_y[2] = 0;
+        table.output_x[3] = 0, table.output_y[3] = 0;
+        count = windows_screen_numbers(&table, number);
+        check("identify: a 2 by 2 arrangement is counted as four", count == 4);
+        check("identify: a 2 by 2 arrangement is numbered top left 1, top right 2, bottom left 3, bottom right 4",
+              number[3] == 1 && number[2] == 2 && number[1] == 3 && number[0] == 4);
         table.outputs = 0;
         count = windows_screen_numbers(&table, number);
         check("identify: a table that lists no screen is one screen, numbered 1", count == 1 && number[0] == 1);
@@ -134919,7 +134953,7 @@ static fn check_identify_numbers(void)
                           height == (int)table.output_h[at];
         }
         check("identify: each screen's window shows the number windows_screen_numbers gives that screen",
-              count == 3 && matched && number[0] == 3 && number[1] == 2 && number[2] == 1);
+              count == 3 && matched && number[0] == 2 && number[1] == 3 && number[2] == 1);
         check("identify: each screen's window is put on that screen's rectangle", placed);
         table.outputs = 0;
         check("identify: a table with no screens shows the one number, 1", identify_number(&table, 0) == 1);

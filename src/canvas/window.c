@@ -2412,11 +2412,12 @@ static unsigned int windows_output(const struct windows *table, unsigned int ind
 }
 
 /*
-        The identify numbers of the screens the table lists: number[i] is screen i's, from 1, in the order of the screens'
-        left edges and, where those are level, of their top edges (left to right, top to bottom), and a screen level with
-        another in both is numbered by its place in the list. Answers the count, which is windows_output's: one screen
-        numbered 1 where the table lists none or more than WINDOWS_OUTPUTS. The edges are copied once, so the numbers are
-        a permutation of 1 to the count whatever the compositor writes meanwhile.
+        The identify numbers of the screens the table lists: number[i] is screen i's, from 1, in reading order: the screens
+        are read as lines of text, the top edge first and then the left edge (the top row left to right, then the row
+        below it), and a screen level with another in both is numbered by its place in the list. Answers the count, which
+        is windows_output's: one screen numbered 1 where the table lists none or more than WINDOWS_OUTPUTS. The edges are
+        copied once, so the numbers are a permutation of 1 to the count whatever the compositor writes meanwhile. The
+        identify overlay and the settings' Display map and dropdowns all take their numbers from here.
 */
 static unsigned int windows_screen_numbers(const struct windows *table, unsigned int number[WINDOWS_OUTPUTS])
 {
@@ -2439,8 +2440,8 @@ static unsigned int windows_screen_numbers(const struct windows *table, unsigned
 
                 for (unsigned int other = 0; other < count; other++)
                 {
-                        b32 first = left[other] < left[at] || (left[other] == left[at] && top[other] < top[at]) ||
-                                    (left[other] == left[at] && top[other] == top[at] && other < at);
+                        b32 first = top[other] < top[at] || (top[other] == top[at] && left[other] < left[at]) ||
+                                    (top[other] == top[at] && left[other] == left[at] && other < at);
 
                         rank += first;
                 }
