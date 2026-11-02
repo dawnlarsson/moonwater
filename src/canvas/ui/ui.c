@@ -2906,6 +2906,7 @@ struct ui_control
         struct ui_tween item_ink[UI_ITEMS], item_scale[UI_ITEMS];
         struct ui_stretch dom, item_dom[UI_ITEMS];
         int dom_origin;                    // -1 the far edge, 1 the near (left, top), 0 the middle
+        const struct ui_scroll address_to span; // the region a column's items are drawn in: a stretch maps them (ui_scroll_map), or none
         struct ui_spring held_squish;      // --sw-squish or --squish let go
         b64 bend, bend_target;             // --sw-squish / --squish held, Q30 over one; the slider's jello target
         int field_state;                   // a field's: rest, hover or focus, as its shadows were last sent to
@@ -3763,6 +3764,16 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         trailing edge), colours .2s, the hovered one's state layer and a press's
         ripple: the horizontal strip's every number, on the other axis.
 */
+static int ui_scroll_map(const struct ui_scroll address_to s, int y);
+
+// A column's box edge in device Q8, mapped by its region's stretch (in whole device pixels, the items' own snap).
+static b32 ui_span_q8(const struct ui_control address_to c, b32 q8)
+{
+        int px = (int)(q8 >> 8), mapped = c->span ? ui_scroll_map(c->span, px) : px;
+
+        return mapped == px ? q8 : (b32)mapped * 256 + (q8 & 255); // at rest the value is the same, its fraction and all
+}
+
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         b32 busy = ui_kit.busy;
@@ -3784,6 +3795,8 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
         {
                 struct ui_box pip = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
 
+                pip.y0 = (b32)ui_span_q8(c, (b32)((pip_y * ui->scale) >> 22)), pip.y1 = (b32)ui_span_q8(c, (b32)(((pip_y + ui_q(c->h)) * ui->scale) >> 22));
+
                 if (!c->disabled && c->count > 0) // no items, no chosen one to show
                         ui_kit_fill(ui, &pip, ui_role(UI_PRIMARY), null);
                 // The keys in the column: the kit's focus ring, 2 out from the chosen item.
@@ -3801,8 +3814,10 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 int y = c->y + item * c->h;
                 b32 live = 0;
                 b64 dom = ui_stretch_at(&c->item_dom[item], ui_kit.now, &live);
-                b32 by = ui_q8(ui, y), bh = ui_q8(ui, c->h), anchor = c->dom_origin > 0 ? by : by + bh;
+                b32 by = ui_span_q8(c, ui_q8(ui, y)), bh = ui_span_q8(c, ui_q8(ui, y + c->h)) - by, anchor = c->dom_origin > 0 ? by : by + bh;
                 struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(y), ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
+
+                face.y0 = (b32)by, face.y1 = (b32)(by + bh);
                 unsigned int ink;
                 b32 middle;
 
@@ -7208,6 +7223,8 @@ static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_t
         p->left = pad + (p->column_on ? p->column_w + ui_dev(ui, UI_COLUMN_GUTTER) : 0);
         p->right = width - pad;
         p->column_scroll.x = pad + p->column_w + (ui_dev(ui, UI_COLUMN_GUTTER) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
+        // The column scrolls as a list does: its ends squash under a pull or a wheel turn (ui_scroll_span, the same for every region).
+        p->column_scroll.bounds = 1, p->column_scroll.scale = ui->scale;
         p->column_scroll.y = p->top, p->column_scroll.height = p->bottom - p->top, p->column_scroll.view = p->bottom - p->top;
         p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
         ui_scroll_clamp(&p->column_scroll);
@@ -7283,6 +7300,7 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
                 c->at = chosen;
         }
         c->x = UI_PAD;
+        c->span = &p->column_scroll;
         c->y = (p->top - p->column_scroll.scroll) / ui->scale;
         c->w = p->column_w / ui->scale;
         c->h = UI_ROW;

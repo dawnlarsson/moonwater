@@ -127134,6 +127134,44 @@ static fn settings_fit_check(void)
         check("settings list: a list whose rows fit its window does not scroll and shows no bar, at any window height", seen > 0 && still);
 }
 
+// The group column (the settings' tabs on end) squashes at its ends like a list: a wheel turn at its bottom stretches it from that
+// edge, a finger pulled past its top or bottom stretches it from that edge, and its items are drawn through the stretch.
+static fn settings_column_check(void)
+{
+        struct ui_scroll address_to col = &settings.page.column_scroll;
+        int most, edge = 0, x, y, at_bottom = 0, at_top = 0;
+        b32 wheel_ok = false, pull_bottom_ok = false, pull_top_ok = false, items_ok = false;
+
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
+        settings.ui.scale = 1;
+        ui_kit_settle();
+        settings_size(SETTINGS_WIDTH, 300);
+        ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+        most = ui_scroll_most(col);
+        x = ui_dev(&settings.ui, UI_PAD) + 10, y = settings.page.top + 30;
+        settings.page.pointer_x = x, settings.page.pointer_y = y;
+#ifdef UI_LIST_STRETCH
+        ui_scroll_set(col, most);
+        ui_page_wheel(&settings.ui, &settings.page, -120);
+        wheel_ok = ui_scroll_stretched(col, &edge) > 0 && edge > 0;
+        ui_scroll_set(col, most);
+        ui_scroll_drag(col, 150);
+        pull_bottom_ok = ui_scroll_stretched(col, &edge) > 0 && edge > 0 && col->scroll == most;
+        at_bottom = ui_scroll_map(col, col->y + 5);
+        ui_scroll_set(col, 0);
+        ui_scroll_drag(col, -150);
+        pull_top_ok = ui_scroll_stretched(col, &edge) > 0 && edge < 0 && col->scroll == 0;
+        at_top = ui_scroll_map(col, col->y + col->view - 5);
+        items_ok = at_top != col->y + col->view - 5 && at_bottom != col->y + 5;
+        ui_scroll_let_go(col, 0, 0);
+        ui_scroll_set(col, 0);
+#endif
+        check("settings column: a wheel turned at its bottom stretches the groups from that edge, as a list's does", wheel_ok);
+        check("settings column: a finger pulled past its bottom or top stretches the groups from that edge, and its items are drawn through the stretch",
+              pull_bottom_ok && pull_top_ok && items_ok);
+}
+
 // The settings list's scroll ends at its rows: its maximum is the rows minus the view, to the pixel, however it is reached (a wheel
 // turned down past the end, the bar paged down to it, a finger pulled far past it and let go), and the pad is clear space beneath
 // the list, between its bottom edge and the window's, not scroll distance.
@@ -127942,6 +127980,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
               settings_flick_check((string_address) "hard, 100 px above", 100, 40, 6));
         settings_size(SETTINGS_WIDTH, 300);
         settings_fit_check();
+        settings_column_check();
         settings_end_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_frames_gallery();
