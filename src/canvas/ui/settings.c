@@ -138,6 +138,7 @@
 // The file that includes this one includes battery.c first: the Battery row's value is one of its batteries.
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
+#define SETTINGS_BOTTOM_PAD 128 // logical pixels of scroll range below the last row
 #define SETTINGS_UNREAD 0u
 #define SETTINGS_READ 1u
 #define SETTINGS_ABSENT 2u
@@ -1033,9 +1034,12 @@ static fn settings_layout(void)
         settings.page.damaged = settings_changed;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
+        settings.page.bottom = settings.height; // the content runs to the window's bottom edge
         ui_list_place(ui, &settings.list, settings.page.left, settings.page.top, settings.page.right - settings.page.left,
                       settings.page.bottom - settings.page.top);
         ui_list_layout(ui, &settings.list);
+        settings.list.scroll.content += ui_px(ui, SETTINGS_BOTTOM_PAD); // the last row scrolls clear of the bottom edge
+        ui_scroll_clamp(&settings.list.scroll);
         // The card has the body's band and the whole width: the column is not shown with it.
         settings.card.x = settings.page.right + (ui_px(ui, UI_PAD) - ui_px(ui, UI_SCROLL_WIDTH)) / 2;
         settings.card.y = settings.page.top, settings.card.height = settings.card.view = settings.page.bottom - settings.page.top;
