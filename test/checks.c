@@ -119570,12 +119570,13 @@ static void check_compositor_glass_popup(void)
     glass_paint(3, 10, 10, 20, 20, 0xff00ff00u, false);
     compositor_present();
     {
-        unsigned int clear = glass_at(65, 45), drawn = glass_at(80, 60), outside = glass_at(59, 45);
+        unsigned int clear = glass_at(65, 45), drawn = glass_at(80, 60), outside = glass_at(59, 60);
 
         check("glass menu: where its picture is clear it is glass over what is under it, tinted, not the window's colour nor black",
               clear != 0x2060c0u && clear != 0);
         check("glass menu: where it is drawn it is its own colour", drawn == 0x00ff00u);
-        check("glass menu: it has no line at its edge, the window beneath is what is outside it", outside == 0x2060c0u);
+        check("glass menu: it has its line at its edge, as a window does, and the window beneath is what is outside that",
+              outside == compositor_ink_shadow() && glass_at(58, 60) == 0x2060c0u);
     }
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
@@ -122108,6 +122109,9 @@ static void check_glass_lift(void)
                                         plain += centre == 0x404040u && desktop == wall;
                                 cornered += corner == desktop;
                                 bordered += edge == compositor_ink_shadow();
+                                compositor_call(syscall(munmap), (positive)compositor.table, compositor.pixels + compositor.buffer * 2 * WINDOWS, 0, 0,
+                                                0, 0);
+                                compositor_ground = COMPOSITOR_INK_DESKTOP;
                         }
         check("glass lift: over a dark wallpaper the glass is at least 16 levels lighter, over a light one as much darker, on both themes",
               lifted == 2 * 2);
@@ -133667,7 +133671,7 @@ static fn check_glass_pieces(string_address regular)
         ui_popup_look(&popup, &table, &parent);
         check("glass: a menu opened before the compositor gave its ground is inked by the parent's", popup.ui.ground == 0xe0e0e0u);
 
-        // A glass window has no line; a floating window that is not glass has its one.
+        // A glass window has its line too, as a floating window that is not glass does.
         {
                 unsigned int was = compositor.arranged[4];
                 b32 glassy = compositor.glassy[4];
@@ -133677,7 +133681,7 @@ static fn check_glass_pieces(string_address regular)
                 compositor.glassy[4] = 0;
                 kit_ok = compositor_line(4) == COMPOSITOR_LINE;
                 compositor.glassy[4] = 1;
-                check("glass: a glass window has no line, and a floating window that is not glass has its one", kit_ok && compositor_line(4) == 0);
+                check("glass: a glass window has its line, as a floating window that is not glass does", kit_ok && compositor_line(4) == COMPOSITOR_LINE);
                 compositor.arranged[4] = was, compositor.glassy[4] = glassy;
         }
 }

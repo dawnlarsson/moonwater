@@ -3377,10 +3377,10 @@ static int compositor_visible(int row)
 }
 
 // The line round a window while it floats, in device pixels; a window filling the output or half of it
-// meets the output's edges with none, and square. Glass has none: it is flat, and its edge is what is under it.
+// meets the output's edges with none, and square. Glass has the same line and corners: it is what is under it, inside them.
 static int compositor_line(int row)
 {
-        return compositor.arranged[row] == COMPOSITOR_FLOATING && !compositor.glassy[row] ? COMPOSITOR_LINE * compositor.scale : 0;
+        return compositor.arranged[row] == COMPOSITOR_FLOATING ? COMPOSITOR_LINE * compositor.scale : 0;
 }
 
 /*
