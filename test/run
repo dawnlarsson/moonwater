@@ -6428,6 +6428,14 @@ lane_hooks()
                 hooks_row "wire-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
                         -DCHECK_wayland_wire -DCONFIG_MOONWATER_WAYLAND \
                         test/checks.c -o '$work/wire-$hooks_cc' && '$work/wire-$hooks_cc'"
+                if [ "$(uname -s)" = Linux ]
+                then
+                        hooks_row "wayland-client-$hooks_cc" $hooks_cc $hooks_warn -D_GNU_SOURCE \
+                                test/wayland_client.c -o "$work/wayland-client"
+                        hooks_row "e2e-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests -D_GNU_SOURCE \
+                                -DCHECK_wayland_client -DCONFIG_MOONWATER_WAYLAND \
+                                test/checks.c -o '$work/e2e-$hooks_cc' && '$work/e2e-$hooks_cc' '$work/wayland-client'"
+                fi
                 hooks_row "off-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
                         -DCHECK_hooks_off test/checks.c -o '$work/off-$hooks_cc' && '$work/off-$hooks_cc'"
                 hooks_row "off-object-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \

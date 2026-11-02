@@ -143190,6 +143190,438 @@ int main(void)
 }
 #endif /* CHECK_wayland_wire */
 
+#ifdef CHECK_wayland_client
+/*
+        The Canvas shim, end to end. test/wayland_client.c runs as a client on
+        the far end of a socketpair; this program is the bridge and the host's
+        Canvas. It reads what the client sends with recvmsg, descriptors and
+        all, feeds the shim, and sends back what the shim queued. The sink
+        copies each committed picture out of the pool's memory with pread and
+        records the window it opened and the title it was given. When the first
+        picture arrives the window takes the focus, and a pointer motion and a
+        button are delivered to it. The run passes when the client exits 0, the
+        window's picture equals the client's pixels, and the shell still holds
+        the window with its title and app id.
+
+            cc -std=gnu11 -Wall -Wextra -D_GNU_SOURCE -DCHECK_wayland_client -DCONFIG_MOONWATER_WAYLAND test/checks.c
+            ./a.out path/to/wayland-client
+
+        Without the switch the hooks are the inline no-ops of wayland.h, the
+        start is refused, and the run fails before it starts: that build is
+        the run with no shim, and it must be red.
+*/
+#if !defined(__linux__)
+#error "CHECK_wayland_client runs a socketpair and recvmsg with descriptors: Linux only"
+#endif
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#ifndef CONFIG_MOONWATER_WAYLAND
+int main(void)
+{
+        printf("  FAIL: no shim: built without CONFIG_MOONWATER_WAYLAND\n");
+        printf("CHECK_wayland_client: no shim, 1 failure\n");
+        return 1;
+}
+#else
+#include "../src/canvas/wayland.c"
+
+#define E2E_WIDTH 320
+#define E2E_HEIGHT 240
+#define E2E_STRIDE (E2E_WIDTH * 4)
+#define E2E_BYTES (E2E_STRIDE * E2E_HEIGHT)
+#define E2E_OUT 8192
+
+static unsigned int e2e_checks, e2e_failures;
+
+#define E2E_CHECK(condition) \
+        do { \
+                e2e_checks++; \
+                if (!(condition)) \
+                { \
+                        e2e_failures++; \
+                        printf("  FAIL line %d: %s\n", __LINE__, #condition); \
+                } \
+        } while (0)
+
+/*
+        The pixel the client draws, computed here the same way: the bytes of a
+        little-endian word.
+*/
+static unsigned long e2e_pixel(long x, long y)
+{
+        return 0xff000000UL | ((unsigned long)((x * 7) & 0xff) << 16) | ((unsigned long)((y * 5) & 0xff) << 8) |
+               (unsigned long)((x ^ y) & 0xff);
+}
+
+static unsigned char e2e_picture[E2E_BYTES];
+
+static struct e2e_seen
+{
+        unsigned int opened, pictured, titled, damaged, closed;
+        int row;
+        long picture_offset;
+        char title[64];
+        long title_length;
+} e2e_seen;
+
+static int e2e_open(void *context, long client, long role)
+{
+        (void)context;
+        (void)client;
+        (void)role;
+        e2e_seen.opened++;
+        return 3;
+}
+
+static int e2e_key(void *context, long client, long code, long pressed)
+{
+        (void)context; (void)client; (void)code; (void)pressed;
+        return 0;
+}
+
+static int e2e_pointer(void *context, long client, long x, long y, long buttons)
+{
+        (void)context; (void)client; (void)x; (void)y; (void)buttons;
+        return 0;
+}
+
+static int e2e_damage(void *context, int row, const struct shell_rect *rect)
+{
+        (void)context; (void)row; (void)rect;
+        e2e_seen.damaged++;
+        return 0;
+}
+
+static int e2e_picture_copy(void *context, int row, long fd, long offset, long width, long height, long stride)
+{
+        long bytes = stride * height;
+
+        (void)context;
+        if (width != E2E_WIDTH || height != E2E_HEIGHT || stride != E2E_STRIDE || offset < 0)
+                return SHELL_EINVAL;
+        if (bytes != E2E_BYTES)
+                return SHELL_EINVAL;
+        if (pread((int)fd, e2e_picture, (size_t)bytes, (off_t)offset) != bytes)
+                return SHELL_EINVAL;
+        e2e_seen.pictured++;
+        e2e_seen.row = row;
+        e2e_seen.picture_offset = offset;
+        return 0;
+}
+
+static int e2e_place(void *context, int row, long x, long y, long screen)
+{
+        (void)context; (void)row; (void)x; (void)y; (void)screen;
+        return 0;
+}
+
+static int e2e_size(void *context, int row, long width, long height)
+{
+        (void)context; (void)row; (void)width; (void)height;
+        return 0;
+}
+
+static int e2e_flag(void *context, int row, long on)
+{
+        (void)context; (void)row; (void)on;
+        return 0;
+}
+
+static int e2e_stack(void *context, int row, long layer)
+{
+        (void)context; (void)row; (void)layer;
+        return 0;
+}
+
+static int e2e_activate(void *context, int row)
+{
+        (void)context; (void)row;
+        return 0;
+}
+
+static int e2e_close(void *context, int row)
+{
+        (void)context; (void)row;
+        e2e_seen.closed++;
+        return 0;
+}
+
+static int e2e_title(void *context, int row, const char *text, long length)
+{
+        (void)context; (void)row;
+        e2e_seen.titled++;
+        e2e_seen.title_length = length;
+        for (long i = 0; i < length && i < 63; i++)
+                e2e_seen.title[i] = text[i];
+        e2e_seen.title[length < 63 ? length : 63] = 0;
+        return 0;
+}
+
+static int e2e_layer(void *context, int row, const struct shell_layer *layer)
+{
+        (void)context; (void)row; (void)layer;
+        return 0;
+}
+
+static int e2e_query(void *context, int row, struct shell_facts *facts)
+{
+        (void)context; (void)row; (void)facts;
+        return 0;
+}
+
+static const struct shell_sink e2e_sink = {
+        .context = 0,
+        .open = e2e_open,
+        .key = e2e_key,
+        .pointer = e2e_pointer,
+        .damage = e2e_damage,
+        .place = e2e_place,
+        .size = e2e_size,
+        .minimize = e2e_flag,
+        .maximize = e2e_flag,
+        .fullscreen = e2e_flag,
+        .stack = e2e_stack,
+        .activate = e2e_activate,
+        .close = e2e_close,
+        .title = e2e_title,
+        .layer = e2e_layer,
+        .query = e2e_query,
+        .picture = e2e_picture_copy,
+};
+
+/*
+        The descriptors the client sent are kept until the run ends: a pool
+        reads them when a picture is copied, and the shim never closes them.
+*/
+static int e2e_fds[64];
+static int e2e_fd_count;
+
+/*
+        One read from the client: its bytes, and the descriptors that came with
+        them, which are kept for the run.
+*/
+static long e2e_recv(int fd, unsigned char *data, long room, long *fds, long *count)
+{
+        struct iovec iov;
+        struct msghdr msg;
+        char control[CMSG_SPACE(sizeof(int) * 8)];
+        struct cmsghdr *cmsg;
+        ssize_t got;
+
+        iov.iov_base = data;
+        iov.iov_len = (size_t)room;
+        memset(&msg, 0, sizeof msg);
+        memset(control, 0, sizeof control);
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control;
+        msg.msg_controllen = sizeof control;
+        got = recvmsg(fd, &msg, 0);
+        *count = 0;
+        if (got < 0)
+                return -1;
+        for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg))
+                if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+                {
+                        size_t bytes = cmsg->cmsg_len - CMSG_LEN(0);
+
+                        for (size_t i = 0; i + sizeof(int) <= bytes && *count < 8; i += sizeof(int))
+                        {
+                                int value;
+
+                                memcpy(&value, CMSG_DATA(cmsg) + i, sizeof value);
+                                fds[*count] = value;
+                                (*count)++;
+                        }
+                }
+        return got;
+}
+
+/*
+        What the shim queued for the client goes out whole, and the descriptor
+        for a keymap, which this run never asks for, would go with it.
+*/
+static int e2e_flush(int fd, long client)
+{
+        static unsigned char out[E2E_OUT];
+        long keymap = 0;
+        int n = wayland_take_output(client, out, E2E_OUT, &keymap);
+        long sent = 0;
+
+        if (n < 0)
+                return 0;
+        while (sent < n)
+        {
+                ssize_t wrote = send(fd, out + sent, (size_t)(n - sent), MSG_NOSIGNAL);
+
+                if (wrote < 0 && errno == EINTR)
+                        continue;
+                if (wrote <= 0)
+                        return 0;
+                sent += wrote;
+        }
+        return 1;
+}
+
+static int e2e_run(const char *path, long client)
+{
+        int sv[2];
+        pid_t child;
+        int focused = 0;
+        int status = 0;
+        int alive = 1;
+        unsigned char data[8192];
+
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
+                return 0;
+        child = fork();
+        if (child < 0)
+                return 0;
+        if (child == 0)
+        {
+                close(sv[0]);
+                if (sv[1] != 3)
+                {
+                        dup2(sv[1], 3);
+                        close(sv[1]);
+                }
+                execl(path, path, (char *)0);
+                _exit(127);
+        }
+        close(sv[1]);
+        for (int spins = 0; spins < 20000; spins++)
+        {
+                struct pollfd p;
+                long fds[8];
+                long count = 0;
+                long got;
+                int ready;
+
+                p.fd = sv[0];
+                p.events = POLLIN;
+                p.revents = 0;
+                ready = poll(&p, 1, 5000);
+                if (ready <= 0)
+                        break;
+                got = e2e_recv(sv[0], data, sizeof data, fds, &count);
+                if (got < 0 && (errno == EINTR || errno == EAGAIN))
+                        continue;
+                if (got <= 0)
+                        break;
+                for (long i = 0; i < count && e2e_fd_count < 64; i++)
+                        e2e_fds[e2e_fd_count++] = (int)fds[i];
+                if (wayland_feed(client, data, got, fds, count) < 0)
+                {
+                        E2E_CHECK(0);
+                        e2e_flush(sv[0], client);
+                        break;
+                }
+                if (e2e_seen.pictured && !focused)
+                {
+                        focused = 1;
+                        E2E_CHECK(wayland_focus(3, 1) == 0);
+                        E2E_CHECK(wayland_deliver_pointer(3, 100, 50, 1, 1000) == 0);
+                }
+                if (!e2e_flush(sv[0], client))
+                        break;
+        }
+        close(sv[0]);
+        for (int tries = 0; tries < 500 && alive; tries++)
+        {
+                if (waitpid(child, &status, WNOHANG) == child)
+                        alive = 0;
+                else
+                        usleep(10000);
+        }
+        if (alive)
+        {
+                kill(child, SIGKILL);
+                waitpid(child, &status, 0);
+                E2E_CHECK(0);
+                return 0;
+        }
+        E2E_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        return 1;
+}
+
+int main(int argc, char **argv)
+{
+        long client;
+
+        if (argc != 2)
+        {
+                fprintf(stderr, "usage: %s path/to/wayland-client\n", argv[0]);
+                return 2;
+        }
+        if (wayland_start(&e2e_sink) != 0 || wayland_output(1024, 768) != 0)
+        {
+                printf("  FAIL: the shim did not start (the switch is off, or the sink is incomplete)\n");
+                printf("CHECK_wayland_client: no shim, 1 failure\n");
+                return 1;
+        }
+        client = wayland_client_connect();
+        E2E_CHECK(client >= 0);
+        if (client >= 0)
+        {
+                e2e_run(argv[1], client);
+                E2E_CHECK(e2e_seen.opened == 1);
+                E2E_CHECK(e2e_seen.pictured == 1 && e2e_seen.row == 3 && e2e_seen.picture_offset == 0);
+                E2E_CHECK(e2e_seen.titled == 1 && e2e_seen.title_length == 19);
+                E2E_CHECK(memcmp(e2e_seen.title, "Moonwater wire test", 19) == 0);
+                for (long y = 0; y < E2E_HEIGHT; y++)
+                        for (long x = 0; x < E2E_WIDTH; x++)
+                        {
+                                unsigned long want = e2e_pixel(x, y);
+                                unsigned char *at = e2e_picture + y * E2E_STRIDE + x * 4;
+
+                                if (at[0] != (unsigned char)want || at[1] != (unsigned char)(want >> 8) ||
+                                    at[2] != (unsigned char)(want >> 16) || at[3] != (unsigned char)(want >> 24))
+                                {
+                                        E2E_CHECK(0);
+                                        y = E2E_HEIGHT;
+                                        break;
+                                }
+                        }
+#ifdef CONFIG_MOONWATER_WAYLAND
+                {
+                        int found = 0;
+
+                        for (long i = 0; i < SHELL_SURFACES; i++)
+                        {
+                                struct shell_surface *record = &wayland.side.surfaces[i];
+
+                                if (record->live && record->role == SHELL_ROLE_TOPLEVEL && record->row == 3)
+                                {
+                                        found = 1;
+                                        E2E_CHECK(strcmp(record->title, "Moonwater wire test") == 0);
+                                        E2E_CHECK(strcmp(record->app_id, "org.moonwater.test") == 0);
+                                }
+                        }
+                        E2E_CHECK(found);
+                }
+#endif
+                E2E_CHECK(wayland_client_disconnect(client) == 0);
+                E2E_CHECK(e2e_seen.closed == 1);
+        }
+        E2E_CHECK(wayland_stop() == 0);
+        for (int i = 0; i < e2e_fd_count; i++)
+                close(e2e_fds[i]);
+        printf("CHECK_wayland_client: %u checks, %u failures\n", e2e_checks, e2e_failures);
+        return e2e_failures != 0;
+}
+#endif /* CONFIG_MOONWATER_WAYLAND */
+#endif /* CHECK_wayland_client */
+
 #ifdef CHECK_hooks_off
 /*
         With both switches off every hook is an inline no-op that answers
