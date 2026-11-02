@@ -710,7 +710,9 @@ static struct
         */
         struct ui_page page;
         struct ui_list list;
-        struct ui_menu menu;
+        int choice;              // the row whose choice menu is open (its popup is settings.popup), or -1
+        int choice_x, choice_y;  // where that menu is placed, in the window's pixels
+        char choice_label[UI_MENU_ITEMS][SETTINGS_VALUE], choice_mark[UI_MENU_ITEMS][2 * SETTINGS_VALUE];
         struct ui_finger finger;
         struct ui_press press;   // a mouse's press on a row, done on its release where it went down
         struct ui_scroll card;
@@ -1527,7 +1529,6 @@ static fn settings_layout(void)
         // The page's column shows with the rows and not with a card, which has the body and the whole width.
         settings.page.column_on = !settings.view;
         settings.page.body = settings.view ? &settings.card : &settings.list.scroll;
-        settings.page.menu = &settings.menu;
         settings.page.damaged = settings_changed;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
@@ -1598,8 +1599,8 @@ static fn settings_rebuild(void)
                                 settings.list.id[count++] = (unsigned short)row;
                 }
         settings.list.count = count;
-        if (settings.menu.owner >= 0 && settings_pos(settings.menu.owner) < 0)
-                settings.menu.owner = -1;
+        if (settings.choice >= 0 && settings_pos(settings.choice) < 0)
+                settings.choice = -1, ui_popup_close(&settings.popup);
         if (settings_pos(settings.list.focus) < 0 && count)
                 settings.list.focus = settings.list.id[0];
         settings_layout();
@@ -2673,7 +2674,7 @@ static long settings_feed_tick(void)
 */
 static fn settings_reading_changed(int row)
 {
-        if (settings.menu.owner == row)
+        if (settings.choice == row)
                 settings_dirty();
         else if (!settings.view)
                 ui_list_damage(&settings.ui, &settings.list, row);
@@ -3104,58 +3105,104 @@ static fn settings_output_apply(int row, const char address_to label)
         settings_change(row, value);
 }
 
+/*
+        A choice's menu is the kit's popup (ui.c's menu defaults), opened on the settings window: its words are its items,
+        the one the row has now is marked and lit, and it is glass, a temporary overlay. It chooses on a release, closes on
+        a press outside, Escape or Left, and its keys are the popup's: the settings window does not see them while it is open.
+        Its words are copied here, since a popup keeps the labels it is given (a & is doubled, so it is no mnemonic).
+*/
+/*
+        The menu's answer, as the runner gives it (ui_popup_pump): the popup closes as it answers, and the answer goes to the app.
+        A negative answer is the menu gone (Escape, Left, or the compositor's press outside), and closes the choice.
+*/
+static fn settings_chose(int id);
+
+static fn settings_menu_answer(int answer)
+{
+        if (answer != UI_MENU_NOTHING)
+        {
+                ui_popup_close(&settings.popup);
+                settings_chose(answer);
+        }
+}
+
 static fn settings_menu_close(void)
 {
-        if (settings.menu.owner < 0)
+        if (settings.choice < 0)
                 return;
-        settings.menu.owner = -1;
+        settings.choice = -1;
+        ui_popup_close(&settings.popup);
         settings_say((string_address) "");
         settings_dirty();
 }
 
-// The menu placed under its row (or over it), its right edge at the row's: false when its row is not in the list.
-static b32 settings_menu_place(void)
-{
-        int at = settings_pos(settings.menu.owner), top;
-
-        if (at < 0 || settings.ui.scale <= 0)
-                return false;
-        top = ui_list_row_y(&settings.list, at);
-        ui_menu_place(&settings.ui, &settings.menu, top, top + ui_px(&settings.ui, UI_ROW), settings.page.right - ui_px(&settings.ui, UI_INSET),
-                      settings.width, settings.height);
-        return true;
-}
-
-// A choice's menu: its words, the one the row has now where the keys start (a value none of them is starts at the first).
+// A choice's menu, under its row and right-aligned to it, kept in the window's margin: its words, the one the row has now
+// marked (lit where the keys start, the first when none is), and the words said where the keys are.
 static fn settings_menu_open(int row)
 {
         const struct settings_row address_to which = &settings_rows[row];
+        struct ui_popmenu address_to m = &settings.popup.menu;
+        struct ui_menu_sizes sizes = ui_menu_sizes(&settings.ui, settings.touching);
         char word[SETTINGS_VALUE];
+        int at = settings_pos(row), current = -1, x, y;
 
+        if (at < 0 || settings.ui.scale <= 0)
+                return;
         if (which->flags & SETTINGS_BATTERIES)
                 settings.battery_menu_count = battery_list(settings.battery_menu, BATTERY_LIST);
         settings.list.focus = row;
-        ui_menu_open(&settings.menu, row, settings.touching);
-        for (int at = 0; settings_choice(which, (positive)at, word, sizeof(word)); at++)
-                ui_menu_add(&settings.ui, &settings.menu, settings_label_of(row, word),
-                            string_equals((string_address)settings_label_of(row, word), (string_address)settings_shown_value(row)));
+        m->count = 0, m->top = 0, m->pressed = -1, m->typed_length = 0;
+        m->touch = settings.touching;
+        for (int k = 0; k < UI_MENU_ITEMS && settings_choice(which, (positive)k, word, sizeof(word)); k++)
+        {
+                const char address_to shown = settings_label_of(row, word);
+                positive out = 0;
+
+                string_copy_bounded((string_address)settings.choice_label[k], (string_address)shown, SETTINGS_VALUE);
+                for (positive c = 0; settings.choice_label[k][c] && out + 2 < sizeof(settings.choice_mark[k]); c++)
+                {
+                        settings.choice_mark[k][out++] = settings.choice_label[k][c];
+                        if (settings.choice_label[k][c] == '&')
+                                settings.choice_mark[k][out++] = '&';
+                }
+                settings.choice_mark[k][out] = 0;
+                if (string_equals((string_address)settings.choice_label[k], (string_address)settings_shown_value(row)))
+                        current = k;
+                ui_popmenu_add(m, settings.choice_mark[k], null, UI_MENU_RADIO | (current == k ? UI_MENU_ON : 0), k);
+        }
+        {
+                struct ui measure = settings.ui;
+                int top = ui_list_row_y(&settings.list, at);
+
+                ui_popmenu_size(&measure, m, settings.height);
+                x = settings.page.right - ui_px(&settings.ui, UI_INSET) - m->width;
+                x = x < sizes.margin ? sizes.margin : x;
+                y = top + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, 4);
+        }
+        settings.popup.field = null;
+        settings.choice = row, settings.choice_x = x, settings.choice_y = y;
         settings_reveal();
-        if (settings_menu_place())
-                ui_menu_go(&settings.ui, &settings.menu, settings.menu.at);
+        ui_popup_open(&settings.popup, &settings.own, &settings.ui, x, y, 0, 0, WINDOW_POPUP_POINT, settings.touching);
+        settings.popup.menu.hot = current >= 0 ? current : 0;
+        if (settings.popup.open)
+                ui_popup_present(&settings.popup);
         settings_say((string_address) "Up and Down choose, Enter sets it, Escape leaves it");
         settings_dirty();
 }
 
-// The choice the keys are on, set, and the menu closed; a choice the row has already sends nothing.
+// The item's word (as the row has it) set, and the menu closed; a choice the row has already sends nothing.
 static fn settings_menu_apply(int at)
 {
         char word[SETTINGS_VALUE];
-        int row = settings.menu.owner;
+        int row = settings.choice;
 
-        ui_menu_word(&settings.menu, at < 0 ? 0 : at, word, sizeof(word));
-        settings_menu_close();
-        if (at < 0)
+        if (row < 0 || at < 0 || at >= UI_MENU_ITEMS)
+        {
+                settings_menu_close();
                 return;
+        }
+        string_copy_bounded((string_address)word, (string_address)settings.choice_label[at], sizeof(word));
+        settings_menu_close();
         if (settings_rows[row].output != SETTINGS_OUT_NONE)
                 settings_output_apply(row, word);
         else if (!string_equals((string_address)word, (string_address)settings_shown_value(row)))
@@ -3164,18 +3211,6 @@ static fn settings_menu_apply(int at)
 
                 settings_word_of(row, word, value, sizeof(value));
                 settings_change(row, value);
-        }
-}
-
-// A key with the menu open: it has every key.
-static fn settings_menu_key(const struct window_event address_to event)
-{
-        settings_menu_place();
-        switch (ui_menu_key(&settings.ui, &settings.menu, (int)event->a, (unsigned int)event->b, event->flags))
-        {
-        case UI_MENU_CLOSED: settings_menu_close(); break;
-        case UI_MENU_CHOSEN: settings_menu_apply(settings.menu.at); break;
-        default: settings_dirty();
         }
 }
 
@@ -3730,10 +3765,10 @@ static b32 settings_key(const struct window_event address_to event)
 {
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
-        // The menu a choice opened has every key.
-        if (settings.menu.owner >= 0)
+        // A choice's menu has every key: its popup has them while it is open, and a key that comes here is the menu's too.
+        if (settings.choice >= 0)
         {
-                settings_menu_key(event);
+                settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, event, 0, 0));
                 return true;
         }
         if (settings.editing >= 0)
@@ -4231,15 +4266,12 @@ static b32 settings_gallery_event(const struct window_event address_to event)
 
 // A press is numbered by what it went down on: a row by its number, a group and a choice of the open menu past them, and the card.
 #define SETTINGS_PRESS_GROUP (SETTINGS_ALL + 1)
-#define SETTINGS_PRESS_MENU (SETTINGS_PRESS_GROUP + 64)
-#define SETTINGS_PRESS_CARD (SETTINGS_PRESS_MENU + 256)
+#define SETTINGS_PRESS_CARD (SETTINGS_PRESS_GROUP + 64)
 
 static int settings_press_target(int x, int y)
 {
         int at;
 
-        if (settings.menu.owner >= 0)
-                return (at = ui_menu_item(&settings.ui, &settings.menu, x, y)) >= 0 ? SETTINGS_PRESS_MENU + at : -1;
         if (settings.view)
                 return SETTINGS_PRESS_CARD;
         if ((at = ui_page_column_hit(&settings.ui, &settings.page, x, y)) >= 0)
@@ -4312,10 +4344,7 @@ static fn settings_finger(const struct window_event address_to event)
                 if (ui_finger_move(&settings.ui, &settings.finger, event->a, event->b))
                 {
                         if (!dragged && settings.finger.press.dragged)
-                        {
                                 ui_list_let_go(&settings.ui, &settings.list);
-                                settings.menu.pressed = -1;
-                        }
                         ui_page_moved(&settings.ui, &settings.page, settings.finger.region);
                 }
                 return;
@@ -4327,11 +4356,9 @@ static fn settings_finger(const struct window_event address_to event)
                 int target = settings_press_target(x, y);
 
                 ui_finger_down(&settings.finger, x, y, target, ui_page_region(&settings.ui, &settings.page, x, y));
-                // What it is on shows pressed at once: a row, a choice of the menu.
+                // What it is on shows pressed at once: a row.
                 if (target >= 0 && target < SETTINGS_PRESS_GROUP)
                         settings.list.down = target;
-                else if (target >= SETTINGS_PRESS_MENU && target < SETTINGS_PRESS_CARD)
-                        settings.menu.pressed = target - SETTINGS_PRESS_MENU;
                 settings_dirty();
                 return;
         }
@@ -4341,7 +4368,6 @@ static fn settings_finger(const struct window_event address_to event)
                 x = settings.finger.press.x, y = settings.finger.press.y;
                 clicked = ui_finger_up(&settings.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
                 ui_list_let_go(&settings.ui, &settings.list);
-                settings.menu.pressed = -1;
                 settings_dirty();
                 // Done where it went down, as a mouse's press is: the target it was shown on is what is under that point.
                 if (clicked >= 0 && clicked == settings_press_target(x, y))
@@ -4431,7 +4457,7 @@ static b32 settings_event(const struct window_event address_to event)
                 release. A finger does the same on the map, a tap choosing a screen and a drag moving it, and a drag that starts
                 on the map never scrolls the page under it; a pen is a pointer, and is a mouse here.
         */
-        if (settings_map_on() && settings.menu.owner < 0)
+        if (settings_map_on() && settings.choice < 0)
         {
                 if (event->type == WINDOW_EVENT_MOTION && settings.map.drag >= 0)
                 {
@@ -4463,7 +4489,7 @@ static b32 settings_event(const struct window_event address_to event)
                 clipboard's answer to a paste they asked for: the field a row is typed in while it shows, and the
                 search field. A press on the search field ends the typing in a row, as a press anywhere else does.
         */
-        if (event->type != WINDOW_EVENT_KEY && event->type != WINDOW_EVENT_WHEEL && !settings.view && settings.menu.owner < 0)
+        if (event->type != WINDOW_EVENT_KEY && event->type != WINDOW_EVENT_WHEEL && !settings.view && settings.choice < 0)
         {
                 int x = settings.page.pointer_x, y = settings.page.pointer_y;
                 p32 asks;
@@ -4488,7 +4514,7 @@ static b32 settings_event(const struct window_event address_to event)
                 and the press goes on to the row it is on, unless that is the row typed in, whose label a press only leaves.
         */
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == SETTINGS_BUTTON_LEFT && settings.editing >= 0 &&
-            settings.menu.owner < 0 && !settings.view)
+            settings.choice < 0 && !settings.view)
         {
                 b32 own = settings_press_target(settings.page.pointer_x, settings.page.pointer_y) == settings.editing;
 
@@ -4512,18 +4538,8 @@ static b32 settings_event(const struct window_event address_to event)
                 }
                 if (settings.press.down)
                         settings_press_slide(event->a, event->b);
-                // Over the menu the keys' choice follows the pointer; over the rows and the column, what is under it is lit.
-                if (settings.menu.owner >= 0)
-                {
-                        int over = ui_menu_item(&settings.ui, &settings.menu, event->a, event->b);
-
-                        if (over >= 0 && over != settings.menu.at)
-                        {
-                                settings.menu.at = over;
-                                settings_dirty();
-                        }
-                }
-                else if (!settings.view)
+                // The rows and the column: what is under the pointer is lit (a choice's menu is a popup, and has the pointer).
+                if (!settings.view)
                 {
                         ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_MOTION, event->a, event->b, false);
                         if (ui_control_hit(&settings.ui, &settings.page.column, event->a, event->b) != settings.page.column.item)
@@ -4569,17 +4585,6 @@ static fn settings_press_at(void)
 {
         int x = settings.page.pointer_x, y = settings.page.pointer_y, row, before = settings.list.focus;
 
-        // A press on a choice of the menu sets it; a press anywhere else only closes the menu.
-        if (settings.menu.owner >= 0)
-        {
-                int chosen = ui_menu_item(&settings.ui, &settings.menu, x, y);
-
-                if (chosen >= 0)
-                        settings_menu_apply(chosen);
-                else
-                        settings_menu_close();
-                return;
-        }
         // A press on the card of what a command said is done with it.
         if (settings.view)
         {
@@ -4682,8 +4687,6 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 settings.list.keys = settings.focused && settings.pane && !settings.map.keys;
                 ui_list_draw(ui, &settings.list);
         }
-        if (settings.menu.owner >= 0 && settings_menu_place())
-                ui_menu_draw(ui, &settings.menu);
 }
 
 /*
@@ -4778,9 +4781,9 @@ static fn settings_size(unsigned int width, unsigned int height)
                 settings_wrap();
         settings_layout();
         settings_side_reveal();
-        // An open menu shows as many choices as the window holds now, placed again for it.
-        if (settings.menu.owner >= 0)
-                settings_menu_place();
+        // A choice's menu is a popup under its row, which the layout may have moved: it closes, and the row is asked again.
+        if (settings.choice >= 0)
+                settings.choice = -1, ui_popup_close(&settings.popup);
         settings_dirty();
 }
 
@@ -4826,6 +4829,15 @@ static fn settings_chose(int id)
 {
         struct ui_text address_to t = settings.popup.field;
 
+        // A choice's menu: the item it chose, or a negative id when it closed (the compositor's press outside, or Escape).
+        if (!t && settings.choice >= 0)
+        {
+                if (id >= 0)
+                        settings_menu_apply(id);
+                else
+                        settings_menu_close();
+                return;
+        }
         if (t == &settings.edit && settings.editing >= 0)
                 settings_edit_asked(ui_text_menu_do(&settings.ui, t, id));
         else if (t == &settings.filter_edit && settings.editing < 0)
@@ -4945,7 +4957,7 @@ static b32 settings_main()
         settings.shown = -1;
         settings.output = -1;
         settings.pane = 1; // the keys start in the rows, on the first of them
-        settings.menu.owner = -1;
+        settings.choice = -1;
         settings.change_all = settings.stale_all[0] = settings.stale_all[1] = true;
 
         for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
