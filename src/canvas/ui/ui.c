@@ -19,6 +19,13 @@
         under it, and its ground's inks (ui_inks: ink, quiet, lit, ring) are
         what stands out from the tint the compositor gives it.
 
+        Glass is for temporary overlays only: a launcher, a prompt, a
+        notification, a transient popup that goes away on its own or on a key.
+        Every window that stays (settings, the editor, the terminal, a
+        document) is the kit's opaque surface. A temporary overlay is glass
+        because it sits over what is under it and is meant to be read in
+        passing; a window that holds state a person works in is never glass.
+
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
 */
@@ -6855,7 +6862,7 @@ struct ui_app
         string_address missing;         // logged when the desktop has no window for it
         string_address title;
         string_address name;            // what the compositor remembers where it was put by, or none (windows_name)
-        unsigned int glass;
+        unsigned int glass;             // WINDOW_GLASS only for a temporary overlay (a launcher, a prompt, a notification); else the kit's surface
         b32 address_to dirty;           // a picture is due: frame paints it
         b32 address_to focused;         // the app's own: the keys are its
         unsigned int address_to ground; // the app's own: the window's ground, as the loop last saw it
