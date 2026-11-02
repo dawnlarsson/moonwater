@@ -9622,6 +9622,11 @@ static void compositor_leave(int row)
         }
 
         compositor_stack_remove(row);
+        // An armed assist ends with its own window, and loses the thumbnail of one that goes (it is no window to place).
+        if (compositor.assist_on && compositor.assist_row == row)
+                compositor_assist_close();
+        else if (compositor.assist_on)
+                compositor_assist_refresh();
         if (compositor.keys_to == row)
         {
                 compositor.keys_to = COMPOSITOR_NONE;
