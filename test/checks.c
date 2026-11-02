@@ -115753,6 +115753,105 @@ static fn check_copy_rect()
 }
 
 /*
+        The walk compositor_blit_scaled made before it moved to lib.c, with the rectangle as arguments: the visible part of
+        a width by height rectangle, its top left at left, top, of a picture from_width by from_height, a source position
+        per target pixel's centre stepping in 24-bit fixed point and rounded down. memory_resample_u32_rect is checked
+        against it, and timed against it below.
+*/
+static void resample_reference(unsigned int address_to into, positive into_stride, positive visible_width,
+                               positive visible_height, const unsigned int address_to from, positive from_stride,
+                               positive from_width, positive from_height, positive width, positive height,
+                               positive left, positive top)
+{
+        positive step_x = (from_width << 24) / width, step_y = (from_height << 24) / height;
+        positive fy = ((2 * top + 1) * from_height << 23) / height;
+
+        if (!visible_width || !visible_height)
+                return;
+        for (positive row = 0; row < visible_height; row++, fy += step_y)
+        {
+                const unsigned int address_to source = from + (fy >> 24) * from_stride;
+                unsigned int address_to to = into + row * into_stride;
+                positive fx = ((2 * left + 1) * from_width << 23) / width;
+
+                for (positive col = 0; col < visible_width; col++, fx += step_x)
+                        *to++ = source[fx >> 24];
+        }
+}
+
+/*
+        memory_resample_u32_rect against resample_reference: every width to 300 and a sample of heights to 300, a picture
+        at 100%, 104% (the landing's 96% to 100%), half and double of the rectangle, the visible part clipped on the left
+        and top, on the right and bottom or not at all, every word offset of the target and of the picture from zero to
+        fifteen (four each), rows strided past their width, the words around the visible part held to a canary; on x86_64
+        with AVX-512, with AVX2 alone and with neither, and on arm64 and riscv64 once.
+*/
+static fn check_resample_rect()
+{
+        static const positive heights[] = {1, 2, 3, 4, 7, 8, 9, 16, 17, 31, 33, 64, 65, 127, 129, 255, 300};
+        static const positive offsets[] = {0, 1, 8, 15};
+        static unsigned int picture[1 << 19], into_asm[1 << 17], into_ref[1 << 17];
+        bool fine = true;
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
+#endif
+
+        for (positive word = 0; word < sizeof(picture) / sizeof(picture[0]); word++)
+                picture[word] = (unsigned int)word * 2654435761u;
+#if X64
+        for (positive tier = 0; tier < 3; tier++)
+#else
+        for (positive tier = 0; tier < 1; tier++)
+#endif
+        {
+#if X64
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide2;
+#endif
+                for (positive width = 1; width <= 300; width++)
+                        for (positive at = 0; at < sizeof(heights) / sizeof(heights[0]); at++)
+                                for (positive scale = 0; scale < 4; scale++)
+                                        for (positive clip = 0; clip < 4; clip++)
+                                                for (positive pair = 0; pair < 16; pair++)
+                                                {
+                                                        positive height = heights[at];
+                                                        positive from_width = scale == 0 ? width : scale == 1 ? width + width / 25 : scale == 2 ? width / 2 + 1 : 2 * width - 1;
+                                                        positive from_height = scale == 0 ? height : scale == 1 ? height + height / 25 : scale == 2 ? height / 2 + 1 : 2 * height - 1;
+                                                        positive left = clip & 1 ? 3 : 0, top = clip & 2 ? 2 : 0;
+                                                        positive right = clip == 3 ? 1 : 0, bottom = clip == 1 ? 1 : 0;
+                                                        positive ao = offsets[pair / 4], fo = offsets[pair % 4];
+                                                        positive into_stride = width + (pair & 1) * 3, from_stride = from_width + (pair & 2) * 2;
+                                                        positive vis_w, vis_h, span;
+
+                                                        if (left + right >= width || top + bottom >= height)
+                                                                continue;
+                                                        vis_w = width - left - right;
+                                                        vis_h = height - top - bottom;
+                                                        span = vis_h * into_stride + vis_w + 16;
+                                                        for (positive i = 0; i < ao + span + 16; i++)
+                                                                into_asm[i] = into_ref[i] = 0xdeadbeefu;
+                                                        resample_reference(into_ref + ao, into_stride, vis_w, vis_h, picture + fo, from_stride,
+                                                                           from_width, from_height, width, height, left, top);
+                                                        memory_resample_u32_rect(into_asm + ao, into_stride, vis_w, vis_h, picture + fo, from_stride,
+                                                                                 from_width, from_height, width, height, left, top);
+                                                        for (positive i = 0; i < ao + span + 16; i++)
+                                                                fine = fine && into_asm[i] == into_ref[i];
+                                                }
+        }
+#if X64
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide2;
+#endif
+        check("resample: every visible word of the rectangle the reference's, nothing else touched, on each tier", fine);
+        check("resample: a zero visible size touches nothing", ({
+                      static unsigned int canary[4] = {7, 7, 7, 7};
+                      memory_resample_u32_rect(canary, 2, 0, 3, picture, 4, 4, 4, 2, 2, 0, 0);
+                      memory_resample_u32_rect(canary, 2, 3, 0, picture, 4, 4, 4, 2, 2, 0, 0);
+                      canary[0] == 7 && canary[1] == 7 && canary[2] == 7 && canary[3] == 7;
+              }));
+}
+
+/*
         memory_copy_changed_u32: every count to 80 words and rows of 127 to
         1000, differences none, one at each place and everywhere; the answer
         against chunks counted from the front, mirror equal to from after,
@@ -116481,6 +116580,7 @@ b32 main()
         check_mix();
         check_fill_rect();
         check_copy_rect();
+        check_resample_rect();
         check_copy_changed();
         check_first_differs();
         check_sweep();
@@ -146112,6 +146212,90 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_copy_rect */
+
+#ifdef BENCH_resample
+/* memory_resample_u32_rect against resample_reference, the walk compositor_blit_scaled made: a landing window's picture,
+   1000 by 600 words, drawn at 96%, 98% and 100% of its size, a whole rectangle a frame. On x86_64 with AVX-512, with
+   AVX2 alone and with neither; on arm64 and riscv64 the scalar walk. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define PICTURE_WIDTH 1000
+#define PICTURE_HEIGHT 600
+
+static unsigned int picture[PICTURE_WIDTH * PICTURE_HEIGHT];
+static unsigned int drawn[1024 * 640];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        positive answers = 0;
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                unsigned int address_to into = drawn + round % 8;
+
+                if (assembly)
+                        memory_resample_u32_rect(into, 1024, width, height, picture, PICTURE_WIDTH, PICTURE_WIDTH,
+                                                 PICTURE_HEIGHT, width, height, 0, 0);
+                else
+                        resample_reference(into, 1024, width, height, picture, PICTURE_WIDTH, PICTURE_WIDTH, PICTURE_HEIGHT,
+                                           width, height, 0, 0);
+                answers += into[width - 1] + round;
+        }
+        sink = answers;
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const positive shapes[][2] = {{960, 576}, {980, 588}, {1000, 600}};
+        static const string_address names[] = {"a landing at 96%", "a landing at 98%", "a landing at 100%"};
+
+        for (positive at = 0; at < PICTURE_WIDTH * PICTURE_HEIGHT; at++)
+                picture[at] = (unsigned int)at * 2654435761u;
+#if X64
+        p8 wide512 = cpu_has_avx512, wide2 = cpu_has_avx2;
+        for (positive tier = 0; tier < 3; tier++)
+        {
+                cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                cpu_has_avx2 = tier == 2 ? 0 : wide2;
+                if (tier == 0 && !wide512)
+                        continue;
+#else
+        for (positive tier = 0; tier < 1; tier++)
+        {
+#endif
+                for (positive at = 0; at < sizeof(shapes) / sizeof(shapes[0]); at++)
+                {
+                        positive ratios[TRIES];
+                        positive rounds = 4000000 / (shapes[at][0] * shapes[at][1] / 16 + 64) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, shapes[at][0], shapes[at][1], rounds);
+                        string_format(log, "memory_resample_u32_rect %s: paired median ASM/C %p.", names[at],
+#if X64
+                                      cpu_has_avx512 ? (string_address) "avx512" : cpu_has_avx2 ? (string_address) "avx2" : (string_address) "scalar",
+#else
+                                      (string_address) "scalar",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+        }
+#if X64
+        cpu_has_avx512 = wide512;
+        cpu_has_avx2 = wide2;
+#endif
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_resample */
 
 #ifdef BENCH_ranged
 /* The call-site entries at the shapes their callers have, against what the

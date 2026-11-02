@@ -280,6 +280,9 @@ cover('benchmark_context', 'test/checks.c#BENCH_matrix', 'matrix_engine_f32',
 cover('direct_benchmark', 'test/checks.c#BENCH_fill_rect', 'memory_fill_u32_rect',
       'paired timing against a memory_fill_u32 a row over cells, a sliver, a '
       'line of blank cells and a panel, with AVX-512 and without')
+cover('direct_benchmark', 'test/checks.c#BENCH_resample', 'memory_resample_u32_rect',
+      'paired timing against resample_reference, the walk compositor_blit_scaled made, over a landing of a 1000 by 600 '
+      'picture at 96%, 98% and 100%, with AVX-512, with AVX2 and with neither; the scalar walk on arm64 and riscv64')
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fused_residual_add_f32',
       'paired timing against the C loop at -O3 for the same instruction set, '
       'over 2048, 65536 and 2097152 floats (L1, L2, L3), every x86-64 body')

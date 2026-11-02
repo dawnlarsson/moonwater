@@ -25868,6 +25868,8 @@ bench_about()
                  bench_line="the text engine's coverage rows summed into bytes, against the C loop it replaced" ;;
         copy-rect) bench_section=BENCH_copy_rect
                  bench_line="a rectangle of words copied by memory_copy_rect_u32 against the row loop compositor_blit had, over a window, a sliver, a band and a row" ;;
+        resample) bench_section=BENCH_resample
+                 bench_line="a landing window's picture drawn by memory_resample_u32_rect at 96, 98 and 100 percent against the walk compositor_blit_scaled made" ;;
         first-differs) bench_section=BENCH_first_differs
                  bench_line="the first word of a row of paper that is not paper, from runs of one word to three hundred, against the C loop ui_run_in had" ;;
         saturate) bench_section=BENCH_saturate

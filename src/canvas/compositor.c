@@ -208,9 +208,9 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
 
 /*
         A picture drawn at a size that is not its own, which only a window landing is (compositor_land): nearest
-        neighbour, the source pixel under the centre of each target pixel. The source position steps in 24-bit
-        fixed point, so a pixel costs an add and a store and no divide; a row's first position is worked out once.
-        The step is rounded down, so the position never reaches the picture's last column or row.
+        neighbour, the source pixel under the centre of each target pixel. The walk is memory_resample_u32_rect in
+        lib.c, the C it was measured against being resample_reference in test/checks.c; the source position steps in
+        24-bit fixed point, and the step is rounded down, so the position never reaches the picture's last column or row.
 */
 static void compositor_blit_scaled(const struct compositor_target *t, int x, int y, int width, int height,
                                    const unsigned int *source, unsigned long pitch, int source_w, int source_h)
@@ -219,22 +219,13 @@ static void compositor_blit_scaled(const struct compositor_target *t, int x, int
         int y1 = y > t->y1 ? y : t->y1;
         int x2 = x + width < t->x2 ? x + width : t->x2;
         int y2 = y + height < t->y2 ? y + height : t->y2;
-        unsigned long step_x, step_y, fy;
 
         if (x2 <= x1 || y2 <= y1 || width <= 0 || height <= 0)
                 return;
-        step_x = ((unsigned long)source_w << 24) / (unsigned long)width;
-        step_y = ((unsigned long)source_h << 24) / (unsigned long)height;
-        fy = ((unsigned long)(2 * (y1 - y) + 1) * (unsigned long)source_h << 23) / (unsigned long)height;
-        for (int row = y1; row < y2; row++, fy += step_y)
-        {
-                const unsigned int *from = source + (fy >> 24) * pitch;
-                unsigned int *to = t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
-                unsigned long fx = ((unsigned long)(2 * (x1 - x) + 1) * (unsigned long)source_w << 23) / (unsigned long)width;
-
-                for (int col = x1; col < x2; col++, fx += step_x)
-                        *to++ = from[fx >> 24];
-        }
+        memory_resample_u32_rect(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
+                                 (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), source, pitch,
+                                 (unsigned long)source_w, (unsigned long)source_h, (unsigned long)width,
+                                 (unsigned long)height, (unsigned long)(x1 - x), (unsigned long)(y1 - y));
 }
 
 // A frame whose contents are its picture at another size (a window landing), so they are scaled from it.

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        429 routines (405 public, 24 local), 419 of them on all three and 10 local to one.
+        430 routines (406 public, 24 local), 420 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -281,6 +281,7 @@
           memory_offsets_range_x64       local   yes     --      --
           memory_paste_lines__room_64    public  yes     yes     yes
           memory_release                 public  yes     yes     yes
+          memory_resample_u32_rect       public  yes     yes     yes
           memory_reserve                 public  yes     yes     yes
           memory_reverse                 public  yes     yes     yes
           memory_reverse_lines__room_64  public  yes     yes     yes
@@ -15292,6 +15293,108 @@ __asm__(
     "8:  " ASM_RET
     ASM_END(memory_copy_rect_u32)
 
+    //
+    //       memory_resample_u32_rect -- rdi into (the visible rectangle's top left word), rsi into_stride in words,
+    //       rdx visible width, rcx visible height, r8 from, r9 from_stride in words, and on the stack from_width,
+    //       from_height, width, height, left, top. Nearest neighbour, the C in test/checks.c (resample_reference).
+    //       A target column's source column is the position's integer part, the position stepping by a floored
+    //       step, so the walk is exact integer arithmetic and never reaches the picture's last column or row.
+    //       With a step under two (2^25 in fixed point) and sixteen (AVX2) or thirty two (AVX-512) source words
+    //       from the block's first column in the picture, eight or sixteen target columns are one permute of those
+    //       words: each lane's offset is the position's low 24 bits plus its share of the step, the high part of
+    //       that sum, and the words are never gathered. Anything else is the scalar walk, four pixels a turn with
+    //       each position its own register, the way the arm64 and riscv64 walks are: a serial add per pixel was
+    //       measured at 1.1 to 1.2 times the C's cycles, and the four-wide walk at 0.63. Measured on the box with
+    //       perf, per call at the landing shapes against the C it replaces: AVX-512 0.20 of the cycles and 0.16 of
+    //       the instructions, AVX2 0.33 and 0.33, the scalar walk 0.63 and 0.58.
+    //       Stack: 0 the row stride in bytes, 8 from_width - 16, 16 from_width - 32 (signed, for the bounds), 24 the
+    //       step down a row, 32 the first position of a row, then the six arguments above at 104..144. Kernel builds
+    //       take the scalar walk: the wide bodies are userspace.
+    //
+    ASM_FUNC(memory_resample_u32_rect)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $48, %rsp\n"
+    "test %rdx, %rdx\n   jz .Lresample_out\n   test %rcx, %rcx\n   jz .Lresample_out\n"
+    "mov %rdx, %r15\n   mov %rcx, %rbx\n   shl $2, %rsi\n   shl $2, %r9\n   mov %r9, (%rsp)\n"
+    "mov 104(%rsp), %rax\n   sub $16, %rax\n   mov %rax, 8(%rsp)\n"
+    "mov 104(%rsp), %rax\n   sub $32, %rax\n   mov %rax, 16(%rsp)\n"
+    "mov 112(%rsp), %rax\n   shl $24, %rax\n   xor %edx, %edx\n   divq 128(%rsp)\n   mov %rax, 24(%rsp)\n"
+    "mov 104(%rsp), %rax\n   shl $24, %rax\n   xor %edx, %edx\n   divq 120(%rsp)\n   mov %rax, %r14\n"
+    "mov 136(%rsp), %rax\n   lea 1(%rax,%rax), %rax\n   imul 104(%rsp), %rax\n   shl $23, %rax\n"
+    "   xor %edx, %edx\n   divq 120(%rsp)\n   mov %rax, 32(%rsp)\n"
+    "mov 144(%rsp), %rax\n   lea 1(%rax,%rax), %rax\n   imul 112(%rsp), %rax\n   shl $23, %rax\n"
+    "   xor %edx, %edx\n   divq 128(%rsp)\n   mov %rax, %r10\n"
+    ASM_USERSPACE_WIDE(
+    "cmp $33554432, %r14\n   jae .Lresample_rows\n"
+    "cmpb $0, cpu_has_avx512(%rip)\n   jne .Lresample_init512\n"
+    "cmpb $0, cpu_has_avx2(%rip)\n   jne .Lresample_init2\n"
+    )
+    ".Lresample_rows:\n"
+    "mov %r10, %rax\n   shr $24, %rax\n   imul (%rsp), %rax\n   lea (%r8,%rax), %rbp\n"
+    "mov 32(%rsp), %rax\n   mov %r15, %rcx\n   mov %rdi, %rdx\n"
+    "cmp $4, %rcx\n   jb .Lresample_pixel\n"
+    ".Lresample_quad:\n"
+    "lea (%rax,%r14), %r9\n   lea (%rax,%r14,2), %r11\n   lea (%r9,%r14,2), %r12\n   mov %rax, %r13\n"
+    "lea (%rax,%r14,4), %rax\n   shr $24, %r13\n   shr $24, %r9\n   shr $24, %r11\n   shr $24, %r12\n"
+    "mov (%rbp,%r13,4), %r13d\n   mov (%rbp,%r9,4), %r9d\n   mov (%rbp,%r11,4), %r11d\n   mov (%rbp,%r12,4), %r12d\n"
+    "mov %r13d, (%rdx)\n   mov %r9d, 4(%rdx)\n   mov %r11d, 8(%rdx)\n   mov %r12d, 12(%rdx)\n"
+    "add $16, %rdx\n   sub $4, %rcx\n   cmp $4, %rcx\n   jae .Lresample_quad\n"
+    "test %rcx, %rcx\n   jz .Lresample_next\n"
+    ".Lresample_pixel:\n"
+    "mov %rax, %r11\n   shr $24, %r11\n   mov (%rbp,%r11,4), %r11d\n   mov %r11d, (%rdx)\n   add %r14, %rax\n"
+    "   add $4, %rdx\n   dec %rcx\n   jnz .Lresample_pixel\n"
+    ".Lresample_next:\n"
+    "add %rsi, %rdi\n   add 24(%rsp), %r10\n   dec %rbx\n   jnz .Lresample_rows\n   jmp .Lresample_out\n"
+    ASM_USERSPACE_WIDE(
+    ".pushsection .rodata\n.p2align 6\n"
+    ".Lresample_iota: .long 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
+    ".popsection\n"
+    ".Lresample_init2:\n"
+    "vmovd %r14d, %xmm14\n   vpbroadcastd %xmm14, %ymm14\n   vpmulld .Lresample_iota(%rip), %ymm14, %ymm14\n"
+    "mov $7, %r9d\n   vmovd %r9d, %xmm13\n   vpbroadcastd %xmm13, %ymm13\n"
+    ".Lresample_rows2:\n"
+    "mov %r10, %rax\n   shr $24, %rax\n   imul (%rsp), %rax\n   lea (%r8,%rax), %rbp\n"
+    "mov 32(%rsp), %rax\n   mov %r15, %rcx\n   mov %rdi, %rdx\n"
+    ".Lresample_block2:\n"
+    "cmp $8, %rcx\n   jb .Lresample_tail2\n"
+    "mov %rax, %r11\n   shr $24, %r11\n   cmp 8(%rsp), %r11\n   jg .Lresample_tail2\n"
+    "mov %eax, %r9d\n   and $0xffffff, %r9d\n   vmovd %r9d, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n"
+    "   vpaddd %ymm14, %ymm0, %ymm0\n   vpsrld $24, %ymm0, %ymm0\n"
+    "vmovdqu (%rbp,%r11,4), %ymm1\n   vmovdqu 32(%rbp,%r11,4), %ymm2\n"
+    "vpermd %ymm1, %ymm0, %ymm1\n   vpermd %ymm2, %ymm0, %ymm2\n   vpcmpgtd %ymm13, %ymm0, %ymm3\n"
+    "vpblendvb %ymm3, %ymm2, %ymm1, %ymm1\n   vmovdqu %ymm1, (%rdx)\n"
+    "lea (%rax,%r14,8), %rax\n   add $32, %rdx\n   sub $8, %rcx\n   jmp .Lresample_block2\n"
+    ".Lresample_tail2:\n"
+    "test %rcx, %rcx\n   jz .Lresample_next2\n"
+    ".Lresample_pixel2:\n"
+    "mov %rax, %r11\n   shr $24, %r11\n   mov (%rbp,%r11,4), %r11d\n   mov %r11d, (%rdx)\n   add %r14, %rax\n"
+    "   add $4, %rdx\n   dec %rcx\n   jnz .Lresample_pixel2\n"
+    ".Lresample_next2:\n"
+    "add %rsi, %rdi\n   add 24(%rsp), %r10\n   dec %rbx\n   jnz .Lresample_rows2\n   vzeroupper\n   jmp .Lresample_out\n"
+    ".Lresample_init512:\n"
+    "vmovd %r14d, %xmm14\n   vpbroadcastd %xmm14, %zmm14\n   vpmulld .Lresample_iota(%rip), %zmm14, %zmm14\n"
+    ".Lresample_rows512:\n"
+    "mov %r10, %rax\n   shr $24, %rax\n   imul (%rsp), %rax\n   lea (%r8,%rax), %rbp\n"
+    "mov 32(%rsp), %rax\n   mov %r15, %rcx\n   mov %rdi, %rdx\n"
+    ".Lresample_block512:\n"
+    "cmp $16, %rcx\n   jb .Lresample_tail512\n"
+    "mov %rax, %r11\n   shr $24, %r11\n   cmp 16(%rsp), %r11\n   jg .Lresample_tail512\n"
+    "mov %eax, %r9d\n   and $0xffffff, %r9d\n   vmovd %r9d, %xmm0\n   vpbroadcastd %xmm0, %zmm0\n"
+    "   vpaddd %zmm14, %zmm0, %zmm0\n   vpsrld $24, %zmm0, %zmm0\n"
+    "vmovdqu32 (%rbp,%r11,4), %zmm1\n   vmovdqu32 64(%rbp,%r11,4), %zmm2\n   vpermt2d %zmm2, %zmm0, %zmm1\n"
+    "vmovdqu32 %zmm1, (%rdx)\n"
+    "lea (%rax,%r14,8), %rax\n   lea (%rax,%r14,8), %rax\n   add $64, %rdx\n   sub $16, %rcx\n   jmp .Lresample_block512\n"
+    ".Lresample_tail512:\n"
+    "test %rcx, %rcx\n   jz .Lresample_next512\n"
+    ".Lresample_pixel512:\n"
+    "mov %rax, %r11\n   shr $24, %r11\n   mov (%rbp,%r11,4), %r11d\n   mov %r11d, (%rdx)\n   add %r14, %rax\n"
+    "   add $4, %rdx\n   dec %rcx\n   jnz .Lresample_pixel512\n"
+    ".Lresample_next512:\n"
+    "add %rsi, %rdi\n   add 24(%rsp), %r10\n   dec %rbx\n   jnz .Lresample_rows512\n   vzeroupper\n   jmp .Lresample_out\n"
+    )
+    ".Lresample_out:\n"
+    "add $48, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n" ASM_RET
+    ASM_END(memory_resample_u32_rect)
+
     /* Deflate primary-table decode. job (88 bytes): bits, bit count <64,
        input cursor/limit, output cursor/limit, valid history before output,
        literal[512], distance[64], length info[29], distance info[30]. Cells
@@ -24915,6 +25018,63 @@ __asm__(
     "ldp x27, x28, [sp, #64]\n   ldp x29, x30, [sp, #80]\n   add sp, sp, #96\n"
     "8:  " ASM_RET
     ASM_END(memory_copy_rect_u32)
+
+    //
+    //       memory_resample_u32_rect -- x0 into, x1 into_stride in words, x2 visible width, x3 visible height, x4 from,
+    //       x5 from_stride in words, x6 from_width, x7 from_height, and on the stack width, height, left, top. The
+    //       x86_64 block carries the contract. The walk is four target pixels a turn, each source position the block's
+    //       position plus a multiple of the step held in x5, x6 and x7 (two, three and four steps), so the four
+    //       positions do not wait on one another and the chain is one add a turn. A vector body was measured on
+    //       arm64 with tbl over the source words and lost to this walk and to clang's C, so it is not here.
+    //
+    ASM_FUNC(memory_resample_u32_rect)
+    "stp x29, x30, [sp, #-112]!\n   mov x29, sp\n"
+    "stp x19, x20, [sp, #16]\n   stp x21, x22, [sp, #32]\n   stp x23, x24, [sp, #48]\n   stp x25, x26, [sp, #64]\n"
+    "stp x27, x28, [sp, #80]\n"
+    "cbz x2, .Lresample_out_a\n   cbz x3, .Lresample_out_a\n"
+    "mov x19, x0\n   lsl x20, x1, #2\n   mov x21, x3\n   mov x22, x2\n   lsl x23, x5, #2\n   mov x24, x4\n"
+    "sub x8, x6, #16\n   str x8, [sp, #96]\n"
+    "ldr x9, [sp, #112]\n   ldr x10, [sp, #120]\n   ldr x11, [sp, #128]\n   ldr x12, [sp, #136]\n"
+    "lsl x13, x7, #24\n   udiv x28, x13, x10\n"
+    "lsl x13, x6, #24\n   udiv x25, x13, x9\n"
+    "add x13, x11, x11\n   add x13, x13, #1\n   mul x13, x13, x6\n   lsl x13, x13, #23\n   udiv x26, x13, x9\n"
+    "add x14, x12, x12\n   add x14, x14, #1\n   mul x14, x14, x7\n   lsl x14, x14, #23\n   udiv x27, x14, x10\n"
+    "add x5, x25, x25\n   add x6, x5, x25\n   add x7, x6, x25\n"
+    ".Lresample_rows_s:\n"
+    "lsr x9, x27, #24\n   mul x9, x9, x23\n   add x10, x24, x9\n"
+    "mov x11, x26\n   mov x12, x19\n   mov x13, x22\n"
+    "cmp x13, #8\n   b.lo .Lresample_quad_s\n"
+    ".Lresample_oct_s:\n"
+    "lsr x14, x11, #24\n   add x0, x11, x25\n   add x1, x11, x5\n   add x2, x11, x6\n   add x3, x11, x7\n"
+    "add x4, x0, x7\n   add x15, x1, x7\n   add x16, x2, x7\n"
+    "lsr x0, x0, #24\n   lsr x1, x1, #24\n   lsr x2, x2, #24\n   lsr x3, x3, #24\n"
+    "lsr x4, x4, #24\n   lsr x15, x15, #24\n   lsr x16, x16, #24\n"
+    "ldr w17, [x10, x14, lsl #2]\n   ldr w14, [x10, x0, lsl #2]\n   ldr w0, [x10, x1, lsl #2]\n"
+    "ldr w1, [x10, x2, lsl #2]\n   ldr w2, [x10, x3, lsl #2]\n   ldr w3, [x10, x4, lsl #2]\n"
+    "ldr w4, [x10, x15, lsl #2]\n   ldr w15, [x10, x16, lsl #2]\n"
+    "stp w17, w14, [x12], #8\n   stp w0, w1, [x12], #8\n   stp w2, w3, [x12], #8\n   stp w4, w15, [x12], #8\n"
+    "add x11, x11, x7, lsl #1\n   sub x13, x13, #8\n   cmp x13, #8\n   b.hs .Lresample_oct_s\n"
+    ".Lresample_fix_s:\n"
+    "cbz x13, .Lresample_next_s\n"
+    "mov x14, #8\n   sub x14, x14, x13\n   msub x11, x14, x25, x11\n   sub x12, x12, x14, lsl #2\n"
+    "mov x13, #8\n   b .Lresample_oct_s\n"
+    ".Lresample_quad_s:\n"
+    "cmp x13, #4\n   b.lo .Lresample_pixel_s\n"
+    "lsr x14, x11, #24\n   add x1, x11, x25\n   add x2, x11, x5\n   add x3, x11, x6\n"
+    "lsr x1, x1, #24\n   lsr x2, x2, #24\n   lsr x3, x3, #24\n"
+    "ldr w15, [x10, x14, lsl #2]\n   ldr w16, [x10, x1, lsl #2]\n   ldr w17, [x10, x2, lsl #2]\n   ldr w8, [x10, x3, lsl #2]\n"
+    "stp w15, w16, [x12], #8\n   stp w17, w8, [x12], #8\n"
+    "add x11, x11, x7\n   sub x13, x13, #4\n   b .Lresample_quad_s\n"
+    ".Lresample_pixel_s:\n"
+    "cbz x13, .Lresample_next_s\n"
+    "lsr x14, x11, #24\n   ldr w15, [x10, x14, lsl #2]\n   str w15, [x12], #4\n   add x11, x11, x25\n"
+    "   subs x13, x13, #1\n   b.ne .Lresample_pixel_s\n"
+    ".Lresample_next_s:\n"
+    "add x19, x19, x20\n   add x27, x27, x28\n   subs x21, x21, #1\n   b.ne .Lresample_rows_s\n"
+    ".Lresample_out_a:\n"
+    "ldp x27, x28, [sp, #80]\n   ldp x25, x26, [sp, #64]\n   ldp x23, x24, [sp, #48]\n   ldp x21, x22, [sp, #32]\n"
+    "ldp x19, x20, [sp, #16]\n   ldp x29, x30, [sp], #112\n" ASM_RET
+    ASM_END(memory_resample_u32_rect)
 
     /* See the x86_64 body. */
     /* See the x86_64 range encoder contract. */
@@ -34550,6 +34710,49 @@ __asm__(
     "addi sp, sp, 64\n"
     "8:  " ASM_RET
     ASM_END(memory_copy_rect_u32)
+
+    //
+    //       memory_resample_u32_rect -- a0 into, a1 into_stride in words, a2 visible width, a3 visible height, a4 from,
+    //       a5 from_stride in words, a6 from_width, a7 from_height, and on the stack width, height, left, top. The
+    //       x86_64 block carries the contract. Four target pixels a turn, each position the turn's plus one, two or
+    //       three steps, so the four do not wait on one another; the source byte offset is the position's bits 24 to
+    //       31 times four, read from bits 22 to 31 with the low two cleared. Measured on the box's instruction
+    //       counter against the C it replaces: 0.68 of its instructions at the landing shapes, cycles unmeasured.
+    //
+    ASM_FUNC(memory_resample_u32_rect)
+    "addi sp, sp, -112\n   sd ra, 104(sp)\n   sd s1, 0(sp)\n   sd s2, 8(sp)\n   sd s3, 16(sp)\n   sd s4, 24(sp)\n"
+    "sd s5, 32(sp)\n   sd s6, 40(sp)\n   sd s7, 48(sp)\n   sd s8, 56(sp)\n   sd s9, 64(sp)\n   sd s10, 72(sp)\n   sd s11, 80(sp)\n"
+    "beqz a2, .Lresample_out_r\n   beqz a3, .Lresample_out_r\n"
+    "mv s1, a0\n   slli s2, a1, 2\n   mv s3, a3\n   mv s4, a2\n   slli s5, a5, 2\n   mv s6, a4\n"
+    "ld t0, 112(sp)\n   ld t1, 120(sp)\n   ld t2, 128(sp)\n   ld t3, 136(sp)\n"
+    "slli t4, a7, 24\n   divu s10, t4, t1\n"
+    "slli t4, a6, 24\n   divu s7, t4, t0\n"
+    "slli t4, t2, 1\n   addi t4, t4, 1\n   mul t4, t4, a6\n   slli t4, t4, 23\n   divu s8, t4, t0\n"
+    "slli t4, t3, 1\n   addi t4, t4, 1\n   mul t4, t4, a7\n   slli t4, t4, 23\n   divu s9, t4, t1\n"
+    "slli a2, s7, 1\n   add a3, a2, s7\n   slli a4, s7, 2\n   li a6, 4\n"
+    ".Lresample_row_r:\n"
+    "srli t4, s9, 24\n   mul t4, t4, s5\n   add t5, s6, t4\n"
+    "mv t6, s8\n   mv t0, s4\n   mv t2, s1\n"
+    "bltu t0, a6, .Lresample_px_r\n"
+    ".Lresample_quad_r:\n"
+    "add t1, t6, s7\n   add t3, t6, a2\n   add a7, t6, a3\n"
+    "srli t4, t6, 24\n   slli t4, t4, 2\n   add t4, t4, t5\n   lw t4, 0(t4)\n   sw t4, 0(t2)\n"
+    "srli t4, t1, 24\n   slli t4, t4, 2\n   add t4, t4, t5\n   lw t4, 0(t4)\n   sw t4, 4(t2)\n"
+    "srli t4, t3, 24\n   slli t4, t4, 2\n   add t4, t4, t5\n   lw t4, 0(t4)\n   sw t4, 8(t2)\n"
+    "srli t4, a7, 24\n   slli t4, t4, 2\n   add t4, t4, t5\n   lw t4, 0(t4)\n   sw t4, 12(t2)\n"
+    "add t6, t6, a4\n   addi t2, t2, 16\n   addi t0, t0, -4\n   bgeu t0, a6, .Lresample_quad_r\n"
+    ".Lresample_px_r:\n"
+    "beqz t0, .Lresample_next_r\n"
+    ".Lresample_pixel_r:\n"
+    "srli t3, t6, 22\n   andi t3, t3, -4\n   add t3, t5, t3\n   lw t3, 0(t3)\n   sw t3, 0(t2)\n"
+    "add t6, t6, s7\n   addi t2, t2, 4\n   addi t0, t0, -1\n   bnez t0, .Lresample_pixel_r\n"
+    ".Lresample_next_r:\n"
+    "add s1, s1, s2\n   add s9, s9, s10\n   addi s3, s3, -1\n   bnez s3, .Lresample_row_r\n"
+    ".Lresample_out_r:\n"
+    "ld ra, 104(sp)\n   ld s1, 0(sp)\n   ld s2, 8(sp)\n   ld s3, 16(sp)\n   ld s4, 24(sp)\n   ld s5, 32(sp)\n"
+    "ld s6, 40(sp)\n   ld s7, 48(sp)\n   ld s8, 56(sp)\n   ld s9, 64(sp)\n   ld s10, 72(sp)\n   ld s11, 80(sp)\n"
+    "addi sp, sp, 112\n" ASM_RET
+    ASM_END(memory_resample_u32_rect)
 
     /* See the x86_64 body. Unaligned loads go through bytes: no unaligned ld. */
     /* See the x86_64 range encoder contract. */
@@ -45910,6 +46113,13 @@ fn memory_fill_u32_rect(p32 address_to into, positive into_stride, positive widt
 // rectangles are copied row by row in order, as memory_copy copies them.
 fn memory_copy_rect_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
+// A picture from_width by from_height (from_stride words a row) drawn nearest neighbour into a width by height
+// rectangle, of which the visible_width by visible_height part at left, top is written: into points at its top left
+// word, into_stride words a row. A pixel is the picture's at the source position of its centre, which steps in 24-bit
+// fixed point, so the picture is never read past its last column or row. Zero visible sizes touch nothing.
+fn memory_resample_u32_rect(p32 address_to into, positive into_stride, positive visible_width, positive visible_height,
+                            const p32 address_to from, positive from_stride, positive from_width, positive from_height,
+                            positive width, positive height, positive left, positive top);
 // count 32-bit words of from copied to into and to mirror wherever they differ from mirror, in 64-byte chunks from
 // the front, the count's rest past its last whole chunk being one more: a chunk whose words all equal mirror's is
 // stored to neither. Answers how many chunks were stored. into is only written, never read (a card's memory, where

@@ -378,6 +378,10 @@ cover('folds_already', 'length', 'fast_argmax_f32',
 cover('folds_already', 'width', 'memory_copy_rect_u32',
       'compositor_blit hands it the visible width of a span, which the damage sets at run time; no reachable call '
       'site passes a literal, and the height is the same kind of value')
+cover('folds_already', 'width', 'memory_resample_u32_rect',
+      'compositor_blit_scaled hands it the width of a landing window, which its size sets at run time, and the clip '
+      'of that rectangle, which the damage sets; no reachable call site passes a literal, and the height is the same '
+      'kind of value')
 cover('folds_already', 'count', 'memory_first_differs_u32',
       'ui_run_in hands it the rest of a row of scratch paper from the column '
       'it has reached, a length the run sets at run time (its width less the '
