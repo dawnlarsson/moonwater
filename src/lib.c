@@ -37258,9 +37258,12 @@ __asm__(
 
     "5:      mov     %ecx, %eax\n   shl     $32, %rcx\n   or      %rax, %rcx              # the mask twice\n"
 
-    "        sub     $2, %rdx\n   jb      7f\n"
-    "6:      mov     (%rsi), %r8             # two pixels an iteration\n"
-    "        or      %rcx, %r8\n   mov     %r8, (%rdi)\n   add     $8, %rsi\n   add     $8, %rdi\n   sub     $2, %rdx\n   jae     6b\n"
+    "        cmp     $4, %rdx\n   jb      6f\n"
+    "        .p2align 4\n"
+    "4:      mov     (%rsi), %r8             # four pixels an iteration\n   mov     8(%rsi), %r9\n"
+    "        or      %rcx, %r8\n   or      %rcx, %r9\n   mov     %r8, (%rdi)\n   mov     %r9, 8(%rdi)\n   add     $16, %rsi\n   add     $16, %rdi\n   sub     $4, %rdx\n   cmp     $4, %rdx\n   jae     4b\n"
+    "6:      cmp     $2, %rdx\n   jb      7f\n"
+    "        mov     (%rsi), %r8\n   or      %rcx, %r8\n   mov     %r8, (%rdi)\n   add     $8, %rsi\n   add     $8, %rdi\n   sub     $2, %rdx\n"
     "7:      test    $1, %dl\n   jz      9f\n   mov     (%rsi), %r8d\n   or      %eax, %r8d\n   mov     %r8d, (%rdi)\n"
     "9:      " ASM_RET
     ASM_END(canvas_row_blit)

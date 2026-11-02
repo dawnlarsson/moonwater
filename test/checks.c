@@ -17311,8 +17311,43 @@ static positive dirty_canvas_differ(void)
                             sizeof(dirty_canvas_one));
 }
 
+/*
+        canvas_row_blit against the C it replaced: every count from nought to
+        three hundred, the destination and the source each at every pixel
+        offset from nought to three, and both the copy (opaque nought) and
+        the mask taking the opaque bits.
+*/
+static fn dirty_row_blit_every(void)
+{
+        static p32 source[320 + 8], target[320 + 8], want[320 + 8];
+
+        for (positive i = 0; i < array_count(source); i++)
+                source[i] = (p32)dirty_random();
+        for (positive count = 0; count <= 300; count++)
+                for (positive at = 0; at < 4; at++)
+                        for (positive from = 0; from < 4; from++)
+                                for (positive turn = 0; turn < 2; turn++)
+                                {
+                                        p32 opaque = turn ? 0xa5000000u | (p32)dirty_random() : 0;
+
+                                        for (positive i = 0; i < array_count(target); i++)
+                                                target[i] = want[i] = (p32)(0x5a5a0000u ^ i);
+                                        for (positive i = 0; i < count; i++)
+                                                want[at + i] = turn ? (p32)(source[from + i] | opaque)
+                                                                    : source[from + i];
+                                        DIRTY(4, canvas_row_blit)(P(target + at), P(source + from), count, D32(opaque));
+                                        for (positive i = 0; i < array_count(target); i++)
+                                                if (target[i] != want[i])
+                                                {
+                                                        failures++;
+                                                        break;
+                                                }
+                                }
+}
+
 static fn dirty_canvas(void)
 {
+        dirty_row_blit_every();
         static const positive widths[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17,
                                           31, 32, 33, 63, 64, 65, 207, 208, 209, 300};
         static const positive heights[] = {0, 1, 3};
