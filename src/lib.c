@@ -21312,8 +21312,8 @@ __asm__(
     ASM_FUNC(unicode_width)
     "cmp w0, #0x300\n   b.lo .Lunicode_width_arm64_latin\n   mov w2, #0x3250\n   cmp w0, w2\n   b.hs .Lunicode_width_arm64_upper\n"
     ".Lunicode_width_arm64_table:  adrp x3, unicode_width_tab\n   add x3, x3, :lo12:unicode_width_tab\n   lsr w2, w0, #7\n   ldrb w2, [x3, x2]\n"
-    "lsr w4, w0, #4\n   and w4, w4, #7\n   add w2, w4, w2, lsl #3\n   add x4, x3, #2056\n   ldrh w2, [x4, x2, lsl #1]\n   lsr w5, w0, #1\n   and w5, w5, #7\n   add w2, w2, w5\n"
-    "add x4, x4, #3856\n   ldrb w2, [x4, x2]\n   and w0, w0, #1\n   add w0, w1, w0, lsl #1\n   lsl w0, w0, #1\n   lsr w2, w2, w0\n   and w0, w2, #3\n" ASM_RET
+    "ubfx w4, w0, #4, #3\n   add w2, w4, w2, lsl #3\n   add x4, x3, #2056\n   ldrh w2, [x4, x2, lsl #1]\n   ubfx w5, w0, #1, #3\n   add w2, w2, w5\n"
+    "add x4, x4, #3856\n   ldrb w2, [x4, x2]\n   ubfiz w0, w0, #2, #1\n   add w0, w0, w1, lsl #1\n   lsr w2, w2, w0\n   and w0, w2, #3\n" ASM_RET
     ".Lunicode_width_arm64_latin:  sub w2, w0, #0x80\n   cmp w2, #0x20\n   cset w2, lo\n   and w2, w2, w1\n   mov w0, #1\n   sub w0, w0, w2\n" ASM_RET
     ".Lunicode_width_arm64_upper:  mov w2, #0xa48d\n   cmp w0, w2\n   b.lo .Lunicode_width_arm64_two\n   mov w2, #0xac00\n   sub w2, w0, w2\n   mov w3, #0x2ba4\n   cmp w2, w3\n"
     "b.lo .Lunicode_width_arm64_two\n   cmp w0, #0x40, lsl #12\n   b.lo .Lunicode_width_arm64_table\n   sub w2, w0, #0xe0, lsl #12\n   cmp w2, #0x200\n   b.hs .Lunicode_width_arm64_plane\n"
