@@ -4193,21 +4193,6 @@ static int compositor_glass_compose(int row, const int *c)
 }
 
 /*
-        A block's boosted pixel went from was to now: the channel sums take
-        the new in and the old out. The old is in the sums already, so the
-        subtraction never takes them below zero.
-*/
-static void compositor_glass_sum_change(unsigned long *sum, unsigned int was, unsigned int now)
-{
-        sum[0] += now >> 16 & 255;
-        sum[0] -= was >> 16 & 255;
-        sum[1] += now >> 8 & 255;
-        sum[1] -= was >> 8 & 255;
-        sum[2] += now & 255;
-        sum[2] -= was & 255;
-}
-
-/*
         The side a glass window's tint goes to, from the mean of its blocks,
         and the ground that comes to: what its program's inks stand out from.
         The mean is the sums compositor_glass_pass keeps as the blocks change,
@@ -4380,11 +4365,8 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                         unsigned int *now = compositor.tinted[row] + first;
 
                                         memory_saturate_u32(now, compositor.backdrop[row] + first, (positive)(bx1 - bx0));
-                                        for (int bx = 0; bx < bx1 - bx0; bx++)
-                                        {
-                                                compositor_glass_sum_change(compositor.glass_sum[row], compositor.boosted[row][first + bx], now[bx]);
-                                                compositor.boosted[row][first + bx] = now[bx];
-                                        }
+                                        memory_sum_swap_u32((p64 address_to)compositor.glass_sum[row], compositor.boosted[row] + first, now,
+                                                            (positive)(bx1 - bx0));
                                         compositor_glass_tone_span(now, compositor.boosted[row] + first, (positive)(bx1 - bx0), compositor.glass_side[row]);
                                 }
                                 compositor.blurred += (positive)(bx1 - bx0) * (positive)(by1 - by0);

@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        432 routines (408 public, 24 local), 422 of them on all three and 10 local to one.
+        433 routines (409 public, 24 local), 423 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -300,6 +300,7 @@
           memory_span_byte_wide          local   yes     --      --
           memory_squeeze_bytes           public  yes     yes     yes
           memory_sum_bytes               public  yes     yes     yes
+          memory_sum_swap_u32            public  yes     yes     yes
           memory_sweep_coverage          public  yes     yes     yes
           memory_take                    public  yes     yes     yes
           memory_text_span               public  yes     yes     yes
@@ -13670,6 +13671,50 @@ __asm__(
 
 #ifndef KERNEL_MODE
     //
+    //       memory_sum_swap_u32 -- rdi sums (three words: red, green, blue),
+    //       rsi old, rdx now, rcx count: for each pixel the channels of now
+    //       are added to the sums and those of old taken off (red bits 23..16,
+    //       green 15..8, blue 7..0; the top byte ignored), and old takes now.
+    //       The sums wrap at 2^64, as the C loop's do, and the count is under
+    //       2^23: the dword lanes add up to 255 * count, which must fit in 32
+    //       bits when the four lanes are summed. Four pixels a turn in xmm8,
+    //       xmm9 and xmm10, the channels by psrld and pand, and the lanes
+    //       added to the sums once at the end; the last under four, a pixel
+    //       at a time, in the three registers the sums are kept in.
+    //
+    ASM_FUNC(memory_sum_swap_u32)
+    "push %rdi\n   mov (%rdi), %r9\n   mov 8(%rdi), %r10\n   mov 16(%rdi), %r11\n"
+    "cmp $4, %rcx\n   jb 4f\n"
+    "pxor %xmm8, %xmm8\n   pxor %xmm9, %xmm9\n   pxor %xmm10, %xmm10\n"
+    "mov $255, %eax\n   movd %eax, %xmm7\n   pshufd $0, %xmm7, %xmm7\n"
+    "1:  cmp $4, %rcx\n   jb 3f\n"
+    "movdqu (%rdx), %xmm0\n   movdqu (%rsi), %xmm1\n   movdqu %xmm0, (%rsi)\n"
+    "movdqa %xmm0, %xmm2\n   psrld $16, %xmm2\n   pand %xmm7, %xmm2\n"
+    "movdqa %xmm1, %xmm3\n   psrld $16, %xmm3\n   pand %xmm7, %xmm3\n"
+    "paddd %xmm2, %xmm8\n   psubd %xmm3, %xmm8\n"
+    "movdqa %xmm0, %xmm2\n   psrld $8, %xmm2\n   pand %xmm7, %xmm2\n"
+    "movdqa %xmm1, %xmm3\n   psrld $8, %xmm3\n   pand %xmm7, %xmm3\n"
+    "paddd %xmm2, %xmm9\n   psubd %xmm3, %xmm9\n"
+    "movdqa %xmm0, %xmm2\n   pand %xmm7, %xmm2\n"
+    "movdqa %xmm1, %xmm3\n   pand %xmm7, %xmm3\n"
+    "paddd %xmm2, %xmm10\n   psubd %xmm3, %xmm10\n"
+    "add $16, %rdx\n   add $16, %rsi\n   sub $4, %rcx\n   jmp 1b\n"
+    "3:  pshufd $0x4e, %xmm8, %xmm0\n   paddd %xmm0, %xmm8\n   pshufd $0xb1, %xmm8, %xmm0\n   paddd %xmm0, %xmm8\n"
+    "movd %xmm8, %eax\n   cltq\n   add %rax, %r9\n"
+    "pshufd $0x4e, %xmm9, %xmm0\n   paddd %xmm0, %xmm9\n   pshufd $0xb1, %xmm9, %xmm0\n   paddd %xmm0, %xmm9\n"
+    "movd %xmm9, %eax\n   cltq\n   add %rax, %r10\n"
+    "pshufd $0x4e, %xmm10, %xmm0\n   paddd %xmm0, %xmm10\n   pshufd $0xb1, %xmm10, %xmm0\n   paddd %xmm0, %xmm10\n"
+    "movd %xmm10, %eax\n   cltq\n   add %rax, %r11\n"
+    "4:  test %rcx, %rcx\n   jz 9f\n"
+    "mov (%rdx), %eax\n   mov (%rsi), %r8d\n   mov %eax, (%rsi)\n"
+    "movzbl %al, %edi\n   add %rdi, %r11\n   movzbl %r8b, %edi\n   sub %rdi, %r11\n"
+    "movzbl %ah, %edi\n   add %rdi, %r10\n   mov %r8d, %edi\n   shr $8, %edi\n   movzbl %dil, %edi\n   sub %rdi, %r10\n"
+    "shr $16, %eax\n   movzbl %al, %edi\n   add %rdi, %r9\n   shr $16, %r8d\n   movzbl %r8b, %edi\n   sub %rdi, %r9\n"
+    "add $4, %rdx\n   add $4, %rsi\n   dec %rcx\n   jmp 4b\n"
+    "9:  pop %rdi\n   mov %r9, (%rdi)\n   mov %r10, 8(%rdi)\n   mov %r11, 16(%rdi)\n" ASM_RET
+    ASM_END(memory_sum_swap_u32)
+
+    //
     //       memory_tint_u32 -- rdi into, rsi from, rdx count, rcx toward (a
     //       colour's three bytes), r8 amount, r9 cap, and floor on the stack:
     //       each pixel of from is mixed toward toward by amount of 256 (the
@@ -24462,6 +24507,38 @@ __asm__(
 
 #ifndef KERNEL_MODE
     //
+    //       memory_sum_swap_u32: x0 sums (three words), x1 old, x2 now, x3
+    //       count, as on x86-64: the channels by ushr and and, the lanes in
+    //       v16 to v18 (v8 to v15 are the callee-saved halves, so they are not
+    //       spent), four pixels a turn, the old words stored over by st1 in
+    //       the same turn, each lane sum added to its 64-bit sum once at the
+    //       end, and the last under four a word at a time with ubfx.
+    //
+    ASM_FUNC(memory_sum_swap_u32)
+    "ldr x9, [x0]\n   ldr x10, [x0, #8]\n   ldr x11, [x0, #16]\n   cmp x3, #4\n   b.lo 5f\n"
+    "movi v16.4s, #0\n   movi v17.4s, #0\n   movi v18.4s, #0\n   movi v19.4s, #255\n"
+    "1:  cmp x3, #4\n   b.lo 3f\n"
+    "ld1 {v0.4s}, [x2], #16\n   ld1 {v1.4s}, [x1]\n   st1 {v0.4s}, [x1], #16\n"
+    "ushr v2.4s, v0.4s, #16\n   and v2.16b, v2.16b, v19.16b\n   ushr v3.4s, v1.4s, #16\n   and v3.16b, v3.16b, v19.16b\n"
+    "add v16.4s, v16.4s, v2.4s\n   sub v16.4s, v16.4s, v3.4s\n"
+    "ushr v2.4s, v0.4s, #8\n   and v2.16b, v2.16b, v19.16b\n   ushr v3.4s, v1.4s, #8\n   and v3.16b, v3.16b, v19.16b\n"
+    "add v17.4s, v17.4s, v2.4s\n   sub v17.4s, v17.4s, v3.4s\n"
+    "and v2.16b, v0.16b, v19.16b\n   and v3.16b, v1.16b, v19.16b\n"
+    "add v18.4s, v18.4s, v2.4s\n   sub v18.4s, v18.4s, v3.4s\n"
+    "sub x3, x3, #4\n   b 1b\n"
+    "3:  addv s16, v16.4s\n   fmov w12, s16\n   sxtw x12, w12\n   add x9, x9, x12\n"
+    "addv s17, v17.4s\n   fmov w12, s17\n   sxtw x12, w12\n   add x10, x10, x12\n"
+    "addv s18, v18.4s\n   fmov w12, s18\n   sxtw x12, w12\n   add x11, x11, x12\n"
+    "5:  cbz x3, 9f\n"
+    "4:  ldr w4, [x2], #4\n   ldr w5, [x1]\n   str w4, [x1], #4\n"
+    "ubfx w6, w4, #16, #8\n   ubfx w7, w5, #16, #8\n   add x9, x9, x6\n   sub x9, x9, x7\n"
+    "ubfx w6, w4, #8, #8\n   ubfx w7, w5, #8, #8\n   add x10, x10, x6\n   sub x10, x10, x7\n"
+    "add x11, x11, w4, uxtb\n   sub x11, x11, w5, uxtb\n"
+    "subs x3, x3, #1\n   b.ne 4b\n"
+    "9:  str x9, [x0]\n   str x10, [x0, #8]\n   str x11, [x0, #16]\n" ASM_RET
+    ASM_END(memory_sum_swap_u32)
+
+    //
     //       memory_tint_u32: x0 into, x1 from, x2 count, x3 toward, x4 amount,
     //       x5 cap, x6 floor: the x86_64 block's steps (the contract is there)
     //       four pixels a turn in v registers, the constants splat once, and
@@ -33767,6 +33844,44 @@ __asm__(
 #endif
 
 #ifndef KERNEL_MODE
+    //
+    //       memory_sum_swap_u32: a0 sums (three words), a1 old, a2 now, a3
+    //       count: a word at a time with the three sums in a4 to a6, each
+    //       channel's difference of now and old added in 64 bits (the sums
+    //       wrap as the C's do), old stored over by the now word.
+    //
+    ASM_FUNC(memory_sum_swap_u32)
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    //  V is asked lazily, as the other riscv bodies ask it: 0 unasked, 1 absent, 2 present. The detect keeps a0-a4.
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   bnez t3, 6f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n"
+#endif
+    "6:  ld a4, 0(a0)\n   ld a5, 8(a0)\n   ld a6, 16(a0)\n"
+    "li t4, 3\n   bltu a3, t4, 1f\n"
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   bne t3, t4, 1f\n"
+    ".option push\n   .option arch, +v\n"
+    "li t0, 255\n   vsetvli t1, zero, e32, m1, tu, ma\n   vmv.v.x v7, t0\n   vmv.v.i v8, 0\n   vmv.v.i v9, 0\n   vmv.v.i v10, 0\n"
+    "5:  vsetvli t0, a3, e32, m1, tu, ma\n"
+    "vle32.v v0, (a2)\n   vle32.v v1, (a1)\n   vse32.v v0, (a1)\n"
+    "vsrl.vi v2, v0, 16\n   vand.vv v2, v2, v7\n   vsrl.vi v3, v1, 16\n   vand.vv v3, v3, v7\n   vadd.vv v8, v8, v2\n   vsub.vv v8, v8, v3\n"
+    "vsrl.vi v2, v0, 8\n   vand.vv v2, v2, v7\n   vsrl.vi v3, v1, 8\n   vand.vv v3, v3, v7\n   vadd.vv v9, v9, v2\n   vsub.vv v9, v9, v3\n"
+    "vand.vv v2, v0, v7\n   vand.vv v3, v1, v7\n   vadd.vv v10, v10, v2\n   vsub.vv v10, v10, v3\n"
+    "slli t2, t0, 2\n   add a1, a1, t2\n   add a2, a2, t2\n   sub a3, a3, t0\n   bnez a3, 5b\n"
+    "vsetvli t0, zero, e32, m1, ta, ma\n"
+    "vmv.s.x v11, zero\n   vredsum.vs v11, v8, v11\n   vmv.x.s t2, v11\n   add a4, a4, t2\n"
+    "vmv.s.x v11, zero\n   vredsum.vs v11, v9, v11\n   vmv.x.s t2, v11\n   add a5, a5, t2\n"
+    "vmv.s.x v11, zero\n   vredsum.vs v11, v10, v11\n   vmv.x.s t2, v11\n   add a6, a6, t2\n"
+    ".option pop\n"
+    "j 2f\n"
+    "1:  beqz a3, 2f\n"
+    "lwu t0, 0(a2)\n   lwu t1, 0(a1)\n   sw t0, 0(a1)\n"
+    "srli t2, t0, 16\n   andi t2, t2, 255\n   srli t3, t1, 16\n   andi t3, t3, 255\n   sub t2, t2, t3\n   add a4, a4, t2\n"
+    "srli t2, t0, 8\n   andi t2, t2, 255\n   srli t3, t1, 8\n   andi t3, t3, 255\n   sub t2, t2, t3\n   add a5, a5, t2\n"
+    "andi t2, t0, 255\n   andi t3, t1, 255\n   sub t2, t2, t3\n   add a6, a6, t2\n"
+    "addi a1, a1, 4\n   addi a2, a2, 4\n   addi a3, a3, -1\n   j 1b\n"
+    "2:  sd a4, 0(a0)\n   sd a5, 8(a0)\n   sd a6, 16(a0)\n" ASM_RET
+    ASM_END(memory_sum_swap_u32)
+
     //
     //       memory_tint_u32: a0 into, a1 from, a2 count, a3 toward, a4
     //       amount, a5 cap, a6 floor: the x86_64 block's steps (the contract
@@ -46365,6 +46480,9 @@ fn memory_glass_over_u32(p32 address_to into, const p32 address_to picture, cons
 // clamped (the top byte is ignored and answers zero): the colour boost the glass is made more vivid with. Integer
 // only, so every tier answers the same bits; the words past the count are not touched.
 fn memory_saturate_u32(p32 address_to into, const p32 address_to from, positive count);
+// count pixels of now: each channel of now is added to the matching 64-bit sum (red, green, blue, the sums wrapping
+// at 2^64) and the same channel of old taken off, and old takes now. The compositor's glass sums, kept as the blocks change.
+fn memory_sum_swap_u32(p64 address_to sums, p32 address_to old, const p32 address_to now, positive count);
 // count pixels of from, each mixed toward toward (0 or 0xffffff, per channel) by amount of 256, then with its brightest
 // channel capped at cap (every channel scaled down by cap over it) or else its dimmest raised to floor (every channel
 // taken toward 255 by the same proportion); the window's tint. Integer only; exact for every pixel and every cap and

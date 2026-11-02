@@ -25937,6 +25937,8 @@ bench_about()
                  bench_line="the first word of a row of paper that is not paper, from runs of one word to three hundred, against the C loop ui_run_in had" ;;
         saturate) bench_section=BENCH_saturate
                  bench_line="the colour boost of a row of backdrop, from one pixel to three hundred, against the C compositor_vivid made of each pixel" ;;
+        sum-swap) bench_section=BENCH_sum_swap
+                 bench_line="the glass sums of a row of blocks, swapped in by memory_sum_swap_u32, from one block to three hundred, against the word loop compositor_glass_pass ran" ;;
         tint)    bench_section=BENCH_tint
                  bench_line="the window's tint of a row of boosted pixels, from one to three hundred, against the C the glass tone was" ;;
         mix)     bench_section=BENCH_mix

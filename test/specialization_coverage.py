@@ -396,6 +396,9 @@ cover('folds_already', 'count', 'memory_first_differs_u32',
 cover('folds_already', 'count', 'memory_saturate_u32',
       'the compositor hands it a span of the changed backdrop cells of a row, whose length the damage sets at run '
       'time; no reachable call site passes a literal, and a one-pixel call is the taskbar\'s per-column loop')
+cover('folds_already', 'count', 'memory_sum_swap_u32',
+      'compositor_glass_pass hands it the changed blocks of one row of a glass window, a span whose length the damage '
+      'sets at run time; no reachable call site passes a literal')
 cover('folds_already', 'count', 'memory_mix_u32_row',
       'the round corners hand it a row of their cover, whose length the frame sets at run time (the corner width, '
       'or the part of it inside the contents); no reachable call site passes a literal')

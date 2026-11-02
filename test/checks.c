@@ -115488,6 +115488,98 @@ static fn check_saturate(void)
 #endif
 }
 
+// The glass's channel sums as compositor_glass_pass kept them, word by word: each channel of now added, the same channel
+// of old taken off (64-bit, wrapping), and old takes now.
+static fn sum_swap_reference(unsigned long long address_to sums, p32 address_to old, const p32 address_to now, positive count)
+{
+        for (positive i = 0; i < count; i++)
+        {
+                sums[0] += now[i] >> 16 & 255;
+                sums[0] -= old[i] >> 16 & 255;
+                sums[1] += now[i] >> 8 & 255;
+                sums[1] -= old[i] >> 8 & 255;
+                sums[2] += now[i] & 255;
+                sums[2] -= old[i] & 255;
+                old[i] = now[i];
+        }
+}
+
+static fn check_sum_swap(void)
+{
+        static p32 old[300 + 32], made[300 + 32], now[300 + 32];
+        unsigned long long sums[3], want[3];
+        p64 state = 0x2545f4914f6cdd1dull;
+        bool same = true, untouched = true, big = true;
+#if RISCV64
+        /* the vector body and the scalar one, each run: the first call asks the machine for V, as the body does */
+        p8 vector_asked;
+
+        memory_sum_swap_u32((p64 address_to)sums, old, now, 4);
+        vector_asked = cpu_has_vector;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                if (tier == 0 && vector_asked != 2)
+                        continue;
+                cpu_has_vector = tier == 0 ? vector_asked : 1;
+#endif
+
+        // Every width to 300 at every alignment of now and of old, with the sums starting anywhere in 64 bits (so they
+        // wrap), and the words past the count left as they were.
+        for (positive width = 0; width <= 300; width++)
+                for (positive a = 0; a < 16; a++)
+                        for (positive b = 0; b < 16; b += 5)
+                        {
+                                p32 address_to from = now + a, address_to into = old + b;
+
+                                for (positive i = 0; i < 300 + 32; i++)
+                                {
+                                        XORSHIFT64(state);
+                                        now[i] = (p32)(state >> 13);
+                                        old[i] = (p32)(state >> 7);
+                                }
+                                memory_copy(made, old, sizeof(old));
+                                for (int k = 0; k < 3; k++)
+                                {
+                                        XORSHIFT64(state);
+                                        sums[k] = want[k] = state;
+                                }
+                                sum_swap_reference(want, made + b, from, width);
+                                memory_sum_swap_u32((p64 address_to)sums, into, from, width);
+                                same = same && sums[0] == want[0] && sums[1] == want[1] && sums[2] == want[2] &&
+                                       !memory_compare(into, made + b, width * 4);
+                                for (positive i = b + width; i < b + width + 8 && i < 300 + 32; i++)
+                                        untouched = untouched && old[i] == made[i];
+                        }
+        // A row of 65536 words, twice: the sums of many words, against the loop word by word, and the words written.
+        for (positive round = 0; round < 2; round++)
+        {
+                static p32 long_now[1 << 16], long_old[1 << 16], long_want[1 << 16];
+
+                for (positive i = 0; i < (1 << 16); i++)
+                {
+                        XORSHIFT64(state);
+                        long_now[i] = (p32)(state >> 9);
+                        long_old[i] = long_want[i] = (p32)(state >> 3);
+                }
+                for (int k = 0; k < 3; k++)
+                {
+                        XORSHIFT64(state);
+                        sums[k] = want[k] = state;
+                }
+                sum_swap_reference(want, long_want, long_now, 1 << 16);
+                memory_sum_swap_u32((p64 address_to)sums, long_old, long_now, 1 << 16);
+                big = big && sums[0] == want[0] && sums[1] == want[1] && sums[2] == want[2] &&
+                      !memory_compare(long_old, long_want, sizeof(long_old));
+        }
+#if RISCV64
+        }
+        cpu_has_vector = vector_asked;
+#endif
+        check("sum swap: every width to 300 at every alignment of now and old, the sums wrapping at 2^64, is the loop word by word", same);
+        check("sum swap: words past the count are not touched", untouched);
+        check("sum swap: a row of 65536 words, twice, sums and words as the loop makes them", big);
+}
+
 // The tint compositor_glass_tone made, with the cap and floor as parameters: window_mix toward the colour, then the
 // brightest channel capped (scaled by cap over it) or else the dimmest raised to floor, with the divisions C makes.
 static p32 tint_reference(p32 pixel, p32 toward, p32 amount, p32 cap, p32 floor_)
@@ -116775,6 +116867,7 @@ b32 main()
         check_glass_routines();
         check_glass_tiers();
         check_saturate();
+        check_sum_swap();
         check_tint();
         check_mix();
         check_fill_rect();
@@ -149542,6 +149635,79 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_saturate */
+
+#ifdef BENCH_sum_swap
+/* memory_sum_swap_u32 against the word loop compositor_glass_pass ran (the glass sums of a row of blocks, each
+   swapped in), runs of one, three, twelve, sixty and three hundred blocks: the body the machine has, on each tier. */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define WORDS 4096
+
+static p32 now_row[WORDS], old_row[WORDS];
+static unsigned long long sums_row[3];
+static volatile positive sink;
+
+/* The loop as a call of its own, as the compositor makes it: the sums are in memory between rows, not in registers. */
+__attribute__((noinline, noclone)) static void former_sum_swap(p64 address_to sums, p32 address_to into, const p32 address_to from,
+                                                              positive length)
+{
+        for (positive at = 0; at < length; at++)
+        {
+                sums[0] += from[at] >> 16 & 255;
+                sums[0] -= into[at] >> 16 & 255;
+                sums[1] += from[at] >> 8 & 255;
+                sums[1] -= into[at] >> 8 & 255;
+                sums[2] += from[at] & 255;
+                sums[2] -= into[at] & 255;
+                into[at] = from[at];
+        }
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive length, positive rounds)
+{
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                const p32 address_to from = now_row + round % 8;
+                p32 address_to into = old_row + round % 8;
+
+                if (assembly)
+                        memory_sum_swap_u32((p64 address_to)sums_row, into, from, length);
+                else
+                        former_sum_swap((p64 address_to)sums_row, into, from, length);
+        }
+        sink = (positive)sums_row[0];
+        return get_cpu_time() - start;
+}
+
+b32 main()
+{
+        static const positive lengths[] = {1, 3, 12, 60, 300};
+        static const string_address names[] = {"one block", "three blocks", "twelve blocks", "sixty blocks", "three hundred blocks"};
+
+        for (positive at = 0; at < WORDS; at++)
+                now_row[at] = (p32)at * 2654435761u, old_row[at] = (p32)at * 40503u;
+        for (positive at = 0; at < sizeof(lengths) / sizeof(lengths[0]); at++)
+        {
+                positive ratios[TRIES];
+                positive rounds = 4000000 / (lengths[at] + 8) + 1;
+
+                BENCH_PAIRED_RUNS(ratios, former, assembly, lengths[at], rounds);
+                string_format(log, "memory_sum_swap_u32 %s: paired median ASM/C %p.", names[at],
+                              ratios[TRIES / 2] / 100);
+                positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                log("%\n", 2);
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_sum_swap */
 
 #ifdef BENCH_tint
 /* memory_tint_u32 against the C the compositor's glass tone was: a row of boosted pixels tinted toward the light side
