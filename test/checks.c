@@ -134004,6 +134004,77 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
         }
 }
 
+/*
+        A selection drag past the top edge of a code view scrolls it, a line at a time as the time passes, and the further past the
+        edge the finger is the faster; the selection follows the text as it scrolls. A drag back inside the box, and the lift, stop it.
+*/
+static fn touch_scroll_open(struct ui address_to wui, struct ui_text address_to view, int top)
+{
+        static char text[40 * 8];
+        positive length = 0;
+
+        for (int n = 0; n < 40; n++)
+        {
+                text[length++] = 'l', text[length++] = 'i', text[length++] = 'n', text[length++] = 'e', text[length++] = ' ';
+                text[length++] = (char)('0' + n / 10), text[length++] = (char)('0' + n % 10), text[length++] = '\n';
+        }
+        ui_text_open(view, UI_TEXT_CODE, (const p8 address_to)text, length, ui_text_keymap());
+        view->focused = true;
+        view->top_line = (p64)top;
+        view->dragging = false;
+        view->scroll_past = 0;
+        view->scroll_at = 0;
+        ui_text_draw(wui, view, 20, 20, 300, 100, 0);
+}
+
+// Presses the third visible line and drags past the top edge by past, two steps 200 ms apart; the lines scrolled, and whether
+// the selection's start is the first line now shown.
+static int touch_scroll_rows(struct ui address_to wui, struct ui_text address_to view, int past, b32 address_to follows)
+{
+        b32 redraw = false;
+        positive now = 1000000000ull;
+        int x, row;
+
+        touch_scroll_open(wui, view, 10);
+        x = view->left + 2;
+        row = view->top + 2 * view->line_height + view->line_height / 2;
+        field_button(wui, view, 0x110, true, x, row, 0);
+        field_motion(wui, view, x, view->top - past);
+        ui_text_autoscroll(wui, view, now, &redraw);
+        ui_text_autoscroll(wui, view, now + 200000000ull, &redraw);
+        *follows = doc_sel_start(&view->doc.selections[view->doc.primary]) == doc_line_start(&view->doc, view->top_line);
+        field_button(wui, view, 0x110, false, x, row, 0);
+        ui_text_close(view);
+        return (int)(10 - (long)view->top_line);
+}
+
+static fn touch_scroll_check(struct ui address_to wui)
+{
+        static struct ui_text view;
+        b32 near_follows = false, far_follows = false, redraw = false;
+        int near_rows = touch_scroll_rows(wui, &view, 4, &near_follows), far_rows = touch_scroll_rows(wui, &view, 200, &far_follows);
+        int x, row;
+        positive now = 1000000000ull;
+
+        check("scroll: a drag past the top edge scrolls the code view, and the further past it the faster",
+              near_rows >= 1 && far_rows > near_rows);
+        check("scroll: the selection follows the text as it scrolls", near_follows && far_follows);
+
+        touch_scroll_open(wui, &view, 10);
+        x = view.left + 2;
+        row = view.top + 2 * view.line_height + view.line_height / 2;
+        field_button(wui, &view, 0x110, true, x, row, 0);
+        field_motion(wui, &view, x, view.top - 200);
+        ui_text_autoscroll(wui, &view, now, &redraw);
+        field_motion(wui, &view, x, view.top + view.line_height);
+        check("scroll: a drag back inside the box stops it", !ui_text_autoscroll(wui, &view, now + 200000000ull, &redraw) && view.top_line == 10);
+        field_motion(wui, &view, x, view.top - 200);
+        ui_text_autoscroll(wui, &view, now + 400000000ull, &redraw);
+        field_button(wui, &view, 0x110, false, x, row, 0);
+        check("scroll: the lift stops it", !ui_text_autoscroll(wui, &view, now + 600000000ull, &redraw) && view.top_line == 10);
+        ui_text_close(&view);
+}
+
 static fn field_check(struct ui address_to wui)
 {
         static struct ui_text t;
@@ -134346,6 +134417,7 @@ static fn field_check(struct ui address_to wui)
         }
 
         touch_hold_check(wui, &t);
+        touch_scroll_check(wui);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {

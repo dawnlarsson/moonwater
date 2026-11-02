@@ -7701,6 +7701,9 @@ struct ui_text
         struct ui_press tap;                    // a finger's press on the selection: its lift with no drag asks for the menu
         b32 choices;                            // the menu asked for is a touch selection's (Cut, Copy, Paste, Select All)
         b32 handles;                            // a touch selection: its two ends show handles a finger drags (ui_text_draw_handles)
+        int drag_x, drag_y, scroll_past;        // a selection drag's last point, and how far past the box's top (-) or bottom it is (0 inside)
+        positive scroll_at;                     // when the last autoscroll step was (ui_text_autoscroll), 0 before the first
+        long scroll_owed;                       // the scroll that step owes and has not made, in thousandths of a device pixel
         int drag_kind;                          // 1 characters, 2 words, 3 lines
         p64 drag_start, drag_end;
         p64 box_line, box_column;
@@ -8535,6 +8538,32 @@ static p32 ui_text_hold(struct ui address_to ui, struct ui_text address_to t, in
         return UI_TEXT_MOVED;
 }
 
+// A drag's selection, taken at the point at: it grows by the drag's kind from where the drag began (drag_kind, drag_start and
+// drag_end). A word or a line is taken whole, back to the start of one before the drag's start and on to the end of one after.
+static fn ui_text_extend(struct ui address_to ui, struct ui_text address_to t, p64 at)
+{
+        p64 start = at, finish = at;
+        struct doc_selection address_to primary = &t->doc.selections[t->doc.primary];
+
+        if (t->drag_kind == 2)
+                doc_word_at(&t->doc, at, &start, &finish);
+        else if (t->drag_kind == 3)
+        {
+                p64 line = doc_line_of(&t->doc, at);
+
+                start = doc_line_start(&t->doc, line), finish = doc_line_start(&t->doc, line + 1);
+        }
+        if (start < t->drag_start)
+                primary->anchor = t->drag_end, primary->active = start;
+        else
+                primary->anchor = t->drag_start, primary->active = finish > t->drag_end ? finish : t->drag_end;
+        if (t->drag_kind == 1)
+                primary->active = at;
+        doc_normalize(&t->doc);
+        ui_text_reveal(ui, t);
+        ui_text_wake(t);
+}
+
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
         b32 inside = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
@@ -8581,7 +8610,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 {
                         b32 was = t->dragging, tapped = event->a == 0x110 && ui_press_end(&t->tap, (event->flags & WINDOW_KEY_CANCEL) != 0) == 0;
 
-                        t->dragging = false;
+                        t->dragging = false, t->scroll_past = 0;
                         if (tapped)
                         {
                                 // A tap on the selection: its copy and paste menu, and the selection kept (ui_text_menu_open places it).
@@ -8701,33 +8730,19 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         return lines ? UI_TEXT_MOVED : 0;
                 }
                 {
-                        p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
-                        struct doc_selection address_to primary = &t->doc.selections[t->doc.primary];
+                        // A drag past the top or bottom edge scrolls the box (ui_text_autoscroll), and the selection is taken at the
+                        // edge's row meanwhile: the drag's last point is kept for that.
+                        int edge = y < t->top ? t->top : y >= t->bottom ? t->bottom - 1 : y;
+                        p64 at = ui_text_hit(ui, t, x, edge);
 
+                        t->drag_x = x, t->drag_y = y;
+                        t->scroll_past = t->mode == UI_TEXT_FIELD ? 0 : y < t->top ? y - t->top : y >= t->bottom ? y - t->bottom + 1 : 0;
                         if (t->drag_box)
                         {
                                 doc_select_box(&t->doc, t->box_line, t->box_column, doc_line_of(&t->doc, at), doc_column(&t->doc, at));
                                 return UI_TEXT_MOVED;
                         }
-                        if (t->drag_kind == 2)
-                                doc_word_at(&t->doc, at, &start, &finish);
-                        else if (t->drag_kind == 3)
-                        {
-                                p64 line = doc_line_of(&t->doc, at);
-
-                                start = doc_line_start(&t->doc, line), finish = doc_line_start(&t->doc, line + 1);
-                        }
-                        // The selection grows by its kind from where it began: back to the start of a word or a line
-                        // before it, on to the end of one after it.
-                        if (start < t->drag_start)
-                                primary->anchor = t->drag_end, primary->active = start;
-                        else
-                                primary->anchor = t->drag_start, primary->active = finish > t->drag_end ? finish : t->drag_end;
-                        if (t->drag_kind == 1)
-                                primary->active = at;
-                        doc_normalize(&t->doc);
-                        ui_text_reveal(ui, t);
-                        ui_text_wake(t);
+                        ui_text_extend(ui, t, at);
                         return UI_TEXT_MOVED;
                 }
         }
@@ -8743,6 +8758,52 @@ static b32 ui_text_fling(struct ui_text address_to t, positive now)
         if (lines)
                 t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
         return t->kinetic.flying;
+}
+
+/*
+        A selection drag past the top or the bottom edge of a code view scrolls it, smoothly, a line at a time as the time passes:
+        120 logical pixels a second at the edge, 6 more for each logical pixel the drag is past it, at most 2400. Each step the
+        selection is taken again at the edge's row, so it grows as the text scrolls, and a drag back inside, or its lift, stops
+        it. A field has no vertical edge, and a drag by a box is not scrolled. Answers when the next step is due, 0 for none.
+*/
+#define UI_TEXT_SCROLL_SPEED 120
+#define UI_TEXT_SCROLL_FAR 6
+#define UI_TEXT_SCROLL_MOST 2400
+
+static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, positive now, b32 address_to redraw)
+{
+        p64 lines = doc_line_count(&t->doc);
+        long distance, speed, rows;
+        int edge;
+
+        if (!t->dragging || !t->scroll_past || t->drag_box || t->mode == UI_TEXT_FIELD || t->line_height <= 0)
+        {
+                t->scroll_at = 0;
+                return 0;
+        }
+        if (!t->scroll_at || now < t->scroll_at)
+        {
+                t->scroll_at = now, t->scroll_owed = 0;
+                return now + UI_DRAG_FRAME_NS;
+        }
+        distance = (t->scroll_past < 0 ? -(long)t->scroll_past : (long)t->scroll_past) / ui->scale;
+        speed = UI_TEXT_SCROLL_SPEED + distance * UI_TEXT_SCROLL_FAR;
+        speed = speed > UI_TEXT_SCROLL_MOST ? UI_TEXT_SCROLL_MOST : speed;
+        // Device pixels a second, the time since the last step in nanoseconds: thousandths of a device pixel owed.
+        t->scroll_owed += speed * ui->scale * (long)(now - t->scroll_at) / 1000000l;
+        t->scroll_at = now;
+        rows = t->scroll_owed / (1000l * t->line_height);
+        if (rows <= 0)
+                return now + UI_DRAG_FRAME_NS;
+        t->scroll_owed -= rows * 1000l * t->line_height;
+        if (t->scroll_past < 0)
+                t->top_line = (p64)rows < t->top_line ? t->top_line - (p64)rows : 0;
+        else
+                t->top_line = t->top_line + (p64)rows < lines ? t->top_line + (p64)rows : lines - 1;
+        edge = t->drag_y < t->top ? t->top : t->drag_y >= t->bottom ? t->bottom - 1 : t->drag_y;
+        ui_text_extend(ui, t, ui_text_hit(ui, t, t->drag_x, edge));
+        *redraw = true;
+        return now + UI_DRAG_FRAME_NS;
 }
 
 // Any event of the window the widget may take: keys only while it has the keys; the pointer within its box.
