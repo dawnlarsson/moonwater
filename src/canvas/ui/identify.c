@@ -219,11 +219,7 @@ static b32 identify_main()
         if (program_argument_count() > 1)
         {
                 string_address word = program_argument(1);
-                unsigned int index = 0;
-
-                for (positive at = 0; word[at] >= '0' && word[at] <= '9' && at < 4; at++)
-                        index = index * 10 + (unsigned int)(word[at] - '0');
-                identify.screen = index;
+                identify.screen = (unsigned int)string_digits_max(word, 4, null);
         }
         return ui_app_run(&identify_app);
 }

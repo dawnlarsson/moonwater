@@ -81,17 +81,14 @@ static bipolar battery_word(string_address name, string_address leaf, p8 address
 static b32 battery_number(string_address name, string_address leaf, positive address_to value)
 {
         p8 text[32];
-        positive number = 0;
+        positive number = 0, used = 0;
         bipolar got = battery_word(name, leaf, text, sizeof(text));
 
         if (got <= 0 || got > BATTERY_DIGITS)
                 return false;
-        for (bipolar at = 0; at < got; at++)
-        {
-                if (text[at] < '0' || text[at] > '9')
-                        return false;
-                number = number * 10 + (positive)(text[at] - '0');
-        }
+        number = string_digits_max((string_address)text, (positive)got, &used);
+        if (used != (positive)got)
+                return false;
         *value = number;
         return true;
 }

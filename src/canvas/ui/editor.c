@@ -415,10 +415,8 @@ static fn editor_find_enter(b32 back)
 
         if (editor.finding == 3)
         {
-                p64 line = 0;
+                p64 line = (p64)string_digits_max((string_address)text, length, null);
 
-                for (positive at = 0; at < length && byte_is_digit((b8)text[at]); at++)
-                        line = line * 10 + (p64)(text[at] - '0');
                 doc_goto_line(&view->doc, line ? line - 1 : 0);
                 ui_text_reveal(&editor.ui, view);
                 editor.finding = 0;

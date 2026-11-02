@@ -1673,11 +1673,12 @@ static unsigned int terminal_size_read(void)
         got = system_read_once(handle, text, sizeof(text));
         system_close(handle);
 
-        for (bipolar at = 0; at < got; at++)
+        // The digits, and nothing after them but one newline at the end.
         {
-                if (text[at] >= '0' && text[at] <= '9')
-                        value = value * 10 + (unsigned int)(text[at] - '0');
-                else if (text[at] != '\n' || at + 1 != got)
+                positive size = got > 0 ? (positive)got : 0, used = 0;
+
+                value = (unsigned int)string_digits_max((string_address)text, size, &used);
+                if (used < size && (text[used] != '\n' || used + 1 != size))
                         return 0;
         }
 

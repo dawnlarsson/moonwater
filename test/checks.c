@@ -137146,6 +137146,38 @@ static fn check_one_cut(void)
 }
 
 /*
+        One decimal reader for every window's number: the library's string_digits_max reads a number's digits, and no window
+        of Canvas folds the digits into a number by hand (the value * 10 + digit loop, or the digit's byte less '0'). The four
+        windows that read a number say so, and the scan reads their sources from the repository's root.
+*/
+static fn check_one_digits(void)
+{
+        static const char address_to const files[] = {"src/canvas/ui/identify.c", "src/canvas/ui/battery.c", "src/canvas/ui/editor.c",
+                                                      "src/canvas/ui/terminal.c"};
+        static const char address_to const hand[] = {"* 10 + (", "- '0')"};
+        positive read = 0, hand_found = 0, reads = 0;
+
+        for (positive f = 0; f < sizeof(files) / sizeof(files[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)files[f], &size);
+
+                if (!bytes)
+                        continue;
+                read++;
+                for (positive i = 0; i < sizeof(hand) / sizeof(hand[0]); i++)
+                        hand_found += check_hits((const char address_to)bytes, size, hand[i]);
+                reads += check_hits((const char address_to)bytes, size, "string_digits_max(");
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: one decimal reader, the sources are not here\n");
+                return;
+        }
+        check("digits: every window's number is read by string_digits_max, none folds its digits by hand", read == sizeof(files) / sizeof(files[0]) && !hand_found && reads == read);
+}
+
+/*
         No input code by hand: a key and a pointer button are the kit's names (UI_KEY_*, UI_POINTER_*, in ui.c), so no
         window of Canvas defines its own key or button numbers or writes a button's evdev code as a literal. The scan
         reads the sources of the windows, as check_no_hand_typing does; the kit is where the codes are named.
@@ -140212,6 +140244,7 @@ b32 main()
         check_no_hand_typing();
         check_one_blink();
         check_one_cut();
+        check_one_digits();
         check_no_input_codes();
         check_no_shapes_by_hand();
         check_no_element_by_hand();
