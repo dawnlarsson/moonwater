@@ -54527,7 +54527,7 @@ __asm__(
     //       itself and the separate lsl is not spent.
     //
     ASM_FUNC(byte_to_upper)
-    "sub w1, w0, #97\n   cmp w1, #26\n   cset w1, lo\n   sub w0, w0, w1, lsl #5\n" ASM_RET
+    "sub w1, w0, #97\n   cmp w1, #26\n   sub w2, w0, #32\n   csel w0, w2, w0, lo\n" ASM_RET
     ASM_END(byte_to_upper)
 
     ASM_FUNC(byte_to_lower)
