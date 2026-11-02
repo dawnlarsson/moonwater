@@ -133265,6 +133265,34 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
         check("touch: a drag after a long press extends the selection by words", field_selected(t, 6, 16));
         asks = field_button(wui, t, 0x110, false, gamma + 1, y, cancel);
         check("touch: the lift ends the drag and keeps the selection", (asks & UI_TEXT_MOVED) && field_selected(t, 6, 16) && !t->dragging);
+
+        // A tap on the selection keeps it and asks for its menu, which is Cut, Copy, Paste and Select All (not the full menu).
+        field_button(wui, t, 0x110, true, beta + 1, y, touch);
+        asks = field_button(wui, t, 0x110, false, beta + 1, y, touch);
+        check("touch: a tap on the selection keeps it and asks for its menu", (asks & UI_TEXT_MENU) && field_selected(t, 6, 16));
+        {
+                static struct ui_popmenu m;
+
+                m.count = 0;
+                ui_text_menu_items(&m, t);
+                check("touch: the menu of a selection is Cut, Copy, Paste and Select All",
+                      m.count == 4 && m.items[0].id == UI_TEXT_MENU_CUT && m.items[1].id == UI_TEXT_MENU_COPY &&
+                              m.items[2].id == UI_TEXT_MENU_PASTE && m.items[3].id == UI_TEXT_MENU_ALL);
+        }
+        // A tap off the selection is a caret, and asks for no menu; a press cancelled by the compositor is no tap either.
+        field_button(wui, t, 0x110, true, field_x(wui, t, 0) + 1, y, touch);
+        asks = field_button(wui, t, 0x110, false, field_x(wui, t, 0) + 1, y, touch);
+        check("touch: a tap off the selection is a caret and asks for no menu", field_selected(t, 0, 0) && !(asks & UI_TEXT_MENU));
+        field_button(wui, t, 0x110, true, beta + 1, y, touch);
+        field_button(wui, t, 0x110, false, beta + 1, y, cancel);
+        field_button(wui, t, 0x111, true, beta + 1, y, hold);
+        field_button(wui, t, 0x111, false, beta + 1, y, hold);
+        field_button(wui, t, 0x110, false, beta + 1, y, cancel);
+        check("touch: a long press again selects the word", field_selected(t, 6, 10));
+        field_button(wui, t, 0x110, true, beta + 1, y, touch);
+        asks = field_button(wui, t, 0x110, false, beta + 1, y, cancel);
+        check("touch: a cancelled press on the selection asks for no menu and keeps the selection",
+              !(asks & UI_TEXT_MENU) && field_selected(t, 6, 10));
 }
 
 static fn field_check(struct ui address_to wui)

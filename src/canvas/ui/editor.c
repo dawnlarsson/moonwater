@@ -661,7 +661,9 @@ static b32 editor_event(const struct window_event address_to event)
         asks = ui_text_event(&editor.ui, &tab->view, event, editor.pointer_x, editor.pointer_y);
         if (asks & UI_TEXT_COMMAND)
                 editor_command(tab->view.command);
-        if (asks & UI_TEXT_MENU)
+        if ((asks & UI_TEXT_MENU) && tab->view.choices)
+                ui_text_menu_open(&editor.menu, &tab->view, &editor.ui, 0, 0, true);
+        else if (asks & UI_TEXT_MENU)
                 editor_menu_open(tab->view.menu_x, tab->view.menu_y);
         if (asks)
                 editor.dirty = true;

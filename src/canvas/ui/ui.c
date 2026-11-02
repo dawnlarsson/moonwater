@@ -7551,6 +7551,8 @@ struct ui_text
         positive click_at;
         b32 dragging, drag_box, touch;
         b32 holding;                            // a finger's long press holds the selection (ui_text_hold) until its lift
+        struct ui_press tap;                    // a finger's press on the selection: its lift with no drag asks for the menu
+        b32 choices;                            // the menu asked for is a touch selection's (Cut, Copy, Paste, Select All)
         int drag_kind;                          // 1 characters, 2 words, 3 lines
         p64 drag_start, drag_end;
         p64 box_line, box_column;
@@ -8265,6 +8267,30 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
         The pointer and the wheel. x and y are the window's device pixels; the widget's box is where it was last drawn.
         Answers what changed, and UI_TEXT_MENU for the right button (menu_x and menu_y say where).
 */
+static b32 ui_text_selected(const struct ui_text address_to t, p64 offset);
+
+// The first line of the primary selection as it is drawn now, in device pixels: its ends (the line's own where the selection
+// goes on past it) and the top and bottom of its row. False with no selection, or when that line is scrolled off the top.
+static b32 ui_text_span(struct ui address_to ui, struct ui_text address_to t, int *left, int *top, int *right, int *bottom)
+{
+        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+        static struct ui_text_layout l;
+        p64 start = doc_sel_start(s), finish = doc_sel_end(s), first = t->mode == UI_TEXT_FIELD ? 0 : t->top_line, line;
+        int origin = t->left - (int)t->scroll_x;
+
+        if (start >= finish)
+                return false;
+        line = doc_line_of(&t->doc, start);
+        if (line < first)
+                return false;
+        ui_text_layout_line(ui, t, line, &l);
+        *left = origin + ui_text_x_of(&l, start);
+        *right = origin + ui_text_x_of(&l, doc_line_of(&t->doc, finish) == line ? finish : doc_line_end(&t->doc, line));
+        *top = t->top + (int)(line - first) * t->line_height;
+        *bottom = *top + t->line_height;
+        return true;
+}
+
 // A finger's long press (the compositor's right button, WINDOW_KEY_HOLD): the word under it is selected, and the drag after it
 // is by words from there (drag_kind 2) until the lift. A masked field has no words, so its whole text is taken, as a double
 // click takes it.
@@ -8279,6 +8305,7 @@ static p32 ui_text_hold(struct ui address_to ui, struct ui_text address_to t, in
         ui_drag_stop(&t->kinetic);
         doc_select_set(&t->doc, start, finish);
         t->touch = false, t->holding = true, t->dragging = true, t->drag_box = false;
+        t->tap.down = false;
         t->drag_kind = 2, t->drag_start = start, t->drag_end = finish;
         ui_text_reveal(ui, t);
         ui_text_wake(t);
@@ -8329,9 +8356,15 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 }
                 if (!down)
                 {
-                        b32 was = t->dragging;
+                        b32 was = t->dragging, tapped = event->a == 0x110 && ui_press_end(&t->tap, (event->flags & WINDOW_KEY_CANCEL) != 0) == 0;
 
                         t->dragging = false;
+                        if (tapped)
+                        {
+                                // A tap on the selection: its copy and paste menu, and the selection kept (ui_text_menu_open places it).
+                                t->choices = true;
+                                return UI_TEXT_MENU | UI_TEXT_MOVED;
+                        }
                         if (t->touch && ui_drag_let_go(&t->kinetic, now))
                                 return UI_TEXT_MOVED;
                         if (was && doc_any_selected(&t->doc))
@@ -8369,9 +8402,16 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 t->touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
                 if (t->touch)
                 {
-                        // A finger: a caret where it lands, and a drag scrolls rather than selects.
+                        // A finger: a caret where it lands, and a drag scrolls rather than selects. On the selection it keeps the
+                        // selection, and a tap there (a lift with no drag) asks for the copy and paste menu.
+                        p64 at = ui_text_hit(ui, t, x, y);
+                        b32 on = doc_any_selected(&t->doc) && ui_text_selected(t, at);
+
                         ui_drag_start(&t->kinetic, y, now);
-                        doc_select_set(&t->doc, ui_text_hit(ui, t, x, y), ui_text_hit(ui, t, x, y));
+                        if (on)
+                                ui_press_begin(&t->tap, x, y, 0, true);
+                        else
+                                doc_select_set(&t->doc, at, at), t->tap.down = false;
                         t->dragging = true;
                         ui_text_wake(t);
                         return UI_TEXT_MOVED;
@@ -8426,6 +8466,8 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 if (t->touch)
                 {
                         int moved = ui_drag_follow(&t->kinetic, y, now), lines = t->line_height ? -moved / t->line_height : 0;
+
+                        ui_press_move(ui, &t->tap, x, y);
                         b64 to = (b64)t->top_line + lines;
 
                         if (lines)
@@ -8481,6 +8523,7 @@ static b32 ui_text_fling(struct ui_text address_to t, positive now)
 static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
         t->asks = 0;
+        t->choices = false;
         if (event->type == WINDOW_EVENT_KEY)
                 return t->focused ? t->asks = ui_text_key(ui, t, event) : 0;
         if (event->type == WINDOW_EVENT_CLIP)
@@ -8518,6 +8561,17 @@ static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_tex
         p32 none = doc_any_selected(&t->doc) ? 0 : UI_MENU_DISABLED, fixed = t->read_only ? UI_MENU_DISABLED : 0;
         p32 hidden = t->masked ? UI_MENU_DISABLED : 0;
 
+        // A tap on a touch selection: the copy and paste menu, Cut, Copy, Paste and Select All, and nothing else.
+        if (t->choices)
+        {
+                ui_popmenu_add(m, "Cu&t", ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
+                ui_popmenu_add(m, "&Copy", ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
+                ui_popmenu_add(m, "&Paste", ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
+                               fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
+                ui_popmenu_add(m, "Select &All", ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
+                               doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
+                return;
+        }
         ui_popmenu_add(m, "&Undo", ui_text_menu_key(t, UI_TEXT_MENU_UNDO, DOC_CMD_UNDO),
                        t->doc.done && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_UNDO);
         ui_popmenu_add(m, "&Redo", ui_text_menu_key(t, UI_TEXT_MENU_REDO, DOC_CMD_REDO),
@@ -8535,11 +8589,23 @@ static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_tex
 
 static b32 ui_text_menu_open(struct ui_popup address_to p, struct ui_text address_to t, const struct ui address_to ui, int x, int y, b32 touch)
 {
+        struct ui measure = *ui;
+        int left, top, right, bottom, screen_x, screen_y, screen_w, screen_h;
+
         if (!p || !t->own)
                 return false;
         p->menu.count = 0;
         ui_text_menu_items(&p->menu, t);
         p->field = t;
+        // A touch selection's menu goes above its first line, centred on it, and below the line when the window has no room
+        // above on the screen. The anchor is a point (the menu's top-left), so the menu's own height is measured here first.
+        if (t->choices && ui_text_span(&measure, t, &left, &top, &right, &bottom))
+        {
+                windows_output(t->own->table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
+                ui_popmenu_size(&measure, &p->menu, screen_h);
+                x = (left + right) / 2 - p->menu.width / 2;
+                y = t->own->table->y[t->own->row] + top - p->menu.height >= screen_y ? top - p->menu.height : bottom;
+        }
         return ui_popup_open(p, t->own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
