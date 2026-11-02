@@ -756,6 +756,7 @@ struct windows
         unsigned int glass[WINDOWS];  // the program's: WINDOW_GLASS, WINDOW_NO_CLOSE and WINDOW_DISMISS, read with the first picture
         unsigned int asked[WINDOWS];  // the launch's: 1 when the user asked for the program (MOONWATER_ASKED=1 at its start), so its first window takes the keys
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
+        unsigned int window_scale[WINDOWS]; // the compositor's: the percent the window is drawn at, its screen's (0 until known)
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
         unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
         /*

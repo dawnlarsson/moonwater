@@ -2935,6 +2935,7 @@ struct compositor_output
         unsigned int crtc, crtc_index, connector;
         struct compositor_mode mode;
         char name[WINDOWS_OUTPUT_NAME], model[WINDOWS_OUTPUT_MODEL];
+        int scale;             // the percent this screen is drawn at: its displays line's, 100 when none
         unsigned int shows;
         int cursor_x, cursor_y;
         // The framebuffer its crtc shows: on one screen the scanout's own, and on more a framebuffer of the same buffer
@@ -3781,16 +3782,19 @@ static void compositor_stretch(int row)
                 memory_copy(pixels + line * stride, pixels + (drawn_h - 1) * stride, (positive)width * 4);
 }
 
+static int compositor_row_scale(int row);
+
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
         int line = compositor_frame_line(row);
 
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
-                                           (int)compositor.h[row], compositor.scale, compositor_pixels(row),
+                                           (int)compositor.h[row], compositor_row_scale(row), compositor_pixels(row),
                                            (unsigned long)compositor_stride(), 0, null, 0,
-                                           line ? UI_RADIUS * compositor.scale / 100 : 0, line,
+                                           line ? UI_RADIUS * compositor_row_scale(row) / 100 : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
+        compositor.table->window_scale[row] = (unsigned int)frame->scale;
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && row != compositor.drag)
                 compositor_glide_frame(row, frame);
@@ -6235,6 +6239,31 @@ static void compositor_turn_say(const char *name, unsigned int degrees, int hard
 }
 
 // The degrees a screen is turned by its displays line (0 when it has none): the screen is laid out at its turned size.
+// The percent a screen's displays line draws it at: 100 when it has no line or none for it.
+static int compositor_display_scale(const char *name)
+{
+        const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
+                                                                   windows_name_length(name));
+
+        return display && display->scale ? (int)display->scale : WINDOWS_SCALE_DEFAULT;
+}
+
+// The percent screen at is drawn at (the desktop's when there is no such screen).
+static int compositor_output_scale(int at)
+{
+        return at >= 0 && at < (int)compositor.outputs ? compositor.output[at].scale : compositor.scale;
+}
+
+// The percent a window is drawn at: the scale of the screen it is mostly on, which is what a window straddling a seam takes.
+static int compositor_row_scale(int row)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        return compositor_output_scale(compositor_screen_owner(screens, count, compositor.x[row], compositor.y[row],
+                                                              (int)compositor.w[row], (int)compositor.h[row]));
+}
+
 static unsigned int compositor_display_degrees(const char *name)
 {
         const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
@@ -6864,6 +6893,7 @@ static b32 compositor_space_take(int first)
                                         compositor.output[at].crtc_index = index;
                         // The turn its displays line asks for: the card's own rotation where its plane has one, else Canvas's.
                         compositor.output[at].degrees = compositor_display_degrees(found.name[n]);
+                        compositor.output[at].scale = compositor_display_scale(found.name[n]);
                         compositor.output[at].turned = !compositor.output[at].degrees ? 0 :
                                 compositor_rotation_hardware(compositor.output[at].crtc_index, compositor.output[at].degrees,
                                                              &compositor.output[at].turn_plane,
@@ -6884,6 +6914,8 @@ static b32 compositor_space_take(int first)
                         period = !period || 1000000000ull / refresh < period ? 1000000000ull / refresh : period;
                 }
                 compositor.outputs = lit;
+                if (lit)
+                        compositor.scale = compositor.output[0].scale;
                 compositor.period = period;
                 compositor.crtc = compositor.output[0].crtc;
                 compositor.crtc_index = compositor.output[0].crtc_index;
@@ -11124,8 +11156,8 @@ static unsigned int compositor_snap(const int *box, unsigned int *touch, int *sc
         if (at < 0 || compositor_screen_cover(screens[at], box[0], box[1], box[2], box[3]) <= 0)
                 return COMPOSITOR_FLOATING;
         free = compositor_snap_free(screens, count, box, at);
-        return compositor_snap_rule(box, screens[at], free, compositor.snap_held, COMPOSITOR_SNAP_EDGE * compositor.scale / 100,
-                                    COMPOSITOR_SNAP_CORNER * compositor.scale / 100, touch);
+        return compositor_snap_rule(box, screens[at], free, compositor.snap_held, COMPOSITOR_SNAP_EDGE * compositor_output_scale(at) / 100,
+                                    COMPOSITOR_SNAP_CORNER * compositor_output_scale(at) / 100, touch);
 }
 
 // The rectangle a window dragged is where the hand has it, before placement keeps it on its screen (compositor_place

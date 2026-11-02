@@ -128316,6 +128316,32 @@ static fn check_display_section(void)
                       set_made > 0 && strstr(set_text, "rotation=90") && !strstr(set_text, "scale="));
         }
 
+        // The per-screen scale: a window is drawn at the scale of the screen it is mostly on (a window straddling the seam takes
+        // the screen with more of it), and the screen's own scale is its displays line's; the desktop's is the primary's.
+        {
+                unsigned int saved_outputs = compositor.outputs;
+                int saved_scale = compositor.scale;
+
+                compositor.outputs = 2;
+                compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 1920, compositor.screen[0][3] = 1080;
+                compositor.screen[1][0] = 1920, compositor.screen[1][1] = 0, compositor.screen[1][2] = 1920, compositor.screen[1][3] = 1080;
+                compositor.output[0].scale = 100, compositor.output[1].scale = 150;
+                compositor.scale = compositor.output[0].scale;
+                compositor.x[1] = 2000, compositor.y[1] = 100, compositor.w[1] = 800, compositor.h[1] = 600;
+                check("display section: a window on the screen at 150% is drawn at 150%, and that screen's scale is its own",
+                      compositor_row_scale(1) == 150 && compositor_output_scale(1) == 150);
+                compositor.x[1] = 1500;
+                check("display section: a window mostly on the screen at 100% is drawn at 100%, though it reaches the other",
+                      compositor_row_scale(1) == 100);
+                compositor.x[1] = 1500, compositor.w[1] = 1200;
+                check("display section: a window straddling the seam is drawn at the scale of the screen with more of it",
+                      compositor_row_scale(1) == 150);
+                compositor.x[1] = 5000, compositor.w[1] = 300;
+                check("display section: a window off every screen is drawn at the scale of the nearest one", compositor_row_scale(1) == 150);
+                compositor.outputs = saved_outputs;
+                compositor.scale = saved_scale;
+        }
+
         // A screen's monitor name, from its EDID: the descriptor tagged FC, its text ended by a newline, its blanks at the end
         // dropped; a block with no EDID header, no such descriptor, or too short for one names nothing, and a room cuts the name.
         {

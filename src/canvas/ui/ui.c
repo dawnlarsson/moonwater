@@ -7619,7 +7619,8 @@ static int ui_app_run(struct ui_app address_to app)
         }
         table = app->own->table;
         row = app->own->row;
-        app->ui->scale = table->scale >= 25 && table->scale <= 800 ? (int)table->scale : 100;
+        app->ui->scale = table->window_scale[row] >= 25 && table->window_scale[row] <= 800 ? (int)table->window_scale[row]
+                         : table->scale >= 25 && table->scale <= 800 ? (int)table->scale : 100;
         if (!app->own_faces)
         {
                 if (!ui_engine_open(app->ui) || !ui_face_load(&app->ui->faces[0], app->font ? app->font : (string_address)UI_FONT_REGULAR))
@@ -7702,6 +7703,17 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_kit_inks(app->ui);
                         ui_app_changed(app);
+                }
+                // The screen the window is on draws it at that screen's scale (the compositor counts it into the table): the
+                // picture is laid out again at the new scale, at the size it has, as a resize lays it out.
+                if (table->window_scale[row] >= 25 && table->window_scale[row] <= 800 &&
+                    (int)table->window_scale[row] != app->ui->scale)
+                {
+                        app->ui->scale = (int)table->window_scale[row];
+                        ui_kit_settle();
+                        ui_app_changed(app);
+                        if (table->width[row] && table->height[row])
+                                app->size(table->width[row], table->height[row]);
                 }
                 if (table->want_width[row] && table->want_height[row] &&
                     (table->want_width[row] != app->asked_w || table->want_height[row] != app->asked_h))
