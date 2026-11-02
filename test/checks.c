@@ -120182,8 +120182,10 @@ static void check_compositor_lifecycle_more(void)
     table->x[3] = 80, table->y[3] = 20;
     life_paint(3, 90, 70, GLASS_SIDE);
     compositor_focus(3);
+    compositor_frame_of(3, &was);
     compositor_minimize_row(3);
     life_step("put the window away", (compositor.state[3] & WINDOW_MINIMIZED) != 0);
+    check("lifecycle more: a window put away leaves none of its colour on the screen", life_ghost(3, &was) == 0);
     table->lift[3] = 1;
     life_paint(3, 90, 70, GLASS_SIDE);
     life_step("the program lifts it", compositor_visible(3) != 0);
@@ -120274,6 +120276,26 @@ static void check_compositor_lifecycle_more(void)
         }
     check("lifecycle more: after the churn nothing is shown, stacked or focused",
           compositor.stacked == 0 && compositor.focus == COMPOSITOR_NONE && table->focus == WINDOWS);
+
+    // A popup of a window, which is closed while the popup is open: the popup is asked to go, and it is no popup of the next
+    // window that takes its row.
+    table->x[6] = 50, table->y[6] = 50;
+    life_paint(6, 120, 100, GLASS_SIDE);
+    table->popup_parent[7] = 7; // named: the window it is of, counted from one
+    table->popup_x[7] = 10, table->popup_y[7] = 10, table->popup_w[7] = 40, table->popup_h[7] = 30;
+    life_paint(7, 40, 30, GLASS_SIDE);
+    life_step("open a popup of a window", compositor.showing[7] != 0);
+    check("lifecycle more: a popup is a popup of its window, and takes no keys", compositor_popup_parent[7] == 6 && compositor.focus != 7);
+    life_close(6);
+    life_step("close the window the popup is of", !compositor.showing[6]);
+    check("lifecycle more: its popup is asked to go", (table->state[7] & WINDOW_CLOSING) != 0);
+    life_paint(6, 100, 80, GLASS_SIDE);
+    life_step("a new window takes the row", compositor.showing[6] != 0);
+    check("lifecycle more: the popup of the window that went is no popup of the next one in its row", compositor_popup_parent[7] < 0);
+    life_close(7);
+    life_step("close the popup", !compositor.showing[7]);
+    life_close(6);
+    life_step("close the window again", !compositor.showing[6]);
 
     // A row whose buffer the card refused to show straight is pinned for the attempt (its program may not give its pages
     // back then), and that pin is no one's once the window is gone: the next program in the row discards as any does.

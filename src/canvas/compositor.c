@@ -9546,6 +9546,10 @@ static void compositor_popup_leave(int row)
 {
         compositor_popup_parent[row] = -1;
         compositor_popups_close(row, -1);
+        // Asked to go, they are no popups of whatever takes the row next: their link to it is cut.
+        for (int child = 0; child < WINDOWS; child++)
+                if (compositor_popup_parent[child] == row)
+                        compositor_popup_parent[child] = -1;
 }
 
 static void compositor_door(int row, int returned)
