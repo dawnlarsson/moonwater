@@ -135741,7 +135741,6 @@ b32 main()
                         struct ui menu_ui = launcher.ui;
 
                         memory_zero(&menu, sizeof(menu));
-                        menu.pressed = -1;
                         ui_popmenu_add(&menu, "Copy", "Ctrl+C", 0, 1);
                         ui_popmenu_add(&menu, "Paste", "Ctrl+V", 0, 2);
                         ui_popmenu_add(&menu, "", null, UI_MENU_SEPARATOR, 0);
@@ -136945,7 +136944,7 @@ static fn check_glass_pieces(string_address regular)
         ui_popmenu_add(&menu, "Paste", "Ctrl+V", 0, 2);
         ui_popmenu_add(&menu, "", null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(&menu, "Select all", null, 0, 3);
-        menu.hot = 1, menu.pressed = -1;
+        menu.hot = 1, menu.press.down = false;
         menu_ui = ui;
         menu_ui.opaque = 0, menu_ui.glass = 1;
         ui_popmenu_size(&menu_ui, &menu, 0);
@@ -138669,7 +138668,7 @@ static p32 menu_next(p32 below)
 static fn menu_defaults_items(struct ui address_to wui, struct ui_popmenu address_to m)
 {
         memory_zero(m, sizeof(*m));
-        m->pressed = -1;
+        m->press.down = false;
         ui_popmenu_add(m, "Copy", null, 0, 1);
         ui_popmenu_add(m, "Paste", null, 0, 2);
         ui_popmenu_add(m, "Select all", null, 0, 3);
@@ -138699,6 +138698,17 @@ static fn menu_defaults_check(struct ui address_to wui)
         check("menu: a press on an item and a release on it chooses it", chosen_same == 2);
         check("menu: a press released on another item chooses nothing", chosen_other == UI_MENU_NOTHING);
         check("menu: a press released outside the menu chooses nothing, and is consumed", chosen_away == UI_MENU_NOTHING);
+        // The menu's press is the kit's (ui_press): one taken back chooses nothing and shows nothing pressed, as a button's does.
+        {
+                struct window_event taken = {WINDOW_EVENT_BUTTON, WINDOW_KEY_CANCEL, 0x110, 0};
+                int chosen_taken;
+
+                menu_defaults_items(wui, &m);
+                ui_popmenu_event(wui, &m, &press, x, y1);
+                check("menu: a press on an item shows it pressed at once", ui_pressed(&m.press, ui_popmenu_at(wui, &m, y1)));
+                chosen_taken = ui_popmenu_event(wui, &m, &taken, x, y1);
+                check("menu: a press taken back chooses nothing, and shows nothing pressed", chosen_taken == UI_MENU_NOTHING && !m.press.down);
+        }
         // Drawn opaque (the menu's own face is what that would show), it has no face: the glass is what is under it.
         menu_defaults_items(wui, &m);
         {
@@ -138731,7 +138741,7 @@ static fn menu_defaults_check(struct ui address_to wui)
         }
         // A menu of twenty items shown five high has the kit's bar down its right, and nothing else there.
         memory_zero(&m, sizeof(m));
-        m.pressed = -1;
+        m.press.down = false;
         for (int at = 0; at < 20; at++)
                 ui_popmenu_add(&m, "Item", null, 0, at + 1);
         ui_popmenu_size(wui, &m, 5 * row + 2 * pad);

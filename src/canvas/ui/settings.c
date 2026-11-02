@@ -3156,7 +3156,8 @@ static fn settings_menu_open(int row)
         if (which->flags & SETTINGS_BATTERIES)
                 settings.battery_menu_count = battery_list(settings.battery_menu, BATTERY_LIST);
         settings.list.focus = row;
-        m->count = 0, m->top = 0, m->pressed = -1, m->typed_length = 0;
+        m->count = 0, m->top = 0, m->typed_length = 0;
+        memory_zero(&m->press, sizeof(m->press));
         m->touch = settings.touching;
         for (int k = 0; k < UI_MENU_ITEMS && settings_choice(which, (positive)k, word, sizeof(word)); k++)
         {

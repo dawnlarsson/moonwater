@@ -5799,7 +5799,7 @@ struct ui_popmenu
         struct ui_menu_item items[UI_MENU_ITEMS];
         int count, hot, top, rows_shown;
         b32 touch;
-        int pressed;                 // the item a press went down on, -1 none
+        struct ui_press press;       // a press on an item: its target is the item it went down on, -1 none
         int width, height;
         struct ui_scroll scroll;     // the kit's bar: its track down the right, its scroll the top item's offset (in pixels)
         char typed[16];
@@ -5951,7 +5951,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         y += ui_popmenu_tall(ui, m, at);
                         continue;
                 }
-                if (ui_popmenu_choosable(m, at) && at == m->pressed)
+                if (ui_popmenu_choosable(m, at) && ui_pressed(&m->press, at))
                         ui_popmenu_lit(ui, m, y, ui_mix(ui_role(UI_ON_SURFACE), 10, 0));
                 if (ui_popmenu_choosable(m, at) && at == m->hot)
                         ui_popmenu_lit(ui, m, y, ui_well(ui, UI_SELECTION, 40));
@@ -6116,22 +6116,22 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
         {
-                int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1, was = m->pressed;
+                int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1, clicked;
 
                 m->touch |= (event->flags & WINDOW_KEY_TOUCH) != 0;
                 if (event->flags & WINDOW_KEY_DOWN)
                 {
                         if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, true))
                                 return UI_MENU_NOTHING;
-                        m->pressed = at;
+                        ui_press_begin(&m->press, x, y, at, m->touch);
                         m->hot = at;
                         return UI_MENU_NOTHING;
                 }
                 if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, false))
                         return UI_MENU_NOTHING;
-                // The release chooses an item only where its press went down, and a press that went down on none chooses nothing.
-                m->pressed = -1;
-                if ((event->flags & WINDOW_KEY_CANCEL) || at != was || !ui_popmenu_choosable(m, at))
+                // The release chooses an item only where its press went down (the kit's press: a cancel, or no press, is none).
+                clicked = ui_press_end(&m->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
+                if (clicked < 0 || at != clicked || !ui_popmenu_choosable(m, at))
                         return UI_MENU_NOTHING;
                 return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
         }
@@ -6237,7 +6237,7 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         p->pending = false;
         p->menu.touch = touch;
         p->menu.hot = -1;
-        p->menu.pressed = -1;
+        memory_zero(&p->menu.press, sizeof(p->menu.press));
         p->menu.top = 0;
         windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
         ui_popmenu_size(&p->ui, &p->menu, screen_h);
