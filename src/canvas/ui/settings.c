@@ -139,7 +139,6 @@
 // The file that includes this one includes battery.c first: the Battery row's value is one of its batteries.
 
 // What a row's value is: not asked yet, said, not on this machine, asked and not found in what was said.
-#define SETTINGS_BOTTOM_PAD 128 // logical pixels of scroll range below the last row
 #define SETTINGS_UNREAD 0u
 #define SETTINGS_READ 1u
 #define SETTINGS_ABSENT 2u
@@ -1533,15 +1532,13 @@ static fn settings_layout(void)
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
         settings.page.bottom = settings.height; // the content runs to the window's bottom edge
         {
-                int top = settings.page.top, room;
+                int top = settings.page.top;
 
                 if (settings_map_on())
                         settings_map_place(), top += settings_map_height();
+                // The list's view runs from its top to the window's bottom edge; its content is clipped to that view, and its
+                // scroll track has the view's ends. The scroll ends at the rows minus the view.
                 ui_list_place(ui, &settings.list, settings.page.left, top, settings.page.right - settings.page.left, settings.page.bottom - top);
-                // The rows are drawn to the window's bottom edge, and scroll in a view that stops SETTINGS_BOTTOM_PAD above it: the
-                // pad is clear space under the list, not scroll distance, so the scroll ends at rows minus view.
-                room = settings.page.bottom - top - ui_px(ui, SETTINGS_BOTTOM_PAD);
-                settings.list.scroll.view = settings.list.scroll.height = room > ui_px(ui, UI_ROW) ? room : settings.page.bottom - top;
         }
         ui_list_layout(ui, &settings.list);
         ui_scroll_clamp(&settings.list.scroll);

@@ -5012,7 +5012,6 @@ struct ui_scroll
         // that fits does not move under a finger unless it is bounded. scale is the kit's, for the pull's size in logical pixels.
         b32 bounds;
         int edge, scale;
-        int reach;                 // how far down the region's rows are drawn, device pixels, when past its track (a list's pad); 0 for its height
         b64 notch;                 // when the region last took a notch of the wheel, ns (ui_wheel_rate)
 };
 
@@ -5068,14 +5067,17 @@ static b32 ui_scroll_moving(const struct ui_scroll address_to s)
 }
 
 // The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth.
+static int ui_scroll_map(const struct ui_scroll address_to s, int y);
+
 static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll address_to s, int top, int length, struct ui_box address_to thumb)
 {
         int border = UI_SCROLL_BORDER * ui->scale, width = UI_SCROLL_WIDTH * ui->scale;
         b64 centre = (b64)(s->x + width / 2) * 256, half = (b64)(width / 2 - border) * 256;
         b64 r = ui_qmul(half, ui_kit_tween(&s->grow));
 
+        // The thumb's ends go where a stretch draws the track's: the same map as the items, in the same axis and by the same spring.
         thumb->x0 = (b32)(centre - r), thumb->x1 = (b32)(centre + r);
-        thumb->y0 = (b32)((top + border) * 256), thumb->y1 = (b32)((top + length - border) * 256);
+        thumb->y0 = (b32)(ui_scroll_map(s, top + border) * 256), thumb->y1 = (b32)(ui_scroll_map(s, top + length - border) * 256);
         thumb->rx = thumb->ry = (b32)r;
 }
 
@@ -5085,7 +5087,7 @@ static fn ui_scroll_mark(const struct ui address_to ui, const struct ui_scroll a
         int top, height, bottom;
 
         ui_scroll_track(ui, s, &top, &height);
-        bottom = top + height;
+        bottom = ui_scroll_map(s, top + height), top = ui_scroll_map(s, top);
         if (ui_kit.damage_bottom <= ui_kit.damage_top)
                 ui_kit.damage_top = top, ui_kit.damage_bottom = bottom;
         else
@@ -5498,7 +5500,7 @@ static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll addre
         {
                 // A row that overlaps the region paints up to a row past either end (a switch's knob at its foot), so the band
                 // is the region and a row each way: what a frame that moved it must draw again.
-                int pad = ui_dev(ui, UI_ROW), top = s->y - pad, bottom = s->y + (s->reach > s->height ? s->reach : s->height) + pad;
+                int pad = ui_dev(ui, UI_ROW), top = s->y - pad, bottom = s->y + s->height + pad;
 
                 top = top < 0 ? 0 : top;
                 if (ui_kit.damage_bottom <= ui_kit.damage_top)
@@ -6556,7 +6558,7 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
         l->scroll.x = x + w + (ui_dev(ui, UI_PAD) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
         l->scroll.y = y, l->scroll.height = h, l->scroll.view = h;
         l->scroll.content = l->content;
-        l->scroll.bounds = 1, l->scroll.scale = ui->scale, l->scroll.reach = h;
+        l->scroll.bounds = 1, l->scroll.scale = ui->scale;
         ui_scroll_clamp(&l->scroll);
 }
 
@@ -6581,19 +6583,25 @@ static int ui_list_row_y(const struct ui_list address_to l, int at)
         the items keep their places from that edge, their tops and bottoms scaled about it by the stretch, and the item's text
         is set in the middle of the stretched item (the kit's stretch of a label). Every region that scrolls takes it the same.
 */
-static void ui_scroll_span(const struct ui_scroll address_to s, int y, int row, int address_to top, int address_to height)
+// A y in the region's scroll axis as its stretch draws it: scaled about the edge the region is pulled past, by the stretch (the
+// same for its items, its track and its thumb). At rest it is y.
+static int ui_scroll_map(const struct ui_scroll address_to s, int y)
 {
         int edge = 0, pivot, drawn_end;
         b64 scale = UI_ONE + ui_scroll_stretched(s, &edge);
 
-        *top = y, *height = row;
         if (!edge)
-                return;
+                return y;
         // The edge pulled past: the region's top, or where its drawn items end (the view's bottom once it scrolls).
         drawn_end = s->content - s->scroll;
         pivot = edge < 0 ? s->y : s->y + (drawn_end < s->view ? drawn_end : s->view);
-        *top = pivot + (int)ui_qmul(y - pivot, scale);
-        *height = (pivot + (int)ui_qmul(y + row - pivot, scale)) - *top;
+        return pivot + (int)ui_qmul(y - pivot, scale);
+}
+
+static void ui_scroll_span(const struct ui_scroll address_to s, int y, int row, int address_to top, int address_to height)
+{
+        *top = ui_scroll_map(s, y);
+        *height = ui_scroll_map(s, y + row) - *top;
 }
 
 // A row of a list, where it is drawn (ui_scroll_span).

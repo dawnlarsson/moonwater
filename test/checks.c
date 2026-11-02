@@ -126636,7 +126636,9 @@ static fn settings_end_check(void)
                 settings_size(SETTINGS_WIDTH * scale, 300 * scale);
                 expected = settings.list.content - settings.list.scroll.view;
                 rows_ok = rows_ok && expected > 0 && ui_scroll_most(&settings.list.scroll) == expected && settings.list.scroll.content == settings.list.content;
-                clear_ok = clear_ok && settings.height - (settings.list.y + settings.list.scroll.view) == ui_px(&settings.ui, SETTINGS_BOTTOM_PAD) &&
+                ui_scroll_track(&settings.ui, &settings.list.scroll, &track_top, &track_height);
+                clear_ok = clear_ok && settings.height == settings.list.y + settings.list.scroll.view && track_top == settings.list.y &&
+                           track_top + track_height == settings.height &&
                            settings.list.top[last] + ui_dev(&settings.ui, UI_ROW) - expected <= settings.list.scroll.view;
                 x = settings.list.x + settings.list.w / 2, y = settings.list.y + settings.list.scroll.view / 2;
 
@@ -126688,7 +126690,7 @@ static fn settings_end_check(void)
         check("settings list: the rows are the scroll's content, and its maximum is the rows minus the view to the pixel", rows_ok);
         check("settings list: a wheel turned down to the end, the bar paged to it and a finger pulled past it and let go each stop at that maximum",
               wheel_ok && bar_ok && finger_ok);
-        check("settings list: the pad is clear space under the list's view, and the last row ends inside the view at the end", clear_ok);
+        check("settings list: the view runs to the window's bottom edge, its scroll track has the view's ends, and the last row ends inside the view at the end", clear_ok);
 }
 
 static fn settings_wheel_end_check(string_address name, positive gap, int notches)
@@ -132960,6 +132962,48 @@ static fn check_kit_place(void)
                       squashed && kept);
                 check("kit card: a card that fits squashes at its top when pulled, and released it springs back to scale 1 without overshoot",
                       fits_squashed && eased && lowest >= 0);
+        }
+
+        // Every list: its scroll track runs the view's full height with the view's ends (its top at the view's top, its bottom at the
+        // view's bottom), and its content is clipped to the view: drawn scrolled, with a row cut by the view's bottom, nothing below the
+        // view changes, and the rows draw inside it.
+        {
+                static struct ui_list scrolled, fitting;
+                static unsigned int before_draw[600 * 300];
+                int track_top = 0, track_height = 0, changed_inside = 0, changed_below = 0, view_bottom;
+                b32 track_ends = true;
+
+                bounds_list_make(&ui, &scrolled, 40, 120 * ui.scale);
+                bounds_list_make(&ui, &fitting, 2, 120 * ui.scale);
+                for (int k = 0; k < 2; k++)
+                {
+                        struct ui_list address_to l = k ? &fitting : &scrolled;
+
+                        ui_scroll_track(&ui, &l->scroll, &track_top, &track_height);
+                        track_ends = track_ends && track_top == l->y && track_top + track_height == l->y + l->h && l->h == l->scroll.view;
+                }
+                ui_scroll_set(&scrolled.scroll, 20 * ui.scale);
+                for (int at = 0; at < 600 * 300; at++)
+                        pixels[at] = 0x00ff00ffu;
+                memory_copy(before_draw, pixels, sizeof(pixels));
+                ui_list_draw(&ui, &scrolled);
+                view_bottom = scrolled.y + scrolled.h;
+                for (int at = 0; at < 600 * 300; at++)
+                {
+                        int row = at / 600;
+
+                        if (pixels[at] == before_draw[at])
+                                continue;
+                        if (row >= view_bottom)
+                                changed_below++;
+                        else if (row >= scrolled.y)
+                                changed_inside++;
+                }
+                check("kit list: every list's scroll track runs the view's full height, from the view's top to its bottom",
+                      track_ends && view_bottom == scrolled.y + scrolled.h);
+                check("kit list: a list's content is clipped to its view (nothing below the view changes) and its rows draw inside it",
+                      changed_below == 0 && changed_inside > 0);
+                ui.top = 0, ui.bottom = 300;
         }
 
         // A list's bounds (UI_LIST_STRETCH; without it the stretch checks are red). A list that fits does not move: a wheel turn
