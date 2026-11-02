@@ -6232,11 +6232,6 @@ static fn numfmt_record(p8 address_to bytes, positive length)
 
 /* The shared field list is walked once per field spelling, and each -f
    starts a fresh one. */
-static fn numfmt_fields_begin()
-{
-        text_list_reset();
-}
-
 static bool numfmt_hint()
 {
         return string_report(writer_stderr, false, TOOLS_TRY("numfmt"));
@@ -6374,7 +6369,7 @@ static bool numfmt_option_seen(p8 letter, string_address value)
 
                 /* A dash with nothing either side is every field, alone or
                    as one piece of a list. */
-                numfmt_fields_begin();
+                text_list_reset();
                 text_list_dash_all = true;
                 bool parsed = text_list_parse(value);
                 text_list_dash_all = false;
@@ -6515,7 +6510,7 @@ static b32 tools_numfmt()
 
         if (!numfmt.fields_given)
         {
-                numfmt_fields_begin();
+                text_list_reset();
                 text_list_parse((string_address) "1");
         }
 

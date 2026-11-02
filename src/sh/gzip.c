@@ -4945,11 +4945,6 @@ static bool gzip_encode_write(p8 address_to src, positive n)
         return !gzip_writer.failed;
 }
 
-static bool gzip_encode_end(void)
-{
-        return gzip_encode_trailer();
-}
-
 static bipolar gzip_deflate_mem(p8 address_to src, positive src_len,
                                 p8 address_to dst, positive dst_cap, p8 level)
 {

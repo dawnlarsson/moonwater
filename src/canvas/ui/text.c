@@ -3332,16 +3332,6 @@ static fn doc_move(struct doc address_to doc, p64 (address_to step)(const struct
         doc->closer_count = 0;
 }
 
-static p64 doc_step_right(const struct doc address_to doc, p64 at)
-{
-        return doc_cluster_end(doc, at);
-}
-
-static p64 doc_step_left(const struct doc address_to doc, p64 at)
-{
-        return doc_cluster_start(doc, at);
-}
-
 /*
         Left and Right: a caret steps a cluster; without Shift a selection collapses to the end the key points at
         rather than stepping.
@@ -3361,7 +3351,7 @@ static fn doc_move_horizontal(struct doc address_to doc, b32 right, b32 word, b3
                 doc_seal(doc);
                 return;
         }
-        doc_move(doc, word ? (right ? doc_word_right : doc_word_left) : (right ? doc_step_right : doc_step_left), extend);
+        doc_move(doc, word ? (right ? doc_word_right : doc_word_left) : (right ? doc_cluster_end : doc_cluster_start), extend);
 }
 
 // Home: to the line's first text, and from there (or from before it) to the line's start. End: to the line's end.

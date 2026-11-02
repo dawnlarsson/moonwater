@@ -1007,7 +1007,7 @@ typedef struct
 static const tar_codec tar_codecs[] = {
     [TAR_PACK_GZIP] = {6, gzip_decode_begin_prefix, gzip_decode_read,
         gzip_decode_end, gzip_encode_begin, gzip_encode_write,
-        gzip_encode_end, address_of gzip_why},
+        gzip_encode_trailer, address_of gzip_why},
     [TAR_PACK_XZ] = {6, xz_decode_begin_prefix, xz_decode_read,
         xz_decode_end, xz_encode_begin, xz_encode_write,
         xz_encode_end, address_of xz_why},

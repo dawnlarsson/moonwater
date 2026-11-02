@@ -3939,11 +3939,6 @@ static long settings_tick(long timeout, long address_to other)
         return timeout;
 }
 
-static fn settings_ready(void)
-{
-        settings_drain();
-}
-
 // A verb still running when the window closes is stopped.
 static fn settings_close(void)
 {
@@ -3984,7 +3979,7 @@ static struct ui_app settings_app = {
         .moving = settings_moving,
         .size = settings_size,
         .tick = settings_tick,
-        .ready = settings_ready,
+        .ready = settings_drain,
         .close = settings_close,
         .popup = &settings.popup,
         .chose = settings_chose,

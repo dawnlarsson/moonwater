@@ -1924,12 +1924,6 @@ static inline INLINE positive rx_span(const regex_program *program, const rx_nod
 */
 enum { RX_BACK_STAY, RX_BACK_MOVED, RX_BACK_NONE };
 
-static __attribute__((noinline)) positive rx_run_span(const regex_program *program, const rx_node *child,
-                                                       string_address at, positive available)
-{
-        return rx_span(program, child, at, available);
-}
-
 static inline INLINE int rx_back(const rx_match *match, const rx_choice *choice,
                                  positive *position, positive *work, positive work_limit)
 {
@@ -2355,7 +2349,7 @@ static p8 rx_find_walk(rx_match *match, const regex_program *program, p8 mode, b
                 if (hints->shape == 2 && !hints->shape_minimum)
                 {
                         match->slots[0] = at;
-                        match->slots[1] = at + rx_run_span(program, one, bytes + at, length - at);
+                        match->slots[1] = at + rx_span(program, one, bytes + at, length - at);
                         return RX_MATCH;
                 }
                 for (;;)
@@ -2367,7 +2361,7 @@ static p8 rx_find_walk(rx_match *match, const regex_program *program, p8 mode, b
                                         at++;
                         if (at >= length)
                                 return RX_NO_MATCH;
-                        positive taken = hints->shape == 1 ? 1 : rx_run_span(program, one, bytes + at, length - at);
+                        positive taken = hints->shape == 1 ? 1 : rx_span(program, one, bytes + at, length - at);
 
                         if (taken >= (hints->shape == 1 ? 1 : (positive)hints->shape_minimum))
                         {
@@ -2427,7 +2421,7 @@ static p8 rx_find_walk(rx_match *match, const regex_program *program, p8 mode, b
                 */
                 if (follow)
                 {
-                        positive taken = rx_run_span(program, run, bytes + at, length - at);
+                        positive taken = rx_span(program, run, bytes + at, length - at);
 
                         if (taken < (positive)hints->lead_minimum || at + taken >= length ||
                             !rx_single(program, follow, bytes[at + taken]))
@@ -2474,7 +2468,7 @@ static p8 rx_find_walk(rx_match *match, const regex_program *program, p8 mode, b
                         return RX_NO_MATCH;
                 if (run && at < length && rx_single(program, run, bytes[at]))
                 {
-                        positive taken = rx_run_span(program, run, bytes + at, length - at);
+                        positive taken = rx_span(program, run, bytes + at, length - at);
 
                         if (taken > 1)
                                 at += taken - 1;
