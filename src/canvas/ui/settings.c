@@ -4161,7 +4161,8 @@ static b32 settings_map_press(int x, int y)
 
         if (x < settings.map.x || x >= settings.map.x + settings.map.w || y < settings.map.y || y >= settings.map.y + settings.map.h)
                 return false;
-        if (ui_control_hit(&settings.ui, &settings.map.identify, x, y))
+        // ui_control_hit answers 0 for a hit on a button and -1 for a miss, so the test is that it hits, not that it answers.
+        if (ui_control_hit(&settings.ui, &settings.map.identify, x, y) >= 0)
         {
                 settings_change(SETTINGS_JOB_IDENTIFY, "");
                 return true;

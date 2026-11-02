@@ -125117,6 +125117,36 @@ static fn check_display_section(void)
         check("display section: the map's numbers and the dropdown's are the same screens (Screen 2 is DP-2, top right)",
               windows_screen_numbers(&table, number) == 4 && number[2] == 2 && number[1] == 3 && number[3] == 1 && number[0] == 4);
 
+        // A finger on the map, on the bottom left screen (table index 1): the press chooses it and starts its drag, a move
+        // drags it, and no press of the page starts (no row is pressed, and the finger is not the page's), so a drag never
+        // scrolls the list under it. The release is not sent here: it would run a verb.
+        {
+                struct settings_screen grid[WINDOWS_OUTPUTS];
+                unsigned int grid_number[WINDOWS_OUTPUTS] = {0}, grid_count = settings_map_load(grid, grid_number);
+                struct settings_map_view grid_view;
+                struct window_event touch;
+                int tx, ty, tw, th;
+                b32 taken;
+                bipolar child_before;
+
+                settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
+                settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
+                settings_gallery.on = 0, settings.menu.owner = -1, settings.editing = -1, settings.view = false, settings.filter_length = 0;
+                settings.map.display = settings.map.drag = -1;
+
+                // A mouse on the top right screen (table index 2): the same press chooses and takes it, and a press on a screen
+                // is no press of the identify button (which would run the verb, a child process; none is started).
+                settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
+                touch = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
+                settings_event(&touch);
+                child_before = settings.child;
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, SETTINGS_BUTTON_LEFT, 0};
+                taken = settings_event(&touch);
+                check("display section: a mouse's press on a screen of the map chooses it and starts its drag, and runs no verb",
+                      taken && settings.map.display == 2 && settings.map.drag == 2 && settings.child == child_before);
+                settings.map.display = settings.map.drag = -1;
+        }
+
         settings.own.table = saved;
         settings.map.display = -1;
 }
