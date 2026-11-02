@@ -138503,6 +138503,152 @@ static fn terminal_gutter_check(void)
         full_reset();
 }
 
+/*
+        The terminal's paper and default ink are the kit's surface and on-surface roles, light or dark, read off the
+        pixels of a frame: a blank cell's paper, the ink of an underline (a rule is drawn whole, not blended), the fill a
+        block cursor makes of its cell, a reversed blank, and the tint a selected cell takes over its paper. A turn of the
+        theme while the terminal is open repaints it in the new pair with its text and cursor where they were, and the
+        frame is the full draw of the grid in that pair. The program's colours stay the palette's, in both themes.
+*/
+#define THEME_BYTES(text) term_bytes((const p8 address_to)(text), sizeof(text) - 1)
+
+static unsigned int theme_pixel(const p32 address_to buffer, unsigned int row, unsigned int column, unsigned int x, unsigned int y)
+{
+        return buffer[(positive)(terminal.pad_y + row * terminal.cell_h + y) * terminal.pitch + terminal.pad +
+                      column * terminal.cell_w + x] & 0xffffffu;
+}
+
+// The first pixel of a cell that is not its paper: the ink of a rule through a blank cell, which is drawn in the ink whole.
+static unsigned int theme_rule(const p32 address_to buffer, unsigned int row, unsigned int column, unsigned int paper)
+{
+        for (unsigned int y = 0; y < terminal.cell_h; y++)
+                for (unsigned int x = 0; x < terminal.cell_w; x++)
+                        if (theme_pixel(buffer, row, column, x, y) != paper)
+                                return theme_pixel(buffer, row, column, x, y);
+        return paper;
+}
+
+// What the terminal answers to OSC 10 (ink) and OSC 11 (paper) with, as the BEL-ended reply.
+static b32 theme_answers(string_address question, string_address answer)
+{
+        positive length = string_length(answer);
+
+        to_shell_length = 0;
+        term_bytes((const p8 address_to)question, string_length(question));
+        return to_shell_length == length && !memory_compare(to_shell, answer, length);
+}
+
+static void terminal_theme_check(void)
+{
+        static struct window_cell before[80 * 8], after[80 * 8];
+        static p32 address_to reference;
+        const unsigned int light_paper = ui_theme_dawning.role[UI_SURFACE] & 0xffffffu;
+        const unsigned int light_ink = ui_theme_dawning.role[UI_ON_SURFACE] & 0xffffffu;
+        const unsigned int dark_paper = ui_theme_night.role[UI_SURFACE] & 0xffffffu;
+        const unsigned int dark_ink = ui_theme_night.role[UI_ON_SURFACE] & 0xffffffu;
+        static const unsigned int sixteen[16] = {0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+                                                 0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff};
+        p32 address_to buffer;
+        unsigned int first, column, paper, ink, selected, mismatch = 0, palette = 0;
+
+        if (!reference)
+                reference = render_map((positive)terminal.pitch * terminal.height * 4);
+        cursor_hide();
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 1);
+        full_reset();
+        THEME_BYTES("\x1b[1;1H\x1b[4m \x1b[0m");          // row 0, column 0: an underlined blank
+        THEME_BYTES("\x1b[1;2H\x1b[7m \x1b[0m");          // row 0, column 1: a reversed blank
+        THEME_BYTES("\x1b[1;3H\x1b[44m \x1b[0m");         // row 0, column 2: blue paper the program asked for
+        THEME_BYTES("\x1b[1;4H\x1b[40m \x1b[0m");         // row 0, column 3: black paper the program asked for
+        THEME_BYTES("\x1b[1;5H\x1b[37m\x1b[4m \x1b[0m");  // row 0, column 4: grey ink the program asked for, underlined
+        THEME_BYTES("\x1b[7;1Habc");                      // row 6: text, which a turn must keep
+        THEME_BYTES("\x1b[5;1H");                         // row 4, column 0: the block cursor
+        cursor_show();
+        terminal.view = TERMINAL_LIVE;
+        terminal_place_at(6, 4, &first, &column);
+        terminal.selecting = true;
+        terminal.select_box = false;
+        terminal.select_anchor_line = first, terminal.select_anchor_column = 4;
+        terminal.select_active_line = first, terminal.select_active_column = 6;
+
+        buffer = render_frame();
+        terminal_build(before);
+        paper = theme_pixel(buffer, 2, 0, 1, 1);
+        ink = theme_rule(buffer, 0, 0, paper);
+        check("terminal theme light: the paper is the kit's light surface", paper == light_paper);
+        check("terminal theme light: the default ink is the kit's light on-surface ink", ink == light_ink);
+        check("terminal theme light: the default ink reads on the paper at 4.70:1 or more", ui_contrast(ink, paper) >= UI_READABLE);
+        check("terminal theme light: a reversed blank is the ink", theme_pixel(buffer, 0, 1, 1, 1) == light_ink);
+        check("terminal theme light: the cursor's block is the ink", theme_pixel(buffer, 4, 0, 1, 1) == light_ink);
+        check("terminal theme light: the program's blue paper is the palette's", theme_pixel(buffer, 0, 2, 1, 1) == window_cell_colour(4));
+        check("terminal theme light: the program's black paper is black, not the paper",
+              theme_pixel(buffer, 0, 3, 1, 1) == window_cell_colour(0));
+        check("terminal theme light: the program's grey ink is the palette's", theme_rule(buffer, 0, 4, paper) == window_cell_colour(7));
+        selected = theme_pixel(buffer, 6, 5, 1, 1);
+        check("terminal theme light: a selected cell is tinted over the paper", selected != paper);
+        check("terminal theme light: the default ink reads on the selection at 4.70:1 or more",
+              ui_contrast(ink, selected) >= UI_READABLE);
+        check("terminal theme light: the kit's lit scroll bar reads on the paper at 4.70:1 or more",
+              ui_contrast(ui_role(UI_ON_SURFACE) & 0xffffffu, paper) >= UI_READABLE);
+        check("terminal theme light: the OSC 11 question is answered with the paper",
+              theme_answers("\x1b]11;?\x07", "\x1b]11;rgb:f7f7/f7f7/f8f8\x07"));
+        check("terminal theme light: the OSC 10 question is answered with the ink",
+              theme_answers("\x1b]10;?\x1b\\", "\x1b]10;rgb:1818/1818/1b1b\x1b\\"));
+        for (unsigned int at = 0; at < 16; at++)
+                palette += terminal_colour[at] == sixteen[at];
+        check("terminal theme: the sixteen colours are the palette's", palette == 16);
+        string_format(log, "  light: paper %p ink %p ratio %p hundredths, selection %p, scroll bar %p\n", paper, ink,
+                      ui_contrast(ink, paper), ui_contrast(ink, selected),
+                      ui_contrast(ui_role(UI_ON_SURFACE) & 0xffffffu, paper));
+
+        // The theme turns to the dark pair while the terminal is open: its text and cursor do not move.
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_DAWN, 1);
+        buffer = render_frame();
+        terminal_build(after);
+        check("terminal theme dark: a turn keeps the text, the cursor and the selection", !memory_compare(before, after, sizeof(before)));
+        paper = theme_pixel(buffer, 2, 0, 1, 1);
+        ink = theme_rule(buffer, 0, 0, paper);
+        check("terminal theme dark: the paper is the kit's dark surface", paper == dark_paper);
+        check("terminal theme dark: the default ink is the kit's dark on-surface ink", ink == dark_ink);
+        check("terminal theme dark: the default ink reads on the paper at 4.70:1 or more", ui_contrast(ink, paper) >= UI_READABLE);
+        check("terminal theme dark: a reversed blank is the ink", theme_pixel(buffer, 0, 1, 1, 1) == dark_ink);
+        check("terminal theme dark: the cursor's block is the ink", theme_pixel(buffer, 4, 0, 1, 1) == dark_ink);
+        check("terminal theme dark: the program's blue and black paper are the palette's",
+              theme_pixel(buffer, 0, 2, 1, 1) == window_cell_colour(4) && theme_pixel(buffer, 0, 3, 1, 1) == window_cell_colour(0));
+        check("terminal theme dark: the program's grey ink is the palette's", theme_rule(buffer, 0, 4, paper) == window_cell_colour(7));
+        selected = theme_pixel(buffer, 6, 5, 1, 1);
+        check("terminal theme dark: a selected cell is tinted over the paper", selected != paper);
+        check("terminal theme dark: the default ink reads on the selection at 4.70:1 or more", ui_contrast(ink, selected) >= UI_READABLE);
+        check("terminal theme dark: the kit's lit scroll bar reads on the paper at 4.70:1 or more",
+              ui_contrast(ui_role(UI_ON_SURFACE) & 0xffffffu, paper) >= UI_READABLE);
+        check("terminal theme dark: the OSC 11 question is answered with the paper",
+              theme_answers("\x1b]11;?\x07", "\x1b]11;rgb:1111/1111/1313\x07"));
+        check("terminal theme dark: the OSC 10 question is answered with the ink",
+              theme_answers("\x1b]10;?\x1b\\", "\x1b]10;rgb:eded/eded/efef\x1b\\"));
+        string_format(log, "  dark: paper %p ink %p ratio %p hundredths, selection %p, scroll bar %p\n", paper, ink,
+                      ui_contrast(ink, paper), ui_contrast(ink, selected),
+                      ui_contrast(ui_role(UI_ON_SURFACE) & 0xffffffu, paper));
+
+        // The whole picture after the turn is the full draw of the grid in the dark pair.
+        if (reference)
+        {
+                render_reference(reference, terminal.frame[terminal.shown]);
+                for (unsigned int y = 0; y < terminal.height; y++)
+                        for (unsigned int x = 0; x < terminal.width; x++)
+                                mismatch += buffer[(positive)y * terminal.pitch + x] != reference[(positive)y * terminal.pitch + x];
+        }
+        check("terminal theme dark: the repainted frame is the full draw of the grid", reference && !mismatch);
+
+        ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 1);
+        buffer = render_frame();
+        check("terminal theme light again: the paper turns back", theme_pixel(buffer, 2, 0, 1, 1) == light_paper);
+
+        cursor_hide();
+        terminal.selecting = false;
+        full_reset();
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
+}
+
 b32 main()
 {
         string_address paths[1];
@@ -138773,25 +138919,8 @@ b32 main()
         check_kit_defaults(&terminal.ui);
 #endif
 
-        // What the terminal says its paper and ink are is what it paints them with.
-        {
-                static const char paper[] = "\x1b]11;rgb:1010/2020/3030\x07", ink[] = "\x1b]10;rgb:c0c0/d0d0/e0e0\x1b\\";
-                unsigned int was_paper = terminal_colour[0], was_ink = terminal_colour[7];
-
-                terminal_colour[0] = 0x102030;
-                terminal_colour[7] = 0xc0d0e0;
-                to_shell_length = 0;
-                term_bytes((const p8 address_to)"\x1b]11;?\x07", 7);
-                check("osc: the paper is asked and answered from the table it is painted from",
-                      to_shell_length == sizeof(paper) - 1 && !memory_compare(to_shell, paper, sizeof(paper) - 1));
-                to_shell_length = 0;
-                term_bytes((const p8 address_to)"\x1b]10;?\x1b\\", 8);
-                check("osc: and the ink",
-                      to_shell_length == sizeof(ink) - 1 && !memory_compare(to_shell, ink, sizeof(ink) - 1));
-                to_shell_length = 0;
-                terminal_colour[0] = was_paper;
-                terminal_colour[7] = was_ink;
-        }
+        // What the terminal says its paper and ink are is what it paints them with: the theme's pair, and the palette's.
+        terminal_theme_check();
         check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
         check("frames: some were drawn", compared > 1000);
         check("frames: the screen and the buffer are always the full draw", !wrong);
