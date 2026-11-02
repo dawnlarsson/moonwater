@@ -24703,6 +24703,8 @@ static string_address host_wipe_keep[128] = {
     //  The text size every terminal follows, which is the module's own
     //  (TERMINAL_SIZE_DIR in src/canvas/ui/terminal.c) and so named here.
     "terminal",
+    //  The text fields' and text areas' keymap (ui.c's UI_TEXT_KEYS_PATH), which the text widgets keep.
+    "canvas.text.keys",
     null,
 };
 
