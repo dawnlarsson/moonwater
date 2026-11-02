@@ -30,7 +30,7 @@
 #define EDITOR_READ_MOST (64u << 20)
 #define EDITOR_PATH 512
 #define EDITOR_BAR UI_PAGE_FOOT // the status bar: the kit's status line band, logical pixels
-#define EDITOR_FIND (UI_SEARCH_H + 2 * UI_GAP1) // the find bar: the kit's search field, a gap of UI_GAP1 above and below
+#define EDITOR_FIND (UI_FIELD_H + 2 * UI_GAP1) // the find bar: the kit's field (UI_FIELD_H), a gap of UI_GAP1 above and below
 #define EDITOR_TAB_STRIP 32 // the file tabs' strip: a kit segmented tab's height (ui_tabs_draw in ui.c)
 #define EDITOR_QUERY 1024 // the bytes of what the find bar holds
 
@@ -56,13 +56,13 @@ static struct
         int width, height, shown, pointer_x, pointer_y;
         // The find bar: its field, what it does (0 closed, 1 find, 2 replace, 3 go to a line), and its flags.
         struct ui_text find;
-        struct ui_control find_control;
+        struct ui_control find_control, strip; // the find bar's field; the file tabs, the kit's segmented tabs
         int finding;
         p32 find_flags;
         struct doc_find search;
         char status[160];
         struct ui_popup menu;
-        p32 armed;   // the command that asked once (Ctrl+W of a file with changes, Ctrl+S of one changed on disk): asked again, it is done
+        struct ui_confirm confirm; // the kit's press again to confirm: Ctrl+W of a file with changes, Ctrl+S of one changed on disk
         b32 leaving; // the window may go: asked to, and nothing in it unsaved
 } editor = {.shown = -1};
 
@@ -296,13 +296,20 @@ static fn editor_close_tab(void)
 */
 static fn editor_close_tab_asked(void)
 {
-        if (doc_dirty(&editor_now()->view.doc) && editor.armed != DOC_CMD_CLOSE)
+        char line[UI_CONFIRM_TEXT];
+
+        if (!doc_dirty(&editor_now()->view.doc))
         {
-                editor.armed = DOC_CMD_CLOSE;
-                string_copy_bounded((string_address)editor.status, (string_address) "unsaved changes: Ctrl+S saves them, Ctrl+W again closes without saving", sizeof(editor.status));
+                ui_confirm_drop(&editor.confirm);
+                editor_close_tab();
                 return;
         }
-        editor.armed = 0;
+        if (!ui_confirm_ask(&editor.confirm, DOC_CMD_CLOSE, ""))
+        {
+                ui_confirm_line(line, sizeof(line), "closes the unsaved changes");
+                string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
+                return;
+        }
         editor_close_tab();
 }
 
@@ -313,18 +320,21 @@ static fn editor_close_tab_asked(void)
 static fn editor_save_asked(void)
 {
         struct editor_tab address_to tab = editor_now();
+        char line[UI_CONFIRM_TEXT];
 
         // A file with no write bit is asked for the same way: the rename that saves would replace it without a word.
-        if ((tab->changed_on_disk || !(tab->mode & 0222)) && editor.armed != DOC_CMD_SAVE)
+        if (!tab->changed_on_disk && (tab->mode & 0222))
         {
-                editor.armed = DOC_CMD_SAVE;
-                string_copy_bounded((string_address)editor.status,
-                                    tab->changed_on_disk ? (string_address) "changed on disk: Ctrl+S again writes over it, Ctrl+R reads it again"
-                                                         : (string_address) "read-only: Ctrl+S again writes over it",
-                                    sizeof(editor.status));
+                ui_confirm_drop(&editor.confirm);
+                editor_save(tab);
                 return;
         }
-        editor.armed = 0;
+        if (!ui_confirm_ask(&editor.confirm, DOC_CMD_SAVE, ""))
+        {
+                ui_confirm_line(line, sizeof(line), tab->changed_on_disk ? "writes over the change on disk (Ctrl+R reads it again)" : "writes over a read-only file");
+                string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
+                return;
+        }
         editor_save(tab);
 }
 
@@ -474,6 +484,75 @@ static fn editor_chose(int id)
 
 /* ---- the window ---- */
 
+/*
+        The file tabs: the kit's segmented tabs, one item a file's name (untitled for none), the file shown chosen; a dot
+        after a name that has changes. The strip is the top band of the window, EDITOR_TAB_STRIP high.
+*/
+static fn editor_tabs_layout(struct ui address_to ui)
+{
+        struct ui_control address_to c = &editor.strip;
+
+        if (c->kind != UI_TABS)
+                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
+        c->x = 0, c->y = 0, c->w = editor.width / ui->scale, c->h = EDITOR_TAB_STRIP;
+        c->count = editor.count;
+        for (int at = 0; at < editor.count; at++)
+        {
+                const char address_to name = editor.tabs[at].path;
+
+                for (const char address_to s = editor.tabs[at].path; *s; s++)
+                        if (*s == '/')
+                                name = s + 1;
+                c->items[at] = name[0] ? name : "untitled";
+        }
+        c->at = editor.tab;
+}
+
+// The file shown is at is: the keys and the mouse choose a tab alike.
+static fn editor_show_tab(int at)
+{
+        editor.tab = at;
+        editor_now()->view.focused = editor.focused && !editor.find.focused;
+        editor.dirty = true;
+}
+
+static fn editor_tabs_draw(struct ui address_to ui, int height)
+{
+        struct ui_control address_to c = &editor.strip;
+
+        editor_tabs_layout(ui);
+        ui_control_draw(ui, c);
+        // The dot is 6 px, as the kit badge's (ui_badge_draw draws its dot at 6 px, and the kit names no constant for it).
+        for (int at = 0; at < editor.count; at++)
+                if (doc_dirty(&editor.tabs[at].view.doc))
+                        ui_round(ui, ui_dev(ui, ui_tab_left(ui, c, at) + ui_tab_width(ui, c, at)) - ui_px(ui, 12), height / 2 - ui_px(ui, 3),
+                                 ui_px(ui, 6), ui_px(ui, 6), ui_px(ui, 3), ui_role(UI_ON_SURFACE) | 0xff000000u);
+}
+
+/*
+        The file tabs take the mouse as the kit's tabs do: a press on one shows it pressed, and its release on the same tab
+        chooses it; a press released elsewhere chooses nothing. Only a press in the strip, and the release of one, are the
+        strip's; a motion over it moves its hover. Answers true when the event was the strip's.
+*/
+static b32 editor_tabs_event(const struct window_event address_to event)
+{
+        struct ui_control address_to strip = &editor.strip;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && editor.pointer_y >= 0 && editor.pointer_y < ui_px(&editor.ui, EDITOR_TAB_STRIP);
+        int x = event->type == WINDOW_EVENT_MOTION ? event->a : editor.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? event->b : editor.pointer_y;
+
+        if (event->type == WINDOW_EVENT_BUTTON && event->a != 0x110)
+                return false;
+        if (event->type == WINDOW_EVENT_BUTTON && (down ? !band : !strip->down))
+                return false;
+        if (event->type == WINDOW_EVENT_MOTION && !band && !strip->hover)
+                return false;
+        editor_tabs_layout(&editor.ui);
+        if (ui_kit_pointer(&editor.ui, strip, 1, event->type, x, y, down, event->flags) && strip->at != editor.tab)
+                editor_show_tab(strip->at);
+        editor.dirty = true;
+        return event->type == WINDOW_EVENT_BUTTON;
+}
+
 static fn editor_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &editor.ui;
@@ -483,33 +562,15 @@ static fn editor_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, editor.own.stride, editor.width, editor.height);
         ui_fill(ui, 0, 0, editor.width, editor.height, ui_role_surface());
-        // The tabs: each file's name, the one shown lit, a dot after a name that has changes. A name sits a kit inset in from its tab's sides.
-        for (int at = 0, x = ui_px(ui, UI_GAP2); at < editor.count && tabs; at++)
-        {
-                const char address_to name = editor.tabs[at].path;
-                int wide;
-
-                for (const char address_to c = editor.tabs[at].path; *c; c++)
-                        if (*c == '/')
-                                name = c + 1;
-                wide = ui_kit_measure(ui, (string_address)(name[0] ? name : "untitled"), UI_BODY_MEDIUM) + ui_px(ui, 2 * UI_INSET);
-                if (at == editor.tab)
-                        ui_fill(ui, x, 0, wide, tabs, ui_role(UI_SURFACE_HIGH) | 0xff000000u);
-                ui_kit_text(ui, x + ui_px(ui, UI_INSET), ui_kit_baseline(ui, (tabs - ui_px(ui, UI_LINE)) / 2, UI_BODY_MEDIUM), (string_address)(name[0] ? name : "untitled"),
-                            UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE), 0);
-                // The dot is 6 px, as the kit badge's (ui_badge_draw draws its dot at 6 px, and the kit names no constant for it).
-                if (doc_dirty(&editor.tabs[at].view.doc))
-                        ui_round(ui, x + wide - ui_px(ui, 12), tabs / 2 - ui_px(ui, 3), ui_px(ui, 6), ui_px(ui, 6), ui_px(ui, 3),
-                                 ui_role(UI_ON_SURFACE) | 0xff000000u);
-                x += wide;
-        }
+        if (tabs)
+                editor_tabs_draw(ui, tabs);
         if (find)
         {
                 struct ui_control address_to c = &editor.find_control;
                 static const char address_to const hints[4] = {"", "Find", "Find/Replace with", "Line"};
 
                 c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
-                c->x = UI_GAP2, c->y = (tabs + ui_px(ui, UI_GAP1)) / ui->scale, c->w = editor.width / ui->scale - 2 * UI_GAP2, c->h = UI_SEARCH_H;
+                c->x = UI_GAP2, c->y = (tabs + ui_px(ui, UI_GAP1)) / ui->scale, c->w = editor.width / ui->scale - 2 * UI_GAP2, c->h = UI_FIELD_H;
                 c->items[0] = hints[editor.finding];
                 c->focused = editor.find.focused;
                 c->edit = &editor.find;
@@ -607,11 +668,13 @@ static b32 editor_event(const struct window_event address_to event)
         p32 asks;
 
         // A key or a press other than the one that asked is a change of mind: the next such key asks again.
-        if (editor.armed && (event->flags & WINDOW_KEY_DOWN) &&
-            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && editor_key_command(event) != editor.armed)))
-                editor.armed = 0;
+        if ((event->flags & WINDOW_KEY_DOWN) &&
+            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && editor_key_command(event) != editor.confirm.what)))
+                ui_confirm_drop(&editor.confirm);
         if (event->type == WINDOW_EVENT_MOTION)
                 editor.pointer_x = event->a, editor.pointer_y = event->b;
+        if (editor_tabs_event(event))
+                return true;
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && (event->flags & WINDOW_KEY_CONTROL) &&
             ((p32)event->b | 0x60) == 'r' && tab->changed_on_disk)
         {
@@ -631,6 +694,9 @@ static b32 editor_event(const struct window_event address_to event)
                 if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                         editor.find.focused = ui_text_inside(&editor.find, editor.pointer_x, editor.pointer_y);
                 asks = ui_field_event(&editor.ui, &editor.find, &editor.menu, event, editor.pointer_x, editor.pointer_y);
+                // A press outside the find bar is the view's: the bar's answer to it (commit or cancel) changes nothing here.
+                if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
+                        asks = 0;
                 if (asks & UI_TEXT_REFUSED)
                         string_copy_bounded((string_address)editor.status, (string_address)editor.find.refused, sizeof(editor.status));
                 if (asks & UI_TEXT_SUBMIT)
