@@ -1,11 +1,6 @@
 # Production-function inventory seal; not a proof of review coverage or correctness.
-<<<<<<< HEAD
-sha256 b7a299f5a897bcfe2a21070532a979f99b57667a6155d31007d4c40cf8ec87a4
+sha256 7181234ce642759c098b890b404afa8133d535d6044d85b9d5123e457deb0d03
 c_functions 10446
-=======
-sha256 54b37ea32330a89aeb16f9895c942041b5bd8e95dbe06b32c5aaf8b892231ec0
-c_functions 10444
->>>>>>> 783906d8 (ui kit: glass is for temporary overlays only (a launcher, a prompt, a notification); a window that stays is the kit's opaque surface, documented where the kit says what glass is)
 library_asm 432
 library_arch_bodies 1276
 library_aliases 98
