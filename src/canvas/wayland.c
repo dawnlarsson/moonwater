@@ -2761,6 +2761,23 @@ static long wire_surface_of_slot(const struct wayland_client *c, long slot)
 }
 
 /*
+        The xdg_toplevel object whose surface holds the slot, or -1 when the
+        slot has no toplevel object on this client.
+*/
+static long wire_toplevel_of_slot(const struct wayland_client *c, long slot)
+{
+        for (long i = 0; i < WAYLAND_OBJECTS; i++)
+                if (c->objects[i].type == W_XDG_TOPLEVEL)
+                {
+                        long surface = wire_of_type(c, c->objects[i].surface, W_SURFACE);
+
+                        if (surface >= 0 && c->objects[surface].slot == slot)
+                                return i;
+                }
+        return -1;
+}
+
+/*
         Enter or leave for a surface, to each pointer and keyboard of the
         client. An enter names the pointer's place as zero, which the motion
         that follows corrects; a keyboard enter names no keys held.
@@ -3056,9 +3073,32 @@ int wayland_window_activate(long client, long surface)
         return shell_window_activate(&wayland.side, client, surface);
 }
 
+/*
+        Canvas closes a window. The sink closes it, and the client hears of it
+        as xdg_toplevel.close, the event it destroys its toplevel on. The room
+        for that event is checked before the window is touched, so a refusal
+        for lack of room changes nothing.
+*/
 int wayland_window_close(long client, long surface)
 {
-        return shell_window_close(&wayland.side, client, surface);
+        struct wayland_client *c;
+        struct wire_out w;
+        long index;
+        int status;
+
+        if (!shell_window(&wayland.side, client, surface))
+                return SHELL_EINVAL;
+        c = &wayland.clients[client];
+        index = wire_toplevel_of_slot(c, surface);
+        if (index >= 0 && c->out_length + WAYLAND_REPLY > WAYLAND_OUT_MAX)
+                return SHELL_ENOSPC;
+        status = shell_window_close(&wayland.side, client, surface);
+        if (status >= 0 && index >= 0)
+        {
+                event_begin(&w, c->objects[index].id, 1);
+                event_send(c, &w);
+        }
+        return status;
 }
 
 int wayland_window_title(long client, long surface, const char *text, long length)

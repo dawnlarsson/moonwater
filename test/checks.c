@@ -143788,6 +143788,8 @@ static void wire_teardown_checks(void)
         closed = wire_seen.closed;
         WIRE_CHECK(wayland_window_close(client, wayland.clients[client].objects[wire_object_index(&wayland.clients[client], 10)].slot) == 0);
         WIRE_CHECK(wire_seen.closed == closed + 1);
+        WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
+        WIRE_CHECK(objects[0] == 12 && ops[0] == 1);
         wb_begin(&m, 12, 0);
         WIRE_CHECK(wire_feed_build(client, &m) == 0);
         WIRE_CHECK(wire_seen.closed == closed + 1);
