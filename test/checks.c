@@ -132316,6 +132316,66 @@ static fn check_kit_place(void)
 #endif
         }
 
+        // A held thumb dragged past the end of a list that scrolls stretches it from that edge, as a finger's pull does, one for one
+        // with the hand: the list's scroll stays at its end while it is held, and the release springs the stretch back to scale 1
+        // without overshoot. Each frame is drawn as the kit's loop draws it (UI_LIST_STRETCH; without it these checks are red).
+        {
+                static struct ui_list held;
+                static struct ui_page page;
+                int top = 0, length = 0, frame, most, x, y, edge = 0;
+                b32 stretched = false, kept = true, eased = true, lowest_ok = true;
+                b64 stretch = 0, last = 0, lowest = 0;
+
+                ui_kit.now = 9000000000ll, ui_kit.busy = 0;
+                bounds_list_make(&ui, &held, 40, 300 * ui.scale);
+                most = ui_scroll_most(&held.scroll);
+                ui_scroll_set(&held.scroll, most);
+                ui_scroll_thumb(&ui, &held.scroll, &top, &length);
+                x = held.scroll.x + UI_SCROLL_WIDTH * ui.scale / 2;
+                y = top + length / 2;
+                memory_zero(&page, sizeof(page));
+                page.body = &held.scroll;
+                page.pointer_x = x, page.pointer_y = y;
+                ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, true);
+                page.pointer_y = y + 60 * ui.scale;
+                ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
+#ifdef UI_LIST_STRETCH
+                stretched = ui_scroll_stretched(&held.scroll, &edge) > 0 && edge > 0;
+#endif
+                for (frame = 0; frame < 20; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &held.scroll);
+                        kept = kept && held.scroll.scroll == most;
+                }
+                page.pointer_y = y + 90 * ui.scale;
+                ui_page_bars(&ui, &page, WINDOW_EVENT_MOTION, true);
+                kept = kept && held.scroll.scroll == most;
+                ui_page_bars(&ui, &page, WINDOW_EVENT_BUTTON, false);
+#ifdef UI_LIST_STRETCH
+                stretch = last = ui_scroll_stretched(&held.scroll, &edge);
+                for (frame = 0; frame < 240 && (held.scroll.gliding || held.scroll.back.live); frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &held.scroll);
+                        stretch = ui_scroll_stretched(&held.scroll, &edge);
+                        eased = eased && stretch <= last;
+                        lowest = stretch < lowest ? stretch : lowest;
+                        last = stretch;
+                        kept = kept && held.scroll.scroll == most;
+                }
+                lowest_ok = lowest >= 0;
+                eased = eased && stretch == 0 && !held.scroll.back.live && held.scroll.scroll == most && !held.scroll.dragging;
+#else
+                eased = false;
+                lowest_ok = false;
+#endif
+                check("kit list: a held thumb dragged past the end of a list stretches it from that edge, and the list keeps its end",
+                      stretched && kept);
+                check("kit list: released, the thumb's stretch springs back to scale 1 without overshoot, and the list stays at its end",
+                      eased && lowest_ok);
+        }
+
         // Tabs stood on end: the pip starts on the chosen item, slides along y to another over .35s with the items it
         // passes stretched (and only those), rests on it, and a point hits the item it is on.
         {

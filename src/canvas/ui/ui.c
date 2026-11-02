@@ -5063,6 +5063,8 @@ static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll
         the thumb within UI_TARGET likewise. Answers the scroll it asks for, or -1 when the event was not its own
         (a press off it, a motion with nothing held); a press on it that pages answers the new scroll.
 */
+static void ui_scroll_show(struct ui_scroll address_to s);
+
 static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down, b32 touch)
 {
         int top, length, at, track, rest = s->content - s->view;
@@ -5078,6 +5080,19 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                         return -1;
                 if (track - length <= 0)
                         return s->scroll;
+                // A bounded region's thumb dragged past an end stretches it from that edge, one for one with the hand, as a finger's
+                // pull does: the scroll stays at the end and the stretch is held until the release (ui_page_bars lets it go).
+                if (s->bounds && (y - s->grab < at || y - s->grab > at + track - length))
+                {
+                        int thumb = y - s->grab;
+                        b64 pull = thumb > at ? thumb - (at + track - length) : thumb - at;
+
+                        s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0, s->flung = 0;
+                        s->at = thumb > at ? ((b64)rest + pull) * 256 : pull * 256; // 256ths of a device pixel
+                        ui_scroll_show(s);
+                        return s->scroll;
+                }
+                s->dragging = 0; // back within the track: the drag is the scroll's again
                 return (int)((b64)(y - s->grab - at) * rest / (track - length));
         }
         if (type != WINDOW_EVENT_BUTTON)
@@ -7206,8 +7221,12 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                 if (scroll >= 0)
                 {
                         taken = true;
-                        ui_scroll_set(bars[k], scroll);
+                        // A thumb stretching its region past an end keeps the stretch; its release lets it go, as a finger's does.
+                        if (!bars[k]->dragging)
+                                ui_scroll_set(bars[k], scroll);
                 }
+                if (type == WINDOW_EVENT_BUTTON && !down && bars[k]->dragging)
+                        ui_scroll_let_go(bars[k], 0, 0);
                 if (scroll >= 0 || lit != bars[k]->hover)
                         ui_page_moved(ui, p, bars[k]);
         }
