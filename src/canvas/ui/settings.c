@@ -4276,6 +4276,31 @@ static int settings_press_target(int x, int y)
 
 static fn settings_press_at(void);
 
+// What a press on target shows pressed as it goes down, for a mouse and a finger alike: a row's state layer, a group's ripple.
+static fn settings_press_show(int target, int x, int y)
+{
+        if (target < 0)
+                return;
+        if (target < SETTINGS_PRESS_GROUP)
+                settings.list.down = target;
+        else if (target < SETTINGS_PRESS_CARD)
+                ui_page_column_press(&settings.ui, &settings.page, target - SETTINGS_PRESS_GROUP, x, y);
+}
+
+// A press done where it went down (a mouse's, or a finger's that did not move off it): the press runs at the point it went down
+// and the list lets go; the pointer is put back where the release was, and a finger's press is the touch one.
+static fn settings_press_done(int press_x, int press_y, int x, int y, b32 touch)
+{
+        settings.page.pointer_x = press_x, settings.page.pointer_y = press_y;
+        settings.touching = touch;
+        settings_press_at();
+        settings.touching = false;
+        // The target was pressed again to be done: let it go now, the release has come.
+        ui_list_let_go(&settings.ui, &settings.list);
+        ui_kit_ripples_exit(&settings.page.column);
+        settings.page.pointer_x = x, settings.page.pointer_y = y;
+}
+
 /*
         A mouse's press on a row, a group or the card is begun here and done on its release,
         where it went down, as a finger's is: what it is on shows pressed (a row's state layer, a group's ripple), a slide
@@ -4289,10 +4314,7 @@ static b32 settings_press_begin(void)
         if (target < 0)
                 return false;
         ui_press_begin(&settings.press, x, y, target, false);
-        if (target < SETTINGS_PRESS_GROUP)
-                settings.list.down = target;
-        else if (target < SETTINGS_PRESS_CARD)
-                ui_page_column_press(&settings.ui, &settings.page, target - SETTINGS_PRESS_GROUP, x, y);
+        settings_press_show(target, x, y);
         settings_dirty();
         return true;
 }
@@ -4314,12 +4336,7 @@ static fn settings_press_up(void)
         settings_dirty();
         if (clicked < 0 || clicked != settings_press_target(x, y))
                 return;
-        settings.page.pointer_x = settings.press.x, settings.page.pointer_y = settings.press.y;
-        settings_press_at();
-        // The row was pressed again to be done (as a finger's press is): let it go now, the release has come.
-        ui_list_let_go(&settings.ui, &settings.list);
-        ui_kit_ripples_exit(&settings.page.column);
-        settings.page.pointer_x = x, settings.page.pointer_y = y;
+        settings_press_done(settings.press.x, settings.press.y, x, y, false);
 }
 
 /*
@@ -4350,16 +4367,12 @@ static fn settings_finger(const struct window_event address_to event)
                 int target = settings_press_target(x, y);
 
                 ui_finger_down(&settings.finger, x, y, target, ui_page_region(&settings.ui, &settings.page, x, y));
-                // What it is on shows pressed at once: a row, or a group's ripple (a choice of the popup is the kit's own).
-                if (target >= 0 && target < SETTINGS_PRESS_GROUP)
-                        settings.list.down = target;
-                else if (target >= SETTINGS_PRESS_GROUP && target < SETTINGS_PRESS_CARD)
-                        ui_page_column_press(&settings.ui, &settings.page, target - SETTINGS_PRESS_GROUP, x, y);
+                settings_press_show(target, x, y);
                 settings_dirty();
                 return;
         }
         {
-                int clicked;
+                int clicked, release_x = x, release_y = y;
 
                 x = settings.finger.press.x, y = settings.finger.press.y;
                 clicked = ui_finger_up(&settings.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
@@ -4367,14 +4380,7 @@ static fn settings_finger(const struct window_event address_to event)
                 settings_dirty();
                 // Done where it went down, as a mouse's press is: the target it was shown on is what is under that point.
                 if (clicked >= 0 && clicked == settings_press_target(x, y))
-                {
-                        settings.page.pointer_x = x, settings.page.pointer_y = y;
-                        settings.touching = true;
-                        settings_press_at();
-                        settings.touching = false;
-                        ui_list_let_go(&settings.ui, &settings.list);
-                        ui_kit_ripples_exit(&settings.page.column);
-                }
+                        settings_press_done(x, y, release_x, release_y, true);
         }
 }
 

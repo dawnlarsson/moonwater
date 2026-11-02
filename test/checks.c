@@ -126170,6 +126170,12 @@ static fn check_settings(string_address regular, string_address bold)
                                       settings.choice < 0 && settings.queued == 1 &&
                                           string_equals((string_address)settings.queue[0].value, (string_address) "se"));
                                 settings.queued = 0;
+                                // What a press lands on shows pressed for a mouse and a finger alike (settings_press_show): a row by its
+                                // number, and a press on no row shows none.
+                                settings_press_show(3, 0, 0);
+                                check("settings: a press that lands on a row shows that row pressed, and one on nothing shows none",
+                                      settings.list.down == 3 && (settings_press_show(-1, 0, 0), settings.list.down == 3));
+                                settings.list.down = -1;
 
                                 settings.height = 220;
                                 settings_refilter();
