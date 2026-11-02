@@ -142356,6 +142356,12 @@ static int hook_query(void *context, int row, struct shell_facts *facts)
         return hook_answer(context, row);
 }
 
+static void hook_release(void *context, long fd)
+{
+        (void)context;
+        (void)fd;
+}
+
 static int hook_picture(void *context, int row, long fd, long offset, long width, long height, long stride)
 {
         (void)fd;
@@ -142384,6 +142390,7 @@ static const struct shell_sink hook_sink = {
         .layer = hook_layer,
         .query = hook_query,
         .picture = hook_picture,
+        .release = hook_release,
 };
 
 static unsigned int hook_checks, hook_failures;
@@ -142510,6 +142517,9 @@ static void hook_battery(const struct hook_side *h)
         HOOK_REFUSED(state, h->disconnect(0));
         HOOK_REFUSED(state, h->start(0));
         partial.query = 0;
+        HOOK_REFUSED(state, h->start(&partial));
+        partial = hook_sink;
+        partial.release = 0;
         HOOK_REFUSED(state, h->start(&partial));
         status = h->start(&hook_sink);
         HOOK_CHECK(status == SHELL_OK);
@@ -142874,9 +142884,11 @@ int main(void)
 #if !defined(CONFIG_MOONWATER_WAYLAND)
 #error "CHECK_wayland_wire builds wayland.c: define CONFIG_MOONWATER_WAYLAND"
 #endif
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "../src/canvas/wayland.c"
 
 struct wire_build
@@ -143045,6 +143057,12 @@ static int wire_query(void *context, int row, struct shell_facts *facts)
         return 0;
 }
 
+static void wire_release(void *context, long fd)
+{
+        (void)context;
+        close((int)fd);
+}
+
 static const struct shell_sink wire_sink_full = {
         .context = 0,
         .open = wire_open,
@@ -143063,6 +143081,7 @@ static const struct shell_sink wire_sink_full = {
         .layer = wire_layer,
         .query = wire_query,
         .picture = wire_picture,
+        .release = wire_release,
 };
 
 /*
@@ -143486,12 +143505,13 @@ static void wire_object_checks(void)
         unsigned long objects[80], ops[80];
         unsigned long serial;
         long events, keymap = 0;
-        long fds[1] = {7};
+        long fds[1];
         int status;
 
         WIRE_CHECK(client >= 0);
         if (client < 0)
                 return;
+        fds[0] = open("/dev/null", O_RDONLY);
 
         wb_begin(&m, WAYLAND_DISPLAY, 1);
         wb_u(&m, 2);
@@ -143624,7 +143644,7 @@ static void wire_object_checks(void)
         WIRE_CHECK(events == 4 && objects[2] == 13 && ops[2] == 0);
         WIRE_CHECK(events == 4 && objects[3] == WAYLAND_DISPLAY && ops[3] == 1);
         WIRE_CHECK(wire_seen.damaged == 1 && wire_seen.row == 3);
-        WIRE_CHECK(wire_seen.pictures == 1 && wire_seen.picture_fd == 7 && wire_seen.picture_offset == 0);
+        WIRE_CHECK(wire_seen.pictures == 1 && wire_seen.picture_fd == fds[0] && wire_seen.picture_offset == 0);
         WIRE_CHECK(wire_seen.picture_width == 16 && wire_seen.picture_height == 16 && wire_seen.picture_stride == 64);
 
         /* a second commit without a frame releases the buffer again and shows nothing new. */
@@ -143918,6 +143938,114 @@ static void wire_pointer_room_checks(void)
         WIRE_CHECK(wayland_client_disconnect(client) == 0);
 }
 
+static int wire_fd_open(long fd)
+{
+        return fcntl((int)fd, F_GETFD) != -1;
+}
+
+/*
+        Descriptors. The shim owns a descriptor a client sends from the call
+        that queues it: a pool's is released when the pool is gone and its last
+        buffer with it, and a descriptor still queued is released when the
+        client disconnects. A call refused before it queues anything leaves
+        the descriptors with the caller, and a full queue refuses the call.
+*/
+static void wire_descriptor_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        long fds[1];
+        long fd, n;
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+        WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+
+        /* a pool destroyed with no buffer releases its descriptor. */
+        fd = open("/dev/null", O_RDONLY);
+        fds[0] = fd;
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 4);
+        wb_u(&m, 1024);
+        n = wb_end(&m);
+        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
+        WIRE_CHECK(wire_fd_open(fd));
+        wb_begin(&m, 4, 1);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(!wire_fd_open(fd));
+
+        /* a pool destroyed with a buffer keeps its descriptor until the buffer goes. */
+        fd = open("/dev/null", O_RDONLY);
+        fds[0] = fd;
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 5);
+        wb_u(&m, 1024);
+        n = wb_end(&m);
+        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
+        wb_begin(&m, 5, 0);
+        wb_u(&m, 6);
+        wb_u(&m, 0);
+        wb_u(&m, 16);
+        wb_u(&m, 16);
+        wb_u(&m, 64);
+        wb_u(&m, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 5, 1);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_fd_open(fd));
+        wb_begin(&m, 6, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(!wire_fd_open(fd));
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+
+        /* a descriptor no request takes is released at the disconnect. */
+        fd = open("/dev/null", O_RDONLY);
+        fds[0] = fd;
+        wb_begin(&m, WAYLAND_DISPLAY, 0);
+        wb_u(&m, 7);
+        n = wb_end(&m);
+        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
+        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+        WIRE_CHECK(wire_fd_open(fd));
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+        WIRE_CHECK(!wire_fd_open(fd));
+
+        /* eight queued and a ninth refused: the ninth stays with the caller, the eight go at the disconnect. */
+        client = wayland_client_connect();
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        {
+                long held[WAYLAND_FDS + 1];
+
+                for (long i = 0; i <= WAYLAND_FDS; i++)
+                        held[i] = open("/dev/null", O_RDONLY);
+                for (long i = 0; i < WAYLAND_FDS; i++)
+                {
+                        wb_begin(&m, WAYLAND_DISPLAY, 0);
+                        wb_u(&m, (unsigned long)(2 + i));
+                        n = wb_end(&m);
+                        WIRE_CHECK(wayland_feed(client, m.b, n, &held[i], 1) == 0);
+                }
+                wire_take(client, wire_many_objects, wire_many_ops, 1024);
+                wb_begin(&m, WAYLAND_DISPLAY, 0);
+                wb_u(&m, 20);
+                n = wb_end(&m);
+                WIRE_CHECK(wayland_feed(client, m.b, n, &held[WAYLAND_FDS], 1) == SHELL_ENOSPC);
+                WIRE_CHECK(wire_fd_open(held[WAYLAND_FDS]));
+                close((int)held[WAYLAND_FDS]);
+                WIRE_CHECK(wayland_client_disconnect(client) == 0);
+                for (long i = 0; i < WAYLAND_FDS; i++)
+                        WIRE_CHECK(!wire_fd_open(held[i]));
+        }
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -143928,6 +144056,7 @@ int main(void)
         wire_refusal_checks();
         wire_teardown_checks();
         wire_pointer_room_checks();
+        wire_descriptor_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;
@@ -144123,6 +144252,12 @@ static int e2e_query(void *context, int row, struct shell_facts *facts)
         return 0;
 }
 
+static void e2e_release(void *context, long fd)
+{
+        (void)context;
+        close((int)fd);
+}
+
 static const struct shell_sink e2e_sink = {
         .context = 0,
         .open = e2e_open,
@@ -144141,14 +144276,8 @@ static const struct shell_sink e2e_sink = {
         .layer = e2e_layer,
         .query = e2e_query,
         .picture = e2e_picture_copy,
+        .release = e2e_release,
 };
-
-/*
-        The descriptors the client sent are kept until the run ends: a pool
-        reads them when a picture is copied, and the shim never closes them.
-*/
-static int e2e_fds[64];
-static int e2e_fd_count;
 
 /*
         One read from the client: its bytes, and the descriptors that came with
@@ -144262,8 +144391,6 @@ static int e2e_run(const char *path, long client)
                         continue;
                 if (got <= 0)
                         break;
-                for (long i = 0; i < count && e2e_fd_count < 64; i++)
-                        e2e_fds[e2e_fd_count++] = (int)fds[i];
                 if (wayland_feed(client, data, got, fds, count) < 0)
                 {
                         E2E_CHECK(0);
@@ -144358,8 +144485,6 @@ int main(int argc, char **argv)
                 E2E_CHECK(e2e_seen.closed == 1);
         }
         E2E_CHECK(wayland_stop() == 0);
-        for (int i = 0; i < e2e_fd_count; i++)
-                close(e2e_fds[i]);
         printf("CHECK_wayland_client: %u checks, %u failures\n", e2e_checks, e2e_failures);
         return e2e_failures != 0;
 }

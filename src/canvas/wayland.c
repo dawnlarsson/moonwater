@@ -353,6 +353,10 @@
         open takes a window row for a toplevel or a layer surface and returns
         it; key and pointer receive a client's input for the sink to decide on;
         query fills the geometry of a window, which the engine then completes.
+
+        release closes a descriptor the engine is done with: a pool's once
+        the pool and its buffers are gone, and a queued one at the client's
+        disconnect or the stop. The engine never closes one itself.
 */
 struct shell_rect
 {
@@ -404,6 +408,7 @@ struct shell_sink
         int (*layer)(void *context, int row, const struct shell_layer *layer);
         int (*query)(void *context, int row, struct shell_facts *facts);
         int (*picture)(void *context, int row, long fd, long offset, long width, long height, long stride);
+        void (*release)(void *context, long fd);
 };
 
 /*
@@ -577,7 +582,7 @@ static inline int shell_sink_ok(const struct shell_sink *sink)
         return sink && sink->open && sink->key && sink->pointer && sink->damage &&
                sink->place && sink->size && sink->minimize && sink->maximize &&
                sink->fullscreen && sink->stack && sink->activate && sink->close &&
-               sink->title && sink->layer && sink->query && sink->picture;
+               sink->title && sink->layer && sink->query && sink->picture && sink->release;
 }
 
 /*
@@ -1644,6 +1649,30 @@ static void wire_object_remove(struct wayland_client *c, long index)
         c->objects[index].id = 0;
 }
 
+/*
+        Descriptors the shim owns. A pool's is released through the sink once
+        the pool is gone and its last buffer with it; wire_release_client gives
+        back everything a client still holds, the queued descriptors and each
+        live pool's, at a disconnect or a stop. Both run while the sink is set.
+*/
+static void wire_pool_release(struct wayland_pool *pool)
+{
+        if (pool->live)
+        {
+                wayland.side.sink->release(wayland.side.sink->context, pool->fd);
+                pool->live = 0;
+        }
+}
+
+static void wire_release_client(struct wayland_client *c)
+{
+        for (long i = 0; i < c->fd_count; i++)
+                wayland.side.sink->release(wayland.side.sink->context, c->fds[i]);
+        c->fd_count = 0;
+        for (long i = 0; i < WAYLAND_POOLS; i++)
+                wire_pool_release(&c->pools[i]);
+}
+
 static void wire_reset(struct wayland_client *c)
 {
         c->in_length = 0;
@@ -2271,7 +2300,7 @@ static int pool_request(long client, struct wayland_client *c, long index, long 
         case 1:
                 pool->gone = 1;
                 if (pool->refs == 0)
-                        pool->live = 0;
+                        wire_pool_release(pool);
                 wire_object_remove(c, index);
                 return SHELL_OK;
         case 2:
@@ -2299,7 +2328,7 @@ static int buffer_request(long client, struct wayland_client *c, long index)
                 shell_buffer_drop(&wayland.side, client, object->slot);
         pool->refs--;
         if (pool->refs == 0 && pool->gone)
-                pool->live = 0;
+                wire_pool_release(pool);
         for (i = 0; i < WAYLAND_OBJECTS; i++)
                 if (c->objects[i].type == W_SURFACE && c->objects[i].attached == object->id)
                         c->objects[i].attached = 0;
@@ -3020,8 +3049,13 @@ int wayland_start(const struct shell_sink *sink)
 
 int wayland_stop(void)
 {
-        int status = shell_stop(&wayland.side);
+        int status;
 
+        if (!wayland.side.running)
+                return SHELL_EINVAL;
+        for (long i = 0; i < SHELL_CLIENTS; i++)
+                wire_release_client(&wayland.clients[i]);
+        status = shell_stop(&wayland.side);
         if (status < 0)
                 return status;
         wayland.focused = 0;
@@ -3056,6 +3090,7 @@ int wayland_client_disconnect(long client)
                 return status;
         if (wayland.focused && wayland.focus_client == client)
                 wayland.focused = 0;
+        wire_release_client(&wayland.clients[client]);
         wire_reset(&wayland.clients[client]);
         return status;
 }
