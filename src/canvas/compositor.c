@@ -2805,29 +2805,50 @@ struct compositor_poll
 #define COMPOSITOR_TOUCH_TAP_NS 400000000ull
 #define COMPOSITOR_TOUCH_WHEEL 48
 /*
-        The prediction a frame ahead, per class: the mouse, a touch screen's fingers, and a tablet or pen. A class's newest two
-        places give its velocity; the pointer is its real place (compositor.real_x, real_y) led by that velocity over one frame,
-        no further than the cap, and held on a screen. The pointer is where every consumer of motion reads it (the cursor, the
-        windows told a motion, drags, hovers, snaps), so the lead lives at the root of input; a press or a release is handled at
-        the real place (compositor.at_real), so a click lands where the hand was. A class with no new place for a frame is back
-        on its real place, so a stop is not carried past the cap.
+        The prediction a frame ahead, per class: the mouse, a touch screen's fingers, and a tablet or pen. The pointer is its
+        real place (compositor.real_x, real_y) led by the class's lead over one frame, no further than the cap, and held on a
+        screen. The pointer is where every consumer of motion reads it (the cursor, the windows told a motion, drags, hovers,
+        snaps), so the lead lives at the root of input; a press or a release is handled at the real place (compositor.at_real),
+        so a click lands where the hand was. A class with no new place for a frame is back on its real place, so a stop is not
+        carried past the cap.
+
+        The lead is a least-squares slope over the places of the last COMPOSITOR_PREDICT_WINDOW_NS, each in 1/1024 of a pixel
+        (a mouse's place keeps the fraction its acceleration left) and at the time its device reported it. It is zero for a
+        motion that is still (a hand that moved less than COMPOSITOR_PREDICT_STILL_LO to COMPOSITOR_PREDICT_STILL_HI
+        1/1024 px a millisecond over the window, ramped), for a motion that is a wiggle (a net move under
+        COMPOSITOR_PREDICT_STRAIGHT_LO thousandths of the path it took, ramped), and for an axis whose newest step turned back.
 */
 #define COMPOSITOR_PREDICT_MOUSE 0
 #define COMPOSITOR_PREDICT_TOUCH 1
 #define COMPOSITOR_PREDICT_PEN 2
 #define COMPOSITOR_PREDICTS 3
-#define COMPOSITOR_PREDICT_CAP 4                // logical pixels a lead may take a place past its newest
-#define COMPOSITOR_PREDICT_MIN_NS 1000000ull    // two places this close are one batch of reports: no velocity
-#define COMPOSITOR_PREDICT_STALE_NS 50000000ull // two places this far apart are a pause, not a motion: no velocity
+#define COMPOSITOR_PREDICT_CAP 4                  // logical pixels a lead may take a place past its newest
+#define COMPOSITOR_PREDICT_FX 1024                // places and leads are in 1/1024 of a pixel
+#define COMPOSITOR_PREDICT_HISTORY 16             // the newest places held per class
+#define COMPOSITOR_PREDICT_WINDOW_NS 50000000ull  // the places a fit is taken over: the last 50 ms of their device times
+#define COMPOSITOR_PREDICT_SPAN_NS 4000000ull     // a fit needs places spanning this much, or the batch of one read is no motion
+#define COMPOSITOR_PREDICT_STILL_LO 40            // the speed, in 1/1024 px a ms over the window, below which there is no lead
+#define COMPOSITOR_PREDICT_STILL_HI 80            // and the speed at which the whole lead is given
+#define COMPOSITOR_PREDICT_STRAIGHT_LO 600        // the net move over the path, in thousandths, below which there is no lead
+#define COMPOSITOR_PREDICT_STRAIGHT_SPAN 300      // and the net move over the path at which the whole lead is given
 
 struct compositor_predict
 {
-        int x[2], y[2];     // the newest two places the class reported, the newest last
-        positive at[2];     // when each of them was reported
-        unsigned int count; // how many of them are held
-        positive last;      // when the newest was reported (a new place, not a repeat of one)
-        int lead_x, lead_y; // how far ahead of the newest place it is shown or delivered; 0 for none
+        long long x[COMPOSITOR_PREDICT_HISTORY], y[COMPOSITOR_PREDICT_HISTORY]; // the places the class reported, in 1/1024 px
+        positive when[COMPOSITOR_PREDICT_HISTORY];   // when each was reported, by its device (the event's time, or the arrival)
+        positive arrived[COMPOSITOR_PREDICT_HISTORY]; // when each was read by the compositor
+        unsigned int count; // how many of them are held, the newest last
+        positive last;      // when the newest was read (a new place, not a repeat of one)
+        long long lead_x, lead_y; // how far ahead of the newest place it is shown or delivered, in 1/1024 px; 0 for none
 };
+
+// A lead in 1/1024 px, as the whole pixel it is shown at (to the nearest).
+static long long compositor_predict_px(long long fx)
+{
+        long long half = COMPOSITOR_PREDICT_FX / 2;
+
+        return fx >= 0 ? (fx + half) / COMPOSITOR_PREDICT_FX : -((-fx + half) / COMPOSITOR_PREDICT_FX);
+}
 static void compositor_pointer_sync(void);
 static void compositor_pointer_shown(void);
 
@@ -10922,6 +10943,7 @@ static void compositor_pointer_sync(void)
         if (compositor.pointer_x != compositor.shown_x || compositor.pointer_y != compositor.shown_y)
         {
                 compositor.real_x = compositor.pointer_x, compositor.real_y = compositor.pointer_y;
+                compositor.accel_x = compositor.accel_y = 0;
                 track->lead_x = track->lead_y = 0;
         }
 }
@@ -10931,12 +10953,12 @@ static void compositor_pointer_shown(void)
         struct compositor_predict *track = &compositor.predict[compositor.owner];
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
-        int lead_x, lead_y;
+        long long lead_x, lead_y;
 
-        lead_x = compositor.at_real ? 0 : track->lead_x;
-        lead_y = compositor.at_real ? 0 : track->lead_y;
-        compositor.pointer_x = compositor.real_x + lead_x;
-        compositor.pointer_y = compositor.real_y + lead_y;
+        lead_x = compositor.at_real ? 0 : compositor_predict_px(track->lead_x);
+        lead_y = compositor.at_real ? 0 : compositor_predict_px(track->lead_y);
+        compositor.pointer_x = (int)(compositor.real_x + lead_x);
+        compositor.pointer_y = (int)(compositor.real_y + lead_y);
         compositor_screen_keep_point(screens, count, compositor.real_x, compositor.real_y, &compositor.pointer_x,
                                      &compositor.pointer_y);
         compositor.shown_x = compositor.pointer_x, compositor.shown_y = compositor.pointer_y;
@@ -11652,64 +11674,119 @@ static positive compositor_predict_period(void)
         return compositor.period ? compositor.period : 1000000000ull / 60;
 }
 
-// The lead two places give: their velocity over one frame, no further than the cap (the length is rounded up before the
-// scale, so the lead is never past the cap, whole pixels or not).
-static void compositor_predict_lead(const struct compositor_predict *track, int *lead_x, int *lead_y)
+/*
+        The lead of a class: the least-squares slope of its places over the window, times one frame (see the comment on the
+        prediction), per axis; then the gates; then the cap on its length, rounded up before the scale so it is never past the
+        cap, whole pixels or not.
+*/
+static void compositor_predict_lead(struct compositor_predict *track)
 {
-        long long period = (long long)compositor_predict_period(), cap = (long long)COMPOSITOR_PREDICT_CAP * compositor.scale;
-        long long dt, dx, dy, length2, length;
+        const long long fx = COMPOSITOR_PREDICT_FX, period = (long long)compositor_predict_period() / 1000;
+        const long long cap = (long long)COMPOSITOR_PREDICT_CAP * compositor.scale * fx;
+        long long tn = (long long)track->when[track->count - 1], St = 0, Stt = 0, Sx = 0, Stx = 0, Sy = 0, Sty = 0, m, i0, i, n;
+        long long denom, lead_x, lead_y, net, path, g, w, span, speed, ws, length2, length, limit, step;
 
-        *lead_x = *lead_y = 0;
-        if (track->count < 2 || cap <= 0)
+        track->lead_x = track->lead_y = 0;
+        n = track->count;
+        i0 = n - 1;
+        while (i0 > 0 && (long long)track->when[i0 - 1] >= tn - (long long)COMPOSITOR_PREDICT_WINDOW_NS)
+                i0--;
+        m = n - i0;
+        if (m < 2 || tn - (long long)track->when[i0] < (long long)COMPOSITOR_PREDICT_SPAN_NS || cap <= 0)
                 return;
-        dt = (long long)(track->at[1] - track->at[0]);
-        if (dt < (long long)COMPOSITOR_PREDICT_MIN_NS || dt > (long long)COMPOSITOR_PREDICT_STALE_NS)
-                return;
-        dx = ((long long)track->x[1] - track->x[0]) * period / dt;
-        dy = ((long long)track->y[1] - track->y[0]) * period / dt;
-        length2 = dx * dx + dy * dy;
-        if (length2 <= cap * cap)
+        for (i = i0; i < n; i++)
         {
-                *lead_x = (int)dx, *lead_y = (int)dy;
-                return;
+                long long t = ((long long)track->when[i] - tn) / 1000; /* microseconds, not after the newest */
+
+                St += t, Stt += t * t;
+                Sx += track->x[i], Stx += t * track->x[i];
+                Sy += track->y[i], Sty += t * track->y[i];
         }
-        length = (long long)compositor_isqrt((unsigned long long)length2);
-        if (length * length < length2)
-                length++;
-        *lead_x = (int)(dx * cap / length);
-        *lead_y = (int)(dy * cap / length);
+        denom = m * Stt - St * St;
+        if (!denom)
+                return;
+        lead_x = (m * Stx - St * Sx) * period / denom;
+        lead_y = (m * Sty - St * Sy) * period / denom;
+
+        /* the straightness: the net move over the window against the path it took, both axes in Manhattan lengths */
+        net = track->x[n - 1] - track->x[i0];
+        net = (net < 0 ? -net : net);
+        path = 0;
+        for (i = i0 + 1; i < n; i++)
+        {
+                step = track->x[i] - track->x[i - 1];
+                path += step < 0 ? -step : step;
+                step = track->y[i] - track->y[i - 1];
+                path += step < 0 ? -step : step;
+        }
+        step = track->y[n - 1] - track->y[i0];
+        net += step < 0 ? -step : step;
+        g = path > 0 ? net * 1000 / path : 0;
+        w = (g - COMPOSITOR_PREDICT_STRAIGHT_LO) * 1000 / COMPOSITOR_PREDICT_STRAIGHT_SPAN;
+        w = w < 0 ? 0 : w > 1000 ? 1000 : w;
+
+        /* the speed: the net move over the window's span, in 1/1024 px a millisecond */
+        span = tn - (long long)track->when[i0];
+        speed = net * 1000000 / span;
+        ws = (speed - COMPOSITOR_PREDICT_STILL_LO) * 1000 / (COMPOSITOR_PREDICT_STILL_HI - COMPOSITOR_PREDICT_STILL_LO);
+        ws = ws < 0 ? 0 : ws > 1000 ? 1000 : ws;
+        lead_x = lead_x * w / 1000 * ws / 1000;
+        lead_y = lead_y * w / 1000 * ws / 1000;
+
+        /* a turn: an axis whose newest step went back has no lead on it */
+        step = track->x[n - 1] - track->x[n - 2];
+        if ((step < 0 && lead_x > 0) || (step > 0 && lead_x < 0))
+                lead_x = 0;
+        step = track->y[n - 1] - track->y[n - 2];
+        if ((step < 0 && lead_y > 0) || (step > 0 && lead_y < 0))
+                lead_y = 0;
+
+        /* the lead is shown in whole pixels: those are the cap's, rounded up before the scale, so the length shown is never past it */
+        lead_x = compositor_predict_px(lead_x), lead_y = compositor_predict_px(lead_y);
+        limit = cap / COMPOSITOR_PREDICT_FX;
+        length2 = lead_x * lead_x + lead_y * lead_y;
+        if (length2 > limit * limit)
+        {
+                length = (long long)compositor_isqrt((unsigned long long)length2);
+                if (length * length < length2)
+                        length++;
+                lead_x = lead_x * limit / length;
+                lead_y = lead_y * limit / length;
+        }
+        track->lead_x = lead_x * COMPOSITOR_PREDICT_FX, track->lead_y = lead_y * COMPOSITOR_PREDICT_FX;
 }
 
-// A class reported the place x, y at now. A place it repeats is no new one, and its lead stays as it was. The place it is
-// shown or delivered at is x, y led by the lead, held on a screen (compositor_screen_keep_point, from x, y).
-// The lead is the raw one (compositor_predict_lead); where it is shown is held on a screen by compositor_pointer_shown.
-static void compositor_predict_sample(unsigned int cls, int x, int y, positive now)
+// A class reported the place x, y (in 1/1024 px) on its device's time when, and was read at now. A place it repeats is no new
+// one, and its lead stays as it was.
+static void compositor_predict_sample(unsigned int cls, long long x, long long y, positive when, positive now)
 {
         struct compositor_predict *track = &compositor.predict[cls];
 
-        if (!track->count || track->x[track->count - 1] != x || track->y[track->count - 1] != y)
+        if (track->count && track->x[track->count - 1] == x && track->y[track->count - 1] == y)
+                return;
+        if (track->count == COMPOSITOR_PREDICT_HISTORY)
         {
-                int lead_x = 0, lead_y = 0;
-
-                if (track->count == 2)
-                {
-                        track->x[0] = track->x[1], track->y[0] = track->y[1], track->at[0] = track->at[1];
-                        track->count = 1;
-                }
-                track->x[track->count] = x, track->y[track->count] = y, track->at[track->count] = now;
-                track->count++;
-                track->last = now;
-                if (!compositor.predict_off[cls])
-                        compositor_predict_lead(track, &lead_x, &lead_y);
-                track->lead_x = lead_x, track->lead_y = lead_y;
+                memmove(track->x, track->x + 1, sizeof(track->x[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                memmove(track->y, track->y + 1, sizeof(track->y[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                memmove(track->when, track->when + 1, sizeof(track->when[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                memmove(track->arrived, track->arrived + 1, sizeof(track->arrived[0]) * (COMPOSITOR_PREDICT_HISTORY - 1));
+                track->count--;
         }
+        track->x[track->count] = x, track->y[track->count] = y, track->when[track->count] = when, track->arrived[track->count] = now;
+        track->count++;
+        track->last = now;
+        track->lead_x = track->lead_y = 0;
+        if (!compositor.predict_off[cls] && track->count >= 2)
+                compositor_predict_lead(track);
 }
 
-// The mouse moved: its real place is sampled, and the pointer is drawn and told where it will be (compositor_pointer_shown).
-static void compositor_predict_mouse(positive now)
+// The mouse moved: its real place is sampled with the fraction its acceleration left, on the time its report had, and the
+// pointer is drawn and told where it will be (compositor_pointer_shown).
+static void compositor_predict_mouse(positive when, positive now)
 {
         compositor.owner = COMPOSITOR_PREDICT_MOUSE;
-        compositor_predict_sample(COMPOSITOR_PREDICT_MOUSE, compositor.real_x, compositor.real_y, now);
+        compositor_predict_sample(COMPOSITOR_PREDICT_MOUSE, (long long)compositor.real_x * COMPOSITOR_PREDICT_FX + compositor.accel_x,
+                                  (long long)compositor.real_y * COMPOSITOR_PREDICT_FX + compositor.accel_y, when, now);
         compositor_pointer_shown();
 }
 
@@ -11720,7 +11797,7 @@ static void compositor_predict_place(unsigned int cls, int x, int y, positive no
         compositor_pointer_sync();
         compositor.owner = cls;
         compositor.real_x = x, compositor.real_y = y;
-        compositor_predict_sample(cls, x, y, now);
+        compositor_predict_sample(cls, (long long)x * COMPOSITOR_PREDICT_FX, (long long)y * COMPOSITOR_PREDICT_FX, now, now);
         compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x = compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_y = 0;
         compositor_pointer_shown();
 }
@@ -11748,8 +11825,8 @@ static void compositor_predict_clear(unsigned int cls)
                 return;
         }
         compositor.owner = cls;
-        compositor.real_x = track->x[track->count - 1];
-        compositor.real_y = track->y[track->count - 1];
+        compositor.real_x = (int)(track->x[track->count - 1] / COMPOSITOR_PREDICT_FX);
+        compositor.real_y = (int)(track->y[track->count - 1] / COMPOSITOR_PREDICT_FX);
         compositor.kept_x = compositor.real_x;
         compositor.kept_y = compositor.real_y;
         compositor_pointer_shown();
@@ -11808,6 +11885,14 @@ static void compositor_predict_read(void)
         compositor_predict_set(COMPOSITOR_PREDICT_PEN, touch);
 }
 
+// When an event was made by its device (its own stamp, in nanoseconds on the device's clock), or now when it has none.
+static positive compositor_stamp(const struct compositor_input_event *event, positive now)
+{
+        positive stamp = (positive)event->seconds * 1000000000ull + (positive)event->microseconds * 1000ull;
+
+        return event->seconds || event->microseconds ? stamp : now;
+}
+
 /*
         One report of a device is over: a mouse's counts since the last one are
         one movement of the hand, with the gain of its speed, and a tablet's
@@ -11817,7 +11902,7 @@ static void compositor_predict_read(void)
         timed each against the last gave left and right one speed and up and
         down another.
 */
-static int compositor_report(positive now)
+static int compositor_report(positive now, positive stamp)
 {
         int moved = 0;
 
@@ -11844,7 +11929,7 @@ static int compositor_report(positive now)
                 compositor.stamp = now;
                 compositor.real_x += compositor_accel(dx, &compositor.accel_x, gain);
                 compositor.real_y += compositor_accel(dy, &compositor.accel_y, gain);
-                compositor_predict_mouse(now);
+                compositor_predict_mouse(stamp, now);
                 moved = 1;
         }
 
@@ -12535,7 +12620,7 @@ static void compositor_input_read(unsigned int at)
                         {
                                 if (compositor.touchpad[at])
                                         compositor_pad_apply(at, now);
-                                moved |= compositor_report(now);
+                                moved |= compositor_report(now, compositor_stamp(event, now));
                         }
                         else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
                                  compositor_pad_finger_key(event->code))
@@ -12558,7 +12643,7 @@ static void compositor_input_read(unsigned int at)
                                                                                                              : COMPOSITOR_BTN_LEFT;
                                         code = compositor.pad[at].clicked ? compositor.pad[at].clicked : code;
                                 }
-                                moved |= compositor_report(now);
+                                moved |= compositor_report(now, compositor_stamp(event, now));
                                 if (moved)
                                         compositor_motion(), moved = 0;
                                 compositor_press(code, event->value != 0);

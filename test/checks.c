@@ -118067,7 +118067,7 @@ static void check_compositor_screens(void)
     screens_hand(900, 900, 0);
     check("screens: and at the space's edge", compositor.pointer_x == SCREENS_W - 1 && compositor.pointer_y == SCREENS_H - 1);
     compositor.tablet_x = 300, compositor.tablet_y = 232, compositor.tablet_have = 3;
-    compositor_report(0);
+    compositor_report(0, 0);
     compositor_motion();
     check("screens: a tablet's point under the shorter screen goes to the nearest screen",
           compositor.pointer_x == SCREENS_A_W && compositor.pointer_y == 232);
@@ -120098,7 +120098,7 @@ static void predict_mouse_to(int x, int y, positive now)
 {
     compositor.real_x = x;
     compositor.real_y = y;
-    compositor_predict_mouse(now);
+    compositor_predict_mouse(now, now);
     compositor_motion();
 }
 
@@ -120152,11 +120152,11 @@ static void check_compositor_predict(void)
     check("predict: a diagonal is led by no more than the cap in its length", lead_x > 0 && lead_y > 0 && lead_x * lead_x + lead_y * lead_y <= 16);
 
     /* A frame at 120 Hz: the same 2 px in 10 ms is 1 px. The distance a steady motion is led, in pixels, at 60 and at 120 Hz. */
-    check("predict: the frame-ahead distance at 60 Hz is 1, 3 and the cap 4 px for 1, 2 and 5 px in 10 ms",
-          predict_lead_at(1000000000ull / 60, 1) == 1 && predict_lead_at(1000000000ull / 60, 2) == 3 &&
+    check("predict: the frame-ahead distance at 60 Hz is 2, 3 and the cap 4 px for 1, 2 and 5 px in 10 ms (1.7, 3.3 and past the cap)",
+          predict_lead_at(1000000000ull / 60, 1) == 2 && predict_lead_at(1000000000ull / 60, 2) == 3 &&
               predict_lead_at(1000000000ull / 60, 5) == 4);
-    check("predict: the frame-ahead distance at 120 Hz is 0, 1 and the cap 4 px for 1, 2 and 5 px in 10 ms",
-          predict_lead_at(1000000000ull / 120, 1) == 0 && predict_lead_at(1000000000ull / 120, 2) == 1 &&
+    check("predict: the frame-ahead distance at 120 Hz is 1, 2 and the cap 4 px for 1, 2 and 5 px in 10 ms (0.8, 1.7 and past the cap)",
+          predict_lead_at(1000000000ull / 120, 1) == 1 && predict_lead_at(1000000000ull / 120, 2) == 2 &&
               predict_lead_at(1000000000ull / 120, 5) == 4);
     compositor.period = 1000000000ull / 60;
 
@@ -120206,7 +120206,7 @@ static void check_compositor_predict(void)
     check("predict: with touch off a finger is not led", compositor.pointer_x == 204 && compositor.predict[COMPOSITOR_PREDICT_TOUCH].lead_x == 0);
     predict_mouse_to(110, 50, t0 + 550 * ms);
     predict_mouse_to(112, 50, t0 + 560 * ms);
-    check("predict: with touch off the mouse is still led", compositor.cursor.x == 115);
+    check("predict: with touch off the mouse is still led, and within the cap", compositor.cursor.x > 112 && compositor.cursor.x <= 116);
     compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, 1);
     memory_zero(compositor.predict, sizeof(compositor.predict));
 
@@ -120268,6 +120268,236 @@ static void check_compositor_predict_drag(void)
     check("predict drag: a press over the picture is told at the real place, 44 in, and the pointer is led 3 px on",
           compositor.told_row == 1 && compositor.told_x == 44 && compositor.pointer_x == 107);
     compositor_press(COMPOSITOR_BTN_LEFT, 0);
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+}
+
+/*
+        The error table. A synthetic hand (steady at a speed, stopped, turned back, wiggled by 1 to 3 px, or jittered) moves in
+        milli-pixels over time in nanoseconds. Its device reports at jittered times, each with the counts the hand moved, go
+        through compositor_report at their device times and are read in batches (a read every 4 ms). At each of 90 frames the
+        pointer is judged against where the hand is one frame later. Three shows are judged: none (the hand's real place), the
+        model before this change (written out below, with the integer places and arrival times main used), and the pointer as
+        compositor.c now leads it. Errors are RMS, in thousandths of a pixel.
+*/
+enum predict_motion { PREDICT_STEADY, PREDICT_STOP, PREDICT_TURN, PREDICT_WIGGLE, PREDICT_JITTER };
+struct predict_hand
+{
+    enum predict_motion kind;
+    long long x0, v, amp, period, turn, seed; // milli-pixels, milli-pixels a millisecond, nanoseconds
+};
+
+static long long predict_hand_at(const struct predict_hand address_to h, long long t)
+{
+    long long ph, t4, tri, bucket, hash;
+
+    switch (h->kind)
+    {
+    case PREDICT_STEADY:
+        return h->x0 + h->v * t / 1000000;
+    case PREDICT_STOP:
+        return h->x0 + h->v * (t < h->turn ? t : h->turn) / 1000000;
+    case PREDICT_TURN:
+        if (t <= h->turn)
+            return h->x0 + h->v * t / 1000000;
+        return h->x0 + h->v * h->turn / 1000000 - h->v * (t - h->turn) / 1000000;
+    case PREDICT_WIGGLE:
+        ph = t % h->period;
+        t4 = ph * 4000 / h->period;
+        tri = t4 <= 1000 ? t4 : t4 <= 3000 ? 2000 - t4 : t4 - 4000;
+        return h->x0 + h->amp * tri / 1000;
+    case PREDICT_JITTER:
+        bucket = t / 8000000;
+        hash = (bucket * 2654435761ll + h->seed * 40503ll) & 0x7fffffffll;
+        return h->x0 + hash % (2 * h->amp + 1) - h->amp;
+    }
+    return h->x0;
+}
+
+// The model before this change: the newest two integer places of the class, the lead their velocity over one frame (integer
+// division, two places a millisecond to 50 ms apart), no further than 4 px, and cleared a frame after the newest place.
+struct predict_old
+{
+    long long x[2], at[2];
+    unsigned int count;
+    long long last, lead;
+};
+
+static void predict_old_sample(struct predict_old address_to tr, long long x, long long now, long long period)
+{
+    if (tr->count && tr->x[tr->count - 1] == x)
+        return;
+    if (tr->count == 2)
+        tr->x[0] = tr->x[1], tr->at[0] = tr->at[1], tr->count = 1;
+    tr->x[tr->count] = x, tr->at[tr->count] = now, tr->count++, tr->last = now, tr->lead = 0;
+    if (tr->count == 2 && tr->at[1] - tr->at[0] >= 1000000 && tr->at[1] - tr->at[0] <= 50000000)
+    {
+        long long dx = (tr->x[1] - tr->x[0]) * period / (tr->at[1] - tr->at[0]);
+
+        tr->lead = dx > 4 ? 4 : dx < -4 ? -4 : dx;
+    }
+}
+
+// The hand's trace judged: out[0..2] are the RMS errors of none, the model before and the model now, out[3..4] the mean lead of
+// the two models, all in thousandths of a pixel.
+static void predict_table_case(const struct predict_hand address_to h, long long gain_percent, long long interval_us,
+                               long long jitter_us, long long out[5])
+{
+    enum { FRAMES = 90, REPORTS = 1600 };
+    static long long when[REPORTS], arrive[REPORTS], counts[REPORTS];
+    const long long period = (long long)compositor.period;
+    long long err[3] = {0, 0, 0}, lead_sum[2] = {0, 0}, sent = 0, lcg = h->seed * 6364136223846793ll + 1, tt = 0, real = 0;
+    struct predict_old old;
+    int n = 0, next = 0;
+
+    memory_zero(&old, sizeof(old));
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    compositor.width = compositor.height = 6000; /* the screen the hand walks across: from 2000 px, 900 px back and 3000 px on at most */
+    compositor.accel_x = compositor.accel_y = 0;
+    compositor.real_x = compositor.real_y = 0;
+    compositor.flat = 1;
+    compositor.sensitivity = (int)gain_percent;
+    when[n++] = 0;
+    while (tt < FRAMES * period + 3 * period && n < REPORTS)
+    {
+        long long j = 0;
+
+        lcg = (long long)((unsigned long long)lcg * 6364136223846793005ull + 1442695040888963407ull);
+        if (jitter_us)
+            j = (long long)(((unsigned long long)lcg >> 33) % (unsigned long long)(2 * jitter_us + 1)) - jitter_us;
+        tt += (interval_us + j) * 1000;
+        when[n++] = tt;
+    }
+    for (int k = 0; k < n; k++)
+    {
+        long long target = predict_hand_at(h, when[k]) * 1000 / (gain_percent * 10), c;
+
+        c = (target - sent + (target >= sent ? 500 : -500)) / 1000;
+        sent += c * 1000;
+        counts[k] = c;
+        arrive[k] = (when[k] + 3999999) / 4000000 * 4000000;
+    }
+    for (int f = 1; f <= FRAMES; f++)
+    {
+        long long now = f * period, truth = predict_hand_at(h, now + period), e;
+        long long last_real;
+
+        while (next < n && arrive[next] <= now)
+        {
+            compositor.raw_x = (int)counts[next], compositor.raw_y = 0;
+            compositor_report((positive)arrive[next], (positive)when[next]);
+            real = compositor.real_x;
+            predict_old_sample(&old, real, arrive[next], period);
+            next++;
+        }
+        if (old.lead && now >= old.last + period)
+            old.lead = 0;
+        compositor_predict_expire((positive)now);
+        last_real = real;
+        e = last_real * 1000 - truth;
+        err[0] += e * e;
+        e = (last_real + old.lead) * 1000 - truth;
+        err[1] += e * e;
+        e = compositor.pointer_x * 1000 - truth;
+        err[2] += e * e;
+        lead_sum[0] += (old.lead < 0 ? -old.lead : old.lead) * 1000;
+        lead_sum[1] += (compositor.pointer_x - compositor.real_x < 0 ? compositor.real_x - compositor.pointer_x : compositor.pointer_x - compositor.real_x) * 1000;
+    }
+    for (int i = 0; i < 3; i++)
+        out[i] = (long long)compositor_isqrt((unsigned long long)(err[i] / FRAMES));
+    out[3] = lead_sum[0] / FRAMES, out[4] = lead_sum[1] / FRAMES;
+}
+
+static void check_compositor_predict_table(void)
+{
+    struct windows address_to table = predict_setup();
+    static const struct
+    {
+        const char address_to name;
+        struct predict_hand hand;
+        long long gain;
+    } cases[] = {
+        {"steady 0.1 px/ms", {PREDICT_STEADY, 2000000, 100, 0, 0, 0, 1}, 100},
+        {"steady 0.5 px/ms", {PREDICT_STEADY, 2000000, 500, 0, 0, 0, 2}, 100},
+        {"steady 2 px/ms", {PREDICT_STEADY, 2000000, 2000, 0, 0, 0, 3}, 100},
+        {"steady 0.5 px/ms, gain 1.5", {PREDICT_STEADY, 2000000, 500, 0, 0, 0, 4}, 150},
+        {"steady 0.1 px/ms, gain 1.5", {PREDICT_STEADY, 2000000, 100, 0, 0, 0, 11}, 150},
+        {"stop after 2 px/ms", {PREDICT_STOP, 2000000, 2000, 0, 0, 300000000ll, 5}, 100},
+        {"turn at 1 px/ms", {PREDICT_TURN, 2000000, 1000, 0, 0, 300000000ll, 6}, 100},
+        {"wiggle +-1 px, 60 ms", {PREDICT_WIGGLE, 2000000, 0, 1000, 60000000ll, 0, 7}, 100},
+        {"wiggle +-2 px, 60 ms", {PREDICT_WIGGLE, 2000000, 0, 2000, 60000000ll, 0, 7}, 100},
+        {"wiggle +-1.5 px, 120 ms", {PREDICT_WIGGLE, 2000000, 0, 1500, 120000000ll, 0, 8}, 100},
+        {"jitter +-2 px", {PREDICT_JITTER, 2000000, 0, 2000, 0, 0, 9}, 100},
+    };
+    long long out[5];
+
+    if (!table)
+    {
+        check("predict table: the table is mapped", false);
+        return;
+    }
+    for (unsigned int i = 0; i < sizeof cases / sizeof cases[0]; i++)
+    {
+        predict_table_case(&cases[i].hand, cases[i].gain, 8000, 2000, out);
+        string_format(log, "  predict table: %s  none %p  before %p  now %p  thousandths of a pixel RMS; lead before %p now %p\n",
+                      cases[i].name, out[0], out[1], out[2], out[3], out[4]);
+        if (i == 0)
+            check("predict table: a slow steady hand is judged better than before", out[2] < out[1]);
+        else if (i == 4)
+            check("predict table: a slow steady hand at gain 1.5 is judged better than before", out[2] < out[1]);
+        else if (i == 6)
+            check("predict table: a turn is level with before, within 1%: the step back over a lead is no lead", out[2] <= out[1] + out[1] / 100);
+        else if (i >= 7 && i <= 9)
+            check("predict table: a wiggle of 1 to 3 px adds no more than 0.1 px to none, and leads by at most 0.1 px",
+                  out[2] <= out[0] + 100 && out[4] <= 100);
+        else if (i == 10)
+            check("predict table: jitter adds no more than 0.15 px to none, and leads by at most 0.1 px",
+                  out[2] <= out[0] + 150 && out[4] <= 100);
+        else
+            check("predict table: a steady, stopped or fast hand is no worse than before", out[2] <= out[1]);
+    }
+    compositor.width = compositor.height = GLASS_SIDE;
+}
+
+/*
+        The lead's model: a wiggle is no motion, a fit takes its places' device times (two places read in one batch are led by
+        the time between them, not by the arrivals), and a step back over a lead clears the lead on its axis at once.
+*/
+static void check_compositor_predict_model(void)
+{
+    struct windows address_to table = predict_setup();
+    const positive t0 = 4000000000ull, ms = 1000000ull;
+    int led = 0;
+
+    if (!table)
+    {
+        check("predict model: the table is mapped", false);
+        return;
+    }
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    /* The first step of a wiggle is a step, and no later one: the step back over it ends its lead, and a wiggle after that is no motion. */
+    for (int i = 0; i < 12; i++)
+    {
+        predict_mouse_to(100 + (i & 1) * 2, 50, t0 + i * 8 * ms);
+        led |= i >= 2 && compositor.pointer_x != compositor.real_x;
+    }
+    check("predict model: a wiggle of 2 px back and forth every 8 ms is no motion once it has turned, so no later report is led", !led);
+
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    compositor.real_x = 100, compositor.real_y = 50;
+    compositor_predict_mouse(t0, t0 + 20 * ms);
+    compositor.real_x = 102;
+    compositor_predict_mouse(t0 + 10 * ms, t0 + 20 * ms);
+    check("predict model: two places read in one batch are led by their device times: 3 px past 102, 2 px in 10 ms",
+          compositor.pointer_x == 105 && compositor.real_x == 102);
+
+    memory_zero(compositor.predict, sizeof(compositor.predict));
+    predict_mouse_to(100, 50, t0 + 100 * ms);
+    predict_mouse_to(102, 50, t0 + 110 * ms);
+    predict_mouse_to(104, 50, t0 + 120 * ms);
+    check("predict model: a steady mouse is led by 3 px before the turn", compositor.pointer_x == 107);
+    predict_mouse_to(103, 50, t0 + 130 * ms);
+    check("predict model: a step back over the lead clears the lead on its axis at once: the pointer is the hand's place",
+          compositor.pointer_x == 103 && compositor.real_x == 103);
     memory_zero(compositor.predict, sizeof(compositor.predict));
 }
 
@@ -124298,19 +124528,19 @@ static fn check_registry(void)
                 compositor.pointer_x = compositor.pointer_y = 0;
                 compositor.raw_x = 10; compositor.raw_y = 0; compositor.stamp = 1; compositor.accel_x = compositor.accel_y = 0;
                 compositor_input_settings_set("", "", "200", "", "", "");
-                compositor_report(1000000000ull);
+                compositor_report(1000000000ull, 0);
                 check("compositor: a sensitivity of 200 doubles the pixels of a slow hand", compositor.real_x == 20);
                 compositor.pointer_x = 0; compositor.raw_x = 1000; compositor.stamp = 1000000000ull; compositor.accel_x = 0;
                 compositor_input_settings_set("", "", "100", "", "", "");
-                compositor_report(1000000000ull + 1000000ull);
+                compositor_report(1000000000ull + 1000000ull, 0);
                 check("compositor: the curve makes a fast hand two and a half times", compositor.real_x == 2500);
                 compositor.pointer_x = 0; compositor.raw_x = 1000; compositor.stamp = 1000000000ull; compositor.accel_x = 0;
                 compositor_input_settings_set("", "", "100", "off", "", "");
-                compositor_report(1000000000ull + 1000000ull);
+                compositor_report(1000000000ull + 1000000ull, 0);
                 check("compositor: with acceleration off it is one to one", compositor.real_x == 1000);
                 compositor.pointer_x = 0; compositor.raw_x = 1000; compositor.stamp = 1000000000ull; compositor.accel_x = 0;
                 compositor_input_settings_set("", "", "50", "off", "", "");
-                compositor_report(1000000000ull + 1000000ull);
+                compositor_report(1000000000ull + 1000000ull, 0);
                 check("compositor: and the sensitivity scales that", compositor.real_x == 500);
 
                 compositor_input_settings_set("maybe", "5", "9", "x", "1", "0");
@@ -138136,6 +138366,8 @@ b32 main()
         check_compositor_minimise();
         check_compositor_predict();
         check_compositor_predict_drag();
+        check_compositor_predict_model();
+        check_compositor_predict_table();
         check_compositor_lifecycle();
         check_compositor_lifecycle_seam();
         check_compositor_lifecycle_more();
