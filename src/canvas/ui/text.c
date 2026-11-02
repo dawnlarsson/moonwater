@@ -581,8 +581,9 @@ static p32 doc_node_new(struct doc address_to doc, p8 buffer, p64 start, p32 len
                 // Node 0 is no node: the first one made is 1.
                 if (!array_store_reserve(doc->nodes, doc->node_room, doc->node_used, (doc->node_used ? doc->node_used : 1) + 1, 1024))
                         return 0;
+                // Node 0 is the sentinel a missing child reads: all zero, so it adds no bytes, lines or edge.
                 if (!doc->node_used)
-                        doc->node_used = 1;
+                        doc->node_used = 1, memory_zero(&doc->nodes[0], sizeof(doc->nodes[0]));
                 index = (p32)doc->node_used++;
         }
         node = &doc->nodes[index];
@@ -781,7 +782,73 @@ static p64 doc_line_count(const struct doc address_to doc)
 
 // count bytes from at into into: how many there were. A walk down to the piece at at, kept on a stack, and then in
 // order through the pieces after it.
+//
+// The x86-64 body is the walk for a read that lies in one piece, which is nearly every read (a byte, a
+// cluster, a line): it keeps no stack and copies the bytes itself. A read that runs past its piece goes to the C
+// walk below, which is the same code as before, so the answer is the same on every path.
+#if X64
+p64 doc_read(const struct doc address_to doc, p64 at, p8 address_to into, positive count);
+_Static_assert(__builtin_offsetof(struct doc, original) == 0 && __builtin_offsetof(struct doc, added) == 16 &&
+                       __builtin_offsetof(struct doc, nodes) == 40 && __builtin_offsetof(struct doc, root) == 64 &&
+                       __builtin_offsetof(struct doc_node, length) == 12 && __builtin_offsetof(struct doc_node, start) == 16 &&
+                       __builtin_offsetof(struct doc_node, buffer) == 36 && __builtin_offsetof(struct doc_node, sum.bytes) == 40 &&
+                       sizeof(struct doc_node) == 80,
+               "doc and doc_node layout the read walks");
+__asm__(
+    ASM_FUNC(doc_read)
+    "push %rsi\n"                                             // at, for the C walk
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "mov %rdi, %rbp\n   mov %rsi, %r14\n   mov %rdx, %r15\n   mov %rcx, %rbx\n" // rbp: the document, r14: the offset, r15: into, rbx: count
+    "test %rbx, %rbx\n   jz .Ldoc_read_none\n"
+    "mov 40(%rbp), %r12\n   mov 64(%rbp), %r13d\n"        // r12: the nodes, r13: the tree
+    ".Ldoc_read_level:\n"
+    "test %r13d, %r13d\n   jz .Ldoc_read_none\n"          // past the end: nothing
+    "lea (%r13,%r13,4), %rax\n   shl $4, %rax\n   add %r12, %rax\n" // rax: the node, 80 bytes each
+    "mov 0(%rax), %ecx\n"                                  // ecx: left
+    // A missing child is nodes[0], all zero, so its subtree is nothing bytes.
+    "lea (%rcx,%rcx,4), %r11\n   shl $4, %r11\n   add %r12, %r11\n" // r11: the left node
+    "mov 40(%r11), %r10\n"                                 // r10: before, the left subtree's bytes
+    "cmp %r10, %r14\n   jb .Ldoc_read_left\n"              // offset < before: the piece is in the left subtree
+    "mov 12(%rax), %esi\n   add %r10, %rsi\n"              // rsi: before + length
+    "cmp %rsi, %r14\n   jb .Ldoc_read_found\n"             // offset < before + length: this piece
+    "sub %rsi, %r14\n"
+    "mov 4(%rax), %r13d\n"                                 // right
+    "jmp .Ldoc_read_level\n"
+    ".Ldoc_read_left:\n"
+    "mov %ecx, %r13d\n"
+    "jmp .Ldoc_read_level\n"
+    ".Ldoc_read_found:\n"
+    "sub %r10, %r14\n"                                     // the offset within the piece
+    "mov 12(%rax), %esi\n   sub %r14, %rsi\n"              // what the piece has from there
+    "cmp %rbx, %rsi\n   jb .Ldoc_read_span\n"              // the count runs past the piece: the C walk
+    "mov 0(%rbp), %rsi\n   mov 16(%rbp), %rdx\n"           // the original and the added buffer
+    "cmpb $0, 36(%rax)\n   cmovne %rdx, %rsi\n"            // the piece's buffer
+    "add 16(%rax), %rsi\n   add %r14, %rsi\n"              // + its start + the offset: the bytes
+    "cmp $1, %rbx\n   jne .Ldoc_read_copy\n"               // a byte, which doc_byte asks for: no call
+    "movzbl (%rsi), %ecx\n   mov %cl, (%r15)\n   mov $1, %eax\n"
+    "jmp .Ldoc_read_out\n"
+    ".Ldoc_read_copy:\n"
+    "mov %r15, %rdi\n   mov %rbx, %rdx\n"
+    "call memory_copy\n"
+    "mov %rbx, %rax\n"
+    "jmp .Ldoc_read_out\n"
+    ".Ldoc_read_none:\n"
+    "xor %eax, %eax\n"
+    ".Ldoc_read_out:\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "add $8, %rsp\n"
+    ASM_RET
+    ".Ldoc_read_span:\n"
+    "mov %rbp, %rdi\n   mov 48(%rsp), %rsi\n   mov %r15, %rdx\n   mov %rbx, %rcx\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    "add $8, %rsp\n"
+    "jmp doc_read_span\n"
+    ASM_END(doc_read)
+);
+KEEP positive doc_read_span(const struct doc address_to doc, p64 at, p8 address_to into, positive count)
+#else
 static positive doc_read(const struct doc address_to doc, p64 at, p8 address_to into, positive count)
+#endif
 {
         p32 stack[DOC_STACK], depth = 0, tree = doc->root;
         p64 offset = at;
