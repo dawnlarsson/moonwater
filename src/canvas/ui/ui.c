@@ -3535,7 +3535,8 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
 
                 if (spot > 0)
                 {
-                        b32 spx = ui_q8(ui, c->x) + c->spot_x * 256, spy = ry + rh - ui_q8(ui, 24);
+                        // spot_x is the press's logical x in the control: scaled with the rest, not added in device pixels as it was.
+                        b32 spx = ui_q8(ui, c->x + c->spot_x), spy = ry + rh - ui_q8(ui, 24);
 
                         // A radial ellipse 180 by 80, the accent at its middle to nothing at 70%: rings of it, outermost first.
                         for (int ring = 7; ring >= 0; ring--)
