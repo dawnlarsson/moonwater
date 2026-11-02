@@ -54430,7 +54430,8 @@ __asm__(
     //       and says the same thing.
     //
     ASM_FUNC(bits_first_set)
-    "bsf %edi, %eax\n   mov $-1, %edx\n   cmovz %edx, %eax\n   add $1, %eax\n" ASM_RET
+    "bsf %edi, %eax\n   cmovz .Lbits_first_set_none(%rip), %eax\n   add $1, %eax\n" ASM_RET
+    ".Lbits_first_set_none:  .long -1\n"
     ASM_END(bits_first_set)
 
     ASM_FUNC(bits_first_set_wide)
