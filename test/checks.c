@@ -141540,12 +141540,11 @@ int main(void) {
             gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_shell -DCONFIG_MOONWATER_WAYLAND -DCONFIG_MOONWATER_X11 test/checks.c
 */
 #if !defined(CONFIG_MOONWATER_WAYLAND) || !defined(CONFIG_MOONWATER_X11)
-#error "CHECK_shell builds both hook files: define CONFIG_MOONWATER_WAYLAND and CONFIG_MOONWATER_X11"
+#error "CHECK_shell builds the hook file with both switches on: define CONFIG_MOONWATER_WAYLAND and CONFIG_MOONWATER_X11"
 #endif
 #include <stdio.h>
 #include <string.h>
 #include "../src/canvas/wayland.c"
-#include "../src/canvas/x11.c"
 
 struct hook_probe
 {
@@ -142176,16 +142175,79 @@ int main(void)
 #error "CHECK_hooks_off is the build with both switches off; do not define CONFIG_MOONWATER_WAYLAND or CONFIG_MOONWATER_X11"
 #endif
 #include <stdio.h>
-#include "../src/canvas/wayland.h"
-#include "../src/canvas/x11.h"
+
+/*
+        With both switches off wayland.c is not built, so no header declares
+        the hooks. The forms below are declared here, where they are called:
+        each hook with the parameters wayland.c gives it, as an inline no-op that
+        answers SHELL_EOPNOTSUPP. The lists are kept in step with wayland.c's
+        hook functions by hand; the hooks lane's both-on build compiles those.
+        Pointers are passed as 0, because the no-ops never read them.
+*/
+#define SHELL_EOPNOTSUPP (-95)
+#define X11_TYPE_NORMAL 0L
+struct shell_sink;
+struct shell_buffer;
+struct shell_rect;
+struct shell_facts;
+struct shell_layer;
+
+#define OFF_WAYLAND_HOOKS(H) \
+        H(int, wayland_start, (const struct shell_sink *sink), ((void)sink)) \
+        H(int, wayland_stop, (void), ((void)0)) \
+        H(int, wayland_client_connect, (void), ((void)0)) \
+        H(int, wayland_client_disconnect, (long client), ((void)client)) \
+        H(int, wayland_role, (long client, long surface, long role), ((void)client, (void)surface, (void)role)) \
+        H(int, wayland_buffer_offer, (long client, const struct shell_buffer *buffer), ((void)client, (void)buffer)) \
+        H(int, wayland_damage, (long client, long surface, long buffer, const struct shell_rect *rect), ((void)client, (void)surface, (void)buffer, (void)rect)) \
+        H(int, wayland_input_key, (long client, long code, long pressed), ((void)client, (void)code, (void)pressed)) \
+        H(int, wayland_input_pointer, (long client, long x, long y, long buttons), ((void)client, (void)x, (void)y, (void)buttons)) \
+        H(int, wayland_window_place, (long client, long surface, long x, long y, long screen), ((void)client, (void)surface, (void)x, (void)y, (void)screen)) \
+        H(int, wayland_window_size, (long client, long surface, long width, long height), ((void)client, (void)surface, (void)width, (void)height)) \
+        H(int, wayland_window_minimize, (long client, long surface, long on), ((void)client, (void)surface, (void)on)) \
+        H(int, wayland_window_maximize, (long client, long surface, long on), ((void)client, (void)surface, (void)on)) \
+        H(int, wayland_window_fullscreen, (long client, long surface, long on), ((void)client, (void)surface, (void)on)) \
+        H(int, wayland_window_stack, (long client, long surface, long layer), ((void)client, (void)surface, (void)layer)) \
+        H(int, wayland_window_activate, (long client, long surface), ((void)client, (void)surface)) \
+        H(int, wayland_window_close, (long client, long surface), ((void)client, (void)surface)) \
+        H(int, wayland_window_title, (long client, long surface, const char *text, long length), ((void)client, (void)surface, (void)text, (void)length)) \
+        H(int, wayland_window_app_id, (long client, long surface, const char *text, long length), ((void)client, (void)surface, (void)text, (void)length)) \
+        H(int, wayland_window_query, (long client, long surface, struct shell_facts *facts), ((void)client, (void)surface, (void)facts)) \
+        H(int, wayland_layer_surface, (long client, long surface, const struct shell_layer *layer), ((void)client, (void)surface, (void)layer))
+
+#define OFF_X11_HOOKS(H) \
+        H(int, x11_start, (const struct shell_sink *sink), ((void)sink)) \
+        H(int, x11_stop, (void), ((void)0)) \
+        H(int, x11_client_connect, (void), ((void)0)) \
+        H(int, x11_client_disconnect, (long client), ((void)client)) \
+        H(int, x11_window_role, (long client, long window, long type), ((void)client, (void)window, (void)type)) \
+        H(int, x11_buffer_offer, (long client, const struct shell_buffer *buffer), ((void)client, (void)buffer)) \
+        H(int, x11_damage, (long client, long window, long buffer, const struct shell_rect *rect), ((void)client, (void)window, (void)buffer, (void)rect)) \
+        H(int, x11_input_key, (long client, long code, long pressed), ((void)client, (void)code, (void)pressed)) \
+        H(int, x11_input_pointer, (long client, long x, long y, long buttons), ((void)client, (void)x, (void)y, (void)buttons)) \
+        H(int, x11_window_place, (long client, long window, long x, long y, long screen), ((void)client, (void)window, (void)x, (void)y, (void)screen)) \
+        H(int, x11_window_size, (long client, long window, long width, long height), ((void)client, (void)window, (void)width, (void)height)) \
+        H(int, x11_window_minimize, (long client, long window, long on), ((void)client, (void)window, (void)on)) \
+        H(int, x11_window_maximize, (long client, long window, long on), ((void)client, (void)window, (void)on)) \
+        H(int, x11_window_fullscreen, (long client, long window, long on), ((void)client, (void)window, (void)on)) \
+        H(int, x11_window_stack, (long client, long window, long layer), ((void)client, (void)window, (void)layer)) \
+        H(int, x11_window_activate, (long client, long window), ((void)client, (void)window)) \
+        H(int, x11_window_close, (long client, long window), ((void)client, (void)window)) \
+        H(int, x11_window_title, (long client, long window, const char *text, long length), ((void)client, (void)window, (void)text, (void)length)) \
+        H(int, x11_window_app_id, (long client, long window, const char *text, long length), ((void)client, (void)window, (void)text, (void)length)) \
+        H(int, x11_window_query, (long client, long window, struct shell_facts *facts), ((void)client, (void)window, (void)facts)) \
+        H(int, x11_window_strut, (long client, long window, long edge, long size), ((void)client, (void)window, (void)edge, (void)size)) \
+        H(int, xwayland_start, (void), ((void)0)) \
+        H(int, xwayland_stop, (void), ((void)0))
+
+#define OFF_HOOK(ret, name, params, unused) \
+        static inline ret name params { unused; return SHELL_EOPNOTSUPP; }
+OFF_WAYLAND_HOOKS(OFF_HOOK)
+OFF_X11_HOOKS(OFF_HOOK)
+#undef OFF_HOOK
 
 int main(void)
 {
-        struct shell_sink sink = {0};
-        struct shell_buffer buffer = {0};
-        struct shell_rect rect = {0, 0, 1, 1};
-        struct shell_facts facts = {0};
-        struct shell_layer layer = {0};
         unsigned int refused = 0, total = 0;
 
 #define HOOK_OFF(call) \
@@ -142194,13 +142256,13 @@ int main(void)
                 refused += (call) == SHELL_EOPNOTSUPP; \
         } while (0)
 
-        HOOK_OFF(wayland_start(&sink));
+        HOOK_OFF(wayland_start(0));
         HOOK_OFF(wayland_stop());
         HOOK_OFF(wayland_client_connect());
         HOOK_OFF(wayland_client_disconnect(0));
         HOOK_OFF(wayland_role(0, 0, 1));
-        HOOK_OFF(wayland_buffer_offer(0, &buffer));
-        HOOK_OFF(wayland_damage(0, 0, 0, &rect));
+        HOOK_OFF(wayland_buffer_offer(0, 0));
+        HOOK_OFF(wayland_damage(0, 0, 0, 0));
         HOOK_OFF(wayland_input_key(0, 30, 1));
         HOOK_OFF(wayland_input_pointer(0, 1, 2, 1));
         HOOK_OFF(wayland_window_place(0, 0, 1, 2, 0));
@@ -142213,15 +142275,15 @@ int main(void)
         HOOK_OFF(wayland_window_close(0, 0));
         HOOK_OFF(wayland_window_title(0, 0, "t", 1));
         HOOK_OFF(wayland_window_app_id(0, 0, "a", 1));
-        HOOK_OFF(wayland_window_query(0, 0, &facts));
-        HOOK_OFF(wayland_layer_surface(0, 0, &layer));
-        HOOK_OFF(x11_start(&sink));
+        HOOK_OFF(wayland_window_query(0, 0, 0));
+        HOOK_OFF(wayland_layer_surface(0, 0, 0));
+        HOOK_OFF(x11_start(0));
         HOOK_OFF(x11_stop());
         HOOK_OFF(x11_client_connect());
         HOOK_OFF(x11_client_disconnect(0));
         HOOK_OFF(x11_window_role(0, 0, X11_TYPE_NORMAL));
-        HOOK_OFF(x11_buffer_offer(0, &buffer));
-        HOOK_OFF(x11_damage(0, 0, 0, &rect));
+        HOOK_OFF(x11_buffer_offer(0, 0));
+        HOOK_OFF(x11_damage(0, 0, 0, 0));
         HOOK_OFF(x11_input_key(0, 30, 1));
         HOOK_OFF(x11_input_pointer(0, 1, 2, 1));
         HOOK_OFF(x11_window_place(0, 0, 1, 2, 0));
@@ -142234,7 +142296,7 @@ int main(void)
         HOOK_OFF(x11_window_close(0, 0));
         HOOK_OFF(x11_window_title(0, 0, "t", 1));
         HOOK_OFF(x11_window_app_id(0, 0, "a", 1));
-        HOOK_OFF(x11_window_query(0, 0, &facts));
+        HOOK_OFF(x11_window_query(0, 0, 0));
         HOOK_OFF(x11_window_strut(0, 0, 0, 24));
         HOOK_OFF(xwayland_start());
         HOOK_OFF(xwayland_stop());

@@ -256,7 +256,7 @@ describe()
         ranged)   echo "the call-site entries (__max_N, __room_N) on every body of three machines against pages that fault, and every call site naming one under the checked build" ;;
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
-        hooks)    echo "the Canvas Wayland and X11 hook files: built with and without their switches, refusals checked against their state, no hook symbol when off" ;;
+        hooks)    echo "the Canvas Wayland and X11 hook file (wayland.c): built with each switch and both, refusals checked against their state, no hook symbol when off" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
@@ -6373,13 +6373,15 @@ esac
 [ "$failed" = 0 ]
 )
 
-#       The Canvas hook files, wayland.c and x11.c, and their switches. With
-#       both switches on, each file builds on its own under gcc and clang with
-#       -Wall -Wextra -Werror, and CHECK_shell's battery of refusals passes
-#       against each side. With both off, CHECK_hooks_off calls all 44 hooks
-#       and sees SHELL_EOPNOTSUPP from each, and the object it compiles to
-#       defines no hook symbol: nm reads that object. With the switch off
-#       wayland.c refuses to build, which is what keeps the Makefile honest.
+#       The Canvas hook file, wayland.c, and its two switches. Each switch on
+#       alone builds the file under gcc and clang with -Wall -Wextra -Werror,
+#       with the Wayland hooks only or the X11 hooks only (21 or 23 symbols),
+#       and both on builds all 44. CHECK_shell's battery of refusals passes
+#       against both sides together. With both off, CHECK_hooks_off calls all
+#       44 hooks and sees SHELL_EOPNOTSUPP from each, and the object it
+#       compiles to defines no hook symbol: nm reads that object. With both
+#       switches off wayland.c refuses to build, which is what keeps the
+#       Makefile honest.
 #       checks.c has a stray /* at line 19527 that predates these hooks, so
 #       the checks.c compiles here drop -Wcomment and keep everything else.
 lane_hooks()
@@ -6409,8 +6411,14 @@ lane_hooks()
                 hooks_tests="-Wno-comment"
                 hooks_row "wayland-on-$hooks_cc" $hooks_cc $hooks_warn -DCONFIG_MOONWATER_WAYLAND \
                         -c src/canvas/wayland.c -o "$work/wayland-on.o"
+                hooks_row "wayland-only-object-$hooks_cc" sh -c "! nm -g '$work/wayland-on.o' | \
+                        grep -E ' [A-Za-z] _?(x11|xwayland)_'"
                 hooks_row "x11-on-$hooks_cc" $hooks_cc $hooks_warn -DCONFIG_MOONWATER_X11 \
-                        -c src/canvas/x11.c -o "$work/x11-on.o"
+                        -c src/canvas/wayland.c -o "$work/x11-on.o"
+                hooks_row "x11-only-object-$hooks_cc" sh -c "! nm -g '$work/x11-on.o' | \
+                        grep -E ' [A-Za-z] _?wayland_'"
+                hooks_row "both-on-$hooks_cc" $hooks_cc $hooks_warn -DCONFIG_MOONWATER_WAYLAND \
+                        -DCONFIG_MOONWATER_X11 -c src/canvas/wayland.c -o "$work/both-on.o"
                 hooks_row "shell-$hooks_cc" sh -c "$hooks_cc $hooks_warn $hooks_tests \
                         -DCHECK_shell -DCONFIG_MOONWATER_WAYLAND -DCONFIG_MOONWATER_X11 \
                         test/checks.c -o '$work/shell-$hooks_cc' && '$work/shell-$hooks_cc'"
@@ -6422,7 +6430,7 @@ lane_hooks()
                 if $hooks_cc $hooks_warn -c src/canvas/wayland.c -o "$work/wayland-off.o" 2> /dev/null; then
                         tally "hooks-wayland-off-refused-$hooks_cc" 0 1
                         hooks_status=1
-                        note "hooks: wayland.c built without its switch"
+                        note "hooks: wayland.c built with both switches off"
                 else
                         tally "hooks-wayland-off-refused-$hooks_cc" 1 1
                 fi
