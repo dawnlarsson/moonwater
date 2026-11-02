@@ -143708,6 +143708,101 @@ static void wire_object_checks(void)
         WIRE_CHECK(status == SHELL_EINVAL);
 }
 
+static int wire_live_windows(long client)
+{
+        int n = 0;
+
+        for (long i = 0; i < SHELL_SURFACES; i++)
+                if (wayland.side.surfaces[i].live && wayland.side.surfaces[i].client == client)
+                        n++;
+        return n;
+}
+
+/*
+        Toplevel teardown. A destroyed toplevel releases its window record, so
+        the client holds no shell surface afterwards and a later disconnect
+        closes nothing; sixty-nine windows opened and destroyed one after another
+        all get a row, past the sixty-four records the shell has. A window that
+        Canvas closed itself (the close hook) is destroyed by its client with no
+        second close. A surface that still has its role cannot be destroyed.
+*/
+static void wire_teardown_checks(void)
+{
+        long client = wayland_client_connect();
+        struct wire_build m;
+        unsigned long objects[80], ops[80];
+        unsigned int closed;
+
+        WIRE_CHECK(client >= 0);
+        if (client < 0)
+                return;
+        wb_begin(&m, WAYLAND_DISPLAY, 1);
+        wb_u(&m, 2);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
+        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 4) == 0);
+        wire_take(client, objects, ops, 80);
+
+        for (int cycle = 0; cycle < 69; cycle++)
+        {
+                wb_begin(&m, 3, 0);
+                wb_u(&m, 10);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wb_begin(&m, 4, 2);
+                wb_u(&m, 11);
+                wb_u(&m, 10);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wb_begin(&m, 11, 1);
+                wb_u(&m, 12);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                WIRE_CHECK(wire_live_windows(client) == 1);
+                if (cycle == 0)
+                {
+                        wb_begin(&m, 10, 0);
+                        wire_refused(client, "surface destroyed with its role", wb_end(&m), m.b);
+                }
+                wire_take(client, objects, ops, 80);
+                wb_begin(&m, 12, 0);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                WIRE_CHECK(wire_live_windows(client) == 0);
+                wire_take(client, objects, ops, 80);
+                wb_begin(&m, 11, 0);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+                wb_begin(&m, 10, 0);
+                WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        }
+
+        /* a window Canvas closed itself: the client's destroy of its toplevel is accepted, and no second close is sent. */
+        wb_begin(&m, 3, 0);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 4, 2);
+        wb_u(&m, 11);
+        wb_u(&m, 10);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 11, 1);
+        wb_u(&m, 12);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+        closed = wire_seen.closed;
+        WIRE_CHECK(wayland_window_close(client, wayland.clients[client].objects[wire_object_index(&wayland.clients[client], 10)].slot) == 0);
+        WIRE_CHECK(wire_seen.closed == closed + 1);
+        wb_begin(&m, 12, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        WIRE_CHECK(wire_seen.closed == closed + 1);
+        wb_begin(&m, 11, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wb_begin(&m, 10, 0);
+        WIRE_CHECK(wire_feed_build(client, &m) == 0);
+        wire_take(client, objects, ops, 80);
+
+        /* a disconnect with no window left closes nothing. */
+        closed = wire_seen.closed;
+        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+        WIRE_CHECK(wire_seen.closed == closed);
+}
+
 int main(void)
 {
         WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
@@ -143716,6 +143811,7 @@ int main(void)
         wire_good_objects_check();
         wire_object_checks();
         wire_refusal_checks();
+        wire_teardown_checks();
         wire_lifecycle_checks();
         printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
         return wire_failures != 0;

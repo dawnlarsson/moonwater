@@ -1027,6 +1027,30 @@ static inline int shell_window_close(struct shell_side *side, long client, long 
         return status;
 }
 
+/*
+        A toplevel its client destroyed. A window that is not closing yet is
+        closed through the sink, once; a window Canvas already closed is not
+        closed again, since its row may belong to another window by now. The
+        record is released either way, so the slot is free and no later
+        disconnect or stop names the row.
+*/
+static inline int shell_window_destroy(struct shell_side *side, long client, long surface)
+{
+        struct shell_surface *window = shell_window(side, client, surface);
+        int status = SHELL_OK;
+
+        if (!window)
+                return SHELL_EINVAL;
+        if (!(window->state & SHELL_STATE_CLOSING))
+        {
+                status = side->sink->close(side->sink->context, (int)window->row);
+                if (status < 0)
+                        return status;
+        }
+        shell_surface_clear(window);
+        return SHELL_OK;
+}
+
 static inline int shell_window_title(struct shell_side *side, long client, long surface, const char *text, long length)
 {
         struct shell_surface *window = shell_window(side, client, surface);
@@ -2388,7 +2412,7 @@ static int toplevel_request(long client, struct wayland_client *c, long index, l
         switch (opcode)
         {
         case 0:
-                status = shell_window_close(&wayland.side, client, slot);
+                status = shell_window_destroy(&wayland.side, client, slot);
                 if (status < 0)
                         return wire_fail_with(c, toplevel->id, WAYLAND_ERR_IMPLEMENTATION, "window refused close", status);
                 if (wayland.focused && wayland.focus_client == client && wayland.focus_slot == slot)
