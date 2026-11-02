@@ -56783,14 +56783,26 @@ __asm__(
     ASM_SECTION
     ASM_FUNC(memory_ascii_span)
     //   a0 = block, a1 = size; t0 = the run. Up to alignment a byte at a
-    //   time, then eight bytes a test from naturally aligned words, and a
-    //   word that has a byte with bit seven set is read again a byte at a
-    //   time to say which.
+    //   time, then sixteen bytes a test from naturally aligned words (two
+    //   loads, one or, one mask), then eight, and a block that has a byte
+    //   with bit seven set is read again a byte at a time to say which.
     "li t0, 0\n   li t2, 0x8080808080808080\n"
     ".Lascii_span_rv_align:  bgeu t0, a1, .Lascii_span_rv_done\n   add t4, a0, t0\n   andi t3, t4, 7\n   beqz t3, .Lascii_span_rv_word\n"
     "lbu t3, 0(t4)\n   andi t3, t3, 0x80\n   bnez t3, .Lascii_span_rv_done\n   addi t0, t0, 1\n   j .Lascii_span_rv_align\n"
-    ".Lascii_span_rv_word:  add t4, a0, t0\n   sub t5, a1, t0\n   li t6, 8\n   bltu t5, t6, .Lascii_span_rv_bytes\n   ld t3, 0(t4)\n   and t3, t3, t2\n   bnez t3, .Lascii_span_rv_bytes\n"
-    "addi t0, t0, 8\n   j .Lascii_span_rv_word\n"
+    // t5 is size - 16 and t1 is size - 8, both signed and fixed for the
+    // loops, so a short size goes straight to the bytes and a turn is one
+    // compare: sixteen a turn (two aligned words or-ed, one mask) while
+    // sixteen remain, then eight a turn while eight do.
+    ".Lascii_span_rv_word:  addi t5, a1, -16\n   addi t1, a1, -8\n   blt t1, t0, .Lascii_span_rv_bytes\n"
+    "add t4, a0, t0\n   ld t3, 0(t4)\n   and t3, t3, t2\n   bnez t3, .Lascii_span_rv_bytes\n   addi t0, t0, 8\n"
+    ".Lascii_span_rv_word16:  blt t5, t0, .Lascii_span_rv_word8\n   add t4, a0, t0\n   ld t3, 0(t4)\n   ld t6, 8(t4)\n   or a2, t3, t6\n   and a2, a2, t2\n"
+    "bnez a2, .Lascii_span_rv_hit16\n   addi t0, t0, 16\n   j .Lascii_span_rv_word16\n"
+    ".Lascii_span_rv_word8:  blt t1, t0, .Lascii_span_rv_bytes\n   add t4, a0, t0\n   ld t3, 0(t4)\n   and t3, t3, t2\n   bnez t3, .Lascii_span_rv_bytes\n"
+    "addi t0, t0, 8\n   j .Lascii_span_rv_word8\n"
+    // A hit somewhere in the sixteen: the first word's own mask says whether
+    // it is there; if not, the hit is in the second, and the bytes walk from
+    // its start. It falls into bytes, which is why it stands here.
+    ".Lascii_span_rv_hit16:  and t3, t3, t2\n   bnez t3, .Lascii_span_rv_bytes\n   addi t0, t0, 8\n"
     ".Lascii_span_rv_bytes:  bgeu t0, a1, .Lascii_span_rv_done\n   add t4, a0, t0\n   lbu t3, 0(t4)\n   andi t3, t3, 0x80\n   bnez t3, .Lascii_span_rv_done\n"
     "addi t0, t0, 1\n   j .Lascii_span_rv_bytes\n"
     ".Lascii_span_rv_done:\n   mv a0, t0\n" ASM_RET
