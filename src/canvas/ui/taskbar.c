@@ -157,10 +157,10 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         for (int at = 0; lay->most && at < lay->count; at++)
                 windows += taskbar_tab_width(lay, at) + lay->gap;
         lay->windows = windows;
-        // Along a bottom or top band the row is centred; along a side one the tabs start below a gap at the top and
-        // the tray is held to the bottom.
-        lay->start = lay->vertical ? lay->origin + lay->gap : lay->origin + (lay->length - (windows + lay->tray)) / 2;
-        lay->tray_at = lay->vertical ? lay->origin + lay->length - lay->gap - lay->tray : lay->start + windows;
+        // Along a bottom or top band the tray is at the right end and the tabs are centred in what it leaves; along a side
+        // one the tabs start below a gap at the top and the tray is held to the bottom.
+        lay->start = lay->vertical ? lay->origin + lay->gap : lay->origin + (lay->length - lay->tray - windows) / 2;
+        lay->tray_at = lay->origin + lay->length - lay->gap - lay->tray;
         lay->across = lay->vertical ? (view->position == TASKBAR_LEFT ? lay->bx : lay->bx + lay->inset)
                                     : (view->position == TASKBAR_TOP ? lay->by : lay->by + lay->inset);
         lay->across_len = lay->thick - lay->inset;

@@ -118838,9 +118838,9 @@ static void check_taskbar_geometry(void)
         view = compositor_taskbar_view();
         taskbar_band(&view, &x, &y, &w, &h);
         check("taskbar: the band is on its own edge of a 2560 by 1440 output, as thick as a tab", x == band[at][0] && y == band[at][1] && w == band[at][2] && h == band[at][3]);
-        check("taskbar: the tray is inside the band; a row's tray is its right-most item, a side band's sits 4 pixels above its bottom", taskbar_slot(&view, -2, &tx, &ty, &tw, &th) &&
+        check("taskbar: the tray is inside the band; a row's tray is at its right end, a side band's sits 4 pixels above its bottom", taskbar_slot(&view, -2, &tx, &ty, &tw, &th) &&
               tx >= x && ty >= y && tx + tw <= x + w && ty + th <= y + h &&
-              (at < 2 ? tx + tw >= x + w / 2 : ty + th == y + h - 4));
+              (at < 2 ? x + w - (tx + tw) <= 8 : ty + th == y + h - 4));
         check("taskbar: a point in the tray is the tray, a point off the band is none", taskbar_hit(&view, tx + tw / 2, ty + th / 2) == -2 &&
               taskbar_hit(&view, 1280, 700) == TASKBAR_HIT_NONE);
         check("taskbar: with the battery none, no battery cell is drawn", !taskbar_slot(&view, -4, &bx, &by, &bw, &bh));
@@ -120556,7 +120556,7 @@ static int wheel_unread(int row, unsigned int address_to events, int address_to 
         pinned by a hash of the whole output so that a changed default pixel is seen. The tabs' inks the band takes for
         a tab drawn without a font are pinned too.
 */
-#define CHROME_SCENE_HASH 0x1bf5d55fu
+#define CHROME_SCENE_HASH 0x3c4b523fu
 static void check_compositor_chrome(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
