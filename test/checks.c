@@ -130358,6 +130358,27 @@ static fn ui_over_check(void)
                 }
         check("ui_over: the body gives the C's bytes for every alpha pair and for lanes at their edges", same && drawn > 0);
 
+        /*
+                ui_kit_put, the premultiply and the over as one body on x86-64 and arm64, against the C it replaced: every
+                alpha at every cover from nothing past the whole, with colours that are not premultiplied too.
+        */
+        same = true;
+        for (unsigned int a = 0; a < 256; a++)
+                for (unsigned int cover = 0; cover <= 4200; cover += 7)
+                {
+                        unsigned int argb = (XORSHIFT32(state) & 0x00ffffffu) | a << 24, under = XORSHIFT32(state);
+                        unsigned int row[2] = {under, under}, want = under;
+
+                        ui_kit_put(row, 1, cover, argb);
+                        if (!cover)
+                                want = under;
+                        else if (cover >= 4096 && argb >> 24 == 255)
+                                want = argb | 0xff000000u;
+                        else
+                                want = ui_over_reference(ui_premultiplied(argb, cover > 4096 ? 4096 : cover), under);
+                        same &= row[1] == want && row[0] == under;
+                }
+        check("ui_kit_put: the body gives the C's pixel for every alpha and cover, and touches its own pixel alone", same);
 }
 
 /*
