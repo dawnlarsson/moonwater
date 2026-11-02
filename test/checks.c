@@ -135241,6 +135241,37 @@ static fn text_widget_check(string_address inter, string_address mono)
                 check("text widget: a triple click takes the line", doc_sel_start(&view.doc.selections[0]) == 0 && doc_sel_end(&view.doc.selections[0]) == 7);
         }
         ui_text_close(&view);
+        // A code view's text is cut to its body, not to the window: a line wider than the body, scrolled so that it starts
+        // left of the body, draws nothing left of the body's edge and nothing right of it.
+        {
+                static char wide[300];
+                unsigned int address_to shown = (unsigned int address_to)pixels;
+                positive outside_left = 0, outside_right = 0, inside = 0;
+
+                for (int k = 0; k < 299; k++)
+                        wide[k] = (char)('a' + k % 7);
+                wide[299] = 0;
+                memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
+                ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to)wide, 299, ui_text_keymap());
+                view.doc.language = DOC_LANGUAGE_C;
+                view.numbers = 0;
+                view.scroll_x = 30;
+                ui_text_draw(&wui, &view, 50, 50, 200, 100, 0x111113);
+                for (int y = 50; y < 150; y++)
+                {
+                        for (int x = 0; x < 50; x++)
+                                outside_left += shown[(positive)y * 800 + (positive)x] != 0;
+                        for (int x = 250; x < 800; x++)
+                                outside_right += shown[(positive)y * 800 + (positive)x] != 0;
+                        for (int x = 50; x < 250; x++)
+                                inside += shown[(positive)y * 800 + (positive)x] != 0;
+                }
+                check("text widget: a code line draws nothing left of its body", outside_left == 0 && view.left == 50);
+                check("text widget: a code line draws nothing right of its body", outside_right == 0);
+                check("text widget: a code line draws its text inside its body", inside > 0);
+                ui_text_close(&view);
+                memory_fill_u32((unsigned int address_to)pixels, 800 * 600, 0);
+        }
 
         /*
                 The code view's decorations, read off the picture: the current line's tint is under its cells as past

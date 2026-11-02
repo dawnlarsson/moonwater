@@ -9105,6 +9105,16 @@ static positive ui_text_preedit_shown(const struct ui_text address_to t, p8 addr
         paper of its line (ground: the current line's, a line range's) and a highlight's; then the indent's guides,
         a selection's blanks (a dot a space, a line a tab) and the squiggles.
 */
+// A fill of a line's decoration (a highlight, a selection, a squiggle) cut to the widget's box across: it lies inside
+// the box, not over the gutter or past the body's right edge.
+static fn ui_text_fill(struct ui address_to ui, const struct ui_text address_to t, int x, int y, int width, int height, unsigned int tone)
+{
+        int x0 = x < t->left ? t->left : x, x1 = x + width > t->right ? t->right : x + width;
+
+        if (x1 > x0)
+                ui_fill(ui, x0, y, x1 - x0, height, tone);
+}
+
 static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, const struct ui_text_layout address_to l, p64 line,
                             int y, int baseline, unsigned int ground)
 {
@@ -9121,8 +9131,8 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
 
                 if (range->kind != DOC_RANGE_HIGHLIGHT || range->finish <= l->offset[0] || range->start >= l->offset[l->count])
                         continue;
-                ui_fill(ui, origin + ui_text_x_of(l, range->start), y, ui_text_x_of(l, range->finish) - ui_text_x_of(l, range->start),
-                        t->line_height, 0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
+                ui_text_fill(ui, t, origin + ui_text_x_of(l, range->start), y, ui_text_x_of(l, range->finish) - ui_text_x_of(l, range->start),
+                             t->line_height, 0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
         }
         // The selection: one rectangle a run of selected clusters, and a sliver past the end of a line the selection
         // goes on from.
@@ -9133,13 +9143,13 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 while (k < l->count && ui_text_selected(t, l->offset[k]))
                         k++;
                 if (k > from)
-                        ui_fill(ui, origin + l->x[from], y, l->x[k] - l->x[from], t->line_height,
-                                ui_tone(selection & 0xffffffu, selection >> 24));
+                        ui_text_fill(ui, t, origin + l->x[from], y, l->x[k] - l->x[from], t->line_height,
+                                     ui_tone(selection & 0xffffffu, selection >> 24));
                 else
                         k++;
         }
         if (ui_text_selected(t, l->offset[l->count]) && t->mode != UI_TEXT_FIELD)
-                ui_fill(ui, origin + l->x[l->count], y, t->cell / 2 + ui->scale, t->line_height, ui_tone(selection & 0xffffffu, selection >> 24));
+                ui_text_fill(ui, t, origin + l->x[l->count], y, t->cell / 2 + ui->scale, t->line_height, ui_tone(selection & 0xffffffu, selection >> 24));
 
         if (t->mode != UI_TEXT_CODE)
                 ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, origin, baseline, (string_address)l->shown,
@@ -9149,7 +9159,10 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 // A run is the clusters of one role; each cluster of a single code point one cell is part of a run drawn
                 // with font_cells, any other (marks, wide, emoji) a font_draw of its own at its cell.
                 const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
-                font_target target = {ui->pixels, ui->pitch, ui->width, ui->bottom};
+                // The cells are drawn into the body alone: a target at the body's top left, so a cell past its left or right
+                // edge is cut there and not at the window's (the gutter's numbers are not painted over).
+                font_target target = {ui->pixels + (unsigned long)t->top * ui->pitch + t->left, (positive)ui->pitch, t->right - t->left,
+                                      t->bottom - t->top};
                 font_metrics grid = font_metrics_at(faces[0], ui_text_em(ui, t));
                 p32 codes[256];
                 positive token = 0;
@@ -9184,7 +9197,8 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                                 break;
                                         if (origin + l->x[k] >= t->left - t->cell && origin + l->x[k] < t->right)
                                                 font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
-                                                          (b32)((b64)(origin + l->x[k]) * 65536), baseline, ink & 0xffffffu, FONT_UNKNOWN);
+                                                          (b32)((b64)(origin + l->x[k] - t->left) * 65536), baseline - t->top, ink & 0xffffffu,
+                                                          FONT_UNKNOWN);
                                         k++;
                                         run = 0;
                                         goto next;
@@ -9196,8 +9210,8 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         {
                                 unsigned int paper = ui_text_paper(t, l->offset[start], ground);
 
-                                font_cells(ui->engine, faces, 2, codes, run, &grid, ui_text_em(ui, t), 0, &target, origin + l->x[start],
-                                           y + (t->line_height - grid.cell_height) / 2, ink & 0xffffffu, paper);
+                                font_cells(ui->engine, faces, 2, codes, run, &grid, ui_text_em(ui, t), 0, &target, origin + l->x[start] - t->left,
+                                           y + (t->line_height - grid.cell_height) / 2 - t->top, ink & 0xffffffu, paper);
                         }
                 next:;
                 }
@@ -9224,9 +9238,9 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         if ((c != ' ' && c != '\t') || !ui_text_selected(t, l->offset[k]) || x1 <= t->left || x0 >= t->right)
                                 continue;
                         if (c == ' ')
-                                ui_fill(ui, (x0 + x1) / 2 - ui->scale / 2, mid - ui->scale / 2, ui->scale, ui->scale, blank);
+                                ui_text_fill(ui, t, (x0 + x1) / 2 - ui->scale / 2, mid - ui->scale / 2, ui->scale, ui->scale, blank);
                         else
-                                ui_fill(ui, x0 + t->cell / 4, mid, x1 - x0 - t->cell / 2, ui->scale, blank);
+                                ui_text_fill(ui, t, x0 + t->cell / 4, mid, x1 - x0 - t->cell / 2, ui->scale, blank);
                 }
         }
         // Squiggles under what a diagnostic marks: a wave in the error's or the warning's colour.
@@ -9241,7 +9255,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         continue;
                 colour = ui_role(range->kind == DOC_RANGE_ERROR ? UI_ERROR : range->kind == DOC_RANGE_WARNING ? UI_WARNING : UI_INFO);
                 for (int x = origin + ui_text_x_of(l, range->start), stop = origin + ui_text_x_of(l, range->finish); x < stop; x++)
-                        ui_fill(ui, x, baseline + 2 * ui->scale + ((x / (2 * ui->scale)) & 1) * ui->scale, 1, ui->scale, ui_tone(colour & 0xffffffu, 255));
+                        ui_text_fill(ui, t, x, baseline + 2 * ui->scale + ((x / (2 * ui->scale)) & 1) * ui->scale, 1, ui->scale, ui_tone(colour & 0xffffffu, 255));
         }
         // The carets on this line, in the accent, unless it is the blink's off half; a composition's text after the
         // primary, underlined. A bar caret stands on the edge between two characters, half in each one's bearing: drawn
@@ -9271,7 +9285,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         wide = ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, x, baseline, shown,
                                          t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0);
 
-                        ui_fill(ui, x, baseline + 2 * ui->scale, wide, ui->scale, ui_tone(text & 0xffffffu, 255));
+                        ui_text_fill(ui, t, x, baseline + 2 * ui->scale, wide, ui->scale, ui_tone(text & 0xffffffu, 255));
                 }
         }
 }
