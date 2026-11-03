@@ -8,16 +8,19 @@ changes it.
 
 Fonts
 
-Four font files are shipped, unmodified, as the projects released them: the
+Eight font files are shipped, unmodified, as the projects released them: the
 bytes in fonts/ are the bytes in the release archives, not subset, not
 converted, not renamed inside (the SIL Open Font License's rule on Reserved
 Font Names concerns modified versions, and there are none). The build copies
 them, with each family's licence text beside them, into the image under
-/usr/share/fonts/ (fonts/inter/ to /usr/share/fonts/inter/, fonts/ibm-plex-mono/
-to /usr/share/fonts/ibm-plex-mono/). They are TrueType outlines (glyf), static
-instances, which is what src/canvas/font.c reads.
+/usr/share/fonts/ (fonts/inter/ to /usr/share/fonts/inter/, and likewise
+fonts/ibm-plex-mono/, fonts/noto-sans-arabic/ and fonts/noto-sans-hebrew/).
+They are TrueType outlines (glyf), static instances, which is what
+src/canvas/font.c reads. The Noto files are the unhinted builds of their
+releases, 317,728 bytes for the four: the engine draws unhinted, and the hinted
+builds of the same fonts are 550,072 bytes.
 
-Licence of both families: SIL Open Font License, Version 1.1 (26 February
+Licence of all four families: SIL Open Font License, Version 1.1 (26 February
 2007), the text kept next to each family's files as OFL.txt, exactly as the
 project ships it. The fonts are not sold by themselves; the licence text and
 the copyright notice travel with them.
@@ -69,3 +72,56 @@ IBM Plex Mono
   fonts/ibm-plex-mono/OFL.txt                     4360 bytes
       from ibm-plex-mono/fonts/complete/ttf/license.txt
       sha256 91c25c350d3cac39da2736d74f7ba37ef648f5237a4e330a240615bc8d8c4360
+
+
+Noto Sans Arabic
+
+  Copyright:  Copyright 2022 The Noto Project Authors
+              (https://github.com/notofonts/arabic)
+  Licence:    SIL Open Font License 1.1, fonts/noto-sans-arabic/OFL.txt
+              (the OFL.txt of the release archive, byte for byte)
+  Source:     https://github.com/notofonts/arabic/releases/tag/NotoSansArabic-v2.013
+              https://github.com/notofonts/arabic/releases/download/NotoSansArabic-v2.013/NotoSansArabic-v2.013.zip
+  Release:    NotoSansArabic-v2.013 (the fonts say "Version 2.013")
+  Archive:    NotoSansArabic-v2.013.zip
+              sha256 1301aceaea84c501cf2e6dcfb3182e2328c8eae5725817fcb239672bda7154f1
+              (computed after download: GitHub reports none for this asset)
+
+  fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf   142140 bytes
+      from NotoSansArabic/unhinted/ttf/NotoSansArabic-Regular.ttf
+      sha256 bd86ca02f087d7f3c3788ba458fb6b73744c7639ed276b8d870dba6def6c40d0
+  fonts/noto-sans-arabic/NotoSansArabic-Bold.ttf      141852 bytes
+      from NotoSansArabic/unhinted/ttf/NotoSansArabic-Bold.ttf
+      sha256 f4cb79f842a07d1bcf597879574358fb7010f73761396d1d0f2445dfedb4d2ca
+  fonts/noto-sans-arabic/OFL.txt                        4382 bytes
+      from OFL.txt
+      sha256 a7a5a25eb188bf1cd96982030d53e23c33485c69b1044a562254226857ee13af
+
+  The Arabic, Persian and Urdu letters, the marks and the presentation
+  forms the language files need; its Latin is only the digits and the few
+  signs of the script, Inter draws the rest.
+
+
+Noto Sans Hebrew
+
+  Copyright:  Copyright 2022 The Noto Project Authors
+              (https://github.com/notofonts/hebrew)
+              (the notice of its OFL.txt; the fonts' own notice says 2024)
+  Licence:    SIL Open Font License 1.1, fonts/noto-sans-hebrew/OFL.txt
+              (the OFL.txt of the release archive, byte for byte)
+  Source:     https://github.com/notofonts/hebrew/releases/tag/NotoSansHebrew-v3.001
+              https://github.com/notofonts/hebrew/releases/download/NotoSansHebrew-v3.001/NotoSansHebrew-v3.001.zip
+  Release:    NotoSansHebrew-v3.001 (the fonts say "Version 3.001")
+  Archive:    NotoSansHebrew-v3.001.zip
+              sha256 df0a71814b4e63644cf40fcc4529111b61266b7a2dafbe95068b29a7520cc3cb
+              (computed after download: GitHub reports none for this asset)
+
+  fonts/noto-sans-hebrew/NotoSansHebrew-Regular.ttf    16836 bytes
+      from NotoSansHebrew/unhinted/ttf/NotoSansHebrew-Regular.ttf
+      sha256 04272f5600d0ec816d31d0df73b23aa8d3501ea359ebe820da31c11ffcf00853
+  fonts/noto-sans-hebrew/NotoSansHebrew-Bold.ttf       16900 bytes
+      from NotoSansHebrew/unhinted/ttf/NotoSansHebrew-Bold.ttf
+      sha256 dfdb3056de1f4542b888c77a1a8a750548a802e271479f56e52152423b64dde8
+  fonts/noto-sans-hebrew/OFL.txt                        4382 bytes
+      from OFL.txt
+      sha256 9b9fe028b5ba74d231659a1bbaf0ed09b11e759d1ca6a070999e16d151616b47

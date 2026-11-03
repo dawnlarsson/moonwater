@@ -5227,8 +5227,8 @@ static b32 build_kernel_source()
 /*
         The fonts the compositor's tabs and the terminal on it draw with.
 
-        fonts/ holds the files of the Inter and IBM Plex Mono releases as the
-        projects shipped them, each family with its own OFL.txt, and they go
+        fonts/ holds the files of the Inter, IBM Plex Mono, Noto Sans Arabic and
+        Noto Sans Hebrew releases as the projects shipped them, each family with its own OFL.txt, and they go
         into the image as /usr/share/fonts/<family>/, licence beside the
         files, which is where the machine script looks (THIRD-PARTY says what
         they are and under what terms). They are only a font to something
@@ -5247,7 +5247,7 @@ static bool build_tool_named_on(string_address name)
 
 static b32 build_fonts(string_address image)
 {
-        static const string_address families[] = {"inter", "ibm-plex-mono", null};
+        static const string_address families[] = {"inter", "ibm-plex-mono", "noto-sans-arabic", "noto-sans-hebrew", null};
         string_address source = build_setting_get("font_source");
         string_address where = build_join(image, "/usr/share/fonts", null);
 
