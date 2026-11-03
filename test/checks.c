@@ -122341,6 +122341,49 @@ static void assist_fresh(void)
     compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stack[2] = 3, compositor.stacked = 3;
 }
 
+// The pointer of a drag rested in the top band for the grid's time: its rest started that long ago, and the loop's wake for it.
+static void grid_dwell(void)
+{
+    compositor.grid_since = clock_monotonic_nanoseconds() - COMPOSITOR_GRID_DWELL_NS - 1;
+    compositor_snap_tick(clock_monotonic_nanoseconds());
+}
+
+/*
+        The grid waits for a rest and never catches a drag on its way to another screen: two screens one above the other,
+        the upper's bottom against the lower's top, and a window dragged up from the lower with its pointer in the lower's
+        top band. That band is a seam, no free top: no grid however long the pointer rests there, and no wake is asked for.
+*/
+static void check_compositor_grid_seam(void)
+{
+    if (!layout_table_map(256))
+    {
+        check("grid seam: the table is mapped", false);
+        return;
+    }
+    layout_setup(256, 1);
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 128, compositor.screen[0][2] = 256, compositor.screen[0][3] = 128;
+    compositor.screen[1][0] = 0, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 128;
+    layout_show(1, 60, 160, 100, 40);
+    compositor.stack[0] = 1, compositor.stacked = 1;
+    screens_hand(80, 164, 1);
+    screens_hand(127, 130, 0);
+    check("grid seam: the pointer in the lower screen's top band, against the upper screen, brings no grid and asks no wake",
+          !compositor.grid_on && !compositor_snap_due());
+    grid_dwell();
+    check("grid seam: rested there past the grid's time, still no grid", !compositor.grid_on);
+    screens_hand(127, 2, 0);
+    check("grid seam: on up to the upper screen's free top band, the rest starts there", !compositor.grid_on && compositor_snap_due() > 0);
+    grid_dwell();
+    check("grid seam: and the grid comes up on the upper screen after it", compositor.grid_on && compositor.grid_screen == 1);
+    compositor.held[0] |= CK_HELD_LCONTROL;
+    screens_hand(127, 3, 0);
+    check("grid seam: Control held takes the grid away (no snap at all)", !compositor.grid_on);
+    compositor.held[0] &= ~CK_HELD_LCONTROL;
+    screens_hand(127, 3, -1);
+    compositor.press = COMPOSITOR_NONE;
+}
+
 static int assist_row_at(int row)
 {
     for (int at = 0; at < compositor.assist_count; at++)
@@ -122438,12 +122481,15 @@ static void check_compositor_assist(void)
     layout_drop(1, 20, 4, 0, 100);
     check("assist: a drop with no other window floating arms nothing", !compositor.assist_armed && compositor.assist_count == 0);
 
-    /* The grid: the top band brings it up, and the pointer in its row keeps it. */
+    /* The grid: the pointer resting in the top band brings it up after its time, and the pointer in its row keeps it. */
     assist_fresh();
     screens_hand(80, 64, 1);
     screens_hand(127, 4, 0);
-    check("grid: the pointer at the top edge brings the grid up on that screen, hovering the top left quarter",
-          compositor.grid_on && compositor.grid_screen == 0 && compositor.grid_hover == 3);
+    check("grid: the pointer come to the top edge does not bring the grid at once: the window thrown there shows the fill",
+          !compositor.grid_on && compositor.preview[2] == 256 && compositor_snap_due() > 0);
+    grid_dwell();
+    check("grid: rested in the top band for its time, the grid comes up on that screen with no motion, hovering the top left quarter",
+          compositor.grid_on && compositor.grid_screen == 0 && compositor.grid_hover == 3 && !compositor_snap_due());
     compositor_damage(0, 0, 256, 256);
     compositor_present();
     check("grid: presented, the top left tile's mini screen is tinted where the quarter is",
@@ -122453,6 +122499,8 @@ static void check_compositor_assist(void)
     screens_hand(127, 60, 0);
     check("grid: the pointer moved down out of the row takes it away", !compositor.grid_on);
     screens_hand(127, 4, 0);
+    check("grid: back in the band, the rest starts again: no grid yet", !compositor.grid_on);
+    grid_dwell();
     screens_hand(127, 4, -1);
     compositor.press = COMPOSITOR_NONE;
     check("grid: a drop on the top left tile takes the top left quarter",
@@ -122904,6 +122952,7 @@ static void check_compositor_grid_drag(void)
     layout_paint(2, picture);
     screens_hand(120, 50, 1);
     screens_hand(120, 4, 0);
+    grid_dwell();
     compositor_damage(0, 0, 256, 256);
     compositor_present();
     check("grid drag: the grid is up while the window is held over the top, and the window is moved with the hand",
@@ -122984,6 +123033,7 @@ static void check_compositor_overlay_fade(void)
     compositor.showing[2] = compositor.showing[3] = 0;
     screens_hand(80, 64, 1);
     screens_hand(127, 4, 0);
+    grid_dwell();
     compositor_damage(0, 0, 256, 256);
     compositor_present();
     border_at = layout_pixels[12 * 256 + 27] & 0xffffffu;
@@ -141603,6 +141653,7 @@ b32 main()
         check_compositor_push();
         check_compositor_seam();
         check_compositor_assist();
+        check_compositor_grid_seam();
         check_compositor_tile_line();
         check_compositor_snap_cover();
         check_compositor_snap_closing();

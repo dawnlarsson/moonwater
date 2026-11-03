@@ -2896,8 +2896,10 @@ static void compositor_pointer_shown(void);
 #define COMPOSITOR_EDGE_RIGHT CP_EDGE_RIGHT
 #define COMPOSITOR_EDGE_TOP CP_EDGE_TOP
 #define COMPOSITOR_EDGE_BOTTOM CP_EDGE_BOTTOM
-// The band at the top of an output that brings the grid up, and the Display map's snap band, in logical pixels.
+// The band at the top of an output that brings the grid up, and the Display map's snap band, in logical pixels; and how
+// long a drag's pointer rests in it before the grid comes (a window thrown to the top is filled, and not caught by it).
 #define COMPOSITOR_SNAP 8
+#define COMPOSITOR_GRID_DWELL_NS (400 * UI_MS)
 // The snap's dead zone, in logical pixels: a window's edge touched at its screen's edge holds until it is this far inside
 // (compositor_snap_rule). A touch is at 0 px, with no band in front of it.
 #define COMPOSITOR_SNAP_EDGE 8
@@ -3122,9 +3124,11 @@ static struct
         int assist_on, assist_armed, assist_row, assist_screen, assist_count;
         unsigned int assist_how, assist_rows[COMPOSITOR_ASSIST_MAX], assist_zone[COMPOSITOR_ASSIST_MAX];
         int assist_rect[COMPOSITOR_ASSIST_MAX][4];
-        // The top edge's grid (compositor_grid_at): up on a screen, and the tile the pointer is over.
-        int grid_on, grid_screen;
+        // The top edge's grid (compositor_grid_at): up on a screen, and the tile the pointer is over; when a drag's pointer
+        // came to rest in the top band of screen grid_since_screen, which brings it up after COMPOSITOR_GRID_DWELL_NS (0: not there).
+        int grid_on, grid_screen, grid_since_screen;
         unsigned int grid_hover;
+        positive grid_since;
         // The overlays (the assist and the grid) are up when overlays_up; they fade in and out (compositor_overlay_fade) from
         // overlay_from toward overlay_goal percent since overlay_at, and are drawn while they are up or fading out.
         unsigned int overlays_up, overlay_from, overlay_goal;
@@ -9221,20 +9225,43 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
         return added;
 }
 
-// The grid as a drag's pointer is at x, y: up on the screen the pointer is on at the top edge. The snap assist is not shown
-// during a drag, only the preview: the thumbnails are offered after the drop (compositor_release_as).
+/*
+        Whether a drag's pointer at x, y is resting in the top band of screen at where that band may bring the grid: the
+        screen's top there is free (no screen above it: a drag on its way up to another screen crosses the band and is
+        not caught), and Control, which is no snap, is not held.
+*/
+static int compositor_grid_rests(const int (*screens)[4], unsigned int count, int at, int x, int y)
+{
+        int point[4] = {x, y, 1, 1};
+
+        return at >= 0 && compositor_grid_band(screens[at], x, y) && !(compositor_modifiers() & WINDOW_KEY_CONTROL) &&
+               (compositor_snap_free(screens, count, point, at) & COMPOSITOR_SNAP_TOP);
+}
+
+/*
+        The grid as a drag's pointer is at x, y. It comes up only once the pointer has rested in a free top band for
+        COMPOSITOR_GRID_DWELL_NS (grid_since is when it came to it; the loop wakes for the rest, compositor_snap_due), so a
+        window thrown up to the top is filled at once and the grid is for one held there. Up, it stays while the pointer is
+        in its row of tiles, so a drop there can take a region. The snap assist is not shown during a drag, only the
+        preview: the thumbnails are offered after the drop (compositor_release_as).
+*/
 static void compositor_overlays_drag(int row, int x, int y, unsigned int how, int screen)
 {
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
-        int at = compositor_screen_at(screens, count, x, y);
+        int at = compositor_screen_at(screens, count, x, y), rests = compositor_grid_rests(screens, count, at, x, y);
+        positive now = clock_monotonic_nanoseconds();
 
         (void)row, (void)how, (void)screen;
         compositor_overlays_damage();
+        if (!rests)
+                compositor.grid_since = 0;
+        else if (!compositor.grid_since || compositor.grid_since_screen != at)
+                compositor.grid_since = now ? now : 1, compositor.grid_since_screen = at;
 
-        // Up by the top band, and kept up while the pointer is in its row of tiles, so a drop there can take a region.
-        if (at >= 0 && (compositor_grid_band(screens[at], x, y) ||
-                        (compositor.grid_on && compositor.grid_screen == at && compositor_grid_panel(screens[at], x, y))))
+        if (at >= 0 && ((rests && now - compositor.grid_since >= COMPOSITOR_GRID_DWELL_NS) ||
+                        (compositor.grid_on && compositor.grid_screen == at && compositor_grid_panel(screens[at], x, y) &&
+                         !(compositor_modifiers() & WINDOW_KEY_CONTROL))))
         {
                 compositor.grid_on = 1;
                 compositor.grid_screen = at;
@@ -9243,6 +9270,19 @@ static void compositor_overlays_drag(int row, int x, int y, unsigned int how, in
         else
                 compositor.grid_on = 0;
         compositor_overlays_damage();
+}
+
+// When the grid is due to come up under a pointer resting in the top band (compositor_overlays_drag), or 0 for never.
+static positive compositor_snap_due(void)
+{
+        return compositor.drag >= 0 && compositor.grid_since && !compositor.grid_on ? compositor.grid_since + COMPOSITOR_GRID_DWELL_NS : 0;
+}
+
+// The loop woke for the grid: the drag's overlays and preview are read again where the pointer rests.
+static void compositor_snap_tick(positive now)
+{
+        if (compositor_snap_due() && now >= compositor_snap_due())
+                compositor_preview(compositor.drag);
 }
 
 // The snap assist taken away: a click elsewhere, Escape, or a window placed from it.
@@ -11216,6 +11256,8 @@ static void compositor_preview(int row)
                 compositor_overlays_damage();
                 compositor.grid_on = 0;
         }
+        if (row < 0)
+                compositor.grid_since = 0;
         compositor.snap_held = touch;
         if (how == COMPOSITOR_FLOATING)
         {
@@ -13453,6 +13495,12 @@ static b32 compositor_main()
                         now = clock_monotonic_nanoseconds();
                         until = !until || compositor_touch_due() < until ? compositor_touch_due() : until;
                 }
+                // A drag's pointer resting in the top band brings the grid up when its time is up, with no motion.
+                if (compositor_snap_due())
+                {
+                        now = clock_monotonic_nanoseconds();
+                        until = !until || compositor_snap_due() < until ? compositor_snap_due() : until;
+                }
                 if (compositor_spots_any(1))
                 {
                         positive period = compositor.period ? compositor.period : 16666667ull;
@@ -13539,6 +13587,8 @@ static b32 compositor_main()
                 // A finger held long enough, and the marks that fade.
                 if (compositor_touch_due())
                         compositor_touch_tick(clock_monotonic_nanoseconds());
+                if (compositor_snap_due())
+                        compositor_snap_tick(clock_monotonic_nanoseconds());
                 if (compositor_spots_any(1))
                         compositor_spots_tick(clock_monotonic_nanoseconds());
 
