@@ -243,7 +243,7 @@ describe()
         stack)    echo "what each function puts on the stack, and what a deep walk costs" ;;
         differential_oracle) echo "the differential engine's own checks: comparison, covering arrays, ledger and shrinking" ;;
         clang)    echo "the shell built by clang for three machines and run, as gcc builds it: lib.c and the code the programs share take only what both compilers take (NOT RUN without clang, a cross ld or qemu-user)" ;;
-        gate)     echo "the pre-land gate: the gcc, arm64, riscv64 and clang shells and CHECK_terminal built, the audit seal, the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
+        gate)     echo "the pre-land gate: the gcc, arm64, riscv64 and clang shells and CHECK_terminal built, the audit seal, the GPU's kernels assembled by the build and held to LLVM's, the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
         text)     echo "the text utilities against GNU coreutils, every option combination the grammar reaches, and tr's threaded pieces on one processor and on all" ;;
         files)    echo "the file utilities against coreutils, by output and by effect on the directory" ;;
         misc)     echo "the utilities that are neither text nor files -- dd, diff, ps, the checksums, the process wrappers -- against the system's own" ;;
@@ -1006,6 +1006,10 @@ freestanding()
         architecture=${3:-$host_arch}
         if [ "$#" -gt 3 ]; then shift 3; else set --; fi
 
+        if gpu_kernels_wanted "$@"; then
+                gpu_kernels_ready || return 1
+        fi
+
         #       GCC can lower the AArch64 atomic builtins to libgcc's outline
         #       helpers. A spark binary has no libgcc under it, so keep the
         #       atomics inline just as the other two architectures do.
@@ -1148,6 +1152,38 @@ freestanding()
 build_tool()
 {
         sh "$root/build.sh" "$@"
+}
+
+#       artifacts/gpu_kernels.inc, which src/canvas/gpu.c includes: what `build gpu-kernels` assembles
+#       src/canvas/gpu.asm into. A compile that reaches gpu.c has to find it, so the helper that compiles
+#       asks for it first (gpu_kernels_wanted says when), and once for a run: it is made again from the
+#       source each run, so a change to the .asm is what the next compile sees, and the build cache, which
+#       keys on what the preprocessor reads, sees it too.
+gpu_kernels_ready()
+{
+        [ ! -e "$work/gpu-kernels.ready" ] || return 0
+        build_tool gpu-kernels > "$work/gpu-kernels.log" 2>&1 || {
+                note "gpu kernels: build gpu-kernels failed:"
+                sed 's/^/    /' "$work/gpu-kernels.log" | head -20
+                return 1
+        }
+        : > "$work/gpu-kernels.ready"
+}
+
+#       Whether the compile named (its arguments) reaches src/canvas/gpu.c: the two hand checks that include it, and
+#       the programs once a source of theirs does.
+gpu_kernels_wanted()
+{
+        case " $* " in
+        *" -DCHECK_gpu "* | *" -DCHECK_gpu_kit "* | *" -DMOONWATER_GPU_KERNELS="*) return 0 ;;
+        esac
+        case $source_file in
+        programs/*)
+                [ -n "${gpu_includers+x}" ] ||
+                        gpu_includers=$(grep -rlE '#include +"([^"]*/)?gpu\.c"' src programs 2> /dev/null | grep -v '^src/canvas/gpu\.c$')
+                [ -n "$gpu_includers" ] ;;
+        *) return 1 ;;
+        esac
 }
 
 #       One section of test/checks.c, which is where every C check lives. The
@@ -6886,12 +6922,71 @@ gate_inventory()
         python3 test/assembly/inventory.py --check --target all src/lib.c > /dev/null
 }
 
-# The GPU's kernels in src/canvas/gpu.c are what src/canvas/gpu.asm assembles to (a machine with no llvm-mc cannot say, and does not).
+#       The GPU's kernels. src/canvas/gpu.asm is assembled by the build's own assembler (src/build/gpuasm.c, `build
+#       gpu-kernels`) and nothing generated is kept in the tree; this holds that assembler to LLVM's. What it makes of
+#       the shipped file, and of test/gpu_stress.asm (every instruction in every operand form it takes), has to be the
+#       words llvm-mc and ld.lld make of the same text, kernel by kernel; a copy of the assembler with one opcode of its
+#       table changed has to disagree; what it refuses is asked of the verb itself, and the rest of what it refuses and
+#       the smallest kernels it makes are CHECK_gpuasm. A machine without llvm-mc still builds the kernels and runs
+#       the refusals, and says it has not compared them.
+gpu_kernels_mutant()
+{
+        mutant_row=$1
+        mutant_into=$2
+        mutant_asm=$3
+        mkdir -p "$work/gpu-mutant" || return 1
+        sed "s/$mutant_row/$mutant_into/" src/build/gpuasm.c > "$work/gpu-mutant/gpuasm.c" || return 1
+        if cmp -s src/build/gpuasm.c "$work/gpu-mutant/gpuasm.c"; then
+                echo "gpu kernels: the mutation of $mutant_row found no row to change"
+                return 1
+        fi
+        freestanding_check gpuasm "$work/gpuasm-mutant" "" "-DGPUASM_SOURCE=\"$work/gpu-mutant/gpuasm.c\"" || return 1
+        "$work/gpuasm-mutant" "$mutant_asm" "$work/gpu-mutant/out.inc" || return 1
+        if python3 test/gpu_kernels.py "$mutant_asm" "$work/gpu-mutant/out.inc" > "$work/gpu-mutant/said" 2>&1; then
+                echo "gpu kernels: an assembler with $mutant_row changed to $mutant_into still agrees with LLVM on $mutant_asm"
+                return 1
+        fi
+        note "gpu kernels: the mutation $mutant_into is caught: $(sed -n 1p "$work/gpu-mutant/said")"
+}
+
+gpu_kernels_refuses()
+{
+        refuse_name=$1
+        refuse_message=$2
+        refuse_text=$3
+        mkdir -p "$work/gpu-bad" || return 1
+        printf '.amdgcn_target "amdgcn-amd-amdhsa--gfx1036"\n.text\nk:\n%s\n' "$refuse_text" > "$work/gpu-bad/$refuse_name.asm"
+        rm -f "$work/gpu-bad/$refuse_name.inc"
+        if build_tool gpu-kernels "$work/gpu-bad/$refuse_name.asm" "$work/gpu-bad/$refuse_name.inc" \
+                > "$work/gpu-bad/$refuse_name.out" 2>&1; then
+                echo "gpu kernels: $refuse_name was assembled"
+                return 1
+        fi
+        grep -qF -- "$work/gpu-bad/$refuse_name.asm:$refuse_message" "$work/gpu-bad/$refuse_name.out" &&
+                [ ! -e "$work/gpu-bad/$refuse_name.inc" ] || {
+                echo "gpu kernels: $refuse_name did not stop with $refuse_message:"
+                sed 's/^/    /' "$work/gpu-bad/$refuse_name.out"
+                return 1
+        }
+}
+
 gate_gpu_kernels()
 {
+        gpu_kernels_ready || return 1
+        build_tool gpu-kernels test/gpu_stress.asm "$work/gpu-stress.inc" || return 1
+        gpu_kernels_refuses mnemonic '4: unknown instruction '"'s_bogus'" '	s_bogus s1, s2' &&
+                gpu_kernels_refuses register '4: a register out of range '"'s106'" '	s_mov_b32 s106, s1' &&
+                gpu_kernels_refuses label '5: a branch to a label that is never defined: '"'.nowhere'" '	s_mov_b32 s1, s2
+	s_branch .nowhere' &&
+                gpu_kernels_refuses literal '4: a literal where this form has none '"'0x1234'" '	v_pk_min_u16 v1, v2, 0x1234' || return 1
+        freestanding_check gpuasm "$work/gpuasm-check" || return 1
+        "$work/gpuasm-check" || return 1
         command -v llvm-mc > /dev/null 2>&1 && command -v ld.lld > /dev/null 2>&1 ||
-                { note "gate gpu-kernels: no llvm-mc or ld.lld here, not checked"; return 0; }
-        python3 test/gpu_kernels.py --check
+                { note "gate gpu-kernels: no llvm-mc or ld.lld here; the kernels are built, not compared with LLVM's"; return 0; }
+        python3 test/gpu_kernels.py src/canvas/gpu.asm artifacts/gpu_kernels.inc || return 1
+        python3 test/gpu_kernels.py test/gpu_stress.asm "$work/gpu-stress.inc" || return 1
+        gpu_kernels_mutant '{"s_or_b32", GPUASM_SOP2, 0x10,' '{"s_or_b32", GPUASM_SOP2, 0x11,' src/canvas/gpu.asm || return 1
+        gpu_kernels_mutant '{"v_xor_b32", GPUASM_VOP2, 0x1d,' '{"v_xor_b32", GPUASM_VOP2, 0x1c,' test/gpu_stress.asm
 }
 
 lane_gate()

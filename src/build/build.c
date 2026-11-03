@@ -37,6 +37,7 @@
 #include "../lib.util.c"
 #include "../moonwater/spark.c"
 #include "../sh/shell.c"
+#include "gpuasm.c"
 
 /*
         The settings.
@@ -70,6 +71,12 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
         {"output", "dist"},
         {"kernel_tree", "linux"},
         {"profile_root", "kernel/profile"},
+
+        /*      The programs the GPU runs: the assembly they are written in,
+                and the file `build gpu-kernels` makes of it in the artifacts
+                directory, which src/canvas/gpu.c includes. */
+        {"gpu_source", "src/canvas/gpu.asm"},
+        {"gpu_kernels", "gpu_kernels.inc"},
 
         /*      The kernel this tree builds on, and where it comes from.
 
@@ -3159,9 +3166,12 @@ static b32 build_spark(string_address source, string_address output,
         //      built.
         {
                 string_address config = build_setting_get("spark_config");
+                string_address kernels = build_setting_get("spark_gpu_kernels");
 
                 if (config && *config && count + 1 < BUILD_ARGUMENT_ROOM)
                         words[count++] = config;
+                if (kernels && *kernels && count + 1 < BUILD_ARGUMENT_ROOM)
+                        words[count++] = kernels;
         }
         count = build_add_split((string_address address_to)words, count,
                                 BUILD_ARGUMENT_ROOM,
@@ -4646,6 +4656,52 @@ static b32 build_floodlight_policy_check()
         return 0;
 }
 
+//      Its own room: this runs while the buffers above hold the configuration.
+static p8 build_gpu_source[1 << 20];
+
+/*
+        The GPU's kernels: src/canvas/gpu.asm assembled by src/build/gpuasm.c
+        into the arrays src/canvas/gpu.c includes, written beside the
+        configuration header and named to the compiler the same way
+        (-DMOONWATER_GPU_KERNELS), so what the card runs is made by the build
+        from its source and none of it is kept in the tree. A program that is
+        compiled by hand includes artifacts/gpu_kernels.inc without the flag,
+        which is where this writes by default.
+
+        build gpu-kernels [source [output]]: a line with the file and the line
+        of whatever the assembler would not take, and status 1.
+*/
+static b32 build_gpu_kernels(string_address input, string_address output)
+{
+        string_address temporary = build_join(output, ".gpu_tmp", null);
+        bipolar got;
+
+        refuse_if(!build_is_file(input), 1, "gpu-kernels: no such file: %s\n", input);
+
+        got = file_slurp(input, build_gpu_source, sizeof(build_gpu_source));
+
+        refuse_if(got < 0 || (positive)got + 1 >= sizeof(build_gpu_source), 1, "gpu-kernels: cannot read %s\n", input);
+
+        if (!gpuasm_assemble(input, (string_address)build_gpu_source))
+                return string_report(log_error, 1, "gpu-kernels: %s\n", gpuasm_message);
+
+        build_tool("mkdir", "-p", build_directory_of(output), null);
+
+        //      Written beside the output and renamed over it, so lanes that
+        //      ask for the file together never read half of it.
+        if (!build_write_file(temporary, (string_address)gpuasm_output, gpuasm_output_length))
+                return string_report(log_error, 1, "gpu-kernels: cannot write %s\n", temporary);
+
+        if (rename(temporary, output) < 0)
+        {
+                unlink(temporary);
+                return string_report(log_error, 1, "gpu-kernels: cannot rename %s to %s\n",
+                                     temporary, output);
+        }
+
+        return 0;
+}
+
 /*
         Write the header for the configuration now held and point the next
         spark build at it. The path is absolute because a quoted include is
@@ -4672,6 +4728,21 @@ static b32 build_config_header_install(string_address from,
         //      One word, not a list to split: the path may hold a blank.
         build_setting_set("spark_config",
                           build_join("-DMOONWATER_CONFIG=\"", path, "\"", null));
+
+        //      The GPU's kernels go the same way, for a build that has the GPU on.
+        if (build_moon_gpu)
+        {
+                string_address kernels = build_in("artifacts", build_setting_get("gpu_kernels"));
+
+                if (build_gpu_kernels(build_setting_get("gpu_source"), kernels))
+                        return build_die("assembling the GPU's kernels");
+
+                if (kernels[0] != '/')
+                        kernels = build_join(build_working_directory(), "/", kernels, null);
+
+                build_setting_set("spark_gpu_kernels",
+                                  build_join("-DMOONWATER_GPU_KERNELS=\"", kernels, "\"", null));
+        }
 
         return 0;
 }
@@ -6960,6 +7031,7 @@ static fn build_usage()
                       "    build surface <config> [utility]        the names that .config installs\n"
                       "    build config-header <config> <header> [utility]\n"
                       "                                            the header a .config gives the programs\n"
+                      "    build gpu-kernels [source [output]]     assemble the GPU's kernels\n"
                       "\n"
                       "--set name=value overrides one setting, anywhere on the line.\n"
                       "    build key-one <name>                    the same, refusing two\n"
@@ -6986,6 +7058,8 @@ static fn build_usage()
       "surface: usage: build surface <config> [utility]\n") \
     X(CONFIG_HEADER, "config-header", 4, 5, true, false, \
       "config-header: usage: build config-header <config> <header> [utility]\n") \
+    X(GPU_KERNELS, "gpu-kernels", 2, 4, true, false, \
+      "gpu-kernels: usage: build gpu-kernels [source [output]]\n") \
     X(FREESTANDING, "freestanding", 2, 0, false, true, null) \
     X(FLOOR, "floor", 2, 0, true, false, null) \
     X(HELP, "--help", 2, 0, false, false, null) \
@@ -7120,6 +7194,10 @@ b32 main()
                 case BUILD_CONFIG_HEADER:
                         return build_config_header_write(arguments[2], arguments[3],
                                                          count > 4 ? arguments[4] : null);
+                case BUILD_GPU_KERNELS:
+                        return build_gpu_kernels(count > 2 ? arguments[2] : build_setting_get("gpu_source"),
+                                                 count > 3 ? arguments[3]
+                                                           : build_in("artifacts", build_setting_get("gpu_kernels")));
                 case BUILD_FREESTANDING:
                         return build_freestanding(arguments + 2, count - 2);
                 case BUILD_FLOOR:
