@@ -118941,9 +118941,11 @@ static void check_compositor_refresh(void)
 }
 
 /*
-        The snap preview is a tint on its target and on nothing else. Over the desktop, the target is the kit's selection
-        at its own alpha; the window dragged is as it is over the tint, and a window above it is as it is too. Everything
-        else is the desktop, untouched.
+        A tint (frame->preview) of the scene is a tint on its target and on nothing else, and what is after its frame in the
+        list is over it (the grid's tints under the assist's thumbnails): over the desktop, the target is the kit's selection
+        at its own alpha, a frame of the window that carries it is as it is over the tint, and a window above it is as it is
+        too. Everything else is the desktop, untouched. (The snap preview of a window is not one of these: compositor_present
+        takes it off the window into a frame of its own after the windows and the tabs, compositor_preview_lift.)
 */
 static void check_compositor_preview(void)
 {
@@ -124169,6 +124171,237 @@ static void check_compositor_tile_square(void)
         compositor_frame_of(1, &frame);
         lands = frame.source_w > 0 && frame.width < (int)compositor.w[1] && frame.radius == 0 && frame.line == 1;
         check("tile square: a tile gliding into its place and one landing there are square from the first frame", glides && lands);
+    }
+}
+
+/*
+        The snap preview is over every window: the one being dragged, a window above it, a glass window and the tabs of the
+        band, so where the target is stays clear under whatever lies there; and under the overlays only (the assist's thumbnails
+        and the grid's tints), which are meant to lie over it. At each place the pixel is the scene's own pixel with the tint
+        mixed over it, the scene being what the screen shows with no preview, and the tint changes no pixel outside the target.
+        Four windows, the second glass, the band, the preview on the right half held and fading, and then on two screens at
+        100 and 200 percent; and a preview that goes leaves nothing of itself behind.
+*/
+#define OVER_SIDE GLASS_SIDE
+
+static void over_setup(unsigned int *made, unsigned int *band)
+{
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.shared_row = compositor.mark_row = compositor.preview_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = OVER_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = made;
+    compositor.scanout_pitch = OVER_SIDE * 4;
+    compositor.band = band;
+    if (!glass_table_map())
+        return;
+    table = compositor.table;
+    for (int row = 1; row <= 4; row++)
+    {
+        table->x[row] = row == 4 ? 130 : 10 + 40 * row;
+        table->y[row] = row == 4 ? 100 : 6 + 20 * row;
+        table->width[row] = 100;
+        table->height[row] = 100;
+        table->glass[row] = row == 2 ? WINDOW_GLASS : 0;
+        glass_paint(row, 0, 0, 100, 100, row == 1 ? 0x2060c0u : row == 2 ? 0xc04020u : row == 3 ? 0x20c060u : 0xa0a0a0u, true);
+    }
+}
+
+static void over_render(unsigned int *into)
+{
+    compositor_damage(0, 0, OVER_SIDE, OVER_SIDE);
+    compositor_present();
+    memory_copy(into, compositor.scanout, sizeof(unsigned int) * OVER_SIDE * OVER_SIDE);
+}
+
+// The window row's preview being drawn, over rect, at alpha percent (held at 100, or fading from alpha).
+static void over_preview(int row, const int *rect, unsigned int alpha, int fading, unsigned int how)
+{
+    compositor.preview_draw = row + 1;
+    compositor.preview_row = fading ? COMPOSITOR_NONE : row;
+    memory_copy(compositor.preview, rect, sizeof(compositor.preview));
+    if (fading)
+        memory_zero(compositor.preview, sizeof(compositor.preview));
+    memory_copy(compositor.preview_from, rect, sizeof(compositor.preview_from));
+    compositor.preview_from_alpha = alpha;
+    compositor.preview_fading = fading;
+    compositor.preview_at = 0;
+    compositor.preview_how = how;
+}
+
+static void over_preview_off(void)
+{
+    compositor.preview_draw = 0;
+    compositor.preview_row = COMPOSITOR_NONE;
+    memory_zero(compositor.preview, sizeof(compositor.preview));
+    compositor.preview_fading = 0;
+}
+
+// Whether x, y is in row's rectangle grown by margin.
+static int over_in(int row, int x, int y, int margin)
+{
+    return x >= compositor.x[row] - margin && x < compositor.x[row] + (int)compositor.w[row] + margin &&
+           y >= compositor.y[row] - margin && y < compositor.y[row] + (int)compositor.h[row] + margin;
+}
+
+// A point of rect, at least 8 px inside it and 50 above the band, that only window row is at (and no other within 8 px).
+static int over_only(int row, const int *rect, int *px, int *py)
+{
+    for (int y = rect[1] + 8; y < rect[1] + rect[3] - 50; y += 2)
+        for (int x = rect[0] + 8; x < rect[0] + rect[2] - 8; x += 2)
+        {
+            int clear = over_in(row, x, y, -6);
+
+            for (int other = 1; other <= 4 && clear; other++)
+                if (other != row && over_in(other, x, y, 8))
+                    clear = 0;
+            if (clear)
+            {
+                *px = x, *py = y;
+                return 1;
+            }
+        }
+    return 0;
+}
+
+// The preview's rows against the plain scene: each point is the plain pixel with the tint mixed over it, and no pixel
+// outside the target changed. Answers how many points were as they should be, of those given.
+static unsigned int over_compare(const unsigned int *plain, const unsigned int *with, const int *rect, unsigned int alpha,
+                                 const int (*points)[2], unsigned int count)
+{
+    unsigned int ink = compositor_snap_ink(), good = 0, outside = 0;
+    unsigned int cover = (ink >> 24) * alpha / 100;
+
+    for (unsigned int at = 0; at < count; at++)
+    {
+        int x = points[at][0], y = points[at][1];
+        unsigned int want = compositor_mix(plain[y * OVER_SIDE + x] & 0xffffffu, ink & 0xffffffu, cover);
+
+        good += (with[y * OVER_SIDE + x] & 0xffffffu) == want && want != (plain[y * OVER_SIDE + x] & 0xffffffu);
+    }
+    for (int y = 0; y < OVER_SIDE; y++)
+        for (int x = 0; x < OVER_SIDE; x++)
+            if (with[y * OVER_SIDE + x] != plain[y * OVER_SIDE + x] &&
+                (x < rect[0] || x >= rect[0] + rect[2] || y < rect[1] || y >= rect[1] + rect[3]))
+                outside++;
+    return outside ? 0u : good;
+}
+
+static void check_compositor_preview_over(void)
+{
+    static unsigned int made[OVER_SIDE * OVER_SIDE], band[OVER_SIDE * OVER_SIDE], plain[OVER_SIDE * OVER_SIDE],
+        with[OVER_SIDE * OVER_SIDE], scene[OVER_SIDE * OVER_SIDE];
+    int target[4] = {128, 0, 128, 256}, points[5][2], found = 0, tab_x = 0, tab_y = 0;
+    unsigned int held, fading, thumb = 0;
+    unsigned int address_to first_map;
+    struct taskbar_view view;
+
+    over_setup(made, band);
+    if (!compositor.table)
+    {
+        check("preview over: the table is mapped", false);
+        return;
+    }
+    first_map = (unsigned int address_to)compositor.table;
+    over_render(plain);
+    // Where each kind of thing is, in the target: the window dragged (row 1) alone, row 3 alone, row 4 alone (above the dragged
+    // one), the glass window (row 2) alone, and a tab of the band.
+    found += over_only(1, target, &points[0][0], &points[0][1]);
+    found += over_only(3, target, &points[1][0], &points[1][1]);
+    found += over_only(4, target, &points[2][0], &points[2][1]);
+    found += over_only(2, target, &points[3][0], &points[3][1]);
+    view = compositor_taskbar_view();
+    {
+        int x, y, w, h;
+
+        if (taskbar_slot(&view, -2, &x, &y, &w, &h) && x + w / 2 >= target[0] && x + w / 2 < target[0] + target[2])
+        {
+            tab_x = x + w / 2, tab_y = y + h / 2;
+            points[4][0] = tab_x, points[4][1] = tab_y;
+            found += (plain[tab_y * OVER_SIDE + tab_x] & 0xffffffu) != (compositor_ground & 0xffffffu);
+        }
+    }
+    check("preview over: the places are found: the window dragged, two above it, the glass window and the tray's tab in the target",
+          found == 5);
+    if (found != 5)
+    {
+        corner_scene_end(first_map);
+        return;
+    }
+
+    over_preview(1, target, 100, 0, COMPOSITOR_RIGHT);
+    over_render(with);
+    held = over_compare(plain, with, target, 100, points, 5);
+    check("preview over: held, the tint is over the window dragged, a window above it, a window above that, the glass window and "
+          "the tray's tab, each the pixel it had with the tint mixed over it, and over nothing outside the target",
+          held == 5);
+    if (held != 5)
+        string_format(log, "  preview over: held: %p of 5 as they should be\n", (positive)held);
+
+    over_preview(1, target, 60, 1, COMPOSITOR_RIGHT);
+    over_render(with);
+    fading = over_compare(plain, with, target, 60, points, 5);
+    check("preview over: fading, it is as faint over all five and as clear (the tint at the percent it fades to)", fading == 5);
+
+    // A thumbnail of the assist is over the preview: its pixels are what they are with no preview.
+    over_preview_off();
+    compositor.assist_on = 1, compositor.assist_count = 1, compositor.assist_rows[0] = 3, compositor.assist_screen = 0;
+    compositor.assist_rect[0][0] = 150, compositor.assist_rect[0][1] = 20, compositor.assist_rect[0][2] = 80;
+    compositor.assist_rect[0][3] = 60;
+    compositor.overlay_goal = 100;
+    over_render(scene);
+    over_preview(1, target, 100, 0, COMPOSITOR_RIGHT);
+    over_render(with);
+    thumb = (with[50 * OVER_SIDE + 190] == scene[50 * OVER_SIDE + 190]) && (with[40 * OVER_SIDE + 170] == scene[40 * OVER_SIDE + 170]) &&
+            (with[60 * OVER_SIDE + 210] == scene[60 * OVER_SIDE + 210]) && with[10 * OVER_SIDE + 200] != scene[10 * OVER_SIDE + 200];
+    check("preview over: the assist's thumbnail is over the tint (its pixels are as with no preview), and the tint is over what is beside it",
+          thumb);
+    compositor.assist_on = 0, compositor.assist_count = 0, compositor.overlay_goal = 0;
+
+    // A preview that goes leaves nothing of itself: the target damaged as it leaves, and the fade ended, the screen is the plain one.
+    {
+        int trail = 0;
+
+        over_preview_off();
+        over_render(scene);
+        over_preview(1, target, 100, 0, COMPOSITOR_RIGHT);
+        over_render(with);
+        compositor_preview_leave();
+        over_preview_off();
+        compositor_present();
+        for (unsigned int at = 0; at < OVER_SIDE * OVER_SIDE; at++)
+            trail += compositor.scanout[at] != scene[at];
+        check("preview over: a preview that goes leaves no trail: the screen is the one with no preview", trail == 0);
+    }
+    corner_scene_end(first_map);
+
+    // Two screens at 100 and 200 percent: a window on the second, above the dragged one on the first, under the tint of the
+    // second's left half, which has the second's line.
+    {
+        static unsigned int pair[OVER_SIDE * OVER_SIDE];
+        int rect[4] = {128, 0, 64, 256}, point[1][2] = {{170, 70}}, seen, line;
+        unsigned int address_to mapped = corner_scene(pair, 2, 100, 200, 80);
+        struct compositor_frame frame;
+
+        if (!mapped)
+        {
+            check("preview over: the table is mapped for two screens", false);
+            return;
+        }
+        over_render(scene);
+        over_preview(1, rect, 100, 0, COMPOSITOR_RIGHT);
+        over_render(with);
+        compositor_frame_of(1, &frame);
+        seen = over_compare(scene, with, rect, 100, point, 1) == 1;
+        line = frame.preview_line;
+        corner_scene_end(mapped);
+        check("preview over: on the second of two screens (at 200 percent) the tint is over its window, and has that screen's line (2 px)",
+              seen && line == 2);
     }
 }
 
@@ -143895,6 +144128,7 @@ b32 main()
         check_compositor_screen_chord();
         check_compositor_preview_motion();
         check_compositor_tile_square();
+        check_compositor_preview_over();
         check_compositor_restore_glide();
         check_compositor_tile_resize();
         check_compositor_divider();
