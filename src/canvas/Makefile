@@ -8,12 +8,10 @@
 # Canvas's.
 obj-$(CONFIG_MOONWATER_CANVAS) += canvas.o
 
-#       The hook file is built when either switch is on (Kconfig, off by
-#       default): CONFIG_MOONWATER_WAYLAND for the Wayland hooks and
-#       CONFIG_MOONWATER_X11 for the X11 and XWayland hooks, both in wayland.c.
-#       With both off the object is not built at all. The or names the object
-#       once, so both switches on do not list it twice.
-obj-$(or $(CONFIG_MOONWATER_WAYLAND),$(CONFIG_MOONWATER_X11)) += wayland.o
+#       Nothing of the Wayland shim is built here. wayland.c and wayland_host.c are
+#       userspace code, part of the compositor (compositor.c includes them when the
+#       build's config header says CONFIG_MOONWATER_WAYLAND), because a parser of
+#       what a client sends has no place in the kernel's image.
 
 #       A stock comparison: MOONWATER_STOCK in the environment builds the
 #       module without the alias block, so the kernel keeps its own strlen,

@@ -154363,3117 +154363,1938 @@ int main(void) {
 }
 #endif /* CHECK_canvas_cells */
 
-#ifdef CHECK_shell
+#ifdef CHECK_wayland
 /*
-        The Wayland and X11 hooks with both switches on, against the state they keep. Each hook is called with the
-        values a client may not send -- a zero, a negative, a value past its cap, a string with a control byte, a
-        surface another client holds, a sink that is not complete -- and must answer negative, leave its side's whole
-        state byte for byte as it was, and leave the sink uncalled. A refusal that comes from the sink is checked
-        for the state alone. Each hook is also called with a good value and must accept it, so the refusals are not
-        all the file does. The Wayland layer surface, the X strut and XWayland are checked after the shared battery.
+        CHECK_wayland: the Wayland shim against a client that speaks the wire from the generated tables and a fake
+        compositor, in one process. Every request is built from the table the shim reads, and every event the shim sends
+        is read back by the table's event signatures, so a malformed event is a failed check wherever it appears.
 
-            gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_shell -DCONFIG_MOONWATER_WAYLAND -DCONFIG_MOONWATER_X11 test/checks.c
+            cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_wayland -DCONFIG_MOONWATER_WAYLAND test/checks.c
 */
-#if !defined(CONFIG_MOONWATER_WAYLAND) || !defined(CONFIG_MOONWATER_X11)
-#error "CHECK_shell builds the hook file with both switches on: define CONFIG_MOONWATER_WAYLAND and CONFIG_MOONWATER_X11"
-#endif
+#include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
-#include <string.h>
-#include "../src/canvas/wayland.c"
-
-struct hook_probe
-{
-        unsigned int calls;
-        int refuse;
-        int next_row;
-};
-
-static struct hook_probe hook_probe_state = {0, 0, 3};
-
-static int hook_answer(void *context, int row)
-{
-        struct hook_probe *probe = context;
-
-        (void)row;
-        probe->calls++;
-        return probe->refuse ? SHELL_EINVAL : SHELL_OK;
-}
-
-static int hook_open(void *context, long client, long role)
-{
-        struct hook_probe *probe = context;
-
-        (void)client;
-        (void)role;
-        probe->calls++;
-        if (probe->refuse)
-                return SHELL_EINVAL;
-        return probe->next_row++;
-}
-
-static int hook_key(void *context, long client, long code, long pressed)
-{
-        (void)client;
-        (void)code;
-        (void)pressed;
-        return hook_answer(context, -1);
-}
-
-static int hook_pointer(void *context, long client, long x, long y, long buttons)
-{
-        (void)client;
-        (void)x;
-        (void)y;
-        (void)buttons;
-        return hook_answer(context, -1);
-}
-
-static int hook_damage(void *context, int row, const struct shell_rect *rect)
-{
-        (void)rect;
-        return hook_answer(context, row);
-}
-
-static int hook_place(void *context, int row, long x, long y, long screen)
-{
-        (void)x;
-        (void)y;
-        (void)screen;
-        return hook_answer(context, row);
-}
-
-static int hook_size(void *context, int row, long width, long height)
-{
-        (void)width;
-        (void)height;
-        return hook_answer(context, row);
-}
-
-static int hook_minimize(void *context, int row, long on)
-{
-        (void)on;
-        return hook_answer(context, row);
-}
-
-static int hook_maximize(void *context, int row, long on)
-{
-        (void)on;
-        return hook_answer(context, row);
-}
-
-static int hook_fullscreen(void *context, int row, long on)
-{
-        (void)on;
-        return hook_answer(context, row);
-}
-
-static int hook_stack(void *context, int row, long layer)
-{
-        (void)layer;
-        return hook_answer(context, row);
-}
-
-static int hook_activate(void *context, int row)
-{
-        return hook_answer(context, row);
-}
-
-static int hook_close(void *context, int row)
-{
-        return hook_answer(context, row);
-}
-
-static int hook_title(void *context, int row, const char *text, long length)
-{
-        (void)text;
-        (void)length;
-        return hook_answer(context, row);
-}
-
-static int hook_layer(void *context, int row, const struct shell_layer *layer)
-{
-        (void)layer;
-        return hook_answer(context, row);
-}
-
-static int hook_query(void *context, int row, struct shell_facts *facts)
-{
-        facts->x = 5;
-        facts->y = 6;
-        facts->width = 96;
-        facts->height = 48;
-        facts->z = 2;
-        return hook_answer(context, row);
-}
-
-static void hook_release(void *context, long fd)
-{
-        (void)context;
-        (void)fd;
-}
-
-static int hook_pool(void *context, long fd, long size)
-{
-        (void)context;
-        (void)fd;
-        (void)size;
-        return 0;
-}
-
-static int hook_picture(void *context, int row, long fd, long offset, long width, long height, long stride)
-{
-        (void)fd;
-        (void)offset;
-        (void)width;
-        (void)height;
-        (void)stride;
-        return hook_answer(context, row);
-}
-
-static const struct shell_sink hook_sink = {
-        .context = &hook_probe_state,
-        .open = hook_open,
-        .key = hook_key,
-        .pointer = hook_pointer,
-        .damage = hook_damage,
-        .place = hook_place,
-        .size = hook_size,
-        .minimize = hook_minimize,
-        .maximize = hook_maximize,
-        .fullscreen = hook_fullscreen,
-        .stack = hook_stack,
-        .activate = hook_activate,
-        .close = hook_close,
-        .title = hook_title,
-        .layer = hook_layer,
-        .query = hook_query,
-        .picture = hook_picture,
-        .release = hook_release,
-        .pool = hook_pool,
-};
-
-static unsigned int hook_checks, hook_failures;
-static struct shell_side hook_before;
-static unsigned int hook_calls_before;
-
-#define HOOK_CHECK(condition) \
-        do { \
-                hook_checks++; \
-                if (!(condition)) \
-                { \
-                        hook_failures++; \
-                        printf("  FAIL line %d: %s\n", __LINE__, #condition); \
-                } \
-        } while (0)
-
-#define HOOK_SNAPSHOT(state) \
-        (memcpy(&hook_before, (state), sizeof hook_before), hook_calls_before = hook_probe_state.calls)
-
-/*
-        A call that must be refused by the engine: negative, the state as it
-        was, and the sink not called at all.
-*/
-#define HOOK_REFUSED(state, call) \
-        do { \
-                int hook_status; \
-                HOOK_SNAPSHOT(state); \
-                hook_status = (call); \
-                if (hook_status >= 0) \
-                        printf("  ACCEPTED, want refused: %s = %d\n", #call, hook_status); \
-                HOOK_CHECK(hook_status < 0); \
-                HOOK_CHECK(memcmp(&hook_before, (state), sizeof hook_before) == 0); \
-                if (hook_probe_state.calls != hook_calls_before) \
-                        printf("  sink called, want not: %s\n", #call); \
-                HOOK_CHECK(hook_probe_state.calls == hook_calls_before); \
-        } while (0)
-
-/*
-        A call the sink refuses: negative, and the state as it was. The sink is
-        called, which is the point of the case.
-*/
-#define HOOK_REFUSED_BY_SINK(state, call) \
-        do { \
-                int hook_status; \
-                HOOK_SNAPSHOT(state); \
-                hook_status = (call); \
-                HOOK_CHECK(hook_status < 0); \
-                HOOK_CHECK(memcmp(&hook_before, (state), sizeof hook_before) == 0); \
-        } while (0)
-
-struct hook_side
-{
-        struct shell_side *state;
-        int (*start)(const struct shell_sink *sink);
-        int (*stop)(void);
-        int (*connect)(void);
-        int (*disconnect)(long client);
-        int (*role)(long client, long surface, long role);
-        int (*buffer)(long client, const struct shell_buffer *buffer);
-        int (*damage)(long client, long surface, long buffer, const struct shell_rect *rect);
-        int (*key)(long client, long code, long pressed);
-        int (*pointer)(long client, long x, long y, long buttons);
-        int (*place)(long client, long surface, long x, long y, long screen);
-        int (*size)(long client, long surface, long width, long height);
-        int (*minimize)(long client, long surface, long on);
-        int (*maximize)(long client, long surface, long on);
-        int (*fullscreen)(long client, long surface, long on);
-        int (*stack)(long client, long surface, long layer);
-        int (*activate)(long client, long surface);
-        int (*close)(long client, long surface);
-        int (*title)(long client, long surface, const char *text, long length);
-        int (*app_id)(long client, long surface, const char *text, long length);
-        int (*query)(long client, long surface, struct shell_facts *facts);
-        long toplevel, popup, first_bad_role;
-};
-
-static const struct hook_side hook_wayland = {
-        &wayland.side, wayland_start, wayland_stop, wayland_client_connect, wayland_client_disconnect,
-        wayland_role, wayland_buffer_offer, wayland_damage, wayland_input_key, wayland_input_pointer,
-        wayland_window_place, wayland_window_size, wayland_window_minimize, wayland_window_maximize,
-        wayland_window_fullscreen, wayland_window_stack, wayland_window_activate, wayland_window_close,
-        wayland_window_title, wayland_window_app_id, wayland_window_query,
-        SHELL_ROLE_TOPLEVEL, SHELL_ROLE_POPUP, 6,
-};
-
-static const struct hook_side hook_x11 = {
-        &x11, x11_start, x11_stop, x11_client_connect, x11_client_disconnect,
-        x11_window_role, x11_buffer_offer, x11_damage, x11_input_key, x11_input_pointer,
-        x11_window_place, x11_window_size, x11_window_minimize, x11_window_maximize,
-        x11_window_fullscreen, x11_window_stack, x11_window_activate, x11_window_close,
-        x11_window_title, x11_window_app_id, x11_window_query,
-        X11_TYPE_NORMAL, X11_TYPE_MENU, X11_TYPE_COUNT,
-};
-
-/*
-        The battery one side answers. The order is the lifecycle: refusals
-        before a start, the start and its refusals, clients, buffers, roles,
-        then every window request on the windows those roles made, then
-        disconnect and stop.
-*/
-static void hook_battery(const struct hook_side *h)
-{
-        struct shell_buffer good = {SHELL_BUFFER_SHM, SHELL_FORMAT_ARGB8888, 9, 64, 64, 256};
-        struct shell_buffer bad;
-        struct shell_rect rect = {0, 0, 64, 64};
-        struct shell_rect bad_rect;
-        struct shell_facts facts;
-        struct shell_sink partial = hook_sink;
-        struct shell_side *state = h->state;
-        char long_text[SHELL_TITLE_MAX + 2];
-        int status;
-        long i;
-
-        memset(long_text, 'a', sizeof long_text - 1);
-        long_text[sizeof long_text - 1] = 0;
-
-        /* Before a start nothing is accepted, and the sink is not called. */
-        HOOK_REFUSED(state, h->connect());
-        HOOK_REFUSED(state, h->role(0, 0, h->toplevel));
-        HOOK_REFUSED(state, h->buffer(0, &good));
-        HOOK_REFUSED(state, h->key(0, 30, 1));
-        HOOK_REFUSED(state, h->place(0, 0, 1, 2, 0));
-        HOOK_REFUSED(state, h->stop());
-        HOOK_REFUSED(state, h->disconnect(0));
-        HOOK_REFUSED(state, h->start(0));
-        partial.query = 0;
-        HOOK_REFUSED(state, h->start(&partial));
-        partial = hook_sink;
-        partial.release = 0;
-        HOOK_REFUSED(state, h->start(&partial));
-        partial = hook_sink;
-        partial.pool = 0;
-        HOOK_REFUSED(state, h->start(&partial));
-        status = h->start(&hook_sink);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, h->start(&hook_sink));
-
-        /* Clients: a number outside the table, or one not connected, is refused; the table fills and then refuses. */
-        HOOK_REFUSED(state, h->disconnect(-1));
-        HOOK_REFUSED(state, h->disconnect(SHELL_CLIENTS));
-        HOOK_REFUSED(state, h->disconnect(5));
-        status = h->connect();
-        HOOK_CHECK(status == 0);
-        status = h->connect();
-        HOOK_CHECK(status == 1);
-        for (i = 2; i < SHELL_CLIENTS; i++)
-                HOOK_CHECK(h->connect() == (int)i);
-        HOOK_REFUSED(state, h->connect());
-        for (i = 2; i < SHELL_CLIENTS; i++)
-                HOOK_CHECK(h->disconnect(i) == SHELL_OK);
-
-        /* Buffers: every field at its bound and past it. A buffer that is not shm or dma-buf, or has no format or no descriptor, is out. */
-        HOOK_REFUSED(state, h->buffer(0, 0));
-        HOOK_REFUSED(state, h->buffer(-1, &good));
-        HOOK_REFUSED(state, h->buffer(5, &good));
-        bad = good; bad.kind = 0;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.kind = 3;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.format = 0;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.fd = -1;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.fd = SHELL_FD_MAX;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.width = 0;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.width = SHELL_DIMENSION_MAX + 1;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.height = 0;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.height = SHELL_DIMENSION_MAX + 1;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.stride = 0;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.stride = 255;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.stride = 258;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.stride = SHELL_STRIDE_MAX + 4;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        bad = good; bad.width = SHELL_DIMENSION_MAX; bad.height = SHELL_DIMENSION_MAX; bad.stride = SHELL_STRIDE_MAX;
-        HOOK_REFUSED(state, h->buffer(0, &bad));
-        status = h->buffer(0, &good);
-        HOOK_CHECK(status == 0);
-        status = h->buffer(1, &good);
-        HOOK_CHECK(status == 1);
-        status = h->connect();
-        HOOK_CHECK(status == 2);
-
-        /* Roles: a slot out of range, a role that is not one, a client not connected, a sink that refuses, and a second claim. */
-        HOOK_REFUSED(state, h->role(0, -1, h->toplevel));
-        HOOK_REFUSED(state, h->role(0, SHELL_SURFACES, h->toplevel));
-        HOOK_REFUSED(state, h->role(0, 0, -1));
-        HOOK_REFUSED(state, h->role(0, 0, h->first_bad_role));
-        HOOK_REFUSED(state, h->role(7, 0, h->toplevel));
-        hook_probe_state.refuse = 1;
-        HOOK_REFUSED_BY_SINK(state, h->role(0, 0, h->toplevel));
-        hook_probe_state.refuse = 0;
-        status = h->role(0, 0, h->toplevel);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, h->role(0, 0, h->popup));
-        HOOK_REFUSED(state, h->role(1, 0, h->toplevel));
-        status = h->role(0, 1, h->popup);
-        HOOK_CHECK(status == SHELL_OK);
-        status = h->role(1, 2, h->toplevel);
-        HOOK_CHECK(status == SHELL_OK);
-
-        /* Damage: inside the buffer, on a surface that has a row, owned by the client. */
-        HOOK_REFUSED(state, h->damage(0, 0, 0, 0));
-        bad_rect = rect; bad_rect.x = -1;
-        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
-        bad_rect = rect; bad_rect.y = -1;
-        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
-        bad_rect = rect; bad_rect.width = 0;
-        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
-        bad_rect = rect; bad_rect.height = 0;
-        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
-        bad_rect = rect; bad_rect.x = 1;
-        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
-        bad_rect = rect; bad_rect.height = 65;
-        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
-        bad_rect = rect; bad_rect.width = SHELL_DIMENSION_MAX + 1;
-        HOOK_REFUSED(state, h->damage(0, 0, 0, &bad_rect));
-        HOOK_REFUSED(state, h->damage(0, 1, 0, &rect));
-        HOOK_REFUSED(state, h->damage(0, 0, 1, &rect));
-        HOOK_REFUSED(state, h->damage(0, -1, 0, &rect));
-        HOOK_REFUSED(state, h->damage(0, 0, -1, &rect));
-        HOOK_REFUSED(state, h->damage(0, 0, SHELL_BUFFERS, &rect));
-        status = h->damage(0, 0, 0, &rect);
-        HOOK_CHECK(status == SHELL_OK);
-
-        /* Input: a key in range with a state the three reports can take, and a pointer inside the cap. */
-        HOOK_REFUSED(state, h->key(-1, 30, 1));
-        HOOK_REFUSED(state, h->key(0, 0, 1));
-        HOOK_REFUSED(state, h->key(0, SHELL_KEY_MAX + 1, 1));
-        HOOK_REFUSED(state, h->key(0, 30, 3));
-        HOOK_REFUSED(state, h->key(0, 30, -1));
-        status = h->key(0, 30, 1);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, h->pointer(0, SHELL_COORD_MAX + 1, 0, 0));
-        HOOK_REFUSED(state, h->pointer(0, 0, -SHELL_COORD_MAX - 1, 0));
-        HOOK_REFUSED(state, h->pointer(0, 0, 0, 0x20));
-        HOOK_REFUSED(state, h->pointer(0, 0, 0, -1));
-        HOOK_REFUSED(state, h->pointer(7, 0, 0, 1));
-        status = h->pointer(0, 10, 20, 1);
-        HOOK_CHECK(status == SHELL_OK);
-
-        /* Window placement: a screen the table has, a position inside the cap, a toplevel of this client. */
-        HOOK_REFUSED(state, h->place(0, 0, 1, 2, SHELL_SCREENS));
-        HOOK_REFUSED(state, h->place(0, 0, 1, 2, -1));
-        HOOK_REFUSED(state, h->place(0, 0, SHELL_COORD_MAX + 1, 2, 0));
-        HOOK_REFUSED(state, h->place(0, 1, 1, 2, 0));
-        HOOK_REFUSED(state, h->place(1, 0, 1, 2, 0));
-        status = h->place(0, 0, 10, 20, 0);
-        HOOK_CHECK(status == SHELL_OK);
-
-        /* Size: both sides at least one and at most the cap. */
-        HOOK_REFUSED(state, h->size(0, 0, 0, 48));
-        HOOK_REFUSED(state, h->size(0, 0, 96, 0));
-        HOOK_REFUSED(state, h->size(0, 0, SHELL_DIMENSION_MAX + 1, 48));
-        status = h->size(0, 0, 96, 48);
-        HOOK_CHECK(status == SHELL_OK);
-
-        /* The state requests: on is 0 or 1 and nothing else; an accepted one sets its bit, and an unset clears it. */
-        HOOK_REFUSED(state, h->minimize(0, 0, 2));
-        HOOK_REFUSED(state, h->minimize(0, 0, -1));
-        status = h->minimize(0, 0, 1);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_MINIMIZED));
-        status = h->minimize(0, 0, 0);
-        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & SHELL_STATE_MINIMIZED));
-        HOOK_REFUSED(state, h->maximize(0, 0, 2));
-        status = h->maximize(0, 0, 1);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_MAXIMIZED));
-        status = h->maximize(0, 0, 0);
-        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & SHELL_STATE_MAXIMIZED));
-        HOOK_REFUSED(state, h->fullscreen(0, 0, -1));
-        status = h->fullscreen(0, 0, 1);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_FULLSCREEN));
-        status = h->fullscreen(0, 0, 0);
-        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & SHELL_STATE_FULLSCREEN));
-        HOOK_REFUSED(state, h->stack(0, 0, 2));
-        HOOK_REFUSED(state, h->stack(0, 0, -2));
-        status = h->stack(0, 0, 1);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_ABOVE));
-        status = h->stack(0, 0, -1);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_BELOW) &&
-                   !(state->surfaces[0].state & SHELL_STATE_ABOVE));
-        status = h->stack(0, 0, 0);
-        HOOK_CHECK(status == SHELL_OK && !(state->surfaces[0].state & (SHELL_STATE_ABOVE | SHELL_STATE_BELOW)));
-
-        /* Activation: a toplevel of this client; one window holds the keys at a time. */
-        HOOK_REFUSED(state, h->activate(0, 1));
-        HOOK_REFUSED(state, h->activate(0, SHELL_SURFACES));
-        HOOK_REFUSED(state, h->activate(1, 0));
-        status = h->activate(0, 0);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_ACTIVE));
-        status = h->activate(1, 2);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[2].state & SHELL_STATE_ACTIVE) &&
-                   !(state->surfaces[0].state & SHELL_STATE_ACTIVE));
-
-        /* Titles and app ids: a length and no control byte, a NUL included; a zero length clears. */
-        HOOK_REFUSED(state, h->title(0, 0, 0, 1));
-        HOOK_REFUSED(state, h->title(0, 0, long_text, SHELL_TITLE_MAX + 1));
-        HOOK_REFUSED(state, h->title(0, 0, "a\0b", 3));
-        HOOK_REFUSED(state, h->title(0, 0, "\x1f", 1));
-        HOOK_REFUSED(state, h->title(0, 0, "a\x7f", 2));
-        HOOK_REFUSED(state, h->title(0, 0, "a", -1));
-        HOOK_REFUSED(state, h->title(0, 1, "a", 1));
-        status = h->title(0, 0, "hi", 2);
-        HOOK_CHECK(status == SHELL_OK);
-        status = h->title(0, 0, 0, 0);
-        HOOK_CHECK(status == SHELL_OK && state->surfaces[0].title_length == 0);
-        status = h->title(0, 0, "hi", 2);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, h->app_id(0, 0, 0, 1));
-        HOOK_REFUSED(state, h->app_id(0, 0, long_text, SHELL_APP_ID_MAX + 1));
-        HOOK_REFUSED(state, h->app_id(0, 0, "a\n", 2));
-        status = h->app_id(0, 0, "x", 1);
-        HOOK_CHECK(status == SHELL_OK);
-
-        /* The read side: a facts pointer, a toplevel of this client, and the title it just set. */
-        HOOK_REFUSED(state, h->query(0, 0, 0));
-        HOOK_REFUSED(state, h->query(0, 1, &facts));
-        status = h->query(0, 0, &facts);
-        HOOK_CHECK(status == SHELL_OK && facts.x == 5 && facts.y == 6 && facts.width == 96 && facts.height == 48);
-        HOOK_CHECK(facts.title_length == 2 && memcmp(facts.title, "hi", 2) == 0);
-        HOOK_CHECK(facts.app_id_length == 1 && facts.app_id[0] == 'x');
-        HOOK_CHECK(!(facts.state & SHELL_STATE_ACTIVE));
-
-        /* Closing: one request is accepted and then nothing else is, from that window. A sink that refuses changes nothing. */
-        hook_probe_state.refuse = 1;
-        HOOK_REFUSED_BY_SINK(state, h->close(1, 2));
-        hook_probe_state.refuse = 0;
-        status = h->close(0, 0);
-        HOOK_CHECK(status == SHELL_OK && (state->surfaces[0].state & SHELL_STATE_CLOSING));
-        HOOK_REFUSED(state, h->close(0, 0));
-        HOOK_REFUSED(state, h->place(0, 0, 1, 2, 0));
-        HOOK_REFUSED(state, h->size(0, 0, 96, 48));
-        HOOK_REFUSED(state, h->minimize(0, 0, 1));
-        HOOK_REFUSED(state, h->title(0, 0, "x", 1));
-        HOOK_REFUSED(state, h->activate(0, 0));
-        status = h->close(1, 2);
-        HOOK_CHECK(status == SHELL_OK);
-
-        /* Disconnect: the client's windows close and its records go, so its numbers mean nothing afterwards. */
-        status = h->disconnect(1);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, h->place(1, 2, 1, 2, 0));
-        HOOK_REFUSED(state, h->buffer(1, &good));
-        HOOK_REFUSED(state, h->disconnect(1));
-
-        /* Stop: the windows are closed through the sink, and every later call is refused. */
-        status = h->stop();
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, h->stop());
-        HOOK_REFUSED(state, h->connect());
-        HOOK_REFUSED(state, h->key(0, 30, 1));
-}
-
-/*
-        The Wayland layer surface: a panel's layer, anchor, exclusive zone,
-        size and margins. A surface that is not a layer surface, and a layer
-        that asks for room on no edge, are refused.
-*/
-static void wayland_layer_battery(void)
-{
-        struct shell_layer good = {SHELL_LAYER_TOP, SHELL_ANCHOR_TOP, SHELL_KEYBOARD_NONE, 30, 0, 30, {0, 0, 0, 0}};
-        struct shell_layer bad;
-        struct shell_side *state = &wayland.side;
-        int status;
-
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &good));
-        status = wayland_start(&hook_sink);
-        HOOK_CHECK(status == SHELL_OK);
-        status = wayland_client_connect();
-        HOOK_CHECK(status == 0);
-        status = wayland_role(0, 1, SHELL_ROLE_LAYER);
-        HOOK_CHECK(status == SHELL_OK);
-        status = wayland_role(0, 0, SHELL_ROLE_TOPLEVEL);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, 0));
-        bad = good; bad.layer = 4;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.layer = -1;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.anchor = 16;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.keyboard = 3;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.width = SHELL_DIMENSION_MAX + 1;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.margin[2] = -SHELL_DIMENSION_MAX - 1;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.exclusive = -2;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.anchor = 0; bad.exclusive = 5;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        bad = good; bad.anchor = SHELL_ANCHOR_TOP | SHELL_ANCHOR_LEFT; bad.exclusive = 5;
-        HOOK_REFUSED(state, wayland_layer_surface(0, 1, &bad));
-        status = wayland_layer_surface(0, 1, &good);
-        HOOK_CHECK(status == SHELL_OK);
-        status = wayland_layer_surface(0, 1, &good);
-        HOOK_CHECK(status == SHELL_OK);
-        status = wayland_stop();
-        HOOK_CHECK(status == SHELL_OK);
-}
-
-/*
-        The X strut: a dock is a layer surface, and its strut reserves a size on
-        one edge. A toplevel cannot strut, and an edge outside the four cannot.
-        A window type past the last is refused before it is a role at all.
-*/
-static void x11_strut_battery(void)
-{
-        struct shell_side *state = &x11;
-        int status;
-
-        status = x11_start(&hook_sink);
-        HOOK_CHECK(status == SHELL_OK);
-        status = x11_client_connect();
-        HOOK_CHECK(status == 0);
-        status = x11_window_role(0, 1, X11_TYPE_DOCK);
-        HOOK_CHECK(status == SHELL_OK);
-        status = x11_window_role(0, 2, X11_TYPE_NORMAL);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, x11_window_role(0, 3, X11_TYPE_COUNT));
-        HOOK_REFUSED(state, x11_window_role(0, 3, -1));
-        HOOK_REFUSED(state, x11_window_strut(0, 1, -1, 24));
-        HOOK_REFUSED(state, x11_window_strut(0, 1, SHELL_EDGE_COUNT, 24));
-        HOOK_REFUSED(state, x11_window_strut(0, 1, SHELL_EDGE_TOP, -1));
-        HOOK_REFUSED(state, x11_window_strut(0, 1, SHELL_EDGE_TOP, SHELL_DIMENSION_MAX + 1));
-        HOOK_REFUSED(state, x11_window_strut(0, 2, SHELL_EDGE_TOP, 24));
-        status = x11_window_strut(0, 1, SHELL_EDGE_TOP, 24);
-        HOOK_CHECK(status == SHELL_OK);
-        status = x11_window_strut(0, 1, SHELL_EDGE_BOTTOM, 0);
-        HOOK_CHECK(status == SHELL_OK);
-        status = x11_stop();
-        HOOK_CHECK(status == SHELL_OK);
-}
-
-/*
-        XWayland's lifecycle: it needs the X side up, is started once, and
-        stops once. Stopping the X side takes XWayland with it.
-*/
-static void xwayland_battery(void)
-{
-        struct shell_side *state = &x11;
-        int status;
-
-        HOOK_REFUSED(state, xwayland_start());
-        status = x11_start(&hook_sink);
-        HOOK_CHECK(status == SHELL_OK);
-        HOOK_REFUSED(state, xwayland_stop());
-        status = xwayland_start();
-        HOOK_CHECK(status == SHELL_OK && state->xwayland == 1);
-        HOOK_REFUSED(state, xwayland_start());
-        status = xwayland_stop();
-        HOOK_CHECK(status == SHELL_OK && state->xwayland == 0);
-        HOOK_REFUSED(state, xwayland_stop());
-        status = xwayland_start();
-        HOOK_CHECK(status == SHELL_OK);
-        status = x11_stop();
-        HOOK_CHECK(status == SHELL_OK && state->xwayland == 0);
-        HOOK_REFUSED(state, xwayland_stop());
-}
-
-int main(void)
-{
-        hook_battery(&hook_wayland);
-        hook_battery(&hook_x11);
-        wayland_layer_battery();
-        x11_strut_battery();
-        xwayland_battery();
-        printf("CHECK_shell: %u checks, %u failures\n", hook_checks, hook_failures);
-        return hook_failures != 0;
-}
-#endif /* CHECK_shell */
-
-#ifdef CHECK_wayland_wire
-/*
-        The Wayland wire, with the switch on and no client but the test's own
-        bytes. Each message is built here as a client would send it, fed to
-        wayland_feed, and the events it causes are read back with the
-        display's own framing. A malformed, oversized, unknown or misfit
-        message must be refused (negative), leave the objects, the serial, the
-        descriptor queue and the shell side exactly as they were, and queue
-        only the wl_display.error the refusal names. A good message must do
-        what the protocol says: the globals on get_registry, the callback on
-        sync, the object a bind makes, the split and the batched messages.
-        The fuzz at the end feeds a fixed-seed stream of messages and checks
-        every refusal and every table after each one; WIRE_FUZZ_SEED and
-        WIRE_FUZZ_ROUNDS replay another stream (the printed line names both).
-
-            gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_wayland_wire -DCONFIG_MOONWATER_WAYLAND test/checks.c
-*/
-#if !defined(CONFIG_MOONWATER_WAYLAND)
-#error "CHECK_wayland_wire builds wayland.c: define CONFIG_MOONWATER_WAYLAND"
-#endif
-#include <fcntl.h>
-#include <stdio.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+#ifndef CONFIG_MOONWATER_WAYLAND
+#define CONFIG_MOONWATER_WAYLAND 1
+#endif
 #include "../src/canvas/wayland.c"
 
-struct wire_build
-{
-        unsigned char b[WAYLAND_MSG_MAX + 64];
-        long n;
-        unsigned long object;
-        unsigned long op;
-};
+static unsigned wl_checks, wl_failures;
 
-static void wb_begin(struct wire_build *m, unsigned long object, unsigned long op)
-{
-        m->object = object;
-        m->op = op;
-        m->n = WAYLAND_HEADER;
-}
-
-static void wb_u(struct wire_build *m, unsigned long v)
-{
-        wire_put(m->b + m->n, v);
-        m->n += 4;
-}
-
-static void wb_s(struct wire_build *m, const char *text)
-{
-        unsigned long count = (unsigned long)strlen(text) + 1;
-        long padded = (long)((count + 3) & ~3UL);
-
-        wb_u(m, count);
-        for (long i = 0; i < padded; i++)
-                m->b[m->n + i] = (unsigned long)i < count ? (unsigned char)text[i] : 0;
-        m->n += padded;
-}
-
-static long wb_end(struct wire_build *m)
-{
-        wire_put(m->b, m->object);
-        wire_put(m->b + 4, ((unsigned long)m->n << 16) | m->op);
-        return m->n;
-}
-
-static unsigned int wire_checks_run, wire_failures;
-
-#define WIRE_CHECK(condition) \
-        do { \
-                wire_checks_run++; \
-                if (!(condition)) \
-                { \
-                        wire_failures++; \
-                        printf("  FAIL line %d: %s\n", __LINE__, #condition); \
-                } \
+#define WLCHECK(condition, ...)                                                                                       \
+        do                                                                                                            \
+        {                                                                                                             \
+                wl_checks++;                                                                                          \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        wl_failures++;                                                                                \
+                        printf("  FAIL: ");                                                                           \
+                        printf(__VA_ARGS__);                                                                          \
+                        printf(" (line %d)\n", __LINE__);                                                             \
+                }                                                                                                     \
         } while (0)
 
-/*
-        What the sink was asked, for the object checks: how many windows were
-        opened, damaged and closed, the last row, and the last title.
-*/
-static struct wire_seen
-{
-        unsigned int opened, damaged, titled, closed, pictures;
-        int row;
-        char title[64];
-        long title_length;
-        long picture_fd, picture_offset, picture_width, picture_height, picture_stride;
-} wire_seen;
+/* ---- the fake compositor ---- */
 
-static int wire_picture(void *context, int row, long fd, long offset, long width, long height, long stride)
+#define FAKE_W 64
+#define FAKE_H 48
+
+struct fake_row
+{
+        int used, kind, parent;
+        long x, y, width, height;
+        long picture_w, picture_h, pictures;
+        long states, closing, width_asked, height_asked;
+        char title[128];
+        unsigned pixels[FAKE_W * FAKE_H];
+        long did[16];
+        long did_count;
+};
+
+static struct fake_host_state
+{
+        struct fake_row row[WAYLAND_ROWS];
+        long fds_open, fds_closed, maps, unmaps, allocs, releases;
+        long refuse_open;
+        long now;
+        struct wayland_screen screen;
+} fake;
+
+static void *fake_alloc(void *context, long bytes)
 {
         (void)context;
-        wire_seen.pictures++;
-        wire_seen.row = row;
-        wire_seen.picture_fd = fd;
-        wire_seen.picture_offset = offset;
-        wire_seen.picture_width = width;
-        wire_seen.picture_height = height;
-        wire_seen.picture_stride = stride;
-        return 0;
+        fake.allocs++;
+        return calloc(1, (size_t)bytes);
 }
 
-static int wire_open(void *context, long client, long role)
-{
-        static int next_row = 3;
-
-        (void)context;
-        (void)client;
-        (void)role;
-        wire_seen.opened++;
-        wire_seen.row = next_row;
-        return next_row++;
-}
-
-/*
-        Each sink callback has its own stub, so the table is complete and
-        shell_start accepts it. The stubs answer zero: these tests check what
-        the protocol does, not what Canvas does with it.
-*/
-static int wire_key(void *context, long client, long code, long pressed)
-{
-        (void)context; (void)client; (void)code; (void)pressed;
-        return 0;
-}
-
-static int wire_pointer(void *context, long client, long x, long y, long buttons)
-{
-        (void)context; (void)client; (void)x; (void)y; (void)buttons;
-        return 0;
-}
-static int wire_damage(void *context, int row, const struct shell_rect *rect)
-{
-        (void)context; (void)rect;
-        wire_seen.damaged++;
-        wire_seen.row = row;
-        return 0;
-}
-static int wire_place(void *context, int row, long x, long y, long screen)
-{
-        (void)context; (void)row; (void)x; (void)y; (void)screen;
-        return 0;
-}
-static int wire_size(void *context, int row, long width, long height)
-{
-        (void)context; (void)row; (void)width; (void)height;
-        return 0;
-}
-static int wire_flag(void *context, int row, long on)
-{
-        (void)context; (void)row; (void)on;
-        return 0;
-}
-static int wire_stack(void *context, int row, long layer)
-{
-        (void)context; (void)row; (void)layer;
-        return 0;
-}
-static int wire_activate(void *context, int row)
-{
-        (void)context; (void)row;
-        return 0;
-}
-static int wire_close(void *context, int row)
+static void fake_release(void *context, void *block, long bytes)
 {
         (void)context;
-        wire_seen.closed++;
-        wire_seen.row = row;
-        return 0;
-}
-static int wire_title(void *context, int row, const char *text, long length)
-{
-        (void)context;
-        wire_seen.titled++;
-        wire_seen.row = row;
-        wire_seen.title_length = length;
-        for (long i = 0; i < length && i < 63; i++)
-                wire_seen.title[i] = text[i];
-        wire_seen.title[length < 63 ? length : 63] = 0;
-        return 0;
-}
-static int wire_layer(void *context, int row, const struct shell_layer *layer)
-{
-        (void)context; (void)row; (void)layer;
-        return 0;
-}
-static int wire_query(void *context, int row, struct shell_facts *facts)
-{
-        (void)context; (void)row; (void)facts;
-        return 0;
+        (void)bytes;
+        fake.releases++;
+        free(block);
 }
 
-static void wire_release(void *context, long fd)
+static void *fake_map(void *context, long fd, long size)
+{
+        struct stat st;
+        void *at;
+
+        (void)context;
+        if (fstat((int)fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < size)
+                return 0;
+        at = mmap(0, (size_t)size, PROT_READ, MAP_SHARED, (int)fd, 0);
+        if (at == MAP_FAILED)
+                return 0;
+        fake.maps++;
+        return at;
+}
+
+static void *fake_remap(void *context, void *at, long old_size, long new_size)
 {
         (void)context;
+#ifdef __linux__
+        void *grown = mremap(at, (size_t)old_size, (size_t)new_size, MREMAP_MAYMOVE);
+
+        return grown == MAP_FAILED ? 0 : grown;
+#else
+        (void)at;
+        (void)old_size;
+        (void)new_size;
+        return 0;
+#endif
+}
+
+static void fake_unmap(void *context, void *at, long size)
+{
+        (void)context;
+        munmap(at, (size_t)size);
+        fake.unmaps++;
+}
+
+static void fake_close(void *context, long fd)
+{
+        (void)context;
+        fake.fds_closed++;
         close((int)fd);
 }
 
-/*
-        The sink's check of a pool's descriptor: a regular file at least as
-        large as the pool. A device, a pipe or a shorter file is refused.
-*/
-static int wire_pool(void *context, long fd, long size)
+static int fake_row_open(void *context, long client, long kind, int parent, long x, long y)
 {
-        struct stat st;
+        (void)context;
+        (void)client;
+        if (fake.refuse_open)
+                return -1;
+        for (int row = 0; row < WAYLAND_ROWS; row++)
+                if (!fake.row[row].used)
+                {
+                        memset(&fake.row[row], 0, sizeof fake.row[row]);
+                        fake.row[row].used = 1;
+                        fake.row[row].kind = (int)kind;
+                        fake.row[row].parent = parent;
+                        fake.row[row].x = x;
+                        fake.row[row].y = y;
+                        return row;
+                }
+        return -1;
+}
+
+static void fake_row_close(void *context, int row)
+{
+        (void)context;
+        fake.row[row].used = 0;
+}
+
+static int fake_row_picture(void *context, int row, const struct wayland_picture *picture)
+{
+        struct fake_row *r = &fake.row[row];
 
         (void)context;
-        if (fstat((int)fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < size)
-                return SHELL_EINVAL;
-        return SHELL_OK;
+        r->picture_w = picture->width;
+        r->picture_h = picture->height;
+        r->width = picture->width;
+        r->height = picture->height;
+        r->pictures++;
+        if (picture->full || !picture->damages)
+        {
+                for (long y = 0; y < picture->height && y < FAKE_H; y++)
+                        for (long x = 0; x < picture->width && x < FAKE_W; x++)
+                                r->pixels[y * FAKE_W + x] = ((const unsigned *)(picture->pixels + y * picture->stride))[x];
+                return 0;
+        }
+        for (long at = 0; at < picture->damages; at++)
+        {
+                const struct wayland_rect *d = &picture->damage[at];
+
+                for (long y = d->y; y < d->y + d->height && y < FAKE_H; y++)
+                        for (long x = d->x; x < d->x + d->width && x < FAKE_W; x++)
+                                r->pixels[y * FAKE_W + x] = ((const unsigned *)(picture->pixels + y * picture->stride))[x];
+        }
+        return 0;
+}
+
+static void fake_row_title(void *context, int row, const char *text, long length)
+{
+        (void)context;
+        (void)length;
+        snprintf(fake.row[row].title, sizeof fake.row[row].title, "%s", text);
+}
+
+static void fake_row_do(void *context, int row, long what, long a, long b)
+{
+        struct fake_row *r = &fake.row[row];
+
+        (void)context;
+        (void)a;
+        (void)b;
+        if (r->did_count < 16)
+                r->did[r->did_count++] = what;
+        if (what == WAYLAND_DO_MAXIMIZE)
+                r->states |= WAYLAND_STATE_MAXIMIZED;
+        if (what == WAYLAND_DO_UNMAXIMIZE)
+                r->states &= ~(long)WAYLAND_STATE_MAXIMIZED;
+        if (what == WAYLAND_DO_FULLSCREEN)
+                r->states |= WAYLAND_STATE_FULLSCREEN;
+        if (what == WAYLAND_DO_UNFULLSCREEN)
+                r->states &= ~(long)WAYLAND_STATE_FULLSCREEN;
+        if (what == WAYLAND_DO_MINIMIZE)
+                r->states |= WAYLAND_STATE_SUSPENDED;
+}
+
+static int fake_row_facts(void *context, int row, struct wayland_facts *facts)
+{
+        struct fake_row *r = &fake.row[row];
+
+        (void)context;
+        if (!r->used)
+                return -1;
+        facts->width = r->width_asked;
+        facts->height = r->height_asked;
+        facts->states = r->states;
+        facts->closing = r->closing;
+        facts->x = r->x;
+        facts->y = r->y;
+        return 0;
+}
+
+static long fake_screens(void *context, struct wayland_screen *screens, long room)
+{
+        (void)context;
+        (void)room;
+        screens[0] = fake.screen;
+        return 1;
+}
+
+static long fake_now(void *context)
+{
+        (void)context;
+        return fake.now += 16;
+}
+
+static const struct wayland_host fake_host = {
+    0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
+    fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now};
+
+/* ---- a client that builds its requests from the table ---- */
+
+#define EVENTS 512
+
+struct wl_event_seen
+{
+        unsigned long object;
+        long opcode, iface;
+        unsigned long u[8];
+        char text[8][64];
+        long n;
+        long fd_count;
+};
+
+struct wlc
+{
+        long slot;
+        unsigned long next;
+        unsigned char iface[8192];
+        unsigned char version[8192];
+        struct wl_event_seen ev[EVENTS];
+        long events, taken;
+        long malformed;
+        long errors;
+        unsigned long error_object, error_code;
+        char error_text[128];
+};
+
+static struct wlc *wlc_open(void)
+{
+        struct wlc *c = calloc(1, sizeof *c);
+
+        c->slot = wayland_connect(1000, 1000);
+        c->next = 2;
+        c->iface[1] = WLI_wl_display;
+        c->version[1] = 1;
+        return c;
+}
+
+/* A client gone: the shim gives back what it held, and the client's own record goes. */
+static void wlc_end(struct wlc *c)
+{
+        wayland_drop(c->slot);
+        free(c);
+}
+
+static unsigned long wlc_id(struct wlc *c, long iface, long version)
+{
+        unsigned long id = c->next++;
+
+        c->iface[id] = (unsigned char)iface;
+        c->version[id] = (unsigned char)version;
+        return id;
+}
+
+static int wlc_pump(struct wlc *c);
+
+static void wlc_put(unsigned char *at, unsigned long v)
+{
+        wayland_put(at, v);
 }
 
 /*
-        A descriptor for a regular file of the size given: the test's stand-in
-        for a shared-memory file, a temporary file taken as a descriptor of its
-        own and resized. The caller owns the descriptor.
+        One request, encoded by the table. The arguments follow in the table's order: an integer for i, u and f, an id for
+        o, O and n, a C string for s and S, (text, length) for a, a descriptor for h, and for N the interface's name, the
+        version and the id. Returns what the shim answered.
 */
-static long wire_file(long size)
+static int wlc_raw(struct wlc *c, unsigned char *bytes, long size, const long *fds, long count)
 {
-        FILE *f = tmpfile();
-        int fd;
+        int status;
 
-        if (!f)
-                return -1;
-        fd = dup(fileno(f));
-        fclose(f);
-        if (fd < 0)
-                return -1;
-        if (ftruncate(fd, (off_t)size) != 0)
+        wayland_put(bytes + 4, wayland_get(bytes + 4) | (unsigned long)size << 16);
+        status = wayland_feed(c->slot, bytes, size, fds, count);
+        wlc_pump(c);
+        return status;
+}
+
+static int wlc_send(struct wlc *c, unsigned long object, long op, ...)
+{
+        unsigned char b[WAYLAND_MESSAGE];
+        const struct wl_message *msg = &wl_interfaces[c->iface[object]].request[op];
+        long n = 8, fds[8], fd_count = 0;
+        va_list ap;
+
+        memset(b, 0, sizeof b);
+        wlc_put(b, object);
+        wlc_put(b + 4, (unsigned long)op);
+        va_start(ap, op);
+        for (const unsigned char *k = msg->args; k[0]; k += 2)
         {
-                close(fd);
-                return -1;
+                switch (k[0])
+                {
+                case 'i':
+                case 'u':
+                case 'f':
+                        wlc_put(b + n, (unsigned long)va_arg(ap, long));
+                        n += 4;
+                        break;
+                case 'o':
+                case 'O':
+                case 'n':
+                {
+                        unsigned long id = va_arg(ap, unsigned long);
+
+                        wlc_put(b + n, id);
+                        n += 4;
+                        if (k[0] == 'n' && id < 8192)
+                        {
+                                c->iface[id] = k[1];
+                                c->version[id] = c->version[object];
+                        }
+                        break;
+                }
+                case 's':
+                case 'S':
+                case 'N':
+                {
+                        const char *s = va_arg(ap, const char *);
+                        unsigned long count = s ? strlen(s) + 1 : 0, padded = (count + 3) & ~3UL;
+
+                        wlc_put(b + n, count);
+                        n += 4;
+                        memcpy(b + n, s ? s : "", count);
+                        n += (long)padded;
+                        if (k[0] == 'N')
+                        {
+                                wlc_put(b + n, (unsigned long)va_arg(ap, long));
+                                wlc_put(b + n + 4, va_arg(ap, unsigned long));
+                                n += 8;
+                        }
+                        break;
+                }
+                case 'a':
+                {
+                        const unsigned char *p = va_arg(ap, const unsigned char *);
+                        long len = va_arg(ap, long);
+
+                        wlc_put(b + n, (unsigned long)len);
+                        n += 4;
+                        memcpy(b + n, p, (size_t)len);
+                        n += (len + 3) & ~3L;
+                        break;
+                }
+                case 'h':
+                        fds[fd_count++] = va_arg(ap, long);
+                        break;
+                }
         }
+        va_end(ap);
+        return wlc_raw(c, b, n, fds, fd_count);
+}
+
+/* The events the shim has queued, read by the table: every one must be a known object's event, in its version, whole. */
+static int wlc_pump(struct wlc *c)
+{
+        const unsigned char *bytes;
+        const long *fds;
+        long fd_count, length = wayland_out(c->slot, &bytes, &fds, &fd_count), at = 0;
+
+        while (at < length)
+        {
+                unsigned long object, header;
+                long size, opcode, n = 8;
+                const struct wl_interface_info *info;
+                const struct wl_message *msg;
+                struct wl_event_seen *e;
+
+                if (length - at < 8)
+                {
+                        c->malformed++;
+                        if (getenv("WLDEBUG"))
+                                fprintf(stderr, "malformed: short header\n");
+                        break;
+                }
+                object = wayland_get(bytes + at);
+                header = wayland_get(bytes + at + 4);
+                size = (long)(header >> 16);
+                opcode = (long)(header & 0xffff);
+                if (size < 8 || size > length - at || (size & 3) || object >= 8192 || !c->iface[object])
+                {
+                        c->malformed++;
+                        if (getenv("WLDEBUG"))
+                                fprintf(stderr, "malformed: object %lu size %ld iface %d\n", object, size, object < 8192 ? c->iface[object] : -1);
+                        break;
+                }
+                info = &wl_interfaces[c->iface[object]];
+                if (opcode >= info->events || info->event[opcode].since > c->version[object])
+                {
+                        c->malformed++;
+                        if (getenv("WLDEBUG"))
+                                fprintf(stderr, "malformed: %s opcode %ld (version %d)\n", info->name, opcode, c->version[object]);
+                        at += size;
+                        continue;
+                }
+                msg = &info->event[opcode];
+                e = c->events < EVENTS ? &c->ev[c->events++] : &c->ev[EVENTS - 1];
+                memset(e, 0, sizeof *e);
+                e->object = object;
+                e->opcode = opcode;
+                e->iface = c->iface[object];
+                for (const unsigned char *k = msg->args; k[0]; k += 2)
+                {
+                        unsigned long word, count, padded;
+
+                        if (k[0] == 'h')
+                        {
+                                e->fd_count++;
+                                continue;
+                        }
+                        if (at + n + 4 > at + size)
+                        {
+                                c->malformed++;
+                                break;
+                        }
+                        word = wayland_get(bytes + at + n);
+                        n += 4;
+                        if (k[0] == 's' || k[0] == 'S' || k[0] == 'a')
+                        {
+                                count = word;
+                                padded = (count + 3) & ~3UL;
+                                if (count > (unsigned long)(size - n) || padded > (unsigned long)(size - n) ||
+                                    (k[0] != 'a' && count && bytes[at + n + count - 1]))
+                                        c->malformed++;
+                                else if (count && e->n < 8)
+                                        snprintf(e->text[e->n], sizeof e->text[0], "%.*s", (int)(count - (k[0] != 'a')),
+                                                 (const char *)bytes + at + n);
+                                n += (long)padded;
+                        }
+                        else if (k[0] == 'n')
+                        {
+                                /* an event that makes an object: the id is the server's */
+                                if (word >= WAYLAND_SERVER_BASE || word < 8192)
+                                {
+                                        c->iface[word < 8192 ? word : 0] = k[1];
+                                }
+                        }
+                        if (e->n < 8)
+                                e->u[e->n++] = word;
+                }
+                if (n != size)
+                {
+                        c->malformed++;
+                        if (getenv("WLDEBUG"))
+                                fprintf(stderr, "malformed: %s opcode %ld read %ld of %ld\n", info->name, opcode, n, size);
+                }
+                if (c->iface[object] == WLI_wl_display && opcode == WLE_wl_display_error)
+                {
+                        c->errors++;
+                        c->error_object = e->u[0];
+                        c->error_code = e->u[1];
+                        snprintf(c->error_text, sizeof c->error_text, "%s", e->text[2]);
+                }
+                if (c->iface[object] == WLI_wl_display && opcode == WLE_wl_display_delete_id && e->u[0] < 8192)
+                        c->iface[e->u[0]] = 0;
+                at += size;
+        }
+        wayland_sent(c->slot, length);
+        (void)fds;
+        (void)fd_count;
+        return (int)length;
+}
+
+/* The first unread event of an interface and opcode, or 0; reading it takes it. */
+static struct wl_event_seen *wlc_take(struct wlc *c, long iface, long opcode)
+{
+        for (long at = c->taken; at < c->events; at++)
+                if (c->ev[at].iface == iface && c->ev[at].opcode == opcode)
+                {
+                        c->taken = at + 1;
+                        return &c->ev[at];
+                }
+        return 0;
+}
+
+static long wlc_count(struct wlc *c, long iface, long opcode)
+{
+        long count = 0;
+
+        for (long at = 0; at < c->events; at++)
+                count += c->ev[at].iface == iface && c->ev[at].opcode == opcode;
+        return count;
+}
+
+static void wlc_forget(struct wlc *c)
+{
+        c->events = 0;
+        c->taken = 0;
+}
+
+/* A pool: a file of size bytes whose pixels the client wrote, and its descriptor. */
+static long wl_file(long size, unsigned char fill)
+{
+        char name[] = "/tmp/wlcheckXXXXXX";
+        int fd = mkstemp(name);
+
+        unlink(name);
+        if (fd < 0 || ftruncate(fd, size) < 0)
+                return -1;
+        {
+                unsigned char *at = mmap(0, (size_t)size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+                memset(at, fill, (size_t)size);
+                munmap(at, (size_t)size);
+        }
+        fake.fds_open++;
         return fd;
 }
 
-static const struct shell_sink wire_sink_full = {
-        .context = 0,
-        .open = wire_open,
-        .key = wire_key,
-        .pointer = wire_pointer,
-        .damage = wire_damage,
-        .place = wire_place,
-        .size = wire_size,
-        .minimize = wire_flag,
-        .maximize = wire_flag,
-        .fullscreen = wire_flag,
-        .stack = wire_stack,
-        .activate = wire_activate,
-        .close = wire_close,
-        .title = wire_title,
-        .layer = wire_layer,
-        .query = wire_query,
-        .picture = wire_picture,
-        .release = wire_release,
-        .pool = wire_pool,
+static void wl_file_put(long fd, long offset, const void *bytes, long count)
+{
+        if (pwrite((int)fd, bytes, (size_t)count, offset) != count)
+                abort();
+}
+
+/* ---- a session: the display, the registry, and a window of the usual kind ---- */
+
+struct session
+{
+        struct wlc *c;
+        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback;
+        long fd;
 };
 
-/*
-        Read back the events a client has queued: each header's object and
-        opcode, and its size, which must lie inside what was queued.
-*/
-static long wire_events_of(const unsigned char *b, long n, unsigned long *objects, unsigned long *ops, long room)
+static unsigned long wl_global(struct wlc *c, unsigned long registry, long iface, long version)
 {
-        long count = 0;
-        long at = 0;
-
-        while (at + WAYLAND_HEADER <= n && count < room)
-        {
-                long size = (long)(wire_get(b + at + 4) >> 16);
-
-                if (size < WAYLAND_HEADER || at + size > n)
-                        return -1;
-                objects[count] = wire_get(b + at);
-                ops[count] = wire_get(b + at + 4) & 0xffffUL;
-                count++;
-                at += size;
-        }
-        return at == n ? count : -1;
-}
-
-static unsigned char wire_out[WAYLAND_OUT_MAX];
-
-/*
-        Take the queued output of a client and read it back: how many events,
-        and their objects and opcodes. The out buffer is cleared by the take.
-*/
-static long wire_take(long client, unsigned long *objects, unsigned long *ops, long room)
-{
-        long keymap = 0;
-        int n = wayland_take_output(client, wire_out, WAYLAND_OUT_MAX, &keymap);
-
-        if (n < 0)
-                return -1;
-        return wire_events_of(wire_out, n, objects, ops, room);
-}
-
-static long wire_feed_build(long client, struct wire_build *m)
-{
-        long n = wb_end(m);
-
-        return wayland_feed(client, m->b, n, 0, 0);
-}
-
-/*
-        A snapshot of what a refused message must not change: the whole shell
-        side, the objects of the client, its descriptor queue and its serial.
-*/
-struct wire_snapshot
-{
-        struct shell_side side;
-        struct wayland_object objects[WAYLAND_OBJECTS];
-        long fd_count;
-        unsigned long serial;
-};
-
-static struct wire_snapshot wire_before;
-
-static void wire_snap(long client)
-{
-        memcpy(&wire_before.side, &wayland.side, sizeof wayland.side);
-        memcpy(wire_before.objects, wayland.clients[client].objects, sizeof wire_before.objects);
-        wire_before.fd_count = wayland.clients[client].fd_count;
-        wire_before.serial = wayland.clients[client].serial;
-}
-
-static int wire_same(long client)
-{
-        return memcmp(&wire_before.side, &wayland.side, sizeof wayland.side) == 0 &&
-               memcmp(wire_before.objects, wayland.clients[client].objects, sizeof wire_before.objects) == 0 &&
-               wire_before.fd_count == wayland.clients[client].fd_count &&
-               wire_before.serial == wayland.clients[client].serial;
-}
-
-/*
-        One refusal: the feed answers negative, nothing the message would have
-        done is done, and the only event queued is the wl_display.error.
-*/
-static void wire_refused(long client, const char *what, long bytes_n, const unsigned char *bytes)
-{
-        unsigned long objects[8], ops[8];
-        long events;
-        int status;
-
-        wire_take(client, objects, ops, 8);
-        wire_snap(client);
-        status = wayland_feed(client, bytes, bytes_n, 0, 0);
-        if (status >= 0)
-                printf("  ACCEPTED, want refused: %s\n", what);
-        WIRE_CHECK(status < 0);
-        WIRE_CHECK(wire_same(client));
-        events = wire_take(client, objects, ops, 8);
-        WIRE_CHECK(events == 1);
-        WIRE_CHECK(events == 1 && objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
-}
-
-/*
-        A refusal whose wl_display.error names the object it was made on and the
-        code that object's interface gives for it.
-*/
-static unsigned long wire_word_at(long at);
-
-static void wire_refused_as(long client, const char *what, long bytes_n, const unsigned char *bytes, unsigned long object, unsigned long code)
-{
-        wire_refused(client, what, bytes_n, bytes);
-        WIRE_CHECK(wire_word_at(8) == object);
-        WIRE_CHECK(wire_word_at(12) == code);
-}
-
-static void wire_good_objects_check(void)
-{
-        long client = wayland_client_connect();
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
-        long events;
-
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-
-        /* get_registry (display op 1, new id 2): five globals, names one to five. */
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == WAYLAND_GLOBALS);
-        for (long i = 0; i < events && i < WAYLAND_GLOBALS; i++)
-                WIRE_CHECK(objects[i] == 2 && ops[i] == 0);
-
-        /* sync (display op 0, new id 3): the done event, then delete_id for the callback. */
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_u(&m, 3);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2);
-        WIRE_CHECK(events == 2 && objects[0] == 3 && ops[0] == 0);
-        WIRE_CHECK(events == 2 && objects[1] == WAYLAND_DISPLAY && ops[1] == 1);
-        WIRE_CHECK(wayland.clients[client].serial == 1);
-
-        /* bind wl_compositor version 4 as id 4: the object exists with its type. */
-        wb_begin(&m, 2, 0);
-        wb_u(&m, 1);
-        wb_s(&m, "wl_compositor");
-        wb_u(&m, 4);
-        wb_u(&m, 4);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_object_index(&wayland.clients[client], 4) >= 0);
-        WIRE_CHECK(wayland.clients[client].objects[wire_object_index(&wayland.clients[client], 4)].type == W_COMPOSITOR);
-
-        /* the same message in two pieces, then two messages in one call. */
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_u(&m, 5);
-        {
-                long n = wb_end(&m);
-                WIRE_CHECK(wayland_feed(client, m.b, 3, 0, 0) == 0);
-                WIRE_CHECK(wayland_feed(client, m.b + 3, 5, 0, 0) == 0);
-                WIRE_CHECK(wayland_feed(client, m.b + 8, n - 8, 0, 0) == 0);
-        }
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2 && objects[0] == 5 && ops[0] == 0);
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_u(&m, 6);
-        {
-                unsigned char both[128];
-                long first = wb_end(&m);
-                long at = first;
-
-                memcpy(both, m.b, (size_t)first);
-                wb_begin(&m, WAYLAND_DISPLAY, 0);
-                wb_u(&m, 7);
-                wb_end(&m);
-                memcpy(both + at, m.b, (size_t)m.n);
-                WIRE_CHECK(wayland_feed(client, both, first + m.n, 0, 0) == 0);
-        }
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 4);
-
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-        WIRE_CHECK(wayland_feed(client, m.b, 8, 0, 0) == SHELL_EINVAL);
-}
-
-static void wire_refusal_checks(void)
-{
-        unsigned char bytes[WAYLAND_MSG_MAX + 64];
-        struct wire_build m;
-        long client, objects_ok = 0;
-
-        /* a header whose size is six: below the eight of a bare header. */
-        client = wayland_client_connect();
-        WIRE_CHECK(client >= 0);
-        bytes[0] = 1; bytes[1] = 0; bytes[2] = 0; bytes[3] = 0;
-        wire_put(bytes + 4, (6UL << 16) | 1UL);
-        wire_refused(client, "size six", 8, bytes);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a bad header latches the client: the bytes after it are refused and nothing is read
-           past them. Each buffer is exactly its message, so a read before it is a sanitizer report. */
-        client = wayland_client_connect();
-        {
-                unsigned char *bad = malloc(8);
-                unsigned char *next = malloc(8);
-                long status;
-
-                wire_put(bad, WAYLAND_DISPLAY);
-                wire_put(bad + 4, 6UL << 16);
-                wire_put(next, WAYLAND_DISPLAY);
-                wire_put(next + 4, 8UL << 16);
-                WIRE_CHECK(wayland_feed(client, bad, 8, 0, 0) < 0);
-                wire_take(client, (unsigned long[8]){0}, (unsigned long[8]){0}, 8);
-                wire_snap(client);
-                status = wayland_feed(client, next, 8, 0, 0);
-                WIRE_CHECK(status == SHELL_EINVAL);
-                WIRE_CHECK(wire_same(client));
-                WIRE_CHECK(wire_take(client, (unsigned long[8]){0}, (unsigned long[8]){0}, 8) == 0);
-                free(bad);
-                free(next);
-        }
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a size past WAYLAND_MSG_MAX, and one that is not a multiple of four. */
-        client = wayland_client_connect();
-        wire_put(bytes + 4, ((unsigned long)(WAYLAND_MSG_MAX + 4) << 16) | 1UL);
-        wire_refused(client, "oversized", 8, bytes);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-        client = wayland_client_connect();
-        wire_put(bytes + 4, (10UL << 16) | 1UL);
-        wire_refused(client, "size not a multiple of four", 10, bytes);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a request on an object the client never made. */
-        client = wayland_client_connect();
-        wb_begin(&m, 99, 0);
-        wb_u(&m, 3);
-        wb_end(&m);
-        wire_refused(client, "unknown object", m.n, m.b);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a request the display does not have, and one with the wrong arguments. */
-        client = wayland_client_connect();
-        wb_begin(&m, WAYLAND_DISPLAY, 5);
-        wb_u(&m, 3);
-        wb_end(&m);
-        wire_refused(client, "no such display request", m.n, m.b);
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_end(&m);
-        wire_refused(client, "sync without its new id", m.n, m.b);
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_u(&m, 3);
-        wb_u(&m, 4);
-        wb_end(&m);
-        wire_refused(client, "sync with a spare word", m.n, m.b);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a bind with each of its checks failing: no such global, another interface,
-           a version too high, a version of zero, an id already in use. */
-        client = wayland_client_connect();
-        wb_begin(&m, 2, 0);
-        wb_u(&m, 1);
-        wb_s(&m, "wl_compositor");
-        wb_u(&m, 1);
-        wb_u(&m, 2);
-        wb_end(&m);
-        wire_refused(client, "registry is not ours yet", m.n, m.b);
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        wb_end(&m);
-        WIRE_CHECK(wayland_feed(client, m.b, m.n, 0, 0) == 0);
-        wire_take(client, (unsigned long[80]){0}, (unsigned long[80]){0}, 80);
-        wb_begin(&m, 2, 0);
-        wb_u(&m, 9);
-        wb_s(&m, "wl_compositor");
-        wb_u(&m, 4);
-        wb_u(&m, 3);
-        wb_end(&m);
-        wire_refused(client, "no such global", m.n, m.b);
-        wb_begin(&m, 2, 0);
-        wb_u(&m, 2);
-        wb_s(&m, "wl_compositor");
-        wb_u(&m, 1);
-        wb_u(&m, 3);
-        wb_end(&m);
-        wire_refused(client, "global is another interface", m.n, m.b);
-        wb_begin(&m, 2, 0);
-        wb_u(&m, 2);
-        wb_s(&m, "wl_shm");
-        wb_u(&m, 2);
-        wb_u(&m, 3);
-        wb_end(&m);
-        wire_refused(client, "version past the highest", m.n, m.b);
-        wb_begin(&m, 2, 0);
-        wb_u(&m, 2);
-        wb_s(&m, "wl_shm");
-        wb_u(&m, 0);
-        wb_u(&m, 3);
-        wb_end(&m);
-        wire_refused(client, "version zero", m.n, m.b);
-        wb_begin(&m, 2, 0);
-        wb_u(&m, 2);
-        wb_s(&m, "wl_shm");
-        wb_u(&m, 1);
-        wb_u(&m, 2);
-        wb_end(&m);
-        wire_refused(client, "id already in use", m.n, m.b);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* the object table: 64 objects in all, the display counted, so the 65th is out of room. */
-        client = wayland_client_connect();
-        for (unsigned long id = 2; id <= WAYLAND_OBJECTS; id++)
-        {
-                unsigned long objects[80], ops[80];
-
-                wb_begin(&m, WAYLAND_DISPLAY, 1);
-                wb_u(&m, id);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                WIRE_CHECK(wire_take(client, objects, ops, 80) == WAYLAND_GLOBALS);
-                objects_ok++;
-        }
-        WIRE_CHECK(objects_ok == WAYLAND_OBJECTS - 1);
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, WAYLAND_OBJECTS + 1);
-        {
-                unsigned long objects[80], ops[80];
-                long n = wb_end(&m);
-                long took = wire_take(client, objects, ops, 80);
-                (void)took;
-                wire_snap(client);
-                WIRE_CHECK(wayland_feed(client, m.b, n, 0, 0) == SHELL_ENOSPC);
-                WIRE_CHECK(wire_same(client));
-        }
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a refused message costs nothing after it: the good sync behind a refused one in the same
-           read is answered, and the call returns the refusal. */
-        client = wayland_client_connect();
-        {
-                struct wire_build bad, good;
-                unsigned char both[128];
-                unsigned long objects[8], ops[8];
-                long first, second, events;
-                int status;
-
-                wb_begin(&bad, WAYLAND_DISPLAY, 0);
-                wb_u(&bad, 3);
-                wb_u(&bad, 4);
-                first = wb_end(&bad);
-                wb_begin(&good, WAYLAND_DISPLAY, 0);
-                wb_u(&good, 5);
-                second = wb_end(&good);
-                memcpy(both, bad.b, (size_t)first);
-                memcpy(both + first, good.b, (size_t)second);
-                status = wayland_feed(client, both, first + second, 0, 0);
-                WIRE_CHECK(status < 0);
-                events = wire_take(client, objects, ops, 8);
-                WIRE_CHECK(events == 3);
-                WIRE_CHECK(events == 3 && objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
-                WIRE_CHECK(events == 3 && objects[1] == 5 && ops[1] == 0);
-                WIRE_CHECK(events == 3 && objects[2] == WAYLAND_DISPLAY && ops[2] == 1);
-        }
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a message split in four, one byte at a time, lands exactly once. */
-        client = wayland_client_connect();
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_u(&m, 2);
-        {
-                long n = wb_end(&m);
-                unsigned long objects[8], ops[8];
-
-                for (long i = 0; i < n; i++)
-                        WIRE_CHECK(wayland_feed(client, m.b + i, 1, 0, 0) == 0);
-                WIRE_CHECK(wire_take(client, objects, ops, 8) == 2);
-        }
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-}
-
-static void wire_lifecycle_checks(void)
-{
-        long client;
-        long keymap = 0;
-        unsigned char one[8] = {1, 0, 0, 0, 1, 0, 8, 0};
-        static unsigned char out[WAYLAND_OUT_MAX];
-
-        WIRE_CHECK(wayland_stop() == 0);
-        WIRE_CHECK(wayland_feed(0, one, 8, 0, 0) == SHELL_EINVAL);
-        WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
-        WIRE_CHECK(wayland_start(&wire_sink_full) == SHELL_EBUSY);
-        client = wayland_client_connect();
-        WIRE_CHECK(client >= 0);
-        {
-                struct wire_build m;
-
-                wb_begin(&m, WAYLAND_DISPLAY, 0);
-                wb_u(&m, 2);
-                wire_feed_build(client, &m);
-        }
-        WIRE_CHECK(wayland_take_output(client, out, 4, &keymap) == SHELL_ENOSPC);
-        WIRE_CHECK(wayland_take_output(client, out, WAYLAND_OUT_MAX, &keymap) > 0);
-        WIRE_CHECK(wayland_take_output(client, out, WAYLAND_OUT_MAX, &keymap) == 0);
-        WIRE_CHECK(wayland_stop() == 0);
-}
-
-/*
-        The objects, end to end through the wire: the globals bound, a surface
-        and its toplevel, a shared-memory pool and a buffer on it, a commit that
-        shows the buffer, a frame callback, the keymap and the pointer, and the
-        teardown. Each step's events are read back from the output the take
-        returns. Each refusal changes nothing the shell or the objects hold.
-*/
-static unsigned long wire_word_at(long at)
-{
-        return wire_get(wire_out + at);
-}
-
-static int wire_bind(long client, unsigned long name, const char *interface, unsigned long version, unsigned long id)
-{
-        struct wire_build m;
-
-        wb_begin(&m, 2, 0);
-        wb_u(&m, name);
-        wb_s(&m, interface);
-        wb_u(&m, version);
-        wb_u(&m, id);
-        return wire_feed_build(client, &m);
-}
-
-static void wire_object_checks(void)
-{
-        long client = wayland_client_connect();
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
-        unsigned long serial;
-        long events, keymap = 0;
-        long fds[1];
-        int status;
-
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        fds[0] = wire_file(4096);
-
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == WAYLAND_GLOBALS);
-
-        /* the globals: shm sends its two formats, seat its capabilities and name,
-           output its geometry, mode, scale and done; compositor and xdg send nothing. */
-        WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2 && objects[0] == 3 && objects[1] == 3);
-        WIRE_CHECK(wire_word_at(8) == 0 && wire_word_at(20) == 1);
-        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 4) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 5) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        WIRE_CHECK(wire_bind(client, 4, "wl_seat", 5, 6) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2 && objects[0] == 6 && ops[0] == 0 && ops[1] == 1);
-        WIRE_CHECK(wire_bind(client, 3, "wl_output", 3, 7) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 4 && ops[0] == 0 && ops[1] == 1 && ops[2] == 3 && ops[3] == 2);
-
-        /* a surface, then its xdg surface, then its toplevel: the toplevel and the xdg surface each configure. */
-        wb_begin(&m, 4, 0);
-        wb_u(&m, 8);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_of_type(&wayland.clients[client], 8, W_SURFACE) >= 0);
-        wb_begin(&m, 5, 2);
-        wb_u(&m, 9);
-        wb_u(&m, 8);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_of_type(&wayland.clients[client], 9, W_XDG_SURFACE) >= 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        wb_begin(&m, 9, 1);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2 && objects[0] == 10 && ops[0] == 0 && objects[1] == 9 && ops[1] == 0);
-        serial = wire_word_at(28);
-        WIRE_CHECK(serial != 0);
-        WIRE_CHECK(wire_seen.opened == 1 && wire_seen.row == 3);
-        WIRE_CHECK(wire_word_at(8) == (unsigned long)wayland.screen_width);
-        WIRE_CHECK(wire_word_at(12) == (unsigned long)wayland.screen_height);
-
-        /* an ack must name the serial that was sent: a stale one is refused, the right one accepted. */
-        wb_begin(&m, 9, 4);
-        wb_u(&m, serial + 1);
-        wire_refused_as(client, "stale configure serial", wb_end(&m), m.b, 9, 4);
-        wb_begin(&m, 9, 4);
-        wb_u(&m, serial);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-
-        /* the title and the app id reach the sink; a title with a control byte does not. */
-        wb_begin(&m, 10, 2);
-        wb_s(&m, "Canvas test");
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_seen.titled == 1 && wire_seen.title_length == 11);
-        WIRE_CHECK(memcmp(wire_seen.title, "Canvas test", 11) == 0);
-        wb_begin(&m, 10, 3);
-        wb_s(&m, "org.moonwater.test");
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 10, 2);
-        wb_s(&m, "a\x01" "b");
-        wire_refused(client, "title with a control byte", wb_end(&m), m.b);
-        WIRE_CHECK(wire_seen.titled == 1);
-
-        /* a shared-memory pool from the descriptor, and a buffer in it, within the pool's size. */
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 11);
-        wb_u(&m, 2048);
-        WIRE_CHECK(wayland_feed(client, m.b, wb_end(&m), fds, 1) == 0);
-        WIRE_CHECK(wire_of_type(&wayland.clients[client], 11, W_SHM_POOL) >= 0);
-        wb_begin(&m, 11, 0);
-        wb_u(&m, 12);
-        wb_u(&m, 0);
-        wb_u(&m, 16);
-        wb_u(&m, 16);
-        wb_u(&m, 64);
-        wb_u(&m, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_of_type(&wayland.clients[client], 12, W_BUFFER) >= 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-
-        /* a buffer with an unknown format, or one that runs past the pool, is refused. */
-        wb_begin(&m, 11, 0);
-        wb_u(&m, 13);
-        wb_u(&m, 0);
-        wb_u(&m, 16);
-        wb_u(&m, 16);
-        wb_u(&m, 64);
-        wb_u(&m, 2);
-        wire_refused_as(client, "format not offered", wb_end(&m), m.b, 11, 1);
-        wb_begin(&m, 11, 0);
-        wb_u(&m, 13);
-        wb_u(&m, 2000);
-        wb_u(&m, 16);
-        wb_u(&m, 16);
-        wb_u(&m, 64);
-        wb_u(&m, 0);
-        wire_refused_as(client, "buffer past the pool", wb_end(&m), m.b, 11, 0);
-
-        /* attach takes a buffer and nothing else; a commit of the attached buffer is one damage to the shell,
-           then the release, the output entry once, and the frame callback's done and delete. */
-        wb_begin(&m, 8, 1);
-        wb_u(&m, 6);
-        wb_u(&m, 0);
-        wb_u(&m, 0);
-        wire_refused(client, "attach a seat as a buffer", wb_end(&m), m.b);
-        wb_begin(&m, 8, 1);
-        wb_u(&m, 12);
-        wb_u(&m, 0);
-        wb_u(&m, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 8, 2);
-        wb_u(&m, 0);
-        wb_u(&m, 0);
-        wb_u(&m, 16);
-        wb_u(&m, 16);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 8, 3);
-        wb_u(&m, 13);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 8, 6);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 4);
-        WIRE_CHECK(events == 4 && objects[0] == 12 && ops[0] == 0);
-        WIRE_CHECK(events == 4 && objects[1] == 8 && ops[1] == 0 && wire_word_at(16) == 7);
-        WIRE_CHECK(events == 4 && objects[2] == 13 && ops[2] == 0);
-        WIRE_CHECK(events == 4 && objects[3] == WAYLAND_DISPLAY && ops[3] == 1);
-        WIRE_CHECK(wire_seen.damaged == 1 && wire_seen.row == 3);
-        WIRE_CHECK(wire_seen.pictures == 1 && wire_seen.picture_fd == fds[0] && wire_seen.picture_offset == 0);
-        WIRE_CHECK(wire_seen.picture_width == 16 && wire_seen.picture_height == 16 && wire_seen.picture_stride == 64);
-
-        /* a second commit without a frame releases the buffer again and shows nothing new. */
-        wb_begin(&m, 8, 6);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 1 && objects[0] == 12 && ops[0] == 0);
-        WIRE_CHECK(wire_seen.damaged == 2);
-
-        /* destroying the buffer clears the surface's attachment: a commit then shows nothing. */
-        wb_begin(&m, 12, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        wb_begin(&m, 8, 6);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        WIRE_CHECK(wire_seen.damaged == 2);
-
-        /* the keyboard's keymap: one event, the keymap's format and size, and one descriptor for the take. */
-        wb_begin(&m, 6, 1);
-        wb_u(&m, 14);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wayland_take_output(client, wire_out, WAYLAND_OUT_MAX, &keymap) == 16);
-        WIRE_CHECK(keymap == 1);
-        WIRE_CHECK(wire_word_at(0) == 14 && wire_word_at(8) == 1 && wire_word_at(12) == 64);
-
-        /* the pointer, and its release, which takes the object away. */
-        wb_begin(&m, 6, 0);
-        wb_u(&m, 15);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_of_type(&wayland.clients[client], 15, W_POINTER) >= 0);
-        wb_begin(&m, 15, 1);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_of_type(&wayland.clients[client], 15, W_POINTER) < 0);
-
-        /* input from Canvas: nothing reaches a window without the focus; with it, the enter, the pointer's
-           motion, button and frame, the key and its modifiers, and the leave when the focus goes. */
-        wb_begin(&m, 6, 0);
-        wb_u(&m, 15);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        WIRE_CHECK(wayland_deliver_pointer(3, 1, 2, 1, 0) == SHELL_EINVAL);
-        WIRE_CHECK(wayland_focus(9, 1) == SHELL_ENOENT);
-        WIRE_CHECK(wayland_focus(3, 1) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2);
-        WIRE_CHECK(events == 2 && ((objects[0] == 14 && ops[0] == 1) || (objects[0] == 15 && ops[0] == 0)));
-        WIRE_CHECK(events == 2 && ((objects[1] == 14 && ops[1] == 1) || (objects[1] == 15 && ops[1] == 0)));
-        WIRE_CHECK(wayland_focus(3, 1) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        WIRE_CHECK(wayland_deliver_pointer(3, 10, 20, 1, 1000) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 3 && objects[0] == 15 && ops[0] == 2 && objects[1] == 15 && ops[1] == 3);
-        WIRE_CHECK(events == 3 && ops[2] == 5);
-        WIRE_CHECK(wire_word_at(8) == 1000 && wire_word_at(12) == 10 * 256 && wire_word_at(16) == 20 * 256);
-        WIRE_CHECK(wire_word_at(36) == 0x110 && wire_word_at(40) == 1);
-        WIRE_CHECK(wayland_deliver_key(3, 30, 1, 4, 1000) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2 && objects[0] == 14 && ops[0] == 3 && objects[1] == 14 && ops[1] == 4);
-        WIRE_CHECK(wire_word_at(16) == 30 && wire_word_at(20) == 1 && wire_word_at(12) == 1000);
-        WIRE_CHECK(wayland_deliver_key(7, 30, 1, 0, 0) == SHELL_EINVAL);
-        WIRE_CHECK(wayland_deliver_pointer(3, 1, 2, 1 | 0x40, 0) == SHELL_EINVAL);
-        WIRE_CHECK(wayland_focus(3, 0) == 0);
-        events = wire_take(client, objects, ops, 80);
-        WIRE_CHECK(events == 2 && ((ops[0] == 1 && objects[0] == 15) || (ops[0] == 2 && objects[0] == 14)));
-        WIRE_CHECK(wayland_deliver_pointer(3, 1, 2, 1, 0) == SHELL_EINVAL);
-
-        /* teardown: the toplevel closes its window; the xdg surface, the surface and the pool go. */
-        wb_begin(&m, 10, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_seen.closed == 1);
-        wb_begin(&m, 9, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 8, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 11, 1);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wayland.clients[client].pools[0].live == 0);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-        status = wayland_feed(client, m.b, 8, 0, 0);
-        WIRE_CHECK(status == SHELL_EINVAL);
-}
-
-static int wire_live_windows(long client)
-{
-        int n = 0;
-
-        for (long i = 0; i < SHELL_SURFACES; i++)
-                if (wayland.side.surfaces[i].live && wayland.side.surfaces[i].client == client)
-                        n++;
-        return n;
-}
-
-/*
-        Toplevel teardown. A destroyed toplevel releases its window record, so
-        the client holds no shell surface afterwards and a later disconnect
-        closes nothing; sixty-nine windows opened and destroyed one after another
-        all get a row, past the sixty-four records the shell has. A window that
-        Canvas closed itself (the close hook) is destroyed by its client with no
-        second close. A surface that still has its role cannot be destroyed.
-*/
-static void wire_teardown_checks(void)
-{
-        long client = wayland_client_connect();
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
-        unsigned int closed;
-
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
-        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 4) == 0);
-        wire_take(client, objects, ops, 80);
-
-        for (int cycle = 0; cycle < 69; cycle++)
-        {
-                wb_begin(&m, 3, 0);
-                wb_u(&m, 10);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wb_begin(&m, 4, 2);
-                wb_u(&m, 11);
-                wb_u(&m, 10);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wb_begin(&m, 11, 1);
-                wb_u(&m, 12);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                WIRE_CHECK(wire_live_windows(client) == 1);
-                if (cycle == 0)
+        unsigned long id = wlc_id(c, iface, version);
+
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].iface == WLI_wl_registry && c->ev[at].opcode == WLE_wl_registry_global &&
+                    !strcmp(c->ev[at].text[1], wl_interfaces[iface].name))
                 {
-                        wb_begin(&m, 10, 0);
-                        wire_refused(client, "surface destroyed with its role", wb_end(&m), m.b);
+                        wlc_send(c, registry, WLQ_wl_registry_bind, c->ev[at].u[0], wl_interfaces[iface].name, (long)version, id);
+                        return id;
                 }
-                wire_take(client, objects, ops, 80);
-                wb_begin(&m, 12, 0);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                WIRE_CHECK(wire_live_windows(client) == 0);
-                wire_take(client, objects, ops, 80);
-                wb_begin(&m, 11, 0);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wb_begin(&m, 10, 0);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        }
-
-        /* a window Canvas closed itself: the client's destroy of its toplevel is accepted, and no second close is sent. */
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 4, 2);
-        wb_u(&m, 11);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 11, 1);
-        wb_u(&m, 12);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        closed = wire_seen.closed;
-        WIRE_CHECK(wayland_window_close(client, wayland.clients[client].objects[wire_object_index(&wayland.clients[client], 10)].slot) == 0);
-        WIRE_CHECK(wire_seen.closed == closed + 1);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
-        WIRE_CHECK(objects[0] == 12 && ops[0] == 1);
-
-        /* a closing window takes no more pictures or titles. Its commit is accepted: the buffer is released
-           and the frame answered, with no picture; its title is accepted and does nothing. */
-        {
-                long fds[1];
-                long pictures = wire_seen.pictures;
-                unsigned int titled = wire_seen.titled;
-                long n;
-
-                fds[0] = wire_file(1024);
-                WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 5) == 0);
-                wire_take(client, objects, ops, 80);
-                wb_begin(&m, 5, 0);
-                wb_u(&m, 20);
-                wb_u(&m, 1024);
-                n = wb_end(&m);
-                WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
-                wb_begin(&m, 20, 0);
-                wb_u(&m, 21);
-                wb_u(&m, 0);
-                wb_u(&m, 16);
-                wb_u(&m, 16);
-                wb_u(&m, 64);
-                wb_u(&m, 0);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wb_begin(&m, 10, 1);
-                wb_u(&m, 21);
-                wb_u(&m, 0);
-                wb_u(&m, 0);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wb_begin(&m, 10, 3);
-                wb_u(&m, 22);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wire_take(client, objects, ops, 80);
-                wb_begin(&m, 10, 6);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                WIRE_CHECK(wire_take(client, objects, ops, 80) == 3);
-                WIRE_CHECK(objects[0] == 21 && ops[0] == 0);
-                WIRE_CHECK(objects[1] == 22 && ops[1] == 0);
-                WIRE_CHECK(objects[2] == WAYLAND_DISPLAY && ops[2] == 1);
-                WIRE_CHECK(wire_seen.pictures == pictures);
-                wb_begin(&m, 12, 2);
-                wb_s(&m, "after close");
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                WIRE_CHECK(wire_seen.titled == titled);
-                WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        }
-        wb_begin(&m, 12, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_seen.closed == closed + 1);
-        wb_begin(&m, 11, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 10, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-
-        /* a disconnect with no window left closes nothing. */
-        closed = wire_seen.closed;
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-        WIRE_CHECK(wire_seen.closed == closed);
+        return 0;
 }
 
-/*
-        Input room. A focused window's client may hold pointers with a button
-        pressed on each. A delivery either reaches every one of them, with
-        its motion, button and frame events, or it is refused whole with
-        ENOSPC and nothing changes: no event, no button state. Fifty-six
-        pointers with all five buttons need more than the output queue holds,
-        so that delivery is refused; one button on the same pointers fits.
-*/
-static unsigned long wire_many_objects[1024], wire_many_ops[1024];
-
-static void wire_pointer_room_checks(void)
+static void session_open(struct session *s)
 {
-        long client = wayland_client_connect();
-        struct wire_build m;
-        long events;
-        int row;
-
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
-        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 4) == 0);
-        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 5) == 0);
-        WIRE_CHECK(wire_bind(client, 4, "wl_seat", 5, 3) == 0);
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
-        wb_begin(&m, 4, 0);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 5, 2);
-        wb_u(&m, 11);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 11, 1);
-        wb_u(&m, 12);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        row = wire_seen.row;
-        for (unsigned long id = 20; id < 20 + 56; id++)
-        {
-                wb_begin(&m, 3, 0);
-                wb_u(&m, id);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        }
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
-        WIRE_CHECK(wayland_focus(row, 1) == 0);
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
-
-        /* from every button up, five presses on 56 pointers are refused whole. */
-        wire_snap(client);
-        WIRE_CHECK(wayland_deliver_pointer(row, 30, 40, 0x1f, 2000) == SHELL_ENOSPC);
-        WIRE_CHECK(wire_same(client));
-        WIRE_CHECK(wire_take(client, wire_many_objects, wire_many_ops, 1024) == 0);
-
-        /* one press fits: motion, button and frame to each pointer; then a second press of the same
-           pointers, the state carried from the first. */
-        WIRE_CHECK(wayland_deliver_pointer(row, 10, 20, 1, 1000) == 0);
-        events = wire_take(client, wire_many_objects, wire_many_ops, 1024);
-        WIRE_CHECK(events == 56 * 3);
-        WIRE_CHECK(wayland_deliver_pointer(row, 50, 60, 0x03, 3000) == 0);
-        events = wire_take(client, wire_many_objects, wire_many_ops, 1024);
-        WIRE_CHECK(events == 56 * 3);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
+        memset(s, 0, sizeof *s);
+        s->c = wlc_open();
+        s->registry = wlc_id(s->c, WLI_wl_registry, 1);
+        wlc_send(s->c, 1, WLQ_wl_display_get_registry, s->registry);
+        s->compositor = wl_global(s->c, s->registry, WLI_wl_compositor, 6);
+        s->shm = wl_global(s->c, s->registry, WLI_wl_shm, 1);
+        s->wm_base = wl_global(s->c, s->registry, WLI_xdg_wm_base, 6);
+        s->seat = wl_global(s->c, s->registry, WLI_wl_seat, 9);
+        s->output = wl_global(s->c, s->registry, WLI_wl_output, 4);
 }
 
-static int wire_fd_open(long fd)
+/* A toplevel, configured and acknowledged, with a buffer of 32 by 24 of one colour shown. */
+static void session_window(struct session *s, unsigned colour)
 {
-        return fcntl((int)fd, F_GETFD) != -1;
+        struct wlc *c = s->c;
+        unsigned pixels[32 * 24];
+        struct wl_event_seen *configure;
+
+        for (int at = 0; at < 32 * 24; at++)
+                pixels[at] = colour;
+        s->fd = wl_file(32 * 24 * 4 * 2, 0);
+        wl_file_put(s->fd, 0, pixels, sizeof pixels);
+        s->pool = wlc_id(c, WLI_wl_shm_pool, 1);
+        wlc_send(c, s->shm, WLQ_wl_shm_create_pool, s->pool, s->fd, (long)(32 * 24 * 4 * 2));
+        close((int)s->fd);
+        s->buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s->pool, WLQ_wl_shm_pool_create_buffer, s->buffer, 0L, 32L, 24L, 128L, (long)WLN_wl_shm_format_xrgb8888);
+        s->surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s->compositor, WLQ_wl_compositor_create_surface, s->surface);
+        s->xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s->wm_base, WLQ_xdg_wm_base_get_xdg_surface, s->xdg, s->surface);
+        s->toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, s->xdg, WLQ_xdg_surface_get_toplevel, s->toplevel);
+        wlc_send(c, s->surface, WLQ_wl_surface_commit);
+        configure = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        if (configure)
+                wlc_send(c, s->xdg, WLQ_xdg_surface_ack_configure, (long)configure->u[0]);
+        wlc_send(c, s->surface, WLQ_wl_surface_attach, s->buffer, 0L, 0L);
+        wlc_send(c, s->surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s->surface, WLQ_wl_surface_commit);
 }
 
-/*
-        Descriptors. The shim owns a descriptor a client sends from the call
-        that queues it: a pool's is released when the pool is gone and its last
-        buffer with it, and a descriptor still queued is released when the
-        client disconnects. A call refused before it queues anything leaves
-        the descriptors with the caller, and a full queue refuses the call.
-*/
-static void wire_descriptor_checks(void)
+static void wl_reset(void)
 {
-        long client = wayland_client_connect();
-        struct wire_build m;
-        long fds[1];
-        long fd, n;
+        memset(&fake, 0, sizeof fake);
+        fake.screen = (struct wayland_screen){0, 0, 1280, 720, 100, 60000, 340, 190, "Virtual-1"};
+}
 
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
-        WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
+/* ---- the tests ---- */
 
-        /* a pool destroyed with no buffer releases its descriptor. */
-        fd = wire_file(1024);
-        fds[0] = fd;
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 4);
-        wb_u(&m, 1024);
-        n = wb_end(&m);
-        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
-        WIRE_CHECK(wire_fd_open(fd));
-        wb_begin(&m, 4, 1);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(!wire_fd_open(fd));
+static void leak_check(const char *what)
+{
+        struct wayland_stats stats;
 
-        /* a pool destroyed with a buffer keeps its descriptor until the buffer goes. */
-        fd = wire_file(1024);
-        fds[0] = fd;
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 5);
-        wb_u(&m, 1024);
-        n = wb_end(&m);
-        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
-        wb_begin(&m, 5, 0);
-        wb_u(&m, 6);
-        wb_u(&m, 0);
-        wb_u(&m, 16);
-        wb_u(&m, 16);
-        wb_u(&m, 64);
-        wb_u(&m, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 5, 1);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_fd_open(fd));
-        wb_begin(&m, 6, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(!wire_fd_open(fd));
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
-
-        /* a descriptor no request takes is released at the disconnect. */
-        fd = open("/dev/null", O_RDONLY);
-        fds[0] = fd;
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_u(&m, 7);
-        n = wb_end(&m);
-        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
-        wire_take(client, wire_many_objects, wire_many_ops, 1024);
-        WIRE_CHECK(wire_fd_open(fd));
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-        WIRE_CHECK(!wire_fd_open(fd));
-
-        /* eight queued and a ninth refused: the ninth stays with the caller, the eight go at the disconnect. */
-        client = wayland_client_connect();
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        {
-                long held[WAYLAND_FDS + 1];
-
-                for (long i = 0; i <= WAYLAND_FDS; i++)
-                        held[i] = open("/dev/null", O_RDONLY);
-                for (long i = 0; i < WAYLAND_FDS; i++)
+        wayland_stats_get(&stats);
+        WLCHECK(stats.clients == 0 && stats.objects == 0 && stats.rows == 0 && stats.fds == 0 && stats.pools == 0 &&
+                    stats.buffers == 0 && stats.surfaces == 0,
+                "%s: everything comes back (clients %ld objects %ld rows %ld fds %ld pools %ld buffers %ld surfaces %ld)", what,
+                stats.clients, stats.objects, stats.rows, stats.fds, stats.pools, stats.buffers, stats.surfaces);
+        WLCHECK(fake.maps == fake.unmaps, "%s: every mapping is unmapped (%ld %ld)", what, fake.maps, fake.unmaps);
+        WLCHECK(fake.allocs == fake.releases, "%s: every client record is released (%ld %ld)", what, fake.allocs, fake.releases);
+        for (int row = 0; row < WAYLAND_ROWS; row++)
+                if (fake.row[row].used)
                 {
-                        wb_begin(&m, WAYLAND_DISPLAY, 0);
-                        wb_u(&m, (unsigned long)(2 + i));
-                        n = wb_end(&m);
-                        WIRE_CHECK(wayland_feed(client, m.b, n, &held[i], 1) == 0);
-                }
-                wire_take(client, wire_many_objects, wire_many_ops, 1024);
-                wb_begin(&m, WAYLAND_DISPLAY, 0);
-                wb_u(&m, 20);
-                n = wb_end(&m);
-                WIRE_CHECK(wayland_feed(client, m.b, n, &held[WAYLAND_FDS], 1) == SHELL_ENOSPC);
-                WIRE_CHECK(wire_fd_open(held[WAYLAND_FDS]));
-                close((int)held[WAYLAND_FDS]);
-                WIRE_CHECK(wayland_client_disconnect(client) == 0);
-                for (long i = 0; i < WAYLAND_FDS; i++)
-                        WIRE_CHECK(!wire_fd_open(held[i]));
-        }
-}
-
-/*
-        Frame callbacks. A frame is answered once, by the next commit of its
-        surface: done, then delete_id for its id. Until a commit it is not
-        answered. A surface destroyed with a frame still waiting never answers
-        it, and the client is told the callback's id is gone (delete_id), so
-        the id is free for it to reuse.
-*/
-static void wire_frame_checks(void)
-{
-        long client = wayland_client_connect();
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
-
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 4);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 4, 3);
-        wb_u(&m, 5);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        wb_begin(&m, 4, 6);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 2);
-        WIRE_CHECK(objects[0] == 5 && ops[0] == 0);
-        WIRE_CHECK(objects[1] == WAYLAND_DISPLAY && ops[1] == 1);
-        WIRE_CHECK(wire_word_at(20) == 5);
-
-        /* a frame on a surface destroyed before its commit: no done, and a delete_id for the callback. */
-        wb_begin(&m, 4, 3);
-        wb_u(&m, 6);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 0);
-        wb_begin(&m, 4, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
-        WIRE_CHECK(objects[0] == WAYLAND_DISPLAY && ops[0] == 1);
-        WIRE_CHECK(wire_word_at(8) == 6);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-}
-
-/*
-        Roles. An xdg surface takes one role for its life. Destroying its
-        toplevel does not give the surface a new one: a second get_toplevel is
-        refused, and the surface is destroyed with its role, as the protocol says.
-*/
-static void wire_role_checks(void)
-{
-        long client = wayland_client_connect();
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
-
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
-        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 4) == 0);
-        wire_take(client, objects, ops, 80);
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 4, 2);
-        wb_u(&m, 11);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 11, 1);
-        wb_u(&m, 12);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        wb_begin(&m, 12, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        wb_begin(&m, 11, 1);
-        wb_u(&m, 13);
-        wire_refused_as(client, "second toplevel on an xdg surface", wb_end(&m), m.b, 11, 2);
-        wb_begin(&m, 11, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 10, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-}
-
-/*
-        Back-pressure. A client that does not read its events while the output
-        fills cannot be answered. The request that finds no room is refused and
-        consumed, and that client is dead: every later call is refused (EINVAL)
-        until it disconnects, so no answer is lost without the bridge knowing.
-        A client that reads in time is not affected.
-*/
-static void wire_backpressure_checks(void)
-{
-        long client = wayland_client_connect();
-        struct wire_build m;
-        unsigned long objects[1024], ops[1024];
-        long sent = 0;
-        int status = 0;
-
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 1024);
-        for (sent = 0; sent < 400; sent++)
-        {
-                wb_begin(&m, WAYLAND_DISPLAY, 0);
-                wb_u(&m, 3);
-                status = wire_feed_build(client, &m);
-                if (status < 0)
-                        break;
-        }
-        WIRE_CHECK(status == SHELL_ENOSPC);
-        WIRE_CHECK(sent > 0 && sent < 400);
-        WIRE_CHECK(wire_take(client, objects, ops, 1024) == 2 * sent);
-        wb_begin(&m, WAYLAND_DISPLAY, 0);
-        wb_u(&m, 3);
-        WIRE_CHECK(wire_feed_build(client, &m) == SHELL_EINVAL);
-        WIRE_CHECK(wire_take(client, objects, ops, 1024) == 0);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-
-        /* a client that reads between its requests is never refused for room. */
-        client = wayland_client_connect();
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        for (sent = 0; sent < 400; sent++)
-        {
-                wb_begin(&m, WAYLAND_DISPLAY, 0);
-                wb_u(&m, 3);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wire_take(client, objects, ops, 1024);
-        }
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-}
-
-/*
-        Pools. The sink checks a pool's descriptor before the shim takes it: a
-        regular file at least as large as the pool. A character device, or a
-        file smaller than the pool, is refused with wl_shm.error.invalid_fd on
-        the wl_shm object, and the pool does not exist. A resize past the file
-        is refused on the pool; a resize within it is taken.
-*/
-static void wire_pool_checks(void)
-{
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
-        long fds[1];
-        long client, n;
-        int status;
-
-        for (int kind = 0; kind < 2; kind++)
-        {
-                client = wayland_client_connect();
-                WIRE_CHECK(client >= 0);
-                if (client < 0)
-                        return;
-                wb_begin(&m, WAYLAND_DISPLAY, 1);
-                wb_u(&m, 2);
-                WIRE_CHECK(wire_feed_build(client, &m) == 0);
-                wire_take(client, objects, ops, 80);
-                WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
-                wire_take(client, objects, ops, 80);
-                fds[0] = kind == 0 ? open("/dev/null", O_RDONLY) : wire_file(512);
-                wb_begin(&m, 3, 0);
-                wb_u(&m, 4);
-                wb_u(&m, 1024);
-                n = wb_end(&m);
-                wire_snap(client);
-                status = wayland_feed(client, m.b, n, fds, 1);
-                WIRE_CHECK(status == SHELL_EINVAL);
-                WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
-                WIRE_CHECK(objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
-                WIRE_CHECK(wire_word_at(8) == 3 && wire_word_at(12) == 2);
-                WIRE_CHECK(wire_of_type(&wayland.clients[client], 4, W_SHM_POOL) < 0);
-                WIRE_CHECK(wayland.clients[client].fd_count == wire_before.fd_count + 1);
-                WIRE_CHECK(wayland_client_disconnect(client) == 0);
-                WIRE_CHECK(!wire_fd_open(fds[0]));
-        }
-
-        /* a regular file of the pool's size is taken; a resize past the file is refused, one within it is taken. */
-        client = wayland_client_connect();
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        WIRE_CHECK(wire_bind(client, 2, "wl_shm", 1, 3) == 0);
-        wire_take(client, objects, ops, 80);
-        fds[0] = wire_file(1024);
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 4);
-        wb_u(&m, 1024);
-        n = wb_end(&m);
-        WIRE_CHECK(wayland_feed(client, m.b, n, fds, 1) == 0);
-        WIRE_CHECK(wire_of_type(&wayland.clients[client], 4, W_SHM_POOL) >= 0);
-        wb_begin(&m, 4, 2);
-        wb_u(&m, 2048);
-        wire_snap(client);
-        WIRE_CHECK(wire_feed_build(client, &m) == SHELL_EINVAL);
-        WIRE_CHECK(wire_take(client, objects, ops, 80) == 1);
-        WIRE_CHECK(objects[0] == WAYLAND_DISPLAY && ops[0] == 0);
-        WIRE_CHECK(wire_word_at(8) == 4 && wire_word_at(12) == 3);
-        WIRE_CHECK(wayland.clients[client].pools[wayland.clients[client].objects[wire_object_index(&wayland.clients[client], 4)].slot].size == 1024);
-        wb_begin(&m, 4, 2);
-        wb_u(&m, 1024);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-}
-
-/*
-        The fuzz. A xorshift stream with a fixed seed makes FUZZ_ROUNDS messages:
-        an object drawn from a small range of ids (and sometimes any id), an
-        opcode from zero to fifteen, one to six arguments of small numbers, large
-        numbers, strings or nothing, now and then a descriptor (a duplicate of a
-        regular file, which the shim takes or closes), and now and then a header
-        whose size is malformed. Each goes to one client, which starts with the
-        display's registry and the globals bound, so the requests reach the
-        objects. Three things must hold for every round:
-
-        - a refused message changes nothing the shim keeps, the engine and the
-          object table alike, and queues no descriptor it did not take; a
-          framing error or a full output queue kills the client, which is then
-          replaced, and every later call on it is refused;
-        - the tables agree with themselves: ids unique, pool references equal
-          the buffers that use them, an attachment names a buffer, a toplevel
-          names a surface, and no count is past its cap;
-        - at the end every client is gone and every descriptor the test gave
-          out is closed, so nothing leaked.
-
-        The seed and the counts are printed, so a failure can be replayed.
-*/
-#define FUZZ_ROUNDS 4000
-#define FUZZ_SEED 0x9e3779b97f4a7c15UL
-
-static unsigned long fuzz_next(unsigned long *state)
-{
-        unsigned long x = *state;
-
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        *state = x;
-        return x * 2685821657736338717UL;
-}
-
-static unsigned long fuzz_small(unsigned long *state, unsigned long most)
-{
-        return fuzz_next(state) % most;
-}
-
-static const char *fuzz_text[] = {"wl_compositor", "wl_shm", "wl_output", "wl_seat", "xdg_wm_base",
-                                  "bogus", "fuzz", "a\001b", "", "org.moonwater.fuzz"};
-
-static unsigned long fuzz_known(unsigned long *state, const struct wayland_client *c)
-{
-        long index = (long)fuzz_small(state, WAYLAND_OBJECTS);
-
-        if (c->objects[index].type != W_NONE && fuzz_small(state, 6) != 0)
-                return c->objects[index].id;
-        return fuzz_small(state, 2) ? 0 : 1 + fuzz_small(state, 80);
-}
-
-static unsigned long fuzz_number(unsigned long *state)
-{
-        return fuzz_small(state, 3) == 0 ? (fuzz_next(state) & 0xffffffffUL) : fuzz_small(state, 3000);
-}
-
-/*
-        A message the way a client would send it: an object the client holds
-        (or nearly), an opcode, and each argument by its signature. Most of
-        them are accepted; the rest are refused at the arguments or the object.
-*/
-static void fuzz_structured(unsigned long *state, const struct wayland_client *c, struct wire_build *m, long *want_fd)
-{
-        long live = 0, pick, index = 0;
-        unsigned long object;
-        long type;
-        long op;
-        const char *signature;
-
-        for (long i = 0; i < WAYLAND_OBJECTS; i++)
-                live += c->objects[i].type != W_NONE;
-        pick = (long)fuzz_small(state, (unsigned long)live);
-        for (long i = 0; i < WAYLAND_OBJECTS; i++)
-                if (c->objects[i].type != W_NONE && pick-- == 0)
-                {
-                        index = i;
+                        WLCHECK(0, "%s: row %d is still open", what, row);
                         break;
                 }
-        object = c->objects[index].id;
-        type = c->objects[index].type;
-        op = (long)fuzz_small(state, 16);
-        if (fuzz_small(state, 10) != 0)
-                for (long tries = 0; tries < 16 && !wire_signature(type, op); tries++)
-                        op = (op + 1) % 16;
-        signature = wire_signature(type, op);
+}
 
-        wb_begin(m, object, (unsigned long)op);
-        for (const char *s = signature ? signature : ""; *s; s++)
+static int fds_balanced(void)
+{
+        return fake.fds_open == fake.fds_closed;
+}
+
+/* The refusal a client got: the code and the object it names. */
+static int refused_with(struct wlc *c, unsigned long code)
+{
+        return c->errors == 1 && c->error_code == code;
+}
+
+static void test_flow(void)
+{
+        struct session s;
+        struct wl_event_seen *e;
+
+        wl_reset();
+        WLCHECK(wayland_start(&fake_host) == 0, "start");
+        session_open(&s);
+        WLCHECK(s.compositor && s.shm && s.wm_base && s.seat && s.output, "the globals bind");
+        e = wlc_take(s.c, WLI_wl_output, WLE_wl_output_mode);
+        WLCHECK(e && e->u[1] == 1280 && e->u[2] == 720, "the output says its mode");
+        session_window(&s, 0xff336699);
+        WLCHECK(s.c->errors == 0, "no error (%s)", s.c->error_text);
+        WLCHECK(s.c->malformed == 0, "every event is well-formed");
+        WLCHECK(fake.row[0].used && fake.row[0].picture_w == 32 && fake.row[0].pixels[5] == 0xff336699, "the picture is in the window");
+        WLCHECK(wlc_count(s.c, WLI_wl_buffer, WLE_wl_buffer_release) == 1, "the buffer is released");
+        wlc_send(s.c, s.xdg, WLQ_xdg_surface_get_toplevel, wlc_id(s.c, WLI_xdg_toplevel, 6));
+        WLCHECK(refused_with(s.c, WLN_xdg_surface_error_already_constructed), "a second toplevel is refused");
+        wlc_end(s.c);
+        leak_check("flow");
+        WLCHECK(fds_balanced(), "every descriptor was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
+/* What a toplevel is first sent, in order, and what a client may do with it. */
+static void test_configure(void)
+{
+        struct session s;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long first_serial;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, s.surface);
+        s.xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, s.xdg, s.surface);
+        s.toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_get_toplevel, s.toplevel);
+        wlc_forget(c);
+        WLCHECK(wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 0, "no configure before the first commit");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure) == 1 &&
+                    wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1 &&
+                    wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure_bounds) == 1 &&
+                    wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_wm_capabilities) == 1,
+                "the first commit is answered with the toplevel's configure, bounds and capabilities, then the surface's");
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure_bounds);
+        WLCHECK(e && e->u[0] == 1280 && e->u[1] == 720, "the bounds are the screen");
         {
-                if (*s == 'u' || *s == 'i' || *s == 'f')
-                        wb_u(m, fuzz_number(state));
-                else if (*s == 'o')
-                        wb_u(m, fuzz_known(state, c));
-                else if (*s == 'n')
-                        wb_u(m, fuzz_small(state, 8) ? 2 + fuzz_small(state, 70) : fuzz_known(state, c));
-                else if (*s == 's')
-                        wb_s(m, fuzz_text[fuzz_small(state, sizeof fuzz_text / sizeof fuzz_text[0])]);
-                else if (*s == 'a')
+                /* the toplevel's configure comes before the surface's, in the stream */
+                long toplevel_at = -1, surface_at = -1;
+
+                for (long at = 0; at < c->events; at++)
                 {
-                        unsigned long length = fuzz_small(state, 17);
-
-                        wb_u(m, length);
-                        for (unsigned long i = 0; i < length; i += 4)
-                                wb_u(m, fuzz_next(state) & 0xffffffffUL);
+                        if (c->ev[at].iface == WLI_xdg_toplevel && c->ev[at].opcode == WLE_xdg_toplevel_configure)
+                                toplevel_at = at;
+                        if (c->ev[at].iface == WLI_xdg_surface && c->ev[at].opcode == WLE_xdg_surface_configure)
+                                surface_at = at;
                 }
-                else if (*s == 'h')
-                        *want_fd = 1;
+                WLCHECK(toplevel_at >= 0 && toplevel_at < surface_at, "xdg_toplevel.configure precedes xdg_surface.configure");
         }
-        if (!signature)
-                wb_u(m, fuzz_number(state));
-        wb_end(m);
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        first_serial = e ? e->u[0] : 0;
+
+        /* A buffer before the configure is acknowledged is the client's error */
+        {
+                struct session t;
+                unsigned pixels[4] = {0, 0, 0, 0};
+
+                session_open(&t);
+                t.surface = wlc_id(t.c, WLI_wl_surface, 6);
+                wlc_send(t.c, t.compositor, WLQ_wl_compositor_create_surface, t.surface);
+                t.xdg = wlc_id(t.c, WLI_xdg_surface, 6);
+                wlc_send(t.c, t.wm_base, WLQ_xdg_wm_base_get_xdg_surface, t.xdg, t.surface);
+                t.toplevel = wlc_id(t.c, WLI_xdg_toplevel, 6);
+                wlc_send(t.c, t.xdg, WLQ_xdg_surface_get_toplevel, t.toplevel);
+                t.fd = wl_file(64, 0);
+                wl_file_put(t.fd, 0, pixels, sizeof pixels);
+                t.pool = wlc_id(t.c, WLI_wl_shm_pool, 1);
+                wlc_send(t.c, t.shm, WLQ_wl_shm_create_pool, t.pool, t.fd, 64L);
+                close((int)t.fd);
+                t.buffer = wlc_id(t.c, WLI_wl_buffer, 1);
+                wlc_send(t.c, t.pool, WLQ_wl_shm_pool_create_buffer, t.buffer, 0L, 2L, 2L, 8L, (long)WLN_wl_shm_format_xrgb8888);
+                wlc_send(t.c, t.surface, WLQ_wl_surface_attach, t.buffer, 0L, 0L);
+                wlc_send(t.c, t.surface, WLQ_wl_surface_commit);
+                WLCHECK(refused_with(t.c, WLN_xdg_surface_error_unconfigured_buffer), "a buffer before any configure is refused");
+                wlc_end(t.c);
+        }
+
+        /* the initial configure sent and not acknowledged: a buffer is still the client's error */
+        {
+                struct session t;
+                unsigned pixels[4] = {0, 0, 0, 0};
+
+                session_open(&t);
+                t.surface = wlc_id(t.c, WLI_wl_surface, 6);
+                wlc_send(t.c, t.compositor, WLQ_wl_compositor_create_surface, t.surface);
+                t.xdg = wlc_id(t.c, WLI_xdg_surface, 6);
+                wlc_send(t.c, t.wm_base, WLQ_xdg_wm_base_get_xdg_surface, t.xdg, t.surface);
+                t.toplevel = wlc_id(t.c, WLI_xdg_toplevel, 6);
+                wlc_send(t.c, t.xdg, WLQ_xdg_surface_get_toplevel, t.toplevel);
+                wlc_send(t.c, t.surface, WLQ_wl_surface_commit);
+                t.fd = wl_file(64, 0);
+                wl_file_put(t.fd, 0, pixels, sizeof pixels);
+                t.pool = wlc_id(t.c, WLI_wl_shm_pool, 1);
+                wlc_send(t.c, t.shm, WLQ_wl_shm_create_pool, t.pool, t.fd, 64L);
+                close((int)t.fd);
+                t.buffer = wlc_id(t.c, WLI_wl_buffer, 1);
+                wlc_send(t.c, t.pool, WLQ_wl_shm_pool_create_buffer, t.buffer, 0L, 2L, 2L, 8L, (long)WLN_wl_shm_format_xrgb8888);
+                wlc_send(t.c, t.surface, WLQ_wl_surface_attach, t.buffer, 0L, 0L);
+                wlc_send(t.c, t.surface, WLQ_wl_surface_commit);
+                WLCHECK(refused_with(t.c, WLN_xdg_surface_error_unconfigured_buffer), "a buffer before the configure is acknowledged is refused");
+                wlc_end(t.c);
+        }
+
+        /* an acknowledgement of a serial that was not sent is refused; one sent is not */
+        wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, (long)(first_serial + 100));
+        WLCHECK(refused_with(c, WLN_xdg_surface_error_invalid_serial), "a serial that was never sent is refused");
+        wlc_end(c);
+
+        /* size asked, states, close */
+        session_open(&s);
+        session_window(&s, 0xff112233);
+        c = s.c;
+        wlc_forget(c);
+        fake.row[0].width_asked = 500;
+        fake.row[0].height_asked = 300;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[0] == 500 && e->u[1] == 300, "a size the compositor asks is a configure");
+        WLCHECK(wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1, "with its serial");
+        wlc_forget(c);
+        wayland_row_wake(0);
+        WLCHECK(wlc_pump(c) == 0, "nothing changed, nothing is sent");
+        fake.row[0].states |= WAYLAND_STATE_ACTIVATED;
+        wayland_row_wake(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e != 0, "a state that changed is a configure");
+        wlc_forget(c);
+        fake.row[0].closing = 1;
+        wayland_row_wake(0);
+        wayland_row_wake(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_close) == 1, "a close asked is said once");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_destroy);
+        WLCHECK(c->errors == 0 && !fake.row[0].used, "the toplevel's destroy takes the window");
+        wlc_end(c);
+
+        /* a client that never acknowledges is sent no more than the cap */
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        wlc_forget(c);
+        for (int at = 0; at < 20; at++)
+        {
+                fake.row[0].width_asked = 100 + at;
+                wayland_row_wake(0);
+        }
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) <= WAYLAND_SERIALS, "unacknowledged configures are capped (%ld)",
+                wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure));
+        wlc_end(c);
+        leak_check("configure");
+        wayland_stop();
 }
 
-static void fuzz_random(unsigned long *state, struct wire_build *m)
+/* A window's life in every order a client can end it in. */
+static void test_destroy_orders(void)
 {
-        unsigned long object = fuzz_small(state, 8) == 0 ? fuzz_next(state) & 0xffffffffUL : 1 + fuzz_small(state, 40);
-        unsigned long op = fuzz_small(state, 16);
-        long arguments = (long)fuzz_small(state, 7);
+        struct session s;
+        struct wlc *c;
 
-        wb_begin(m, object, op);
-        for (long i = 0; i < arguments; i++)
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* surface first, then the xdg_surface, which is inert and may be destroyed */
+        session_open(&s);
+        session_window(&s, 0xff00ff00);
+        c = s.c;
+        wlc_send(c, s.surface, WLQ_wl_surface_destroy);
+        WLCHECK(c->errors == 0 && !fake.row[0].used, "a destroyed surface takes its window");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_destroy);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_destroy);
+        WLCHECK(c->errors == 0, "the role objects of a destroyed surface may be destroyed (%s)", c->error_text);
+        wlc_end(c);
+
+        /* the xdg_surface with its toplevel still alive is the client's error */
+        session_open(&s);
+        session_window(&s, 0xff00ff00);
+        c = s.c;
+        wlc_send(c, s.xdg, WLQ_xdg_surface_destroy);
+        WLCHECK(refused_with(c, WLN_xdg_surface_error_defunct_role_object), "an xdg_surface destroyed before its toplevel");
+        wlc_end(c);
+
+        /* the toplevel destroyed, then made again on the same xdg_surface: the window shows again */
+        session_open(&s);
+        session_window(&s, 0xff0000ff);
+        c = s.c;
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_destroy);
+        WLCHECK(!fake.row[0].used, "the toplevel destroyed unmaps the window");
+        s.toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_get_toplevel, s.toplevel);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 2, "a new toplevel is configured again (%s)",
+                c->error_text);
+        wlc_end(c);
+
+        /* a null buffer unmaps; the next buffer needs a configure again */
+        session_open(&s);
+        session_window(&s, 0xff0000ff);
+        c = s.c;
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && !fake.row[0].used, "a null buffer unmaps the window");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 2, "and the next commit is the initial one");
+        wlc_end(c);
+
+        /* the pool destroyed before its buffer, the buffer after the surface */
+        session_open(&s);
+        session_window(&s, 0xff0000ff);
+        c = s.c;
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_destroy);
+        wlc_send(c, s.surface, WLQ_wl_surface_destroy);
+        wlc_send(c, s.buffer, WLQ_wl_buffer_destroy);
+        WLCHECK(c->errors == 0, "pool, surface and buffer in the wrong order (%s)", c->error_text);
+        wlc_end(c);
+
+        /* a client that goes at every stage of the opening */
+        for (int stage = 0; stage < 8; stage++)
         {
-                unsigned long kind = fuzz_small(state, 4);
+                struct session t;
+                unsigned pixels[4] = {0, 0, 0, 0};
 
-                if (kind == 0)
-                        wb_s(m, fuzz_text[fuzz_small(state, sizeof fuzz_text / sizeof fuzz_text[0])]);
-                else
-                        wb_u(m, fuzz_number(state));
-        }
-        wb_end(m);
-}
-
-/*
-        One message: seven in ten structured, the rest random; one in forty
-        with a malformed size in its header (a framing error, which kills the
-        client); and a descriptor for the messages that take one.
-*/
-static void fuzz_message(unsigned long *state, const struct wayland_client *c, struct wire_build *m, long *want_fd, long *bad_size)
-{
-        *want_fd = 0;
-        if (fuzz_small(state, 10) < 7)
-                fuzz_structured(state, c, m, want_fd);
-        else
-                fuzz_random(state, m);
-        *bad_size = fuzz_small(state, 40) == 0;
-        if (*bad_size)
-        {
-                static const unsigned long sizes[] = {0, 4, 6, 10, 4100, 0xffff};
-
-                wire_put(m->b + 4, (sizes[fuzz_small(state, 6)] << 16) | (unsigned long)(wire_get(m->b + 4) & 0xffffUL));
-        }
-}
-
-static int fuzz_invariants(long client)
-{
-        const struct wayland_client *c = &wayland.clients[client];
-        int ok = 1;
-
-        if (c->fd_count < 0 || c->fd_count > WAYLAND_FDS || c->in_length < 0 || c->in_length >= WAYLAND_MSG_MAX)
-                ok = 0;
-        if (c->out_length < 0 || c->out_length > WAYLAND_OUT_MAX)
-                ok = 0;
-        for (long i = 0; i < WAYLAND_OBJECTS; i++)
-        {
-                const struct wayland_object *o = &c->objects[i];
-
-                if (o->type == W_NONE)
-                        continue;
-                if (o->id < 1 || o->id > WAYLAND_ID_MAX || wire_object_index(c, o->id) != i)
-                        ok = 0;
-                if (o->type == W_BUFFER && (o->pool < 0 || o->pool >= WAYLAND_POOLS || !c->pools[o->pool].live))
-                        ok = 0;
-                if (o->type == W_SURFACE && o->attached && wire_of_type(c, o->attached, W_BUFFER) < 0)
-                        ok = 0;
-                if (o->type == W_XDG_TOPLEVEL && wire_of_type(c, o->surface, W_SURFACE) < 0)
-                        ok = 0;
-        }
-        for (long p = 0; p < WAYLAND_POOLS; p++)
-        {
-                long uses = 0;
-
-                if (!c->pools[p].live)
-                        continue;
-                for (long i = 0; i < WAYLAND_OBJECTS; i++)
-                        if (c->objects[i].type == W_BUFFER && c->objects[i].pool == p)
-                                uses++;
-                if (uses != c->pools[p].refs || c->pools[p].fd < 0)
-                        ok = 0;
-        }
-        return ok;
-}
-
-static void wire_fuzz_checks(void)
-{
-        unsigned long seed = FUZZ_SEED;
-        unsigned long rounds = FUZZ_ROUNDS;
-        unsigned long state;
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
-        long client = 0;
-        int live = 0;
-        long base_fd[4];
-        long before_open = 0, after_open = 0;
-        unsigned int accepted = 0, refused = 0, framing = 0, reconnects = 0, invariant_failures = 0;
-        unsigned int unchanged_failures = 0;
-
-        if (getenv("WIRE_FUZZ_SEED"))
-                seed = strtoul(getenv("WIRE_FUZZ_SEED"), 0, 0);
-        if (getenv("WIRE_FUZZ_ROUNDS"))
-                rounds = strtoul(getenv("WIRE_FUZZ_ROUNDS"), 0, 0);
-        state = seed;
-        for (long fd = 0; fd < 1024; fd++)
-                before_open += fcntl((int)fd, F_GETFD) != -1;
-        for (long i = 0; i < 4; i++)
-                base_fd[i] = wire_file(4096);
-
-        for (unsigned long round = 0; round < rounds; round++)
-        {
-                long bad_size = 0, want_fd = 0, fds[2], count = 0, before, after, status;
-                struct wayland_client *c;
-
-                if (!live || wayland.clients[client].dead)
+                session_open(&t);
+                if (stage > 0)
                 {
-                        if (live)
-                        {
-                                WIRE_CHECK(wayland_client_disconnect(client) == 0);
-                                reconnects++;
-                                live = 0;
-                        }
-                        client = wayland_client_connect();
-                        WIRE_CHECK(client >= 0);
-                        if (client < 0)
-                                break;
-                        live = 1;
-                        wb_begin(&m, WAYLAND_DISPLAY, 1);
-                        wb_u(&m, 2);
-                        wire_feed_build(client, &m);
-                        wire_bind(client, 1, "wl_compositor", 4, 3);
-                        wire_bind(client, 2, "wl_shm", 1, 4);
-                        wire_bind(client, 5, "xdg_wm_base", 1, 5);
-                        wire_bind(client, 4, "wl_seat", 5, 6);
-                        wire_bind(client, 3, "wl_output", 3, 7);
-                        wire_take(client, objects, ops, 80);
+                        t.surface = wlc_id(t.c, WLI_wl_surface, 6);
+                        wlc_send(t.c, t.compositor, WLQ_wl_compositor_create_surface, t.surface);
                 }
-                c = &wayland.clients[client];
-                fuzz_message(&state, c, &m, &want_fd, &bad_size);
-                if (want_fd || fuzz_small(&state, 8) == 0)
+                if (stage > 1)
                 {
-                        count = 1;
-                        fds[0] = dup((int)base_fd[fuzz_small(&state, 4)]);
+                        t.xdg = wlc_id(t.c, WLI_xdg_surface, 6);
+                        wlc_send(t.c, t.wm_base, WLQ_xdg_wm_base_get_xdg_surface, t.xdg, t.surface);
                 }
-                before = c->fd_count;
-                wire_snap(client);
-                status = wayland_feed(client, m.b, m.n, fds, count);
-                after = c->fd_count;
-                if (status >= 0)
-                        accepted++;
-                else
+                if (stage > 2)
                 {
-                        int queued = after == before + count;
+                        t.toplevel = wlc_id(t.c, WLI_xdg_toplevel, 6);
+                        wlc_send(t.c, t.xdg, WLQ_xdg_surface_get_toplevel, t.toplevel);
+                }
+                if (stage > 3)
+                        wlc_send(t.c, t.surface, WLQ_wl_surface_commit);
+                if (stage > 4)
+                {
+                        t.fd = wl_file(64, 0);
+                        wl_file_put(t.fd, 0, pixels, sizeof pixels);
+                        t.pool = wlc_id(t.c, WLI_wl_shm_pool, 1);
+                        wlc_send(t.c, t.shm, WLQ_wl_shm_create_pool, t.pool, t.fd, 64L);
+                        close((int)t.fd);
+                }
+                if (stage > 5)
+                {
+                        t.buffer = wlc_id(t.c, WLI_wl_buffer, 1);
+                        wlc_send(t.c, t.pool, WLQ_wl_shm_pool_create_buffer, t.buffer, 0L, 2L, 2L, 8L, (long)WLN_wl_shm_format_xrgb8888);
+                }
+                if (stage > 6)
+                {
+                        struct wl_event_seen *e = wlc_take(t.c, WLI_xdg_surface, WLE_xdg_surface_configure);
 
-                        refused++;
-                        if (bad_size)
-                                framing++;
-                        if (!queued && count)
-                                close((int)fds[0]);
-                        if (!c->dead && !bad_size && !(status == SHELL_ENOSPC && c->dead))
-                        {
-                                if (!(memcmp(&wire_before.side, &wayland.side, sizeof wayland.side) == 0 &&
-                                      memcmp(wire_before.objects, c->objects, sizeof wire_before.objects) == 0 &&
-                                      wire_before.serial == c->serial && after == before + (queued ? count : 0)))
-                                        unchanged_failures++;
-                        }
+                        wlc_send(t.c, t.xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+                        wlc_send(t.c, t.surface, WLQ_wl_surface_attach, t.buffer, 0L, 0L);
+                        wlc_send(t.c, t.surface, WLQ_wl_surface_frame, wlc_id(t.c, WLI_wl_callback, 1));
+                        wlc_send(t.c, t.surface, WLQ_wl_surface_commit);
                 }
-                if (!fuzz_invariants(client))
-                        invariant_failures++;
-                if (fuzz_small(&state, 4) == 0)
-                        wire_take(client, objects, ops, 80);
+                wlc_end(t.c);
         }
-        if (live)
-                WIRE_CHECK(wayland_client_disconnect(client) == 0);
-        for (long i = 0; i < 4; i++)
-                close((int)base_fd[i]);
-        for (long fd = 0; fd < 1024; fd++)
-                after_open += fcntl((int)fd, F_GETFD) != -1;
-        WIRE_CHECK(unchanged_failures == 0);
-        WIRE_CHECK(invariant_failures == 0);
-        WIRE_CHECK(after_open == before_open);
-        printf("CHECK_wayland_wire fuzz: seed 0x%lx, %lu rounds, %u accepted, %u refused (%u framing), %u clients replaced, "
-               "%u refusals that changed state, %u broken invariants, %ld descriptors open after\n",
-               seed, rounds, accepted, refused, framing, reconnects, unchanged_failures,
-               invariant_failures, after_open - before_open);
+        leak_check("destroy orders");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
 }
 
-/*
-        Error codes. Each refusal names the object it was made on, and the code
-        is the one the object's interface gives for it: the xdg_wm_base role
-        error, xdg_surface's already_constructed, invalid_serial, invalid_size
-        and defunct_role_object, xdg_toplevel's invalid_parent and invalid_size.
-        A window's toplevel and its surface are left alone by each refusal.
-*/
-static void wire_error_code_checks(void)
+/* The shm pool and buffer rules, the client's every mistake. */
+static void test_shm(void)
 {
-        long client = wayland_client_connect();
-        struct wire_build m;
-        unsigned long objects[80], ops[80];
+        struct session s;
+        struct wlc *c;
+        long fd, pipes[2];
 
-        WIRE_CHECK(client >= 0);
-        if (client < 0)
-                return;
-        wb_begin(&m, WAYLAND_DISPLAY, 1);
-        wb_u(&m, 2);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
-        WIRE_CHECK(wire_bind(client, 1, "wl_compositor", 4, 3) == 0);
-        WIRE_CHECK(wire_bind(client, 5, "xdg_wm_base", 1, 4) == 0);
-        wire_take(client, objects, ops, 80);
-        wb_begin(&m, 3, 0);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 4, 2);
-        wb_u(&m, 11);
-        wb_u(&m, 10);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 11, 1);
-        wb_u(&m, 12);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wire_take(client, objects, ops, 80);
+        wl_reset();
+        wayland_start(&fake_host);
 
-        /* the surface has a role: the wm base refuses, and names itself. */
-        wb_begin(&m, 4, 2);
-        wb_u(&m, 13);
-        wb_u(&m, 10);
-        wire_refused_as(client, "surface has a role", wb_end(&m), m.b, 4, 0);
-        /* the xdg surface is destroyed while its toplevel is alive: defunct_role_object. */
-        wb_begin(&m, 11, 0);
-        wire_refused_as(client, "xdg surface destroyed with its toplevel", wb_end(&m), m.b, 11, 6);
-        /* a window size of zero is no size: xdg_surface.invalid_size. */
-        wb_begin(&m, 11, 3);
-        wb_u(&m, 0);
-        wb_u(&m, 0);
-        wb_u(&m, 0);
-        wb_u(&m, 0);
-        wire_refused_as(client, "zero window geometry", wb_end(&m), m.b, 11, 5);
-        /* a parent that is not a toplevel: the toplevel names itself, invalid_parent. */
-        wb_begin(&m, 12, 1);
-        wb_u(&m, 10);
-        wire_refused_as(client, "parent is a surface", wb_end(&m), m.b, 12, 1);
-        /* a negative minimum size: the toplevel names itself, invalid_size. */
-        wb_begin(&m, 12, 8);
-        wb_u(&m, 0xffffffffUL);
-        wb_u(&m, 0);
-        wire_refused_as(client, "negative minimum size", wb_end(&m), m.b, 12, 2);
+#define FRESH() (session_open(&s), c = s.c, s.pool = wlc_id(c, WLI_wl_shm_pool, 1))
+        /* a size that is zero or absurd, a file too short, a file that is not a file */
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 0L);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "a pool of size 0");
+        wlc_end(c);
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, (long)WAYLAND_POOL_BYTES + 1);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "a pool past the cap");
+        wlc_end(c);
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 8192L);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_fd), "a file shorter than the pool");
+        wlc_end(c);
+        FRESH();
+        if (pipe((int *)pipes) == 0)
+        {
+                int p[2];
 
-        wb_begin(&m, 12, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 11, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        wb_begin(&m, 10, 0);
-        WIRE_CHECK(wire_feed_build(client, &m) == 0);
-        WIRE_CHECK(wayland_client_disconnect(client) == 0);
-}
+                if (pipe(p) == 0)
+                {
+                        fake.fds_open++;
+                        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, (long)p[0], 4096L);
+                        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_fd), "a pipe is not a pool");
+                        close(p[1]);
+                }
+                close((int)pipes[0]);
+                close((int)pipes[1]);
+        }
+        wlc_end(c);
 
-int main(void)
-{
-        WIRE_CHECK(wayland_start(&wire_sink_full) == 0);
-        WIRE_CHECK(wayland_output(1024, 768) == 0);
-        WIRE_CHECK(wayland_keymap(64) == 0);
-        wire_good_objects_check();
-        wire_object_checks();
-        wire_refusal_checks();
-        wire_teardown_checks();
-        wire_pointer_room_checks();
-        wire_descriptor_checks();
-        wire_frame_checks();
-        wire_role_checks();
-        wire_backpressure_checks();
-        wire_pool_checks();
-        wire_error_code_checks();
-        wire_fuzz_checks();
-        wire_lifecycle_checks();
-        printf("CHECK_wayland_wire: %u checks, %u failures\n", wire_checks_run, wire_failures);
-        return wire_failures != 0;
-}
-#endif /* CHECK_wayland_wire */
-
-#ifdef CHECK_wayland_client
-/*
-        The Canvas shim, end to end. test/wayland_client.c runs as a client on
-        the far end of a socketpair; this program is the bridge and the host's
-        Canvas. It reads what the client sends with recvmsg, descriptors and
-        all, feeds the shim, and sends back what the shim queued. The sink
-        copies each committed picture out of the pool's memory with pread and
-        records the window it opened and the title it was given. When the first
-        picture arrives the window takes the focus, and a pointer motion and a
-        button are delivered to it. The run passes when the client exits 0, the
-        window's picture equals the client's pixels, and the shell still holds
-        the window with its title and app id.
-
-            cc -std=gnu11 -Wall -Wextra -D_GNU_SOURCE -DCHECK_wayland_client -DCONFIG_MOONWATER_WAYLAND test/checks.c
-            ./a.out path/to/wayland-client
-
-        Without the switch the hooks are the inline no-ops of wayland.h, the
-        start is refused, and the run fails before it starts: that build is
-        the run with no shim, and it must be red.
-*/
-#if !defined(__linux__)
-#error "CHECK_wayland_client runs a socketpair and recvmsg with descriptors: Linux only"
-#endif
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/uio.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#ifndef CONFIG_MOONWATER_WAYLAND
-int main(void)
-{
-        printf("  FAIL: no shim: built without CONFIG_MOONWATER_WAYLAND\n");
-        printf("CHECK_wayland_client: no shim, 1 failure\n");
-        return 1;
-}
-#else
-#include "../src/canvas/wayland.c"
-
-#define E2E_WIDTH 320
-#define E2E_HEIGHT 240
-#define E2E_STRIDE (E2E_WIDTH * 4)
-#define E2E_BYTES (E2E_STRIDE * E2E_HEIGHT)
-#define E2E_OUT 8192
-
-static unsigned int e2e_checks, e2e_failures;
-
-#define E2E_CHECK(condition) \
-        do { \
-                e2e_checks++; \
-                if (!(condition)) \
-                { \
-                        e2e_failures++; \
-                        printf("  FAIL line %d: %s\n", __LINE__, #condition); \
-                } \
-        } while (0)
-
-/*
-        The pixel the client draws, computed here the same way: the bytes of a
-        little-endian word.
-*/
-static unsigned long e2e_pixel(long x, long y)
-{
-        return 0xff000000UL | ((unsigned long)((x * 7) & 0xff) << 16) | ((unsigned long)((y * 5) & 0xff) << 8) |
-               (unsigned long)((x ^ y) & 0xff);
-}
-
-static unsigned char e2e_picture[E2E_BYTES];
-
-static struct e2e_seen
-{
-        unsigned int opened, pictured, titled, damaged, closed;
-        int row;
-        long picture_offset;
-        char title[64];
-        long title_length;
-} e2e_seen;
-
-static int e2e_open(void *context, long client, long role)
-{
-        (void)context;
-        (void)client;
-        (void)role;
-        e2e_seen.opened++;
-        return 3;
-}
-
-static int e2e_key(void *context, long client, long code, long pressed)
-{
-        (void)context; (void)client; (void)code; (void)pressed;
-        return 0;
-}
-
-static int e2e_pointer(void *context, long client, long x, long y, long buttons)
-{
-        (void)context; (void)client; (void)x; (void)y; (void)buttons;
-        return 0;
-}
-
-static int e2e_damage(void *context, int row, const struct shell_rect *rect)
-{
-        (void)context; (void)row; (void)rect;
-        e2e_seen.damaged++;
-        return 0;
-}
-
-static int e2e_picture_copy(void *context, int row, long fd, long offset, long width, long height, long stride)
-{
-        long bytes = stride * height;
-
-        (void)context;
-        if (width != E2E_WIDTH || height != E2E_HEIGHT || stride != E2E_STRIDE || offset < 0)
-                return SHELL_EINVAL;
-        if (bytes != E2E_BYTES)
-                return SHELL_EINVAL;
-        if (pread((int)fd, e2e_picture, (size_t)bytes, (off_t)offset) != bytes)
-                return SHELL_EINVAL;
-        e2e_seen.pictured++;
-        e2e_seen.row = row;
-        e2e_seen.picture_offset = offset;
-        return 0;
-}
-
-static int e2e_place(void *context, int row, long x, long y, long screen)
-{
-        (void)context; (void)row; (void)x; (void)y; (void)screen;
-        return 0;
-}
-
-static int e2e_size(void *context, int row, long width, long height)
-{
-        (void)context; (void)row; (void)width; (void)height;
-        return 0;
-}
-
-static int e2e_flag(void *context, int row, long on)
-{
-        (void)context; (void)row; (void)on;
-        return 0;
-}
-
-static int e2e_stack(void *context, int row, long layer)
-{
-        (void)context; (void)row; (void)layer;
-        return 0;
-}
-
-static int e2e_activate(void *context, int row)
-{
-        (void)context; (void)row;
-        return 0;
-}
-
-static int e2e_close(void *context, int row)
-{
-        (void)context; (void)row;
-        e2e_seen.closed++;
-        return 0;
-}
-
-static int e2e_title(void *context, int row, const char *text, long length)
-{
-        (void)context; (void)row;
-        e2e_seen.titled++;
-        e2e_seen.title_length = length;
-        for (long i = 0; i < length && i < 63; i++)
-                e2e_seen.title[i] = text[i];
-        e2e_seen.title[length < 63 ? length : 63] = 0;
-        return 0;
-}
-
-static int e2e_layer(void *context, int row, const struct shell_layer *layer)
-{
-        (void)context; (void)row; (void)layer;
-        return 0;
-}
-
-static int e2e_query(void *context, int row, struct shell_facts *facts)
-{
-        (void)context; (void)row; (void)facts;
-        return 0;
-}
-
-static void e2e_release(void *context, long fd)
-{
-        (void)context;
+        /* a buffer that does not fit, a format that is not offered, a stride that is short */
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 4096L);
         close((int)fd);
+        s.buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_create_buffer, s.buffer, 0L, 32L, 33L, 128L, (long)WLN_wl_shm_format_xrgb8888);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "a buffer past the end of its pool");
+        wlc_end(c);
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 4096L);
+        close((int)fd);
+        s.buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_create_buffer, s.buffer, 0L, 8L, 8L, 32L, 777L);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_format), "a format that is not offered");
+        wlc_end(c);
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 4096L);
+        close((int)fd);
+        s.buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_create_buffer, s.buffer, 0L, 8L, 8L, 16L, (long)WLN_wl_shm_format_xrgb8888);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "a stride shorter than a row");
+        wlc_end(c);
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 4096L);
+        close((int)fd);
+        s.buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_create_buffer, s.buffer, 0L, -1L, 8L, 32L, (long)WLN_wl_shm_format_xrgb8888);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "a negative width");
+        wlc_end(c);
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 4096L);
+        close((int)fd);
+        s.buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_create_buffer, s.buffer, 4000L, 8L, 8L, 32L, (long)WLN_wl_shm_format_xrgb8888);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "an offset that runs past the end");
+        wlc_end(c);
+        FRESH();
+        fd = wl_file(4096, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 4096L);
+        close((int)fd);
+        s.buffer = wlc_id(c, WLI_wl_buffer, 1);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_create_buffer, s.buffer, 0L, 0x7fffffffL, 0x7fffffffL, 0x7fffffffL, (long)WLN_wl_shm_format_xrgb8888);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "sizes that would overflow");
+        wlc_end(c);
+#ifdef __linux__
+        /* a pool may grow and may not shrink */
+        FRESH();
+        fd = wl_file(8192, 0);
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, 4096L);
+        close((int)fd);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_resize, 8192L);
+        WLCHECK(c->errors == 0, "a pool grows (%s)", c->error_text);
+        wlc_send(c, s.pool, WLQ_wl_shm_pool_resize, 4096L);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_fd), "a pool does not shrink");
+        wlc_end(c);
+#endif
+        /* too many pools */
+        FRESH();
+        for (int at = 0; at < WAYLAND_POOLS + 1 && !c->errors; at++)
+        {
+                unsigned long id = wlc_id(c, WLI_wl_shm_pool, 1);
+
+                fd = wl_file(4096, 0);
+                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, id, fd, 4096L);
+                close((int)fd);
+        }
+        WLCHECK(refused_with(c, WLN_wl_display_error_no_memory), "more pools than the cap is refused, not crashed");
+        wlc_end(c);
+        leak_check("shm");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+#undef FRESH
 }
 
-static int e2e_pool(void *context, long fd, long size)
+static void test_frames(void)
 {
-        struct stat st;
+        struct session s;
+        struct wlc *c;
+        unsigned long callback;
 
-        (void)context;
-        if (fstat((int)fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < size)
-                return SHELL_EINVAL;
-        return SHELL_OK;
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        callback = wlc_id(c, WLI_wl_callback, 1);
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, callback);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0, "a frame callback waits for the frame");
+        WLCHECK(wayland_frame_wanted(), "and the compositor is told one is wanted");
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "it is answered when the frame is drawn");
+        WLCHECK(!wayland_frame_wanted(), "and nothing waits after it");
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "once");
+
+        /* a window put away is told of no frame, and of the next one when it is back */
+        callback = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, callback);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        fake.row[0].states |= WAYLAND_STATE_SUSPENDED;
+        wlc_forget(c);
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0, "no frame for a window put away");
+        fake.row[0].states &= ~(long)WAYLAND_STATE_SUSPENDED;
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "and the next one when it is shown again");
+
+        /* a surface with no window has no frame to wait for */
+        {
+                unsigned long plain = wlc_id(c, WLI_wl_surface, 6), cb = wlc_id(c, WLI_wl_callback, 1);
+
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, plain);
+                wlc_forget(c);
+                wlc_send(c, plain, WLQ_wl_surface_frame, cb);
+                wlc_send(c, plain, WLQ_wl_surface_commit);
+                WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "a surface with no window is answered at its commit");
+        }
+
+        /* more callbacks than the cap are answered, not kept without end */
+        for (int at = 0; at < WAYLAND_CALLBACKS + 8; at++)
+                wlc_send(c, s.surface, WLQ_wl_surface_frame, wlc_id(c, WLI_wl_callback, 1));
+        WLCHECK(c->errors == 0, "many frame requests are no error");
+        wlc_send(c, s.surface, WLQ_wl_surface_destroy);
+        WLCHECK(c->errors == 0, "a surface destroyed with callbacks waiting");
+        wlc_end(c);
+        leak_check("frames");
+        wayland_stop();
 }
 
-static const struct shell_sink e2e_sink = {
-        .context = 0,
-        .open = e2e_open,
-        .key = e2e_key,
-        .pointer = e2e_pointer,
-        .damage = e2e_damage,
-        .place = e2e_place,
-        .size = e2e_size,
-        .minimize = e2e_flag,
-        .maximize = e2e_flag,
-        .fullscreen = e2e_flag,
-        .stack = e2e_stack,
-        .activate = e2e_activate,
-        .close = e2e_close,
-        .title = e2e_title,
-        .layer = e2e_layer,
-        .query = e2e_query,
-        .picture = e2e_picture_copy,
-        .release = e2e_release,
-        .pool = e2e_pool,
-};
-
-/*
-        One read from the client: its bytes, and the descriptors that came with
-        them, which are kept for the run.
-*/
-static long e2e_recv(int fd, unsigned char *data, long room, long *fds, long *count)
+static void test_text(void)
 {
-        struct iovec iov;
-        struct msghdr msg;
-        char control[CMSG_SPACE(sizeof(int) * 8)];
-        struct cmsghdr *cmsg;
-        ssize_t got;
+        struct session s;
+        struct wlc *c;
+        static const char *titles[] = {"plain", "t\x01\x02" "ab", "\xff\xfe""bad", "caf\xc3\xa9", "\xed\xa0\x80surrogate", "\xf4\x90\x80\x80over",
+                                       "\xc0\xaf", ""};
 
-        iov.iov_base = data;
-        iov.iov_len = (size_t)room;
-        memset(&msg, 0, sizeof msg);
-        memset(control, 0, sizeof control);
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = control;
-        msg.msg_controllen = sizeof control;
-        got = recvmsg(fd, &msg, 0);
-        *count = 0;
-        if (got < 0)
-                return -1;
-        for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg))
-                if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        for (unsigned at = 0; at < sizeof titles / sizeof titles[0]; at++)
+        {
+                char want[WAYLAND_TEXT];
+
+                wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, titles[at]);
+                snprintf(want, sizeof want, "%s", fake.row[0].title);
+                for (const char *p = fake.row[0].title; *p; p++)
+                        WLCHECK((unsigned char)*p >= 0x20 && *p != 0x7f, "title %u has no control byte", at);
+        }
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, "caf\xc3\xa9");
+        WLCHECK(!strcmp(fake.row[0].title, "caf\xc3\xa9"), "valid UTF-8 is kept");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, "\xff");
+        WLCHECK(!strcmp(fake.row[0].title, "?"), "an invalid byte is a question mark");
+        {
+                char big[1000];
+
+                memset(big, 'a', sizeof big - 1);
+                big[sizeof big - 1] = 0;
+                wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, big);
+                WLCHECK(strlen(fake.row[0].title) == WAYLAND_TEXT - 1, "a long title is cut to the room (%zu)", strlen(fake.row[0].title));
+                /* a multi-byte character that would not fit whole is not cut in half */
+                memset(big, 'a', WAYLAND_TEXT - 2);
+                big[WAYLAND_TEXT - 2] = 0;
+                strcat(big, "\xc3\xa9");
+                wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, big);
+                WLCHECK(strlen(fake.row[0].title) == WAYLAND_TEXT - 1 || strlen(fake.row[0].title) == WAYLAND_TEXT - 2,
+                        "a character is not cut in half (%zu)", strlen(fake.row[0].title));
+        }
+        wlc_end(c);
+        leak_check("text");
+        wayland_stop();
+}
+
+/* The pure popup rule, held to every edge. */
+static void test_popup_place(void)
+{
+        struct wayland_positioner p;
+        struct wayland_rect screen = {0, 0, 1000, 800};
+        long x, y, w, h;
+
+        memset(&p, 0, sizeof p);
+        p.width = 100;
+        p.height = 50;
+        p.anchor_x = 10;
+        p.anchor_y = 20;
+        p.anchor_width = 40;
+        p.anchor_height = 10;
+        p.anchor = WLN_xdg_positioner_anchor_bottom_left;
+        p.gravity = WLN_xdg_positioner_gravity_bottom_right;
+        wayland_popup_place(&p, 100, 100, &screen, &x, &y, &w, &h);
+        WLCHECK(x == 10 && y == 30 && w == 100 && h == 50, "below the anchor, to the right (%ld %ld)", x, y);
+        p.offset_x = 5;
+        p.offset_y = 7;
+        wayland_popup_place(&p, 100, 100, &screen, &x, &y, &w, &h);
+        WLCHECK(x == 15 && y == 37, "the offset is added (%ld %ld)", x, y);
+        p.offset_x = p.offset_y = 0;
+        p.anchor = WLN_xdg_positioner_anchor_none;
+        p.gravity = WLN_xdg_positioner_gravity_none;
+        wayland_popup_place(&p, 0, 0, &screen, &x, &y, &w, &h);
+        WLCHECK(x == 10 + 20 - 50 && y == 20 + 5 - 25, "centered on the anchor's centre (%ld %ld)", x, y);
+
+        /* past the right edge: flipped, slid or made narrower, each only when allowed */
+        p.anchor = WLN_xdg_positioner_anchor_bottom_right;
+        p.gravity = WLN_xdg_positioner_gravity_bottom_right;
+        p.anchor_x = 950;
+        p.anchor_y = 10;
+        p.adjustment = 0;
+        wayland_popup_place(&p, 0, 0, &screen, &x, &y, &w, &h);
+        WLCHECK(x == 990 && w == 100, "with no adjustment it is where it asks even past the edge (%ld)", x);
+        p.adjustment = WLN_xdg_positioner_constraint_adjustment_flip_x;
+        wayland_popup_place(&p, 0, 0, &screen, &x, &y, &w, &h);
+        WLCHECK(x + w <= 1000 && x >= 0 && x < 990, "flip_x puts it left of the anchor (%ld)", x);
+        p.adjustment = WLN_xdg_positioner_constraint_adjustment_slide_x;
+        wayland_popup_place(&p, 0, 0, &screen, &x, &y, &w, &h);
+        WLCHECK(x == 900 && w == 100, "slide_x slides it to the edge (%ld)", x);
+        p.adjustment = WLN_xdg_positioner_constraint_adjustment_resize_x;
+        wayland_popup_place(&p, 0, 0, &screen, &x, &y, &w, &h);
+        WLCHECK(x == 990 && w == 10, "resize_x cuts it to what fits (%ld %ld)", x, w);
+        p.adjustment = WLN_xdg_positioner_constraint_adjustment_flip_y | WLN_xdg_positioner_constraint_adjustment_slide_x;
+        p.anchor_y = 790;
+        wayland_popup_place(&p, 0, 0, &screen, &x, &y, &w, &h);
+        WLCHECK(y + h <= 800 && x == 900, "the axes are separate (%ld %ld)", x, y);
+
+        /* an anchor far off any screen does not make the arithmetic wrap */
+        p.anchor_x = 1L << 24;
+        p.anchor_y = -(1L << 24);
+        p.offset_x = 1L << 24;
+        p.offset_y = -(1L << 24);
+        p.adjustment = 63;
+        wayland_popup_place(&p, 1L << 24, -(1L << 24), &screen, &x, &y, &w, &h);
+        WLCHECK(w >= 0 && h >= 0 && w <= 100 && h <= 50, "extremes stay sane (%ld %ld)", w, h);
+}
+
+static void test_popups(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long positioner, popup_surface, popup_xdg, popup;
+        struct wl_event_seen *e;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        positioner = wlc_id(c, WLI_xdg_positioner, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_create_positioner, positioner);
+        wlc_send(c, positioner, WLQ_xdg_positioner_set_size, 40L, 30L);
+        wlc_send(c, positioner, WLQ_xdg_positioner_set_anchor_rect, 4L, 5L, 10L, 8L);
+        wlc_send(c, positioner, WLQ_xdg_positioner_set_anchor, (long)WLN_xdg_positioner_anchor_bottom_left);
+        wlc_send(c, positioner, WLQ_xdg_positioner_set_gravity, (long)WLN_xdg_positioner_gravity_bottom_right);
+        popup_surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, popup_surface);
+        popup_xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, popup_xdg, popup_surface);
+        popup = wlc_id(c, WLI_xdg_popup, 6);
+        wlc_forget(c);
+        wlc_send(c, popup_xdg, WLQ_xdg_surface_get_popup, popup, s.xdg, positioner);
+        WLCHECK(c->errors == 0, "a popup of a toplevel (%s)", c->error_text);
+        e = wlc_take(c, WLI_xdg_popup, WLE_xdg_popup_configure);
+        WLCHECK(e && e->u[0] == 4 && e->u[1] == 13 && e->u[2] == 40 && e->u[3] == 30, "the popup is told where it is (%ld %ld)", e ? (long)e->u[0] : -1,
+                e ? (long)e->u[1] : -1);
+        WLCHECK(wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1, "with a serial");
+        {
+                struct wl_event_seen *conf = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+                unsigned pixels[40 * 30];
+                long fd;
+                unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1), buffer = wlc_id(c, WLI_wl_buffer, 1);
+
+                for (int at = 0; at < 40 * 30; at++)
+                        pixels[at] = 0xffabcdef;
+                fd = wl_file(sizeof pixels, 0);
+                wl_file_put(fd, 0, pixels, sizeof pixels);
+                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pool, fd, (long)sizeof pixels);
+                close((int)fd);
+                wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, buffer, 0L, 40L, 30L, 160L, (long)WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, popup_xdg, WLQ_xdg_surface_ack_configure, conf ? (long)conf->u[0] : 0L);
+                wlc_send(c, popup_surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+                wlc_send(c, popup_surface, WLQ_wl_surface_commit);
+        }
+        WLCHECK(c->errors == 0 && fake.row[1].used && fake.row[1].kind == WAYLAND_KIND_POPUP && fake.row[1].parent == 0,
+                "the popup is a window over its parent (%s)", c->error_text);
+        WLCHECK(fake.row[1].x == 4 && fake.row[1].y == 13, "at the place it was told (%ld %ld)", fake.row[1].x, fake.row[1].y);
+        wlc_forget(c);
+        fake.row[1].closing = 1;
+        wayland_row_wake(1);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_xdg_popup, WLE_xdg_popup_popup_done) == 1, "a dismissed popup is sent popup_done");
+
+        /* the parent cannot be destroyed under it without the popup going: surface destroy takes all */
+        wlc_send(c, popup, WLQ_xdg_popup_destroy);
+        WLCHECK(c->errors == 0 && !fake.row[1].used, "a popup destroyed takes its window (%s)", c->error_text);
+
+        /* an incomplete positioner, a parent that is nothing, a grab after it is shown */
+        {
+                unsigned long bare = wlc_id(c, WLI_xdg_positioner, 6), surf = wlc_id(c, WLI_wl_surface, 6), xs = wlc_id(c, WLI_xdg_surface, 6),
+                              pop = wlc_id(c, WLI_xdg_popup, 6);
+
+                wlc_send(c, s.wm_base, WLQ_xdg_wm_base_create_positioner, bare);
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surf);
+                wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, xs, surf);
+                wlc_send(c, xs, WLQ_xdg_surface_get_popup, pop, s.xdg, bare);
+                WLCHECK(refused_with(c, WLN_xdg_wm_base_error_invalid_positioner), "a positioner with no size is refused");
+        }
+        wlc_end(c);
+        leak_check("popups");
+        wayland_stop();
+}
+
+static void test_surface_rules(void)
+{
+        struct session s;
+        struct wlc *c;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, s.surface);
+        wlc_send(c, s.surface, WLQ_wl_surface_set_buffer_scale, 0L);
+        WLCHECK(refused_with(c, WLN_wl_surface_error_invalid_scale), "scale 0");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, s.surface);
+        wlc_send(c, s.surface, WLQ_wl_surface_set_buffer_transform, 9L);
+        WLCHECK(refused_with(c, WLN_wl_surface_error_invalid_transform), "transform 9");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, s.surface);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0UL, 3L, 0L);
+        WLCHECK(refused_with(c, WLN_wl_surface_error_invalid_offset), "attach with an offset in version 6");
+        wlc_end(c);
+        /* a second role for a surface, an xdg_surface on a surface with a buffer */
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        {
+                unsigned long again = wlc_id(c, WLI_xdg_surface, 6);
+
+                wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, again, s.surface);
+                WLCHECK(refused_with(c, WLN_xdg_wm_base_error_role), "a second xdg_surface for a surface");
+        }
+        wlc_end(c);
+        /* geometry that is not positive, a min above a max */
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 0L, 0L, 0L, 10L);
+        WLCHECK(refused_with(c, WLN_xdg_surface_error_invalid_size), "window geometry of no width");
+        wlc_end(c);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_min_size, 100L, 100L);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_max_size, 50L, 50L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(refused_with(c, WLN_xdg_toplevel_error_invalid_size), "a minimum above the maximum, at the commit");
+        wlc_end(c);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_min_size, -1L, 10L);
+        WLCHECK(refused_with(c, WLN_xdg_toplevel_error_invalid_size), "a negative minimum");
+        wlc_end(c);
+        /* a parent that is the window itself, or its child */
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_parent, s.toplevel);
+        WLCHECK(refused_with(c, WLN_xdg_toplevel_error_invalid_parent), "a toplevel is not its own parent");
+        wlc_end(c);
+        /* a resize edge that does not exist */
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_resize, s.seat, 1L, 3L);
+        WLCHECK(refused_with(c, WLN_xdg_toplevel_error_invalid_resize_edge), "resize edge 3");
+        wlc_end(c);
+        /* set_maximized and the others reach the window, and before it is shown they wait for it */
+        session_open(&s);
+        c = s.c;
+        s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, s.surface);
+        s.xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, s.xdg, s.surface);
+        s.toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_get_toplevel, s.toplevel);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_maximized);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        {
+                struct wl_event_seen *conf = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+                unsigned pixels[16];
+                long fd = wl_file(64, 0);
+                unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1), buffer = wlc_id(c, WLI_wl_buffer, 1);
+
+                memset(pixels, 0, sizeof pixels);
+                wl_file_put(fd, 0, pixels, sizeof pixels);
+                wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pool, fd, 64L);
+                close((int)fd);
+                wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, buffer, 0L, 4L, 4L, 16L, (long)WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, conf ? (long)conf->u[0] : 0L);
+                wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        }
+        WLCHECK(fake.row[0].did_count && fake.row[0].did[0] == WAYLAND_DO_MAXIMIZE, "maximize asked before the window was shown is done when it is");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_fullscreen, 0UL);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_unset_fullscreen);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_minimized);
+        WLCHECK(fake.row[0].did_count >= 4, "and later requests reach it at once");
+        wlc_end(c);
+        leak_check("surface rules");
+        wayland_stop();
+}
+
+/* Everything a client may send that is not a request: sizes, ids, objects that are not there, bytes that end. */
+static void test_wire(void)
+{
+        struct wlc *c;
+        unsigned char b[64];
+        long fds[2];
+
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* a header whose size is below eight, above the largest, or not a multiple of four */
+        for (int size = 0; size < 5; size++)
+        {
+                long sizes[5] = {0, 7, 9, WAYLAND_MESSAGE + 4, 0xffff};
+
+                c = wlc_open();
+                memset(b, 0, sizeof b);
+                wlc_put(b, 1);
+                wlc_put(b + 4, (unsigned long)sizes[size] << 16);
+                wayland_feed(c->slot, b, 8, 0, 0);
+                wlc_pump(c);
+                WLCHECK(c->errors == 1, "a message of size %ld is a protocol error", sizes[size]);
+                WLCHECK(wayland_dead(c->slot) == 1, "and the client is dead");
+                WLCHECK(wayland_feed(c->slot, b, 8, 0, 0) < 0, "and nothing more is read");
+                wlc_end(c);
+        }
+
+        /* the display: a request that is not one, an object that is not there, a bad id */
+        c = wlc_open();
+        memset(b, 0, sizeof b);
+        wlc_put(b, 1);
+        wlc_put(b + 4, 9UL | 8UL << 16);
+        wayland_feed(c->slot, b, 8, 0, 0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_invalid_method, "an opcode that does not exist");
+        wlc_end(c);
+        c = wlc_open();
+        memset(b, 0, sizeof b);
+        wlc_put(b, 777);
+        wlc_put(b + 4, 0UL | 8UL << 16);
+        wayland_feed(c->slot, b, 8, 0, 0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_invalid_object && c->error_object == 777, "an object that is not there");
+        wlc_end(c);
+        c = wlc_open();
+        wlc_send(c, 1, WLQ_wl_display_get_registry, 0UL);
+        WLCHECK(c->errors == 1, "a new id of 0");
+        wlc_end(c);
+        c = wlc_open();
+        wlc_send(c, 1, WLQ_wl_display_get_registry, (unsigned long)WAYLAND_IDS);
+        WLCHECK(c->errors == 1, "a new id past the table");
+        wlc_end(c);
+        c = wlc_open();
+        wlc_send(c, 1, WLQ_wl_display_get_registry, 0xff000001UL);
+        WLCHECK(c->errors == 1, "a new id in the server's range");
+        wlc_end(c);
+        c = wlc_open();
+        c->iface[2] = WLI_wl_registry;
+        wlc_send(c, 1, WLQ_wl_display_get_registry, 2UL);
+        c->iface[3] = WLI_wl_registry;
+        wlc_send(c, 1, WLQ_wl_display_get_registry, 2UL);
+        WLCHECK(c->errors == 1, "a new id already in use");
+        wlc_end(c);
+
+        /* a message cut at every byte arrives whole */
+        c = wlc_open();
+        {
+                unsigned long registry = wlc_id(c, WLI_wl_registry, 1);
+                unsigned char m[12];
+
+                memset(m, 0, sizeof m);
+                wlc_put(m, 1);
+                wlc_put(m + 4, 1UL | 12UL << 16);
+                wlc_put(m + 8, registry);
+                for (int cut = 1; cut < 12; cut++)
                 {
-                        size_t bytes = cmsg->cmsg_len - CMSG_LEN(0);
+                        wayland_feed(c->slot, m, cut, 0, 0);
+                        wayland_feed(c->slot, m + cut, 12 - cut, 0, 0);
+                        wlc_pump(c);
+                        WLCHECK(c->errors == 0, "a message split at byte %d is read once whole", cut);
+                        c->iface[registry] = 0;
+                        registry = wlc_id(c, WLI_wl_registry, 1);
+                        wlc_put(m + 8, registry);
+                }
+        }
+        wlc_end(c);
 
-                        for (size_t i = 0; i + sizeof(int) <= bytes && *count < 8; i += sizeof(int))
+        /* a request with bytes left over, or fewer than it needs */
+        c = wlc_open();
+        memset(b, 0, sizeof b);
+        wlc_put(b, 1);
+        wlc_put(b + 4, 1UL | 16UL << 16);
+        wlc_put(b + 8, 2);
+        wlc_put(b + 12, 0xdead);
+        wayland_feed(c->slot, b, 16, 0, 0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 1, "bytes left over after the arguments");
+        wlc_end(c);
+        c = wlc_open();
+        memset(b, 0, sizeof b);
+        wlc_put(b, 1);
+        wlc_put(b + 4, 1UL | 8UL << 16);
+        wayland_feed(c->slot, b, 8, 0, 0);
+        wlc_pump(c);
+        WLCHECK(c->errors == 1, "an argument missing");
+        wlc_end(c);
+
+        /* a string with no NUL, or longer than its message */
+        {
+                struct session s;
+                unsigned char m[64];
+
+                session_open(&s);
+                c = s.c;
+                memset(m, 'x', sizeof m);
+                wlc_put(m, s.registry);
+                wlc_put(m + 4, 0UL | 32UL << 16);
+                wlc_put(m + 8, 1);
+                wlc_put(m + 12, 8);
+                memset(m + 16, 'a', 8);
+                wlc_put(m + 24, 1);
+                wlc_put(m + 28, 99);
+                wayland_feed(c->slot, m, 32, 0, 0);
+                wlc_pump(c);
+                WLCHECK(c->errors == 1, "a string that is not ended");
+                wlc_end(c);
+                session_open(&s);
+                c = s.c;
+                wlc_put(m, s.registry);
+                wlc_put(m + 4, 0UL | 28UL << 16);
+                wlc_put(m + 8, 1);
+                wlc_put(m + 12, 4000);
+                wayland_feed(c->slot, m, 28, 0, 0);
+                wlc_pump(c);
+                WLCHECK(c->errors == 1, "a string longer than its message");
+                wlc_end(c);
+        }
+
+        /* a bind of the wrong interface, an unknown global, a version that is not there */
+        {
+                struct session s;
+
+                session_open(&s);
+                c = s.c;
+                wlc_send(c, s.registry, WLQ_wl_registry_bind, 1UL, "wl_shm", 1L, wlc_id(c, WLI_wl_shm, 1));
+                WLCHECK(c->errors == 1, "a global bound as another interface");
+                wlc_end(c);
+                session_open(&s);
+                c = s.c;
+                wlc_send(c, s.registry, WLQ_wl_registry_bind, 999UL, "wl_shm", 1L, wlc_id(c, WLI_wl_shm, 1));
+                WLCHECK(c->errors == 1, "a global that does not exist");
+                wlc_end(c);
+                session_open(&s);
+                c = s.c;
+                wlc_send(c, s.registry, WLQ_wl_registry_bind, 1UL, "wl_compositor", 99L, wlc_id(c, WLI_wl_compositor, 1));
+                WLCHECK(c->errors == 1, "a version above the one built");
+                wlc_end(c);
+                session_open(&s);
+                c = s.c;
+                wlc_send(c, s.registry, WLQ_wl_registry_bind, 1UL, "wl_compositor", 0L, wlc_id(c, WLI_wl_compositor, 1));
+                WLCHECK(c->errors == 1, "version 0");
+                wlc_end(c);
+                /* an older version binds, and sends no event it does not have */
+                session_open(&s);
+                c = s.c;
+                {
+                        unsigned long out = wlc_id(c, WLI_wl_output, 1);
+
+                        for (long at = 0; at < c->events; at++)
+                                if (c->ev[at].iface == WLI_wl_registry && !strcmp(c->ev[at].text[1], "wl_output"))
+                                        wlc_send(c, s.registry, WLQ_wl_registry_bind, c->ev[at].u[0], "wl_output", 1L, out);
+                        WLCHECK(c->errors == 0 && c->malformed == 0, "wl_output bound at version 1 (%s)", c->error_text);
+                }
+                wlc_end(c);
+        }
+
+        /* a request of an object on another interface's object: a surface where a buffer goes */
+        {
+                struct session s;
+
+                session_open(&s);
+                c = s.c;
+                s.surface = wlc_id(c, WLI_wl_surface, 6);
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, s.surface);
+                {
+                        /* an attach whose buffer argument is the surface itself: encoded by hand, since the table would not */
+                        unsigned char m[24];
+
+                        memset(m, 0, sizeof m);
+                        wlc_put(m, s.surface);
+                        wlc_put(m + 4, (unsigned long)WLQ_wl_surface_attach | 20UL << 16);
+                        wlc_put(m + 8, s.surface);
+                        wayland_feed(c->slot, m, 20, 0, 0);
+                        wlc_pump(c);
+                        WLCHECK(c->errors == 1, "an object of the wrong interface");
+                }
+                wlc_end(c);
+        }
+
+        /* descriptors: a request that needs one with none sent, and more than the cap */
+        {
+                struct session s;
+
+                session_open(&s);
+                c = s.c;
+                {
+                        unsigned char m[20];
+
+                        memset(m, 0, sizeof m);
+                        wlc_put(m, s.shm);
+                        wlc_put(m + 4, (unsigned long)WLQ_wl_shm_create_pool | 16UL << 16);
+                        wlc_put(m + 8, wlc_id(c, WLI_wl_shm_pool, 1));
+                        wlc_put(m + 12, 4096);
+                        wayland_feed(c->slot, m, 16, 0, 0);
+                        wlc_pump(c);
+                        WLCHECK(c->errors == 1, "a request without the descriptor it needs");
+                }
+                wlc_end(c);
+                session_open(&s);
+                c = s.c;
+                {
+                        unsigned char m[8];
+
+                        for (int at = 0; at < WAYLAND_FDS + 3; at++)
                         {
-                                int value;
+                                fds[0] = wl_file(16, 0);
+                                memset(m, 0, sizeof m);
+                                wlc_put(m, 1);
+                                wlc_put(m + 4, 3UL | 8UL << 16);
+                                (void)m;
+                                wayland_feed(c->slot, 0, 0, fds, 1);
+                        }
+                        wlc_pump(c);
+                        WLCHECK(c->errors == 1 && wayland_dead(c->slot), "more descriptors than the cap is the client's death");
+                }
+                wlc_end(c);
+        }
+        leak_check("wire");
+        WLCHECK(fds_balanced(), "every descriptor was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
 
-                                memcpy(&value, CMSG_DATA(cmsg) + i, sizeof value);
-                                fds[*count] = value;
-                                (*count)++;
+/* The tables are fixed: a client that makes everything it can makes no more than the caps. */
+static void test_caps(void)
+{
+        struct session s;
+        struct wlc *c;
+        long made = 0;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        while (!c->errors && made < WAYLAND_OBJECTS + 50)
+        {
+                wlc_send(c, 1, WLQ_wl_display_get_registry, wlc_id(c, WLI_wl_registry, 1));
+                made++;
+        }
+        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_no_memory && made <= WAYLAND_OBJECTS,
+                "objects stop at the cap with a protocol error (%ld, code %lu)", made, c->error_code);
+        wlc_end(c);
+
+        session_open(&s);
+        c = s.c;
+        for (int at = 0; at < WAYLAND_SURFACES + 5 && !c->errors; at++)
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, wlc_id(c, WLI_wl_surface, 6));
+        WLCHECK(c->errors == 1 && c->error_code == WLN_wl_display_error_no_memory, "surfaces stop at the cap");
+        wlc_end(c);
+
+        /* the client slots */
+        {
+                long slots[WAYLAND_CLIENTS + 1], got = 0;
+
+                for (int at = 0; at < WAYLAND_CLIENTS + 1; at++)
+                {
+                        slots[at] = wayland_connect(1, 1);
+                        got += slots[at] >= 0;
+                }
+                WLCHECK(got == WAYLAND_CLIENTS && slots[WAYLAND_CLIENTS] < 0, "one more client than the slots is refused");
+                for (int at = 0; at < WAYLAND_CLIENTS; at++)
+                        wayland_drop(slots[at]);
+        }
+
+        /* a client that never reads is dropped when its queue is full, and nothing blocks */
+        session_open(&s);
+        c = s.c;
+        {
+                long rounds = 0;
+                unsigned char m[12];
+
+                while (!wayland_dead(c->slot) && rounds < 20000)
+                {
+                        /* a sync is answered with two events and gives its id back: the queue grows and no object does */
+                        memset(m, 0, sizeof m);
+                        wlc_put(m, 1);
+                        wlc_put(m + 4, (unsigned long)WLQ_wl_display_sync | 12UL << 16);
+                        wlc_put(m + 8, 500);
+                        wayland_feed(c->slot, m, 12, 0, 0);
+                        rounds++;
+                }
+                WLCHECK(wayland_dead(c->slot) == 2 && c->errors == 0, "a client that does not read is dead, not waited for (after %ld)", rounds);
+                WLCHECK(rounds > 1000 && rounds < 20000, "after a queue's worth of answers (%ld)", rounds);
+        }
+        wlc_end(c);
+        leak_check("caps");
+        wayland_stop();
+}
+
+/* A fixed-seed fuzz: every request of every interface with arguments that are valid, nearly valid and wild. */
+static unsigned long wl_seed = 0x9e3779b97f4a7c15UL;
+
+static unsigned long wl_random(void)
+{
+        wl_seed ^= wl_seed << 13;
+        wl_seed ^= wl_seed >> 7;
+        wl_seed ^= wl_seed << 17;
+        return wl_seed;
+}
+
+static void test_fuzz(long rounds)
+{
+        long accepted = 0, refused = 0, malformed = 0;
+        struct session s;
+        struct wlc *c = 0;
+        long made = 0;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        for (long round = 0; round < rounds; round++)
+        {
+                if (!c || wayland_dead(c->slot) || round % 400 == 0)
+                {
+                        if (c)
+                        {
+                                malformed += c->malformed;
+                                wlc_end(c);
+                        }
+                        session_open(&s);
+                        c = s.c;
+                        if (wl_random() & 1)
+                                session_window(&s, 0xff112233);
+                        made = 0;
+                }
+                {
+                        /* an object of the client's, and one of its requests, with arguments chosen to be wrong in some way */
+                        unsigned char m[256];
+                        unsigned long object = wl_random() % 4 ? 1 + wl_random() % (c->next + 4) : 1;
+                        long iface = object < 8192 ? c->iface[object] : 0, op, n = 8;
+                        const struct wl_interface_info *info;
+
+                        if (!iface)
+                                iface = WLI_wl_display, object = 1;
+                        info = &wl_interfaces[iface];
+                        op = info->requests ? (long)(wl_random() % (info->requests + (wl_random() % 8 == 0))) : 0;
+                        memset(m, 0, sizeof m);
+                        wlc_put(m, object);
+                        if (op < info->requests)
+                        {
+                                for (const unsigned char *k = info->request[op].args; k[0] && n < 200; k += 2)
+                                {
+                                        unsigned long v;
+
+                                        switch (wl_random() % 6)
+                                        {
+                                        case 0: v = 0; break;
+                                        case 1: v = 1; break;
+                                        case 2: v = 0xffffffffUL; break;
+                                        case 3: v = c->next > 2 ? 2 + wl_random() % (c->next - 2) : 2; break;
+                                        case 4: v = wl_random() & 0xff; break;
+                                        default: v = wl_random() & 0xffffffffUL; break;
+                                        }
+                                        if (k[0] == 'n' && wl_random() % 4)
+                                        {
+                                                v = c->next++;
+                                                made++;
+                                        }
+                                        if (k[0] == 'n' && v < 8192 && !c->iface[v])
+                                        {
+                                                c->iface[v] = k[1];
+                                                c->version[v] = c->version[object];
+                                        }
+                                        if (k[0] == 's' || k[0] == 'S' || k[0] == 'N' || k[0] == 'a')
+                                        {
+                                                unsigned long len = wl_random() % 24, padded = (len + 3) & ~3UL;
+
+                                                wlc_put(m + n, len);
+                                                n += 4;
+                                                for (unsigned long at = 0; at < padded; at++)
+                                                        m[n + at] = at + 1 < len ? (unsigned char)('a' + wl_random() % 26) : 0;
+                                                if (wl_random() % 16 == 0 && len)
+                                                        m[n + len - 1] = 'z';
+                                                n += (long)padded;
+                                                if (k[0] == 'N')
+                                                {
+                                                        wlc_put(m + n, wl_random() % 4);
+                                                        wlc_put(m + n + 4, 2 + wl_random() % 50);
+                                                        n += 8;
+                                                }
+                                        }
+                                        else if (k[0] != 'h')
+                                        {
+                                                wlc_put(m + n, v);
+                                                n += 4;
+                                        }
+                                }
+                        }
+                        wlc_put(m + 4, (unsigned long)op);
+                        /* sometimes the size is wrong */
+                        if (wl_random() % 20 == 0)
+                                n = 8 + (long)(wl_random() % 16) * 4;
+                        {
+                                long fds[1], fd_count = 0;
+
+                                if (wl_random() % 3 == 0)
+                                {
+                                        fds[0] = wl_file(4096, 0);
+                                        fd_count = 1;
+                                }
+                                if (wlc_raw(c, m, n, fds, fd_count) < 0)
+                                        refused++;
+                                else
+                                        accepted++;
                         }
                 }
-        return got;
+                if (round % 64 == 0 && c && !wayland_dead(c->slot))
+                {
+                        /* the compositor's side too: wakes and frames, with the window in whatever state it is in */
+                        for (int row = 0; row < WAYLAND_ROWS; row++)
+                                if (fake.row[row].used)
+                                {
+                                        fake.row[row].states = (long)(wl_random() & 0x1f);
+                                        fake.row[row].width_asked = (long)(wl_random() % 400);
+                                        fake.row[row].closing = (long)(wl_random() % 8 == 0);
+                                        wayland_row_wake(row);
+                                }
+                        wayland_frame();
+                        wlc_pump(c);
+                }
+        }
+        if (c)
+        {
+                malformed += c->malformed;
+                wlc_end(c);
+        }
+        WLCHECK(malformed == 0, "every event of the fuzz was well-formed (%ld malformed)", malformed);
+        WLCHECK(accepted > 0 && refused > 0, "the fuzz has accepted and refused requests (%ld, %ld)", accepted, refused);
+        leak_check("fuzz");
+        WLCHECK(fds_balanced(), "every descriptor of the fuzz was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+        printf("CHECK_wayland fuzz: %ld rounds, %ld accepted, %ld refused, %ld objects made\n", rounds, accepted, refused, made);
+        wayland_stop();
 }
 
-/*
-        What the shim queued for the client goes out whole, and the descriptor
-        for a keymap, which this run never asks for, would go with it.
-*/
-static int e2e_flush(int fd, long client)
+/* Raw bytes, as a hostile stream is: random, and random with plausible headers. */
+static void test_raw(long rounds)
 {
-        static unsigned char out[E2E_OUT];
-        long keymap = 0;
-        int n = wayland_take_output(client, out, E2E_OUT, &keymap);
-        long sent = 0;
+        long malformed = 0;
+        struct wlc *c = 0;
 
-        if (n < 0)
-                return 0;
-        while (sent < n)
+        wl_reset();
+        wayland_start(&fake_host);
+        for (long round = 0; round < rounds; round++)
         {
-                ssize_t wrote = send(fd, out + sent, (size_t)(n - sent), MSG_NOSIGNAL);
+                unsigned char b[256];
+                long n = 1 + (long)(wl_random() % 200);
 
-                if (wrote < 0 && errno == EINTR)
-                        continue;
-                if (wrote <= 0)
-                        return 0;
-                sent += wrote;
-        }
-        return 1;
-}
-
-static int e2e_run(const char *path, long client)
-{
-        int sv[2];
-        pid_t child;
-        int focused = 0;
-        int status = 0;
-        int alive = 1;
-        unsigned char data[8192];
-
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
-                return 0;
-        child = fork();
-        if (child < 0)
-                return 0;
-        if (child == 0)
-        {
-                close(sv[0]);
-                if (sv[1] != 3)
+                if (!c || wayland_dead(c->slot))
                 {
-                        dup2(sv[1], 3);
-                        close(sv[1]);
+                        if (c)
+                        {
+                                wlc_end(c);
+                        }
+                        c = wlc_open();
                 }
-                execl(path, path, (char *)0);
-                _exit(127);
-        }
-        close(sv[1]);
-        for (int spins = 0; spins < 20000; spins++)
-        {
-                struct pollfd p;
-                long fds[8];
-                long count = 0;
-                long got;
-                int ready;
-
-                p.fd = sv[0];
-                p.events = POLLIN;
-                p.revents = 0;
-                ready = poll(&p, 1, 5000);
-                if (ready <= 0)
-                        break;
-                got = e2e_recv(sv[0], data, sizeof data, fds, &count);
-                if (got < 0 && (errno == EINTR || errno == EAGAIN))
-                        continue;
-                if (got <= 0)
-                        break;
-                if (wayland_feed(client, data, got, fds, count) < 0)
+                for (long at = 0; at < n; at++)
+                        b[at] = (unsigned char)wl_random();
+                if (wl_random() % 2 && n >= 8)
                 {
-                        E2E_CHECK(0);
-                        e2e_flush(sv[0], client);
-                        break;
+                        wlc_put(b, wl_random() % 4 ? 1 : wl_random() % 40);
+                        wlc_put(b + 4, (wl_random() % 12) | ((unsigned long)((n & ~3L) > 8 ? n & ~3L : 8) << 16));
                 }
-                if (e2e_seen.pictured && !focused)
-                {
-                        focused = 1;
-                        E2E_CHECK(wayland_focus(3, 1) == 0);
-                        E2E_CHECK(wayland_deliver_pointer(3, 100, 50, 1, 1000) == 0);
-                }
-                if (!e2e_flush(sv[0], client))
-                        break;
+                wayland_feed(c->slot, b, n, 0, 0);
+                malformed += wlc_pump(c) < 0;
         }
-        close(sv[0]);
-        for (int tries = 0; tries < 500 && alive; tries++)
+        if (c)
         {
-                if (waitpid(child, &status, WNOHANG) == child)
-                        alive = 0;
-                else
-                        usleep(10000);
+                wlc_end(c);
         }
-        if (alive)
-        {
-                kill(child, SIGKILL);
-                waitpid(child, &status, 0);
-                E2E_CHECK(0);
-                return 0;
-        }
-        E2E_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-        return 1;
+        WLCHECK(malformed == 0, "raw bytes");
+        leak_check("raw");
+        wayland_stop();
 }
 
 int main(int argc, char **argv)
 {
-        long client;
+        long rounds = argc > 1 ? atol(argv[1]) : 20000;
 
-        if (argc != 2)
-        {
-                fprintf(stderr, "usage: %s path/to/wayland-client\n", argv[0]);
-                return 2;
-        }
-        if (wayland_start(&e2e_sink) != 0 || wayland_output(1024, 768) != 0)
-        {
-                printf("  FAIL: the shim did not start (the switch is off, or the sink is incomplete)\n");
-                printf("CHECK_wayland_client: no shim, 1 failure\n");
-                return 1;
-        }
-        client = wayland_client_connect();
-        E2E_CHECK(client >= 0);
-        if (client >= 0)
-        {
-                e2e_run(argv[1], client);
-                E2E_CHECK(e2e_seen.opened == 1);
-                E2E_CHECK(e2e_seen.pictured == 1 && e2e_seen.row == 3 && e2e_seen.picture_offset == 0);
-                E2E_CHECK(e2e_seen.titled == 1 && e2e_seen.title_length == 19);
-                E2E_CHECK(memcmp(e2e_seen.title, "Moonwater wire test", 19) == 0);
-                for (long y = 0; y < E2E_HEIGHT; y++)
-                        for (long x = 0; x < E2E_WIDTH; x++)
-                        {
-                                unsigned long want = e2e_pixel(x, y);
-                                unsigned char *at = e2e_picture + y * E2E_STRIDE + x * 4;
-
-                                if (at[0] != (unsigned char)want || at[1] != (unsigned char)(want >> 8) ||
-                                    at[2] != (unsigned char)(want >> 16) || at[3] != (unsigned char)(want >> 24))
-                                {
-                                        E2E_CHECK(0);
-                                        y = E2E_HEIGHT;
-                                        break;
-                                }
-                        }
-#ifdef CONFIG_MOONWATER_WAYLAND
-                {
-                        int found = 0;
-
-                        for (long i = 0; i < SHELL_SURFACES; i++)
-                        {
-                                struct shell_surface *record = &wayland.side.surfaces[i];
-
-                                if (record->live && record->role == SHELL_ROLE_TOPLEVEL && record->row == 3)
-                                {
-                                        found = 1;
-                                        E2E_CHECK(strcmp(record->title, "Moonwater wire test") == 0);
-                                        E2E_CHECK(strcmp(record->app_id, "org.moonwater.test") == 0);
-                                }
-                        }
-                        E2E_CHECK(found);
-                }
-#endif
-                E2E_CHECK(wayland_client_disconnect(client) == 0);
-                E2E_CHECK(e2e_seen.closed == 1);
-        }
-        E2E_CHECK(wayland_stop() == 0);
-        printf("CHECK_wayland_client: %u checks, %u failures\n", e2e_checks, e2e_failures);
-        return e2e_failures != 0;
+        test_popup_place();
+        test_flow();
+        test_configure();
+        test_destroy_orders();
+        test_shm();
+        test_frames();
+        test_text();
+        test_popups();
+        test_surface_rules();
+        test_wire();
+        test_caps();
+        test_fuzz(rounds);
+        test_raw(rounds);
+        printf("CHECK_wayland: %u checks, %u failures\n", wl_checks, wl_failures);
+        return wl_failures != 0;
 }
-#endif /* CONFIG_MOONWATER_WAYLAND */
-#endif /* CHECK_wayland_client */
-
-#ifdef CHECK_hooks_off
-/*
-        With both switches off every hook is an inline no-op that answers
-        SHELL_EOPNOTSUPP. This program calls all 51 and must see that answer
-        from each one. The object it compiles to defines no hook symbol, and
-        test/run's hooks lane proves that with nm on that object: the program
-        is built with -c, and no wayland_, x11_ or xwayland_ name is defined.
-
-            gcc -O2 -std=gnu11 -Wall -Wextra -DCHECK_hooks_off test/checks.c
-*/
-#if defined(CONFIG_MOONWATER_WAYLAND) || defined(CONFIG_MOONWATER_X11)
-#error "CHECK_hooks_off is the build with both switches off; do not define CONFIG_MOONWATER_WAYLAND or CONFIG_MOONWATER_X11"
-#endif
-#include <stdio.h>
-
-/*
-        With both switches off wayland.c is not built, so no header declares
-        the hooks. The forms below are declared here, where they are called:
-        each hook with the parameters wayland.c gives it, as an inline no-op that
-        answers SHELL_EOPNOTSUPP. The lists are kept in step with wayland.c's
-        hook functions by hand; the hooks lane's both-on build compiles those.
-        Pointers are passed as 0, because the no-ops never read them.
-*/
-#define SHELL_EOPNOTSUPP (-95)
-#define X11_TYPE_NORMAL 0L
-struct shell_sink;
-struct shell_buffer;
-struct shell_rect;
-struct shell_facts;
-struct shell_layer;
-
-#define OFF_WAYLAND_HOOKS(H) \
-        H(int, wayland_start, (const struct shell_sink *sink), ((void)sink)) \
-        H(int, wayland_stop, (void), ((void)0)) \
-        H(int, wayland_client_connect, (void), ((void)0)) \
-        H(int, wayland_client_disconnect, (long client), ((void)client)) \
-        H(int, wayland_role, (long client, long surface, long role), ((void)client, (void)surface, (void)role)) \
-        H(int, wayland_buffer_offer, (long client, const struct shell_buffer *buffer), ((void)client, (void)buffer)) \
-        H(int, wayland_damage, (long client, long surface, long buffer, const struct shell_rect *rect), ((void)client, (void)surface, (void)buffer, (void)rect)) \
-        H(int, wayland_input_key, (long client, long code, long pressed), ((void)client, (void)code, (void)pressed)) \
-        H(int, wayland_input_pointer, (long client, long x, long y, long buttons), ((void)client, (void)x, (void)y, (void)buttons)) \
-        H(int, wayland_window_place, (long client, long surface, long x, long y, long screen), ((void)client, (void)surface, (void)x, (void)y, (void)screen)) \
-        H(int, wayland_window_size, (long client, long surface, long width, long height), ((void)client, (void)surface, (void)width, (void)height)) \
-        H(int, wayland_window_minimize, (long client, long surface, long on), ((void)client, (void)surface, (void)on)) \
-        H(int, wayland_window_maximize, (long client, long surface, long on), ((void)client, (void)surface, (void)on)) \
-        H(int, wayland_window_fullscreen, (long client, long surface, long on), ((void)client, (void)surface, (void)on)) \
-        H(int, wayland_window_stack, (long client, long surface, long layer), ((void)client, (void)surface, (void)layer)) \
-        H(int, wayland_window_activate, (long client, long surface), ((void)client, (void)surface)) \
-        H(int, wayland_window_close, (long client, long surface), ((void)client, (void)surface)) \
-        H(int, wayland_window_title, (long client, long surface, const char *text, long length), ((void)client, (void)surface, (void)text, (void)length)) \
-        H(int, wayland_window_app_id, (long client, long surface, const char *text, long length), ((void)client, (void)surface, (void)text, (void)length)) \
-        H(int, wayland_window_query, (long client, long surface, struct shell_facts *facts), ((void)client, (void)surface, (void)facts)) \
-        H(int, wayland_layer_surface, (long client, long surface, const struct shell_layer *layer), ((void)client, (void)surface, (void)layer)) \
-        H(int, wayland_feed, (long client, const unsigned char *bytes, long length, const long *fds, long count), ((void)client, (void)bytes, (void)length, (void)fds, (void)count)) \
-        H(int, wayland_take_output, (long client, unsigned char *into, long room, long *keymap), ((void)client, (void)into, (void)room, (void)keymap)) \
-        H(int, wayland_output, (long width, long height), ((void)width, (void)height)) \
-        H(int, wayland_keymap, (long size), ((void)size)) \
-        H(int, wayland_focus, (long row, long on), ((void)row, (void)on)) \
-        H(int, wayland_deliver_pointer, (long row, long x, long y, long buttons, long time), ((void)row, (void)x, (void)y, (void)buttons, (void)time)) \
-        H(int, wayland_deliver_key, (long row, long code, long pressed, long mods, long time), ((void)row, (void)code, (void)pressed, (void)mods, (void)time))
-
-#define OFF_X11_HOOKS(H) \
-        H(int, x11_start, (const struct shell_sink *sink), ((void)sink)) \
-        H(int, x11_stop, (void), ((void)0)) \
-        H(int, x11_client_connect, (void), ((void)0)) \
-        H(int, x11_client_disconnect, (long client), ((void)client)) \
-        H(int, x11_window_role, (long client, long window, long type), ((void)client, (void)window, (void)type)) \
-        H(int, x11_buffer_offer, (long client, const struct shell_buffer *buffer), ((void)client, (void)buffer)) \
-        H(int, x11_damage, (long client, long window, long buffer, const struct shell_rect *rect), ((void)client, (void)window, (void)buffer, (void)rect)) \
-        H(int, x11_input_key, (long client, long code, long pressed), ((void)client, (void)code, (void)pressed)) \
-        H(int, x11_input_pointer, (long client, long x, long y, long buttons), ((void)client, (void)x, (void)y, (void)buttons)) \
-        H(int, x11_window_place, (long client, long window, long x, long y, long screen), ((void)client, (void)window, (void)x, (void)y, (void)screen)) \
-        H(int, x11_window_size, (long client, long window, long width, long height), ((void)client, (void)window, (void)width, (void)height)) \
-        H(int, x11_window_minimize, (long client, long window, long on), ((void)client, (void)window, (void)on)) \
-        H(int, x11_window_maximize, (long client, long window, long on), ((void)client, (void)window, (void)on)) \
-        H(int, x11_window_fullscreen, (long client, long window, long on), ((void)client, (void)window, (void)on)) \
-        H(int, x11_window_stack, (long client, long window, long layer), ((void)client, (void)window, (void)layer)) \
-        H(int, x11_window_activate, (long client, long window), ((void)client, (void)window)) \
-        H(int, x11_window_close, (long client, long window), ((void)client, (void)window)) \
-        H(int, x11_window_title, (long client, long window, const char *text, long length), ((void)client, (void)window, (void)text, (void)length)) \
-        H(int, x11_window_app_id, (long client, long window, const char *text, long length), ((void)client, (void)window, (void)text, (void)length)) \
-        H(int, x11_window_query, (long client, long window, struct shell_facts *facts), ((void)client, (void)window, (void)facts)) \
-        H(int, x11_window_strut, (long client, long window, long edge, long size), ((void)client, (void)window, (void)edge, (void)size)) \
-        H(int, xwayland_start, (void), ((void)0)) \
-        H(int, xwayland_stop, (void), ((void)0))
-
-#define OFF_HOOK(ret, name, params, unused) \
-        static inline ret name params { unused; return SHELL_EOPNOTSUPP; }
-OFF_WAYLAND_HOOKS(OFF_HOOK)
-OFF_X11_HOOKS(OFF_HOOK)
-#undef OFF_HOOK
-
-int main(void)
-{
-        unsigned int refused = 0, total = 0;
-
-#define HOOK_OFF(call) \
-        do { \
-                total++; \
-                refused += (call) == SHELL_EOPNOTSUPP; \
-        } while (0)
-
-        HOOK_OFF(wayland_start(0));
-        HOOK_OFF(wayland_stop());
-        HOOK_OFF(wayland_client_connect());
-        HOOK_OFF(wayland_client_disconnect(0));
-        HOOK_OFF(wayland_role(0, 0, 1));
-        HOOK_OFF(wayland_buffer_offer(0, 0));
-        HOOK_OFF(wayland_damage(0, 0, 0, 0));
-        HOOK_OFF(wayland_input_key(0, 30, 1));
-        HOOK_OFF(wayland_input_pointer(0, 1, 2, 1));
-        HOOK_OFF(wayland_window_place(0, 0, 1, 2, 0));
-        HOOK_OFF(wayland_window_size(0, 0, 96, 48));
-        HOOK_OFF(wayland_window_minimize(0, 0, 1));
-        HOOK_OFF(wayland_window_maximize(0, 0, 1));
-        HOOK_OFF(wayland_window_fullscreen(0, 0, 1));
-        HOOK_OFF(wayland_window_stack(0, 0, 1));
-        HOOK_OFF(wayland_window_activate(0, 0));
-        HOOK_OFF(wayland_window_close(0, 0));
-        HOOK_OFF(wayland_window_title(0, 0, "t", 1));
-        HOOK_OFF(wayland_window_app_id(0, 0, "a", 1));
-        HOOK_OFF(wayland_window_query(0, 0, 0));
-        HOOK_OFF(wayland_layer_surface(0, 0, 0));
-        HOOK_OFF(wayland_feed(0, 0, 0, 0, 0));
-        HOOK_OFF(wayland_take_output(0, 0, 0, 0));
-        HOOK_OFF(wayland_output(1024, 768));
-        HOOK_OFF(wayland_keymap(64));
-        HOOK_OFF(wayland_focus(3, 1));
-        HOOK_OFF(wayland_deliver_pointer(3, 1, 2, 1, 0));
-        HOOK_OFF(wayland_deliver_key(3, 30, 1, 0, 0));
-        HOOK_OFF(x11_start(0));
-        HOOK_OFF(x11_stop());
-        HOOK_OFF(x11_client_connect());
-        HOOK_OFF(x11_client_disconnect(0));
-        HOOK_OFF(x11_window_role(0, 0, X11_TYPE_NORMAL));
-        HOOK_OFF(x11_buffer_offer(0, 0));
-        HOOK_OFF(x11_damage(0, 0, 0, 0));
-        HOOK_OFF(x11_input_key(0, 30, 1));
-        HOOK_OFF(x11_input_pointer(0, 1, 2, 1));
-        HOOK_OFF(x11_window_place(0, 0, 1, 2, 0));
-        HOOK_OFF(x11_window_size(0, 0, 96, 48));
-        HOOK_OFF(x11_window_minimize(0, 0, 1));
-        HOOK_OFF(x11_window_maximize(0, 0, 1));
-        HOOK_OFF(x11_window_fullscreen(0, 0, 1));
-        HOOK_OFF(x11_window_stack(0, 0, 1));
-        HOOK_OFF(x11_window_activate(0, 0));
-        HOOK_OFF(x11_window_close(0, 0));
-        HOOK_OFF(x11_window_title(0, 0, "t", 1));
-        HOOK_OFF(x11_window_app_id(0, 0, "a", 1));
-        HOOK_OFF(x11_window_query(0, 0, 0));
-        HOOK_OFF(x11_window_strut(0, 0, 0, 24));
-        HOOK_OFF(xwayland_start());
-        HOOK_OFF(xwayland_stop());
-#undef HOOK_OFF
-        printf("CHECK_hooks_off: %u of %u hooks answer SHELL_EOPNOTSUPP\n", refused, total);
-        return refused == total && total == 51 ? 0 : 1;
-}
-#endif /* CHECK_hooks_off */
+#endif /* CHECK_wayland */
 
 
 #ifdef CHECK_stdio_buffer
