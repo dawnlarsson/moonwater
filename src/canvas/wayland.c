@@ -721,6 +721,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_zxdg_decoration_manager_v1, 1},
     {WLI_wl_data_device_manager, 3},
     {WLI_zwp_primary_selection_device_manager_v1, 1},
+    {WLI_wp_cursor_shape_manager_v1, 2},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -3727,6 +3728,26 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
         }
 }
 
+/*
+        wp_cursor_shape: a client names the shape it wants under the pointer (a cursor of the theme, by name) instead of drawing
+        one. The compositor draws its own pointer whatever a window's client says, so the shape is checked (a shape that does
+        not exist is the client's error) and no more; a toolkit that is told it is offered shapes does not load a theme and make
+        a surface for each, which is what offering them is for. Tablets are not offered, so there is no tool to name.
+*/
+static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        if (self->iface == WLI_wp_cursor_shape_manager_v1)
+        {
+                if (op == WLQ_wp_cursor_shape_manager_v1_get_tablet_tool_v2)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the seat has no tablet");
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_wp_cursor_shape_device_v1_set_shape &&
+            (a[1].u < WLN_wp_cursor_shape_device_v1_shape_default || a[1].u > WLN_wp_cursor_shape_device_v1_shape_all_resize))
+                return wayland_fail(c, self->id, WLN_wp_cursor_shape_device_v1_error_invalid_shape, "no such shape");
+        return WAYLAND_OK;
+}
+
 /* ---- one request ---- */
 
 /*
@@ -3923,6 +3944,10 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                         break;
                 case WLI_zxdg_toplevel_decoration_v1:
                         status = wayland_decoration_request(c, o, op, a);
+                        break;
+                case WLI_wp_cursor_shape_manager_v1:
+                case WLI_wp_cursor_shape_device_v1:
+                        status = wayland_cursor_shape_request(c, o, op, a);
                         break;
                 case WLI_wl_data_device_manager:
                 case WLI_wl_data_device:

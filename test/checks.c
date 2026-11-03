@@ -158284,6 +158284,64 @@ static void test_geometry(void)
         wayland_stop();
 }
 
+/* The pointer's cursor: a shape named, a surface for it, or none; the compositor draws its own, so these are taken and checked and no more. */
+static void test_cursor(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long manager, device, pointer, surface, buffer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        manager = wl_global(c, s.registry, WLI_wp_cursor_shape_manager_v1, 2);
+        WLCHECK(manager != 0, "the cursor shape manager is offered");
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, pointer);
+        device = wlc_id(c, WLI_wp_cursor_shape_device_v1, 2);
+        wlc_send(c, manager, WLQ_wp_cursor_shape_manager_v1_get_pointer, device, pointer);
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, 1L, (long)WLN_wp_cursor_shape_device_v1_shape_text);
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, 2L, (long)WLN_wp_cursor_shape_device_v1_shape_all_resize);
+        WLCHECK(c->errors == 0, "a shape the protocol has is taken (%s)", c->error_text);
+        /* a cursor of the client's own drawing: a surface with a buffer, or none */
+        surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surface);
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, 3L, surface, 2L, 2L);
+        buffer = wl_buffer_of(&s, 8, 8, 0xff000000, WLN_wl_shm_format_argb8888);
+        wlc_send(c, surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+        wlc_send(c, surface, WLQ_wl_surface_commit);
+        wlc_send(c, pointer, WLQ_wl_pointer_set_cursor, 4L, 0UL, 0L, 0L);
+        WLCHECK(c->errors == 0 && !fake.row[0].used, "a cursor surface and none are taken, and the surface is no window (%s)", c->error_text);
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_destroy);
+        wlc_end(c);
+        /* a shape that does not exist, and one past the last */
+        session_open(&s);
+        c = s.c;
+        manager = wl_global(c, s.registry, WLI_wp_cursor_shape_manager_v1, 2);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, pointer);
+        device = wlc_id(c, WLI_wp_cursor_shape_device_v1, 2);
+        wlc_send(c, manager, WLQ_wp_cursor_shape_manager_v1_get_pointer, device, pointer);
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, 1L, 0L);
+        WLCHECK(refused_with(c, WLN_wp_cursor_shape_device_v1_error_invalid_shape), "shape zero is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        manager = wl_global(c, s.registry, WLI_wp_cursor_shape_manager_v1, 2);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, pointer);
+        device = wlc_id(c, WLI_wp_cursor_shape_device_v1, 2);
+        wlc_send(c, manager, WLQ_wp_cursor_shape_manager_v1_get_pointer, device, pointer);
+        wlc_send(c, device, WLQ_wp_cursor_shape_device_v1_set_shape, 1L, 37L);
+        WLCHECK(refused_with(c, WLN_wp_cursor_shape_device_v1_error_invalid_shape), "a shape past the last is refused");
+        wlc_end(c);
+        leak_check("cursor");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -158302,6 +158360,7 @@ int main(int argc, char **argv)
         test_seat();
         test_subsurfaces();
         test_geometry();
+        test_cursor();
         test_tree_fuzz(rounds);
         test_clipboard();
         test_clip_fuzz(rounds);
