@@ -2955,11 +2955,33 @@ typedef struct { p32 effective; p32 permitted; p32 inheritable; } bowl_cap_data;
 #define BOWL_PR_CAP_AMBIENT 47
 #define BOWL_PR_CAP_AMBIENT_RAISE 2
 
+/*
+        Whether the program is given its namespace's capabilities across
+        exec, which BOWL_CAPABILITIES=none in the environment it is started
+        with says it is not. The capabilities are for the programs that make
+        a mount view of their own (a launcher of another bowl) and they are
+        what a program that refuses to run with any (bubblewrap says
+        "Unexpected capabilities but not setuid") finds: GTK 3 loads its
+        icons through glycin, which runs its loader under bubblewrap, and a
+        browser's file chooser ended in an abort of the whole browser. A
+        program that starts no such view asks for none, and what it starts
+        has none to be refused for; asking can only take privilege away, so
+        whoever starts the program may.
+*/
+static bool bowl_capabilities_wanted(string_address address_to environment)
+{
+        string_address asked = bowl_env_value(environment, "BOWL_CAPABILITIES");
+
+        return !asked || !string_equals(asked, "none");
+}
+
 static bool bowl_keep_capabilities(void)
 {
         bowl_cap_header header = {BOWL_CAP_VERSION_3, 0};
         bowl_cap_data data[2] = {{0}};
 
+        if (!bowl_capabilities_wanted(file_environment_all()))
+                return true;
         if (system_call_2(syscall(capget), (positive)address_of header,
                           (positive)data) < 0)
                 return false;
@@ -2991,9 +3013,12 @@ static fn bowl_bus_refresh(string_address root);
     /etc/group, and a program in a namespace of its own keeps them as host ids
     (unmapped inside, which is cosmetic) because the device files it opens are
     the machine's, judged in the initial namespace. */
+#define BOWL_GROUP_RENDER 105
+#define BOWL_GROUP_RENDER_TEXT "105"
+
 static const p32 bowl_device_groups[] = {
     BOWL_USER_ID, 5 /* tty */, 29 /* audio */, 44 /* video */,
-    104 /* input */, 105 /* render */,
+    104 /* input */, BOWL_GROUP_RENDER,
 };
 
 /*
@@ -7661,6 +7686,11 @@ struct bowl_component
         // What the packages and their dependencies took installed, measured on
         // this machine's own build; 0 where nobody has, which is not checked.
         p64 bytes;
+        // The names of the programs of the bowl's /usr/bin and /usr/sbin this
+        // component makes reachable, and no others: a list of none exposes
+        // nothing, which is a browser whose profile's own launcher is the way
+        // in. Null is every program the bowl holds, which is a desktop.
+        string_address address_to expose;
 };
 
 struct bowl_profile
@@ -7675,6 +7705,20 @@ struct bowl_profile
         // there: no bowl is landed for it, nothing is made reachable by
         // name, and there is no session script.
         bool libraries;
+        // The names the session's launcher is written under besides the
+        // profile's own, which are the names a program is run by when
+        // something else asks for it (a menu, a link, another program), so
+        // that it too is started the way the profile starts it.
+        string_address address_to names;
+        // Why this machine cannot have the profile (the one thing no
+        // package manager can say), or null. Install says it and goes no
+        // further; remove and the list still see the profile.
+        string_address unavailable;
+        // A program that runs on the display there is, and not a session of
+        // its own: `moonwater desktop` does not take it for one, since that
+        // verb ends the compositor to give the display to a session, and a
+        // program has none to give it to.
+        bool program;
 };
 
 /*
@@ -7804,10 +7848,13 @@ static string_address bowl_desktop_session[] = {
         them. A bowl that is not set up is left alone; Nix finds its own
         libraries by path and has nothing to add.
 */
+#define BOWL_GRAPHICS_ALPINE_PACKAGES                                       \
+    "mesa-egl", "mesa-gl", "mesa-gles", "mesa-gbm", "mesa-dri-gallium",     \
+    "mesa-vulkan-ati", "mesa-vulkan-intel", "mesa-vulkan-swrast",           \
+    "vulkan-loader", "alsa-lib", "libpulse", "fontconfig", "font-dejavu"
+
 static string_address bowl_graphics_alpine[] = {
-    "mesa-egl", "mesa-gl", "mesa-gles", "mesa-gbm", "mesa-dri-gallium",
-    "mesa-vulkan-ati", "mesa-vulkan-intel", "mesa-vulkan-swrast",
-    "vulkan-loader", "alsa-lib", "libpulse", "fontconfig", "font-dejavu", null};
+    BOWL_GRAPHICS_ALPINE_PACKAGES, null};
 static string_address bowl_graphics_debian[] = {
     "libegl1", "libgl1", "libgles2", "libgbm1", "libgl1-mesa-dri",
     "libegl-mesa0", "libglx-mesa0", "mesa-vulkan-drivers", "libvulkan1",
@@ -7828,13 +7875,126 @@ static const struct bowl_component bowl_graphics_components[] = {
     {null, null, 0},
 };
 
+/*
+        A browser on Canvas, and nothing else of a desktop. Canvas is the
+        Wayland server (the shim in src/canvas/wayland.c, listening on
+        /run/moonwater/wayland-0), so the profile installs no compositor, no
+        X server, no Xwayland, no display manager, no seat or login daemon, no
+        desktop environment and no portal: Alpine's chromium, and the packages
+        the graphics profile holds (Mesa's EGL, GL, GLES and GBM, the Vulkan
+        loader with the Radeon, Intel and software drivers, the fonts and the
+        sound libraries), which is where the GPU comes from. Alpine ships
+        Chromium, the engine Chrome is built on, and not Google Chrome: no
+        Widevine, no Google sign-in.
+
+        What that comes to, measured on x86-64 (Alpine 3.24, chromium
+        156.0.8078.79) in a bowl just landed: 188 packages and 849 MiB, of
+        which chromium itself is 315 MiB, and LLVM (which libgallium links),
+        Mesa and its three Vulkan drivers 298. The binary's own DT_NEEDED
+        list pulls in 115 of those packages (446 MiB); the other 73 are what
+        the package metadata and Mesa's loaders name (GTK 3, the ICU data,
+        Mesa, LLVM, the Vulkan drivers, xdg-utils). A literal zero of X11 libraries is not possible:
+        the binary links libX11, libxcb, libXext, libXi, libXfixes, libXrandr,
+        libXrender, libXcomposite, libXdamage and libXtst whichever platform it
+        runs, imports 102 symbols from them, and musl's loader refuses to
+        start it without them. Those are 3.5 MiB of the 849 (a stub for each
+        soname would have to export the 102 symbols and would save less than
+        half a percent of the closure, while Mesa's and GTK's own X libraries
+        stay), so none is shipped. Chromium has no libwayland-client in its
+        list (it carries its own copy); libxkbcommon, which it needs on
+        Wayland, is. riscv64: Alpine builds chromium for x86-64 and aarch64
+        only, and there install is refused and says why. None of it is a
+        display server, a session or a seat: the checks hold the package
+        names to that.
+
+        The launcher is the profile's session script, under the profile's
+        name and under the names a menu, a link or another program starts a
+        browser by (it is run by the machine's shell, in the person's
+        environment). It says in one line when Canvas has no Wayland socket
+        (the shim is built only with CONFIG_MOONWATER_WAYLAND, which is off
+        by default) and starts nothing then. It names the socket as the
+        absolute path the shim listens on, marks the launch as the person's
+        (MOONWATER_ASKED, which gives the first window the keys), asks for
+        Wayland and not X11, and for the browser's own password store: the
+        first browser that asks a session's secret service for a key (there
+        is none, and KDE's shows a dialog) waits on the answer and every page
+        stays at "Loading...". The logs are quiet (a browser with no session
+        bus says so in thirty lines of errors on every start). No flag is
+        given for the GPU: with a render node it picks ANGLE on Mesa's GL, and
+        with none it draws in software by itself (measured: no crash, no
+        WebGL, no log). The node is the render group's before the browser
+        starts: with no udev its mode is root's alone (0600), so a program
+        that is the user (the tight tier) could not open it and drew in
+        software; the group and the mode are what udev's rules give a render
+        node everywhere else (a render node carries no display control), and
+        a machine whose programs run as root has what it had.
+
+        The browser is started with BOWL_CAPABILITIES=none. Bowl keeps a
+        program's capabilities of its namespace across exec, for the
+        programs that make a mount view of another bowl's program, and
+        bubblewrap refuses to run with any. GTK 3's file chooser loads its
+        icons through glycin, which runs its image loader under bubblewrap,
+        and the first click on "Choose file" (or Save as) aborted the
+        browser. Cleared, the chooser opens and the browser exits cleanly
+        (measured at both tiers). Chromium's own sandbox is made of user
+        namespaces and needs no capability; what the browser gives up is
+        starting a program of another bowl by its name.
+*/
+#define BOWL_CHROME_SOCKET "/run/moonwater/wayland-0"
+
+static string_address bowl_chrome_alpine[] = {
+    "chromium", BOWL_GRAPHICS_ALPINE_PACKAGES, null};
+
+// Nothing of the bowl's /usr/bin by name: the launcher the profile writes is the way in.
+static string_address bowl_chrome_expose[] = {null};
+
+#if X64
+#define BOWL_CHROME_ALPINE_BYTES ((p64)850 * 1024 * 1024)
+#else
+#define BOWL_CHROME_ALPINE_BYTES 0
+#endif
+
+static const struct bowl_component bowl_chrome_components[] = {
+    {"alpine", bowl_chrome_alpine, BOWL_CHROME_ALPINE_BYTES, bowl_chrome_expose},
+    {null, null, 0, null},
+};
+
+static string_address bowl_chrome_session[] = {
+    "[ -S " BOWL_CHROME_SOCKET " ] || { echo \"chrome: Canvas has no Wayland "
+    "socket (" BOWL_CHROME_SOCKET "): build with CONFIG_MOONWATER_WAYLAND=y "
+    "(off by default) and run moonwater desktop on\" >&2; exit 1; }",
+    "export WAYLAND_DISPLAY=" BOWL_CHROME_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none",
+    "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
+    BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium "
+    "--ozone-platform=wayland --password-store=basic --no-first-run "
+    "--no-default-browser-check --log-level=3 \"$@\"",
+    null};
+
+// What a menu, a link or another program asks for by name, and Alpine's own.
+static string_address bowl_chrome_names[] = {
+    "chromium", "chromium-browser", null};
+
+#if X64 || ARM64
+#define BOWL_CHROME_UNAVAILABLE null
+#else
+#define BOWL_CHROME_UNAVAILABLE                                              \
+    "Alpine has no Chromium for this architecture (its repositories build "  \
+    "it for x86-64 and aarch64 only)\n"
+#endif
+
 static const struct bowl_profile bowl_profiles[] = {
     {"desktop", "KDE Plasma", "start it with: desktop", bowl_desktop_components,
      bowl_desktop_session, false},
     {"graphics", "Graphics, fonts and sound libraries",
      "programs of the bowls set up now can use the GPU, fonts and sound",
      bowl_graphics_components, null, true},
+    {"chrome", "Chromium (Alpine's build, not Google Chrome: no Widevine) on Canvas",
+     "start it with: chrome", bowl_chrome_components, bowl_chrome_session,
+     false, bowl_chrome_names, BOWL_CHROME_UNAVAILABLE, true},
 };
+
+#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome\n"
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {
@@ -7959,14 +8119,26 @@ static fn bowl_profile_note(bipolar marker, string_address name)
         system_write_all((positive)marker, line, length + 1);
 }
 
+/* Whether a list of names (null for none given, which is every name) has this one. */
+static bool bowl_name_listed(string_address address_to names, string_address name)
+{
+        if (!names)
+                return true;
+        for (; *names; names++)
+                if (string_equals(*names, name))
+                        return true;
+        return false;
+}
+
 /*
-        Every program one directory of the bowl holds, exposed. A name that is
-        already a launcher is left to whoever made it and is not recorded, so
-        a program two profiles share is not taken from one by the other's
-        remove.
+        Every program one directory of the bowl holds, exposed, or those of
+        it the component names when it names any. A name that is already a
+        launcher is left to whoever made it and is not recorded, so a program
+        two profiles share is not taken from one by the other's remove.
 */
 static positive __attribute__((__noinline__))
-bowl_profile_expose_dir(string_address root, string_address dir, bipolar marker)
+bowl_profile_expose_dir(string_address root, string_address dir, bipolar marker,
+                        string_address address_to only)
 {
         file_walk walk;
         struct linux_dirent64 address_to entry;
@@ -7985,7 +8157,7 @@ bowl_profile_expose_dir(string_address root, string_address dir, bipolar marker)
                 bool exists;
 
                 if (file_is_dot(name) || !bowl_name(name, true) ||
-                    bowl_bin_taken(name) ||
+                    !bowl_name_listed(only, name) || bowl_bin_taken(name) ||
                     !path_join(rel, sizeof(rel), dir, name) ||
                     !path_join(launcher, sizeof(launcher),
                                BOWL_EXPOSE_DIRECTORY, name) ||
@@ -8082,7 +8254,8 @@ static fn bowl_reconcile(string_address root)
         bowl_prune(root);
         bowl_quiet = true;
         for (positive at = 0; bowl_profile_bins[at]; at++)
-                made += bowl_profile_expose_dir(root, bowl_profile_bins[at], -1);
+                made += bowl_profile_expose_dir(root, bowl_profile_bins[at], -1,
+                                                null);
         bowl_quiet = false;
         bowl_bus_refresh(root);
 
@@ -8115,7 +8288,8 @@ static b32 bowl_profile_mark(string_address root, string_address name)
         return 0;
 }
 
-static b32 bowl_profile_expose(string_address root, string_address name)
+static b32 bowl_profile_expose(string_address root, string_address name,
+                               string_address address_to only)
 {
         p8 marker_path[BOWL_PATH_LIMIT];
         p8 state[BOWL_PATH_LIMIT];
@@ -8134,9 +8308,9 @@ static b32 bowl_profile_expose(string_address root, string_address name)
         return_if(marker < 0, bowl_fail(marker_path, marker));
 
         bowl_quiet = true;
-        for (positive at = 0; bowl_profile_bins[at]; at++)
+        for (positive at = 0; bowl_profile_bins[at] && (!only || *only); at++)
                 made += bowl_profile_expose_dir(root, bowl_profile_bins[at],
-                                                marker);
+                                                marker, only);
         bowl_quiet = false;
         system_close(marker);
 
@@ -8169,7 +8343,11 @@ static b32 bowl_profile_packages(const struct bowl_distro address_to distro,
         return bowl_setup_isolated(distro->root, argv[0], argv, what, null);
 }
 
-static b32 bowl_profile_script(const struct bowl_profile address_to profile)
+/* The launcher of the profile's session, under one of the names it has: the
+   profile's own, or one of the others a program is asked for by. Every one
+   runs the same session (the profile's name is what it hands to bowl). */
+static b32 bowl_profile_script_as(const struct bowl_profile address_to profile,
+                                  string_address launcher)
 {
         p8 path[BOWL_PATH_LIMIT];
         p8 text[BOWL_SHEBANG_LIMIT * 8];
@@ -8177,8 +8355,7 @@ static b32 bowl_profile_script(const struct bowl_profile address_to profile)
         bipolar handle;
 
         path[0] = end;
-        if (!path_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY,
-                       profile->name) ||
+        if (!path_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY, launcher) ||
             !bowl_profile_header(text, sizeof(text), profile->name))
                 return bowl_refuse("session path is too long\n");
 
@@ -8217,6 +8394,68 @@ static b32 bowl_profile_script(const struct bowl_profile address_to profile)
         }
         system_close(handle);
         return 0;
+}
+
+static b32 bowl_profile_script(const struct bowl_profile address_to profile)
+{
+        return bowl_profile_script_as(profile, profile->name);
+}
+
+/*
+        Whether the launcher a name has in /bowls/bin may be taken for the
+        profile's session: none, one of this profile's own scripts, a launcher
+        that names a bowl the profile installs into (which is what a package
+        manager run by hand makes of the program the profile's package holds,
+        and the profile's session starts that program), one whose program is
+        gone, or a file that is no launcher at all. A launcher that names
+        another bowl's program, another profile's script, and a name /bin has
+        for a program of Moonwater's own stay where they are.
+*/
+static bool bowl_session_name_free(const struct bowl_profile address_to profile,
+                                   string_address name)
+{
+        p8 launcher[BOWL_PATH_LIMIT];
+        p8 line[BOWL_SHEBANG_LIMIT];
+        p8 header[BOWL_SHEBANG_LIMIT];
+        p8 owner[BOWL_PATH_LIMIT];
+        string_address program = null;
+        bipolar reader;
+        bipolar got;
+
+        if (!bowl_name(name, true) ||
+            !path_join(launcher, sizeof(launcher), BOWL_EXPOSE_DIRECTORY, name) ||
+            bowl_bin_taken(name))
+                return false;
+
+        reader = system_open_at(AT_FDCWD, launcher,
+                                FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (reader < 0)
+                return true;
+        got = system_read_retry((positive)reader, line, sizeof(line) - 1);
+        system_close(reader);
+        if (got <= 0)
+                return true;
+        line[got] = end;
+
+        if (bowl_profile_header(header, sizeof(header), profile->name) &&
+            !string_compare_max(line, header, string_length(header)))
+                return true;
+        if (string_has_prefix(line, "#!/bin/sh\n# bowl profile "))
+                return false;
+        if (!bowl_shebang_target(line, owner, sizeof(owner), address_of program) ||
+            !program)
+                return true;
+
+        for (const struct bowl_component address_to part = profile->components;
+             part->distro; part++)
+        {
+                const struct bowl_distro address_to distro =
+                    bowl_find_distro(part->distro);
+
+                if (distro && string_equals(distro->root, owner))
+                        return true;
+        }
+        return bowl_executable_in_root(owner, program) < 0;
 }
 
 /*
@@ -8288,6 +8527,8 @@ bowl_profile_session(const struct bowl_profile address_to profile,
 
 static b32 bowl_profile_install(const struct bowl_profile address_to profile)
 {
+        return_if(profile->unavailable, bowl_refuse(profile->unavailable));
+
         for (const struct bowl_component address_to part =
                  profile->components;
              part->distro; part++)
@@ -8323,7 +8564,8 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                                      ? bowl_profile_mark(distro->root,
                                                          profile->name)
                                      : bowl_profile_expose(distro->root,
-                                                           profile->name);
+                                                           profile->name,
+                                                           part->expose);
                 if (failed)
                         return failed;
         }
@@ -8337,6 +8579,20 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                         failed = bowl_publish_bin(profile->name);
                 if (failed)
                         return failed;
+
+                // The other names the session answers to, each only where the
+                // name is nobody else's.
+                for (string_address address_to other = profile->names;
+                     other && *other; other++)
+                {
+                        if (!bowl_session_name_free(profile, *other))
+                                continue;
+                        failed = bowl_profile_script_as(profile, *other);
+                        if (!failed)
+                                failed = bowl_publish_bin(*other);
+                        if (failed)
+                                return failed;
+                }
         }
 
         string_format(log, bowl_label "%s is ready. %s\n", profile->label,
@@ -8421,7 +8677,43 @@ static b32 bowl_profile_unexpose(string_address root, string_address profile,
         return 0;
 }
 
-static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
+/*
+        Whether a package this profile lists is also listed by another
+        profile that is installed in the same bowl: the graphics profile and a
+        browser both hold Mesa, and a desktop holds it too, so the removal of
+        one must leave the others their libraries (the package manager would
+        take them, as it takes anything the profile named).
+*/
+static bool bowl_profile_package_shared(
+    const struct bowl_profile address_to profile, string_address distro,
+    string_address root, string_address package)
+{
+        for (positive at = 0; at < array_count(bowl_profiles); at++)
+        {
+                const struct bowl_profile address_to other = bowl_profiles + at;
+
+                if (other == profile)
+                        continue;
+                for (const struct bowl_component address_to part =
+                         other->components;
+                     part->distro; part++)
+                {
+                        if (!string_equals(part->distro, distro))
+                                continue;
+                        for (string_address address_to name = part->packages;
+                             name && *name; name++)
+                                if (string_equals(*name, package) &&
+                                    bowl_profile_marked(root, other->name))
+                                        return true;
+                }
+        }
+        return false;
+}
+
+/* The launcher of the session under one name goes if it is the script install
+   wrote, and so does /bin's link to it. */
+static fn bowl_profile_script_drop(const struct bowl_profile address_to profile,
+                                   string_address name)
 {
         p8 path[BOWL_PATH_LIMIT];
         p8 want[BOWL_SHEBANG_LIMIT];
@@ -8429,6 +8721,35 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
         bipolar reader;
         bipolar got;
 
+        if (!path_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY, name) ||
+            !bowl_profile_header(want, sizeof(want), profile->name))
+                return;
+
+        reader = system_open_at(AT_FDCWD, path,
+                                FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        got = reader < 0 ? reader
+                         : system_read_retry((positive)reader, have,
+                                             sizeof(have) - 1);
+        if (reader >= 0)
+                system_close(reader);
+        if (got <= 0)
+                return;
+        have[got] = end;
+        if (!string_compare_max(have, want, string_length(want)))
+        {
+                p8 link[BOWL_PATH_LIMIT];
+                p8 current[BOWL_PATH_LIMIT];
+
+                system_remove_at(AT_FDCWD, path, 0);
+                if (path_join(link, sizeof(link), BOWL_BIN_DIRECTORY, name) &&
+                    file_link_text(link, current, sizeof(current)) >= 0 &&
+                    string_equals(current, path))
+                        system_remove_at(AT_FDCWD, link, 0);
+        }
+}
+
+static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
+{
         for (const struct bowl_component address_to part =
                  profile->components;
              part->distro; part++)
@@ -8449,9 +8770,35 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
 
                 failed = bowl_profile_unexpose(distro->root, profile->name, marker);
                 if (!failed && bowl_has(distro->root, distro->marker))
-                        failed = bowl_profile_packages(
-                            distro, distro->remove, part->packages,
-                            "the package manager could not remove them\n");
+                {
+                        // Not those another installed profile holds as well.
+                        string_address left[BOWL_PROFILE_ARGV];
+                        positive count = 0;
+
+                        for (positive at = 0;
+                             part->packages[at] && count + 1 < BOWL_PROFILE_ARGV;
+                             at++)
+                                if (!bowl_profile_package_shared(
+                                        profile, part->distro, distro->root,
+                                        part->packages[at]))
+                                        left[count++] = part->packages[at];
+                        left[count] = null;
+                        if (count)
+                                failed = bowl_profile_packages(
+                                    distro, distro->remove, left,
+                                    "the package manager could not remove them\n");
+
+                        // A package manager run by hand since the install has
+                        // made a launcher of every program the packages held
+                        // (not the profile's to have recorded); those whose
+                        // program is now gone go, as after any manager run.
+                        if (!failed)
+                        {
+                                bowl_quiet = true;
+                                bowl_prune(distro->root);
+                                bowl_quiet = false;
+                        }
+                }
                 if (failed)
                         return failed;
 
@@ -8459,36 +8806,13 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                 bowl_profile_forget(distro->root, profile->name);
         }
 
-        // The script goes only if it is the one install wrote.
-        if (profile->session &&
-            path_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY, profile->name) &&
-            bowl_profile_header(want, sizeof(want), profile->name))
+        // The scripts go only if they are the ones install wrote.
+        if (profile->session)
         {
-                reader = system_open_at(AT_FDCWD, path,
-                                        FILE_READ | O_CLOEXEC | O_NOFOLLOW);
-                got = reader < 0 ? reader
-                                 : system_read_retry((positive)reader, have,
-                                                     sizeof(have) - 1);
-                if (reader >= 0)
-                        system_close(reader);
-                if (got > 0)
-                {
-                        have[got] = end;
-                        if (!string_compare_max(have, want, string_length(want)))
-                        {
-                                p8 link[BOWL_PATH_LIMIT];
-                                p8 current[BOWL_PATH_LIMIT];
-
-                                system_remove_at(AT_FDCWD, path, 0);
-                                if (path_join(link, sizeof(link),
-                                              BOWL_BIN_DIRECTORY,
-                                              profile->name) &&
-                                    file_link_text(link, current,
-                                                   sizeof(current)) >= 0 &&
-                                    string_equals(current, path))
-                                        system_remove_at(AT_FDCWD, link, 0);
-                        }
-                }
+                bowl_profile_script_drop(profile, profile->name);
+                for (string_address address_to other = profile->names;
+                     other && *other; other++)
+                        bowl_profile_script_drop(profile, *other);
         }
 
         string_format(log, bowl_label "%s removed\n", profile->label);
@@ -8519,7 +8843,10 @@ static b32 bowl_profile_list(void)
                 }
 
                 string_format(log, bowl_label "%s  %s%s\n", profile->name,
-                              profile->label, installed ? "  (installed)" : "");
+                              profile->label,
+                              profile->unavailable ? "  (not for this architecture)"
+                              : installed          ? "  (installed)"
+                                                   : "");
         }
 
         log_flush();
@@ -8577,14 +8904,14 @@ bowl_profile_main(positive count, string_address address_to arguments)
         if (count >= 4 && string_equals(arguments[3], "session"))
         {
                 profile = bowl_find_profile(arguments[2]);
-                return_if(!profile, bowl_refuse("known profiles: desktop\n"));
+                return_if(!profile, bowl_refuse(BOWL_PROFILES_KNOWN));
                 return bowl_profile_session(profile, count - 4, arguments + 4);
         }
 
         words = bowl_profile_words(count, arguments, address_of profile,
                                    address_of remove);
         return_if(words == BOWL_PROFILE_WORDS_USAGE, bowl_usage());
-        return_if(words == BOWL_PROFILE_WORDS_UNKNOWN, bowl_refuse("known profiles: desktop, graphics\n"));
+        return_if(words == BOWL_PROFILE_WORDS_UNKNOWN, bowl_refuse(BOWL_PROFILES_KNOWN));
 
         if (bowl_setup_become_root("profile", profile->name,
                                    remove ? "remove" : "install"))

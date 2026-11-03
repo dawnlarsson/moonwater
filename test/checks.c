@@ -96790,6 +96790,323 @@ static fn profiles(void)
         bowl_forget_path(second);
 }
 
+/*
+        The browser profile and what it needed of the machinery under it.
+        A profile that is a program on Canvas (and not a session) must be
+        what it says: Alpine's chromium with the graphics libraries, no
+        display server or session in any package it names, no program of the
+        bowl exposed beside its own launcher, a launcher that refuses to
+        start a browser that cannot show and starts it on Wayland with no
+        flag against the GPU; the names a component exposes and the names a
+        session answers to are only what they say, a remove takes what an
+        install wrote and no more, and a package another installed profile
+        holds is left to it.
+*/
+static bool chrome_has(string_address address_to list, string_address word)
+{
+        for (; list && *list; list++)
+                if (string_equals(*list, word))
+                        return true;
+        return false;
+}
+
+static positive chrome_count(string_address text, string_address piece)
+{
+        positive found = 0;
+        positive length = string_length(piece);
+
+        for (positive at = 0; text[at]; at++)
+                found += !string_compare_max(text + at, piece, length);
+        return found;
+}
+
+static positive chrome_line(string_address address_to lines, string_address piece)
+{
+        for (positive at = 0; lines && lines[at]; at++)
+                if (strstr(lines[at], piece))
+                        return at + 1;
+        return 0;
+}
+
+static fn chrome_profile(void)
+{
+        const struct bowl_profile address_to chrome = bowl_find_profile("chrome");
+        const struct bowl_profile address_to graphics = bowl_find_profile("graphics");
+        const struct bowl_profile address_to desktop = bowl_find_profile("desktop");
+        const struct bowl_component address_to part = chrome ? chrome->components : null;
+        static string_address banned[] = {
+            "weston", "kwin", "sway", "wayfire", "hyprland", "labwc", "mutter", "xorg", "xserver",
+            "xvfb", "xwayland", "sddm", "gdm", "lightdm", "elogind", "seatd", "logind", "plasma",
+            "gnome", "kde", "portal", "polkit", null};
+        bool clean = part != null;
+        bool graphic = part != null;
+
+        check("The chrome profile is a program with Alpine's chromium as its one component",
+              chrome && chrome->program && !chrome->libraries && chrome->session &&
+                  part->distro && string_equals(part->distro, "alpine") && !part[1].distro &&
+                  chrome_has(part->packages, "chromium"));
+        check("A desktop and the graphics libraries are no program of their own",
+              desktop && graphics && !desktop->program && !graphics->program);
+
+        for (string_address address_to name = part ? part->packages : null; name && *name; name++)
+                for (string_address address_to word = banned; *word; word++)
+                        clean &= strstr(*name, *word) == null;
+        check("No package the chrome profile names is a compositor, an X server, a display manager, a seat or "
+              "login daemon, a desktop environment or a portal",
+              clean);
+
+        for (string_address address_to name = graphics ? graphics->components->packages : null;
+             name && *name; name++)
+                graphic &= chrome_has(part ? part->packages : null, *name);
+        check("The chrome profile holds every package of the graphics profile, which is where the GPU comes from",
+              graphic);
+
+        check("The chrome component exposes no program of the bowl by name: its launcher is the way in",
+              part && part->expose && !part->expose[0] && !desktop->components->expose &&
+                  !graphics->components->expose);
+        check("The names a session answers to are valid, are not the profile's own, and name chromium",
+              chrome && chrome->names && chrome_has(chrome->names, "chromium") &&
+                  chrome_has(chrome->names, "chromium-browser") && !chrome_has(chrome->names, "chrome") &&
+                  bowl_name(chrome->names[0], true) && bowl_name(chrome->names[1], true) &&
+                  !bowl_find_distro(chrome->names[0]) && !bowl_find_distro(chrome->names[1]));
+
+        positive socket = chrome_line(chrome ? chrome->session : null, "-S /run/moonwater/wayland-0");
+        positive exported = chrome_line(chrome ? chrome->session : null, "export WAYLAND_DISPLAY=/run/moonwater/wayland-0");
+        positive exec = chrome_line(chrome ? chrome->session : null, "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium ");
+        string_address start = exec ? chrome->session[exec - 1] : (string_address)"";
+        string_address refusal = socket ? chrome->session[socket - 1] : (string_address)"";
+
+        check("The launcher looks for Canvas's socket before it starts anything, and says how to turn the shim on",
+              socket && exec && socket < exec && strstr(refusal, "exit 1") && strstr(refusal, "echo ") &&
+                  strstr(refusal, "CONFIG_MOONWATER_WAYLAND") && strstr(refusal, ">&2") &&
+                  chrome_count(refusal, "echo ") == 1);
+        check("The launcher names the shim's socket as an absolute path and marks the launch as the person's",
+              exported && exported < exec && strstr(chrome->session[exported - 1], "MOONWATER_ASKED=1"));
+        check("The launcher starts the browser with no capabilities of its namespace, which bubblewrap under GTK's file chooser refuses",
+              exported && exported < exec && strstr(chrome->session[exported - 1], "BOWL_CAPABILITIES=none"));
+
+        static string_address kept[] = {"HOME=/root", "BOWL_CAPABILITIES=all", null};
+        static string_address cleared[] = {"HOME=/root", "BOWL_CAPABILITIES=none", null};
+        static string_address longer[] = {"BOWL_CAPABILITIES=nonesuch", null};
+        static string_address plain[] = {"HOME=/root", null};
+        check("A program is given its capabilities unless the environment it is started with says none",
+              bowl_capabilities_wanted(null) && bowl_capabilities_wanted(plain) && bowl_capabilities_wanted(kept) &&
+                  bowl_capabilities_wanted(longer) && !bowl_capabilities_wanted(cleared));
+        positive nodes = chrome_line(chrome ? chrome->session : null, "/dev/dri/renderD*");
+        string_address grant = nodes ? chrome->session[nodes - 1] : (string_address)"";
+
+        check("The render nodes are given to the render group the programs of a bowl run in, before the browser starts",
+              nodes && nodes < exec && strstr(grant, "chown 0:" BOWL_GROUP_RENDER_TEXT " ") &&
+                  strstr(grant, "chmod 0660") && !strstr(grant, "card") && !strstr(grant, "0666") &&
+                  bowl_device_groups[array_count(bowl_device_groups) - 1] == BOWL_GROUP_RENDER);
+        check("The browser is started on Wayland, with its own password store and quiet logs, in the bowl it was added to",
+              exec && strstr(start, "--ozone-platform=wayland") && strstr(start, "--password-store=basic") &&
+                  strstr(start, "--log-level=3") && start[string_length(start) - 1] == '"' &&
+                  strstr(start, "\"$@\"") && bowl_named_root(BOWL_ROOT_PREFIX "alpine"));
+        check("The browser is given no flag against the GPU or the sandbox: it picks its own GPU",
+              exec && !strstr(start, "--disable-gpu") && !strstr(start, "--use-gl") && !strstr(start, "--use-angle") &&
+                  !strstr(start, "--no-sandbox") && !strstr(start, "--disable-software-rasterizer") &&
+                  !strstr(start, "--disable-features") && !strstr(start, "--in-process-gpu"));
+
+        bool known = true;
+
+        for (positive at = 0; at < array_count(bowl_profiles); at++)
+                known &= strstr(BOWL_PROFILES_KNOWN, bowl_profiles[at].name) != null;
+        check("Every profile is named in the words said of an unknown one", known);
+
+#if X64 || ARM64
+        check("Chromium is on this machine's architecture: the profile can be installed", chrome && !chrome->unavailable);
+#else
+        check("Chromium is not on this machine's architecture: the profile says so",
+              chrome && chrome->unavailable && string_has_prefix(chrome->unavailable, "Alpine has no Chromium"));
+#endif
+
+        /*
+                A profile this machine cannot have is refused before a bowl is
+                landed, and says so. The component list is empty and the profile
+                has no session, so that an install that went on would end in "is
+                ready" and return zero, and nothing else of the machine.
+        */
+        static const struct bowl_component none[] = {{null, null, 0, null}};
+        struct bowl_profile gone = {"profgone", "Gone", "next", none, null, false, null,
+                                    "Alpine has no profgone here\n", true};
+        check("An install of a profile the machine cannot have is refused whole",
+              bowl_profile_install(&gone) == 1);
+        gone.unavailable = null;
+        check("and the same profile with nothing in the way is let through to its steps",
+              bowl_profile_install(&gone) == 0);
+#if !(X64 || ARM64)
+        //      The browser's own words, on a machine that is refused: its components and session are taken out of
+        //      the copy, so that a refusal that failed would land nothing and write nothing.
+        struct bowl_profile refused = *chrome;
+
+        refused.components = none;
+        refused.session = null;
+        check("Where Alpine has no Chromium the profile is refused whole, with its own words",
+              refused.unavailable && bowl_profile_install(&refused) == 1);
+#endif
+
+        /*
+                What a component exposes, by name: the programs of a bowl, of
+                which one is listed, are not all made reachable; a list of none
+                makes none and still leaves the profile's marker.
+        */
+        {
+                p8 root[256];
+                p8 other[256];
+                p8 listing[256];
+                static string_address one[] = {"profxone", null};
+                static string_address nothing[] = {null};
+
+                unpack_path(root, "profx", "");
+                unpack_path(other, "profy", "");
+                string_copy_bounded(listing, BOWL_EXPOSE_DIRECTORY, sizeof listing);
+                unpack_directory(root, "/usr/bin");
+                unpack_directory(other, "/usr/bin");
+                bool stood = unpack_write(root, "/usr/bin/profxone", "#!/bin/sh\n", 0755) &&
+                             unpack_write(root, "/usr/bin/profxtwo", "#!/bin/sh\n", 0755) &&
+                             unpack_write(other, "/usr/bin/profxthree", "#!/bin/sh\n", 0755);
+
+                //      Whether the link in /bin could be made is the machine's to say (a
+                //      check that cannot write there still has its launchers), so the
+                //      launchers are what is looked at, and a link that was made goes
+                //      with the launcher it names, below.
+                bowl_quiet = true;
+                bowl_profile_expose_dir(root, "/usr/bin", -1, one);
+                bowl_quiet = false;
+                check("A component that names one program exposes that one and not the other",
+                      stood && system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profxone", 0) == 0 &&
+                          system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profxtwo", 0) < 0);
+
+                bowl_quiet = true;
+                bowl_profile_expose_dir(root, "/usr/bin", -1, null);
+                bowl_quiet = false;
+                check("A component that names none exposes every program, and leaves the one that is there alone",
+                      system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profxone", 0) == 0 &&
+                          system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profxtwo", 0) == 0);
+
+                bowl_profile_drop(root, "profxone");
+                bowl_profile_drop(root, "profxtwo");
+                check("The names of a program of the bowl that is not listed are not asked of the machine at all",
+                      bowl_name_listed(one, "profxone") && !bowl_name_listed(one, "profxtwo") &&
+                          !bowl_name_listed(nothing, "profxone") && bowl_name_listed(null, "profxone"));
+
+                bowl_quiet = true;
+                bool marked = bowl_profile_expose(other, "profymark", nothing) == 0;
+                bowl_quiet = false;
+                check("A list of none exposes nothing of a bowl that holds a program, and the profile is marked",
+                      marked && bowl_profile_marked(other, "profymark") &&
+                          system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profxthree", 0) < 0);
+                bowl_profile_forget(other, "profymark");
+                bowl_forget_path(root);
+                bowl_forget_path(other);
+        }
+
+        /*
+                A session under more names. The script of another profile, one
+                of a bowl the profile is not installing into, and a name /bin
+                has for Moonwater's own program are not taken; no launcher, the
+                profile's own script, a launcher of the bowl it installs into,
+                and one whose program is gone are.
+        */
+        {
+                static const struct bowl_component here[] = {{"alpine", null, 0, null}, {null, null, 0, null}};
+                static string_address aliases[] = {"profalias", null};
+                struct bowl_profile mock = {"profmock", "Mock", "next", here, null, false, aliases, null, true};
+                struct bowl_profile stranger = {"profstranger", "Stranger", "next", here, null, false, null, null, true};
+                p8 foreign[256];
+                p8 own[256];
+                p8 target[256];
+                bool stood;
+
+                unpack_path(foreign, "profz", "");
+                unpack_directory(foreign, "/usr/bin");
+                unpack_directory(BOWL_ROOT_PREFIX "alpine", "/usr/bin");
+                string_copy_bounded(own, BOWL_ROOT_PREFIX "alpine", sizeof own);
+                stood = unpack_write(foreign, "/usr/bin/tool", "#!/bin/sh\n", 0755) &&
+                        unpack_write(own, "/usr/bin/tool", "#!/bin/sh\n", 0755);
+                check("Two bowls hold a program each, for the session's names to be asked about", stood);
+
+                check("A name nobody has is free for the session",
+                      bowl_session_name_free(&mock, "profalias"));
+                check("A name Moonwater's own /bin has is not",
+                      !bowl_session_name_free(&mock, "sh"));
+                check("The session is written under another name with the profile's own header and its own name to bowl",
+                      bowl_profile_script_as(&mock, "profalias") == 0 &&
+                          unpack_says("", BOWL_EXPOSE_DIRECTORY "/profalias",
+                                      "#!/bin/sh\n# bowl profile profmock\n"
+                                      "exec bowl profile profmock session \"$@\"\n") &&
+                          (unpack_mode("", BOWL_EXPOSE_DIRECTORY "/profalias") & 0111));
+                check("and that script is free for the same profile again, and not for another",
+                      bowl_session_name_free(&mock, "profalias") && !bowl_session_name_free(&stranger, "profalias"));
+
+                bowl_profile_script_drop(&stranger, "profalias");
+                check("A profile's remove leaves a script another profile wrote",
+                      system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profalias", 0) == 0);
+                bowl_profile_script_drop(&mock, "profalias");
+                check("and takes its own, under the name it was written",
+                      system_access_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profalias", 0) < 0);
+
+                bowl_quiet = true;
+                bowl_expose_program(foreign, "/usr/bin/tool", "profalias", false);
+                bowl_quiet = false;
+                check("A launcher of a bowl the profile does not install into, whose program is there, is not taken",
+                      !bowl_session_name_free(&mock, "profalias"));
+                system_remove_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profalias", 0);
+
+                bowl_quiet = true;
+                bowl_expose_program(own, "/usr/bin/tool", "profalias", false);
+                bowl_quiet = false;
+                check("A launcher of the bowl the profile installs into (a manager run by hand made it) is taken",
+                      bowl_session_name_free(&mock, "profalias"));
+                system_remove_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profalias", 0);
+
+                bowl_quiet = true;
+                bowl_expose_program(foreign, "/usr/bin/tool", "profalias", false);
+                bowl_quiet = false;
+                string_copy_bounded(target, foreign, sizeof target);
+                string_append_bounded(target, "/usr/bin/tool", sizeof target);
+                system_remove_at(AT_FDCWD, target, 0);
+                check("and so is one whose program is gone",
+                      bowl_session_name_free(&mock, "profalias"));
+                system_remove_at(AT_FDCWD, BOWL_EXPOSE_DIRECTORY "/profalias", 0);
+                bowl_forget_path(foreign);
+                // The check's own Alpine root holds a file of ours and is left standing.
+                string_copy_bounded(target, own, sizeof target);
+                string_append_bounded(target, "/usr/bin/tool", sizeof target);
+                system_remove_at(AT_FDCWD, target, 0);
+        }
+
+        /*
+                Remove leaves to another installed profile what it holds as
+                well: a bowl whose graphics marker is there keeps Mesa when the
+                browser goes, and a package only the browser holds is the
+                browser's to remove.
+        */
+        {
+                p8 root[256];
+
+                unpack_path(root, "profs", "");
+                unpack_directory(root, BOWL_PROFILE_STATE);
+                check("With no other profile installed in the bowl, nothing the browser holds is shared",
+                      chrome && !bowl_profile_package_shared(chrome, "alpine", root, "mesa-egl") &&
+                          !bowl_profile_package_shared(chrome, "alpine", root, "chromium"));
+                check("A marker of the graphics profile makes its packages shared, and not the browser's own",
+                      unpack_write(root, BOWL_PROFILE_STATE "/graphics", "", 0644) &&
+                          bowl_profile_package_shared(chrome, "alpine", root, "mesa-egl") &&
+                          bowl_profile_package_shared(chrome, "alpine", root, "font-dejavu") &&
+                          !bowl_profile_package_shared(chrome, "alpine", root, "chromium"));
+                check("A marker of the profile itself shares nothing with it, and one of another distribution shares nothing here",
+                      unpack_write(root, BOWL_PROFILE_STATE "/chrome", "", 0644) &&
+                          !bowl_profile_package_shared(chrome, "alpine", root, "chromium") &&
+                          !bowl_profile_package_shared(chrome, "arch", root, "mesa-egl"));
+                check("Only a profile that is installed in the bowl shares: the browser's marker is there, the desktop's is not",
+                      !bowl_profile_package_shared(graphics, "alpine", root, "plasma-desktop") &&
+                          bowl_profile_package_shared(graphics, "alpine", root, "chromium"));
+                bowl_forget_path(root);
+        }
+}
+
 static fn json(void)
 {
         //      Fedora 44's own index.json and manifest, as published.
@@ -98502,6 +98819,7 @@ b32 main(void)
         landing();
         distros();
         profiles();
+        chrome_profile();
         downloads();
         download_ceiling();
         secret_lines();

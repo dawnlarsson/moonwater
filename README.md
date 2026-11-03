@@ -166,8 +166,9 @@ while it is, so the compositor ends first and `desktop on` brings it back.
 A switch with no word after it says where it stands, to anybody; with one it
 changes it and needs root, and a word it does not take is a usage page (exit 2)
 and not a refusal (exit 1). `bowl` runs other distributions' programs
-(`bowl profile desktop` installs KDE), and `main.moonwater.sh` is the machine
-script that sets a machine up at boot.
+(`bowl profile desktop` installs KDE, `bowl profile chrome` Alpine's Chromium as a
+program of Canvas: `moonwater desktop` does not take it for a session), and
+`main.moonwater.sh` is the machine script that sets a machine up at boot.
 
 `moonwater security` changes what the TLS client (wget, the clock's NTS, names over
 TLS) trusts without a rebuild. A key is named by the SHA-256 of its DER

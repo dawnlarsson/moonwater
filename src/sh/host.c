@@ -22306,7 +22306,7 @@ static bool desktop_installed(string_address name)
         p8 held[HOST_NAME_ROOM + 40];
         bipolar got;
 
-        return_if(!bowl_find_profile(name) ||
+        return_if(!bowl_find_profile(name) || bowl_find_profile(name)->program ||
                       !host_join(path, sizeof(path), BOWL_EXPOSE_DIRECTORY "/", name) ||
                       !bowl_profile_header(want, sizeof(want), name),
                   false);
@@ -22762,6 +22762,9 @@ static b32 host_desktop(string_address address_to arguments, positive count)
                 return_if(!bowl_find_profile(word),
                           host_refuse("unknown desktop %s: on, off, or a profile of "
                                       "bowl profile\n", word));
+                return_if(bowl_find_profile(word)->program,
+                          host_refuse("%s is a program, not a desktop: it runs on Canvas, "
+                                      "which stays the compositor\n", word));
                 return_if(!desktop_installed(word),
                           host_refuse("the profile %s is not installed: bowl profile "
                                       "installs it\n", word));
