@@ -7,10 +7,11 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-C TEXT] [-P] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-C TEXT] [-P] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
         only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
-        -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
+        -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
+        there are none, -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
         -q quiet,
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
         compiled by libxkbcommon and each key says its keysym and its text).
@@ -29,14 +30,25 @@
 #ifdef HAVE_XKB
 #include <xkbcommon/xkbcommon.h>
 #endif
+#ifdef HAVE_DMABUF
+#include <gbm.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+#endif
 
 #include "xdg-shell-client.h"
+#ifdef HAVE_DMABUF
+#include "linux-dmabuf-client.h"
+#endif
 
 struct buffer
 {
         struct wl_buffer *buffer;
         void *data;
         int busy;
+        int stride; // pixels a row
+        int dmabuf; // the descriptor when the buffer is a dma-buf, else -1
+        size_t size;
 };
 
 static struct wl_display *display;
@@ -45,6 +57,11 @@ static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct wl_seat *seat;
 static struct wl_subcompositor *subcompositor;
+#ifdef HAVE_DMABUF
+static struct zwp_linux_dmabuf_v1 *dmabuf_global;
+static struct gbm_device *gbm;
+#endif
+static int use_dmabuf;
 static struct wl_data_device_manager *data_manager;
 static struct wl_data_device *data_device;
 static struct wl_data_offer *selection_offer;
@@ -75,7 +92,40 @@ static void release(void *data, struct wl_buffer *buffer)
 
 static const struct wl_buffer_listener buffer_listener = {release};
 
+static int make_shm_buffer(struct buffer *b, int w, int h);
+
 static int make_buffer(struct buffer *b, int w, int h)
+{
+        b->dmabuf = -1;
+        b->stride = w;
+#ifdef HAVE_DMABUF
+        if (use_dmabuf)
+        {
+                struct gbm_bo *bo = gbm_bo_create(gbm, (uint32_t)w, (uint32_t)h, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+                struct zwp_linux_buffer_params_v1 *params;
+
+                if (!bo)
+                        return -1;
+                b->dmabuf = gbm_bo_get_fd(bo);
+                b->stride = (int)(gbm_bo_get_stride(bo) / 4);
+                b->size = (size_t)gbm_bo_get_stride(bo) * (size_t)h;
+                b->data = mmap(0, b->size, PROT_READ | PROT_WRITE, MAP_SHARED, b->dmabuf, 0);
+                if (b->data == MAP_FAILED)
+                        return -1;
+                params = zwp_linux_dmabuf_v1_create_params(dmabuf_global);
+                zwp_linux_buffer_params_v1_add(params, b->dmabuf, 0, 0, gbm_bo_get_stride(bo), 0, 0);
+                b->buffer = zwp_linux_buffer_params_v1_create_immed(params, w, h, GBM_FORMAT_XRGB8888, 0);
+                zwp_linux_buffer_params_v1_destroy(params);
+                wl_buffer_add_listener(b->buffer, &buffer_listener, b);
+                gbm_bo_destroy(bo);
+                b->busy = 0;
+                return 0;
+        }
+#endif
+        return make_shm_buffer(b, w, h);
+}
+
+static int make_shm_buffer(struct buffer *b, int w, int h)
 {
         int stride = w * 4, size = stride * h, fd = memfd_create("wayland-shm", MFD_CLOEXEC);
         struct wl_shm_pool *pool;
@@ -97,6 +147,16 @@ static int make_buffer(struct buffer *b, int w, int h)
 static void paint(struct buffer *b, int step)
 {
         unsigned *pixels = b->data;
+        int pitch = b->stride;
+
+#ifdef HAVE_DMABUF
+        if (b->dmabuf >= 0)
+        {
+                struct dma_buf_sync sync = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE};
+
+                ioctl(b->dmabuf, DMA_BUF_IOCTL_SYNC, &sync);
+        }
+#endif
 
         for (int y = 0; y < height; y++)
                 for (int x = 0; x < width; x++)
@@ -105,8 +165,16 @@ static void paint(struct buffer *b, int step)
                         unsigned bl = (unsigned)((step * 4) & 255);
                         int inside = x >= (step * 3) % (width - 20) && x < (step * 3) % (width - 20) + 20 && y >= 10 && y < 30;
 
-                        pixels[y * width + x] = inside ? 0xffffffffu : 0xff000000u | r << 16 | g << 8 | bl;
+                        pixels[y * pitch + x] = inside ? 0xffffffffu : 0xff000000u | r << 16 | g << 8 | bl;
                 }
+#ifdef HAVE_DMABUF
+        if (b->dmabuf >= 0)
+        {
+                struct dma_buf_sync sync = {DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE};
+
+                ioctl(b->dmabuf, DMA_BUF_IOCTL_SYNC, &sync);
+        }
+#endif
 }
 
 static void redraw(void);
@@ -591,6 +659,10 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
                 wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, version < 6 ? version : 6);
         else if (!strcmp(interface, wl_subcompositor_interface.name))
                 subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
+#ifdef HAVE_DMABUF
+        else if (!strcmp(interface, zwp_linux_dmabuf_v1_interface.name))
+                dmabuf_global = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, version < 4 ? version : 4);
+#endif
         else if (!strcmp(interface, wl_data_device_manager_interface.name))
                 data_manager = wl_registry_bind(registry, name, &wl_data_device_manager_interface, version < 3 ? version : 3);
         else if (!strcmp(interface, wl_seat_interface.name))
@@ -611,7 +683,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfduC:Pqv")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubC:Pqv")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -624,6 +696,7 @@ int main(int argc, char **argv)
                 case 'f': fullscreen = 1; break;
                 case 'd': damage_only = 1; break;
                 case 'u': child_wanted = 1; break;
+                case 'b': use_dmabuf = 1; break;
                 case 'C': copy_text = optarg; break;
                 case 'P': paste_wanted = 1; break;
                 case 'q': quiet = 1; break;
@@ -647,6 +720,22 @@ int main(int argc, char **argv)
         xdg_wm_base_add_listener(wm_base, &wm_base_listener, 0);
         if (seat)
                 wl_seat_add_listener(seat, &seat_listener, 0);
+        if (use_dmabuf)
+        {
+#ifdef HAVE_DMABUF
+                int render = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+
+                gbm = render >= 0 ? gbm_create_device(render) : 0;
+                if (!dmabuf_global || !gbm)
+                {
+                        fprintf(stderr, "wayland-shm: no dma-bufs (%s)\n", !dmabuf_global ? "the compositor offers none" : "no render node");
+                        return 2;
+                }
+#else
+                fprintf(stderr, "wayland-shm: built without dma-bufs\n");
+                return 2;
+#endif
+        }
         if (seat && data_manager)
         {
                 data_device = wl_data_device_manager_get_data_device(data_manager, seat);

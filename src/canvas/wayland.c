@@ -62,7 +62,7 @@
 #define WAYLAND_IDS 8192        // a client's ids run from 1 to this less one
 #define WAYLAND_OBJECTS 2048    // live objects of one client
 #define WAYLAND_SURFACES 64
-#define WAYLAND_POOLS 32
+#define WAYLAND_POOLS 96         // a dma-buf buffer is a pool of its own, so this is more than shm needs
 #define WAYLAND_BUFFERS 256
 #define WAYLAND_POSITIONERS 8
 #define WAYLAND_MESSAGE 4096    // the largest message, header included, as in libwayland
@@ -91,6 +91,15 @@
 #define WAYLAND_INPUT_SERIALS 8 // serials of input events a client may name to set a selection
 #define WAYLAND_CLIP_CLIPBOARD 0
 #define WAYLAND_CLIP_PRIMARY 1
+#define WAYLAND_DMABUF_ENTRIES 32    // format and modifier pairs the compositor takes
+#define WAYLAND_DMABUF_TRANCHES 4
+#define WAYLAND_PARAMS 8             // zwp_linux_buffer_params_v1 one client holds
+#define WAYLAND_FEEDBACKS 8          // zwp_linux_dmabuf_feedback_v1 one client holds
+#define WAYLAND_DMABUFS 48           // buffers made of dma-bufs one client has (each holds a descriptor)
+#define WAYLAND_DMABUFS_ALL 192      // and all clients together
+#define WAYLAND_FOURCC_ARGB8888 0x34325241UL
+#define WAYLAND_FOURCC_XRGB8888 0x34325258UL
+#define WAYLAND_MODIFIER_INVALID 0x00ffffffffffffffUL
 
 /*
         What a request answers: zero is done, negative is a client that is dead (the error is queued).
@@ -138,6 +147,29 @@ struct wayland_rect
 #define WAYLAND_STATE_TILED_TOP 128
 #define WAYLAND_STATE_TILED_BOTTOM 256
 
+/*
+        What the compositor takes as dma-bufs: the device the clients are to allocate on (a dev_t, as the kernel's stat
+        gives it), the format and modifier pairs, and the tranches of them a client is told of in order: each is the pairs
+        it names by index, the device they are for and the flags (WLN_zwp_linux_dmabuf_feedback_v1_tranche_flags_*).
+*/
+struct wayland_dmabuf_info
+{
+        unsigned long device;
+        long count;
+        struct
+        {
+                unsigned int format;
+                unsigned long modifier;
+        } entry[WAYLAND_DMABUF_ENTRIES];
+        long tranches;
+        struct
+        {
+                unsigned long device, flags;
+                long count;
+                unsigned char index[WAYLAND_DMABUF_ENTRIES];
+        } tranche[WAYLAND_DMABUF_TRANCHES];
+};
+
 struct wayland_picture
 {
         const unsigned char *pixels; // the buffer's first pixel
@@ -151,6 +183,9 @@ struct wayland_picture
         // there (premultiplied) and not copied, and whether the window's picture is complete and is taken now. A picture
         // with no pixels is only that taking.
         long dest_x, dest_y, row_width, row_height, blend, last;
+        // A picture whose pixels are a dma-buf's: its descriptor, which the host brackets its reads with (and waits on the
+        // buffer's writer through) and may skip, answering 1 where the buffer is not ready; -1 for pixels that are plain memory.
+        long sync_fd;
 };
 
 struct wayland_facts
@@ -198,6 +233,12 @@ struct wayland_host
         // host reads on its own, makes the selection of and says so (wayland_selection_changed, then wayland_clip_pulled), or -1
         // for a copy it will not take; clip_abort ends a pull. clip_push writes the selection to a descriptor a client gave for the
         // window row, and takes the descriptor whatever comes of it. clip_clear empties the selection when the client holds it.
+        // dma-bufs. dmabuf_info is what is taken (0 for nothing, which keeps zwp_linux_dmabuf_v1 from being offered), dmabuf_table the
+        // file of format and modifier pairs the feedback names (the host's: the shim never closes it, -1 for none), dmabuf_map a
+        // descriptor that is a dma-buf of at least size bytes, mapped read-only (0 for a refusal; the descriptor stays the caller's).
+        long (*dmabuf_info)(void *context, struct wayland_dmabuf_info *info);
+        long (*dmabuf_table)(void *context, long *size);
+        void *(*dmabuf_map)(void *context, long fd, long size);
         long (*clip_size)(void *context, long which);
         long (*clip_pull)(void *context, long client, long which);
         void (*clip_abort)(void *context, long client, long which);
@@ -290,7 +331,8 @@ struct wayland_surface
 struct wayland_pool
 {
         long live;
-        long fd;
+        long fd;     // a dma-buf's descriptor while the pool is its mapping, which the buffer holds
+        long dmabuf; // 1 for such a pool
         long size;
         long refs;
         long gone;
@@ -336,6 +378,15 @@ struct wayland_offer
         unsigned long serial;
 };
 
+// A zwp_linux_buffer_params_v1: the planes it was given, up to four, and whether it made its buffer.
+struct wayland_params
+{
+        unsigned int id;
+        unsigned char live, used;
+        long fd[4];
+        unsigned long offset[4], stride[4], modifier[4];
+};
+
 struct wayland_client
 {
         long live, dead, slot, pid, uid;
@@ -358,6 +409,9 @@ struct wayland_client
         unsigned char pending[2];   // the source being read for each selection, as its index and one, or 0
         struct wayland_source sources[WAYLAND_SOURCES];
         struct wayland_offer offers[WAYLAND_OFFERS];
+        struct wayland_params params[WAYLAND_PARAMS];
+        unsigned int feedback_id[WAYLAND_FEEDBACKS];
+        unsigned char feedbacks, dmabufs;
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
         unsigned short index[WAYLAND_IDS];
         unsigned short server_index[WAYLAND_SERVER_IDS];
@@ -387,6 +441,8 @@ static struct
         // how many times it changed, so an offer made of an older one is known.
         long selection_owner[2], selection_source[2];
         unsigned long selection_serial[2];
+        struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
+        long dmabufs;                      // the buffers made of them, all clients
 } wayland;
 
 /* ---- the wire ---- */
@@ -699,6 +755,8 @@ static void wayland_release_buffer(struct wayland_client *c, long slot)
 
 /* ---- the globals ---- */
 
+static void wayland_dmabuf_formats(struct wayland_client *c, unsigned long id, long version);
+
 /*
         What the registry advertises: name n is element n - 1, each at the version this file implements (not the
         table's: the table is what the XML says, this is what is built). A screen is a wl_output global of its own,
@@ -722,8 +780,15 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wl_data_device_manager, 3},
     {WLI_zwp_primary_selection_device_manager_v1, 1},
     {WLI_wp_cursor_shape_manager_v1, 2},
+    {WLI_zwp_linux_dmabuf_v1, 4},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
+
+// Whether a global is offered: all are, but the dma-buf one, which waits for a compositor that takes dma-bufs.
+static int wayland_global_offered(long name)
+{
+        return name < 1 || name > WAYLAND_GLOBAL_COUNT || wayland_globals[name - 1].iface != WLI_zwp_linux_dmabuf_v1 || wayland.dmabuf.count > 0;
+}
 
 static int wayland_name_is(const unsigned char *text, long length, const char *name)
 {
@@ -1136,6 +1201,7 @@ static void wayland_row_take(struct wayland_client *c, struct wayland_surface *r
         none.row_height = wh;
         none.blend = 0;
         none.last = 1;
+        none.sync_fd = -1;
         wayland.host->row_picture(wayland.host->context, root->row, &none);
 }
 
@@ -1163,6 +1229,7 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         picture.row_height = wh;
         picture.blend = child != root && b->format == WLN_wl_shm_format_argb8888;
         picture.last = 0;
+        picture.sync_fd = c->pools[b->pool].dmabuf ? c->pools[b->pool].fd : -1;
         picture.damages = 0;
         picture.full = 1;
         if (only)
@@ -1179,7 +1246,8 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
                 picture.damage[0].width = x2 - x1;
                 picture.damage[0].height = y2 - y1;
         }
-        wayland.host->row_picture(wayland.host->context, root->row, &picture);
+        if (wayland.host->row_picture(wayland.host->context, root->row, &picture) > 0)
+                root->need_full = 1;
 }
 
 // The children of a surface laid over where it was just drawn (the whole picture for a null rectangle), in their order.
@@ -1495,7 +1563,8 @@ static int wayland_display_request(struct wayland_client *c, long op, struct way
                 return WAYLAND_OK;
         }
         for (long name = 1; name <= WAYLAND_GLOBAL_COUNT; name++)
-                wayland_global_send(c, c->objects[a[0].slot].id, name);
+                if (wayland_global_offered(name))
+                        wayland_global_send(c, c->objects[a[0].slot].id, name);
         for (long screen = 0; screen < wayland.screens; screen++)
                 wayland_global_send(c, c->objects[a[0].slot].id, WAYLAND_OUTPUT_NAME + screen);
         return WAYLAND_OK;
@@ -1510,7 +1579,7 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         long name = (long)a[0].u, iface, version, slot;
         unsigned long id = a[1].u;
 
-        if (name >= 1 && name <= WAYLAND_GLOBAL_COUNT)
+        if (name >= 1 && name <= WAYLAND_GLOBAL_COUNT && wayland_global_offered(name))
         {
                 iface = wayland_globals[name - 1].iface;
                 version = wayland_globals[name - 1].version;
@@ -1546,6 +1615,8 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
                         wayland_end(&e);
                 }
         }
+        else if (iface == WLI_zwp_linux_dmabuf_v1 && a[1].version < 4)
+                wayland_dmabuf_formats(c, id, a[1].version);
         else if (iface == WLI_wl_seat)
         {
                 struct wayland_event e = wayland_begin(c, id, WLE_wl_seat_capabilities);
@@ -1654,6 +1725,14 @@ static void wayland_pool_unref(struct wayland_client *c, long pool)
         if (!p->live || p->refs > 0 || !p->gone)
                 return;
         wayland.host->unmap(wayland.host->context, p->at, p->size);
+        if (p->dmabuf)
+        {
+                wayland.host->close(wayland.host->context, p->fd);
+                wayland.fds--;
+                p->dmabuf = 0;
+                c->dmabufs--;
+                wayland.dmabufs--;
+        }
         c->pool_bytes -= p->size;
         p->live = 0;
         wayland.pools--;
@@ -1709,7 +1788,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         struct wayland_pool *p = &c->pools[b->pool];
         struct wayland_picture picture;
         int first = s->row < 0;
-        long wx, wy, ww, wh;
+        long wx, wy, ww, wh, status;
 
         if (first)
         {
@@ -1754,6 +1833,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         picture.row_width = ww;
         picture.row_height = wh;
         picture.blend = 0;
+        picture.sync_fd = p->dmabuf ? p->fd : -1;
         picture.last = !wayland_has_children(c, wayland_surface_index(c, s));
         picture.full = first || s->width != b->width || s->height != b->height || s->damage_full || scale != s->scale || !s->damages ||
                        s->need_full || wx != s->window_x || wy != s->window_y || ww != s->window_w || wh != s->window_h;
@@ -1784,8 +1864,11 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 r.height = y2 - r.y;
                 picture.damage[picture.damages++] = r;
         }
-        if (wayland.host->row_picture(wayland.host->context, s->row, &picture) < 0)
+        status = wayland.host->row_picture(wayland.host->context, s->row, &picture);
+        if (status < 0)
                 return wayland_fail(c, self->id, WAYLAND_IMPLEMENTATION, "the window refused the picture");
+        if (status > 0)
+                s->need_full = 1; // the buffer was not read (a dma-buf whose writer was not done): not shown, and the next is shown whole
         s->flags |= WAYLAND_SURFACE_MAPPED;
         // What was copied, for the subsurfaces to be laid over again.
         s->shown_full = (unsigned char)picture.full;
@@ -2020,6 +2103,8 @@ static int wayland_shm_request(struct wayland_client *c, struct wayland_object *
         if (!at)
                 return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_fd, "not a shared memory file of that size");
         c->pools[pool].live = 1;
+        c->pools[pool].fd = -1;
+        c->pools[pool].dmabuf = 0;
         c->pools[pool].size = size;
         c->pools[pool].refs = 0;
         c->pools[pool].gone = 0;
@@ -3751,6 +3836,360 @@ static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland
         return WAYLAND_OK;
 }
 
+/* ---- dma-bufs ---- */
+
+/*
+        zwp_linux_dmabuf_v1: a client that draws with the GPU hands over its buffer as a dma-buf, and the compositor reads it
+        where it stands. What is taken is the host's to say (wayland_dmabuf_info): the device clients are to allocate on, and
+        the format and modifier pairs with the tranches a client is told them in (version 4's feedback, which is also sent
+        again when the host says they changed; a client of version 3 or less is sent each pair). Nothing is imported here: the
+        host maps the descriptor read-only (it is a dma-buf, and as large as the plane needs), and the buffer is then a buffer
+        of a pool that is that mapping, copied at commit and released as any is, except that the host brackets the read with
+        the dma-buf's own synchronisation and may answer that the buffer's writer is not done, in which case that frame is
+        skipped and the next one drawn whole. A client holds at most 48 such buffers, each with a descriptor, and all clients
+        at most 192. One plane of ARGB8888 or XRGB8888 is what a buffer is.
+*/
+
+// An array of bytes as the wire has it: the length, the bytes, padded to a word.
+static void wayland_array(struct wayland_event *e, const unsigned char *bytes, unsigned long length)
+{
+        unsigned long padded = (length + 3) & ~3UL;
+
+        wayland_word(e, length);
+        for (unsigned long at = 0; at < padded; at++)
+                e->at[at] = at < length ? bytes[at] : 0;
+        e->at += padded;
+}
+
+// A device number as a dev_t's eight bytes, the machine's order.
+static void wayland_device_array(struct wayland_event *e, unsigned long device)
+{
+        unsigned char bytes[8];
+
+        for (long at = 0; at < 8; at++)
+                bytes[at] = (unsigned char)(device >> (8 * at));
+        wayland_array(e, bytes, 8);
+}
+
+// The formats and, for version 3, the modifiers: what a client older than the feedback is told when it binds.
+static void wayland_dmabuf_formats(struct wayland_client *c, unsigned long id, long version)
+{
+        const struct wayland_dmabuf_info *info = &wayland.dmabuf;
+
+        for (long at = 0; at < info->count; at++)
+        {
+                int again = 0;
+
+                for (long before = 0; before < at && !again; before++)
+                        again = info->entry[before].format == info->entry[at].format;
+                if (!again)
+                {
+                        struct wayland_event e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_v1_format);
+
+                        wayland_word(&e, info->entry[at].format);
+                        wayland_end(&e);
+                }
+                if (version >= 3)
+                {
+                        struct wayland_event e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_v1_modifier);
+
+                        wayland_word(&e, info->entry[at].format);
+                        wayland_word(&e, (unsigned long)(info->entry[at].modifier >> 32));
+                        wayland_word(&e, (unsigned long)(info->entry[at].modifier & 0xffffffffUL));
+                        wayland_end(&e);
+                }
+        }
+}
+
+// The feedback to one feedback object: the table, the main device, each tranche in order, and done.
+static void wayland_feedback_send(struct wayland_client *c, long slot)
+{
+        const struct wayland_dmabuf_info *info = &wayland.dmabuf;
+        unsigned long id = c->objects[slot].id;
+        struct wayland_event e;
+        long size = 0, fd = wayland.host->dmabuf_table(wayland.host->context, &size);
+
+        if (fd < 0 || size <= 0 || c->out_fd_count >= WAYLAND_OUT_FDS)
+                return;
+        e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_format_table);
+        wayland_word(&e, (unsigned long)size);
+        c->out_fds[c->out_fd_count] = fd;
+        c->out_fd_at[c->out_fd_count++] = e.start;
+        wayland_end(&e);
+        e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_main_device);
+        wayland_device_array(&e, info->device);
+        wayland_end(&e);
+        for (long at = 0; at < info->tranches; at++)
+        {
+                unsigned char indices[WAYLAND_DMABUF_ENTRIES * 2];
+
+                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_target_device);
+                wayland_device_array(&e, info->tranche[at].device);
+                wayland_end(&e);
+                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_flags);
+                wayland_word(&e, info->tranche[at].flags);
+                wayland_end(&e);
+                for (long each = 0; each < info->tranche[at].count; each++)
+                {
+                        indices[each * 2] = info->tranche[at].index[each];
+                        indices[each * 2 + 1] = 0;
+                }
+                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_formats);
+                wayland_array(&e, indices, (unsigned long)info->tranche[at].count * 2);
+                wayland_end(&e);
+                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_done);
+                wayland_end(&e);
+        }
+        e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_done);
+        wayland_end(&e);
+}
+
+/*
+        What the host takes, read and checked: at least one pair, only the formats a buffer can be (one plane of ARGB8888 or
+        XRGB8888), tranches that name pairs there are, and a table to name them in. A host that fails any of it takes no
+        dma-bufs, and the global is not offered.
+*/
+static void wayland_dmabuf_load(void)
+{
+        struct wayland_dmabuf_info *info = &wayland.dmabuf;
+        long size = 0;
+
+        for (unsigned long at = 0; at < sizeof *info; at++)
+                ((unsigned char *)info)[at] = 0;
+        if (!wayland.host->dmabuf_info(wayland.host->context, info) || info->count < 1 || info->count > WAYLAND_DMABUF_ENTRIES ||
+            info->tranches < 1 || info->tranches > WAYLAND_DMABUF_TRANCHES || wayland.host->dmabuf_table(wayland.host->context, &size) < 0 ||
+            size != info->count * 16)
+                goto none;
+        for (long at = 0; at < info->count; at++)
+                if (info->entry[at].format != WAYLAND_FOURCC_ARGB8888 && info->entry[at].format != WAYLAND_FOURCC_XRGB8888)
+                        goto none;
+        for (long at = 0; at < info->tranches; at++)
+        {
+                if (info->tranche[at].count < 1 || info->tranche[at].count > info->count)
+                        goto none;
+                for (long each = 0; each < info->tranche[at].count; each++)
+                        if (info->tranche[at].index[each] >= info->count)
+                                goto none;
+        }
+        return;
+none:
+        info->count = 0;
+}
+
+/*
+        The host's dma-bufs changed (a device came or went, a plane to scan out was found): what is taken is read again and
+        every feedback object of every client is sent it again. A client that bound at version 3 keeps what it was told.
+*/
+WAYLAND_API void wayland_dmabuf_changed(void)
+{
+        if (!wayland.host)
+                return;
+        wayland_dmabuf_load();
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                for (long at = 0; c && wayland.dmabuf.count > 0 && at < c->feedbacks; at++)
+                {
+                        long object = wayland_slot_of(c, c->feedback_id[at]);
+
+                        if (object >= 0 && c->objects[object].iface == WLI_zwp_linux_dmabuf_feedback_v1)
+                                wayland_feedback_send(c, object);
+                }
+        }
+}
+
+static void wayland_params_free(struct wayland_client *c, struct wayland_params *p)
+{
+        for (long plane = 0; plane < 4; plane++)
+                if (p->fd[plane] >= 0)
+                {
+                        wayland.host->close(wayland.host->context, p->fd[plane]);
+                        wayland.fds--;
+                        p->fd[plane] = -1;
+                }
+        (void)c;
+        p->live = 0;
+}
+
+/*
+        The buffer a params object describes, or why not: 0 and the buffer's slot, -1 for the protocol error already queued,
+        -2 for a buffer that cannot be made (async: failed; immediate: invalid_wl_buffer). The descriptor goes to a pool of
+        its own that is its mapping.
+*/
+static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object *self, struct wayland_params *p, const struct wayland_arg *a,
+                                long id_slot)
+{
+        unsigned long width = a[0].u, height = a[1].u, format = a[2].u, flags = a[3].u;
+        long offset, stride, need, pool = -1, buffer = -1, found = 0;
+        void *at;
+
+        p->used = 1; // a params object used (and checked unused before, by the request) makes one buffer, made or not
+        if (p->fd[0] < 0 || p->fd[1] >= 0 || p->fd[2] >= 0 || p->fd[3] >= 0)
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "one plane is what the format has"), -1;
+        if (width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION)
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions, "the size is out of range"), -1;
+        if (format != WAYLAND_FOURCC_ARGB8888 && format != WAYLAND_FOURCC_XRGB8888)
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_format, "the format is not offered"), -1;
+        offset = (long)p->offset[0];
+        stride = (long)p->stride[0];
+        if (p->offset[0] > 0x7fffffffUL || p->stride[0] > (1UL << 20) || stride < (long)width * 4 || (stride & 3))
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "the plane does not fit its size"), -1;
+        need = offset + stride * ((long)height - 1) + (long)width * 4;
+        for (long entry = 0; entry < wayland.dmabuf.count; entry++)
+                found |= wayland.dmabuf.entry[entry].format == format && wayland.dmabuf.entry[entry].modifier == p->modifier[0];
+        if (!found || flags || need > WAYLAND_POOL_BYTES || c->pool_bytes + need > WAYLAND_POOL_TOTAL || c->dmabufs >= WAYLAND_DMABUFS ||
+            wayland.dmabufs >= WAYLAND_DMABUFS_ALL)
+                return -2;
+        for (long i = 0; i < WAYLAND_POOLS && pool < 0; i++)
+                if (!c->pools[i].live)
+                        pool = i;
+        for (long i = 0; i < WAYLAND_BUFFERS && buffer < 0; i++)
+                if (!c->buffers[i].live)
+                        buffer = i;
+        if (pool < 0 || buffer < 0)
+                return -2;
+        at = wayland.host->dmabuf_map(wayland.host->context, p->fd[0], need);
+        if (!at)
+                return -2;
+        c->pools[pool].live = 1;
+        c->pools[pool].fd = p->fd[0];
+        c->pools[pool].dmabuf = 1;
+        c->pools[pool].size = need;
+        c->pools[pool].refs = 1;
+        c->pools[pool].gone = 1;
+        c->pools[pool].at = at;
+        c->pool_bytes += need;
+        p->fd[0] = -1; // the pool holds it now, and wayland.fds still counts it
+        c->buffers[buffer].live = 1;
+        c->buffers[buffer].pool = pool;
+        c->buffers[buffer].offset = offset;
+        c->buffers[buffer].width = (long)width;
+        c->buffers[buffer].height = (long)height;
+        c->buffers[buffer].stride = stride;
+        c->buffers[buffer].format = format == WAYLAND_FOURCC_ARGB8888 ? WLN_wl_shm_format_argb8888 : WLN_wl_shm_format_xrgb8888;
+        c->buffers[buffer].id = c->objects[id_slot].id;
+        c->buffers[buffer].held = c->buffers[buffer].zombie = 0;
+        c->objects[id_slot].link = (short)buffer;
+        c->dmabufs++;
+        wayland.dmabufs++;
+        wayland.pools++;
+        wayland.buffers++;
+        return buffer;
+}
+
+static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_params *p;
+        long slot;
+
+        switch (self->iface)
+        {
+        case WLI_zwp_linux_dmabuf_v1:
+                if (op == WLQ_zwp_linux_dmabuf_v1_create_params)
+                {
+                        long index = -1;
+
+                        for (long at = 0; at < WAYLAND_PARAMS && index < 0; at++)
+                                if (!c->params[at].live)
+                                        index = at;
+                        if (index < 0)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many buffer params");
+                        c->params[index].id = c->objects[a[0].slot].id;
+                        c->params[index].live = 1;
+                        c->params[index].used = 0;
+                        for (long plane = 0; plane < 4; plane++)
+                        {
+                                c->params[index].fd[plane] = -1;
+                                c->params[index].offset[plane] = c->params[index].stride[plane] = c->params[index].modifier[plane] = 0;
+                        }
+                        c->objects[a[0].slot].link = (short)index;
+                }
+                else if (op == WLQ_zwp_linux_dmabuf_v1_get_default_feedback || op == WLQ_zwp_linux_dmabuf_v1_get_surface_feedback)
+                {
+                        if (c->feedbacks >= WAYLAND_FEEDBACKS)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many feedback objects");
+                        c->feedback_id[c->feedbacks++] = c->objects[a[0].slot].id;
+                        wayland_feedback_send(c, a[0].slot);
+                }
+                return WAYLAND_OK;
+        case WLI_zwp_linux_dmabuf_feedback_v1:
+                for (long at = 0; at < c->feedbacks; at++)
+                        if (c->feedback_id[at] == self->id)
+                        {
+                                c->feedback_id[at] = c->feedback_id[--c->feedbacks];
+                                break;
+                        }
+                return WAYLAND_OK;
+        default:
+                break;
+        }
+        p = &c->params[self->link];
+        if (op == WLQ_zwp_linux_buffer_params_v1_destroy)
+        {
+                wayland_params_free(c, p);
+                return WAYLAND_OK;
+        }
+        if (p->used)
+                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_already_used, "the params were used");
+        if (op == WLQ_zwp_linux_buffer_params_v1_add)
+        {
+                unsigned long plane = a[1].u;
+
+                if (plane > 3)
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_plane_idx, "no such plane");
+                if (p->fd[plane] >= 0)
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_plane_set, "the plane is set");
+                p->fd[plane] = a[0].fd; // held until the params are used or destroyed
+                a[0].fd = -1;
+                p->offset[plane] = a[2].u;
+                p->stride[plane] = a[3].u;
+                p->modifier[plane] = a[4].u << 32 | a[5].u;
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_zwp_linux_buffer_params_v1_set_sampling_device)
+                return WAYLAND_OK;
+        if (op == WLQ_zwp_linux_buffer_params_v1_create)
+        {
+                struct wayland_event e;
+                unsigned long id = wayland_server_id(c);
+                long object = id ? wayland_object_new(c, id, WLI_wl_buffer, 1) : -1, made;
+                struct wayland_arg wa[4] = {a[0], a[1], a[2], a[3]};
+
+                made = object >= 0 ? wayland_dmabuf_make(c, self, p, wa, object) : (p->used = 1, -2);
+                if (made == -1)
+                {
+                        if (object >= 0)
+                                wayland_object_free(c, object);
+                        return WAYLAND_DEAD;
+                }
+                if (made < 0)
+                {
+                        if (object >= 0)
+                                wayland_object_free(c, object);
+                        e = wayland_begin(c, self->id, WLE_zwp_linux_buffer_params_v1_failed);
+                        wayland_end(&e);
+                        return WAYLAND_OK;
+                }
+                e = wayland_begin(c, self->id, WLE_zwp_linux_buffer_params_v1_created);
+                wayland_word(&e, id);
+                wayland_end(&e);
+                return WAYLAND_OK;
+        }
+        // create_immed: the buffer is the id the client chose, and a buffer that cannot be made is the client's error.
+        slot = a[0].slot;
+        {
+                struct wayland_arg wa[4] = {a[1], a[2], a[3], a[4]};
+                long made = wayland_dmabuf_make(c, self, p, wa, slot);
+
+                if (made == -1)
+                        return WAYLAND_DEAD;
+                if (made < 0)
+                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_wl_buffer, "the buffer cannot be made");
+        }
+        return WAYLAND_OK;
+}
+
 /* ---- one request ---- */
 
 /*
@@ -3948,6 +4387,11 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_zxdg_toplevel_decoration_v1:
                         status = wayland_decoration_request(c, o, op, a);
                         break;
+                case WLI_zwp_linux_dmabuf_v1:
+                case WLI_zwp_linux_buffer_params_v1:
+                case WLI_zwp_linux_dmabuf_feedback_v1:
+                        status = wayland_dmabuf_request(c, o, op, a);
+                        break;
                 case WLI_wp_cursor_shape_manager_v1:
                 case WLI_wp_cursor_shape_device_v1:
                         status = wayland_cursor_shape_request(c, o, op, a);
@@ -4004,7 +4448,8 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         if (wayland.host || !host || !host->alloc || !host->release || !host->map || !host->remap || !host->unmap ||
             !host->close || !host->row_open || !host->row_close || !host->row_picture || !host->row_title || !host->row_do ||
             !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks ||
-            !host->clip_size || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear)
+            !host->clip_size || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear || !host->dmabuf_info ||
+            !host->dmabuf_table || !host->dmabuf_map)
                 return -1;
         for (unsigned long at = 0; at < sizeof wayland; at++)
                 clear[at] = 0;
@@ -4015,6 +4460,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         wayland.screens = host->screens(host->context, wayland.screen, WAYLAND_SCREENS);
         if (wayland.screens < 0)
                 wayland.screens = 0;
+        wayland_dmabuf_load();
         return 0;
 }
 
@@ -4064,8 +4510,17 @@ WAYLAND_API void wayland_drop(long slot)
                 if (c->pools[at].live)
                 {
                         wayland.host->unmap(wayland.host->context, c->pools[at].at, c->pools[at].size);
+                        if (c->pools[at].dmabuf)
+                        {
+                                wayland.host->close(wayland.host->context, c->pools[at].fd);
+                                wayland.fds--;
+                                wayland.dmabufs--;
+                        }
                         wayland.pools--;
                 }
+        for (long at = 0; at < WAYLAND_PARAMS; at++)
+                if (c->params[at].live)
+                        wayland_params_free(c, &c->params[at]);
         for (long at = 0; at < WAYLAND_BUFFERS; at++)
                 if (c->buffers[at].live)
                         wayland.buffers--;

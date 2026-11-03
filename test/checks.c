@@ -154804,6 +154804,9 @@ static struct fake_host_state
         long clip_size[2], pull_refuse, pulls, aborts, pushes, clears, pull_client, pull_which, push_row, push_which;
         int pull_wfd, pull_rfd;
         char clip_text[2][64];
+        // dma-bufs: whether the fake takes any, how many pictures were read through a descriptor, whether the next is skipped
+        long dmabuf_off, syncs, skip_next, dmabuf_maps;
+        int dmabuf_table_fd;
 } fake;
 
 static void *fake_alloc(void *context, long bytes)
@@ -154896,6 +154899,15 @@ static int fake_row_picture(void *context, int row, const struct wayland_picture
         struct fake_row *r = &fake.row[row];
 
         (void)context;
+        if (picture->sync_fd >= 0)
+        {
+                fake.syncs++;
+                if (fake.skip_next)
+                {
+                        fake.skip_next = 0;
+                        return 1;
+                }
+        }
         r->width = picture->row_width;
         r->height = picture->row_height;
         r->picture_w = picture->row_width;
@@ -155104,10 +155116,64 @@ static void fake_clip_clear(void *context, long client, long which)
         fake.clip_size[which] = 0;
 }
 
+/* The fake takes ARGB8888 and XRGB8888 linear on a device of its own, in one tranche; the descriptor a client gives is any file. */
+static long fake_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
+{
+        (void)context;
+        if (fake.dmabuf_off)
+                return 0;
+        info->device = (226UL << 8) | 128;
+        info->count = 2;
+        info->entry[0].format = 0x34325241;
+        info->entry[1].format = 0x34325258;
+        info->tranches = 1;
+        info->tranche[0].device = info->device;
+        info->tranche[0].flags = 0;
+        info->tranche[0].count = 2;
+        info->tranche[0].index[0] = 0;
+        info->tranche[0].index[1] = 1;
+        return 1;
+}
+
+static long fake_dmabuf_table(void *context, long *size)
+{
+        (void)context;
+        if (fake.dmabuf_table_fd <= 0)
+        {
+                char name[] = "/tmp/wltableXXXXXX";
+                int fd = mkstemp(name);
+                unsigned char table[32] = {0};
+
+                unlink(name);
+                if (fd < 0 || write(fd, table, sizeof table) != (ssize_t)sizeof table)
+                        abort();
+                fake.dmabuf_table_fd = fd;
+        }
+        *size = 32;
+        return fake.dmabuf_table_fd;
+}
+
+static void *fake_dmabuf_map(void *context, long fd, long size)
+{
+        struct stat st;
+        void *at;
+
+        (void)context;
+        if (fstat((int)fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < size)
+                return 0;
+        at = mmap(0, (size_t)size, PROT_READ, MAP_SHARED, (int)fd, 0);
+        if (at == MAP_FAILED)
+                return 0;
+        fake.maps++;
+        fake.dmabuf_maps++;
+        return at;
+}
+
 static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
-    fake_locks, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push, fake_clip_clear};
+    fake_locks, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
+    fake_clip_clear};
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -155459,7 +155525,7 @@ static void wl_file_put(long fd, long offset, const void *bytes, long count)
 struct session
 {
         struct wlc *c;
-        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback, data, primary;
+        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback, data, primary, dmabuf;
         long fd;
 };
 
@@ -155491,6 +155557,7 @@ static void session_open(struct session *s)
         wl_global(s->c, s->registry, WLI_wl_subcompositor, 1);
         s->data = wl_global(s->c, s->registry, WLI_wl_data_device_manager, 3);
         s->primary = wl_global(s->c, s->registry, WLI_zwp_primary_selection_device_manager_v1, 1);
+        s->dmabuf = wl_global(s->c, s->registry, WLI_zwp_linux_dmabuf_v1, 4);
 }
 
 /* A toplevel, configured and acknowledged, with a buffer of 32 by 24 of one colour shown. */
@@ -155528,6 +155595,8 @@ static void wl_reset(void)
 {
         if (fake.keymap_fd > 0)
                 close((int)fake.keymap_fd);
+        if (fake.dmabuf_table_fd > 0)
+                close(fake.dmabuf_table_fd);
         memset(&fake, 0, sizeof fake);
         fake.caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
         fake.screen = (struct wayland_screen){0, 0, 1280, 720, 100, 60000, 340, 190, "Virtual-1"};
@@ -158350,6 +158419,329 @@ static void test_cursor(void)
         wayland_stop();
 }
 
+/* ---- dma-bufs ---- */
+
+#define DRM_ARGB8888 0x34325241L
+#define DRM_XRGB8888 0x34325258L
+
+/* A file of height rows of stride bytes whose pixel at (x, y) says so, like a dma-buf's pages (the fake takes any file for one). */
+static long dmabuf_file(long width, long stride, long height, unsigned base)
+{
+        long fd = wl_file(stride * height, 0);
+        unsigned *row = calloc(1, (size_t)stride);
+
+        for (long y = 0; y < height; y++)
+        {
+                memset(row, 0, (size_t)stride);
+                for (long x = 0; x < width; x++)
+                        row[x] = base | (unsigned)(y << 8) | (unsigned)x;
+                wl_file_put(fd, y * stride, row, stride);
+        }
+        free(row);
+        return fd;
+}
+
+/* One plane added to a params object made and given. */
+static unsigned long dmabuf_params(struct session *s, long fd, long plane, long offset, long stride, long modifier_low)
+{
+        struct wlc *c = s->c;
+        unsigned long params = wlc_id(c, WLI_zwp_linux_buffer_params_v1, 4);
+
+        wlc_send(c, s->dmabuf, WLQ_zwp_linux_dmabuf_v1_create_params, params);
+        if (fd >= 0)
+                wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_add, fd, plane, offset, stride, 0L, modifier_low);
+        return params;
+}
+
+/* A buffer made at once from a file of width by height pixels. */
+static unsigned long dmabuf_buffer(struct session *s, long width, long height, unsigned base, long format)
+{
+        struct wlc *c = s->c;
+        long stride = width * 4 + 16;
+        unsigned long params = dmabuf_params(s, dmabuf_file(width, stride, height, base), 0, 0, stride, 0), buffer = wlc_id(c, WLI_wl_buffer, 1);
+
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create_immed, buffer, width, height, format, 0L);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_destroy);
+        return buffer;
+}
+
+static void dmabuf_commit(struct session *s, unsigned long buffer, long width, long height)
+{
+        wlc_send(s->c, s->surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(s->c, s->surface, WLQ_wl_surface_damage_buffer, 0L, 0L, width, height);
+        wlc_send(s->c, s->surface, WLQ_wl_surface_commit);
+}
+
+/* How a feedback object is told: the table, the device, each tranche, done. */
+static int feedback_in_order(struct wlc *c, unsigned long object, const long *want, long count)
+{
+        long seen = 0;
+
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].object == object)
+                {
+                        if (seen >= count || c->ev[at].opcode != want[seen])
+                                return 0;
+                        seen++;
+                }
+        return seen == count;
+}
+
+static void test_dmabuf(void)
+{
+        struct session s, other;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long feedback, buffer, params, made;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        WLCHECK(s.dmabuf != 0, "zwp_linux_dmabuf_v1 is offered, at version 4, when the host takes dma-bufs");
+
+        /* the feedback of version 4: the table, the main device, a tranche, and done, in that order */
+        feedback = wlc_id(c, WLI_zwp_linux_dmabuf_feedback_v1, 4);
+        wlc_forget(c);
+        wlc_send(c, s.dmabuf, WLQ_zwp_linux_dmabuf_v1_get_default_feedback, feedback);
+        {
+                static const long order[] = {WLE_zwp_linux_dmabuf_feedback_v1_format_table,         WLE_zwp_linux_dmabuf_feedback_v1_main_device,
+                                             WLE_zwp_linux_dmabuf_feedback_v1_tranche_target_device, WLE_zwp_linux_dmabuf_feedback_v1_tranche_flags,
+                                             WLE_zwp_linux_dmabuf_feedback_v1_tranche_formats,      WLE_zwp_linux_dmabuf_feedback_v1_tranche_done,
+                                             WLE_zwp_linux_dmabuf_feedback_v1_done};
+
+                WLCHECK(c->errors == 0 && c->malformed == 0 && feedback_in_order(c, feedback, order, 7), "the feedback is told in the protocol's order (%s)",
+                        c->error_text);
+        }
+        e = wlc_take(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_format_table);
+        WLCHECK(e && e->fd_count == 1 && e->u[0] == 32, "the table is a descriptor of two pairs of sixteen bytes");
+        e = wlc_take(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_main_device);
+        WLCHECK(e && e->u[0] == 8, "the main device is a dev_t's eight bytes");
+        e = wlc_take(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_tranche_target_device);
+        e = wlc_take(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_tranche_flags);
+        WLCHECK(e && e->u[0] == 0, "the tranche has no flags");
+        e = wlc_take(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_tranche_formats);
+        WLCHECK(e && e->u[0] == 4, "and names both pairs, two bytes each");
+        wlc_send(c, feedback, WLQ_zwp_linux_dmabuf_feedback_v1_destroy);
+
+        /* a buffer made at once, shown, and its picture read through the descriptor */
+        buffer = dmabuf_buffer(&s, 16, 8, 0xff000000u, DRM_XRGB8888);
+        WLCHECK(c->errors == 0, "a buffer is made of a file the host maps (%s)", c->error_text);
+        wlc_forget(c);
+        dmabuf_commit(&s, buffer, 16, 8);
+        WLCHECK(c->errors == 0 && fake.row[0].picture_w == 16 && fake.row[0].picture_h == 8 && fake.row[0].pixels[5 * FAKE_W + 9] == PATTERN(9, 5) &&
+                    fake.row[0].pixels[0] == PATTERN(0, 0) && fake.row[0].pixels[7 * FAKE_W + 15] == PATTERN(15, 7),
+                "its pixels are the window's (%ldx%ld, %08x)", fake.row[0].picture_w, fake.row[0].picture_h, fake.row[0].pixels[5 * FAKE_W + 9]);
+        WLCHECK(fake.syncs == 1 && wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 1, "read through its descriptor once, and released after (%ld syncs)",
+                fake.syncs);
+
+        /* a buffer made by create: told in a created event, with an id of the server's */
+        {
+                long stride = 16 * 4 + 16;
+
+                params = dmabuf_params(&s, dmabuf_file(16, stride, 8, 0xff000000u | 0x400000u), 0, 0, stride, 0);
+                wlc_forget(c);
+                wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_ARGB8888, 0L);
+                e = wlc_take(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_created);
+                made = e ? e->u[0] : 0;
+                WLCHECK(made >= WAYLAND_SERVER_BASE && c->errors == 0, "create is answered with created and an id of the server's (%s)", c->error_text);
+        }
+        dmabuf_commit(&s, made, 16, 8);
+        WLCHECK(c->errors == 0 && fake.row[0].pixels[3 * FAKE_W + 4] == (PATTERN(4, 3) | 0x400000u), "and that buffer is shown (%08x)", fake.row[0].pixels[3 * FAKE_W + 4]);
+        wlc_send(c, made, WLQ_wl_buffer_destroy);
+        WLCHECK(c->errors == 0, "a buffer of the server's id is destroyed as any");
+
+        /* a picture the host did not read (the buffer's writer was not done) is not shown, and the next is shown whole */
+        buffer = dmabuf_buffer(&s, 16, 8, 0xff100000u, DRM_XRGB8888);
+        fake.skip_next = 1;
+        dmabuf_commit(&s, buffer, 16, 8);
+        WLCHECK(c->errors == 0 && fake.row[0].pixels[3 * FAKE_W + 4] == (PATTERN(4, 3) | 0x400000u), "a picture the host skipped changes nothing");
+        buffer = dmabuf_buffer(&s, 16, 8, 0xff200000u, DRM_XRGB8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 1L, 1L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x200000u), "and the next, of one pixel's damage, is the whole of it (%08x)", fake.row[0].pixels[6 * FAKE_W + 12]);
+
+        /* the rules of params */
+        wlc_end(c);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_add, dmabuf_file(16, 80, 8, 0), 0L, 0L, 80L, 0L, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_plane_set), "a plane set twice is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 4, 0, 80, 0);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_plane_idx), "a plane past the fourth is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, -1, 0, 0, 0, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_incomplete), "a buffer with no plane is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 1, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_incomplete), "a buffer with only a second plane is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_add, dmabuf_file(16, 80, 8, 0), 1L, 0L, 80L, 0L, 0L);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_incomplete), "a format of one plane given two is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, 0x30303030L, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_invalid_format), "a format not offered is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 0L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions), "a width of nothing is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 100000L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions), "a width past the most is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 32, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds), "a stride less than a row is refused");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 83, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds), "a stride that is not whole pixels is refused");
+        wlc_end(c);
+
+        /* params that made a buffer make no second */
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_already_used), "params that made a buffer make no second");
+        wlc_end(c);
+
+        /* what cannot be made is a failed event, or for the buffer made at once the client's error */
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_forget(c);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 100L, DRM_XRGB8888, 0L);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_failed) == 1,
+                "a buffer larger than its file is a failed (%s)", c->error_text);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_add, dmabuf_file(16, 80, 8, 0), 0L, 0L, 80L, 0L, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_already_used), "params that were used take no more");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 1);
+        wlc_forget(c);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_failed) == 1,
+                "a modifier that was not offered is a failed");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 1);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create_immed, wlc_id(c, WLI_wl_buffer, 1), 16L, 8L, DRM_XRGB8888, 0L);
+        WLCHECK(refused_with(c, WLN_zwp_linux_buffer_params_v1_error_invalid_wl_buffer), "and for the buffer made at once it is the client's error");
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_forget(c);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 16L, 8L, DRM_XRGB8888, 1L);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_failed) == 1, "flags the shim does not do are a failed");
+        wlc_end(c);
+
+        /* the caps: a client holds at most 48 buffers, each with a descriptor, and params with descriptors given are closed with it */
+        session_open(&s);
+        c = s.c;
+        {
+                long failed = 0, created = 0;
+
+                for (int at = 0; at < WAYLAND_DMABUFS + 3; at++)
+                {
+                        params = dmabuf_params(&s, dmabuf_file(4, 32, 2, 0), 0, 0, 32, 0);
+                        wlc_forget(c);
+                        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_create, 4L, 2L, DRM_XRGB8888, 0L);
+                        failed += (long)wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_failed);
+                        created += (long)wlc_count(c, WLI_zwp_linux_buffer_params_v1, WLE_zwp_linux_buffer_params_v1_created);
+                        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_destroy);
+                }
+                WLCHECK(c->errors == 0 && created == WAYLAND_DMABUFS && failed == 3, "a client has 48 dma-buf buffers and no more (%ld made, %ld failed)", created, failed);
+        }
+        wlc_end(c);
+        session_open(&s);
+        c = s.c;
+        for (int at = 0; at < 3; at++)
+                params = dmabuf_params(&s, dmabuf_file(16, 80, 8, 0), 0, 0, 80, 0);
+        wlc_send(c, params, WLQ_zwp_linux_buffer_params_v1_destroy);
+        WLCHECK(c->errors == 0, "params destroyed with their descriptor close it (%s)", c->error_text);
+        wlc_end(c); /* two params still holding descriptors, and the client gone */
+        leak_check("dmabuf");
+        WLCHECK(fds_balanced(), "every descriptor of the dma-buf rows was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+
+        /* a version 3 client is told each pair, and has no feedback */
+        session_open(&other);
+        c = other.c;
+        {
+                unsigned long old = wl_global(c, other.registry, WLI_zwp_linux_dmabuf_v1, 3);
+
+                WLCHECK(wlc_count(c, WLI_zwp_linux_dmabuf_v1, WLE_zwp_linux_dmabuf_v1_format) >= 2 &&
+                            wlc_count(c, WLI_zwp_linux_dmabuf_v1, WLE_zwp_linux_dmabuf_v1_modifier) >= 2,
+                        "a client of version 3 is told the formats and the modifiers when it binds");
+                (void)old;
+        }
+        wlc_end(c);
+
+        /* the host that takes none: the global is not offered, and is when it takes some again, with the feedback sent again */
+        fake.dmabuf_off = 1;
+        wayland_dmabuf_changed();
+        session_open(&other);
+        c = other.c;
+        {
+                long listed = 0;
+
+                for (long at = 0; at < c->events; at++)
+                        listed += c->ev[at].iface == WLI_wl_registry && c->ev[at].opcode == WLE_wl_registry_global &&
+                                  !strcmp(c->ev[at].text[1], "zwp_linux_dmabuf_v1");
+                WLCHECK(listed == 0 && other.dmabuf == 0, "a host that takes no dma-bufs has no global for them");
+        }
+        wlc_end(c);
+        fake.dmabuf_off = 0;
+        wayland_dmabuf_changed();
+        session_open(&other);
+        c = other.c;
+        other.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, other.compositor, WLQ_wl_compositor_create_surface, other.surface);
+        feedback = wlc_id(c, WLI_zwp_linux_dmabuf_feedback_v1, 4);
+        wlc_send(c, other.dmabuf, WLQ_zwp_linux_dmabuf_v1_get_surface_feedback, feedback, other.surface);
+        wlc_forget(c);
+        wayland_dmabuf_changed();
+        wlc_pump(c);
+        WLCHECK(c->errors == 0 && wlc_count(c, WLI_zwp_linux_dmabuf_feedback_v1, WLE_zwp_linux_dmabuf_feedback_v1_done) == 1,
+                "a change is sent to the feedback objects again (%s)", c->error_text);
+        wlc_end(c);
+        leak_check("dmabuf global");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -158369,6 +158761,7 @@ int main(int argc, char **argv)
         test_subsurfaces();
         test_geometry();
         test_cursor();
+        test_dmabuf();
         test_tree_fuzz(rounds);
         test_clipboard();
         test_clip_fuzz(rounds);

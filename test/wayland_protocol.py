@@ -62,6 +62,9 @@ CONFIG = [
         "zwp_primary_selection_device_manager_v1", "zwp_primary_selection_device_v1",
         "zwp_primary_selection_offer_v1", "zwp_primary_selection_source_v1",
     ]),
+    ("protocols", "stable/linux-dmabuf/linux-dmabuf-v1.xml", [
+        "zwp_linux_dmabuf_v1", "zwp_linux_buffer_params_v1", "zwp_linux_dmabuf_feedback_v1",
+    ]),
     ("protocols", "unstable/idle-inhibit/idle-inhibit-unstable-v1.xml", [
         "zwp_idle_inhibit_manager_v1", "zwp_idle_inhibitor_v1",
     ]),

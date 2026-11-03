@@ -6439,11 +6439,24 @@ lane_wayland()
                         wayland_xkb="-DHAVE_XKB $(pkg-config --cflags --libs xkbcommon)"
                         wayland_input=1
                 fi
+                # With gbm, the protocol's XML and a render node the client draws into dma-bufs too (-b), which the dma-buf rows read.
+                wayland_dmabuf=
+                wayland_dmabuf_libs=
+                wayland_dmabuf_xml=$(pkg-config --variable=pkgdatadir wayland-protocols 2> /dev/null)/stable/linux-dmabuf/linux-dmabuf-v1.xml
+                wayland_dmabuf_code=
+                if [ -r "$wayland_dmabuf_xml" ] && pkg-config --exists gbm 2> /dev/null && [ -c /dev/dri/renderD128 ]; then
+                        wayland_dmabuf="-DHAVE_DMABUF $(pkg-config --cflags gbm)"
+                        wayland_dmabuf_libs=$(pkg-config --libs gbm)
+                        wayland_dmabuf_code="$work/client/linux-dmabuf-code.c"
+                        wayland-scanner client-header "$wayland_dmabuf_xml" "$work/client/linux-dmabuf-client.h" &&
+                                wayland-scanner private-code "$wayland_dmabuf_xml" "$work/client/linux-dmabuf-code.c" || wayland_dmabuf=
+                fi
                 # shellcheck disable=SC2046
                 wayland_row client-build sh -c "wayland-scanner client-header '$wayland_xml' '$work/client/xdg-shell-client.h' &&
                         wayland-scanner private-code '$wayland_xml' '$work/client/xdg-shell-code.c' &&
-                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb test/wayland_shm.c '$work/client/xdg-shell-code.c' \
-                        $(pkg-config --cflags --libs wayland-client) -o '$work/client/wayland-shm'"
+                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb $wayland_dmabuf test/wayland_shm.c '$work/client/xdg-shell-code.c' \
+                        ${wayland_dmabuf:+$wayland_dmabuf_code} \
+                        $(pkg-config --cflags --libs wayland-client) $wayland_dmabuf_libs -o '$work/client/wayland-shm'"
                 if [ -x "$work/client/wayland-shm" ] && freestanding programs/shell.c "$work/shell-wayland" "" -DCONFIG_MOONWATER_WAYLAND; then
                         wayland_e2e=0
                         unshare -rm sh test/wayland_e2e.sh "$work/shell-wayland" "$work/client/wayland-shm" \

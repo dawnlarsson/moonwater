@@ -37,6 +37,11 @@
 #define COMPOSITOR_WL_CHUNK 4096                 // PIPE_BUF: a write of this much to a pipe that poll said is ready does not wait
 #define COMPOSITOR_WL_PULL 1
 #define COMPOSITOR_WL_PUSH 2
+#define COMPOSITOR_WL_DMABUF_SYNC 0x40086200u         // DMA_BUF_IOCTL_SYNC
+#define COMPOSITOR_WL_DMABUF_WAIT_NS 30000000ull      // how long a dma-buf's writer is waited for
+#define COMPOSITOR_WL_DMABUF_SLOW_NS 2000000000ull    // after one that did not finish in time, a client's are not waited for this long
+#define COMPOSITOR_WL_FOURCC_ARGB8888 0x34325241u
+#define COMPOSITOR_WL_FOURCC_XRGB8888 0x34325258u
 
 _Static_assert(WAYLAND_ROWS == WINDOWS, "the shim's rows are the compositor's table");
 
@@ -70,6 +75,9 @@ static struct
                 unsigned long done, total;
                 positive deadline;
         } transfer[COMPOSITOR_WL_TRANSFERS];
+        int dmabuf_table;               // the file of format and modifier pairs the feedback names, made the first time
+        unsigned long render;           // the render node clients allocate on (a dev_t), found the first time; 1 when there is none
+        positive slow_until[WAYLAND_CLIENTS];
         long poll_at[COMPOSITOR_WL_TRANSFERS], poll_count; // the transfers the loop is waiting on, in the order of its list
         int poll_fd[COMPOSITOR_WL_TRANSFERS];
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
@@ -566,6 +574,8 @@ static void compositor_wl_laid(int row, long x1, long y1, long x2, long y2)
         compositor_wl.laying[row].y2 = (int)y2;
 }
 
+static int compositor_wl_dmabuf_ready(long client, int fd);
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         struct windows *table = compositor.table;
@@ -573,10 +583,17 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         long width = picture->row_width, height = picture->row_height;
         long count = picture->full || !picture->damages ? 1 : picture->damages;
         unsigned int *to;
+        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
 
         (void)context;
         if (row < 0 || row >= WINDOWS || !table)
                 return -1;
+        if (picture->sync_fd >= 0 && picture->pixels)
+        {
+                if (!compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
+                        return 1;
+                compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        }
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
         if (!compositor_wl.laying[row].open)
@@ -645,6 +662,11 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                                      (unsigned long)picture->stride / 4, (unsigned long)(right - left),
                                                      (unsigned long)(bottom - top));
                         compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
+                }
+                if (picture->sync_fd >= 0)
+                {
+                        sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
+                        compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
                 }
                 if (compositor_wl_cut(picture->pixels))
                 {
@@ -888,6 +910,218 @@ static long compositor_wl_locks(void *context)
 {
         (void)context;
         return compositor.keymap.caps ? 2 : 0;
+}
+
+/* ---- dma-bufs ---- */
+
+/*
+        What a client that draws with the GPU is told it may hand over: linear ARGB8888 and XRGB8888 on the render node of the
+        card the compositor shows on (or, with no card, the first render node there is), because what is composed from a buffer
+        here is read by the processor, which can read linear memory and no tiled or compressed kind. A buffer the processor
+        cannot wait for is skipped, and one client that makes it wait is not waited for again for a while.
+*/
+static const struct
+{
+        unsigned int format;
+        unsigned long modifier;
+} compositor_wl_dmabuf_entry[2] = {{COMPOSITOR_WL_FOURCC_ARGB8888, 0}, {COMPOSITOR_WL_FOURCC_XRGB8888, 0}};
+
+// A device number as the kernel's stat gives it (the C library's dev_t).
+static unsigned long compositor_wl_dev(unsigned long major, unsigned long minor)
+{
+        return ((major & 0xfffUL) << 8) | (minor & 0xffUL) | ((minor & ~0xffUL) << 12) | ((major & ~0xfffUL) << 32);
+}
+
+// The device number of a node (a statx of its path), 0 for none.
+static unsigned long compositor_wl_node(const char *path)
+{
+        unsigned char info[256];
+
+        memory_zero(info, sizeof info);
+        // struct statx: stx_rdev_major at 128 and stx_rdev_minor at 132 (u32 each).
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)path, 0, 0x7ff, (positive)info, 0) < 0)
+                return 0;
+        return compositor_wl_dev(*(unsigned int *)(info + 128), *(unsigned int *)(info + 132));
+}
+
+// A decimal number appended to a path.
+static char *compositor_wl_decimal(char *at, unsigned long value)
+{
+        char digits[24];
+        unsigned int count = 0;
+
+        do
+                digits[count++] = (char)('0' + value % 10);
+        while ((value /= 10) && count < sizeof digits);
+        while (count)
+                *at++ = digits[--count];
+        return at;
+}
+
+static char *compositor_wl_text(char *at, const char *text)
+{
+        while (*text)
+                *at++ = *text++;
+        return at;
+}
+
+/*
+        The render node that goes with the card: the node next to it in sysfs (its device's drm directory holds both), else the first
+        render node the machine has. 0 when there is none.
+*/
+static unsigned long compositor_wl_render_node(void)
+{
+        unsigned char info[256];
+        char path[96], *tail;
+        unsigned long device;
+
+        if (compositor.card >= 0)
+        {
+                memory_zero(info, sizeof info);
+                // AT_EMPTY_PATH: the card's own descriptor.
+                if (compositor_call(syscall(statx), (positive)compositor.card, (positive) "", 0x1000, 0x7ff, (positive)info, 0) >= 0)
+                        for (unsigned long number = 128; number < 192; number++)
+                        {
+                                tail = compositor_wl_text(path, "/sys/dev/char/");
+                                tail = compositor_wl_decimal(tail, *(unsigned int *)(info + 128));
+                                *tail++ = ':';
+                                tail = compositor_wl_decimal(tail, *(unsigned int *)(info + 132));
+                                tail = compositor_wl_text(tail, "/../renderD");
+                                tail = compositor_wl_decimal(tail, number);
+                                *tail = 0;
+                                if (compositor_call(syscall(faccessat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0) < 0)
+                                        continue;
+                                tail = compositor_wl_text(path, "/dev/dri/renderD");
+                                tail = compositor_wl_decimal(tail, number);
+                                *tail = 0;
+                                device = compositor_wl_node(path);
+                                if (device)
+                                        return device;
+                        }
+        }
+        for (unsigned long number = 128; number < 192; number++)
+        {
+                tail = compositor_wl_text(path, "/dev/dri/renderD");
+                tail = compositor_wl_decimal(tail, number);
+                *tail = 0;
+                device = compositor_wl_node(path);
+                if (device)
+                        return device;
+        }
+        return 0;
+}
+
+static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
+{
+        (void)context;
+        if (!compositor_wl.render)
+        {
+                unsigned long found = compositor_wl_render_node();
+
+                compositor_wl.render = found ? found : 1;
+        }
+        if (compositor_wl.render == 1)
+                return 0;
+        info->device = compositor_wl.render;
+        info->count = 2;
+        for (long at = 0; at < 2; at++)
+        {
+                info->entry[at].format = compositor_wl_dmabuf_entry[at].format;
+                info->entry[at].modifier = compositor_wl_dmabuf_entry[at].modifier;
+        }
+        info->tranches = 1;
+        info->tranche[0].device = info->device;
+        info->tranche[0].flags = 0;
+        info->tranche[0].count = 2;
+        info->tranche[0].index[0] = 0;
+        info->tranche[0].index[1] = 1;
+        return 1;
+}
+
+// The table the feedback names the pairs by: a sealed file of entries of a format, four bytes of padding and a modifier.
+static long compositor_wl_dmabuf_table(void *context, long *size)
+{
+        unsigned char bytes[32];
+        long fd, done = 0;
+
+        (void)context;
+        if (compositor_wl.dmabuf_table <= 0)
+        {
+                memory_zero(bytes, sizeof bytes);
+                for (long at = 0; at < 2; at++)
+                        for (long byte = 0; byte < 4; byte++)
+                                bytes[at * 16 + byte] = (unsigned char)(compositor_wl_dmabuf_entry[at].format >> (8 * byte));
+                // MFD_CLOEXEC | MFD_ALLOW_SEALING
+                fd = compositor_call(syscall(memfd_create), (positive) "moonwater-dmabuf-table", 3, 0, 0, 0, 0);
+                if (fd < 0)
+                        return -1;
+                while (done < (long)sizeof bytes)
+                {
+                        long put = compositor_call(syscall(write), (positive)fd, (positive)(bytes + done), sizeof bytes - (unsigned long)done, 0, 0, 0);
+
+                        if (put <= 0)
+                        {
+                                system_close((int)fd);
+                                return -1;
+                        }
+                        done += put;
+                }
+                compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0); // F_ADD_SEALS: all four
+                compositor_wl.dmabuf_table = (int)fd;
+        }
+        *size = 32;
+        return compositor_wl.dmabuf_table;
+}
+
+/*
+        A descriptor that is a dma-buf of at least size bytes, mapped read-only and shared, in the table the SIGBUS handler reads, like a pool.
+        A dma-buf is told from any other file by the one ioctl that gives it the answer EINVAL (a sync with no direction), where another
+        file says it knows no such ioctl; its size is what seeking to its end gives.
+*/
+static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
+{
+        unsigned long none = 0;
+        long extent, got;
+
+        (void)context;
+        if (size < 1 || compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&none, 0, 0, 0) != -22)
+                return 0;
+        extent = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
+        if (extent < size)
+                return 0;
+        got = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)fd, 0);
+        if (got < 0 && got > -4096)
+                return 0;
+        for (long at = 0; at < WAYLAND_CLIENTS * WAYLAND_POOLS; at++)
+                if (!compositor_wl.map[at].at)
+                {
+                        compositor_wl.map[at].bad = 0;
+                        compositor_wl.map[at].size = (unsigned long)size;
+                        compositor_wl.map[at].at = (unsigned long)got;
+                        return (void *)got;
+                }
+        compositor_call(syscall(munmap), (positive)got, (positive)size, 0, 0, 0, 0);
+        return 0;
+}
+
+/*
+        Whether a dma-buf has nobody writing it, for a client's picture: the descriptor says it can be read when the GPU is done. A short
+        wait for one that is not; if it is not done then, this picture is not read and its client is not waited for again for a while,
+        so a buffer that never finishes cannot hold the compositor more than once in two seconds.
+*/
+static int compositor_wl_dmabuf_ready(long client, int fd)
+{
+        struct compositor_poll watch = {fd, COMPOSITOR_POLLIN, 0};
+        positive now = clock_monotonic_nanoseconds(), wait[2] = {0, 0};
+
+        if (client < 0 || client >= WAYLAND_CLIENTS || now >= compositor_wl.slow_until[client])
+                wait[1] = COMPOSITOR_WL_DMABUF_WAIT_NS;
+        compositor_call(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 0, 0);
+        if (watch.returned & COMPOSITOR_POLLIN)
+                return 1;
+        if (client >= 0 && client < WAYLAND_CLIENTS)
+                compositor_wl.slow_until[client] = now + COMPOSITOR_WL_DMABUF_SLOW_NS;
+        return 0;
 }
 
 /* ---- the clipboard ---- */
@@ -1197,6 +1431,9 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_repeat,
     compositor_wl_seat,
     compositor_wl_locks,
+    compositor_wl_dmabuf_info,
+    compositor_wl_dmabuf_table,
+    compositor_wl_dmabuf_map,
     compositor_wl_clip_size,
     compositor_wl_clip_pull,
     compositor_wl_clip_abort,
@@ -1301,6 +1538,7 @@ static void compositor_wl_accept(void)
                         continue;
                 }
                 compositor_wl.fd[slot] = (int)fd;
+                compositor_wl.slow_until[slot] = 0;
                 compositor_wl.asked[slot] = 0;
                 compositor_wl.pid[slot] = credentials[0];
                 compositor_wl.uid[slot] = credentials[1];
@@ -1689,6 +1927,9 @@ static void compositor_wl_stop(void)
         for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
                 if (compositor_wl.transfer[at].state)
                         compositor_wl_transfer_free(at);
+        if (compositor_wl.dmabuf_table > 0)
+                system_close(compositor_wl.dmabuf_table);
+        compositor_wl.dmabuf_table = 0;
         for (long at = 0; at < 16; at++)
                 if (compositor_wl.keymap[at] >= 0)
                         system_close(compositor_wl.keymap[at]);

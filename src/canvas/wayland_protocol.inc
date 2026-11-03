@@ -48,6 +48,9 @@ enum {
         WLI_zwp_primary_selection_device_v1,
         WLI_zwp_primary_selection_offer_v1,
         WLI_zwp_primary_selection_source_v1,
+        WLI_zwp_linux_dmabuf_v1,
+        WLI_zwp_linux_buffer_params_v1,
+        WLI_zwp_linux_dmabuf_feedback_v1,
         WLI_zwp_idle_inhibit_manager_v1,
         WLI_zwp_idle_inhibitor_v1,
         WLI_zwp_relative_pointer_manager_v1,
@@ -109,6 +112,9 @@ enum {
 #define WLV_zwp_primary_selection_device_v1 1
 #define WLV_zwp_primary_selection_offer_v1 1
 #define WLV_zwp_primary_selection_source_v1 1
+#define WLV_zwp_linux_dmabuf_v1 6
+#define WLV_zwp_linux_buffer_params_v1 6
+#define WLV_zwp_linux_dmabuf_feedback_v1 6
 #define WLV_zwp_idle_inhibit_manager_v1 1
 #define WLV_zwp_idle_inhibitor_v1 1
 #define WLV_zwp_relative_pointer_manager_v1 1
@@ -540,6 +546,41 @@ enum {
 #define WLQ_zwp_primary_selection_source_v1_destroy 1
 #define WLE_zwp_primary_selection_source_v1_send 0
 #define WLE_zwp_primary_selection_source_v1_cancelled 1
+#define WLQ_zwp_linux_dmabuf_v1_destroy 0
+#define WLQ_zwp_linux_dmabuf_v1_create_params 1
+#define WLQ_zwp_linux_dmabuf_v1_get_default_feedback 2
+#define WLQ_zwp_linux_dmabuf_v1_get_surface_feedback 3
+#define WLE_zwp_linux_dmabuf_v1_format 0
+#define WLE_zwp_linux_dmabuf_v1_modifier 1
+#define WLQ_zwp_linux_buffer_params_v1_destroy 0
+#define WLQ_zwp_linux_buffer_params_v1_add 1
+#define WLQ_zwp_linux_buffer_params_v1_create 2
+#define WLQ_zwp_linux_buffer_params_v1_create_immed 3
+#define WLQ_zwp_linux_buffer_params_v1_set_sampling_device 4
+#define WLE_zwp_linux_buffer_params_v1_created 0
+#define WLE_zwp_linux_buffer_params_v1_failed 1
+#define WLN_zwp_linux_buffer_params_v1_error_already_used 0
+#define WLN_zwp_linux_buffer_params_v1_error_plane_idx 1
+#define WLN_zwp_linux_buffer_params_v1_error_plane_set 2
+#define WLN_zwp_linux_buffer_params_v1_error_incomplete 3
+#define WLN_zwp_linux_buffer_params_v1_error_invalid_format 4
+#define WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions 5
+#define WLN_zwp_linux_buffer_params_v1_error_out_of_bounds 6
+#define WLN_zwp_linux_buffer_params_v1_error_invalid_wl_buffer 7
+#define WLN_zwp_linux_buffer_params_v1_error_invalid_dev_t_size 8
+#define WLN_zwp_linux_buffer_params_v1_flags_y_invert 1
+#define WLN_zwp_linux_buffer_params_v1_flags_interlaced 2
+#define WLN_zwp_linux_buffer_params_v1_flags_bottom_first 4
+#define WLQ_zwp_linux_dmabuf_feedback_v1_destroy 0
+#define WLE_zwp_linux_dmabuf_feedback_v1_done 0
+#define WLE_zwp_linux_dmabuf_feedback_v1_format_table 1
+#define WLE_zwp_linux_dmabuf_feedback_v1_main_device 2
+#define WLE_zwp_linux_dmabuf_feedback_v1_tranche_done 3
+#define WLE_zwp_linux_dmabuf_feedback_v1_tranche_target_device 4
+#define WLE_zwp_linux_dmabuf_feedback_v1_tranche_formats 5
+#define WLE_zwp_linux_dmabuf_feedback_v1_tranche_flags 6
+#define WLN_zwp_linux_dmabuf_feedback_v1_tranche_flags_scanout 1
+#define WLN_zwp_linux_dmabuf_feedback_v1_tranche_flags_sampling 2
 #define WLQ_zwp_idle_inhibit_manager_v1_destroy 0
 #define WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor 1
 #define WLQ_zwp_idle_inhibitor_v1_destroy 0
@@ -822,6 +863,27 @@ static const unsigned char wl_q_zwp_primary_selection_source_v1_offer[] = {'s', 
 static const unsigned char wl_q_zwp_primary_selection_source_v1_destroy[] = {0, 0};
 static const unsigned char wl_e_zwp_primary_selection_source_v1_send[] = {'s', 0, 'h', 0, 0, 0};
 static const unsigned char wl_e_zwp_primary_selection_source_v1_cancelled[] = {0, 0};
+static const unsigned char wl_q_zwp_linux_dmabuf_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_zwp_linux_dmabuf_v1_create_params[] = {'n', WLI_zwp_linux_buffer_params_v1, 0, 0};
+static const unsigned char wl_q_zwp_linux_dmabuf_v1_get_default_feedback[] = {'n', WLI_zwp_linux_dmabuf_feedback_v1, 0, 0};
+static const unsigned char wl_q_zwp_linux_dmabuf_v1_get_surface_feedback[] = {'n', WLI_zwp_linux_dmabuf_feedback_v1, 'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_v1_format[] = {'u', 0, 0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_v1_modifier[] = {'u', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_zwp_linux_buffer_params_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_zwp_linux_buffer_params_v1_add[] = {'h', 0, 'u', 0, 'u', 0, 'u', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_zwp_linux_buffer_params_v1_create[] = {'i', 0, 'i', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_zwp_linux_buffer_params_v1_create_immed[] = {'n', WLI_wl_buffer, 'i', 0, 'i', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_zwp_linux_buffer_params_v1_set_sampling_device[] = {'a', 0, 0, 0};
+static const unsigned char wl_e_zwp_linux_buffer_params_v1_created[] = {'n', WLI_wl_buffer, 0, 0};
+static const unsigned char wl_e_zwp_linux_buffer_params_v1_failed[] = {0, 0};
+static const unsigned char wl_q_zwp_linux_dmabuf_feedback_v1_destroy[] = {0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_feedback_v1_done[] = {0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_feedback_v1_format_table[] = {'h', 0, 'u', 0, 0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_feedback_v1_main_device[] = {'a', 0, 0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_feedback_v1_tranche_done[] = {0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_feedback_v1_tranche_target_device[] = {'a', 0, 0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_feedback_v1_tranche_formats[] = {'a', 0, 0, 0};
+static const unsigned char wl_e_zwp_linux_dmabuf_feedback_v1_tranche_flags[] = {'u', 0, 0, 0};
 static const unsigned char wl_q_zwp_idle_inhibit_manager_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_zwp_idle_inhibit_manager_v1_create_inhibitor[] = {'n', WLI_zwp_idle_inhibitor_v1, 'o', WLI_wl_surface, 0, 0};
 static const unsigned char wl_q_zwp_idle_inhibitor_v1_destroy[] = {0, 0};
@@ -1214,6 +1276,39 @@ static const struct wl_message wl_events_zwp_primary_selection_source_v1[] = {
         {1, 0, wl_e_zwp_primary_selection_source_v1_send},
         {1, 0, wl_e_zwp_primary_selection_source_v1_cancelled},
 };
+static const struct wl_message wl_requests_zwp_linux_dmabuf_v1[] = {
+        {1, 1, wl_q_zwp_linux_dmabuf_v1_destroy},
+        {1, 0, wl_q_zwp_linux_dmabuf_v1_create_params},
+        {4, 0, wl_q_zwp_linux_dmabuf_v1_get_default_feedback},
+        {4, 0, wl_q_zwp_linux_dmabuf_v1_get_surface_feedback},
+};
+static const struct wl_message wl_events_zwp_linux_dmabuf_v1[] = {
+        {1, 0, wl_e_zwp_linux_dmabuf_v1_format},
+        {3, 0, wl_e_zwp_linux_dmabuf_v1_modifier},
+};
+static const struct wl_message wl_requests_zwp_linux_buffer_params_v1[] = {
+        {1, 1, wl_q_zwp_linux_buffer_params_v1_destroy},
+        {1, 0, wl_q_zwp_linux_buffer_params_v1_add},
+        {1, 0, wl_q_zwp_linux_buffer_params_v1_create},
+        {2, 0, wl_q_zwp_linux_buffer_params_v1_create_immed},
+        {6, 0, wl_q_zwp_linux_buffer_params_v1_set_sampling_device},
+};
+static const struct wl_message wl_events_zwp_linux_buffer_params_v1[] = {
+        {1, 0, wl_e_zwp_linux_buffer_params_v1_created},
+        {1, 0, wl_e_zwp_linux_buffer_params_v1_failed},
+};
+static const struct wl_message wl_requests_zwp_linux_dmabuf_feedback_v1[] = {
+        {1, 1, wl_q_zwp_linux_dmabuf_feedback_v1_destroy},
+};
+static const struct wl_message wl_events_zwp_linux_dmabuf_feedback_v1[] = {
+        {1, 0, wl_e_zwp_linux_dmabuf_feedback_v1_done},
+        {1, 0, wl_e_zwp_linux_dmabuf_feedback_v1_format_table},
+        {1, 0, wl_e_zwp_linux_dmabuf_feedback_v1_main_device},
+        {1, 0, wl_e_zwp_linux_dmabuf_feedback_v1_tranche_done},
+        {1, 0, wl_e_zwp_linux_dmabuf_feedback_v1_tranche_target_device},
+        {1, 0, wl_e_zwp_linux_dmabuf_feedback_v1_tranche_formats},
+        {1, 0, wl_e_zwp_linux_dmabuf_feedback_v1_tranche_flags},
+};
 static const struct wl_message wl_requests_zwp_idle_inhibit_manager_v1[] = {
         {1, 1, wl_q_zwp_idle_inhibit_manager_v1_destroy},
         {1, 0, wl_q_zwp_idle_inhibit_manager_v1_create_inhibitor},
@@ -1327,6 +1422,9 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_zwp_primary_selection_device_v1] = {"zwp_primary_selection_device_v1", 1, 2, 2, wl_requests_zwp_primary_selection_device_v1, wl_events_zwp_primary_selection_device_v1},
         [WLI_zwp_primary_selection_offer_v1] = {"zwp_primary_selection_offer_v1", 1, 2, 1, wl_requests_zwp_primary_selection_offer_v1, wl_events_zwp_primary_selection_offer_v1},
         [WLI_zwp_primary_selection_source_v1] = {"zwp_primary_selection_source_v1", 1, 2, 2, wl_requests_zwp_primary_selection_source_v1, wl_events_zwp_primary_selection_source_v1},
+        [WLI_zwp_linux_dmabuf_v1] = {"zwp_linux_dmabuf_v1", 6, 4, 2, wl_requests_zwp_linux_dmabuf_v1, wl_events_zwp_linux_dmabuf_v1},
+        [WLI_zwp_linux_buffer_params_v1] = {"zwp_linux_buffer_params_v1", 6, 5, 2, wl_requests_zwp_linux_buffer_params_v1, wl_events_zwp_linux_buffer_params_v1},
+        [WLI_zwp_linux_dmabuf_feedback_v1] = {"zwp_linux_dmabuf_feedback_v1", 6, 1, 7, wl_requests_zwp_linux_dmabuf_feedback_v1, wl_events_zwp_linux_dmabuf_feedback_v1},
         [WLI_zwp_idle_inhibit_manager_v1] = {"zwp_idle_inhibit_manager_v1", 1, 2, 0, wl_requests_zwp_idle_inhibit_manager_v1, 0},
         [WLI_zwp_idle_inhibitor_v1] = {"zwp_idle_inhibitor_v1", 1, 1, 0, wl_requests_zwp_idle_inhibitor_v1, 0},
         [WLI_zwp_relative_pointer_manager_v1] = {"zwp_relative_pointer_manager_v1", 1, 2, 0, wl_requests_zwp_relative_pointer_manager_v1, 0},

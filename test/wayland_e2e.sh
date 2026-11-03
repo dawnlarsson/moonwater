@@ -128,6 +128,45 @@ else
         row FAIL "a subsurface is on the screen at its place in the window" "window $wx,$wy, subsurface $sub"
 fi
 
+# A client that draws into dma-bufs from the GPU's render node (where the machine has one): its buffer is read through the descriptor,
+# and the window shows its pixels. The one pixel of 255, 234, 0 is at the right edge of the picture, 220 rows down.
+if "$client" -b -n 1 -s -w 64 -h 64 -q > /dev/null 2>&1; then
+        "$client" -b -n 1000000 -s -w 320 -h 240 -q > /dev/null 2>&1 &
+        shown=$!
+        sleep 1
+        set -- $(box)
+        wx=$1
+        wy=$2
+        wx2=$3
+        wy2=$4
+        yellow=$(python3 - "$work/scan.img" 800 600 << 'PY'
+import sys
+raw = open(sys.argv[1], 'rb').read()
+w, h = int(sys.argv[2]), int(sys.argv[3])
+found = []
+for y in range(h):
+    row = raw[y * w * 4:(y + 1) * w * 4]
+    for x in range(w):
+        if row[x * 4:x * 4 + 3] == b'\x00\xea\xff':
+            found.append((x, y))
+print(len(found), found[0][0] if found else -1, found[0][1] if found else -1)
+PY
+)
+        kill "$shown" 2> /dev/null
+        wait "$shown" 2> /dev/null
+        set -- $yellow
+        if [ "$1" = 1 ] && [ "$2" -ge $((wx2 - 1)) ] && [ "$2" -le "$wx2" ] && [ "$3" -ge $((wy + 220)) ] && [ "$3" -le $((wy + 222)) ]; then
+                row ok "a window of dma-bufs is on the screen with the pixels the client drew ($yellow in $wx,$wy to $wx2,$wy2)"
+        else
+                row FAIL "a window of dma-bufs is on the screen with the pixels the client drew" "pixel $yellow, window $wx,$wy to $wx2,$wy2"
+        fi
+        out=$("$client" -b -n 30 -w 200 -h 120 2>&1)
+        case $out in
+        *"frames 30"*) row ok "a client of dma-bufs draws thirty frames, each when the last is released" ;;
+        *) row FAIL "a client of dma-bufs draws thirty frames, each when the last is released" "$out" ;;
+        esac
+fi
+
 # Damage only: the same picture comes of drawing a rectangle at a time.
 out=$("$client" -n 20 -w 200 -h 120 -d 2>&1)
 case $out in
