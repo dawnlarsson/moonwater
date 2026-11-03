@@ -138371,11 +138371,13 @@ static fn field_check(struct ui address_to wui)
                 check("field: and a while after the last it stays drawn, and no frame is due",
                       !ui_text_tick(&t, now + UI_TEXT_BLINK_FOR_NS + 1, &redraw) && redraw && !t.caret_fade);
         }
-        // The caret's width: 1, 2 and 3 pixels at 100 percent (thin, normal, thick), and twice that at 200 percent. An empty field
-        // holds nothing but the caret, so the widest run of pixels that are not the ground is the caret.
+        // The caret's width: 1, 2 and 3 pixels at 100 percent (thin, normal, thick), and each scales with the screen, never to nothing:
+        // a thin caret at 75 percent is one pixel, not the 0 that 0.75 rounds to. An empty field holds nothing but the caret, so the
+        // widest run of pixels that are not the ground is the caret.
         {
                 static const unsigned int places[3] = {UI_CARET_THIN, UI_CARET_MID, UI_CARET_THICK};
                 static const int wanted[3] = {1, 2, 3};
+                static const int scales[4] = {50, 75, 100, 200};
                 unsigned int saved_thick = ui_kit.caret_thick, saved_speed = ui_kit.caret_speed;
                 int scale_was = wui->scale, widths = 0;
 
@@ -138383,11 +138385,13 @@ static fn field_check(struct ui address_to wui)
                 ui_text_set(&t, (const p8 address_to) "", 0);
                 t.focused = true;
                 t.caret_fade = 0;
-                for (int scale = 100; scale <= 200; scale += 100)
+                for (int s = 0; s < 4; s++)
                         for (positive k = 0; k < 3; k++)
                         {
                                 unsigned int *shown = (unsigned int address_to)pixels;
-                                int widest = 0;
+                                int widest = 0, scale = scales[s], want = wanted[k] * scale / 100;
+
+                                want = want > 0 ? want : 1;
 
                                 wui->scale = scale;
                                 ui_kit.caret_thick = places[k];
@@ -138403,9 +138407,9 @@ static fn field_check(struct ui address_to wui)
                                                 widest = run > widest ? run : widest;
                                         }
                                 }
-                                widths += widest == wanted[k] * scale / 100;
+                                widths += widest == want;
                         }
-                check("caret: thin, normal and thick are 1, 2 and 3 pixels, and each scales with the screen", widths == 6);
+                check("caret: thin, normal and thick are 1, 2 and 3 pixels, and each scales with the screen, never to nothing", widths == 12);
                 wui->scale = scale_was;
                 ui_kit.caret_thick = saved_thick;
                 ui_kit.caret_speed = saved_speed;

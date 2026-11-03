@@ -8477,6 +8477,14 @@ static int ui_caret_thick(void)
         return ui_kit.caret_thick == UI_CARET_THIN ? 1 : ui_kit.caret_thick == UI_CARET_THICK ? 3 : 2;
 }
 
+// The caret's width in device pixels: its logical width at the scale, and never less than one (a thin caret is 0 at 75 percent).
+static int ui_caret_px(const struct ui address_to ui)
+{
+        int w = ui_caret_thick() * ui->scale / 100;
+
+        return w > 0 ? w : 1;
+}
+
 // A fade's cover, 0 to UI_CARET_FULL, at `at` ns into a fade of `edge` ns: smoothstep, rising or falling.
 static unsigned int ui_caret_ramp(b64 at, b64 edge, int rising)
 {
@@ -9706,7 +9714,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         if (caret < l->offset[0] || caret > l->offset[l->count])
                                 continue;
                         ui_fill(ui, origin + ui_text_x_of(l, caret) - (t->doc.overwrite ? 0 : ui_px(ui, 1)), y + ui_px(ui, 1),
-                                t->doc.overwrite ? t->cell : ui_caret_thick() * ui->scale / 100,
+                                t->doc.overwrite ? t->cell : ui_caret_px(ui),
                                 t->line_height - 2 * ui->scale / 100,
                                 ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 * cover / UI_CARET_FULL : cover));
                 }
