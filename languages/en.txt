@@ -171,6 +171,7 @@ ui_field_full	fe02	that is as much as it holds
 =Cursor size	65d4	Cursor size
 =Display	d9b5	Display
 =Editor	bf98	Editor
+=GPU rendering	d4d5	GPU rendering
 =Gallery	4cdd	Gallery
 =Hubs	456d	Hubs
 =Identify	033d	Identify

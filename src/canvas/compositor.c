@@ -8539,6 +8539,9 @@ static bool compositor_setting_kept(const char *path, const char *word, long *va
 }
 
 static void compositor_clip_settings(void);
+#ifndef SHELL_NO_GPU
+static void compositor_gpu_settings(void);
+#endif
 
 // Whether a name in /root is the file of a row the compositor takes at once.
 static bool compositor_setting_file(const char *name)
@@ -8918,6 +8921,9 @@ static void compositor_inputs_watch(void)
                             string_equals((string_address)name, (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
                         {
                                 compositor_clip_settings();
+#ifndef SHELL_NO_GPU
+                                compositor_gpu_settings();
+#endif
                                 compositor_look_read();
                                 compositor_theme_read();
                                 compositor_input_settings_read();
@@ -11346,6 +11352,19 @@ static void compositor_clip_wipe(void)
 }
 
 // The settings: on or off, how many copies the history keeps (none by default), the limit in MiB (16 by default).
+#ifndef SHELL_NO_GPU
+// GPU rendering as the setting has it (on unless the file says off): what the compose path asks before it uses src/canvas/gpu.c.
+static int compositor_gpu = 1;
+
+static void compositor_gpu_settings(void)
+{
+        char word[16];
+
+        compositor_word(SETTING_GPU_PATH, word, sizeof(word));
+        compositor_gpu = !string_equals((string_address)word, (string_address) "off");
+}
+#endif
+
 static void compositor_clip_settings(void)
 {
         char word[16];
@@ -11523,6 +11542,9 @@ static int compositor_clip_start(void)
         compositor.table->clip_pid = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
         compositor.table->clip_owner[0] = compositor.table->clip_owner[1] = -1;
         compositor_clip_settings();
+#ifndef SHELL_NO_GPU
+        compositor_gpu_settings();
+#endif
         return compositor_clip.door;
 }
 

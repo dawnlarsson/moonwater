@@ -4205,6 +4205,9 @@ static bool build_moon_floodlight;
 //      The Wayland shim, off unless the .config says CONFIG_MOONWATER_WAYLAND=y: the shell's compositor is built with it
 //      and the header says so, so the compositor and the checks read one switch.
 static bool build_moon_wayland;
+//      GPU rendering, on unless the .config says CONFIG_MOONWATER_GPU=n; a build that names no header is the default, so the header
+//      carries the exception (SHELL_NO_GPU) as it does for the utilities.
+static bool build_moon_gpu;
 static string_address build_floodlight_policy;
 static string_address const build_floodlight_switches[] = {
     "AWK_SPAWN", "SHELL_ESCAPES", "FIND_EXEC", "FIND_DELETE", "FIND_WRITE",
@@ -4273,6 +4276,7 @@ static fn build_components(string_address config)
         build_moon_builtins_all = true;
         build_moon_floodlight = true;
         build_moon_wayland = false;
+        build_moon_gpu = true;
         build_floodlight_policy = null;
         build_switch_count = 0;
 
@@ -4399,6 +4403,8 @@ static fn build_components(string_address config)
                         build_moon_floodlight = on;
                 else if (memory_is_word(name, length, "WAYLAND"))
                         build_moon_wayland = on;
+                else if (memory_is_word(name, length, "GPU"))
+                        build_moon_gpu = on;
                 else if ((string_has_prefix(name, "TOOL_") ||
                           string_has_prefix(name, "BUILTIN_") ||
                           string_has_prefix(name, "FLOODLIGHT_")) &&
@@ -4542,6 +4548,8 @@ static string_address build_config_header(string_address from,
         //      absent one as off, so the two always travel together.
         if (build_moon_wayland)
                 text = build_join(text, "#define CONFIG_MOONWATER_WAYLAND 1\n", null);
+        if (!build_moon_gpu)
+                text = build_join(text, "#define SHELL_NO_GPU 1\n", null);
 
         if (build_moon_floodlight)
         {

@@ -171,6 +171,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Cursor size	65d4	Dimensione del puntatore
 =Display	d9b5	Schermo
 =Editor	bf98	Editor
+=GPU rendering	d4d5	Rendering con GPU
 =Gallery	4cdd	Galleria
 =Hubs	456d	Hub
 =Identify	033d	Identifica

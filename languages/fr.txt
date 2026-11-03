@@ -171,6 +171,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Cursor size	65d4	Taille du pointeur
 =Display	d9b5	Écran
 =Editor	bf98	Éditeur
+=GPU rendering	d4d5	Rendu par GPU
 =Gallery	4cdd	Galerie
 =Hubs	456d	Concentrateurs
 =Identify	033d	Identifier

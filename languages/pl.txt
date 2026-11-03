@@ -171,6 +171,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Cursor size	65d4	Rozmiar wskaźnika
 =Display	d9b5	Ekran
 =Editor	bf98	Edytor
+=GPU rendering	d4d5	Renderowanie przez GPU
 =Gallery	4cdd	Galeria
 =Hubs	456d	Huby
 =Identify	033d	Identyfikuj

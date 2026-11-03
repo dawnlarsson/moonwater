@@ -98,6 +98,7 @@
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
 #define SETTING_PREDICT_TOUCH_PATH "/root/canvas.predict.touch"
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
+#define SETTING_GPU_PATH "/root/canvas.gpu"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
 #define SETTING_CLIPBOARD_LIMIT_PATH "/root/canvas.clipboard.limit"
 // Where the windows were last put, which the compositor writes (window.c's places) and is no plain row's file: `canvas
@@ -236,6 +237,15 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Clipboard", SETTINGS_SWITCH, 0, ("canvas", "clipboard"), "clipboard ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas clipboard [on|off]", .help = "copy and paste between windows; off empties the clipboard [on]"),
+#ifndef SHELL_NO_GPU
+    //  Canvas draws and composes on the GPU where it has a driver for it (src/canvas/gpu.c) and on the processor where it
+    //  has none, so on is safe on any machine; off keeps every pixel on the processor. Not in the image when the build
+    //  says CONFIG_MOONWATER_GPU=n.
+    SETTING_PLAIN_ROW(null, "GPU rendering", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_GPU_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas gpu [on|off]",
+                      .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere [on]"),
+#endif
     SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_FIELD, 0, ("canvas", "clipboard", "history"), "history ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLIPBOARD_HISTORY_PATH,
                       .standard = "0", .unit = "copies", .low = 0, .high = 32, .need = "how Canvas draws",

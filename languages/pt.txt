@@ -171,6 +171,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Cursor size	65d4	Tamanho do ponteiro
 =Display	d9b5	Tela
 =Editor	bf98	Editor
+=GPU rendering	d4d5	Renderização por GPU
 =Gallery	4cdd	Galeria
 =Hubs	456d	Hubs
 =Identify	033d	Identificar

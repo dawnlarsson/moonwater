@@ -30,6 +30,18 @@ menu "Moonwater Canvas"
           line does not contain drm_client_lib.active=, which intentionally
           suppresses the framebuffer console for a Canvas-first desktop.
 
+    config MOONWATER_GPU
+        bool "GPU rendering on Canvas's desktop"
+        depends on MOONWATER_CANVAS
+        default y
+        help
+          Let Canvas draw and compose on the GPU where it has a driver for
+          it (src/canvas/gpu.c, userspace, the card's render node), and on the
+          processor everywhere else. The Canvas setting "GPU rendering"
+          (moonwater canvas gpu [on|off]) switches it at run time; this
+          option takes the code out of the image altogether, and with it
+          the setting.
+
     config MOONWATER_WAYLAND
         bool "Wayland clients on Canvas's desktop"
         depends on MOONWATER_CANVAS

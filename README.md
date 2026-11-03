@@ -82,6 +82,7 @@ moonwater canvas cursor shake delay [MS|default]  how long it stays large after 
 moonwater canvas predict touch [on|off]  a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]
 moonwater canvas windows remember [on|off]  a window opens where the hand last put it, kept across boots [on]
 moonwater canvas touch [on|off]        a circle under each finger on a touch screen, fading for a second after it lifts [on]
+moonwater canvas gpu [on|off]    draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere [on]
 moonwater canvas clipboard [on|off]    copy and paste between windows; off empties the clipboard [on]
 moonwater canvas clipboard history [N|default]  copies the compositor keeps in memory, never on a disk, 0 to 32 [0]
 moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 16 MiB [16]

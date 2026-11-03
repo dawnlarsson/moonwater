@@ -171,6 +171,7 @@ ui_field_full	fe02	no cabe más
 =Cursor size	65d4	Tamaño del puntero
 =Display	d9b5	Pantalla
 =Editor	bf98	Editor
+=GPU rendering	d4d5	Renderizado por GPU
 =Gallery	4cdd	Galería
 =Hubs	456d	Concentradores
 =Identify	033d	Identificar

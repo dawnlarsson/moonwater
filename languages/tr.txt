@@ -171,6 +171,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Cursor size	65d4	İşaretçi boyutu
 =Display	d9b5	Ekran
 =Editor	bf98	Düzenleyici
+=GPU rendering	d4d5	GPU ile oluşturma
 =Gallery	4cdd	Galeri
 =Hubs	456d	Hub'lar
 =Identify	033d	Tanımla

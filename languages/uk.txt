@@ -171,6 +171,7 @@ ui_field_full	fe02	більше не вміщається
 =Cursor size	65d4	Розмір вказівника
 =Display	d9b5	Екран
 =Editor	bf98	Редактор
+=GPU rendering	d4d5	Рендеринг на GPU
 =Gallery	4cdd	Галерея
 =Hubs	456d	Хаби
 =Identify	033d	Визначити
