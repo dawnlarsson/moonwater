@@ -4816,6 +4816,8 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 ui_squish_release(&c->squish);
                 if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
                         ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
+                if (c->bend > UI_REST_SCALE && !ui_kit.motion)
+                        ui_spring_go(&c->held_squish, c->bend, 0);
                 c->bend = c->bend_target = 0;
                 return null;
         }

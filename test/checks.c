@@ -124498,6 +124498,34 @@ static void caret_fade_check(void)
 }
 
 /*
+        A switch dragged sideways and then taken back by the compositor (a second finger, a long press for the right button):
+        what the drag stretched springs home as a release's does, from the stretch it had, and no value changes.
+*/
+static void switch_cancel_check(struct ui address_to wui)
+{
+    static struct ui_control sw;
+    b32 motion_was = ui_kit.motion;
+    b64 bend;
+    b32 on_was;
+
+    memory_zero(&sw, sizeof(sw));
+    sw.kind = UI_SWITCH, sw.x = 520, sw.y = 220, sw.w = 52, sw.h = 48, sw.label = "";
+    sw.row_x = 10, sw.row_y = 220, sw.row_w = 580, sw.row_h = 48;
+    ui_control_start(&sw);
+    ui_kit.motion = 0;
+    ui_kit.now += 1000000000ll;
+    ui_control_draw(wui, &sw);
+    on_was = sw.on;
+    ui_kit_pointer(wui, &sw, 1, WINDOW_EVENT_BUTTON, 560, 244, true, 0);
+    ui_kit_pointer(wui, &sw, 1, WINDOW_EVENT_MOTION, 620, 244, false, 0);
+    bend = sw.bend;
+    ui_kit_pointer(wui, &sw, 1, WINDOW_EVENT_BUTTON, 620, 244, false, WINDOW_KEY_CANCEL);
+    check("kit switch: a press the compositor takes back springs the drag's stretch home, and changes nothing",
+          bend > UI_REST_SCALE && sw.held_squish.live && sw.held_squish.amplitude[0] == bend && sw.on == on_was);
+    ui_kit.motion = motion_was;
+}
+
+/*
         A code view under a finger: a drag of 5 pixels a report, 60 reports, is 300 pixels, and the view moves the lines they make.
         A report short of a line used to round to no line, and the drag scrolled nothing unless each report was a line or more.
 */
@@ -138537,6 +138565,7 @@ static fn field_check(struct ui address_to wui)
         check_field_drag_drawn(wui);
         caret_fade_check();
         check_code_finger(wui);
+        switch_cancel_check(wui);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {
