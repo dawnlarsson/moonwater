@@ -118918,6 +118918,24 @@ static void check_compositor_refresh(void)
     compositor_refresh_pick("B-1", 4, modes, &mode);
     check("refresh: a screen with no line keeps the mode it has", mode.clock == modes[1].clock);
 
+    // The rates a screen lists are those at the size of its panel, whether it is laid out turned or not.
+    {
+        static struct compositor_connected found;
+
+        memory_zero(&found, sizeof(found));
+        found.mode[0] = modes[1];
+        found.size[0][0] = 1920, found.size[0][1] = 1080;
+        compositor_rates_take(&found, 0, modes, 4);
+        check("refresh: a screen lists the rates it has at its size, the first first",
+              found.hz_count[0] == 2 && found.hz[0][0] == 60 && found.hz[0][1] == 50);
+        memory_zero(&found, sizeof(found));
+        found.mode[0] = modes[1];
+        found.size[0][0] = 1080, found.size[0][1] = 1920; // the same screen turned a quarter: laid out the other way round
+        compositor_rates_take(&found, 0, modes, 4);
+        check("refresh: and a screen turned a quarter lists the same, not the none that a size no mode has gives",
+              found.hz_count[0] == 2 && found.hz[0][0] == 60 && found.hz[0][1] == 50);
+    }
+
     compositor_displays = 0;
     memory_zero(compositor_display, sizeof(compositor_display));
 }

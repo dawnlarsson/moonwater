@@ -6772,6 +6772,19 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
         }
 }
 
+/*
+        The rates screen n lists at the size its panel has: the size of the mode it is at, which is not the size it is laid
+        out at when it is turned a quarter (its width and height the other way round: no mode has that), each rate once, in
+        the order the screen lists them, which is the order the settings list them in.
+*/
+static void compositor_rates_take(struct compositor_connected *found, unsigned int n, const struct compositor_mode *modes,
+                                  unsigned int count)
+{
+        for (unsigned int each = 0; each < count; each++)
+                compositor_rate_add(found->hz[n], &found->hz_count[n], &modes[each], found->mode[n].hdisplay,
+                                    found->mode[n].vdisplay);
+}
+
 static b32 compositor_connected_read(struct compositor_connected *found)
 {
         struct compositor_card_res resources = {0};
@@ -6859,9 +6872,8 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                 }
                 if (found->size[n][0] && found->size[n][1])
                 {
-                        for (unsigned int each = 0; listed && each < probe.mode_count; each++)
-                                compositor_rate_add(found->hz[n], &found->hz_count[n], &modes[each], found->size[n][0],
-                                                    found->size[n][1]);
+                        if (listed)
+                                compositor_rates_take(found, n, modes, probe.mode_count);
                         found->count++;
                 }
         }
