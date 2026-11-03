@@ -427,15 +427,34 @@ static const unsigned int gpu_k_fill[] = {
     0xe0ac0001, 0x0000018c, 0xf4040282, 0xfa000008, 0xf40003c2, 0xfa00001c, 0xf4040402, 0xfa000024, 0xf4000502, 0xfa00002c,
     0xd76f0001, 0x04010c06, 0xbf8cc07f, 0x7d880210, 0xbe80246a, 0xbf880006, 0x93130f07, 0x4a060213, 0x34060682, 0x7e080214,
     0xdc708000, 0x000a0403, 0xbf810000};
+static const unsigned int gpu_k_tone[] = {
+    0xe0ac0002, 0x0000018c, 0xf4040282, 0xfa000008, 0xf40003c2, 0xfa00001c, 0xf4040402, 0xfa000024, 0xf4000502, 0xfa00002c,
+    0xd76f0001, 0x04010c06, 0xbf8cc07f, 0x90159814, 0xbf068015, 0xbf850031, 0x7d880210, 0xbe80246a, 0xbf88002e, 0x93130f07,
+    0x4a060213, 0x34060682, 0xdc308000, 0x040a0003, 0x809515ff, 0x000000ff, 0xbe9603ff, 0x00ff00ff, 0x87171614, 0x90188814,
+    0x87181618, 0xbf8c3f70, 0x360a0816, 0x2c0c0888, 0x360c0c16, 0xd5430005, 0x03fc2b05, 0x007f007f, 0xd5430006, 0x03fc2b06,
+    0x007f007f, 0x2c0e0a88, 0x360e0e16, 0xd76d0005, 0x041dff05, 0x00010001, 0x2c0a0a88, 0x360a0a16, 0x2c100c88, 0x36101016,
+    0xd76d0006, 0x0421ff06, 0x00010001, 0x2c0c0c88, 0x360c0c16, 0x4a0a0a17, 0x4a0c0c18, 0xcc0d4005, 0x1a002d05, 0xcc0d4006,
+    0x1a002d06, 0xd76f0004, 0x04151106, 0xdc708000, 0x000a0403, 0xbf810000};
+static const unsigned int gpu_k_glass[] = {
+    0xe0ac0003, 0x0000018c, 0xf40c0202, 0xfa000000, 0xf40c0402, 0xfa000020, 0xd76f0001, 0x04010c06, 0xbf8cc07f, 0x7d880211,
+    0xbe80246a, 0xbf88004d, 0x93180e07, 0x93190f07, 0x931a1007, 0x4a040218, 0x34040482, 0xdc308000, 0x04080002, 0x4a06021a,
+    0x34060682, 0xdc308000, 0x050c0003, 0x801b1507, 0x871c811b, 0x4a0c0214, 0x3a0c0c1b, 0x360c0c81, 0xd7460006, 0x00710306,
+    0x160e0cff, 0x00010001, 0xbe9d03ff, 0x00ff00ff, 0xbf8c3f70, 0x36100a1d, 0x2c120a88, 0x3612121d, 0xbf068013, 0xbf840007,
+    0x4a100f08, 0x4a120d09, 0xcc0d4008, 0x1a003b08, 0xcc0d4009, 0x1a003b09, 0xbf820004, 0xcc0bc008, 0x1a020f08, 0xcc0bc009,
+    0x1a020d09, 0x2c140898, 0x4c1414ff, 0x000000ff, 0xd5430008, 0x03fe1508, 0x007f007f, 0xd5430009, 0x03fe1509, 0x007f007f,
+    0x2c161088, 0x3616161d, 0xd76d0008, 0x042dff08, 0x00010001, 0x2c101088, 0x3610101d, 0x2c181288, 0x3618181d, 0xd76d0009,
+    0x0431ff09, 0x00010001, 0x2c121288, 0x3612121d, 0x361a081d, 0x2c1c0888, 0x361c1c1d, 0x4a101b08, 0x4a121d09, 0xcc0d4008,
+    0x1a003b08, 0xcc0d4009, 0x1a003b09, 0xd76f0004, 0x04211109, 0x4a040219, 0x34040482, 0xdc708000, 0x000a0402, 0xbf810000};
 // gpu.asm end
 
-// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024; GPU_KERNEL_OF says which one an op runs.
+// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (the clang ones, 4 and 5, to be taken over).
 static const struct { const unsigned int *words; unsigned int size; } gpu_kernels[] = {
-    {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}};
+    {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
+    {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
-#define GPU_KERNEL_OF(op) ((op) == 0 ? 0 : (op) == 1 ? 1 : (op) == 5 ? 3 : 2)
+#define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_cp) + sizeof(gpu_bx) + 256 * 4 <= GPU_DATA - 1024 ? 1 : -1]; // they end before the pixels begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + 256 * 6 <= GPU_DATA - 1024 ? 1 : -1]; // they end before the pixels begin
 
 #define gpu_io(dir, n, size, a) (system_control(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 
