@@ -187123,6 +187123,14 @@ b32 main(void)
                                 f->scale = 100, f->radius = gpu_random() % 4 ? (int)(gpu_random() % 26) : 0, f->line = gpu_random() % 3 ? (int)(gpu_random() % 4) : 0;
                                 f->edge = gpu_random() % 5 ? (gpu_random() | 0xff000000u) : gpu_random(), f->square = gpu_random() % 3 ? 0 : (int)(gpu_random() % 16);
                                 pitch = (unsigned int)f->width + gpu_random() % 8;
+                                if (gpu_random() % 4 == 0)
+                                {
+                                        // a tab of the panel: one ink, no picture and no line
+                                        static const int slots[4] = {-2, 0, 1, 2};
+
+                                        f->builtin = 1, f->slot = slots[gpu_random() % 4], f->line = 0, f->height = 20 + (int)(gpu_random() % 30);
+                                        continue;
+                                }
                                 f->pitch = pitch, f->pixels = region + used;
                                 for (positive i = 0; i < (positive)pitch * (unsigned int)f->height; i++)
                                         region[used + i] = gpu_random();

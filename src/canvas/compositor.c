@@ -1047,14 +1047,25 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
         g->count++;
 }
 
-// A frame as compositor_draw_with draws it (a window with a picture at its own size and nothing over it): false if it is not one, or the pools are full.
+// What is inside a frame's line, in a rectangle of it: the picture's pixels copied, or the tab's one ink.
+static void compositor_gpu_contents(const struct compositor_frame *f, unsigned int tab, int x0, int y0, int x1, int y1)
+{
+        if (f->builtin)
+                compositor_gpu_rect(0, x0, y0, x1, y1, tab, 0, 0, 0);
+        else
+                compositor_gpu_rect(4, x0, y0, x1, y1, 0, f, 0, 0);
+}
+
+// A frame as compositor_draw_with draws it (a window with a picture at its own size, or a tab of the panel, and nothing over it): false if it is not one, or the pools are full.
 static b32 compositor_gpu_frame(const struct compositor_frame *f)
 {
         struct compositor_gscene *g = &compositor_gscene;
         int x = f->x, y = f->y, w = f->width, h = f->height, ox, oy, ow, oh, r = compositor_radius(f), b, ri;
 
-        if (f->builtin || !f->pixels || compositor_scaled(f) || f->lit || f->close || f->preview[0] || f->preview[1] || f->preview[2] || f->preview[3] ||
-            f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || !gpu_va(f->pixels) || g->count + 40 > g->room)
+        unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
+
+        if ((!f->builtin && (!f->pixels || !gpu_va(f->pixels))) || compositor_scaled(f) || f->lit || f->close || f->preview[0] || f->preview[1] || f->preview[2] ||
+            f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || g->count + 40 > g->room)
                 return false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox, ri = r > b ? r - b : 0;
@@ -1067,12 +1078,12 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         }
         if (!r)
         {
-                compositor_gpu_rect(4, x, y, x + w, y + h, 0, f, 0, 0);
+                compositor_gpu_contents(f, tab, x, y, x + w, y + h);
                 return true;
         }
-        compositor_gpu_rect(4, x + ri, y, x + w - ri, y + h, 0, f, 0, 0);
-        compositor_gpu_rect(4, x, y + ri, x + ri, y + h - ri, 0, f, 0, 0);
-        compositor_gpu_rect(4, x + w - ri, y + ri, x + w, y + h - ri, 0, f, 0, 0);
+        compositor_gpu_contents(f, tab, x + ri, y, x + w - ri, y + h);
+        compositor_gpu_contents(f, tab, x, y + ri, x + ri, y + h - ri);
+        compositor_gpu_contents(f, tab, x + w - ri, y + ri, x + w, y + h - ri);
         for (int corner = 0; corner < 4; corner++)
         {
                 int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
@@ -1083,7 +1094,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 {
                         if (b)
                                 compositor_gpu_rect(0, cx, cy, cx + r, cy + r, f->edge, 0, 0, 0);
-                        compositor_gpu_rect(4, sx1, sy1, sx2, sy2, 0, f, 0, 0);
+                        compositor_gpu_contents(f, tab, sx1, sy1, sx2, sy2);
                         continue;
                 }
                 edge_table = b ? compositor_gpu_table(r, b, corner, 0) : 0;
@@ -1093,7 +1104,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 if (b)
                         compositor_gpu_rect(5, cx, cy, cx + r, cy + r, f->edge & 0xffffffu, 0, edge_table, r);
                 if (ri && sx2 > sx1 && sy2 > sy1)
-                        compositor_gpu_rect(5, sx1, sy1, sx2, sy2, 0, f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
+                        compositor_gpu_rect(5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         }
         return true;
 }
