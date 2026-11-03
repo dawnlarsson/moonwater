@@ -185584,7 +185584,7 @@ b32 main(void)
         struct ui ui;
         positive bad = 0;
 
-        if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20)))
+        if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20)))
         {
                 string_format(log, "gpu: no amdgpu render node, skipped\n");
                 return test_report(null);
@@ -185628,6 +185628,144 @@ b32 main(void)
                                         string_format(log, "  FAIL gpu kit round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
                                                       (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
                         }
+        }
+
+        // 8K: a window's clear and 159 boxes of the sizes cards and buttons have, the radii a card has, a third of them translucent;
+        // the scene on the GPU against ui_kit_fill laid the same way, the whole picture compared once, then each timed, best of 5.
+        {
+                enum { KW = 7680, KH = 4320, M = 160 };
+                positive big_at = bins_at + (8 << 20), kops_at = big_at + (positive)KW * KH * 4, kbins_at = kops_at + (1 << 20);
+                unsigned int address_to big = (unsigned int address_to)((p8 address_to)gpu.at + big_at), address_to kops = (unsigned int address_to)((p8 address_to)gpu.at + kops_at);
+                unsigned int address_to want = (unsigned int address_to)memory((positive)KW * KH * 4);
+                positive total = ~0ull, run = ~0ull, host = ~0ull, began;
+
+                if (!want)
+                        return 1;
+                for (int k = 0; k < M; k++)
+                {
+                        unsigned int address_to q = kops + 8 * k;
+                        int w = k ? 40 * 256 + (int)(gpu_random() % (1200 * 256)) : KW * 256, h = k ? 40 * 256 + (int)(gpu_random() % (800 * 256)) : KH * 256;
+                        int x0 = k ? (int)(gpu_random() % ((KW - 1240) * 256)) : 0, y0 = k ? (int)(gpu_random() % ((KH - 840) * 256)) : 0;
+                        int r = k ? (int)(gpu_random() % (24 * 256)) : 0;
+                        unsigned int argb = k == 0 ? 0xff203040u : (gpu_random() % 3 ? gpu_random() | 0xff000000u : gpu_random());
+
+                        q[0] = 2, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)(x0 + w), q[4] = (unsigned int)(y0 + h), q[5] = argb, q[6] = q[7] = (unsigned int)r;
+                }
+                ui.pixels = want, ui.pitch = KW, ui.width = KW, ui.height = KH, ui.bottom = KH;
+                for (int i = 0; i < 3; i++)
+                {
+                        memory_zero(want, (positive)KW * KH * 4);
+                        began = clock_monotonic_nanoseconds();
+                        for (int k = 0; k < M; k++)
+                        {
+                                struct ui_box box = {(int)kops[8 * k + 1], (int)kops[8 * k + 2], (int)kops[8 * k + 3], (int)kops[8 * k + 4], (int)kops[8 * k + 6], (int)kops[8 * k + 7]};
+
+                                ui_kit_fill(&ui, &box, kops[8 * k + 5], 0);
+                        }
+                        began = clock_monotonic_nanoseconds() - began;
+                        host = began < host ? began : host;
+                }
+                memory_zero(big, (positive)KW * KH * 4);
+                check("gpu kit: the 8K scene finishes", gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH));
+                for (positive i = 0; i < (positive)KW * KH; i++)
+                {
+                        checks++;
+                        if (big[i] != want[i] && (++failures, ++bad) < 6)
+                                string_format(log, "  FAIL gpu kit 8K: pixel %p,%p is %p, wanted %p\n", i % KW, i / KW, (positive)big[i], (positive)want[i]);
+                }
+                for (int i = 0; i < 5; i++)
+                {
+                        memory_zero(big, (positive)KW * KH * 4);
+                        began = clock_monotonic_nanoseconds();
+                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                        began = clock_monotonic_nanoseconds() - began;
+                        total = began < total ? began : total;
+                        memory_zero(big, (positive)KW * KH * 4);
+                        began = clock_monotonic_nanoseconds();
+                        gpu_run();
+                        began = clock_monotonic_nanoseconds() - began;
+                        run = began < run ? began : run;
+                }
+                string_format(log, "  gpu kit: 8K scene of %p boxes: GPU with the binning %p us, the run alone %p us, CPU ui_kit_fill %p us\n", (positive)M, total / 1000, run / 1000, host / 1000);
+                // Where the time goes: the clear alone; the same 160 as plain fills run through the box kernel; the boxes without the clear.
+                {
+                        unsigned int save[8], address_to f = (unsigned int address_to)((p8 address_to)gpu.at + kops_at);
+                        positive t_clear = ~0ull, t_fills = ~0ull, t_boxes = ~0ull;
+
+                        memory_copy(save, f, 32);
+                        for (int i = 0; i < 4; i++)
+                        {
+                                memory_zero(big, (positive)KW * KH * 4);
+                                gpu_scene(kops_at, 1, kbins_at, big_at, KW, KW, KH);
+                                began = clock_monotonic_nanoseconds();
+                                gpu_run();
+                                began = clock_monotonic_nanoseconds() - began;
+                                t_clear = began < t_clear ? began : t_clear;
+                                memory_zero(big, (positive)KW * KH * 4);
+                                gpu_scene(kops_at + 32, M - 1, kbins_at, big_at, KW, KW, KH);
+                                began = clock_monotonic_nanoseconds();
+                                gpu_run();
+                                began = clock_monotonic_nanoseconds() - began;
+                                t_boxes = began < t_boxes ? began : t_boxes;
+                        }
+                        // the same boxes all opaque, then opaque with square corners
+                        {
+                                positive t_opaque = ~0ull, t_square = ~0ull;
+
+                                for (int k = 0; k < M; k++)
+                                        kops[8 * k + 5] |= 0xff000000u;
+                                for (int i = 0; i < 3; i++)
+                                {
+                                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                                        memory_zero(big, (positive)KW * KH * 4);
+                                        began = clock_monotonic_nanoseconds();
+                                        gpu_run();
+                                        began = clock_monotonic_nanoseconds() - began;
+                                        t_opaque = began < t_opaque ? began : t_opaque;
+                                }
+                                for (int k = 0; k < M; k++)
+                                        kops[8 * k + 6] = kops[8 * k + 7] = 0;
+                                for (int i = 0; i < 3; i++)
+                                {
+                                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                                        memory_zero(big, (positive)KW * KH * 4);
+                                        began = clock_monotonic_nanoseconds();
+                                        gpu_run();
+                                        began = clock_monotonic_nanoseconds() - began;
+                                        t_square = began < t_square ? began : t_square;
+                                }
+                                string_format(log, "  gpu kit: the 160 boxes all opaque %p us, opaque and square %p us\n", t_opaque / 1000, t_square / 1000);
+                        }
+                        // fills in the box kernel: kind 0 ops made from the same rectangles, the kernel forced to the box one
+                        for (int k = 0; k < M; k++)
+                        {
+                                unsigned int address_to q = kops + 8 * k;
+
+                                q[0] = 0, q[1] = (unsigned int)((int)q[1] >> 8), q[2] = (unsigned int)((int)q[2] >> 8), q[3] = (unsigned int)((int)(q[3] + 255) >> 8), q[4] = (unsigned int)((int)(q[4] + 255) >> 8);
+                                q[5] |= 0xff000000u;
+                        }
+                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                        for (int i = 0; i < 4; i++)
+                        {
+                                GPU_ARGS->op = 5;
+                                memory_zero(big, (positive)KW * KH * 4);
+                                began = clock_monotonic_nanoseconds();
+                                gpu_run();
+                                began = clock_monotonic_nanoseconds() - began;
+                                t_fills = began < t_fills ? began : t_fills;
+                        }
+                        {
+                                unsigned int address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + kbins_at);
+                                positive sum = 0, most = 0, squares = (positive)((KW + 63) >> 6) * ((KH + 63) >> 6);
+
+                                for (positive c = 0; c < squares; c++)
+                                        sum += tab[2 * c + 1], most = tab[2 * c + 1] > most ? tab[2 * c + 1] : most;
+                                string_format(log, "  gpu kit: the lists: %p squares, %p entries (%p a square), the longest %p\n", squares, sum, sum / squares, most);
+                        }
+                        string_format(log, "  gpu kit: 8K, box kernel: the clear alone %p us, 159 boxes without the clear %p us, the 160 as plain fills %p us\n", t_clear / 1000, t_boxes / 1000,
+                                      t_fills / 1000);
+                        memory_copy(f, save, 32);
+                }
         }
         return test_report(null);
 }
