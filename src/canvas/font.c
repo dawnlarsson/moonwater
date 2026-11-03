@@ -8416,15 +8416,6 @@ static inline bool font_complex(const p8 address_to text, positive length, p32 f
         return (flags & FONT_RTL) || !font_plain(text, length);
 }
 
-//      The same question of one code point, for the loops that read a code point at a time: under U+0590 it is no, and
-//      so for the blocks that hold no right to left or directional character (U+1000 to U+1FFF, U+3000 to U+FAFF, the
-//      Hangul and the rest to U+FB1C, the emoji of the astral planes).
-static inline bool font_complex_code(p32 code)
-{
-        if (code < 0x590 || (code >= 0x1000 && code < 0x2000) || (code >= 0x3000 && code < 0xfb1d) || code >= 0x1f000)
-                return false;
-        return !font_bidi_plain(font_bidi_class(code));
-}
 
 /*
         A line of text laid by the whole engine: split in paragraphs, each
@@ -8604,12 +8595,17 @@ static fn font_flow_close(font_flow address_to f, p32 n)
                 if (w->span_right[i] < w->span_left[i])
                         continue;
 
-                p32 stop = i + 1;
+                p32 stop = i + 1, used;
 
                 while (stop < n && w->span_right[stop] < w->span_left[stop])
                         stop++;
 
-                p32 first = w->pair[i], last = w->pair[stop - 1], parts = last - first + 1, lvl = w->level[i];
+                //      The code points a glyph stands for end before a joiner or a control after them: those have
+                //      nothing of their own to be shared a part of.
+                for (used = stop; used > i + 1 && (w->level[used - 1] == FONT_GONE || font_ignorable(w->code[used - 1])); used--)
+                        ;
+
+                p32 first = w->pair[i], last = w->pair[used - 1], parts = last - first + 1, lvl = w->level[i];
                 b64 low = w->span_left[i], width = w->span_right[i] - w->span_left[i];
 
                 for (p32 k = first; k <= last; k++)
