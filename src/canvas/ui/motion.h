@@ -12,6 +12,9 @@
 #define UI_ONE (1ll << UI_Q)
 #define UI_HALF (1ll << (UI_Q - 1))
 #define UI_MS 1000000ll                    // a millisecond in nanoseconds
+// A window's own motion, on --ease: a window gliding to where it was put (a snap, a tile, a restore, a take back) and a
+// snap's preview moving between targets or fading. One time for all of them, so a window lands as its preview goes.
+#define UI_WINDOW_NS (180 * UI_MS)
 static inline b64 ui_qmul(b64 a, b64 b)
 {
         return (b64)(((b128)a * b + UI_HALF) >> UI_Q);

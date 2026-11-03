@@ -172,9 +172,12 @@ struct compositor_frame
         // picture scaled (compositor_scaled). 0 for a frame drawn at its picture's size.
         int source_w, source_h;
         // The snap preview of the window being dragged: its target's rectangle on the output (width 0 for none) and
-        // the kit's selection, 0xaarrggbb, whose alpha is the tint's (compositor_scene draws it).
+        // the kit's selection, 0xaarrggbb, whose alpha is the tint's (compositor_scene draws it); shaped as the window will be
+        // there, its corners' radius and its line in device pixels (0 for square, or none) and the line's ink, 0xaarrggbb.
         int preview[4];
         unsigned int preview_ink;
+        int preview_radius, preview_line;
+        unsigned int preview_edge;
         // The shared edge's indicator over this window (compositor_mark_set): the rectangle and the kit's selection.
         int mark[4];
         unsigned int mark_ink;
@@ -982,15 +985,69 @@ static void compositor_draw_ring(const struct compositor_target *cell, const str
         preview of frames[from], the window it belongs to: its own contents are copied over the tint, so the tint is not
         made where they are (the cross compositor_draw_with copies), and the pixels are the same as with it made.
 */
+/*
+        A tint's shape, when it has one (a snap preview's: a tile is drawn as the window will be): its corners round at r and
+        a line of `line` along its inside in the edge's ink, the rest in the fill's. Each row is a run at one cover between
+        two ends drawn a pixel at a time: the corners' squares (the outer mask less the inner one is the line, the inner the
+        fill, as a border frame's corner is drawn) on the rows of the corners, and the line's columns on the rest.
+*/
+struct compositor_shape
+{
+        int x, y, w, h, r, line;
+        unsigned int fill, edge; // 0xaarrggbb
+        const unsigned char *outer, *outer_right, *inner, *inner_right;
+};
+
+static unsigned int compositor_shape_cover(const struct compositor_shape *s, int px, int my, int corner)
+{
+        int ri = s->r - s->line, right = px >= s->x + s->w - s->r, col = right ? px - (s->x + s->w - s->r) : px - s->x;
+        unsigned int outer, inner = 0;
+        int iy = my - s->line, ix = right ? col : col - s->line;
+
+        if (!corner)
+                return s->edge >> 24;
+        outer = (right ? s->outer_right : s->outer)[my * s->r + col];
+        if (ri > 0 && iy >= 0 && iy < ri && ix >= 0 && ix < ri)
+                inner = (right ? s->inner_right : s->inner)[iy * ri + ix];
+        inner = inner > outer ? outer : inner;
+        return ((outer - inner) * (s->edge >> 24) + inner * (s->fill >> 24) + 127) / 255;
+}
+
+// The columns [a, b) of row py of a shaped tint, at in the cell's pixels being column a.
+static unsigned long compositor_shape_row(const struct compositor_shape *s, unsigned int *at, int a, int b, int py,
+                                          const unsigned int *colour, const unsigned char *fill_cover, const unsigned char *edge_cover)
+{
+        int top = py - s->y, bottom = s->y + s->h - 1 - py, my = top < bottom ? top : bottom, corner = my < s->r;
+        int zone = corner ? s->r : s->line, middle_to = s->x + s->w - zone;
+        int edge_row = my < s->line;
+
+        for (int px = a; px < b; px++)
+        {
+                if (px >= s->x + zone && px < middle_to)
+                {
+                        int to = middle_to < b ? middle_to : b;
+
+                        compositor_mix_run(at + (px - a), to - px, edge_row ? s->edge : s->fill, colour,
+                                           edge_row ? edge_cover : fill_cover);
+                        px = to - 1;
+                        continue;
+                }
+                at[px - a] = compositor_mix(at[px - a], s->fill & 0xffffffu, compositor_shape_cover(s, px, my, corner));
+        }
+        return (unsigned long)(b > a ? b - a : 0);
+}
+
 static void compositor_tint(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count,
-                            const int *radii, const int *rect, unsigned int ink, unsigned int from, int under)
+                            const int *radii, const int *rect, unsigned int ink, unsigned int from, int under, int radius,
+                            int edge_line, unsigned int edge)
 {
         const struct compositor_frame *owner = under && from < count && !frames[from].builtin ? &frames[from] : 0;
         struct compositor_target cell;
         unsigned int colour[COMPOSITOR_TINT_RUN];
-        unsigned char cover[COMPOSITOR_TINT_RUN];
+        unsigned char cover[COMPOSITOR_TINT_RUN], edge_cover[COMPOSITOR_TINT_RUN];
         unsigned long made = 0;
         int line = 0, ri = 0;
+        struct compositor_shape shape = {rect[0], rect[1], rect[2], rect[3], 0, 0, ink, edge, 0, 0, 0, 0};
 
         if (rect[2] <= 0 || rect[3] <= 0)
                 return;
@@ -999,6 +1056,25 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
                 return;
         memory_fill_u32(colour, COMPOSITOR_TINT_RUN, ink & 0xffffffu);
         memory_fill(cover, (int)(ink >> 24), COMPOSITOR_TINT_RUN);
+        // A shape: its radius kept to its half sides and the masks' largest, and its line inside the radius.
+        radius = radius > rect[2] / 2 ? rect[2] / 2 : radius;
+        radius = radius > rect[3] / 2 ? rect[3] / 2 : radius;
+        radius = radius > COMPOSITOR_RADIUS_MOST ? COMPOSITOR_RADIUS_MOST : radius < 0 ? 0 : radius;
+        edge_line = edge_line < 0 || !(edge >> 24) ? 0 : edge_line > radius && radius ? radius : edge_line;
+        if (radius || edge_line)
+        {
+                shape.r = radius, shape.line = edge_line;
+                memory_fill(edge_cover, (int)(edge >> 24), COMPOSITOR_TINT_RUN);
+                if (radius)
+                {
+                        shape.outer = compositor_corner_mask(radius), shape.outer_right = compositor_corner_mirror(radius);
+                        if (radius - edge_line > 0)
+                        {
+                                shape.inner = compositor_corner_mask(radius - edge_line);
+                                shape.inner_right = compositor_corner_mirror(radius - edge_line);
+                        }
+                }
+        }
         // The contents are the frame less its line, and less the round corners' squares of the radius past the line.
         if (owner)
         {
@@ -1025,6 +1101,14 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
                 }
                 lo = hide_from < cell.x2 ? hide_from : cell.x2;
                 hi = hide_to > cell.x1 ? hide_to : cell.x1;
+                if (shape.r || shape.line)
+                {
+                        if (lo > cell.x1)
+                                made += compositor_shape_row(&shape, at, cell.x1, lo, py, colour, cover, edge_cover);
+                        if (hi < cell.x2)
+                                made += compositor_shape_row(&shape, at + (hi - cell.x1), hi, cell.x2, py, colour, cover, edge_cover);
+                        continue;
+                }
                 if (lo > cell.x1)
                 {
                         compositor_mix_run(at, lo - cell.x1, ink, colour, cover);
@@ -1062,9 +1146,10 @@ static void compositor_preview_draw(const struct compositor_target *t, const str
                                     const int *radii)
 {
         for (unsigned int at = 0; at < count; at++)
-                compositor_tint(t, frames, count, radii, frames[at].preview, frames[at].preview_ink, at, 1);
+                compositor_tint(t, frames, count, radii, frames[at].preview, frames[at].preview_ink, at, 1, frames[at].preview_radius,
+                                frames[at].preview_line, frames[at].preview_edge);
         for (unsigned int at = 0; at < count; at++)
-                compositor_tint(t, frames, count, radii, frames[at].mark, frames[at].mark_ink, at + 1, 0);
+                compositor_tint(t, frames, count, radii, frames[at].mark, frames[at].mark_ink, at + 1, 0, 0, 0, 0);
 }
 
 // Every frame's radius, as compositor_radius gives it: made once for the frames of a damage, and read by every band of it.
@@ -3227,11 +3312,21 @@ static struct
         // The window whose line is lit (lit_row, COMPOSITOR_NONE for none), what of it, and whether held (else hovered).
         int lit_row;
         unsigned int lit_edges, lit_held;
-        // The snap preview a drag shows (compositor_preview): the row whose drag it is, and the rectangle it is drawn on. It
-        // is not faded. The edges of the window's screen its rectangle touched last frame (compositor_snap_rule's dead zone).
+        // The snap preview a drag shows (compositor_preview): the row whose drag it is, and its target's rectangle, from the
+        // frame the target is touched. The edges of the window's screen its rectangle touched last frame (compositor_snap_rule's
+        // dead zone).
         int preview_row;
         int preview[4];
         unsigned int snap_held;
+        /*
+                The preview as it is drawn (compositor_preview_shown), under the window preview_draw - 1 (0 for none) and
+                shaped as preview_how fills: it moves from preview_from, at preview_from_alpha percent, to the target over
+                UI_WINDOW_NS once the target changes, and with no target (lost, or let go on) it fades out where it was
+                drawn; preview_at is when that began, 0 until the first present draws it (compositor_preview_keep).
+        */
+        int preview_draw, preview_from[4], preview_fading;
+        unsigned int preview_how, preview_from_alpha;
+        positive preview_at;
         // What moonwater debug is told of each device, kept here for the table that is made after they are opened.
         unsigned int input_kinds[COMPOSITOR_INPUTS];
         unsigned short input_id[COMPOSITOR_INPUTS][4];
@@ -3680,12 +3775,13 @@ static void compositor_land_keep(void)
 }
 
 /*
-        A window arranged or floated glides from the rectangle it had to the one it has, over COMPOSITOR_GLIDE_NS on the kit's
-        --ease, so the eye sees where it went. It is called once the change is made (from is what it was, taken before). Reduced
-        motion, the table's as the kit reads it, glides nothing: the window is where it is at once. A window that is dragged
-        does not glide, and one that stops being shown ends its glide (compositor_glide_keep).
+        A window arranged or floated glides from the rectangle it had to the one it has, over COMPOSITOR_GLIDE_NS (the kit's
+        window motion) on the kit's --ease, so the eye sees where it went. It is called once the change is made (from is what
+        it was, taken before); a window still gliding starts from where it is drawn, not from where it was going, so two
+        changes in a row never jump. Reduced motion, the table's as the kit reads it, glides nothing: the window is where it
+        is at once. A window that is dragged does not glide, and one that stops being shown ends its glide (compositor_glide_keep).
 */
-#define COMPOSITOR_GLIDE_NS (160 * UI_MS)
+#define COMPOSITOR_GLIDE_NS UI_WINDOW_NS
 
 static void compositor_damage_row(int row);
 
@@ -3704,10 +3800,29 @@ static void compositor_glide_damage(int row, const int *from)
         compositor_damage(x1 - line, y1 - line, x2 - x1 + 2 * line, y2 - y1 + 2 * line);
 }
 
+// How far a glide that began at `at` is, Q30 on the kit's ease: none before its first present (at 0).
+static b64 compositor_glide_done(positive at)
+{
+        return at ? ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - at), COMPOSITOR_GLIDE_NS)) : 0;
+}
+
 static void compositor_glide_start(int row, const int *from)
 {
+        int drawn[4];
+
         if (!compositor_glides() || row < 0 || !compositor.showing[row] || row == compositor.drag)
                 return;
+        // Still gliding toward from: it is drawn between where it glided from and there, and goes on from that.
+        if (compositor.glide[row])
+        {
+                b64 done = compositor_glide_done(compositor.glide_at[row]);
+
+                for (int k = 0; k < 4; k++)
+                        drawn[k] = compositor.glide_from[row][k] +
+                                   (int)(((long long)(from[k] - compositor.glide_from[row][k]) * (long long)done) / (long long)UI_ONE);
+                compositor_glide_damage(row, compositor.glide_from[row]);
+                from = drawn;
+        }
         memory_copy(compositor.glide_from[row], from, sizeof(compositor.glide_from[row]));
         compositor.glide[row] = 1;
         compositor.glide_at[row] = 0;
@@ -3720,10 +3835,8 @@ static void compositor_glide_frame(int row, struct compositor_frame *frame)
         const int *from = compositor.glide_from[row];
         long long to[4] = {compositor.x[row], compositor.y[row], (long long)compositor.w[row], (long long)compositor.h[row]};
         long long at[4];
-        b64 done = 0;
+        b64 done = compositor_glide_done(compositor.glide_at[row]);
 
-        if (compositor.glide_at[row])
-                done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.glide_at[row]), COMPOSITOR_GLIDE_NS));
         for (int k = 0; k < 4; k++)
                 at[k] = from[k] + ((long long)(to[k] - from[k]) * (long long)done) / (long long)UI_ONE;
         frame->x = (int)at[0], frame->y = (int)at[1], frame->width = (int)at[2], frame->height = (int)at[3];
@@ -3754,6 +3867,126 @@ static void compositor_glide_keep(void)
                         continue;
                 }
                 compositor_glide_damage((int)row, compositor.glide_from[row]);
+        }
+}
+
+/*
+        The snap preview as it is drawn. It is there at full strength the frame its target is touched; a new target (an edge's
+        corner) is reached from where the preview is drawn, over UI_WINDOW_NS on the kit's ease, so it moves and does not
+        cut; and with no target -- lost, or let go on, the window gliding into it -- it fades out where it was drawn over the
+        same time, so the window covers it as it lands. Reduced motion cuts. compositor.preview, the target, is the target
+        from the first frame whatever is drawn, so a let go at any point lands on it.
+*/
+// The preview drawn now: its rectangle, and its strength in percent, 0 for none.
+static unsigned int compositor_preview_shown(int *rect)
+{
+        b64 done;
+
+        if (!compositor.preview_draw)
+                return 0;
+        done = compositor_glide_done(compositor.preview_at);
+        if (compositor.preview_fading || compositor.preview[2] <= 0)
+        {
+                memory_copy(rect, compositor.preview_from, sizeof(compositor.preview_from));
+                return compositor.preview_fading
+                           ? (unsigned int)(compositor.preview_from_alpha -
+                                            (long long)compositor.preview_from_alpha * (long long)done / (long long)UI_ONE)
+                           : 0;
+        }
+        for (int k = 0; k < 4; k++)
+                rect[k] = compositor.preview_from[k] +
+                          (int)((long long)(compositor.preview[k] - compositor.preview_from[k]) * (long long)done / (long long)UI_ONE);
+        return compositor.preview_from_alpha +
+               (unsigned int)((long long)(100 - compositor.preview_from_alpha) * (long long)done / (long long)UI_ONE);
+}
+
+// A new target (rect, filling how) for row's preview, before compositor.preview is set to it: from where it is drawn when it
+// is drawn for row, else there at once.
+static void compositor_preview_enter(int row, const int *rect, unsigned int how)
+{
+        int drawn[4];
+        unsigned int alpha = compositor_preview_shown(drawn);
+
+        if (alpha)
+                compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
+        if (alpha && compositor_glides() && compositor.preview_draw == row + 1)
+        {
+                memory_copy(compositor.preview_from, drawn, sizeof(drawn));
+                compositor.preview_from_alpha = alpha;
+        }
+        else
+        {
+                memory_copy(compositor.preview_from, rect, sizeof(compositor.preview_from));
+                compositor.preview_from_alpha = 100;
+        }
+        compositor.preview_fading = 0;
+        compositor.preview_at = 0;
+        compositor.preview_draw = row + 1;
+        compositor.preview_how = how;
+}
+
+// The target gone, before compositor.preview is cleared: the preview fades out where it is drawn.
+static void compositor_preview_leave(void)
+{
+        int drawn[4];
+        unsigned int alpha = compositor_preview_shown(drawn);
+
+        if (alpha)
+                compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
+        if (!alpha || !compositor_glides())
+        {
+                compositor.preview_draw = 0;
+                return;
+        }
+        memory_copy(compositor.preview_from, drawn, sizeof(drawn));
+        compositor.preview_from_alpha = alpha;
+        compositor.preview_fading = 1;
+        compositor.preview_at = 0;
+}
+
+/*
+        After a present: a preview still moving or fading is damaged again (where it moves from and to), its clock started at
+        the present that first drew it; one that has arrived is still, and one that has faded is gone. A window that stops
+        being shown takes its preview with it.
+*/
+static void compositor_preview_keep(void)
+{
+        int row = compositor.preview_draw - 1, drawn[4], *to = compositor.preview_fading || compositor.preview[2] <= 0
+                                                                   ? compositor.preview_from : compositor.preview;
+        int x1, y1, x2, y2;
+        positive now;
+
+        if (row < 0)
+                return;
+        if (!compositor_visible(row))
+        {
+                if (compositor_preview_shown(drawn))
+                        compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
+                compositor.preview_draw = 0;
+                return;
+        }
+        if (!compositor.preview_fading && compositor.preview_from_alpha == 100 &&
+            !memory_compare(compositor.preview_from, compositor.preview, sizeof(compositor.preview)))
+                return;
+        now = clock_monotonic_nanoseconds();
+        if (!compositor.preview_at)
+                compositor.preview_at = now;
+        x1 = to[0] < compositor.preview_from[0] ? to[0] : compositor.preview_from[0];
+        y1 = to[1] < compositor.preview_from[1] ? to[1] : compositor.preview_from[1];
+        x2 = to[0] + to[2] > compositor.preview_from[0] + compositor.preview_from[2] ? to[0] + to[2]
+                                                                                      : compositor.preview_from[0] + compositor.preview_from[2];
+        y2 = to[1] + to[3] > compositor.preview_from[1] + compositor.preview_from[3] ? to[1] + to[3]
+                                                                                      : compositor.preview_from[1] + compositor.preview_from[3];
+        compositor_damage(x1, y1, x2 - x1, y2 - y1);
+        if (now - compositor.preview_at < UI_WINDOW_NS)
+                return;
+        if (compositor.preview_fading || compositor.preview[2] <= 0)
+                compositor.preview_draw = 0;
+        else
+        {
+                memory_copy(compositor.preview_from, compositor.preview, sizeof(compositor.preview));
+                compositor.preview_from_alpha = 100;
+                compositor.preview_at = 0;
         }
 }
 
@@ -3794,6 +4027,7 @@ static void compositor_stretch(int row)
 }
 
 static int compositor_row_scale(int row);
+static int compositor_output_scale(int at);
 
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
@@ -3815,14 +4049,30 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                 frame->lit = compositor.lit_edges;
                 frame->lit_ink = compositor.lit_held ? COMPOSITOR_INK_LINE_HELD : COMPOSITOR_INK_LINE_HOVER;
         }
-        // The snap preview is the dragged window's: drawn under it, where its target is (compositor_scene).
-        if (row == compositor.preview_row && compositor.preview[2] > 0)
+        // The snap preview is the dragged window's: drawn under it, where it is drawn now (compositor_preview_shown), shaped as
+        // the window will be there -- a tile with the window's corners and a line, filling the screen square -- at the scale of
+        // the screen it is on, its line the tint's colour at twice its strength (compositor_scene).
+        if (row == compositor.preview_draw - 1)
         {
-                unsigned int ink = compositor_snap_ink();
+                int rect[4];
+                unsigned int alpha = compositor_preview_shown(rect), ink = compositor_snap_ink(), a, edge;
 
-                frame->preview[0] = compositor.preview[0], frame->preview[1] = compositor.preview[1];
-                frame->preview[2] = compositor.preview[2], frame->preview[3] = compositor.preview[3];
-                frame->preview_ink = ink;
+                if (alpha && rect[2] > 0 && rect[3] > 0)
+                {
+                        unsigned int count;
+                        const int (*screens)[4] = compositor_screens(&count);
+                        int on = compositor_screen_owner(screens, count, rect[0], rect[1], rect[2], rect[3]);
+                        int scale = compositor_output_scale(on) > 0 ? compositor_output_scale(on) : compositor.scale;
+                        int square = compositor.preview_how == COMPOSITOR_MAXIMIZED || compositor.preview_how == COMPOSITOR_ROOM;
+
+                        a = (ink >> 24) * alpha / 100;
+                        edge = (ink >> 24) * 2 > 255 ? 255 : (ink >> 24) * 2;
+                        memory_copy(frame->preview, rect, sizeof(rect));
+                        frame->preview_ink = (ink & 0xffffffu) | a << 24;
+                        frame->preview_radius = square ? 0 : UI_RADIUS * scale / 100;
+                        frame->preview_line = square ? 0 : compositor_px1(scale);
+                        frame->preview_edge = square ? 0 : (ink & 0xffffffu) | (edge * alpha / 100) << 24;
+                }
         }
         if (row == compositor.mark_row && compositor.mark[2] > 0)
         {
@@ -10118,6 +10368,17 @@ static void compositor_leave(int row)
         compositor.grab = compositor.grab == row ? COMPOSITOR_NONE : compositor.grab;
         if (compositor.preview_row == row)
                 compositor_preview(COMPOSITOR_NONE);
+        // What is drawn of its preview goes with it, and nothing of it is held to be put back.
+        if (compositor.preview_draw == row + 1)
+        {
+                int drawn[4];
+
+                if (compositor_preview_shown(drawn))
+                        compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
+                compositor.preview_draw = 0;
+        }
+        for (int at = 0; at < 2; at++)
+                compositor.hold_row[at] = compositor.hold_row[at] == row + 1 ? 0 : compositor.hold_row[at];
         if (compositor.mark_row == row || compositor.mark_with == row)
                 compositor_mark_clear();
         // A window that meets the one resized, and goes, ends the resize: the other is no longer taken with it.
@@ -11417,9 +11678,10 @@ static void compositor_box_of(int row, int *box)
 }
 
 /*
-        The snap preview: the target the window being moved touches (compositor_target), drawn as its tint at full strength
-        from the frame it is touched in, and damaged where it was and where it is. It is not faded: it is there while the
-        contact is, and gone the moment it is lost or the window is let go. Once the window has moved only.
+        The snap preview: the target the window being moved touches (compositor_target), from the frame it is touched in, and
+        damaged where it was and where it is. Its target is there while the contact is, and gone the moment it is lost or the
+        window is let go; what is drawn of it is there at once, moves to a new target and fades out when there is none
+        (compositor_preview_shown). Once the window has moved only.
 */
 static void compositor_preview(int row)
 {
@@ -11446,7 +11708,10 @@ static void compositor_preview(int row)
         if (how == COMPOSITOR_FLOATING)
         {
                 if (compositor.preview[2] > 0)
+                {
                         compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]);
+                        compositor_preview_leave();
+                }
                 memory_zero(compositor.preview, sizeof(compositor.preview));
                 compositor.preview_row = COMPOSITOR_NONE;
                 return;
@@ -11455,6 +11720,7 @@ static void compositor_preview(int row)
                 return;
         if (compositor.preview[2] > 0)
                 compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]);
+        compositor_preview_enter(row, rect, how);
         memory_copy(compositor.preview, rect, sizeof(rect));
         compositor.preview_row = row;
         compositor_damage(rect[0], rect[1], rect[2], rect[3]);
@@ -13817,6 +14083,7 @@ static b32 compositor_main()
                                 compositor_present();
                                 compositor_land_keep();
                                 compositor_glide_keep();
+                                compositor_preview_keep();
                                 compositor_overlays_keep();
                                 if (compositor.motion_ts)
                                 {

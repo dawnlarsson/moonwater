@@ -122902,9 +122902,10 @@ static void check_compositor_snap_trigger(void)
     snap_let_go(412, 60, 50, 40);
     check("snap screen: and the let go takes B's right half", compositor.arranged[1] == COMPOSITOR_RIGHT && compositor.x[1] == 384);
 
-    /* The drawn frames: the tint is in the frame while the target is, and no frame after the let go has any of it. */
+    /* The drawn frames: the tint is in the frame while the target is; after the let go it fades out under the window gliding
+       into it (its first frame is the tint as it was), and once the fade is over no frame has any of it. */
     {
-        unsigned int ink, tint, drawn = 0, after = 0;
+        unsigned int ink, tint, drawn = 0, fading = 0, after = 0;
 
         snap_fresh();
         snap_hand(1, 0, 60, 50, 40);
@@ -122918,9 +122919,18 @@ static void check_compositor_snap_trigger(void)
         compositor_damage(0, 0, 256, 256);
         compositor_present();
         for (int at = 0; at < 256 * 256; at++)
+            fading += (layout_pixels[at] & 0xffffffu) == (tint & 0xffffffu);
+        compositor.preview_at = clock_monotonic_nanoseconds() - UI_WINDOW_NS - 1;
+        compositor.glide_at[1] = clock_monotonic_nanoseconds() - UI_WINDOW_NS - 1;
+        compositor_preview_keep();
+        compositor_glide_keep();
+        compositor_damage(0, 0, 256, 256);
+        compositor_present();
+        for (int at = 0; at < 256 * 256; at++)
             after += (layout_pixels[at] & 0xffffffu) == (tint & 0xffffffu);
-        check("snap frames: while the target is touched the frame is tinted, and after the let go no frame has any of the tint",
-              drawn > 0 && after == 0);
+        check("snap frames: while the target is touched the frame is tinted; the let go's first frame still has it, fading under "
+              "the gliding window, and after the fade no frame has any of the tint",
+              drawn > 0 && fading > 0 && after == 0 && !compositor.preview_draw);
     }
 }
 
@@ -123154,6 +123164,113 @@ static void check_compositor_screen_chord(void)
     compositor_key(0, CK_KEY_RIGHT, 1, 0);
     check("screen chord: and its remembered rectangle came with it there and back: undone, it is where it floated on the left screen",
           compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 10 && compositor.y[1] == 20 && compositor_screen_of(1) == 0);
+}
+
+/*
+        The preview's motion and shape. Entering a target it is drawn there at full strength at once; a new target (the left
+        half's corner) is reached from where it is drawn, between the two half way and on the quarter exactly at the end;
+        dragged off, its target is gone at once and what is drawn fades out where it was; let go on a target, it fades out
+        under the window gliding into it, over the same time. A tile's preview has the window's round corners and a line
+        stronger than its fill; a filled screen's is square with none. Reduced motion cuts. A glide that starts while another
+        runs starts from where the window is drawn.
+*/
+static void check_compositor_preview_motion(void)
+{
+    int rect[4], half[4] = {0, 0, 128, 256}, quarter[4] = {0, 0, 128, 128}, was[4];
+    unsigned int alpha, ink, fill, line_at, fill_at, corner_at;
+    positive now;
+    struct compositor_frame frame;
+
+    if (!layout_table_map(256))
+    {
+        check("preview motion: the table is mapped", false);
+        return;
+    }
+    snap_fresh();
+    snap_hand(1, 0, 60, 50, 40);
+    alpha = compositor_preview_shown(rect);
+    check("preview motion: entering a target it is drawn there at once, at full strength",
+          alpha == 100 && !memory_compare(rect, half, sizeof(rect)));
+
+    snap_hand(1, 0, 6, 50, 40); /* the top within the corner's 16 px: the top left quarter */
+    alpha = compositor_preview_shown(rect);
+    check("preview motion: a new target is reached from where it is drawn: at its first frame still the half",
+          compositor.preview[3] == 128 && alpha == 100 && !memory_compare(rect, half, sizeof(rect)));
+    now = clock_monotonic_nanoseconds();
+    compositor.preview_at = now - UI_WINDOW_NS / 2;
+    compositor_preview_shown(rect);
+    check("preview motion: half way it is between the half and the quarter", rect[3] > 128 && rect[3] < 256 && rect[2] == 128);
+    compositor.preview_at = now - UI_WINDOW_NS - 1;
+    compositor_preview_keep();
+    alpha = compositor_preview_shown(rect);
+    check("preview motion: at the end it is on the quarter exactly, and still", alpha == 100 && !memory_compare(rect, quarter, sizeof(rect)) &&
+                                                                                    compositor.preview_at == 0);
+
+    snap_hand(1, 60, 60, 50, 40);
+    alpha = compositor_preview_shown(rect);
+    check("preview motion: dragged off, the target is gone at once and what is drawn fades from where it was",
+          compositor.preview[2] == 0 && compositor.preview_row == COMPOSITOR_NONE && alpha == 100 && !memory_compare(rect, quarter, sizeof(rect)));
+    compositor.preview_at = clock_monotonic_nanoseconds() - UI_WINDOW_NS / 2;
+    alpha = compositor_preview_shown(rect);
+    check("preview motion: half way through the fade it is fainter, where it was", alpha > 0 && alpha < 100 &&
+                                                                                     !memory_compare(rect, quarter, sizeof(rect)));
+    compositor.preview_at = clock_monotonic_nanoseconds() - UI_WINDOW_NS - 1;
+    compositor_preview_keep();
+    check("preview motion: and then it is gone", !compositor.preview_draw && !compositor_preview_shown(rect));
+
+    /* The shape, presented above the window (it is at 60 down): a tile is round with a line, filling the screen is square. */
+    snap_fresh();
+    snap_hand(1, 0, 60, 50, 40);
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    ink = compositor_snap_ink();
+    fill = compositor_mix(compositor_ground, ink & 0xffffffu, ink >> 24) & 0xffffffu;
+    corner_at = layout_pixels[0] & 0xffffffu, fill_at = layout_pixels[30 * 256 + 64] & 0xffffffu, line_at = layout_pixels[30 * 256 + 127] & 0xffffffu;
+    check("preview shape: a half's preview has the window's round corner (its corner pixel is the wallpaper), its fill inside, "
+          "and a line stronger than the fill along its edge",
+          corner_at == (compositor_ground & 0xffffffu) && fill_at == fill && line_at != fill && line_at != (compositor_ground & 0xffffffu));
+    snap_hand(1, 60, 0, 50, 40);
+    compositor.preview_at = clock_monotonic_nanoseconds() - UI_WINDOW_NS - 1;
+    compositor_preview_keep();
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    check("preview shape: filling the screen it is square and has no line: its corner pixel is the fill",
+          (layout_pixels[0] & 0xffffffu) == fill && (layout_pixels[30 * 256 + 255] & 0xffffffu) == fill);
+    snap_let_go(60, 0, 50, 40);
+
+    /* Let go on a target: the window glides into it and the preview fades out over the same time. */
+    snap_fresh();
+    snap_hand(1, 0, 60, 50, 40);
+    snap_let_go(0, 60, 50, 40);
+    alpha = compositor_preview_shown(rect);
+    check("preview motion: let go on the half, the window glides into it and the preview fades from where it was, under it",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.glide[1] && compositor.preview_fading && alpha == 100 &&
+              !memory_compare(rect, half, sizeof(rect)) && compositor.preview_draw == 2);
+    compositor_frame_of(1, &frame);
+    check("preview motion: the window's frame carries the fading preview under it", frame.preview[2] == 128 && frame.preview_radius > 0);
+
+    /* Reduced motion cuts: off a target, nothing is drawn at once. */
+    snap_fresh();
+    compositor.table->motion = 1;
+    snap_hand(1, 0, 60, 50, 40);
+    snap_hand(1, 60, 60, 50, 40);
+    check("preview motion: reduced motion, dragged off, nothing is drawn at once", !compositor_preview_shown(rect) && !compositor.preview_draw);
+    snap_let_go(60, 60, 50, 40);
+    compositor.table->motion = 0;
+
+    /* A glide begun while another runs starts from where the window is drawn. */
+    layout_setup(256, 1);
+    compositor.table->motion = 0;
+    layout_show(1, 40, 40, 100, 100);
+    compositor.stack[0] = 1, compositor.stacked = 1;
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    compositor.glide_at[1] = clock_monotonic_nanoseconds() - UI_WINDOW_NS / 2;
+    compositor_frame_of(1, &frame);
+    was[0] = frame.x, was[1] = frame.y, was[2] = frame.width, was[3] = frame.height;
+    compositor_arrange(1, COMPOSITOR_RIGHT);
+    check("glide: a glide begun half way through another starts from where the window is drawn, not from the left half",
+          compositor.glide[1] && compositor.glide_from[1][0] - was[0] <= 1 && was[0] - compositor.glide_from[1][0] <= 1 &&
+              compositor.glide_from[1][2] - was[2] <= 1 && was[2] - compositor.glide_from[1][2] <= 1 && compositor.glide_from[1][2] != 128);
 }
 
 /*
@@ -141889,6 +142006,7 @@ b32 main()
         check_compositor_restore();
         check_compositor_cancel();
         check_compositor_screen_chord();
+        check_compositor_preview_motion();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
