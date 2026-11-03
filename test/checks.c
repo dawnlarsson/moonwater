@@ -135132,6 +135132,205 @@ static b64 sweep_value(struct ui_tween address_to t)
         return ui_tween_at(t, ui_kit.now, &live);
 }
 
+/*
+        A trackpad's scroll that reaches a list's end, as the owner reports it: the notches run on to the end while the finger is
+        down (a burst, one a frame), and the momentum tail keeps coming after the lift, a decaying run of small notches, all at the
+        end. The region goes out monotone and never passes its end, and no frame moves it faster than a glide may (a notch at the
+        end does not snap it there); its rubber band rises and falls once, never held at its peak while the notches come and never
+        shivering back and forth; and it settles idle at the end. A notch is 120ths as the compositor sends it, a frame apart on
+        the kit's clock. The touch's flick and pull at the same end are run the same way (ends_touch).
+*/
+#define ENDS_FRAME 16666667l
+#define ENDS_FINGER 30
+#define ENDS_TAIL 90
+#define ENDS_NOTCH 24
+#define ENDS_RUN_CAP ((b64)UI_WHEEL_RUN * UI_ROW * UI_SCROLL_SCALE / 60 + 1) // what a glide may move in a frame, 60 rows a second at most
+
+// The stretch and the position of a bounded region, frame by frame: what went one way and the other, held frames, the largest
+// frame's move. A stretch that rises and falls once is one turn; one that is held (the same value again) or goes back is not.
+struct ends_trace
+{
+        b32 monotone, inside, idle;
+        int held, turns;
+        b64 biggest;
+};
+
+// One frame's sample: prev holds the last frame's position, stretch and edge, and is taken to this frame's.
+struct ends_prev
+{
+        b64 at, st;
+        int edge, dir;
+};
+
+static void ends_note(struct ui_scroll address_to s, struct ends_prev address_to prev, b64 st, int edge, int sign, struct ends_trace address_to t)
+{
+        b64 d = s->at - prev->at, step = d < 0 ? -d : d;
+
+        if (sign > 0 ? d < 0 : d > 0)
+                t->monotone = false;
+        if (s->at < 0 || s->at > ui_scroll_most256(s))
+                t->inside = false;
+        if (step > t->biggest)
+                t->biggest = step;
+        if (st && st == prev->st && edge == prev->edge)
+                t->held++;
+        if (st && prev->st && edge == prev->edge && st != prev->st)
+        {
+                int now_dir = st > prev->st ? 1 : -1;
+
+                if (prev->dir && now_dir != prev->dir)
+                        t->turns++;
+                prev->dir = now_dir;
+        }
+        prev->at = s->at, prev->st = st, prev->edge = edge;
+}
+
+static void ends_run(struct ui address_to ui, struct ui_scroll address_to s, int sign, struct ends_trace address_to t)
+{
+        long q = -(long)sign * ENDS_NOTCH * 256;
+        struct ends_prev prev;
+        int edge = 0;
+        b64 st = 0;
+
+        memory_zero(&prev, sizeof(prev));
+        prev.at = s->at;
+        memory_zero(t, sizeof(*t));
+        t->monotone = t->inside = true;
+        for (int frame = 0; frame < 400; frame++)
+        {
+                struct window_event turn = {WINDOW_EVENT_WHEEL, 0, 0, 0};
+
+                if (frame >= ENDS_FINGER && frame < ENDS_FINGER + ENDS_TAIL)
+                        q = q * 245 / 256;
+                turn.a = (int)(q / 256);
+                ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
+                ui_kit.wheel_clock = ui_kit.now;
+                if (turn.a)
+                        ui_wheel_turn(ui, s, &turn);
+                ui_scroll_glide(ui, s);
+                st = ui_scroll_stretched(s, &edge);
+                ends_note(s, &prev, st, edge, sign, t);
+#ifdef ENDS_TRACE
+                string_format(log, "frame %p notch %b at %b st %b edge %b glide %b back %b\n", (positive)frame, (bipolar)turn.a,
+                              (bipolar)s->at, (bipolar)st, (bipolar)edge, (bipolar)s->gliding, (bipolar)s->back.live);
+#endif
+                if (frame >= ENDS_FINGER + ENDS_TAIL && !s->gliding && !s->back.live)
+                {
+                        t->idle = true;
+                        break;
+                }
+        }
+        ui_kit.wheel_clock = 0;
+}
+
+// A finger on a list's end, the way the kit's finger path drives it: a flick moves it fast enough to fling (the region clamps at
+// the end, as a throw does), and a pull moves it slowly past the end and lets go, when the stretch springs home from the pull.
+static void ends_touch(struct ui address_to ui, struct ui_scroll address_to s, b32 flick, struct ends_trace address_to t)
+{
+        struct ends_prev prev;
+        int edge = 0;
+        b64 st = 0;
+
+        memory_zero(&prev, sizeof(prev));
+        memory_zero(t, sizeof(*t));
+        t->monotone = t->inside = true;
+        s->flung = flick;
+        for (int frame = 0; frame < 6; frame++)
+        {
+                ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
+                ui_scroll_drag(s, flick ? 40 : 10);
+                ui_scroll_glide(ui, s);
+        }
+        ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
+        ui_scroll_let_go(s, flick, flick ? 2400 : 0);
+        s->flung = 0;
+        prev.at = s->at;
+        for (int frame = 0; frame < 240; frame++)
+        {
+                ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
+                ui_scroll_glide(ui, s);
+                st = ui_scroll_stretched(s, &edge);
+                ends_note(s, &prev, st, edge, 1, t);
+                if (!s->gliding && !s->back.live)
+                {
+                        t->idle = true;
+                        break;
+                }
+        }
+}
+
+static fn check_kit_scroll_ends(void)
+{
+        struct ui ui = terminal.ui;
+        struct ui_scroll bottom, top, flick, pull;
+        struct ends_trace t;
+
+        ui.scale = 100;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0;
+
+        memory_zero(&bottom, sizeof(bottom));
+        bottom.x = 100, bottom.y = 10, bottom.height = 200, bottom.content = 1000, bottom.view = 200, bottom.bounds = 1, bottom.scale = 100;
+        ui_scroll_set(&bottom, 300);
+        ends_run(&ui, &bottom, 1, &t);
+        check("kit ends: a trackpad's notches to a list's bottom go out monotone, never pass the end, and rest at it",
+              t.monotone && t.inside && bottom.scroll == 800 && bottom.at == 800 * UI_SCROLL_SCALE);
+        check("kit ends: the bottom's rubber band rises and falls once, never held at its peak while the notches come", t.held == 0 && t.turns <= 1);
+        check("kit ends: no frame moves the bottom faster than a glide may, so a notch at the end does not snap the list there",
+              t.biggest <= ENDS_RUN_CAP);
+        check("kit ends: after the momentum tail the bottom settles idle at its end", t.idle);
+
+        memory_zero(&top, sizeof(top));
+        top.x = 100, top.y = 10, top.height = 200, top.content = 1000, top.view = 200, top.bounds = 1, top.scale = 100;
+        ui_scroll_set(&top, 500);
+        ends_run(&ui, &top, -1, &t);
+        check("kit ends: a trackpad's notches to a list's top go out monotone, never pass the end, and rest at it",
+              t.monotone && t.inside && top.scroll == 0 && top.at == 0);
+        check("kit ends: the top's rubber band rises and falls once, never held at its peak while the notches come", t.held == 0 && t.turns <= 1);
+        check("kit ends: no frame moves the top faster than a glide may, so a notch at the end does not snap the list there",
+              t.biggest <= ENDS_RUN_CAP);
+        check("kit ends: after the momentum tail the top settles idle at its end", t.idle);
+
+        // A notch that reaches the end, and one past it a tenth of a second on once the glide has settled, is a new burst: it kicks.
+        {
+                struct ui_scroll reach;
+                int edge = 0, frame;
+                b32 kicked;
+
+                memory_zero(&reach, sizeof(reach));
+                reach.x = 100, reach.y = 10, reach.height = 200, reach.content = 1000, reach.view = 200, reach.bounds = 1, reach.scale = 100;
+                ui_scroll_set(&reach, 780);
+                ui_kit.wheel_clock = ui_kit.now + 1000000000ll;
+                ui_scroll_wheel(&ui, &reach, -120);
+                for (frame = 0; frame < 60; frame++)
+                {
+                        ui_kit.now += ENDS_FRAME, ui_kit.busy = 0;
+                        ui_kit.wheel_clock = ui_kit.now;
+                        ui_scroll_glide(&ui, &reach);
+                }
+                ui_kit.now += 100000000ll;
+                ui_kit.wheel_clock = ui_kit.now;
+                ui_scroll_wheel(&ui, &reach, -120);
+                kicked = reach.back.live && reach.edge == 1 && ui_scroll_stretched(&reach, &edge) > 0 && edge == 1;
+                ui_kit.wheel_clock = 0;
+                check("kit ends: a notch past the end, a tenth of a second after the glide to it settled, kicks the stretch",
+                      kicked && reach.scroll == 800 && !reach.gliding);
+        }
+
+        // A finger's flick to the bottom clamps there as a throw does, and a slow pull past it springs home from the pull.
+        memory_zero(&flick, sizeof(flick));
+        flick.x = 100, flick.y = 10, flick.height = 200, flick.content = 1000, flick.view = 200, flick.bounds = 1, flick.scale = 100;
+        ui_scroll_set(&flick, 600);
+        ends_touch(&ui, &flick, 1, &t);
+        check("kit ends: a finger's flick to the bottom clamps there, monotone, with no stretch held or shivering, and settles idle",
+              t.monotone && t.held == 0 && t.turns == 0 && t.idle && flick.scroll == 800 && flick.at == 800 * UI_SCROLL_SCALE);
+        memory_zero(&pull, sizeof(pull));
+        pull.x = 100, pull.y = 10, pull.height = 200, pull.content = 1000, pull.view = 200, pull.bounds = 1, pull.scale = 100;
+        ui_scroll_set(&pull, 780);
+        ends_touch(&ui, &pull, 0, &t);
+        check("kit ends: a finger's slow pull past the bottom springs home from the pull, monotone, and settles idle at the end",
+              t.monotone && t.held == 0 && t.turns == 0 && t.idle && pull.scroll == 800 && pull.at == 800 * UI_SCROLL_SCALE);
+}
+
 static fn check_kit_states(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -141400,6 +141599,7 @@ b32 main()
         check_kit_place();
         check_kit_controls();
         check_kit_states();
+        check_kit_scroll_ends();
         check_kit_turn();
         check_kit_tab_ripple();
 #endif
