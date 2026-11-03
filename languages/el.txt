@@ -51,6 +51,10 @@ menu_zoom_out	9234	Σμίκρυνση
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
 settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα
 settings_asks_first	e9bd	ρωτά πρώτα
+settings_battery_charging	5116	, φορτίζει
+settings_battery_discharging	7964	, αποφορτίζεται
+settings_battery_full	ded8	, πλήρης
+settings_battery_idle	1635	, δεν φορτίζει
 settings_busy	34e0	το moonwater είναι απασχολημένο: οι προηγούμενες αλλαγές δεν έχουν ολοκληρωθεί
 settings_cannot_join	dfa4	το moonwater δεν μπορεί να συνδεθεί σε ό,τι ζητά αυτό το δίκτυο
 settings_cannot_run	954f	η εντολή moonwater δεν μπόρεσε να εκτελεστεί
@@ -72,20 +76,40 @@ settings_item_open	4429	το Enter συνδέεται και το αποθηκε
 settings_item_saved	3ffd	αποθηκευμένο: το Enter ζητά ξανά τον κωδικό, το Delete το ξεχνά
 settings_joined	1050	συνδεδεμένο
 settings_kept	4759	κρατημένο
+settings_map_drag	125f	Αφήστε για να τοποθετηθεί η οθόνη
+settings_map_hint	9efb	Σύρετε μια οθόνη για να τη μετακινήσετε.
+settings_map_keys	54c9	Τα βέλη επιλέγουν οθόνη. Το Shift και ένα βέλος τη μετακινούν. Το Enter την αναγνωρίζει. Το Κάτω βγαίνει.
+settings_map_none	1b29	Δεν είναι συνδεδεμένη καμία οθόνη.
+settings_map_one	7ff2	Είναι συνδεδεμένη μόνο μία οθόνη.
 settings_menu_keys	5546	Πάνω και Κάτω επιλέγουν, το Enter ορίζει, το Escape αφήνει
+settings_mode_largest	c7c4	Μεγαλύτερη εικόνα
+settings_mode_preferred	024c	Προτεινόμενο
 settings_name_chars	58a2	ένα όνομα αποτελείται από γράμματα, ψηφία και παύλες
 settings_name_long	f2c0	ένα όνομα έχει λιγότερους από 32 χαρακτήρες
+settings_no_rates	185b	Η οθόνη δεν αναφέρει ρυθμούς
+settings_no_screen	55fd	Δεν είναι συνδεδεμένη καμία οθόνη
 settings_not_here	4e20	δεν υπάρχει σε αυτό το μηχάνημα
 settings_nothing_kept	85a2	δεν πληκτρολογήθηκε τίποτα: η τιμή διατηρείται
 settings_nothing_matches	14e9	Τίποτα δεν ταιριάζει με το κείμενο
 settings_nothing_typed	edce	δεν πληκτρολογήθηκε τίποτα
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d Hz (προτεινόμενο)
+settings_rate_plain	743a	%d Hz
 settings_refused	454b	το moonwater αρνήθηκε
+settings_refused_place	9632	%s (η θέση του στο αρχείο δεν διαβάζεται)
+settings_refused_rate	97bc	%1$s (το %2$d Hz δεν προσφέρεται)
+settings_refused_turn	7b3a	%1$s (δεν έγινε: %2$s)
 settings_run_any	3ffd	Εκτέλεση οποιασδήποτε εντολής moonwater
 settings_running	d0e2	εκτελείται το %s (το Escape το σταματά)
 settings_saved	9f44	αποθηκευμένο
+settings_scale_best	2ba0	%d%% (προτεινόμενο)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	Οθόνη %1$d: %2$s
+settings_screen_named	d918	Οθόνη %1$d: %2$s [%3$s]
 settings_stopped	f34e	διακόπηκε
 settings_too_long	fed7	το moonwater άργησε πολύ και σταμάτησε
 settings_too_many	db0e	είναι περισσότερες λέξεις από όσες δέχεται μια εντολή
+settings_turned_software	64d9	Περιστρέφεται από το Moonwater (πιο αργά)
 settings_type_command	75f8	πληκτρολογήστε μια εντολή: το ρήμα και ό,τι ακολουθεί
 settings_type_device	63e0	πληκτρολογήστε το όνομα μιας συσκευής: το Enter το κρατά, το Escape το αφήνει
 settings_type_passphrase	ca95	πληκτρολογήστε τον κωδικό: το Enter συνδέεται, το Escape το αφήνει
@@ -174,6 +198,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Network	ad65	Δίκτυο
 =Network adapters	88ef	Προσαρμογείς δικτύου
 =New USB devices	c15c	Νέες συσκευές USB
+=Normal	2772	Κανονική
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
 =Other devices	8362	Άλλες συσκευές
 =Plain Text	2bbe	Απλό κείμενο
@@ -207,7 +232,10 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Time server (auto for the pool)	67e5	Διακομιστής ώρας (auto για το pool)
 =Time zone	741a	Ζώνη ώρας
 =Turned by the screen	ea45	Περιστρέφεται από την οθόνη
+=Turned left	507c	Στραμμένη αριστερά
+=Turned right	7a49	Στραμμένη δεξιά
 =USB	da81	USB
+=Upside down	9dc1	Ανάποδα
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Ενσύρματο
 =all	4bc4	όλα

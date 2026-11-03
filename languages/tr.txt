@@ -51,6 +51,10 @@ menu_zoom_out	9234	&Uzaklaştır
 settings_already_joined	71fb	%s ağına zaten bağlı
 settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri
 settings_asks_first	e9bd	önce sorar
+settings_battery_charging	5116	, şarj oluyor
+settings_battery_discharging	7964	, boşalıyor
+settings_battery_full	ded8	, dolu
+settings_battery_idle	1635	, şarj olmuyor
 settings_busy	34e0	moonwater meşgul: bundan önceki değişiklikler bitmedi
 settings_cannot_join	dfa4	moonwater bu ağın istediğine katılamıyor
 settings_cannot_run	954f	moonwater komutu çalıştırılamadı
@@ -72,20 +76,40 @@ settings_item_open	4429	Enter bağlanır ve kaydeder
 settings_item_saved	3ffd	kayıtlı: Enter parolayı yeniden sorar, Delete unutturur
 settings_joined	1050	bağlı
 settings_kept	4759	saklı
+settings_map_drag	125f	Ekranı yerleştirmek için bırakın
+settings_map_hint	9efb	Bir ekranı taşımak için sürükleyin.
+settings_map_keys	54c9	Oklar bir ekran seçer. Shift ve bir ok onu taşır. Enter tanımlar. Aşağı çıkar.
+settings_map_none	1b29	Bağlı bir ekran yok.
+settings_map_one	7ff2	Yalnızca bir ekran bağlı.
 settings_menu_keys	5546	Yukarı ve Aşağı seçer, Enter ayarlar, Escape bırakır
+settings_mode_largest	c7c4	En büyük görüntü
+settings_mode_preferred	024c	Önerilen
 settings_name_chars	58a2	bir ad harflerden, rakamlardan ve tirelerden oluşur
 settings_name_long	f2c0	bir ad 32 karakterden kısadır
+settings_no_rates	185b	Ekran hiçbir hız bildirmiyor
+settings_no_screen	55fd	Bağlı bir ekran yok
 settings_not_here	4e20	bu makinede yok
 settings_nothing_kept	85a2	bir şey yazılmadı: değer korunur
 settings_nothing_matches	14e9	Yazılana uyan bir şey yok
 settings_nothing_typed	edce	bir şey yazılmadı
+settings_percent	e76a	%%%d
+settings_rate_best	7450	%d Hz (önerilen)
+settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater reddetti
+settings_refused_place	9632	%s (dosyadaki konumu okunmuyor)
+settings_refused_rate	97bc	%1$s (%2$d Hz sunulmuyor)
+settings_refused_turn	7b3a	%1$s (%2$s yapılamadı)
 settings_run_any	3ffd	Herhangi bir moonwater komutunu çalıştır
 settings_running	d0e2	%s çalışıyor (Escape durdurur)
 settings_saved	9f44	kayıtlı
+settings_scale_best	2ba0	%%%d (önerilen)
+settings_scale_plain	e76a	%%%d
+settings_screen_bare	c945	Ekran %1$d: %2$s
+settings_screen_named	d918	Ekran %1$d: %2$s [%3$s]
 settings_stopped	f34e	durduruldu
 settings_too_long	fed7	moonwater çok uzun sürdü ve durduruldu
 settings_too_many	db0e	bu, bir komutun alabileceğinden fazla sözcük
+settings_turned_software	64d9	Moonwater tarafından döndürülür (daha yavaş)
 settings_type_command	75f8	bir komut yazın: fiili, sonra devamı
 settings_type_device	63e0	bir aygıtın adını yazın: Enter saklar, Escape bırakır
 settings_type_passphrase	ca95	parolayı yazın: Enter bağlanır, Escape bırakır
@@ -174,6 +198,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Network	ad65	Ağ
 =Network adapters	88ef	Ağ bağdaştırıcıları
 =New USB devices	c15c	Yeni USB aygıtları
+=Normal	2772	Normal
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
 =Other devices	8362	Diğer aygıtlar
 =Plain Text	2bbe	Düz Metin
@@ -207,7 +232,10 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Time server (auto for the pool)	67e5	Zaman sunucusu (havuz için auto)
 =Time zone	741a	Saat dilimi
 =Turned by the screen	ea45	Ekran tarafından döndürülür
+=Turned left	507c	Sola döndürülmüş
+=Turned right	7a49	Sağa döndürülmüş
 =USB	da81	USB
+=Upside down	9dc1	Baş aşağı
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Kablolu
 =all	4bc4	tümü

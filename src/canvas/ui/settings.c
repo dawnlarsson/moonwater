@@ -489,7 +489,6 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
 static unsigned int settings_battery(string_address chosen, char address_to value, positive room)
 {
         struct battery_state battery;
-        p8 digits[16];
 
         value[0] = 0;
         // none is no battery. A chosen name is read as it is; only a name that has gone (no longer a battery) falls back to the first present one.
@@ -502,21 +501,17 @@ static unsigned int settings_battery(string_address chosen, char address_to valu
         if (!battery.present)
                 return SETTINGS_ABSENT;
         if (battery.percent < 0)
-                string_copy_bounded((string_address)value, (string_address) "unknown", room);
+                string_copy_bounded((string_address)value, (string_address)WORDS(settings_unknown), room);
         else
-        {
-                positive_into_string(digits, (positive)battery.percent);
-                string_copy_bounded((string_address)value, (string_address)digits, room);
-                string_append_bounded((string_address)value, (string_address) "%", room);
-        }
+                language_format(value, room, WORDS(settings_percent), (long)battery.percent);
         if (battery.charging == BATTERY_CHARGING)
-                string_append_bounded((string_address)value, (string_address) ", Charging", room);
+                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_charging), room);
         else if (battery.charging == BATTERY_DISCHARGING)
-                string_append_bounded((string_address)value, (string_address) ", Discharging", room);
+                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_discharging), room);
         else if (battery.charging == BATTERY_FULL)
-                string_append_bounded((string_address)value, (string_address) ", Full", room);
+                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_full), room);
         else if (battery.charging == BATTERY_NOT_CHARGING)
-                string_append_bounded((string_address)value, (string_address) ", Not charging", room);
+                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_idle), room);
         return SETTINGS_READ;
 }
 
@@ -1328,8 +1323,8 @@ static const char address_to settings_turn_label(unsigned int turn)
 {
         for (positive at = 0; at < sizeof(settings_turns) / sizeof(settings_turns[0]); at++)
                 if (settings_turns[at].degrees == (int)turn)
-                        return settings_turns[at].label;
-        return settings_turns[0].label;
+                        return language_of(settings_turns[at].label);
+        return language_of(settings_turns[0].label);
 }
 
 // A screen's name as the Screen dropdown and the rows show it: its number and its monitor's name from its EDID with its
@@ -1337,16 +1332,9 @@ static const char address_to settings_turn_label(unsigned int turn)
 static positive settings_screen_label(unsigned int number, const char address_to name, const char address_to model, char address_to into,
                                       positive room)
 {
-        positive at = settings_map_add(into, room, 0, "Screen ");
-
-        at = settings_map_number(into, room, at, (long)number);
-        at = settings_map_add(into, room, at, ": ");
         if (!model[0])
-                return settings_map_add(into, room, at, name);
-        at = settings_map_add(into, room, at, model);
-        at = settings_map_add(into, room, at, " [");
-        at = settings_map_add(into, room, at, name);
-        return settings_map_add(into, room, at, "]");
+                return language_format(into, room, WORDS(settings_screen_bare), (long)number, name);
+        return language_format(into, room, WORDS(settings_screen_named), (long)number, model, name);
 }
 
 // A rate in Hz, with the screen's first rate, the one it recommends, marked.
@@ -1364,16 +1352,12 @@ static unsigned int settings_scale_suggested(const struct windows address_to tab
 // A scale in percent, with the marker of the one the screen suggests: 150% (recommended).
 static positive settings_scale_label(unsigned int percent, b32 recommended, char address_to into, positive room)
 {
-        positive at = settings_map_number(into, room, 0, (long)percent);
-
-        return settings_map_add(into, room, at, recommended ? "% (recommended)" : "%");
+        return language_format(into, room, recommended ? WORDS(settings_scale_best) : WORDS(settings_scale_plain), (long)percent);
 }
 
 static positive settings_rate_label(unsigned int hz, b32 recommended, char address_to into, positive room)
 {
-        positive at = settings_map_number(into, room, 0, (long)hz);
-
-        return settings_map_add(into, room, at, recommended ? " Hz (recommended)" : " Hz");
+        return language_format(into, room, recommended ? WORDS(settings_rate_best) : WORDS(settings_rate_plain), (long)hz);
 }
 
 // How many refresh rates the chosen screen lists, at most WINDOWS_OUTPUT_HZ.
@@ -1428,31 +1412,24 @@ static const char address_to settings_row_text(int row, int chosen)
         const char address_to shown = settings_output_text(row, chosen);
         unsigned char output = settings_rows[row].output;
         unsigned int refused;
-        positive length;
 
         if (chosen < 0)
                 return shown;
         refused = table->output_refused[chosen];
         if (output == SETTINGS_OUT_REFRESH && (refused & WINDOWS_REFUSED_RATE))
         {
-                length = settings_map_add(settings_noted, sizeof(settings_noted), 0, shown);
-                length = settings_map_add(settings_noted, sizeof(settings_noted), length, " (");
-                length = settings_map_number(settings_noted, sizeof(settings_noted), length, (long)table->output_asked_hz[chosen]);
-                settings_map_add(settings_noted, sizeof(settings_noted), length, " Hz is not offered)");
+                language_format(settings_noted, sizeof(settings_noted), WORDS(settings_refused_rate), shown, (long)table->output_asked_hz[chosen]);
                 return settings_noted;
         }
         if (output == SETTINGS_OUT_TURN && (refused & WINDOWS_REFUSED_TURN))
         {
-                length = settings_map_add(settings_noted, sizeof(settings_noted), 0, shown);
-                length = settings_map_add(settings_noted, sizeof(settings_noted), length, " (");
-                length = settings_map_add(settings_noted, sizeof(settings_noted), length, settings_turn_label(table->output_asked_turn[chosen]));
-                settings_map_add(settings_noted, sizeof(settings_noted), length, " could not be done)");
+                language_format(settings_noted, sizeof(settings_noted), WORDS(settings_refused_turn), shown,
+                                settings_turn_label(table->output_asked_turn[chosen]));
                 return settings_noted;
         }
         if (output == SETTINGS_OUT_SCREEN && (refused & WINDOWS_REFUSED_PLACE))
         {
-                length = settings_map_add(settings_noted, sizeof(settings_noted), 0, shown);
-                settings_map_add(settings_noted, sizeof(settings_noted), length, " (its place in the file is not read)");
+                language_format(settings_noted, sizeof(settings_noted), WORDS(settings_refused_place), shown);
                 return settings_noted;
         }
         return shown;
@@ -1480,10 +1457,10 @@ static int settings_map_at(int px, int py, const struct settings_screen address_
 // which has nothing to be moved against).
 static const char address_to settings_map_hint(unsigned int count)
 {
-        return settings.map.drag >= 0 ? "Let go to place the screen"
-               : settings.map.keys && count > 1 ? "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves."
-               : !count               ? "No screen is connected."
-               : count == 1           ? "Only one screen is connected." : "Drag a screen to move it.";
+        return settings.map.drag >= 0 ? WORDS(settings_map_drag)
+               : settings.map.keys && count > 1 ? WORDS(settings_map_keys)
+               : !count               ? WORDS(settings_map_none)
+               : count == 1           ? WORDS(settings_map_one) : WORDS(settings_map_hint);
 }
 
 // The panel, its screens drawn to fit it (a drag shows the screen where it would be let go), each one's number, and the
@@ -2966,8 +2943,9 @@ static const char address_to settings_label_of(int row, const char address_to wo
                                setting_place(settings_rows[row].choices, (string_address)word) >= 0
                            ? language_of(word)
                            : word;
-        return string_equals((string_address)word, (string_address) "largest") ? "Biggest picture"
-               : string_equals((string_address)word, (string_address) "preferred") ? "Recommended" : word;
+        // The word is the verb's, a key; what comes back is what is shown.
+        return string_equals((string_address)word, (string_address) "largest") ? WORDS(settings_mode_largest) // shown for a key
+               : string_equals((string_address)word, (string_address) "preferred") ? WORDS(settings_mode_preferred) : word; // shown for a key
 }
 
 // The verb's word for a plain word shown in a row's menu (the inverse of settings_label_of).
@@ -2990,8 +2968,8 @@ static void settings_word_of(int row, const char address_to label, char address_
                         }
         }
         else if (settings_is_modes(row))
-                word = string_equals((string_address)label, (string_address) "Biggest picture") ? "largest"
-                       : string_equals((string_address)label, (string_address) "Recommended") ? "preferred" : label;
+                word = string_equals((string_address)label, (string_address)WORDS(settings_mode_largest)) ? "largest" // shown against shown
+                       : string_equals((string_address)label, (string_address)WORDS(settings_mode_preferred)) ? "preferred" : label; // shown against shown
         string_copy_bounded((string_address)into, (string_address)word, room);
 }
 
@@ -3020,7 +2998,7 @@ static b32 settings_output_choice(const struct settings_row address_to which, po
         {
                 if (index >= sizeof(settings_turns) / sizeof(settings_turns[0]))
                         return false;
-                string_copy_bounded((string_address)into, (string_address)settings_turns[index].label, room);
+                string_copy_bounded((string_address)into, (string_address)language_of(settings_turns[index].label), room);
                 return true;
         }
         if (which->output == SETTINGS_OUT_SCALE && chosen >= 0 && index < sizeof(settings_scales) / sizeof(settings_scales[0]))
@@ -3069,18 +3047,18 @@ static void settings_describe_output(int id, struct ui_row address_to row)
         if (output == SETTINGS_OUT_NOTE)
         {
                 row->kind = UI_ROW_PLAIN, row->dim = true;
-                row->label = chosen >= 0 && table->output_software[chosen] ? "Turned by Moonwater (slower)" : "Turned by the screen";
+                row->label = chosen >= 0 && table->output_software[chosen] ? WORDS(settings_turned_software) : language_of(settings_rows[id].label);
                 return;
         }
         if (chosen < 0)
         {
-                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "No screen is connected";
+                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = WORDS(settings_no_screen);
                 return;
         }
         // A screen with no rate to choose says so, and a screen with one rate has nothing to choose either: a word, not a menu.
         if (output == SETTINGS_OUT_REFRESH && !settings_rates_of(chosen))
         {
-                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = "The screen lists no rates";
+                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = WORDS(settings_no_rates);
                 return;
         }
         if ((output == SETTINGS_OUT_REFRESH && settings_rates_of(chosen) == 1) || (output == SETTINGS_OUT_SCREEN && settings_map_count() == 1))

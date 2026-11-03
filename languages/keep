@@ -15,3 +15,29 @@ src/canvas/ui/terminal.c	by
 src/canvas/ui/terminal.c	px
 src/canvas/ui/terminal.c	klog pid
 src/canvas/ui/terminal.c	terminal pid
+src/canvas/ui/settings.c	[Moonwater]
+src/canvas/ui/settings.c	Run any moonwater command
+src/canvas/ui/settings.c	Normal
+src/canvas/ui/settings.c	Turned right
+src/canvas/ui/settings.c	Upside down
+src/canvas/ui/settings.c	Turned left
+src/canvas/ui/settings.c	Keep a device by its name
+src/canvas/ui/settings.c	Wi-Fi
+src/canvas/ui/settings.c	Bluetooth
+src/canvas/ui/settings.c	In range and saved
+src/canvas/ui/settings.c	Remembered devices
+src/canvas/ui/settings.c	Power
+src/canvas/ui/settings.c	Time
+src/canvas/ui/settings.c	rotation
+src/canvas/ui/settings.c	scale
+src/canvas/ui/settings.c	refresh
+src/canvas/ui/settings.c	place
+src/canvas/ui/settings.c	more
+src/canvas/ui/settings.c	* joined
+src/canvas/ui/settings.c	All commands
+src/canvas/ui/settings.c	this machine has no
+src/canvas/ui/settings.c	this battery has no
+src/canvas/ui/settings.c	no wireless hardware
+src/canvas/ui/settings.c	dBm
+src/canvas/ui/settings.c	and
+src/canvas/ui/settings.c	wifi

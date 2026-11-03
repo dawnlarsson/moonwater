@@ -45,3 +45,10 @@ Undo | Deshacer | Annuler | Rückgängig | Desfazer | Annulla | Ongedaan maken |
 Redo | Rehacer | Rétablir | Wiederholen | Refazer | Ripeti | Opnieuw | Ponów | Yinele | Gör om | Повторить | Повторити | Επανάληψη
 power off (turn the machine off) | apagar | éteindre | ausschalten | desligar | spegni | uitschakelen | wyłącz | kapat | stäng av | выключить | вимкнути | τερματισμός
 restart (start the machine again) | reiniciar | redémarrer | neu starten | reiniciar | riavvia | opnieuw opstarten | uruchom ponownie | yeniden başlat | starta om | перезагрузить | перезавантажити | επανεκκίνηση
+passphrase | contraseña | mot de passe | Passwort | senha | password | wachtwoord | hasło | parola | lösenord | пароль | пароль | κωδικός
+device (hardware) | dispositivo | appareil | Gerät | dispositivo | dispositivo | apparaat | urządzenie | aygıt | enhet | устройство | пристрій | συσκευή
+forget (a network, a device) | olvidar | oublier | vergessen | esquecer | dimenticare | vergeten | zapomnieć | unutmak | glömma | забыть | забути | ξεχνώ
+join (a network) | conectarse | rejoindre | verbinden | conectar | connettersi | verbinden | połączyć | bağlanmak | ansluta | подключиться | підключитися | συνδέομαι
+launcher | lanzador | lanceur | Starter | lançador | avviatore | starter | uruchamianie | başlatıcı | startare | запуск | запуск | εκκινητής
+terminal | terminal | terminal | Terminal | terminal | terminale | terminal | terminal | terminal | terminal | терминал | термінал | τερματικό
+kernel log | registro del kernel | journal du noyau | Kernel-Protokoll | registro do kernel | registro del kernel | kernellogboek | dziennik jądra | çekirdek günlüğü | kärnlogg | журнал ядра | журнал ядра | αρχείο καταγραφής πυρήνα

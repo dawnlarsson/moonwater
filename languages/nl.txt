@@ -51,6 +51,10 @@ menu_zoom_out	9234	&Uitzoomen
 settings_already_joined	71fb	al verbonden met %s
 settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
 settings_asks_first	e9bd	vraagt eerst
+settings_battery_charging	5116	, laadt op
+settings_battery_discharging	7964	, ontlaadt
+settings_battery_full	ded8	, vol
+settings_battery_idle	1635	, laadt niet op
 settings_busy	34e0	moonwater is bezig: de vorige wijzigingen zijn nog niet klaar
 settings_cannot_join	dfa4	moonwater kan niet voldoen aan wat dat netwerk vraagt
 settings_cannot_run	954f	de moonwater-opdracht kon niet worden uitgevoerd
@@ -72,20 +76,40 @@ settings_item_open	4429	Enter verbindt en bewaart het
 settings_item_saved	3ffd	opgeslagen: Enter vraagt het wachtwoord opnieuw, Delete vergeet het
 settings_joined	1050	verbonden
 settings_kept	4759	bewaard
+settings_map_drag	125f	Laat los om het scherm te plaatsen
+settings_map_hint	9efb	Sleep een scherm om het te verplaatsen.
+settings_map_keys	54c9	Pijlen kiezen een scherm. Shift en een pijl verplaatst het. Enter identificeert. Omlaag verlaat.
+settings_map_none	1b29	Er is geen scherm aangesloten.
+settings_map_one	7ff2	Er is maar één scherm aangesloten.
 settings_menu_keys	5546	Omhoog en Omlaag kiezen, Enter stelt in, Escape laat
+settings_mode_largest	c7c4	Grootste beeld
+settings_mode_preferred	024c	Aanbevolen
 settings_name_chars	58a2	een naam bestaat uit letters, cijfers en streepjes
 settings_name_long	f2c0	een naam is korter dan 32 tekens
+settings_no_rates	185b	Het scherm geeft geen frequenties op
+settings_no_screen	55fd	Er is geen scherm aangesloten
 settings_not_here	4e20	niet op deze machine
 settings_nothing_kept	85a2	niets getypt: de waarde blijft
 settings_nothing_matches	14e9	Niets komt overeen met de invoer
 settings_nothing_typed	edce	niets getypt
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d Hz (aanbevolen)
+settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater weigerde
+settings_refused_place	9632	%s (de plaats in het bestand wordt niet gelezen)
+settings_refused_rate	97bc	%1$s (%2$d Hz wordt niet aangeboden)
+settings_refused_turn	7b3a	%1$s (%2$s kon niet worden gedaan)
 settings_run_any	3ffd	Een willekeurige moonwater-opdracht uitvoeren
 settings_running	d0e2	%s wordt uitgevoerd (Escape stopt het)
 settings_saved	9f44	opgeslagen
+settings_scale_best	2ba0	%d%% (aanbevolen)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	Scherm %1$d: %2$s
+settings_screen_named	d918	Scherm %1$d: %2$s [%3$s]
 settings_stopped	f34e	gestopt
 settings_too_long	fed7	moonwater deed er te lang over en werd gestopt
 settings_too_many	db0e	dat zijn meer woorden dan een opdracht aankan
+settings_turned_software	64d9	Gedraaid door Moonwater (langzamer)
 settings_type_command	75f8	typ een opdracht: het werkwoord, dan wat volgt
 settings_type_device	63e0	typ de naam van een apparaat: Enter bewaart hem, Escape laat het
 settings_type_passphrase	ca95	typ het wachtwoord: Enter verbindt, Escape laat het
@@ -174,6 +198,7 @@ ui_field_full	fe02	meer past er niet in
 =Network	ad65	Netwerk
 =Network adapters	88ef	Netwerkadapters
 =New USB devices	c15c	Nieuwe USB-apparaten
+=Normal	2772	Normaal
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
 =Other devices	8362	Andere apparaten
 =Plain Text	2bbe	Platte tekst
@@ -207,7 +232,10 @@ ui_field_full	fe02	meer past er niet in
 =Time server (auto for the pool)	67e5	Tijdserver (auto voor de pool)
 =Time zone	741a	Tijdzone
 =Turned by the screen	ea45	Gedraaid door het scherm
+=Turned left	507c	Naar links gedraaid
+=Turned right	7a49	Naar rechts gedraaid
 =USB	da81	USB
+=Upside down	9dc1	Ondersteboven
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Bekabeld
 =all	4bc4	alle

@@ -51,6 +51,10 @@ menu_zoom_out	9234	Zoom &Out
 settings_already_joined	71fb	already joined to %s
 settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
 settings_asks_first	e9bd	asks first
+settings_battery_charging	5116	, Charging
+settings_battery_discharging	7964	, Discharging
+settings_battery_full	ded8	, Full
+settings_battery_idle	1635	, Not charging
 settings_busy	34e0	moonwater is busy: the changes before this one are not done
 settings_cannot_join	dfa4	moonwater cannot join what that network asks for
 settings_cannot_run	954f	the moonwater command could not be run
@@ -72,20 +76,40 @@ settings_item_open	4429	Enter joins it, and saves it
 settings_item_saved	3ffd	saved: Enter types its passphrase again, Delete forgets it
 settings_joined	1050	joined
 settings_kept	4759	kept
+settings_map_drag	125f	Let go to place the screen
+settings_map_hint	9efb	Drag a screen to move it.
+settings_map_keys	54c9	Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves.
+settings_map_none	1b29	No screen is connected.
+settings_map_one	7ff2	Only one screen is connected.
 settings_menu_keys	5546	Up and Down choose, Enter sets it, Escape leaves it
+settings_mode_largest	c7c4	Biggest picture
+settings_mode_preferred	024c	Recommended
 settings_name_chars	58a2	a name is letters, digits and hyphens
 settings_name_long	f2c0	a name is under 32 characters
+settings_no_rates	185b	The screen lists no rates
+settings_no_screen	55fd	No screen is connected
 settings_not_here	4e20	not on this machine
 settings_nothing_kept	85a2	nothing typed: the value is kept
 settings_nothing_matches	14e9	Nothing matches what is typed
 settings_nothing_typed	edce	nothing typed
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d Hz (recommended)
+settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater refused
+settings_refused_place	9632	%s (its place in the file is not read)
+settings_refused_rate	97bc	%1$s (%2$d Hz is not offered)
+settings_refused_turn	7b3a	%1$s (%2$s could not be done)
 settings_run_any	3ffd	Run any moonwater command
 settings_running	d0e2	running %s (Escape stops it)
 settings_saved	9f44	saved
+settings_scale_best	2ba0	%d%% (recommended)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	Screen %1$d: %2$s
+settings_screen_named	d918	Screen %1$d: %2$s [%3$s]
 settings_stopped	f34e	stopped
 settings_too_long	fed7	moonwater took too long, and was stopped
 settings_too_many	db0e	that is more words than one command takes
+settings_turned_software	64d9	Turned by Moonwater (slower)
 settings_type_command	75f8	type a command: its verb, then what follows it
 settings_type_device	63e0	type the name of a device: Enter keeps it, Escape leaves it
 settings_type_passphrase	ca95	type its passphrase: Enter joins it, Escape leaves it
@@ -174,6 +198,7 @@ ui_field_full	fe02	that is as much as it holds
 =Network	ad65	Network
 =Network adapters	88ef	Network adapters
 =New USB devices	c15c	New USB devices
+=Normal	2772	Normal
 =Open windows where they were last put	8711	Open windows where they were last put
 =Other devices	8362	Other devices
 =Plain Text	2bbe	Plain Text
@@ -207,7 +232,10 @@ ui_field_full	fe02	that is as much as it holds
 =Time server (auto for the pool)	67e5	Time server (auto for the pool)
 =Time zone	741a	Time zone
 =Turned by the screen	ea45	Turned by the screen
+=Turned left	507c	Turned left
+=Turned right	7a49	Turned right
 =USB	da81	USB
+=Upside down	9dc1	Upside down
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Wired
 =all	4bc4	all

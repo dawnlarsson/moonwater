@@ -51,6 +51,10 @@ menu_zoom_out	9234	Zooma &ut
 settings_already_joined	71fb	redan ansluten till %s
 settings_any_text	89dc	valfritt kommando, som orden efter moonwater: verbet och sedan argumenten
 settings_asks_first	e9bd	frågar först
+settings_battery_charging	5116	, laddar
+settings_battery_discharging	7964	, laddar ur
+settings_battery_full	ded8	, full
+settings_battery_idle	1635	, laddar inte
 settings_busy	34e0	moonwater är upptaget: ändringarna före den här är inte klara
 settings_cannot_join	dfa4	moonwater kan inte ansluta till det som nätverket kräver
 settings_cannot_run	954f	moonwater-kommandot kunde inte köras
@@ -72,20 +76,40 @@ settings_item_open	4429	Enter ansluter och sparar
 settings_item_saved	3ffd	sparad: Enter frågar efter lösenordet igen, Delete glömmer den
 settings_joined	1050	ansluten
 settings_kept	4759	sparad
+settings_map_drag	125f	Släpp för att placera skärmen
+settings_map_hint	9efb	Dra en skärm för att flytta den.
+settings_map_keys	54c9	Piltangenterna väljer en skärm. Shift och en pil flyttar den. Enter identifierar. Ned lämnar.
+settings_map_none	1b29	Ingen skärm är ansluten.
+settings_map_one	7ff2	Bara en skärm är ansluten.
 settings_menu_keys	5546	Upp och Ned väljer, Enter ställer in, Escape lämnar
+settings_mode_largest	c7c4	Största bilden
+settings_mode_preferred	024c	Rekommenderad
 settings_name_chars	58a2	ett namn består av bokstäver, siffror och bindestreck
 settings_name_long	f2c0	ett namn är kortare än 32 tecken
+settings_no_rates	185b	Skärmen anger inga frekvenser
+settings_no_screen	55fd	Ingen skärm är ansluten
 settings_not_here	4e20	finns inte på den här maskinen
 settings_nothing_kept	85a2	inget skrivet: värdet behålls
 settings_nothing_matches	14e9	Inget matchar det som skrivits
 settings_nothing_typed	edce	inget skrivet
+settings_percent	e76a	%d %%
+settings_rate_best	7450	%d Hz (rekommenderad)
+settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater avvisade
+settings_refused_place	9632	%s (dess plats i filen läses inte)
+settings_refused_rate	97bc	%1$s (%2$d Hz erbjuds inte)
+settings_refused_turn	7b3a	%1$s (%2$s gick inte att göra)
 settings_run_any	3ffd	Kör valfritt moonwater-kommando
 settings_running	d0e2	kör %s (Escape stoppar)
 settings_saved	9f44	sparad
+settings_scale_best	2ba0	%d %% (rekommenderad)
+settings_scale_plain	e76a	%d %%
+settings_screen_bare	c945	Skärm %1$d: %2$s
+settings_screen_named	d918	Skärm %1$d: %2$s [%3$s]
 settings_stopped	f34e	stoppad
 settings_too_long	fed7	moonwater tog för lång tid och stoppades
 settings_too_many	db0e	det är fler ord än ett kommando tar
+settings_turned_software	64d9	Vänds av Moonwater (långsammare)
 settings_type_command	75f8	skriv ett kommando: verbet och det som följer
 settings_type_device	63e0	skriv namnet på en enhet: Enter sparar det, Escape lämnar
 settings_type_passphrase	ca95	skriv lösenordet: Enter ansluter, Escape lämnar
@@ -174,6 +198,7 @@ ui_field_full	fe02	mer ryms inte
 =Network	ad65	Nätverk
 =Network adapters	88ef	Nätverksadaptrar
 =New USB devices	c15c	Nya USB-enheter
+=Normal	2772	Normal
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
 =Other devices	8362	Andra enheter
 =Plain Text	2bbe	Oformaterad text
@@ -207,7 +232,10 @@ ui_field_full	fe02	mer ryms inte
 =Time server (auto for the pool)	67e5	Tidsserver (auto för poolen)
 =Time zone	741a	Tidszon
 =Turned by the screen	ea45	Vänds av skärmen
+=Turned left	507c	Vriden åt vänster
+=Turned right	7a49	Vriden åt höger
 =USB	da81	USB
+=Upside down	9dc1	Upp och ned
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Trådbundet
 =all	4bc4	alla

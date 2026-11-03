@@ -51,6 +51,10 @@ menu_zoom_out	9234	&Diminuir zoom
 settings_already_joined	71fb	já conectado a %s
 settings_any_text	89dc	qualquer comando, como as palavras depois de moonwater: o verbo e os argumentos
 settings_asks_first	e9bd	pergunta antes
+settings_battery_charging	5116	, carregando
+settings_battery_discharging	7964	, descarregando
+settings_battery_full	ded8	, completa
+settings_battery_idle	1635	, não está carregando
 settings_busy	34e0	moonwater está ocupado: as alterações anteriores não terminaram
 settings_cannot_join	dfa4	moonwater não pode entrar no que essa rede pede
 settings_cannot_run	954f	não foi possível executar o comando moonwater
@@ -72,20 +76,40 @@ settings_item_open	4429	Enter conecta e salva
 settings_item_saved	3ffd	salva: Enter pede a senha de novo, Delete esquece
 settings_joined	1050	conectado
 settings_kept	4759	guardado
+settings_map_drag	125f	Solte para colocar a tela
+settings_map_hint	9efb	Arraste uma tela para movê-la.
+settings_map_keys	54c9	As setas escolhem uma tela. Shift e uma seta a movem. Enter identifica. Baixo sai.
+settings_map_none	1b29	Nenhuma tela está conectada.
+settings_map_one	7ff2	Apenas uma tela está conectada.
 settings_menu_keys	5546	Cima e Baixo escolhem, Enter aplica, Escape deixa
+settings_mode_largest	c7c4	Maior imagem
+settings_mode_preferred	024c	Recomendado
 settings_name_chars	58a2	um nome é feito de letras, dígitos e hifens
 settings_name_long	f2c0	um nome tem menos de 32 caracteres
+settings_no_rates	185b	A tela não informa taxas
+settings_no_screen	55fd	Nenhuma tela está conectada
 settings_not_here	4e20	não existe nesta máquina
 settings_nothing_kept	85a2	nada digitado: o valor é mantido
 settings_nothing_matches	14e9	Nada corresponde ao digitado
 settings_nothing_typed	edce	nada digitado
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d Hz (recomendada)
+settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater recusou
+settings_refused_place	9632	%s (sua posição no arquivo não é lida)
+settings_refused_rate	97bc	%1$s (%2$d Hz não é oferecido)
+settings_refused_turn	7b3a	%1$s (não foi possível: %2$s)
 settings_run_any	3ffd	Executar qualquer comando do moonwater
 settings_running	d0e2	executando %s (Escape interrompe)
 settings_saved	9f44	salva
+settings_scale_best	2ba0	%d%% (recomendada)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	Tela %1$d: %2$s
+settings_screen_named	d918	Tela %1$d: %2$s [%3$s]
 settings_stopped	f34e	interrompido
 settings_too_long	fed7	moonwater demorou demais e foi interrompido
 settings_too_many	db0e	são mais palavras do que um comando aceita
+settings_turned_software	64d9	Girada pelo Moonwater (mais lento)
 settings_type_command	75f8	digite um comando: o verbo e o que vem depois
 settings_type_device	63e0	digite o nome de um dispositivo: Enter guarda, Escape deixa
 settings_type_passphrase	ca95	digite a senha: Enter conecta, Escape deixa
@@ -174,6 +198,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Network	ad65	Rede
 =Network adapters	88ef	Adaptadores de rede
 =New USB devices	c15c	Novos dispositivos USB
+=Normal	2772	Normal
 =Open windows where they were last put	8711	Abrir janelas onde foram deixadas
 =Other devices	8362	Outros dispositivos
 =Plain Text	2bbe	Texto simples
@@ -207,7 +232,10 @@ ui_field_full	fe02	não cabe mais que isso
 =Time server (auto for the pool)	67e5	Servidor de hora (auto para o pool)
 =Time zone	741a	Fuso horário
 =Turned by the screen	ea45	Girado pela tela
+=Turned left	507c	Girada para a esquerda
+=Turned right	7a49	Girada para a direita
 =USB	da81	USB
+=Upside down	9dc1	De cabeça para baixo
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Com fio
 =all	4bc4	todas

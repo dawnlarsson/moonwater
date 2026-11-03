@@ -51,6 +51,10 @@ menu_zoom_out	9234	Зменшити
 settings_already_joined	71fb	уже підключено до %s
 settings_any_text	89dc	будь-яка команда, як слова після moonwater: її дієслово, потім аргументи
 settings_asks_first	e9bd	спершу запитає
+settings_battery_charging	5116	, заряджається
+settings_battery_discharging	7964	, розряджається
+settings_battery_full	ded8	, заряджена
+settings_battery_idle	1635	, не заряджається
 settings_busy	34e0	moonwater зайнятий: попередні зміни ще не виконано
 settings_cannot_join	dfa4	moonwater не може підключитися до того, що вимагає ця мережа
 settings_cannot_run	954f	команду moonwater не вдалося виконати
@@ -72,20 +76,40 @@ settings_item_open	4429	Enter підключить і збереже
 settings_item_saved	3ffd	збережено: Enter знову запитає пароль, Delete забуває
 settings_joined	1050	підключено
 settings_kept	4759	запам'ятовано
+settings_map_drag	125f	Відпустіть, щоб розмістити екран
+settings_map_hint	9efb	Перетягніть екран, щоб перемістити його.
+settings_map_keys	54c9	Стрілки вибирають екран. Shift і стрілка переміщують його. Enter визначає. Вниз — вийти.
+settings_map_none	1b29	Екран не підключено.
+settings_map_one	7ff2	Підключено лише один екран.
 settings_menu_keys	5546	Вгору й Вниз вибирають, Enter задає, Escape залишає
+settings_mode_largest	c7c4	Найбільше зображення
+settings_mode_preferred	024c	Рекомендовано
 settings_name_chars	58a2	ім'я складається з літер, цифр і дефісів
 settings_name_long	f2c0	ім'я коротше за 32 символи
+settings_no_rates	185b	Екран не повідомляє частот
+settings_no_screen	55fd	Екран не підключено
 settings_not_here	4e20	немає на цьому комп'ютері
 settings_nothing_kept	85a2	нічого не введено: значення зберігається
 settings_nothing_matches	14e9	Нічого не знайдено за запитом
 settings_nothing_typed	edce	нічого не введено
+settings_percent	e76a	%d %%
+settings_rate_best	7450	%d Гц (рекомендовано)
+settings_rate_plain	743a	%d Гц
 settings_refused	454b	moonwater відмовив
+settings_refused_place	9632	%s (його розташування у файлі не прочитано)
+settings_refused_rate	97bc	%1$s (%2$d Гц не пропонується)
+settings_refused_turn	7b3a	%1$s (не вдалося: %2$s)
 settings_run_any	3ffd	Виконати будь-яку команду moonwater
 settings_running	d0e2	виконується %s (Escape зупиняє)
 settings_saved	9f44	збережено
+settings_scale_best	2ba0	%d %% (рекомендовано)
+settings_scale_plain	e76a	%d %%
+settings_screen_bare	c945	Екран %1$d: %2$s
+settings_screen_named	d918	Екран %1$d: %2$s [%3$s]
 settings_stopped	f34e	зупинено
 settings_too_long	fed7	moonwater працював надто довго й був зупинений
 settings_too_many	db0e	це більше слів, ніж приймає команда
+settings_turned_software	64d9	Повертає Moonwater (повільніше)
 settings_type_command	75f8	введіть команду: її дієслово і те, що за ним
 settings_type_device	63e0	введіть назву пристрою: Enter запам'ятає, Escape залишить
 settings_type_passphrase	ca95	введіть пароль: Enter підключить, Escape залишить
@@ -174,6 +198,7 @@ ui_field_full	fe02	більше не вміщається
 =Network	ad65	Мережа
 =Network adapters	88ef	Мережеві адаптери
 =New USB devices	c15c	Нові USB-пристрої
+=Normal	2772	Звичайний
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
 =Other devices	8362	Інші пристрої
 =Plain Text	2bbe	Звичайний текст
@@ -207,7 +232,10 @@ ui_field_full	fe02	більше не вміщається
 =Time server (auto for the pool)	67e5	Сервер часу (auto для пулу)
 =Time zone	741a	Часовий пояс
 =Turned by the screen	ea45	Повертає екран
+=Turned left	507c	Повернуто ліворуч
+=Turned right	7a49	Повернуто праворуч
 =USB	da81	USB
+=Upside down	9dc1	Догори дриґом
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Дротова мережа
 =all	4bc4	усі

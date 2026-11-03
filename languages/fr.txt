@@ -51,6 +51,10 @@ menu_zoom_out	9234	Zoom a&rrière
 settings_already_joined	71fb	déjà connecté à %s
 settings_any_text	89dc	n'importe quelle commande, comme les mots après moonwater : son verbe, puis ses arguments
 settings_asks_first	e9bd	demande d'abord
+settings_battery_charging	5116	, en charge
+settings_battery_discharging	7964	, en décharge
+settings_battery_full	ded8	, pleine
+settings_battery_idle	1635	, ne charge pas
 settings_busy	34e0	moonwater est occupé : les changements précédents ne sont pas terminés
 settings_cannot_join	dfa4	moonwater ne peut pas rejoindre ce que ce réseau demande
 settings_cannot_run	954f	la commande moonwater n'a pas pu être lancée
@@ -72,20 +76,40 @@ settings_item_open	4429	Enter rejoint et l'enregistre
 settings_item_saved	3ffd	enregistré : Enter redemande son mot de passe, Delete l'oublie
 settings_joined	1050	connecté
 settings_kept	4759	gardé
+settings_map_drag	125f	Relâchez pour placer l'écran
+settings_map_hint	9efb	Faites glisser un écran pour le déplacer.
+settings_map_keys	54c9	Les flèches choisissent un écran. Shift et une flèche le déplacent. Enter l'identifie. Bas quitte.
+settings_map_none	1b29	Aucun écran n'est connecté.
+settings_map_one	7ff2	Un seul écran est connecté.
 settings_menu_keys	5546	Haut et Bas choisissent, Enter applique, Escape laisse
+settings_mode_largest	c7c4	Image la plus grande
+settings_mode_preferred	024c	Recommandé
 settings_name_chars	58a2	un nom, ce sont des lettres, des chiffres et des tirets
 settings_name_long	f2c0	un nom compte moins de 32 caractères
+settings_no_rates	185b	L'écran n'indique aucune fréquence
+settings_no_screen	55fd	Aucun écran n'est connecté
 settings_not_here	4e20	absent de cette machine
 settings_nothing_kept	85a2	rien de saisi : la valeur est gardée
 settings_nothing_matches	14e9	Rien ne correspond à la saisie
 settings_nothing_typed	edce	rien de saisi
+settings_percent	e76a	%d %%
+settings_rate_best	7450	%d Hz (recommandée)
+settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater a refusé
+settings_refused_place	9632	%s (sa place dans le fichier n'est pas lue)
+settings_refused_rate	97bc	%1$s (%2$d Hz n'est pas proposé)
+settings_refused_turn	7b3a	%1$s (%2$s n'a pas pu être fait)
 settings_run_any	3ffd	Exécuter une commande moonwater
 settings_running	d0e2	exécution de %s (Escape l'arrête)
 settings_saved	9f44	enregistré
+settings_scale_best	2ba0	%d %% (recommandée)
+settings_scale_plain	e76a	%d %%
+settings_screen_bare	c945	Écran %1$d : %2$s
+settings_screen_named	d918	Écran %1$d : %2$s [%3$s]
 settings_stopped	f34e	arrêté
 settings_too_long	fed7	moonwater a pris trop de temps et a été arrêté
 settings_too_many	db0e	c'est plus de mots que n'en prend une commande
+settings_turned_software	64d9	Pivoté par Moonwater (plus lent)
 settings_type_command	75f8	saisissez une commande : son verbe, puis ce qui suit
 settings_type_device	63e0	saisissez le nom d'un appareil : Enter le garde, Escape laisse
 settings_type_passphrase	ca95	saisissez son mot de passe : Enter rejoint, Escape laisse
@@ -174,6 +198,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Network	ad65	Réseau
 =Network adapters	88ef	Adaptateurs réseau
 =New USB devices	c15c	Nouveaux périphériques USB
+=Normal	2772	Normal
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
 =Other devices	8362	Autres périphériques
 =Plain Text	2bbe	Texte brut
@@ -207,7 +232,10 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Time server (auto for the pool)	67e5	Serveur de temps (auto pour le pool)
 =Time zone	741a	Fuseau horaire
 =Turned by the screen	ea45	Pivoté par l'écran
+=Turned left	507c	Pivoté à gauche
+=Turned right	7a49	Pivoté à droite
 =USB	da81	USB
+=Upside down	9dc1	À l'envers
 =Wi-Fi	0ec1	Wi-Fi
 =Wired	9a54	Filaire
 =all	4bc4	tous

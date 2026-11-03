@@ -143027,6 +143027,16 @@ static unsigned int lcheck_mnemonic(const char address_to text, positive length,
         return letter;
 }
 
+// How many characters (not bytes) a text is.
+static positive lcheck_characters(const char address_to text, positive length)
+{
+        positive count = 0;
+
+        for (positive at = 0; at < length; at++)
+                count += ((p8)text[at] & 0xc0) != 0x80;
+        return count;
+}
+
 // Whether every character of a text is well formed UTF-8 that the face draws (a glyph, not the notdef) and none is a control.
 static b32 lcheck_drawn(const font_face address_to face, const char address_to text, positive length)
 {
@@ -143098,6 +143108,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
         const char address_to wanted = SETTINGS_LANGUAGE_CODES;
         positive missing_keys = 0, order = 0, absent = 0, bad_header = 0, bad_text = 0, bad_stamp = 0, bad_ids = 0, bad_keys = 0;
         positive bad_specs = 0, bad_menus = 0, bad_glyphs = 0, tab_words = 0;
+        positive english_total, language_total, longest;
 
         // The registry's own texts are the keyed lines of English.
         for (positive at = 0; at < SETTINGS_ROWS; at++)
@@ -143131,6 +143142,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                 const char address_to name = null;
 
                 path[10] = codes[l][0], path[11] = codes[l][1], memory_copy(path + 12, ".txt", 5);
+                english_total = language_total = longest = 0;
                 if (!lcheck_load((string_address)path, &lcheck_other))
                 {
                         absent++;
@@ -143165,6 +143177,15 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         lcheck_stamp(said->text, said->text_length, stamp);
                         bad_stamp += memory_compare(mine->stamp, stamp, 4) != 0;
                         bad_text += !mine->text_length || mine->text_length > 200;
+                        // How long it runs against the English, in characters: the windows cut a text with ... where it does not fit, and
+                        // a text more than twice the English and a dozen over is no layout's to hold.
+                        {
+                                positive was = lcheck_characters(said->text, said->text_length), grew = lcheck_characters(mine->text, mine->text_length);
+
+                                bad_text += grew > 2 * was + 12;
+                                english_total += was, language_total += grew;
+                                longest = grew * 100 / (was ? was : 1) > longest && was > 8 ? grew * 100 / (was ? was : 1) : longest;
+                        }
                         for (positive k = 0; k < mine->text_length; k++)
                                 bad_text += (p8)mine->text[k] < 0x20 || mine->text[k] == 0x7f;
                         bad_specs += !lcheck_specs(said->text, said->text_length, specs, &specs_count) ||
@@ -143210,6 +143231,8 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         }
                 }
                 lcheck_close(&lcheck_other);
+                string_format(log, "  language %s: %p percent of the English in characters, the longest text %p percent\n",
+                              (string_address)codes[l], english_total ? language_total * 100 / english_total : 0, longest);
         }
         if (missing_keys + order + absent + bad_header + bad_text + bad_stamp + bad_ids + bad_keys + bad_specs + bad_menus + bad_glyphs)
                 string_format(log, "  languages: keys %p, order %p, absent %p, header %p, text %p, stamp %p, ids %p, lines %p, placeholders %p, mnemonics %p, glyphs %p\n",
@@ -143231,7 +143254,7 @@ static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c"};
 static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
-                                                         "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c"};
+                                                         "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -143338,7 +143361,9 @@ static b32 lcheck_kept(const char address_to keep, positive keep_size, const cha
         return false;
 }
 
-// The literals of a file that are English text and are not kept, counted, and reported by line when it is converted (report).
+// The literals of a file that are English text and are not kept, counted, and reported by line when it is converted (report). A
+// section the file says is not translated (the settings window's gallery, which is the kit's demo page) is left out, from its
+// header comment to the next one.
 static positive lcheck_left(const char address_to file, const char address_to text, positive size, const char address_to keep, positive keep_size,
                             b32 report)
 {
@@ -143351,6 +143376,18 @@ static positive lcheck_left(const char address_to file, const char address_to te
                 if (text[at] == '\n')
                 {
                         line++, line_start = ++at;
+                        // A section that is not translated: the gallery, up to the next section's header.
+                        if (at + 27 < size && !memory_compare(text + at, "/* ---- the gallery ---- */", 27))
+                        {
+                                const char address_to next = (const char address_to)memory_search((address_any)(text + at + 27), size - at - 27,
+                                                                                                   (address_any) "\n/* ---- ", 9);
+
+                                if (!next)
+                                        break;
+                                for (; text + at < next; at++)
+                                        line += text[at] == '\n';
+                                line_start = at;
+                        }
                         continue;
                 }
                 if (text[at] == '/' && at + 1 < size && text[at + 1] == '/')
@@ -143949,6 +143986,85 @@ static fn settings_status_check(void)
 }
 #endif
 
+#if MOONWATER_UI_SETTINGS
+/*
+        The Display group's words: a screen as the dropdown names it, a scale, a refresh rate, a turn, the screen modes' two words
+        and the caption under the map. English is what the window said before the table (written out here), the places of a
+        sentence are filled in whatever order a language puts them, and German says them in German.
+*/
+static fn settings_display_check(void)
+{
+        char label[96];
+        int modes = lcheck_row("Screen modes"), drag = settings.map.drag, keys = settings.map.keys;
+        positive wrong = 0;
+
+        language_take(0);
+        settings_screen_label(2, "DP-1", "Dell U2720Q", label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "Screen 2: Dell U2720Q [DP-1]", 64);
+        settings_screen_label(1, "HDMI-A-2", "", label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "Screen 1: HDMI-A-2", 64);
+        settings_scale_label(150, 1, label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "150% (recommended)", 64);
+        settings_scale_label(75, 0, label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "75%", 64);
+        settings_rate_label(60, 1, label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "60 Hz (recommended)", 64);
+        settings_rate_label(144, 0, label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "144 Hz", 64);
+        wrong += !!string_compare_max((string_address)settings_turn_label(90), (string_address) "Turned right", 32) ||
+                 !!string_compare_max((string_address)settings_turn_label(0), (string_address) "Normal", 32) ||
+                 !!string_compare_max((string_address)settings_label_of(modes, "largest"), (string_address) "Biggest picture", 32) ||
+                 !!string_compare_max((string_address)settings_label_of(modes, "preferred"), (string_address) "Recommended", 32);
+        settings.map.drag = -1, settings.map.keys = 0;
+        wrong += !!string_compare_max((string_address)settings_map_hint(0), (string_address) "No screen is connected.", 64) ||
+                 !!string_compare_max((string_address)settings_map_hint(1), (string_address) "Only one screen is connected.", 64) ||
+                 !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Drag a screen to move it.", 64);
+        settings.map.keys = 1;
+        wrong += !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves.", 96);
+        settings.map.drag = 0;
+        wrong += !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Let go to place the screen", 64);
+        check("settings display: a screen, a scale, a rate, a turn, the modes' words and the map's caption are the English they were", !wrong && modes >= 0);
+        settings.map.drag = -1, settings.map.keys = 0;
+        language_take('d' | 'e' << 8);
+        settings_screen_label(2, "DP-1", "Dell U2720Q", label, sizeof(label));
+        wrong = !!string_compare_max((string_address)label, (string_address) "Bildschirm 2: Dell U2720Q [DP-1]", 64);
+        settings_scale_label(150, 1, label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "150 % (empfohlen)", 64);
+        settings_rate_label(60, 1, label, sizeof(label));
+        wrong += !!string_compare_max((string_address)label, (string_address) "60 Hz (empfohlen)", 64);
+        wrong += !!string_compare_max((string_address)settings_turn_label(90), (string_address) "Nach rechts gedreht", 32) ||
+                 !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Einen Bildschirm ziehen, um ihn zu verschieben.", 64);
+        {
+                char back[SETTINGS_VALUE];
+
+                wrong += !!string_compare_max((string_address)settings_label_of(modes, "largest"), (string_address) "Gr\xc3\xb6\xc3\x9f" "tes Bild", 32);
+                settings_word_of(modes, settings_label_of(modes, "preferred"), back, sizeof(back));
+                wrong += !!string_compare_max((string_address)back, (string_address) "preferred", 12);
+        }
+        check("settings display: in German they say German, the modes' words come back as the verb's, and a sentence's places are filled in", !wrong);
+        {
+                static const char address_to const codes[] = {"es", "fr", "de", "pt", "it", "nl", "pl", "tr", "sv", "ru", "uk", "el"};
+                positive broken = 0;
+
+                for (positive l = 0; l < sizeof(codes) / sizeof(codes[0]); l++)
+                {
+                        language_take((unsigned int)codes[l][0] | (unsigned int)codes[l][1] << 8);
+                        settings_scale_label(150, 1, label, sizeof(label));
+                        broken += !memory_search((address_any)label, string_length((string_address)label), (address_any) "150", 3);
+                        settings_rate_label(144, 0, label, sizeof(label));
+                        broken += !memory_search((address_any)label, string_length((string_address)label), (address_any) "144", 3);
+                        settings_screen_label(3, "DP-1", "Dell", label, sizeof(label));
+                        broken += !memory_search((address_any)label, string_length((string_address)label), (address_any) "[DP-1]", 6) ||
+                                  !memory_search((address_any)label, string_length((string_address)label), (address_any) "Dell", 4) ||
+                                  !memory_search((address_any)label, string_length((string_address)label), (address_any) "3", 1);
+                }
+                check("settings display: in every language a scale, a rate and a screen keep their numbers and names", !broken);
+        }
+        settings.map.drag = drag, settings.map.keys = keys;
+        language_take(0);
+}
+#endif
+
 static fn language_check(void)
 {
         font_face regular, bold;
@@ -143984,6 +144100,7 @@ static fn language_check(void)
 #if MOONWATER_UI_SETTINGS
         settings_words_check();
         settings_status_check();
+        settings_display_check();
 #endif
 }
 #endif
