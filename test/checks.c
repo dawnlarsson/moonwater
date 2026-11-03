@@ -156535,6 +156535,29 @@ static void test_seat(void)
                 wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_discrete));
         wlc_end(c);
 
+        /* a move or a resize names the press the client was last sent, and no other */
+        seated_open(&t, 9, 9);
+        c = t.s.c;
+        wayland_pointer_to(0, 5, 5);
+        wayland_pointer_button(0, 0x110, 1);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_button);
+        WLCHECK(e != 0, "a press");
+        {
+                unsigned long serial = e ? e->u[0] : 0;
+
+                fake.row[0].did_count = 0;
+                wlc_send(c, t.s.toplevel, WLQ_xdg_toplevel_move, t.s.seat, (long)(serial + 7));
+                WLCHECK(fake.row[0].did_count == 0 && c->errors == 0, "a move that names a serial it was never sent is ignored");
+                wlc_send(c, t.s.toplevel, WLQ_xdg_toplevel_resize, t.s.seat, (long)(serial + 7), (long)WLN_xdg_toplevel_resize_edge_bottom_right);
+                WLCHECK(fake.row[0].did_count == 0, "and so is a resize");
+                wlc_send(c, t.s.toplevel, WLQ_xdg_toplevel_move, t.s.seat, (long)serial);
+                WLCHECK(fake.row[0].did_count == 1 && fake.row[0].did[0] == WAYLAND_DO_MOVE, "a move that names the press is asked of the window");
+                wlc_send(c, t.s.toplevel, WLQ_xdg_toplevel_resize, t.s.seat, (long)serial, (long)WLN_xdg_toplevel_resize_edge_bottom_right);
+                WLCHECK(fake.row[0].did_count == 2 && fake.row[0].did[1] == WAYLAND_DO_RESIZE, "and so is a resize");
+        }
+        wlc_end(c);
+
         /* a client holds at most WAYLAND_SEATS pointers */
         session_open(&t.s);
         c = t.s.c;

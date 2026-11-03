@@ -1914,14 +1914,16 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
         case WLQ_xdg_toplevel_show_window_menu:
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_move:
-                if (row >= 0)
+                // Only for the press this client was last sent: a serial it was never given is no move (a compositor may ignore
+                // it, and does), so a client cannot take a window by naming a number.
+                if (row >= 0 && c->press_serial && a[1].u == c->press_serial)
                         wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_MOVE, (long)a[1].u, 0);
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_resize:
                 if (a[2].u > WLN_xdg_toplevel_resize_edge_bottom_right || a[2].u == 3 || a[2].u == 7 || a[2].u == 11 || a[2].u == 12 ||
                     a[2].u == 13 || a[2].u == 14)
                         return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_resize_edge, "no such edge");
-                if (row >= 0 && a[2].u)
+                if (row >= 0 && a[2].u && c->press_serial && a[1].u == c->press_serial)
                         wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_RESIZE, (long)a[2].u, 0);
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_set_max_size:
