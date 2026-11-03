@@ -46,12 +46,17 @@
         and ripple. It is the one window of its program: a second start finds
         the first by the program's name and lifts it.
 
-            launcher [-x] [-f FONT.ttf] [-m MONO.ttf] [-M MONOBOLD.ttf]
+            launcher [-x] [-a] [-f FONT.ttf] [-m MONO.ttf] [-M MONOBOLD.ttf]
 
         -f is the face the bar is drawn in, -m the monospace one the terminals
         it starts are given, with -M their bold. -x closes the launcher that is
         up and ends when there is one, which is what the chord is: a press opens
-        it and the next press puts it away.
+        it and the next press puts it away. -a opens it beside the panel's
+        launcher button, at the rectangle the compositor wrote in the window
+        table when the button was pressed (above a bottom panel, below a top
+        one, to the side of a left or right one, all of it on the screen), the
+        edge nearest the panel kept where it is as the list grows and shrinks;
+        with no such rectangle it is in the middle, as the chord's is.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -143,6 +148,13 @@ static struct
         int pointer_x, pointer_y;
         b32 focused, had_focus, dirty;
         struct ui_press press; // a finger's press on a row: shown pressed as it lands, run as it lifts there
+
+        // Opened beside the panel's launcher button (-a): the rectangle it opens beside and the edge of the screen the panel
+        // is along (the panel's own numbers), the screen's rectangle and number, and whether the place is asked again with
+        // the next picture, as the list grows and shrinks (a bar above a bottom panel keeps its bottom).
+        b32 asked_beside, anchored, moved;
+        int anchor[4], screen[4];
+        unsigned int edge, number;
 } launcher;
 
 /* ---- the model: what a text names, and what a row starts ---- */
@@ -388,6 +400,59 @@ static positive launcher_words(const struct launcher_entry address_to entry, str
         return count;
 }
 
+/*
+        Where the bar's top left goes beside the rectangle the panel's button gave (button: x, y, width, height), for the
+        edge the panel is along: a bottom panel's bar ends where the rectangle starts, a top panel's starts where it ends, a
+        left panel's starts where it ends and a right panel's ends where it starts, the top of the bar at the top of the
+        rectangle for the two sides, and the bar's left at the button's for the other two. Then kept inside the screen
+        (screen: x, y, width, height), all of it where it fits and its top left where it does not.
+*/
+static fn launcher_anchor_place(unsigned int edge, const int address_to button, const int address_to screen, int width, int height,
+                                int address_to x, int address_to y)
+{
+        *x = button[0], *y = button[1];
+        if (edge == TASKBAR_BOTTOM)
+                *y = button[1] - height;
+        else if (edge == TASKBAR_TOP)
+                *y = button[1] + button[3];
+        else if (edge == TASKBAR_LEFT)
+                *x = button[0] + button[2];
+        else
+                *x = button[0] - width;
+        *x = *x > screen[0] + screen[2] - width ? screen[0] + screen[2] - width : *x;
+        *y = *y > screen[1] + screen[3] - height ? screen[1] + screen[3] - height : *y;
+        *x = *x < screen[0] ? screen[0] : *x;
+        *y = *y < screen[1] ? screen[1] : *y;
+}
+
+// The most height the bar may have: the output's, and beside a panel along the top or bottom of its screen the room that
+// panel leaves, so the bar does not cover it.
+static int launcher_most_height(void)
+{
+        int most = (int)launcher.own.table->output_height, room;
+
+        if (!launcher.anchored || (launcher.edge != TASKBAR_BOTTOM && launcher.edge != TASKBAR_TOP))
+                return most;
+        room = launcher.edge == TASKBAR_BOTTOM ? launcher.anchor[1] - launcher.screen[1]
+                                               : launcher.screen[1] + launcher.screen[3] - launcher.anchor[1] - launcher.anchor[3];
+        return room > 0 && room < most ? room : most;
+}
+
+// The bar's place asked of the compositor, in its row's placement columns, counted from its screen's top left.
+static fn launcher_place(void)
+{
+        struct window_place place;
+        int x, y;
+
+        memory_zero(&place, sizeof(place));
+        launcher_anchor_place(launcher.edge, launcher.anchor, launcher.screen, launcher.width, launcher.height, &x, &y);
+        place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
+        place.x = x - launcher.screen[0], place.y = y - launcher.screen[1];
+        place.width = (unsigned int)launcher.width, place.height = (unsigned int)launcher.height;
+        place.screen = launcher.number;
+        windows_place_set(launcher.own.table, launcher.own.row, &place);
+}
+
 /* ---- PATH ---- */
 
 // PATH as this program has it, or the one a terminal's shell starts with.
@@ -559,12 +624,15 @@ static b32 launcher_run(int row)
 // A new text: the list for it, from the top.
 static fn launcher_changed(void)
 {
-        int height;
+        int height, was = launcher.height, most;
 
         launcher_search();
         height = ui_px(&launcher.ui, UI_PAD) * 2 + ui_px(&launcher.ui, UI_TARGET) +
                  (launcher.entries ? ui_px(&launcher.ui, UI_GAP2) + (int)launcher.entries * ui_px(&launcher.ui, UI_ROW) : 0);
-        launcher.height = height > (int)launcher.own.table->output_height ? (int)launcher.own.table->output_height : height;
+        most = launcher_most_height();
+        launcher.height = height > most ? most : height;
+        // A bar above a bottom panel keeps its bottom where it is, so it is put again with the picture of its new height.
+        launcher.moved |= launcher.anchored && launcher.shown >= 0 && launcher.edge == TASKBAR_BOTTOM && launcher.height != was;
         launcher.dirty = true;
 }
 
@@ -841,6 +909,13 @@ static b32 launcher_frame(void)
         table->width[row] = (unsigned int)launcher.width;
         table->height[row] = (unsigned int)launcher.height;
         table->damage_width[row] = 0;
+        // A new height of a bar that keeps its bottom: its place, asked with the picture it is for, in one knock.
+        if (launcher.moved)
+        {
+                launcher_place();
+                __atomic_add_fetch(&table->moved[row], 1u, __ATOMIC_RELEASE);
+                launcher.moved = false;
+        }
         windows_show(&launcher.own, (unsigned int)slot);
         launcher.shown = slot;
         launcher.dirty = false;
@@ -874,6 +949,26 @@ static fn launcher_size(unsigned int width, unsigned int height)
         launcher.dirty = true;
 }
 
+/*
+        For -a: the rectangle the compositor wrote when the panel's button was pressed, the screen it is on and the edge of it
+        the panel is along, taken once. A table with no press in it (a width of 0), or a screen or an edge that is none, leaves
+        the bar unanchored, in the middle.
+*/
+static fn launcher_anchor_take(void)
+{
+        struct windows address_to table = launcher.own.table;
+        unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
+
+        if (!launcher.asked_beside || !table->button_w || !table->button_h || table->button_edge > TASKBAR_RIGHT ||
+            table->button_screen >= (count ? count : 1))
+                return;
+        launcher.anchor[0] = table->button_x, launcher.anchor[1] = table->button_y;
+        launcher.anchor[2] = (int)table->button_w, launcher.anchor[3] = (int)table->button_h;
+        launcher.edge = table->button_edge, launcher.number = table->button_screen;
+        windows_output(table, launcher.number, &launcher.screen[0], &launcher.screen[1], &launcher.screen[2], &launcher.screen[3]);
+        launcher.anchored = true;
+}
+
 // The launcher's start, once its window is taken: the lift, the fonts and the first picture. -1 runs the loop.
 static int launcher_open(void)
 {
@@ -891,14 +986,21 @@ static int launcher_open(void)
         }
 
         launcher_size((unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
+        launcher_anchor_take();
         launcher_changed();
-        // The bar is centred across, and sits a third of the way down: its y is not the middle, so it is set after.
-        ui_centre(table, row, launcher.width, 0, 0);
+        if (launcher.anchored)
+                // Beside the panel's button, asked as a placement, which is read with the first picture.
+                launcher_place();
+        else
         {
-                int x, y, width, height;
+                // The bar is centred across, and sits a third of the way down: its y is not the middle, so it is set after.
+                ui_centre(table, row, launcher.width, 0, 0);
+                {
+                        int x, y, width, height;
 
-                windows_output(table, 0, &x, &y, &width, &height);
-                table->y[row] = y + height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, UI_TARGET) / 2;
+                        windows_output(table, 0, &x, &y, &width, &height);
+                        table->y[row] = y + height / 3 - ui_px(&launcher.ui, UI_PAD) - ui_px(&launcher.ui, UI_TARGET) / 2;
+                }
         }
         launcher_frame();
 
@@ -967,6 +1069,11 @@ static b32 launcher_main()
                 if (option[0] == '-' && option[1] == 'x' && !option[2])
                 {
                         launcher.toggle = true;
+                        continue;
+                }
+                if (option[0] == '-' && option[1] == 'a' && !option[2])
+                {
+                        launcher.asked_beside = true;
                         continue;
                 }
                 if ((value = ui_argument(at, (string_address) "-f")))

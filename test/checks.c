@@ -119701,6 +119701,210 @@ static p64 band_hash(p64 hash)
     return hash;
 }
 
+/*
+        The launcher button of the panel (`taskbar launcher on`). Off, which is the default, the band is what it was: the tabs and
+        the tray are where the band's own formula puts them with nothing taken from its start, whatever the position and the scale.
+        On, the button is a tab-sized square a gap in from the leading end of the band (the left of a bottom or top one, the top of
+        a side one), its own slot to hit and to damage, the tabs are laid out in what it leaves, and its three bars are drawn whole at
+        every scale. The formula is written out here again, as it was before the button, so a layout that moves with the button off
+        is a red row.
+*/
+static void launcher_oracle(unsigned int position, int scale, int count, const unsigned char *lengths, int length, int origin, int lead,
+                            int *start, int *wide, int *tray_at, int *tray_length)
+{
+    int thick = COMPOSITOR_PANEL * scale / 100, gap = UI_GAP1 * scale / 100, high = thick - 3 * scale / 100;
+    int tray = (5 * high * 308 + high * 604) / 1000, room, most, windows = 0;
+
+    tray = tray < high ? high : tray;
+    room = length - lead - tray - (count + 2) * gap;
+    most = count && room > 0 ? room / count : 0;
+    most = most > 8 * thick ? 8 * thick : most;
+    for (int at = 0; at < count; at++)
+    {
+        int width = (lengths[at] * high * 308 + high * 604) / 1000;
+
+        width = width < high ? high : width;
+        wide[at] = width < most ? width : most;
+        windows += wide[at] + gap;
+    }
+    *start = position == TASKBAR_LEFT || position == TASKBAR_RIGHT ? origin + gap + lead : origin + lead + (length - lead - tray - windows) / 2;
+    *tray_at = origin + length - gap - tray;
+    *tray_length = tray;
+}
+
+static unsigned int launcher_band_pixels[BAND_W * 2 * COMPOSITOR_PANEL];
+
+static void check_taskbar_launcher(void)
+{
+    static const unsigned int positions[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
+    static const char *const words[4] = {"bottom", "top", "left", "right"};
+    static const int scales[6] = {50, 75, 100, 125, 150, 200};
+    static const unsigned char lengths[3] = {5, 15, 30};
+    int off_same = 1, button_square = 1, button_leads = 1, tabs_after = 1, hits = 1, anchored = 1, damaged = 1, glyphs = 1, lit_differs = 1,
+        outside = 1, scale_ok = 1;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.width = BAND_W;
+    compositor.height = BAND_H;
+    compositor.scale = 100;
+    taskbar_tray_set("");
+    // The button's redo bit is its own: not the tray's, and not any tab's.
+    {
+        int own = taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(-2) != taskbar_bit(WINDOWS - 1);
+
+        for (int tab = 0; tab < WINDOWS; tab++)
+            own &= taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(tab);
+        check("launcher button: its redo bit is its own, not the tray's and not a tab's", own);
+    }
+    for (int at = 0; at < 4; at++)
+        for (int each = 0; each < 6; each++)
+        {
+            struct taskbar_view view;
+            unsigned int position = positions[at];
+            int scale = scales[each], vertical = position == TASKBAR_LEFT || position == TASKBAR_RIGHT;
+            int x, y, w, h, bx, by, bw, bh, tx, ty, tw, th, start, wide[3], tray_at, tray_length, length, origin, lead, thick, gap, high, inset;
+            int along[3], span[3];
+
+            memory_zero(&view, sizeof(view));
+            view.width = BAND_W;
+            view.height = BAND_H;
+            view.scale = scale;
+            view.position = position;
+            view.count = 3;
+            view.lengths = lengths;
+            thick = COMPOSITOR_PANEL * scale / 100;
+            gap = UI_GAP1 * scale / 100;
+            inset = 3 * scale / 100;
+            high = thick - inset;
+            taskbar_settings_set(words[at], "primary", "battery none\n");
+
+            // Off: no slot of its own, and every other slot as it was.
+            taskbar_launcher_set(0);
+            taskbar_band(&view, &bx, &by, &bw, &bh);
+            length = vertical ? bh : bw;
+            origin = vertical ? by : bx;
+            launcher_oracle(position, scale, 3, lengths, length, origin, 0, &start, wide, &tray_at, &tray_length);
+            off_same &= !taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) && taskbar_hit(&view, bx + gap + 1, by + 1) != TASKBAR_LAUNCHER &&
+                        !taskbar_anchor(&view, &x, &y, &w, &h);
+            for (int tab = 0, place = start; tab < 3; place += wide[tab] + gap, tab++)
+            {
+                int got = taskbar_slot(&view, tab, &x, &y, &w, &h);
+
+                off_same &= got && (vertical ? y : x) == place && (vertical ? h : w) == wide[tab];
+            }
+            off_same &= taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && (vertical ? ty : tx) == tray_at && (vertical ? th : tw) == tray_length;
+
+            // On: the button, a gap in from the leading end.
+            taskbar_launcher_set(1);
+            lead = gap + high;
+            launcher_oracle(position, scale, 3, lengths, length, origin, lead, &start, wide, &tray_at, &tray_length);
+            if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h))
+            {
+                button_square = button_leads = tabs_after = hits = anchored = damaged = glyphs = 0;
+                continue;
+            }
+            button_square &= w == high && h == high;
+            button_leads &= (vertical ? y : x) == origin + gap && x >= bx && y >= by && x + w <= bx + bw && y + h <= by + bh &&
+                            (position == TASKBAR_TOP ? y == by : position == TASKBAR_BOTTOM ? y == by + inset
+                                                             : position == TASKBAR_LEFT ? x == bx : x == bx + inset);
+            for (int tab = 0, place = start; tab < 3; place += wide[tab] + gap, tab++)
+            {
+                int tx2, ty2, tw2, th2, got = taskbar_slot(&view, tab, &tx2, &ty2, &tw2, &th2);
+
+                along[tab] = vertical ? ty2 : tx2;
+                span[tab] = vertical ? th2 : tw2;
+                tabs_after &= got && along[tab] == place && span[tab] == wide[tab];
+            }
+            tabs_after &= along[0] >= (vertical ? y + h : x + w) + gap && along[2] + span[2] <= tray_at &&
+                          taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && (vertical ? ty : tx) == tray_at;
+
+            // Hit: the button, a tab, the tray, and the gap between the button and the first tab is none.
+            hits &= taskbar_hit(&view, x + w / 2, y + h / 2) == TASKBAR_LAUNCHER &&
+                    taskbar_hit(&view, vertical ? x + w / 2 : along[0] + span[0] / 2, vertical ? along[0] + span[0] / 2 : y + h / 2) == 0 &&
+                    taskbar_hit(&view, tx + tw / 2, ty + th / 2) == -2 &&
+                    taskbar_hit(&view, vertical ? x + w / 2 : x + w + gap / 2, vertical ? y + h + gap / 2 : y + h / 2) == TASKBAR_HIT_NONE &&
+                    taskbar_hit_reach(&view, x + w / 2, y + h / 2, 4) == TASKBAR_LAUNCHER;
+
+            // The anchor: the button along the edge, the band's whole thickness across it.
+            anchored &= taskbar_anchor(&view, &tx, &ty, &tw, &th) &&
+                        (vertical ? tx == bx && tw == bw && ty == y && th == h : tx == x && tw == w && ty == by && th == bh);
+
+            // Damage over the button redoes the button's slot and not the tray's, which is the other end of the band.
+            {
+                int hurt[1][4] = {{x + w / 2, y + h / 2, x + w / 2 + 1, y + h / 2 + 1}}; // x1, y1, x2, y2
+                unsigned long redo = taskbar_meets(&view, hurt, 1);
+
+                damaged &= (redo & taskbar_bit(TASKBAR_LAUNCHER)) != 0 && !(redo & taskbar_bit(-2)) &&
+                           taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(-2) && taskbar_bit(TASKBAR_LAUNCHER) != taskbar_bit(WINDOWS - 1);
+            }
+
+            // Drawn: the glass, lit or not, and the three bars of whole device pixels in one ink, centred on the button.
+            {
+                unsigned int shot[2] = {0, 0};
+                int rect[4], bar = 10 * scale / 100, bar_thick = 2 * scale / 100, step = 5 * scale / 100, left, top, count = 0, stray = 0;
+                unsigned int ink = 0;
+
+                bar = bar < 3 ? 3 : bar > w ? w : bar;
+                bar_thick = bar_thick < 1 ? 1 : bar_thick;
+                step = step <= bar_thick ? bar_thick + 1 : step;
+                left = x + (w - bar) / 2;
+                top = y + (h - (2 * step + bar_thick)) / 2;
+                for (int lit = 0; lit < 2; lit++)
+                {
+                    struct taskbar_view drawn = view;
+
+                    memory_zero(launcher_band_pixels, sizeof(launcher_band_pixels));
+                    drawn.pixels = launcher_band_pixels;
+                    drawn.band_bytes = sizeof(launcher_band_pixels);
+                    drawn.glass = band_glass_pixels;
+                    drawn.launcher_lit = (unsigned int)lit;
+                    if (taskbar_draw(&drawn, taskbar_bit(TASKBAR_LAUNCHER), band_glass, null, rect) != 1)
+                    {
+                        glyphs = 0;
+                        continue;
+                    }
+                    shot[lit] = launcher_band_pixels[(unsigned long)(y - by + 1) * (unsigned long)bw + (unsigned long)(x - bx + 1)];
+                    if (lit)
+                        continue;
+                    // The ink is what the first bar's middle pixel is; every pixel of the three bars is it and no other pixel of the slot is.
+                    ink = launcher_band_pixels[(unsigned long)(top - by) * (unsigned long)bw + (unsigned long)(left + bar / 2 - bx)];
+                    for (int row = y; row < y + h; row++)
+                        for (int column = x; column < x + w; column++)
+                        {
+                            int in_bar = column >= left && column < left + bar && row >= top && (row - top) / step < 3 && (row - top) % step < bar_thick;
+                            unsigned int pixel = launcher_band_pixels[(unsigned long)(row - by) * (unsigned long)bw + (unsigned long)(column - bx)];
+
+                            count += in_bar;
+                            stray += in_bar != (pixel == ink);
+                        }
+                    glyphs &= count == 3 * bar * bar_thick && !stray && ink != 0;
+                    // Nothing outside the slot is drawn: the rest of the band is the zeroes it was cleared to.
+                    for (int row = 0; row < bh; row++)
+                        for (int column = 0; column < bw; column++)
+                            if ((column + bx < x || column + bx >= x + w || row + by < y || row + by >= y + h) &&
+                                launcher_band_pixels[(unsigned long)row * (unsigned long)bw + (unsigned long)column])
+                                outside = 0;
+                }
+                lit_differs &= shot[0] != shot[1];
+                // The bars are the same whole pixels at every scale: a bar is 5 to 20 long and 1 to 4 thick, centred to a pixel.
+                scale_ok &= bar >= 3 && bar_thick == (scale >= 100 ? scale / 50 : 1) && 2 * (left - x) + bar - w >= -1 && 2 * (left - x) + bar - w <= 0;
+            }
+        }
+    check("launcher button: with it off the tabs and the tray are where the band's own formula puts them, at every position and scale, and no slot is the button's", off_same);
+    check("launcher button: on, it is a tab-sized square a gap in from the leading end of the band, inside it", button_square && button_leads);
+    check("launcher button: and the tabs are laid out in what it leaves, clear of it and of the tray", tabs_after);
+    check("launcher button: a point on it is the launcher button, a point on a tab or the tray is theirs, and the gap between is none", hits);
+    check("launcher button: its anchor is its length along the edge and the band's whole thickness across it", anchored);
+    check("launcher button: damage over it redoes its slot and not the tray's, on a bit of its own", damaged);
+    check("launcher button: its three bars are whole device pixels in one ink, centred on it, at every position and scale", glyphs && scale_ok);
+    check("launcher button: lit while the launcher is up it is drawn as the tab with the keys is, and nothing outside it is drawn", lit_differs && outside);
+    check("launcher button: in the shapes the panel draws with no font it is the lit tab's ink when lit and the shadow's when not",
+          taskbar_tab_ink(TASKBAR_LAUNCHER, COMPOSITOR_TAB_LIT) == taskbar_tab_ink(0, COMPOSITOR_TAB_LIT) &&
+          taskbar_tab_ink(TASKBAR_LAUNCHER, 0) == taskbar_tab_ink(0, 0) && taskbar_tab_ink(-2, COMPOSITOR_TAB_LIT) == taskbar_tab_ink(-2, 0));
+    taskbar_launcher_set(0);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+}
+
 /* A bottom and a top band in the standard theme (dark, with white) are the bytes the baseline draws, pinned there before
    the kit's roles drew the band. The unthemed table had a tint of its own, which no shell draws: the compositor themes
    its table at start. */
@@ -121195,6 +121399,127 @@ static void check_compositor_tray(void)
     compositor_button(COMPOSITOR_BTN_LEFT, 1);
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     check("tray: a third press right after the pair starts a new one", compositor.settings_asked == 1);
+}
+
+/*
+        The panel's launcher button pressed. With the button on, a left press on it asks the script for the launcher (launcher_button)
+        and writes the rectangle it opens beside, the panel's edge and the screen in the window table first; a press of another button
+        does nothing; a press while the launcher is up puts it away and asks for no other; and the button is lit while the launcher is
+        up. With the button off the same place is the empty desktop, and nothing is asked.
+*/
+static void check_compositor_launcher(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static const char *const words[4] = {"bottom", "top", "left", "right"};
+    struct windows address_to table;
+    struct taskbar_view view;
+    int ok_asked = 1, ok_table = 1, ok_other = 1, ok_toggle = 1, ok_lit = 1, ok_off = 1;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    for (int at = 0; at < 4; at++)
+    {
+        int x, y, w, h, rect[4];
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 100;
+        compositor.card = -1;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+            check("launcher button press: the table is mapped", false);
+            return;
+        }
+        table = compositor.table;
+        taskbar_tray_set("");
+        taskbar_settings_set(words[at], "primary", "battery none\n");
+        taskbar_launcher_set(1);
+        table->x[1] = 60;
+        table->y[1] = 60;
+        table->width[1] = 100;
+        table->height[1] = 60;
+        glass_paint(1, 0, 0, 100, 60, 0x404040u, true);
+        compositor_present();
+        compositor_focus(1);
+
+        view = compositor_band_view();
+        if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || !taskbar_anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
+        {
+            check("launcher button press: the band has a button", false);
+            return;
+        }
+        compositor.pointer_x = x + w / 2;
+        compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+
+        // A left press asks for the launcher once, and says where beside.
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        ok_asked &= compositor.launcher_asked == 1 && compositor.focus == 1 && !compositor.settings_asked;
+        ok_table &= table->button_x == rect[0] && table->button_y == rect[1] && table->button_w == (unsigned int)rect[2] &&
+                    table->button_h == (unsigned int)rect[3] && table->button_edge == taskbar_position() && table->button_screen == 0;
+
+        // Another button, and the button of a pointer that is off the button, ask for nothing.
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+        compositor_button(COMPOSITOR_BTN_MIDDLE, 1);
+        compositor_button(COMPOSITOR_BTN_MIDDLE, 0);
+        compositor.pointer_x = GLASS_SIDE / 2;
+        compositor.pointer_y = GLASS_SIDE / 2 - 20;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        ok_other &= compositor.launcher_asked == 1;
+        compositor.pointer_x = x + w / 2;
+        compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+
+        // The launcher up (a glass window with no close button that asks to be put away by a press elsewhere, which has the keys):
+        // the button is lit, and a press on it puts the launcher away and asks for no other.
+        view = compositor_band_view();
+        ok_lit &= !view.launcher_lit && compositor_launcher_row() < 0;
+        table->x[2] = 100;
+        table->y[2] = 100;
+        table->width[2] = 80;
+        table->height[2] = 50;
+        table->glass[2] = WINDOW_GLASS | WINDOW_NO_CLOSE | WINDOW_DISMISS;
+        glass_paint(2, 0, 0, 80, 50, 0, true);
+        compositor_present();
+        compositor_focus(2);
+        view = compositor_band_view();
+        ok_lit &= compositor_launcher_row() == 2 && view.launcher_lit;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        ok_toggle &= (table->state[2] & WINDOW_CLOSING) && compositor.launcher_asked == 1;
+        view = compositor_band_view();
+        ok_lit &= compositor_launcher_row() < 0 && !view.launcher_lit;
+
+        // Gone, a press asks again.
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        ok_toggle &= compositor.launcher_asked == 2;
+
+        // With the button off the same place asks nothing.
+        taskbar_launcher_set(0);
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        ok_off &= compositor.launcher_asked == 2;
+        compositor_call(syscall(munmap), (positive)table,
+                        ((sizeof(struct windows) + 4095) & ~4095ul) + (((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul) * 2 * WINDOWS, 0, 0, 0, 0);
+    }
+    check("launcher button press: a left press on it asks the script for the launcher once, at each position of the panel", ok_asked);
+    check("launcher button press: and the table holds the rectangle it opens beside, the panel's edge and the screen", ok_table);
+    check("launcher button press: another button, or a press off the button, asks for nothing", ok_other);
+    check("launcher button press: with the launcher up a press on it puts the launcher away and asks for no other, and gone it asks again", ok_toggle);
+    check("launcher button press: the button is lit while the launcher is up and not before or after", ok_lit);
+    check("launcher button press: with the button off the place where it was asks nothing", ok_off);
+    taskbar_launcher_set(0);
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
 }
 
 /*
@@ -127712,6 +128037,149 @@ static fn check_launcher(void)
                 system_remove_at(AT_FDCWD, made[1], 0x200);
                 system_remove_at(AT_FDCWD, made[0], 0x200);
         }
+}
+
+/*
+        The launcher opened beside the panel's button (-a). The bar ends where a bottom panel's button starts, starts where a top
+        panel's ends, is beside a left or right panel's with its top at the button's top, its left at the button's for the other two,
+        and is all of it on its screen at every scale and screen, a screen past the first included; what the table says is taken once
+        and only when it says something; the bar's height is held to the room the panel leaves; and a bar above a bottom panel is put
+        again when its height changes, which is the only edge whose bar moves with it.
+*/
+static fn check_launcher_anchor(void)
+{
+        static struct windows table;
+        static const unsigned int edges[4] = {TASKBAR_BOTTOM, TASKBAR_TOP, TASKBAR_LEFT, TASKBAR_RIGHT};
+        static const int scales[6] = {50, 75, 100, 125, 150, 200};
+        static const int screens[2][4] = {{0, 0, 1920, 1080}, {1920, 0, 1280, 720}};
+        int beside = 1, inside = 1, kept = 1;
+
+        for (int on = 0; on < 2; on++)
+                for (int at = 0; at < 4; at++)
+                        for (int each = 0; each < 6; each++)
+                        {
+                                int scale = scales[each], thick = COMPOSITOR_PANEL * scale / 100, gap = UI_GAP1 * scale / 100;
+                                int high = thick - 3 * scale / 100, width = LAUNCHER_WIDTH * scale / 100, height = 300 * scale / 100;
+                                const int *screen = screens[on];
+                                int right = screen[0] + screen[2], bottom = screen[1] + screen[3], x, y;
+                                int button[4];
+
+                                switch (edges[at])
+                                {
+                                case TASKBAR_BOTTOM: button[0] = screen[0] + gap, button[1] = bottom - thick, button[2] = high, button[3] = thick; break;
+                                case TASKBAR_TOP: button[0] = screen[0] + gap, button[1] = screen[1], button[2] = high, button[3] = thick; break;
+                                case TASKBAR_LEFT: button[0] = screen[0], button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
+                                default: button[0] = right - thick, button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
+                                }
+                                launcher_anchor_place(edges[at], button, screen, width, height, &x, &y);
+                                beside &= edges[at] == TASKBAR_BOTTOM ? y + height == button[1] && x == button[0]
+                                          : edges[at] == TASKBAR_TOP  ? y == button[1] + button[3] && x == button[0]
+                                          : edges[at] == TASKBAR_LEFT ? x == button[0] + button[2] && y == button[1]
+                                                                      : x + width == button[0] && y == button[1];
+                                inside &= x >= screen[0] && y >= screen[1] && x + width <= right && y + height <= bottom;
+                        }
+        // A bar wider and taller than the room is kept on the screen by its top left; a button near the right edge pulls the bar left.
+        {
+                int button[4] = {1900, 1056, 21, 24}, x, y;
+
+                launcher_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 300, &x, &y);
+                inside &= x == 1920 - 560 && y == 1056 - 300;
+                launcher_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 1200, &x, &y);
+                inside &= x == 1920 - 560 && y == 0;
+                launcher_anchor_place(TASKBAR_RIGHT, (int[4]){1896, 4, 24, 21}, screens[0], 2400, 300, &x, &y);
+                inside &= x == 0 && y == 4;
+        }
+        check("launcher beside the button: the bar is above a bottom panel's button, below a top panel's and beside a side panel's, at every scale and on any screen", beside);
+        check("launcher beside the button: and all of it is on its screen, a wide or tall bar by its top left", inside);
+
+        // The table's press: taken once, and only a whole one.
+        memory_zero(&launcher, sizeof(launcher));
+        launcher.own.table = &table;
+        launcher.own.row = 3;
+        launcher.ui.scale = 100;
+        table.output_width = 1920;
+        table.output_height = 1080;
+        table.outputs = 2;
+        for (int screen = 0; screen < 2; screen++)
+                table.output_x[screen] = screens[screen][0], table.output_y[screen] = screens[screen][1],
+                table.output_w[screen] = (unsigned int)screens[screen][2], table.output_h[screen] = (unsigned int)screens[screen][3];
+        table.button_x = 1944, table.button_y = 696, table.button_w = 21, table.button_h = 24;
+        table.button_edge = TASKBAR_BOTTOM, table.button_screen = 1;
+        launcher_anchor_take();
+        kept &= !launcher.anchored;
+        launcher.asked_beside = true;
+        table.button_w = 0;
+        launcher_anchor_take();
+        kept &= !launcher.anchored;
+        table.button_w = 21, table.button_edge = TASKBAR_RIGHT + 1;
+        launcher_anchor_take();
+        kept &= !launcher.anchored;
+        table.button_edge = TASKBAR_BOTTOM, table.button_screen = 2;
+        launcher_anchor_take();
+        kept &= !launcher.anchored;
+        table.button_screen = 1;
+        launcher_anchor_take();
+        kept &= launcher.anchored && launcher.edge == TASKBAR_BOTTOM && launcher.number == 1 && launcher.anchor[0] == 1944 &&
+                launcher.anchor[1] == 696 && launcher.anchor[2] == 21 && launcher.anchor[3] == 24 && launcher.screen[0] == 1920 &&
+                launcher.screen[2] == 1280 && launcher.screen[3] == 720;
+        check("launcher beside the button: what the table says is taken once, with the screen it names, and only when it says something whole", kept);
+
+        // The room: a bar beside a top or bottom panel is held to what the panel leaves, a side panel's to the output.
+        launcher.height = 0;
+        launcher.width = 560;
+        launcher_changed();
+        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW;
+        launcher.anchor[1] = 100;
+        launcher.screen[1] = 0;
+        kept &= launcher_most_height() == 100;
+        launcher_changed();
+        kept &= launcher.height == 100;
+        launcher.edge = TASKBAR_TOP;
+        launcher.anchor[1] = 0;
+        launcher.screen[1] = 0, launcher.screen[3] = 720, launcher.anchor[3] = 24;
+        kept &= launcher_most_height() == 720 - 24;
+        launcher.edge = TASKBAR_LEFT;
+        kept &= launcher_most_height() == 1080;
+        launcher.anchored = false;
+        kept &= launcher_most_height() == 1080;
+        check("launcher beside the button: its height is held to the room the panel leaves above or below it, and to the output beside a side panel", kept);
+
+        // The place it asks: the placement columns of its row, from its screen's top left, with the size.
+        launcher.anchored = true;
+        launcher.edge = TASKBAR_BOTTOM;
+        launcher.number = 1;
+        launcher.anchor[0] = 1944, launcher.anchor[1] = 696, launcher.anchor[2] = 21, launcher.anchor[3] = 24;
+        launcher.screen[0] = 1920, launcher.screen[1] = 0, launcher.screen[2] = 1280, launcher.screen[3] = 720;
+        launcher.width = 560, launcher.height = 200;
+        launcher_place();
+        kept = table.place[3] == (WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE) && table.place_x[3] == 24 && table.place_y[3] == 496 &&
+               table.place_width[3] == 560 && table.place_height[3] == 200 && table.place_screen[3] == 1;
+        check("launcher beside the button: it asks for its place and size as a placement, counted from its screen's top left", kept);
+
+        // Moved again with a new height only above a bottom panel, and only once shown.
+        launcher.shown = -1;
+        launcher.height = 0;
+        string_copy_bounded((string_address)launcher.text, (string_address) "zzzz", sizeof(launcher.text));
+        launcher.moved = false;
+        launcher_changed();
+        kept = !launcher.moved;
+        launcher.shown = 0;
+        launcher.text[0] = 0;
+        launcher_changed();
+        kept &= launcher.moved;
+        launcher.moved = false;
+        launcher_changed();
+        kept &= !launcher.moved;
+        launcher.edge = TASKBAR_TOP;
+        string_copy_bounded((string_address)launcher.text, (string_address) "zzzz", sizeof(launcher.text));
+        launcher_changed();
+        kept &= !launcher.moved;
+        launcher.edge = TASKBAR_BOTTOM;
+        launcher.anchored = false;
+        launcher.text[0] = 0;
+        launcher_changed();
+        kept &= !launcher.moved;
+        check("launcher beside the button: a bar above a bottom panel is put again when its height changes, once it is shown, and no other is", kept);
 }
 #endif
 
@@ -144549,14 +145017,17 @@ b32 main()
         check_compositor_popup_holds();
         check_compositor_glass_popup();
         check_compositor_tray();
+        check_compositor_launcher();
         check_compositor_place();
         check_compositor_remember();
 #if MOONWATER_UI_LAUNCHER
         check_launcher();
+        check_launcher_anchor();
 #endif
         check_compositor_look();
         check_taskbar_geometry();
         check_taskbar_tray();
+        check_taskbar_launcher();
 #if MOONWATER_UI_ANY
         check_kit_motion();
         check_kit_theme();

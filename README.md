@@ -89,6 +89,7 @@ moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the 
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
+moonwater taskbar launcher [on|off]    a button at the start of the taskbar that opens the launcher beside it and puts it away again [off]
 moonwater taskbar text [center|edge]   on a left or right taskbar, which way the tops of the letters face: the middle of its screen or its edge [center]
 moonwater taskbar tray [FORMAT|default]  what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]
 moonwater ntp [on|off]                 set the clock from the network [on]
@@ -255,7 +256,7 @@ with, and `canvas motion reduced` turns the motion off; every open window turns 
 change at once. `moonwater settings gallery` opens the settings window on the kit's
 gallery: every control, as the kit's own demo page has them, to see and press.
 
-On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away.
+On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. With `moonwater taskbar launcher on` the taskbar has a button at its start (its left end, or the top of a side taskbar) that opens it beside the button, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the button while it is open puts it away.
 
 Every screen the card has connected is one desktop. `moonwater canvas arrange` lays the
 screens by their connectors' names, left to right with their tops level, the first the

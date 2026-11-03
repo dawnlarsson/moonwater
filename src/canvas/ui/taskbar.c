@@ -15,6 +15,11 @@
         the letters toward the middle of its output or toward the edge it is
         on, as `taskbar text` says.
 
+        With `taskbar launcher on` the band also has a button at its leading end (the left of a bottom or top band, the top
+        of a side one): a tab-sized square with three bars on it, that opens the launcher. It is a slot of the band like the
+        tray, with a bit of its own in the redo mask, drawn as a tab is (lit while the launcher is up), and the tabs are laid
+        out in what it leaves. Off, which is the default, the band is as it was.
+
         Every rectangle here is on the output and in device pixels. The painting
         works in the band's own coordinates (the pixels start at its top left) and
         the glass in the rectangle the compositor blurred for the span.
@@ -39,6 +44,7 @@ static struct taskbar_state
         char tray_format[SETTING_TRAY_MOST + 1]; // that format
         char tray_text[SETTING_TRAY_MOST * 4];  // what it says this minute
         int tray_chars;                         // characters in tray_text
+        int launcher;                           // `taskbar launcher on`: the band has a launcher button at its leading end
 } taskbar = {1, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
@@ -65,6 +71,7 @@ struct taskbar_layout
         int start, windows;          // where the first tab is along the edge, and what the tabs take with their gaps
         int tray, tray_at;           // the tray's length and where it starts along the edge
         int across, across_len;      // the tabs' place and thickness across the edge
+        int button, lead;            // the launcher button's length along the edge (0: none), and what it and its gap take of the start
 };
 
 static unsigned int taskbar_minute_now(void)
@@ -151,7 +158,10 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         // A format of the person's may be long, but the tabs keep half of the band.
         if (taskbar.tray_custom && lay->tray > lay->length / 2)
                 lay->tray = lay->length / 2;
-        room = lay->length - lay->tray - (lay->count + 2) * lay->gap;
+        // The launcher button is a square a tab high at the leading end, a gap in from it; the tabs have what is left.
+        lay->button = taskbar.launcher && lay->high > 0 ? lay->high : 0;
+        lay->lead = lay->button ? lay->gap + lay->button : 0;
+        room = lay->length - lay->lead - lay->tray - (lay->count + 2) * lay->gap;
         lay->most = lay->count && room > 0 ? room / lay->count : 0;
         lay->most = lay->most > 8 * lay->thick ? 8 * lay->thick : lay->most;
         for (int at = 0; lay->most && at < lay->count; at++)
@@ -159,7 +169,8 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
         lay->windows = windows;
         // Along a bottom or top band the tray is at the right end and the tabs are centred in what it leaves; along a side
         // one the tabs start below a gap at the top and the tray is held to the bottom.
-        lay->start = lay->vertical ? lay->origin + lay->gap : lay->origin + (lay->length - lay->tray - windows) / 2;
+        lay->start = lay->vertical ? lay->origin + lay->gap + lay->lead
+                                   : lay->origin + lay->lead + (lay->length - lay->lead - lay->tray - windows) / 2;
         lay->tray_at = lay->origin + lay->length - lay->gap - lay->tray;
         lay->across = lay->vertical ? (view->position == TASKBAR_LEFT ? lay->bx : lay->bx + lay->inset)
                                     : (view->position == TASKBAR_TOP ? lay->by : lay->by + lay->inset);
@@ -168,9 +179,11 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
 
 /*
         Where a slot is along the edge: its start and length. Slot -2 is the
-        tray as a whole, -3 the clock and -4 the battery (both inside the tray).
-        Answers 0 for a slot that has none: a tab past the count or too narrow
-        for one, or the battery when none is shown.
+        tray as a whole, -3 the clock and -4 the battery (both inside the tray),
+        and TASKBAR_LAUNCHER (-5) the launcher button, a gap in from the leading
+        end. Answers 0 for a slot that has none: a tab past the count or too
+        narrow for one, the battery when none is shown, or the button when the
+        band has none.
 */
 static int taskbar_along(const struct taskbar_layout *lay, int which, int *along, int *length)
 {
@@ -184,6 +197,12 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
                 for (at = 0; at < which; at++)
                         *along += taskbar_tab_width(lay, at) + lay->gap;
                 *length = taskbar_tab_width(lay, which);
+        }
+        else if (which == TASKBAR_LAUNCHER)
+        {
+                if (!lay->button)
+                        return 0;
+                *along = lay->origin + lay->gap, *length = lay->button;
         }
         else if (which == -2)
                 *along = lay->tray_at, *length = lay->tray;
@@ -244,11 +263,11 @@ static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, in
 {
         int half = reach ? 2 * view->scale / 100 : 0;
 
-        for (int which = -2; which < (int)view->count; which++)
+        for (int which = TASKBAR_LAUNCHER; which < (int)view->count; which++)
         {
                 int x, y, width, height;
 
-                if (!taskbar_slot(view, which, &x, &y, &width, &height))
+                if (which == -4 || which == -3 || !taskbar_slot(view, which, &x, &y, &width, &height))
                         continue;
                 if (taskbar_vertical(view->position))
                         y -= half, height += 2 * half, width += reach, x -= view->position == TASKBAR_RIGHT ? reach : 0;
@@ -283,10 +302,10 @@ static int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *wi
         return 1;
 }
 
-// A slot's redo bit: a tab's, and the tray's on its own bit past the tabs.
+// A slot's redo bit: a tab's, the tray's on its own bit past the tabs, and the launcher button's on the one after.
 static unsigned long taskbar_bit(int which)
 {
-        return which < 0 ? 1ul << WINDOWS : 1ul << which;
+        return which == TASKBAR_LAUNCHER ? 1ul << (WINDOWS + 1) : which < 0 ? 1ul << WINDOWS : 1ul << which;
 }
 
 /*
@@ -300,11 +319,11 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
         unsigned long redo = 0;
 
         taskbar_layout(view, &lay);
-        for (int which = -2; which < lay.count; which++)
+        for (int which = TASKBAR_LAUNCHER; which < lay.count; which++)
         {
                 int x, y, width, height, reach[4];
 
-                if (!taskbar_slot(view, which, &x, &y, &width, &height))
+                if (which == -4 || which == -3 || !taskbar_slot(view, which, &x, &y, &width, &height))
                         continue;
                 if (lay.vertical)
                         reach[0] = lay.bx - COMPOSITOR_GLASS_REACH, reach[1] = y - COMPOSITOR_GLASS_REACH,
@@ -330,7 +349,7 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
 
 static unsigned int taskbar_tab_ink(int slot, unsigned int mark)
 {
-        return slot < 0                 ? compositor_ink_shadow()
+        return slot < 0 && slot != TASKBAR_LAUNCHER ? compositor_ink_shadow()
                : mark & COMPOSITOR_TAB_AWAY ? COMPOSITOR_INK_PANEL
                : mark & COMPOSITOR_TAB_LIT  ? COMPOSITOR_INK_BUTTON_LIT
                                             : compositor_ink_shadow();
@@ -459,9 +478,11 @@ static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, i
                                       int x, int y, int width, int height, int slot, unsigned int mark)
 {
         unsigned int middle = compositor_vivid(view->glass[(long)(y + height / 2 - gy) * gw + x - gx + width / 2]);
-        unsigned int amount = slot >= 0 && (mark & COMPOSITOR_TAB_LIT) ? 140 : 179;
+        // The tray (-2) is never lit; a tab with the keys is, and so is the launcher button while the launcher is up.
+        b32 lit = (slot >= 0 || slot == TASKBAR_LAUNCHER) && (mark & COMPOSITOR_TAB_LIT);
+        unsigned int amount = lit ? 140 : 179;
         // The tabs follow the theme: toward its surface, and the tab of the window with the keys toward its fill.
-        unsigned int target = compositor_tab_target(slot >= 0 && (mark & COMPOSITOR_TAB_LIT));
+        unsigned int target = compositor_tab_target(lit);
 
         for (int row = y; row < y + height; row++)
         {
@@ -773,6 +794,31 @@ static void taskbar_battery_refresh(void)
 }
 
 /*
+        The launcher button's mark: three bars ten logical pixels long and two thick, five apart from the top of one to the
+        top of the next, centred on the button. Whole device pixels at every scale (50 to 200 percent are bars of 5 to 20
+        by 1 to 4), drawn as a run of fill, so there is no icon file and no font in it.
+*/
+static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y,
+                                   int width, int height, unsigned int ink)
+{
+        int bar = 10 * view->scale / 100, thick = 2 * view->scale / 100, step = 5 * view->scale / 100, left, top;
+
+        thick = thick < 1 ? 1 : thick;
+        bar = bar < 3 ? 3 : bar > width ? width : bar;
+        step = step <= thick ? thick + 1 : step;
+        left = x + (width - bar) / 2;
+        top = y + (height - (2 * step + thick)) / 2;
+        for (int at = 0; at < 3; at++)
+                for (int row = 0; row < thick; row++)
+                {
+                        int line = top + at * step + row;
+
+                        if (line >= y && line < y + height)
+                                memory_fill_u32(view->pixels + (long)(line - lay->by) * lay->bw + (left - lay->bx), (positive)bar, ink);
+                }
+}
+
+/*
         The band drawn over what is under it: each tab redone made glass with
         its title on it, and the tray made glass with the clock and the
         battery. Only the slots in redo are made again, and only their span
@@ -796,10 +842,12 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         taskbar_layout(view, &lay);
         if ((unsigned long)lay.bw * (unsigned long)lay.bh * 4 > view->band_bytes)
                 return 0;
-        for (int which = -2; which < lay.count; which++)
+        for (int which = TASKBAR_LAUNCHER; which < lay.count; which++)
         {
                 int along, length;
 
+                if (which == -4 || which == -3)
+                        continue;
                 if ((redo & taskbar_bit(which)) && taskbar_along(&lay, which, &along, &length))
                 {
                         if (!any || along < first)
@@ -835,6 +883,18 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                 taskbar_text_line(view, lay.bx, lay.by, lay.bw, x, y, width, height, view->titles[at],
                                                   ink, ground);
                 }
+        }
+
+        // The launcher button: a tab's glass, lit while the launcher is up, with its three bars in the tab's ink.
+        if ((redo & taskbar_bit(TASKBAR_LAUNCHER)) && taskbar_slot(view, TASKBAR_LAUNCHER, &x, &y, &width, &height))
+        {
+                unsigned int mark = view->launcher_lit ? COMPOSITOR_TAB_LIT : 0;
+
+                ground = taskbar_glass_tab(view, rect[0], rect[1], gw, lay.bx, lay.by, lay.bw, x, y, width, height,
+                                           TASKBAR_LAUNCHER, mark);
+                ink = window_contrast(ground);
+                ink = mark ? ink : window_mix(ground, ink, 170);
+                taskbar_launcher_glyph(view, &lay, x, y, width, height, ink);
         }
 
         taskbar.minute = taskbar_minute_now();
@@ -1010,4 +1070,31 @@ static void taskbar_text_set(int edge)
 {
         taskbar.edge = edge != 0;
         taskbar.stale = 1;
+}
+
+// `taskbar launcher`: on puts the launcher button at the band's leading end, and the tabs are laid out in what it leaves.
+static void taskbar_launcher_set(int on)
+{
+        taskbar.launcher = on != 0;
+        taskbar.stale = 1;
+}
+
+/*
+        Where a menu from the launcher button opens, as the rectangle it opens beside: the button's length along the edge
+        and the band's whole thickness across it, on the output. A bottom band's menu ends where this starts, a top band's
+        starts where it ends, and a side band's is beside it, its top at this top. Answers 0 when the band has no button.
+*/
+static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{
+        struct taskbar_layout lay;
+        int along, length;
+
+        taskbar_layout(view, &lay);
+        if (!taskbar_along(&lay, TASKBAR_LAUNCHER, &along, &length))
+                return 0;
+        if (lay.vertical)
+                *x = lay.bx, *y = along, *width = lay.bw, *height = length;
+        else
+                *x = along, *y = lay.by, *width = length, *height = lay.bh;
+        return 1;
 }

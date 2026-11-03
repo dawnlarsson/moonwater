@@ -92,6 +92,7 @@
 #define SETTING_TASKBAR_POSITION_PATH "/root/taskbar.position"
 #define SETTING_TASKBAR_DISPLAY_PATH "/root/taskbar.display"
 #define SETTING_TASKBAR_TEXT_PATH "/root/taskbar.text"
+#define SETTING_TASKBAR_LAUNCHER_PATH "/root/taskbar.launcher"
 #define SETTING_WINDOWS_REMEMBER_PATH "/root/canvas.windows.remember"
 #define SETTING_TOUCH_PATH "/root/canvas.touch"
 #define SETTING_PREDICT_TOUCH_PATH "/root/canvas.predict.touch"
@@ -311,6 +312,12 @@ static const struct settings_row settings_rows[] = {
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_DISPLAY_PATH, .standard = "primary", .reset = "primary",
                       .need = "how Canvas draws", .refusal = "taskbar display is primary or all, not %s\n",
                       .usage = "taskbar display [primary|all]", .help = "the screens the taskbar is on: the primary, or all, each listing its windows [primary]"),
+    //  Off by default: the launcher opens from its key alone. On, the band has a button at its leading end (the left of a
+    //  bottom or top band, the top of a side one) that opens and closes the launcher beside it.
+    SETTING_PLAIN_ROW(null, "Taskbar launcher button", SETTINGS_SWITCH, 0, ("taskbar", "launcher"), "launcher ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_LAUNCHER_PATH, .standard = "off", .need = "how Canvas draws",
+                      .usage = "taskbar launcher [on|off]",
+                      .help = "a button at the start of the taskbar that opens the launcher beside it and puts it away again [off]"),
     //  The letters' tops toward the middle by default: a side band is then the bottom band stood on its end, its titles
     //  facing the round corners of its tabs as the bottom band's do. Flipping the default is this row's standard, its
     //  help and the README's line; the compositor takes the standard from here, and a file that says default follows it.

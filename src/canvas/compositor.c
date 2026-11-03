@@ -173,7 +173,8 @@ struct compositor_frame
         int line;            // the line round the contents, outside them, in device pixels; 0 for none
         unsigned int edge;   // the line's colour
         int square;          // corners kept square though there is a radius: 1 top left, 2 top right, 4, 8 below
-        int slot;            // the compositor's panel: the tab this frame is (-2 tray, 0 up windows)
+        int slot;            // the compositor's panel: the tab this frame is (-2 tray, TASKBAR_LAUNCHER the launcher button, 0 up windows)
+        unsigned int launcher_lit; // the panel: the launcher is up, so its button is drawn as the tab with the keys is
         unsigned int position; // the panel: where its band sits (TASKBAR_BOTTOM, TOP, LEFT or RIGHT)
         const unsigned char *lengths; // the panel: each window's title in characters, which its tab fits
         int close;           // a window with a close button over its top right
@@ -332,6 +333,14 @@ static unsigned char compositor_title_length(const char *title, unsigned int mos
         for (unsigned int at = 0; at < most && title[at]; at++)
                 count += ((unsigned char)title[at] & 0xc0) != 0x80;
         return (unsigned char)(count > 255 ? 255 : count);
+}
+
+// A panel frame's mark: its window's lit and put-away bits, the button's lit one, and none for the tray.
+static unsigned int compositor_panel_mark(const struct compositor_frame *frame)
+{
+        if (frame->slot == TASKBAR_LAUNCHER)
+                return frame->launcher_lit ? COMPOSITOR_TAB_LIT : 0;
+        return frame->slot >= 0 && frame->slot < (int)frame->mark_count ? frame->marks[frame->slot] : 0;
 }
 
 /*
@@ -601,9 +610,7 @@ static void compositor_contents(const struct compositor_target *t, const struct 
         if (!frame->builtin && !frame->pixels)
                 return;
         if (frame->builtin)
-                compositor_panel_tab(t, frame->slot,
-                                     frame->slot >= 0 && frame->slot < (int)frame->mark_count ? frame->marks[frame->slot] : 0,
-                                     frame->x, frame->y, frame->width, frame->height);
+                compositor_panel_tab(t, frame->slot, compositor_panel_mark(frame), frame->x, frame->y, frame->width, frame->height);
         else if (compositor_scaled(frame))
                 compositor_blit_scaled(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
                                        frame->source_w, frame->source_h);
@@ -783,11 +790,7 @@ static void compositor_draw_with(const struct compositor_target *t, const struct
         if (frame->lit)
                 for (int corner = 0; corner < 4; corner++)
                         lit_corners |= (unsigned int)compositor_corner_lit(frame, corner) << corner;
-        unsigned int tab = frame->builtin ? taskbar_tab_ink(frame->slot, frame->slot >= 0 &&
-                                                                                    frame->slot < (int)frame->mark_count
-                                                                                ? frame->marks[frame->slot]
-                                                                                : 0)
-                                          : 0;
+        unsigned int tab = frame->builtin ? taskbar_tab_ink(frame->slot, compositor_panel_mark(frame)) : 0;
         // A picture drawn at its own size is read straight from its pixels; a scaled one through its map.
         const unsigned int *picture = compositor_scaled(frame) ? 0 : frame->pixels;
 
@@ -865,9 +868,9 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
         struct taskbar_view view = compositor_taskbar_view();
         unsigned int count = 0;
 
-        for (int slot = 0; slot <= (int)band->mark_count; slot++)
+        for (int slot = 0; slot <= (int)band->mark_count + 1; slot++)
         {
-                int which = slot == (int)band->mark_count ? -2 : slot;
+                int which = slot < (int)band->mark_count ? slot : slot == (int)band->mark_count ? -2 : TASKBAR_LAUNCHER;
                 int x, y, width, height;
 
                 if (!taskbar_slot(&view, which, &x, &y, &width, &height))
@@ -878,6 +881,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
                 tabs[count].width = width;
                 tabs[count].height = height;
                 tabs[count].slot = which;
+                tabs[count].launcher_lit = band->launcher_lit;
                 tabs[count].radius = UI_RADIUS * band->scale / 100;
                 tabs[count].line = 0;
                 tabs[count].square = taskbar_square(band->position);
@@ -901,12 +905,12 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 #define COMPOSITOR_TOP_RIGHT 7
 #define COMPOSITOR_BOTTOM_LEFT 8
 #define COMPOSITOR_BOTTOM_RIGHT 9
-// The windows, and a tab for each window and a tray for each band (`taskbar display all` is one on every screen).
+// The windows, and a tab for each window and a tray and a launcher button for each band (`taskbar display all` is one on every screen).
 #define COMPOSITOR_ASSIST_MAX 8
 #define COMPOSITOR_GRID_TILES 7
 #define COMPOSITOR_CELLS 15u // the four quarters of a screen, a bit each (compositor_tile_cells)
 #define COMPOSITOR_OVERLAYS 40 // the snap assist's thumbnails and veils, and the grid's tiles, borders and regions (compositor_overlays)
-#define COMPOSITOR_FRAMES (2 * WINDOWS + 2 + WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS) // the snap preview has a frame of its own
+#define COMPOSITOR_FRAMES (2 * WINDOWS + 2 + 2 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS) // the snap preview has a frame of its own
 
 /*
         The scene: inside the target's damage, each window where nothing
@@ -3251,6 +3255,7 @@ static struct
         positive press_ns; // when the last press on a window's top was
         positive tray_ns;  // when the last press on the tray was (0 after the second of a pair)
         unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)
+        unsigned int launcher_asked; // the times the script was asked for the launcher by its button (compositor_launcher_open)
         int drag_x, drag_y;
         int drag_moved; // the window being moved has moved: only then is where it is let go an arrangement
         // The floating rectangle the window being moved is remembered by, taken at the press: its own if it floated, else the
@@ -4260,6 +4265,20 @@ static b32 compositor_popups_close(int root, int keep);
 static b32 compositor_popup_first(int row);
 static void compositor_popup_leave(int row);
 
+/*
+        The launcher that is up: the window that asked to be put away by a press anywhere but on it and has no close button
+        (WINDOW_DISMISS and WINDOW_NO_CLOSE, which only the launcher asks for both of), unless it has been asked to go.
+        The row, or COMPOSITOR_NONE.
+*/
+static int compositor_launcher_row(void)
+{
+        for (int row = 0; row < WINDOWS; row++)
+                if (compositor.showing[row] && compositor_popup_parent[row] < 0 && !(compositor.state[row] & WINDOW_CLOSING) &&
+                    (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE))
+                        return row;
+        return COMPOSITOR_NONE;
+}
+
 static unsigned int compositor_windows(void)
 {
         unsigned int count = 0;
@@ -4310,6 +4329,7 @@ static struct taskbar_view compositor_taskbar_view(void)
         view.face = &compositor.face;
         view.engine = compositor.engine;
         view.count = compositor.listing;
+        view.launcher_lit = compositor_launcher_row() >= 0;
         view.marks = compositor.marks;
         view.lengths = compositor.lengths;
         for (unsigned int at = 0; at < compositor.listing; at++)
@@ -4340,6 +4360,7 @@ static void compositor_band_frame(struct compositor_frame *frame)
                                            compositor.listing};
         frame->position = view.position;
         frame->lengths = compositor.lengths;
+        frame->launcher_lit = view.launcher_lit;
 }
 
 // What the tabs show changed: the windows, which has the keys, which are put away, a title, the minute, the battery.
@@ -8329,7 +8350,7 @@ static void compositor_bands_where(int (*rects)[4])
 
 static void compositor_taskbar_settings_read(void)
 {
-        char position[16], display[16], tune[512], text[16], tray[SETTING_TRAY_MOST + 8];
+        char position[16], display[16], tune[512], text[16], tray[SETTING_TRAY_MOST + 8], launcher[16];
         int was[WINDOWS_OUTPUTS][4], now[WINDOWS_OUTPUTS][4];
         long edge;
 
@@ -8339,11 +8360,13 @@ static void compositor_taskbar_settings_read(void)
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
         compositor_text(SETTING_TASKBAR_TRAY_PATH, tray, sizeof(tray));
+        compositor_word(SETTING_TASKBAR_LAUNCHER_PATH, launcher, sizeof(launcher));
         compositor_bands_where(was);
         compositor_tabs_changed();
         taskbar_settings_set(position, display, tune);
         taskbar_text_set(edge == 1);
         taskbar_tray_set(tray);
+        taskbar_launcher_set(string_equals((string_address)launcher, (string_address) "on"));
         compositor_band_room();
         compositor_tabs_changed();
         compositor_bands_where(now);
@@ -11513,7 +11536,7 @@ static void compositor_keys_read(void)
 }
 
 // A name said to the script on the FIFO, a line: a chord pressed, or a thing done to the desktop that the script
-// starts a program for (tray_double). A script that does not listen hears nothing.
+// starts a program for (tray_double, launcher_button). A script that does not listen hears nothing.
 static void compositor_script_say(const char *name)
 {
         bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FIRE, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
@@ -11565,6 +11588,34 @@ static void compositor_settings_open(void)
         }
         compositor.settings_asked++;
         compositor_script_say("tray_double");
+}
+
+/*
+        The launcher button pressed with no launcher up: the script is told (launcher_button) and starts the launcher, since
+        everything on the desktop is started by the machine script and by nothing else. Before it says so the table holds the
+        rectangle of the button that was pressed, the edge its band is along and its screen, which the launcher opens beside
+        (window.c's button_x and the rest); the band is the one whose button the point is on.
+*/
+static void compositor_launcher_open(int x, int y)
+{
+        struct windows *table = compositor.table;
+        int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale / 100 : 0;
+
+        for (compositor.band_at = 0; table && compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_band_view();
+                int rect[4];
+
+                if (taskbar_hit_reach(&view, x, y, reach) != TASKBAR_LAUNCHER || !taskbar_anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
+                        continue;
+                table->button_x = rect[0], table->button_y = rect[1];
+                table->button_w = (unsigned int)rect[2], table->button_h = (unsigned int)rect[3];
+                table->button_edge = view.position, table->button_screen = (unsigned int)compositor.band_at;
+                break;
+        }
+        compositor.band_at = 0;
+        compositor.launcher_asked++;
+        compositor_script_say("launcher_button");
 }
 
 // What is held on every keyboard, as the flags a key event carries.
@@ -12285,7 +12336,7 @@ static void compositor_cancel_holds(unsigned int roots)
 
 static void compositor_button(unsigned int code, int down)
 {
-        int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top;
+        int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top, up;
         unsigned int roots;
         positive now;
 
@@ -12325,6 +12376,10 @@ static void compositor_button(unsigned int code, int down)
                 return;
         }
 
+        // The launcher that is up before this press, if there is one: the press below on the launcher's button puts it away
+        // (it is asked to go here, like any press outside it) and asks for no other.
+        up = compositor_launcher_row();
+
         // A window that asked to be put away by a press anywhere but on it (WINDOW_DISMISS) is asked to go by one on
         // the desktop, a tab, another window or the tray alike; the press then goes on as it would have.
         if (compositor.focus >= 0 && (compositor.asks[compositor.focus] & WINDOW_DISMISS) && compositor.showing[compositor.focus] &&
@@ -12333,6 +12388,22 @@ static void compositor_button(unsigned int code, int down)
               compositor.pointer_y >= compositor.y[compositor.focus] &&
               compositor.pointer_y < compositor.y[compositor.focus] + (int)compositor.h[compositor.focus]))
                 compositor_close(compositor.focus);
+
+        // The launcher button takes a left press and no other: with the launcher up the press puts it away, and with none
+        // it asks the script for one beside the button (compositor_launcher_open).
+        if (tab == TASKBAR_LAUNCHER)
+        {
+                if (code != COMPOSITOR_BTN_LEFT)
+                        return;
+                if (up >= 0)
+                {
+                        compositor_close(up);
+                        compositor_tabs_changed();
+                }
+                else
+                        compositor_launcher_open(compositor.pointer_x, compositor.pointer_y);
+                return;
+        }
 
         // The tray takes no press but a pair of left ones, which open the settings (compositor_settings_open).
         if (tab == COMPOSITOR_TRAY && code == COMPOSITOR_BTN_LEFT)

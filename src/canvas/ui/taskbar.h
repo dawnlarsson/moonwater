@@ -22,8 +22,10 @@
 #define TASKBAR_LEFT 2u
 #define TASKBAR_RIGHT 3u
 
-// What a point of the band is over: a tab's number (0 up), -2 the tray, or TASKBAR_HIT_NONE for neither.
+// What a point of the band is over: a tab's number (0 up), -2 the tray, TASKBAR_LAUNCHER for the launcher button (which
+// is a slot of the band's like the tray, its own bit of the redo mask), or TASKBAR_HIT_NONE for none of them.
 #define TASKBAR_HIT_NONE (-3)
+#define TASKBAR_LAUNCHER (-5)
 
 // The kept settings the battery is named in (the battery verb keeps "battery NAME" there), and the name of that file in
 // /root, which the compositor reads again when it is written.
@@ -69,6 +71,7 @@ struct taskbar_view
         font_face *face;                 // the face the tabs are written in
         font_engine *engine;             // and its engine
         unsigned int count;              // the windows with a tab, in the order they are shown
+        unsigned int launcher_lit;       // the launcher is up: its button, when the band has one, is drawn as a tab with the keys is
         const unsigned char *marks;      // each tab's mark: lit, put away
         const unsigned char *lengths;    // each tab's title, in characters
         const char *titles[WINDOWS];     // each tab's title
@@ -100,6 +103,8 @@ static void taskbar_settings_set(const char *position, const char *display, cons
 static int taskbar_display_all(void);
 static void taskbar_text_set(int edge);
 static void taskbar_tray_set(const char *text);
+static void taskbar_launcher_set(int on);
+static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 
 #else
 
@@ -134,6 +139,9 @@ static inline void taskbar_settings_set(const char *position, const char *displa
 static inline int taskbar_display_all(void) { return 0; }
 static inline void taskbar_text_set(int edge) { (void)edge; }
 static inline void taskbar_tray_set(const char *text) { (void)text; }
+static inline void taskbar_launcher_set(int on) { (void)on; }
+static inline int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 
 #endif
 

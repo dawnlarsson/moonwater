@@ -780,6 +780,16 @@ struct windows
         // Anyone's, as lift is: one more puts a window that shows where its placement says now (`window move`).
         unsigned int moved[WINDOWS];
 
+        /*
+                The compositor's, for the launcher: where the panel's launcher button was last pressed, so the launcher it
+                asks for opens beside it. button_x, button_y, button_w and button_h are the rectangle it opens beside (the
+                button along the panel, the panel's whole thickness across it) in the table's space, button_edge the panel's
+                edge of its screen (TASKBAR_BOTTOM 0, TOP 1, LEFT 2, RIGHT 3) and button_screen the screen's number. A width
+                of 0 is no press: the launcher is then in the middle of the primary screen, as its key puts it.
+        */
+        int button_x, button_y;
+        unsigned int button_w, button_h, button_edge, button_screen;
+
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
         int event_a[WINDOWS][WINDOWS_EVENTS], event_b[WINDOWS][WINDOWS_EVENTS];

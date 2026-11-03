@@ -133,11 +133,12 @@ function desktop_terminal {
   fi
 }
 
-# The launcher is drawn in the tabs' face; the terminals it starts are given the faces of the terminal.
+# The launcher is drawn in the tabs' face; the terminals it starts are given the faces of the terminal. -a opens it beside
+# the panel's launcher button, which the compositor said it was pressed at (the key's is in the middle of the screen).
 function desktop_launcher {
   desktop_font
   [ -n "$desktop_face" ] || return
-  desktop_run /launcher -x ${desktop_text:+-f "$desktop_text"} -m "$desktop_face" ${desktop_bold:+-M "$desktop_bold"}
+  desktop_run /launcher -x "$@" ${desktop_text:+-f "$desktop_text"} -m "$desktop_face" ${desktop_bold:+-M "$desktop_bold"}
 }
 
 # The settings, started by the compositor's saying tray_double: the clock and the battery pressed twice. The compositor
@@ -166,6 +167,7 @@ function desktop_keys_answer {
       case $desktop_pressed in
       key_*) declare -F "$desktop_pressed" > /dev/null && "$desktop_pressed" ;;
       tray_double) desktop_asked desktop_settings ;;
+      launcher_button) desktop_asked desktop_launcher -a ;;
       esac
     done < /run/moonwater/keys.fire
   done
