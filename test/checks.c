@@ -154741,6 +154741,7 @@ int main(void) {
             cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_wayland -DCONFIG_MOONWATER_WAYLAND test/checks.c
 */
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154794,6 +154795,10 @@ static struct fake_host_state
         long now;
         long locks, caps, keymap_fd, rate, delay;
         struct wayland_screen screen;
+        // the clipboard the compositor holds: the bytes of each selection, and what the shim asked of it
+        long clip_size[2], pull_refuse, pulls, aborts, pushes, clears, pull_client, pull_which, push_row, push_which;
+        int pull_wfd, pull_rfd;
+        char clip_text[2][64];
 } fake;
 
 static void *fake_alloc(void *context, long bytes)
@@ -155032,10 +155037,72 @@ static long fake_locks(void *context)
         return fake.locks;
 }
 
+static void fake_pull_close(void)
+{
+        if (fake.pull_wfd > 0)
+                close(fake.pull_wfd);
+        if (fake.pull_rfd > 0)
+                close(fake.pull_rfd);
+        fake.pull_wfd = fake.pull_rfd = 0;
+}
+
+static long fake_clip_size(void *context, long which)
+{
+        (void)context;
+        return fake.clip_size[which];
+}
+
+/* A source to read: a pipe whose write end goes to the client, kept here until the shim has sent it. */
+static long fake_clip_pull(void *context, long client, long which)
+{
+        int fds[2];
+
+        (void)context;
+        if (fake.pull_refuse)
+                return -1;
+        fake_pull_close();
+        if (pipe(fds) < 0)
+                return -1;
+        fake.pull_rfd = fds[0];
+        fake.pull_wfd = fds[1];
+        fake.pulls++;
+        fake.pull_client = client;
+        fake.pull_which = which;
+        return fds[1];
+}
+
+static void fake_clip_abort(void *context, long client, long which)
+{
+        (void)context;
+        (void)client;
+        (void)which;
+        fake.aborts++;
+}
+
+/* The text written to the client's descriptor, which is closed here as the compositor closes it. */
+static void fake_clip_push(void *context, long row, long which, long fd)
+{
+        (void)context;
+        fake.pushes++;
+        fake.push_row = row;
+        fake.push_which = which;
+        if (write((int)fd, fake.clip_text[which], strlen(fake.clip_text[which])) < 0)
+                fake.pushes += 1000;
+        fake_close(NULL, fd);
+}
+
+static void fake_clip_clear(void *context, long client, long which)
+{
+        (void)context;
+        (void)client;
+        fake.clears++;
+        fake.clip_size[which] = 0;
+}
+
 static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
-    fake_locks};
+    fake_locks, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push, fake_clip_clear};
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -155057,6 +155124,7 @@ struct wlc
         unsigned long next;
         unsigned char iface[8192];
         unsigned char version[8192];
+        unsigned char siface[64], sversion[64]; /* the objects the server makes: ids from WAYLAND_SERVER_BASE */
         struct wl_event_seen ev[EVENTS];
         long events, taken;
         long fds_seen;
@@ -155095,6 +155163,35 @@ static unsigned long wlc_id(struct wlc *c, long iface, long version)
 
 static int wlc_pump(struct wlc *c);
 
+static int wlc_known(unsigned long id)
+{
+        return id < 8192 || (id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64);
+}
+
+static unsigned char wlc_iface(struct wlc *c, unsigned long id)
+{
+        return id < 8192 ? c->iface[id] : id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64 ? c->siface[id - WAYLAND_SERVER_BASE] : 0;
+}
+
+static unsigned char wlc_version(struct wlc *c, unsigned long id)
+{
+        return id < 8192 ? c->version[id] : id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64 ? c->sversion[id - WAYLAND_SERVER_BASE] : 0;
+}
+
+static void wlc_set(struct wlc *c, unsigned long id, long iface, long version)
+{
+        if (id < 8192)
+        {
+                c->iface[id] = (unsigned char)iface;
+                c->version[id] = (unsigned char)version;
+        }
+        else if (id >= WAYLAND_SERVER_BASE && id - WAYLAND_SERVER_BASE < 64)
+        {
+                c->siface[id - WAYLAND_SERVER_BASE] = (unsigned char)iface;
+                c->sversion[id - WAYLAND_SERVER_BASE] = (unsigned char)version;
+        }
+}
+
 static void wlc_put(unsigned char *at, unsigned long v)
 {
         wayland_put(at, v);
@@ -155118,7 +155215,7 @@ static int wlc_raw(struct wlc *c, unsigned char *bytes, long size, const long *f
 static int wlc_send(struct wlc *c, unsigned long object, long op, ...)
 {
         unsigned char b[WAYLAND_MESSAGE];
-        const struct wl_message *msg = &wl_interfaces[c->iface[object]].request[op];
+        const struct wl_message *msg = &wl_interfaces[wlc_iface(c, object)].request[op];
         long n = 8, fds[8], fd_count = 0;
         va_list ap;
 
@@ -155144,11 +155241,8 @@ static int wlc_send(struct wlc *c, unsigned long object, long op, ...)
 
                         wlc_put(b + n, id);
                         n += 4;
-                        if (k[0] == 'n' && id < 8192)
-                        {
-                                c->iface[id] = k[1];
-                                c->version[id] = c->version[object];
-                        }
+                        if (k[0] == 'n')
+                                wlc_set(c, id, k[1], wlc_version(c, object));
                         break;
                 }
                 case 's':
@@ -155216,19 +155310,19 @@ static int wlc_pump(struct wlc *c)
                 header = wayland_get(bytes + at + 4);
                 size = (long)(header >> 16);
                 opcode = (long)(header & 0xffff);
-                if (size < 8 || size > length - at || (size & 3) || object >= 8192 || !c->iface[object])
+                if (size < 8 || size > length - at || (size & 3) || !wlc_known(object) || !wlc_iface(c, object))
                 {
                         c->malformed++;
                         if (getenv("WLDEBUG"))
-                                fprintf(stderr, "malformed: object %lu size %ld iface %d\n", object, size, object < 8192 ? c->iface[object] : -1);
+                                fprintf(stderr, "malformed: object %lu size %ld iface %d\n", object, size, wlc_known(object) ? wlc_iface(c, object) : -1);
                         break;
                 }
-                info = &wl_interfaces[c->iface[object]];
-                if (opcode >= info->events || info->event[opcode].since > c->version[object])
+                info = &wl_interfaces[wlc_iface(c, object)];
+                if (opcode >= info->events || info->event[opcode].since > wlc_version(c, object))
                 {
                         c->malformed++;
                         if (getenv("WLDEBUG"))
-                                fprintf(stderr, "malformed: %s opcode %ld (version %d)\n", info->name, opcode, c->version[object]);
+                                fprintf(stderr, "malformed: %s opcode %ld (version %d)\n", info->name, opcode, wlc_version(c, object));
                         at += size;
                         continue;
                 }
@@ -155237,7 +155331,7 @@ static int wlc_pump(struct wlc *c)
                 memset(e, 0, sizeof *e);
                 e->object = object;
                 e->opcode = opcode;
-                e->iface = c->iface[object];
+                e->iface = wlc_iface(c, object);
                 for (const unsigned char *k = msg->args; k[0]; k += 2)
                 {
                         unsigned long word, count, padded;
@@ -155269,10 +155363,7 @@ static int wlc_pump(struct wlc *c)
                         else if (k[0] == 'n')
                         {
                                 /* an event that makes an object: the id is the server's */
-                                if (word >= WAYLAND_SERVER_BASE || word < 8192)
-                                {
-                                        c->iface[word < 8192 ? word : 0] = k[1];
-                                }
+                                wlc_set(c, word, k[1], wlc_version(c, object));
                         }
                         if (e->n < 8)
                                 e->u[e->n++] = word;
@@ -155283,20 +155374,26 @@ static int wlc_pump(struct wlc *c)
                         if (getenv("WLDEBUG"))
                                 fprintf(stderr, "malformed: %s opcode %ld read %ld of %ld\n", info->name, opcode, n, size);
                 }
-                if (c->iface[object] == WLI_wl_display && opcode == WLE_wl_display_error)
+                if (wlc_iface(c, object) == WLI_wl_display && opcode == WLE_wl_display_error)
                 {
                         c->errors++;
                         c->error_object = e->u[0];
                         c->error_code = e->u[1];
                         snprintf(c->error_text, sizeof c->error_text, "%s", e->text[2]);
                 }
-                if (c->iface[object] == WLI_wl_display && opcode == WLE_wl_display_delete_id && e->u[0] < 8192)
+                if (wlc_iface(c, object) == WLI_wl_display && opcode == WLE_wl_display_delete_id && e->u[0] < 8192)
                         c->iface[e->u[0]] = 0;
                 at += size;
         }
         c->fds_seen += fd_count;
+        // a descriptor of a copy's source has been sent: the host's end of it is let go
+        for (long fd_at = 0; fd_at < fd_count; fd_at++)
+                if (fake.pull_wfd > 0 && fds[fd_at] == fake.pull_wfd)
+                {
+                        close(fake.pull_wfd);
+                        fake.pull_wfd = 0;
+                }
         wayland_sent(c->slot, length);
-        (void)fds;
         return (int)length;
 }
 
@@ -155357,7 +155454,7 @@ static void wl_file_put(long fd, long offset, const void *bytes, long count)
 struct session
 {
         struct wlc *c;
-        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback;
+        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback, data, primary;
         long fd;
 };
 
@@ -155387,6 +155484,8 @@ static void session_open(struct session *s)
         s->seat = wl_global(s->c, s->registry, WLI_wl_seat, 9);
         s->output = wl_global(s->c, s->registry, WLI_wl_output, 4);
         wl_global(s->c, s->registry, WLI_wl_subcompositor, 1);
+        s->data = wl_global(s->c, s->registry, WLI_wl_data_device_manager, 3);
+        s->primary = wl_global(s->c, s->registry, WLI_zwp_primary_selection_device_manager_v1, 1);
 }
 
 /* A toplevel, configured and acknowledged, with a buffer of 32 by 24 of one colour shown. */
@@ -157495,6 +157594,510 @@ static void test_tree_fuzz(long rounds)
         wayland_stop();
 }
 
+/* ---- the clipboard ---- */
+
+struct clipc
+{
+        struct session s;
+        unsigned long keyboard, device, primary_device;
+        long row;
+};
+
+/* A client with a window, a keyboard and both kinds of device. */
+static void clip_open(struct clipc *k)
+{
+        struct wlc *c;
+
+        session_open(&k->s);
+        c = k->s.c;
+        session_window(&k->s, 0xff404040);
+        k->row = -1;
+        for (long row = 0; row < WAYLAND_ROWS; row++)
+                if (fake.row[row].used && wayland_row_owner(row) == c->slot)
+                        k->row = row;
+        k->keyboard = wlc_id(c, WLI_wl_keyboard, 9);
+        wlc_send(c, k->s.seat, WLQ_wl_seat_get_keyboard, k->keyboard);
+        k->device = wlc_id(c, WLI_wl_data_device, 3);
+        wlc_send(c, k->s.data, WLQ_wl_data_device_manager_get_data_device, k->device, k->s.seat);
+        k->primary_device = wlc_id(c, WLI_zwp_primary_selection_device_v1, 1);
+        wlc_send(c, k->s.primary, WLQ_zwp_primary_selection_device_manager_v1_get_device, k->primary_device, k->s.seat);
+}
+
+/* The serial of a key the client has just been sent (the keys are its). */
+static unsigned long clip_serial(struct clipc *k)
+{
+        struct wl_event_seen *e;
+
+        wlc_forget(k->s.c);
+        wayland_key(k->row, 30, 1);
+        wayland_key(k->row, 30, 0);
+        wlc_pump(k->s.c);
+        e = wlc_take(k->s.c, WLI_wl_keyboard, WLE_wl_keyboard_key);
+        return e ? e->u[0] : 0;
+}
+
+static unsigned long clip_source(struct clipc *k, int primary, const char *mime)
+{
+        struct wlc *c = k->s.c;
+        unsigned long source = wlc_id(c, primary ? WLI_zwp_primary_selection_source_v1 : WLI_wl_data_source, primary ? 1 : 3);
+
+        if (primary)
+                wlc_send(c, k->s.primary, WLQ_zwp_primary_selection_device_manager_v1_create_source, source);
+        else
+                wlc_send(c, k->s.data, WLQ_wl_data_device_manager_create_data_source, source);
+        if (mime)
+                wlc_send(c, source, primary ? WLQ_zwp_primary_selection_source_v1_offer : WLQ_wl_data_source_offer, mime);
+        return source;
+}
+
+static void clip_set(struct clipc *k, int primary, unsigned long source, unsigned long serial)
+{
+        wlc_send(k->s.c, primary ? k->primary_device : k->device,
+                 primary ? WLQ_zwp_primary_selection_device_v1_set_selection : WLQ_wl_data_device_set_selection, source, (long)serial);
+}
+
+/* The host has read the source's text to its end: it is the selection, and then the source is told so. */
+static void clip_finish(struct clipc *k, int primary, const char *text)
+{
+        snprintf(fake.clip_text[primary], sizeof fake.clip_text[primary], "%s", text);
+        fake.clip_size[primary] = (long)strlen(text);
+        wayland_selection_changed(primary);
+        wayland_clip_pulled(k->s.c->slot, primary, 1);
+        wlc_pump(k->s.c);
+}
+
+/* The text of a selection changed by someone else: the compositor's own copy. */
+static void clip_other(int primary, const char *text)
+{
+        snprintf(fake.clip_text[primary], sizeof fake.clip_text[primary], "%s", text);
+        fake.clip_size[primary] = (long)strlen(text);
+        wayland_selection_changed(primary);
+}
+
+static long wl_pipe(int *reader)
+{
+        int fds[2];
+
+        if (pipe(fds) < 0)
+                abort();
+        fcntl(fds[0], F_SETFL, O_NONBLOCK);
+        *reader = fds[0];
+        fake.fds_open++;
+        return fds[1];
+}
+
+/* A paste asked of an offer: the bytes the compositor wrote to the descriptor (0 for none, an end of file), -1 if it is still open. */
+static long clip_paste(struct clipc *k, int primary, unsigned long offer, const char *mime, char *text, long room)
+{
+        int reader;
+        long write_end = wl_pipe(&reader), got;
+
+        wlc_send(k->s.c, offer, primary ? WLQ_zwp_primary_selection_offer_v1_receive : WLQ_wl_data_offer_receive, mime, write_end);
+        got = (long)read(reader, text, (size_t)room - 1);
+        close(reader);
+        if (got >= 0)
+                text[got] = 0;
+        return got;
+}
+
+static unsigned long clip_offer_of(struct wlc *c, int primary, struct wl_event_seen **selection)
+{
+        struct wl_event_seen *e = wlc_take(c, primary ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device,
+                                           primary ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer);
+        unsigned long offer = e ? e->u[0] : 0;
+
+        *selection = wlc_take(c, primary ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device,
+                              primary ? WLE_zwp_primary_selection_device_v1_selection : WLE_wl_data_device_selection);
+        return offer;
+}
+
+static long clip_cancelled(struct wlc *c, int primary)
+{
+        return wlc_count(c, primary ? WLI_zwp_primary_selection_source_v1 : WLI_wl_data_source,
+                         primary ? WLE_zwp_primary_selection_source_v1_cancelled : WLE_wl_data_source_cancelled);
+}
+
+static void test_clipboard(void)
+{
+        struct clipc a, b, k;
+        struct wlc *ca, *cb;
+        struct wl_event_seen *e, *chosen;
+        unsigned long source, serial, offer, offer_b, second;
+        char text[64];
+        long pulls;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        clip_open(&a);
+        clip_open(&b);
+        ca = a.s.c;
+        cb = b.s.c;
+        WLCHECK(a.s.data && a.s.primary && a.row >= 0 && b.row >= 0 && a.row != b.row,
+                "the data device manager and the primary selection manager are offered, to windows of their own");
+
+        /* getting the keys is being told the selection, and there is none yet */
+        wlc_forget(ca);
+        wayland_keyboard_to(a.row);
+        wlc_pump(ca);
+        e = wlc_take(ca, WLI_wl_data_device, WLE_wl_data_device_selection);
+        WLCHECK(e && e->u[0] == 0, "a client that gets the keys is told there is no selection when there is none");
+        e = wlc_take(ca, WLI_zwp_primary_selection_device_v1, WLE_zwp_primary_selection_device_v1_selection);
+        WLCHECK(e && e->u[0] == 0, "and no primary selection");
+
+        /* a copy: the source is asked for its text, in the UTF-8 type, with a descriptor, and the text is the selection when it is read */
+        serial = clip_serial(&a);
+        WLCHECK(serial != 0, "a key has a serial");
+        source = clip_source(&a, 0, "text/plain;charset=utf-8");
+        wlc_forget(ca);
+        clip_set(&a, 0, source, serial);
+        e = wlc_take(ca, WLI_wl_data_source, WLE_wl_data_source_send);
+        WLCHECK(fake.pulls == 1 && fake.pull_which == 0 && fake.pull_client == ca->slot && e && e->fd_count == 1 &&
+                    !strcmp(e->text[0], "text/plain;charset=utf-8"),
+                "a source set with a serial of the client's is asked for its text, in the UTF-8 type, with a descriptor (%ld pulls)", fake.pulls);
+        WLCHECK(ca->errors == 0 && clip_cancelled(ca, 0) == 0, "and it is not cancelled while it is read");
+        wlc_forget(ca);
+        clip_finish(&a, 0, "hello");
+        offer = clip_offer_of(ca, 0, &chosen);
+        WLCHECK(offer >= WAYLAND_SERVER_BASE && chosen && chosen->u[0] == offer,
+                "the text the compositor holds is offered to the client that has the keys, as an object of the server's, and selected");
+        WLCHECK(wlc_count(ca, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 3, "with the three types of text");
+        WLCHECK(clip_cancelled(ca, 0) == 0, "the source that made it is not told it is not wanted");
+        WLCHECK(clip_paste(&a, 0, offer, "text/plain;charset=utf-8", text, sizeof text) == 5 && !strcmp(text, "hello") &&
+                    fake.pushes == 1 && fake.push_row == a.row && fake.push_which == 0,
+                "a paste on the offer is the text, written to the descriptor for the window with the keys");
+        WLCHECK(clip_paste(&a, 0, offer, "UTF8_STRING", text, sizeof text) == 5 && fake.pushes == 2, "in the other text type too");
+        pulls = fake.pushes;
+        WLCHECK(clip_paste(&a, 0, offer, "image/png", text, sizeof text) == 0 && fake.pushes == pulls,
+                "a type that is not text is nothing, and the descriptor is closed");
+        WLCHECK(ca->errors == 0, "no error of these (%s)", ca->error_text);
+
+        /* B gets the keys: it is offered the text; A, which no longer has them, is given nothing for its old offer */
+        wlc_forget(cb);
+        wayland_keyboard_to(b.row);
+        wlc_pump(cb);
+        offer_b = clip_offer_of(cb, 0, &chosen);
+        WLCHECK(offer_b >= WAYLAND_SERVER_BASE && chosen && chosen->u[0] == offer_b, "a client that gets the keys is offered the selection");
+        pulls = fake.pushes;
+        WLCHECK(clip_paste(&a, 0, offer, "text/plain;charset=utf-8", text, sizeof text) == 0 && fake.pushes == pulls,
+                "a client that does not have the keys is given nothing");
+        WLCHECK(clip_paste(&b, 0, offer_b, "text/plain;charset=utf-8", text, sizeof text) == 5 && fake.push_row == b.row,
+                "and the one that has them is");
+
+        /* the text changes under it: the old offer is no longer the selection, and the source that was it is cancelled */
+        wlc_forget(cb);
+        wlc_forget(ca);
+        clip_other(0, "next");
+        wlc_pump(ca);
+        wlc_pump(cb);
+        WLCHECK(clip_cancelled(ca, 0) == 1, "when the text is another's the source that made it is told it is not wanted");
+        offer = clip_offer_of(cb, 0, &chosen);
+        pulls = fake.pushes;
+        WLCHECK(clip_paste(&b, 0, offer_b, "text/plain;charset=utf-8", text, sizeof text) == 0 && fake.pushes == pulls,
+                "an offer of the text before it changed gets nothing");
+        WLCHECK(clip_paste(&b, 0, offer, "text/plain;charset=utf-8", text, sizeof text) == 4 && !strcmp(text, "next"),
+                "and the new offer gets the new text");
+        wlc_send(cb, offer_b, WLQ_wl_data_offer_destroy);
+        WLCHECK(cb->errors == 0, "an offer is destroyed");
+
+        /* what is refused is cancelled and is nothing more */
+        serial = clip_serial(&b);
+        pulls = fake.pulls;
+        source = clip_source(&b, 0, "text/plain;charset=utf-8");
+        wlc_forget(cb);
+        clip_set(&b, 0, source, serial + 1000);
+        wlc_pump(cb);
+        WLCHECK(clip_cancelled(cb, 0) == 1 && fake.pulls == pulls, "a serial the client was never sent cancels the source");
+        source = clip_source(&b, 0, "image/png");
+        wlc_forget(cb);
+        clip_set(&b, 0, source, serial);
+        wlc_pump(cb);
+        WLCHECK(clip_cancelled(cb, 0) == 1 && fake.pulls == pulls, "a source with no text is cancelled");
+        source = clip_source(&b, 0, "text/plain");
+        fake.pull_refuse = 1;
+        wlc_forget(cb);
+        clip_set(&b, 0, source, serial);
+        wlc_pump(cb);
+        WLCHECK(clip_cancelled(cb, 0) == 1 && fake.pulls == pulls, "a copy the host will not take (no gesture, the service off) cancels the source");
+        fake.pull_refuse = 0;
+        WLCHECK(cb->errors == 0, "none of these is an error (%s)", cb->error_text);
+
+        /* a second copy before the first is read ends the first */
+        {
+                unsigned long first = clip_source(&b, 0, "text/plain;charset=utf-8");
+
+                second = clip_source(&b, 0, "UTF8_STRING");
+                serial = clip_serial(&b);
+                wlc_forget(cb);
+                pulls = fake.aborts;
+                clip_set(&b, 0, first, serial);
+                serial = clip_serial(&b);
+                clip_set(&b, 0, second, serial);
+                wlc_pump(cb);
+                WLCHECK(clip_cancelled(cb, 0) == 1 && fake.aborts == pulls + 1, "a copy set while another is being read ends the other");
+                e = wlc_take(cb, WLI_wl_data_source, WLE_wl_data_source_send);
+                WLCHECK(e && e->fd_count == 1 && !strcmp(e->text[0], "UTF8_STRING"), "and the second is asked for its own type, with a descriptor");
+                /* the host ended the second: it is the selection */
+                wlc_forget(cb);
+                clip_finish(&b, 0, "second");
+                WLCHECK(clip_cancelled(cb, 0) == 0, "the source that is read last is the selection and is not cancelled");
+                clip_other(0, "third");
+                wlc_pump(cb);
+                WLCHECK(clip_cancelled(cb, 0) == 1, "and is cancelled when the text is another's");
+                /* a source destroyed while it is read ends the read; the host's end afterwards is nothing */
+                first = clip_source(&b, 0, "text/plain");
+                serial = clip_serial(&b);
+                clip_set(&b, 0, first, serial);
+                pulls = fake.aborts;
+                wlc_send(cb, first, WLQ_wl_data_source_destroy);
+                WLCHECK(fake.aborts == pulls + 1, "a source destroyed while it is read ends the read");
+                wayland_clip_pulled(cb->slot, 0, 1);
+                WLCHECK(cb->errors == 0, "and the host saying it ended afterwards is nothing");
+        }
+
+        /* clearing: only the client whose source it is may */
+        {
+                unsigned long mine = clip_source(&b, 0, "text/plain");
+
+                serial = clip_serial(&b);
+                clip_set(&b, 0, mine, serial);
+                clip_finish(&b, 0, "mine");
+                pulls = fake.clears;
+                clip_set(&a, 0, 0UL, 0UL);
+                WLCHECK(fake.clears == pulls, "a client that is not the selection's owner cannot clear it");
+                clip_set(&b, 0, 0UL, 0UL);
+                WLCHECK(fake.clears == pulls + 1, "its owner can");
+        }
+
+        /* a drag is not done: its source is told it is not going */
+        {
+                unsigned long drag = clip_source(&b, 0, "text/plain");
+
+                serial = clip_serial(&b);
+                wlc_forget(cb);
+                wlc_send(cb, b.device, WLQ_wl_data_device_start_drag, drag, b.s.surface, 0UL, (long)serial);
+                wlc_pump(cb);
+                WLCHECK(clip_cancelled(cb, 0) == 1 && cb->errors == 0, "a drag's source is cancelled");
+        }
+
+        /* the primary selection is a selection of its own, by the same rules */
+        serial = clip_serial(&b);
+        source = clip_source(&b, 1, "text/plain;charset=utf-8");
+        wlc_forget(cb);
+        pulls = fake.pulls;
+        clip_set(&b, 1, source, serial);
+        e = wlc_take(cb, WLI_zwp_primary_selection_source_v1, WLE_zwp_primary_selection_source_v1_send);
+        WLCHECK(fake.pulls == pulls + 1 && fake.pull_which == 1 && e && e->fd_count == 1, "a primary selection is read as a copy is, for its own selection");
+        wlc_forget(cb);
+        clip_finish(&b, 1, "prim");
+        offer = clip_offer_of(cb, 1, &chosen);
+        WLCHECK(offer >= WAYLAND_SERVER_BASE && chosen && chosen->u[0] == offer, "and is offered as primary selection offers");
+        WLCHECK(clip_paste(&b, 1, offer, "text/plain;charset=utf-8", text, sizeof text) == 4 && !strcmp(text, "prim") && fake.push_which == 1,
+                "and pasted as itself");
+        WLCHECK(cb->errors == 0 && ca->errors == 0, "no error (%s)", cb->error_text);
+
+        wlc_end(ca);
+        wlc_end(cb);
+        leak_check("clipboard");
+        WLCHECK(fds_balanced(), "every descriptor of the clipboard rows was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+
+        /* what a client may not do */
+        wl_reset();
+        wayland_start(&fake_host);
+        clip_open(&k);
+        wlc_send(k.s.c, k.device, WLQ_wl_data_device_set_selection, clip_source(&k, 0, "text/plain"), 0L);
+        WLCHECK(k.s.c->errors == 0, "a copy with no gesture is cancelled and no error");
+        {
+                unsigned long used;
+
+                wayland_keyboard_to(k.row);
+                serial = clip_serial(&k);
+                used = clip_source(&k, 0, "text/plain");
+                clip_set(&k, 0, used, serial);
+                clip_set(&k, 0, used, serial);
+                WLCHECK(refused_with(k.s.c, WLN_wl_data_device_error_used_source), "a source is used once");
+        }
+        wlc_end(k.s.c);
+        clip_open(&k);
+        for (int at = 0; at < WAYLAND_SOURCES + 1; at++)
+                clip_source(&k, at & 1, "text/plain");
+        WLCHECK(k.s.c->errors == 1 && k.s.c->error_code == WAYLAND_NO_MEMORY, "a client holds at most eight sources (%s)", k.s.c->error_text);
+        wlc_end(k.s.c);
+        clip_open(&k);
+        wlc_send(k.s.c, clip_source(&k, 0, "text/plain"), WLQ_wl_data_source_set_actions, 8L);
+        WLCHECK(refused_with(k.s.c, WLN_wl_data_source_error_invalid_action_mask), "actions beyond the three are refused");
+        wlc_end(k.s.c);
+        clip_open(&k);
+        wayland_keyboard_to(k.row);
+        clip_other(0, "offered");
+        wlc_forget(k.s.c);
+        for (int at = 0; at < WAYLAND_OFFERS + 6; at++)
+                clip_other(0, "offered");
+        wlc_pump(k.s.c);
+        WLCHECK(wlc_count(k.s.c, WLI_wl_data_device, WLE_wl_data_device_data_offer) <= WAYLAND_OFFERS && k.s.c->errors == 0,
+                "a client that keeps its offers is given at most sixteen (%ld)", wlc_count(k.s.c, WLI_wl_data_device, WLE_wl_data_device_data_offer));
+        {
+                long last = 0;
+
+                for (long at = 0; at < k.s.c->events; at++)
+                        if (k.s.c->ev[at].iface == WLI_wl_data_device && k.s.c->ev[at].opcode == WLE_wl_data_device_selection)
+                                last = (long)k.s.c->ev[at].u[0];
+                WLCHECK(last == 0, "and then told there is no selection");
+        }
+        wlc_end(k.s.c);
+        /* a client that goes while its copy is being read: the host is told, and everything comes back */
+        clip_open(&k);
+        wayland_keyboard_to(k.row);
+        serial = clip_serial(&k);
+        source = clip_source(&k, 0, "text/plain");
+        clip_set(&k, 0, source, serial);
+        pulls = fake.aborts;
+        wlc_end(k.s.c);
+        WLCHECK(fake.aborts == pulls + 1, "a client that goes in the middle of a copy ends the read");
+        wayland_clip_pulled(0, 0, 1);
+        fake_pull_close();
+        leak_check("clipboard rules");
+        WLCHECK(fds_balanced(), "every descriptor of the rules was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
+/*
+        Copies, pastes, focus changes and the compositor's own copies in random order between two clients, with offers kept
+        and let go and sources destroyed where they stand: nothing may fail, no event be malformed, and everything (descriptors
+        too) come back.
+*/
+static void test_clip_fuzz(long rounds)
+{
+        struct clipc k[2];
+        unsigned long source[2][4], offer[2][6];
+        int open = 0;
+        long malformed = 0, copies = 0, pastes = 0;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        for (long round = 0; round < rounds; round++)
+        {
+                long who = (long)(wl_random() & 1), slot = (long)(wl_random() % 4), primary = (long)(wl_random() & 1);
+                struct clipc *c;
+                struct wlc *wc;
+
+                if (round % 300 == 0 || !open || wayland_dead(k[0].s.c->slot) || wayland_dead(k[1].s.c->slot))
+                {
+                        if (open)
+                        {
+                                malformed += k[0].s.c->malformed + k[1].s.c->malformed;
+                                wlc_end(k[0].s.c);
+                                wlc_end(k[1].s.c);
+                        }
+                        clip_open(&k[0]);
+                        clip_open(&k[1]);
+                        memset(source, 0, sizeof source);
+                        memset(offer, 0, sizeof offer);
+                        open = 1;
+                }
+                c = &k[who];
+                wc = c->s.c;
+                switch (wl_random() % 12)
+                {
+                case 0:
+                        wayland_keyboard_to(c->row);
+                        break;
+                case 1:
+                case 2:
+                        if (!source[who][slot])
+                                source[who][slot] = clip_source(c, (int)primary, wl_random() % 8 ? "text/plain;charset=utf-8" : "image/png");
+                        break;
+                case 3:
+                case 4:
+                        if (source[who][slot] && wl_random() % 4)
+                        {
+                                unsigned long serial = wayland.keyboard_row == c->row ? clip_serial(c) : (unsigned long)wl_random();
+
+                                clip_set(c, (int)primary, source[who][slot], serial);
+                                copies++;
+                        }
+                        break;
+                case 5:
+                        wlc_end(wc);
+                        clip_open(c);
+                        source[who][0] = source[who][1] = source[who][2] = source[who][3] = 0;
+                        memset(offer[who], 0, sizeof offer[who]);
+                        break;
+                case 6:
+                        if (wl_random() & 1)
+                                clip_finish(c, (int)primary, "fuzz text");
+                        else
+                                clip_other((int)primary, wl_random() & 1 ? "other" : "");
+                        if ((wl_random() & 3) == 0)
+                                fake.clip_size[primary] = 0;
+                        break;
+                case 7:
+                        if (source[who][slot])
+                        {
+                                wlc_send(wc, source[who][slot], primary ? WLQ_zwp_primary_selection_source_v1_destroy : WLQ_wl_data_source_destroy);
+                                source[who][slot] = 0;
+                        }
+                        break;
+                case 8:
+                {
+                        /* the newest offer of a kind, pasted or let go */
+                        long found = -1;
+                        unsigned long id = 0;
+
+                        for (long at = wc->events - 1; at >= 0 && found < 0; at--)
+                                if (wc->ev[at].iface == (primary ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device) &&
+                                    wc->ev[at].opcode == (primary ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer))
+                                {
+                                        found = at;
+                                        id = wc->ev[at].u[0];
+                                }
+                        if (id && wl_random() % 3)
+                        {
+                                char text[64];
+
+                                clip_paste(c, (int)primary, id, wl_random() % 4 ? "UTF8_STRING" : "x/y", text, sizeof text);
+                                pastes++;
+                        }
+                        else if (id)
+                        {
+                                wlc_send(wc, id, primary ? WLQ_zwp_primary_selection_offer_v1_destroy : WLQ_wl_data_offer_destroy);
+                                wc->ev[found].u[0] = 0;
+                        }
+                        break;
+                }
+                case 9:
+                        if (wl_random() & 1)
+                                clip_set(c, (int)primary, 0UL, 0UL);
+                        else if (source[who][slot])
+                                wayland_clip_pulled(wc->slot, primary, (long)(wl_random() & 1));
+                        break;
+                case 10:
+                        fake.pull_refuse = (long)(wl_random() % 4 == 0);
+                        break;
+                default:
+                        wlc_forget(wc);
+                        break;
+                }
+                if (round % 5 == 0)
+                {
+                        wlc_pump(k[0].s.c);
+                        wlc_pump(k[1].s.c);
+                }
+        }
+        if (open)
+        {
+                malformed += k[0].s.c->malformed + k[1].s.c->malformed;
+                wlc_end(k[0].s.c);
+                wlc_end(k[1].s.c);
+        }
+        fake_pull_close();
+        WLCHECK(malformed == 0, "every event of the clipboard fuzz was well-formed (%ld malformed)", malformed);
+        WLCHECK(copies > 0 && pastes > 0, "the clipboard fuzz copied and pasted (%ld, %ld)", copies, pastes);
+        leak_check("clipboard fuzz");
+        WLCHECK(fds_balanced(), "every descriptor of the clipboard fuzz was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+        printf("CHECK_wayland clipboard fuzz: %ld rounds, %ld copies, %ld pastes\n", rounds, copies, pastes);
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -157513,6 +158116,8 @@ int main(int argc, char **argv)
         test_seat();
         test_subsurfaces();
         test_tree_fuzz(rounds);
+        test_clipboard();
+        test_clip_fuzz(rounds);
         test_fuzz(rounds);
         test_raw(rounds);
         printf("CHECK_wayland: %u checks, %u failures\n", wl_checks, wl_failures);

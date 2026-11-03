@@ -85,6 +85,12 @@
 #define WAYLAND_GLOBALS_MAX 32
 #define WAYLAND_SEATS 8         // pointers, and keyboards, one client holds
 #define WAYLAND_KEYMAP_MAX (1L << 20)
+#define WAYLAND_SOURCES 8       // data sources (and primary selection sources) one client holds
+#define WAYLAND_OFFERS 16       // offers made to one client and not yet destroyed by it
+#define WAYLAND_DEVICES 8       // data devices, of each kind, one client holds
+#define WAYLAND_INPUT_SERIALS 8 // serials of input events a client may name to set a selection
+#define WAYLAND_CLIP_CLIPBOARD 0
+#define WAYLAND_CLIP_PRIMARY 1
 
 /*
         What a request answers: zero is done, negative is a client that is dead (the error is queued).
@@ -187,6 +193,16 @@ struct wayland_host
         void (*repeat)(void *context, long *rate, long *delay);
         long (*seat)(void *context);
         long (*locks)(void *context);
+        // The clipboard, which the compositor holds as text (which is WAYLAND_CLIP_*). clip_size is the bytes of the selection, 0
+        // for none (and while the service is off). clip_pull is a descriptor for a client's source to write its text to, which the
+        // host reads on its own, makes the selection of and says so (wayland_selection_changed, then wayland_clip_pulled), or -1
+        // for a copy it will not take; clip_abort ends a pull. clip_push writes the selection to a descriptor a client gave for the
+        // window row, and takes the descriptor whatever comes of it. clip_clear empties the selection when the client holds it.
+        long (*clip_size)(void *context, long which);
+        long (*clip_pull)(void *context, long client, long which);
+        void (*clip_abort)(void *context, long client, long which);
+        void (*clip_push)(void *context, long row, long which, long fd);
+        void (*clip_clear)(void *context, long client, long which);
 };
 
 /*
@@ -300,6 +316,25 @@ struct wayland_positioner
         long reactive;
 };
 
+/*
+        A data source, or a primary selection source, a client made: the types it offers (text only is taken: bit 0 the UTF-8
+        type, 1 UTF8_STRING, 2 plain text), which selection it is for, and where it is: 0 made, 1 asked for and being read by the
+        host, 2 the selection, 3 let go (cancelled, or used up).
+*/
+struct wayland_source
+{
+        unsigned int id;
+        unsigned char live, which, mimes, state;
+};
+
+// An offer made to a client of the selection as it was when it was made.
+struct wayland_offer
+{
+        unsigned int id;
+        unsigned char live, which;
+        unsigned long serial;
+};
+
 struct wayland_client
 {
         long live, dead, slot, pid, uid;
@@ -315,6 +350,13 @@ struct wayland_client
         unsigned int pointer_id[WAYLAND_SEATS], keyboard_id[WAYLAND_SEATS];
         unsigned char pointers, keyboards;
         unsigned int press_serial;  // the last button press this client was sent, which a move or a resize must name
+        unsigned int device_id[2][WAYLAND_DEVICES]; // data devices (0) and primary selection devices (1)
+        unsigned char devices[2];
+        unsigned int input_serial[WAYLAND_INPUT_SERIALS]; // the serials of the last input this client was sent
+        unsigned char input_next, server_hint;
+        unsigned char pending[2];   // the source being read for each selection, as its index and one, or 0
+        struct wayland_source sources[WAYLAND_SOURCES];
+        struct wayland_offer offers[WAYLAND_OFFERS];
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
         unsigned short index[WAYLAND_IDS];
         unsigned short server_index[WAYLAND_SERVER_IDS];
@@ -340,6 +382,10 @@ static struct
         long pointer_row, pointer_surface, keyboard_row, pointer_x, pointer_y;
         unsigned long mods[4];
         unsigned char keys[16];
+        // Which client's source is each selection (its slot and one, 0 for none: the text outlives its source), and a count of
+        // how many times it changed, so an offer made of an older one is known.
+        long selection_owner[2], selection_source[2];
+        unsigned long selection_serial[2];
 } wayland;
 
 /* ---- the wire ---- */
@@ -547,6 +593,23 @@ static inline unsigned long wayland_serial(struct wayland_client *c)
         return ++c->serial;
 }
 
+// The serial of an input event sent to a client, kept among the last few: a selection is set by naming one.
+static unsigned long wayland_input_serial(struct wayland_client *c)
+{
+        unsigned long serial = ++c->serial;
+
+        c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
+        return serial;
+}
+
+static int wayland_input_serial_ok(const struct wayland_client *c, unsigned long serial)
+{
+        for (long at = 0; serial && at < WAYLAND_INPUT_SERIALS; at++)
+                if (c->input_serial[at] == (unsigned int)serial)
+                        return 1;
+        return 0;
+}
+
 /* ---- text, damage and geometry a client gave ---- */
 
 /*
@@ -655,6 +718,8 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_xdg_wm_base, 6},
     {WLI_zxdg_output_manager_v1, 3},
     {WLI_zxdg_decoration_manager_v1, 1},
+    {WLI_wl_data_device_manager, 3},
+    {WLI_zwp_primary_selection_device_manager_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -2839,7 +2904,7 @@ WAYLAND_API void wayland_pointer_to(long row, long x, long y)
         wayland.pointer_surface = is ? wayland_surface_index(now, is) : -1;
         if (is)
         {
-                unsigned long serial = wayland_serial(now);
+                unsigned long serial = wayland_input_serial(now);
                 long slots[WAYLAND_SEATS], count = wayland_seats(now, WLI_wl_pointer, slots);
 
                 for (long at = 0; at < count; at++)
@@ -2885,7 +2950,7 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
         if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || code < 0 || code > 0x2ff)
                 return;
         time = wayland.host->now(wayland.host->context);
-        serial = wayland_serial(c);
+        serial = wayland_input_serial(c);
         if (pressed)
                 c->press_serial = (unsigned int)serial;
         count = wayland_seats(c, WLI_wl_pointer, slots);
@@ -3047,6 +3112,8 @@ static void wayland_keyboard_enter_one(struct wayland_client *c, long slot, stru
         wayland_modifiers_to(c, slot);
 }
 
+static void wayland_selections_to(struct wayland_client *c);
+
 /* The keys go to row (or to none, -1): the client it leaves is sent its leave, the one it enters its enter with the keys held. */
 WAYLAND_API void wayland_keyboard_to(long row)
 {
@@ -3074,7 +3141,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
         wayland.keyboard_row = is ? row : -1;
         if (is)
         {
-                unsigned long serial = wayland_serial(now);
+                unsigned long serial = wayland_input_serial(now);
                 long slots[WAYLAND_SEATS], count = wayland_seats(now, WLI_wl_keyboard, slots);
 
                 // A window is entered with no key held and the locks the compositor says: whatever was held went with the window
@@ -3085,6 +3152,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
                 wayland.mods[2] = (unsigned long)wayland.host->locks(wayland.host->context);
                 for (long at = 0; at < count; at++)
                         wayland_keyboard_enter_one(now, slots[at], is, serial);
+                wayland_selections_to(now);
         }
 }
 
@@ -3111,7 +3179,7 @@ WAYLAND_API void wayland_key(long row, long code, long pressed)
         if (row != wayland.keyboard_row || !(s = wayland_row_surface(row, &c)))
                 return;
         time = wayland.host->now(wayland.host->context);
-        serial = wayland_serial(c);
+        serial = wayland_input_serial(c);
         count = wayland_seats(c, WLI_wl_keyboard, slots);
         for (long at = 0; at < count; at++)
         {
@@ -3210,6 +3278,388 @@ static int wayland_seat_object_request(struct wayland_client *c, struct wayland_
         else if (op == WLQ_wl_keyboard_release && self->iface == WLI_wl_keyboard)
                 wayland_seat_remove(c, WLI_wl_keyboard, self->id);
         return WAYLAND_OK;
+}
+
+/* ---- the clipboard ---- */
+
+/*
+        A client's copy and paste are the compositor's: it holds one text for each selection (the clipboard and the primary
+        selection), whoever made it, and what a client is shown of it is made from that text. A client's copy (set_selection
+        with a source) is read once, into the compositor's: the host gives the shim a descriptor to hand the source in a send
+        event and reads what comes, and the text is the selection when the source has ended it, so it outlives its source and
+        its client, as a copy made in any window of the compositor does. A paste is an offer of text made to the client that
+        has the keys, when it gets them and when the text changes, and a receive on an offer that is still the selection's is the
+        host writing the text to the descriptor the client gave. Nothing but text is held, so a source that offers no text is
+        cancelled; a copy is taken only for a client the person has just touched, and a paste is given only to the window that
+        has the keys with the person's key or button just on it (the host's rule, as for a program of the compositor's).
+        Dragging is not done: a drag that starts is cancelled.
+*/
+static const struct
+{
+        const char *name;
+        unsigned char bit;
+} wayland_mimes[] = {{"text/plain;charset=utf-8", 1}, {"UTF8_STRING", 2}, {"text/plain", 4}};
+#define WAYLAND_MIME_COUNT 3
+
+// The bit of a type that is text we take (either case), or 0.
+static long wayland_mime_bit(const unsigned char *text, long length)
+{
+        for (long at = 0; at < WAYLAND_MIME_COUNT; at++)
+        {
+                long same = 1, n = 0;
+
+                for (; wayland_mimes[at].name[n]; n++)
+                {
+                        unsigned char a = n < length ? text[n] : 0, b = (unsigned char)wayland_mimes[at].name[n];
+
+                        a = a >= 'A' && a <= 'Z' ? (unsigned char)(a + 32) : a;
+                        b = b >= 'A' && b <= 'Z' ? (unsigned char)(b + 32) : b;
+                        if (a != b)
+                        {
+                                same = 0;
+                                break;
+                        }
+                }
+                if (same && n == length)
+                        return wayland_mimes[at].bit;
+        }
+        return 0;
+}
+
+// The type to ask a source for, of those it offers: the UTF-8 one first.
+static const char *wayland_mime_choice(unsigned int mimes)
+{
+        for (long at = 0; at < WAYLAND_MIME_COUNT; at++)
+                if (mimes & wayland_mimes[at].bit)
+                        return wayland_mimes[at].name;
+        return 0;
+}
+
+/* The slots of a client's devices for a selection that are still there. */
+static long wayland_devices(struct wayland_client *c, long which, long *slots)
+{
+        long found = 0, iface = which ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device;
+
+        for (long at = 0; at < c->devices[which]; at++)
+        {
+                long slot = wayland_slot_of(c, c->device_id[which][at]);
+
+                if (slot >= 0 && c->objects[slot].iface == iface)
+                        slots[found++] = slot;
+        }
+        return found;
+}
+
+static void wayland_device_remove(struct wayland_client *c, long which, unsigned int id)
+{
+        for (long at = 0; at < c->devices[which]; at++)
+                if (c->device_id[which][at] == id)
+                {
+                        c->device_id[which][at] = c->device_id[which][--c->devices[which]];
+                        return;
+                }
+}
+
+// An id of the server's own that no object of the client has now, taken in turn so a number just let go is not the next.
+static unsigned long wayland_server_id(struct wayland_client *c)
+{
+        for (long step = 0; step < WAYLAND_SERVER_IDS; step++)
+        {
+                long at = (c->server_hint + step) % WAYLAND_SERVER_IDS;
+
+                if (!c->server_index[at])
+                {
+                        c->server_hint = (unsigned char)((at + 1) % WAYLAND_SERVER_IDS);
+                        return WAYLAND_SERVER_BASE + (unsigned long)at;
+                }
+        }
+        return 0;
+}
+
+/*
+        The text the compositor holds for a selection, to one of a client's devices: a new offer of it with its types, then the
+        selection naming the offer; or the selection with none when there is nothing, or no room for an offer (a client that
+        keeps sixteen and lets none go is not offered more).
+*/
+static void wayland_selection_to(struct wayland_client *c, long slot, long which)
+{
+        unsigned long device = c->objects[slot].id, id = 0;
+        struct wayland_event e;
+        long index = -1, offer = -1;
+
+        if (wayland.host->clip_size(wayland.host->context, which) > 0)
+        {
+                for (long at = 0; at < WAYLAND_OFFERS && index < 0; at++)
+                        if (!c->offers[at].live)
+                                index = at;
+                id = index >= 0 ? wayland_server_id(c) : 0;
+                if (id)
+                        offer = wayland_object_new(c, id, which ? WLI_zwp_primary_selection_offer_v1 : WLI_wl_data_offer,
+                                                   c->objects[slot].version);
+        }
+        if (offer >= 0)
+        {
+                c->offers[index].id = (unsigned int)id;
+                c->offers[index].live = 1;
+                c->offers[index].which = (unsigned char)which;
+                c->offers[index].serial = wayland.selection_serial[which];
+                c->objects[offer].link = (short)index;
+                e = wayland_begin(c, device, which ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer);
+                wayland_word(&e, id);
+                wayland_end(&e);
+                for (long at = 0; at < WAYLAND_MIME_COUNT; at++)
+                {
+                        e = wayland_begin(c, id, which ? WLE_zwp_primary_selection_offer_v1_offer : WLE_wl_data_offer_offer);
+                        wayland_string(&e, wayland_mimes[at].name);
+                        wayland_end(&e);
+                }
+        }
+        else
+                id = 0;
+        e = wayland_begin(c, device, which ? WLE_zwp_primary_selection_device_v1_selection : WLE_wl_data_device_selection);
+        wayland_word(&e, id);
+        wayland_end(&e);
+}
+
+// Both selections to a client's devices: what it is shown when it gets the keys.
+static void wayland_selections_to(struct wayland_client *c)
+{
+        for (long which = 0; which < 2; which++)
+        {
+                long slots[WAYLAND_DEVICES], count = wayland_devices(c, which, slots);
+
+                for (long at = 0; at < count; at++)
+                        wayland_selection_to(c, slots[at], which);
+        }
+}
+
+// A source told it is not wanted: its copy is not taken, or the text is another's now. It is let go but for its object.
+static void wayland_source_cancel(struct wayland_client *c, long index)
+{
+        struct wayland_source *source = &c->sources[index];
+        struct wayland_event e;
+
+        source->state = 3;
+        if (wayland_slot_of(c, source->id) < 0)
+                return;
+        e = wayland_begin(c, source->id, source->which ? WLE_zwp_primary_selection_source_v1_cancelled : WLE_wl_data_source_cancelled);
+        wayland_end(&e);
+}
+
+// A source object destroyed: a copy of it still being read is ended, and the selection stays what it was but is nobody's.
+static void wayland_source_drop(struct wayland_client *c, long index)
+{
+        struct wayland_source *source = &c->sources[index];
+        long which = source->which;
+
+        if (source->state == 1 && c->pending[which] == index + 1)
+        {
+                c->pending[which] = 0;
+                wayland.host->clip_abort(wayland.host->context, c->slot, which);
+        }
+        if (wayland.selection_owner[which] == c->slot + 1 && wayland.selection_source[which] == index)
+                wayland.selection_owner[which] = 0;
+        source->live = 0;
+}
+
+/*
+        The compositor's text for a selection is new (or gone): the source of a client that was the selection is told it is not,
+        the count that tells an old offer from a current one moves, and the client that has the keys is offered the new text.
+*/
+WAYLAND_API void wayland_selection_changed(long which)
+{
+        struct wayland_client *c;
+        long slots[WAYLAND_DEVICES], count;
+
+        if (!wayland.host || which < 0 || which > 1)
+                return;
+        wayland.selection_serial[which]++;
+        if (wayland.selection_owner[which] > 0 && (c = wayland.client[wayland.selection_owner[which] - 1]) &&
+            c->sources[wayland.selection_source[which]].live && c->sources[wayland.selection_source[which]].state == 2)
+                wayland_source_cancel(c, wayland.selection_source[which]);
+        wayland.selection_owner[which] = 0;
+        if (wayland.keyboard_row < 0 || wayland.row_client[wayland.keyboard_row] < 0)
+                return;
+        c = wayland.client[wayland.row_client[wayland.keyboard_row]];
+        count = c ? wayland_devices(c, which, slots) : 0;
+        for (long at = 0; at < count; at++)
+                wayland_selection_to(c, slots[at], which);
+}
+
+/*
+        The host has read a client's source to its end (ok), or could not: the source is the selection, or is cancelled. The
+        host says it after it has made the text the selection, so the text's change has been told by then.
+*/
+WAYLAND_API void wayland_clip_pulled(long client, long which, long ok)
+{
+        struct wayland_client *c = client >= 0 && client < WAYLAND_CLIENTS && wayland.host ? wayland.client[client] : 0;
+        long index;
+
+        if (!c || which < 0 || which > 1 || !c->pending[which])
+                return;
+        index = c->pending[which] - 1;
+        c->pending[which] = 0;
+        if (!c->sources[index].live || c->sources[index].state != 1)
+                return;
+        if (!ok)
+        {
+                wayland_source_cancel(c, index);
+                return;
+        }
+        c->sources[index].state = 2;
+        wayland.selection_owner[which] = c->slot + 1;
+        wayland.selection_source[which] = index;
+}
+
+// A source made: a record, and the object tied to it.
+static int wayland_source_new(struct wayland_client *c, struct wayland_object *self, long which, long slot)
+{
+        long index = -1;
+
+        for (long at = 0; at < WAYLAND_SOURCES && index < 0; at++)
+                if (!c->sources[at].live)
+                        index = at;
+        if (index < 0)
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many data sources");
+        c->sources[index].id = c->objects[slot].id;
+        c->sources[index].live = 1;
+        c->sources[index].which = (unsigned char)which;
+        c->sources[index].mimes = 0;
+        c->sources[index].state = 0;
+        c->objects[slot].link = (short)index;
+        return WAYLAND_OK;
+}
+
+// A device made: kept in the client's list, and shown the selection at once when the client has the keys already.
+static int wayland_device_new(struct wayland_client *c, struct wayland_object *self, long which, long slot)
+{
+        if (c->devices[which] >= WAYLAND_DEVICES)
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many data devices");
+        c->device_id[which][c->devices[which]++] = c->objects[slot].id;
+        if (wayland.keyboard_row >= 0 && wayland.row_client[wayland.keyboard_row] == c->slot)
+                wayland_selection_to(c, slot, which);
+        return WAYLAND_OK;
+}
+
+/*
+        set_selection: a source (or none) and the serial of an input event of this client's. None clears the text when this
+        client's source is the selection. A source is used once; one made from an event the client was not sent, one that offers
+        no text, one the host will not take (no gesture of the person's, the service off, no room) is cancelled and nothing else
+        happens. Otherwise the host is given the source to read, and it is the selection when it has been.
+*/
+static int wayland_set_selection(struct wayland_client *c, struct wayland_object *self, long which, const struct wayland_arg *a)
+{
+        long index = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1, fd;
+        struct wayland_source *source;
+        struct wayland_event e;
+        const char *mime;
+
+        if (index < 0)
+        {
+                if (wayland.selection_owner[which] == c->slot + 1)
+                        wayland.host->clip_clear(wayland.host->context, c->slot, which);
+                return WAYLAND_OK;
+        }
+        source = &c->sources[index];
+        if (source->state != 0)
+                return wayland_fail(c, self->id, WLN_wl_data_device_error_used_source, "the source was used before");
+        mime = wayland_mime_choice(source->mimes);
+        if (!wayland_input_serial_ok(c, a[1].u) || !mime || c->out_fd_count >= WAYLAND_OUT_FDS)
+        {
+                wayland_source_cancel(c, index);
+                return WAYLAND_OK;
+        }
+        if (c->pending[which])
+        {
+                wayland.host->clip_abort(wayland.host->context, c->slot, which);
+                wayland_source_cancel(c, c->pending[which] - 1);
+                c->pending[which] = 0;
+        }
+        fd = wayland.host->clip_pull(wayland.host->context, c->slot, which);
+        if (fd < 0)
+        {
+                wayland_source_cancel(c, index);
+                return WAYLAND_OK;
+        }
+        source->state = 1;
+        c->pending[which] = (unsigned char)(index + 1);
+        e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
+        wayland_string(&e, mime);
+        c->out_fds[c->out_fd_count] = fd;
+        c->out_fd_at[c->out_fd_count++] = e.start;
+        wayland_end(&e);
+        return WAYLAND_OK;
+}
+
+// receive: the text of an offer that is still the selection's, written to the descriptor, for the client that has the keys.
+static int wayland_receive(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a)
+{
+        struct wayland_offer *offer = &c->offers[self->link];
+
+        if (wayland_mime_bit(a[0].text, a[0].length) && offer->serial == wayland.selection_serial[offer->which] &&
+            wayland.keyboard_row >= 0 && wayland.row_client[wayland.keyboard_row] == c->slot)
+        {
+                wayland.host->clip_push(wayland.host->context, wayland.keyboard_row, offer->which, a[1].fd);
+                wayland.fds--;
+                a[1].fd = -1;
+        }
+        return WAYLAND_OK;
+}
+
+static int wayland_data_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        switch (self->iface)
+        {
+        case WLI_wl_data_device_manager:
+                if (op == WLQ_wl_data_device_manager_create_data_source)
+                        return wayland_source_new(c, self, 0, a[0].slot);
+                return op == WLQ_wl_data_device_manager_get_data_device ? wayland_device_new(c, self, 0, a[0].slot) : WAYLAND_OK;
+        case WLI_zwp_primary_selection_device_manager_v1:
+                if (op == WLQ_zwp_primary_selection_device_manager_v1_create_source)
+                        return wayland_source_new(c, self, 1, a[0].slot);
+                return op == WLQ_zwp_primary_selection_device_manager_v1_get_device ? wayland_device_new(c, self, 1, a[0].slot) : WAYLAND_OK;
+        case WLI_wl_data_source:
+        case WLI_zwp_primary_selection_source_v1:
+                if (op == WLQ_wl_data_source_offer && c->sources[self->link].state == 0)
+                        c->sources[self->link].mimes |= (unsigned char)wayland_mime_bit(a[0].text, a[0].length);
+                else if (op == WLQ_wl_data_source_destroy)
+                        wayland_source_drop(c, self->link);
+                else if (op == WLQ_wl_data_source_set_actions && (a[0].u & ~7UL))
+                        return wayland_fail(c, self->id, WLN_wl_data_source_error_invalid_action_mask, "the actions are not a mask of three");
+                return WAYLAND_OK;
+        case WLI_wl_data_device:
+                if (op == WLQ_wl_data_device_set_selection)
+                        return wayland_set_selection(c, self, 0, a);
+                if (op == WLQ_wl_data_device_start_drag)
+                {
+                        // Not done: the source of a drag is told it is not going.
+                        if (a[0].slot >= 0 && c->sources[c->objects[a[0].slot].link].state == 0)
+                                wayland_source_cancel(c, c->objects[a[0].slot].link);
+                        return WAYLAND_OK;
+                }
+                wayland_device_remove(c, 0, self->id);
+                return WAYLAND_OK;
+        case WLI_zwp_primary_selection_device_v1:
+                if (op == WLQ_zwp_primary_selection_device_v1_set_selection)
+                        return wayland_set_selection(c, self, 1, a);
+                wayland_device_remove(c, 1, self->id);
+                return WAYLAND_OK;
+        case WLI_wl_data_offer:
+                if (op == WLQ_wl_data_offer_receive)
+                        return wayland_receive(c, self, a);
+                if (op == WLQ_wl_data_offer_destroy)
+                        c->offers[self->link].live = 0;
+                else if (op == WLQ_wl_data_offer_finish)
+                        return wayland_fail(c, self->id, WLN_wl_data_offer_error_invalid_finish, "finish is for a drag's offer");
+                return WAYLAND_OK;
+        case WLI_zwp_primary_selection_offer_v1:
+                if (op == WLQ_zwp_primary_selection_offer_v1_receive)
+                        return wayland_receive(c, self, a);
+                c->offers[self->link].live = 0;
+                return WAYLAND_OK;
+        default:
+                return WAYLAND_OK;
+        }
 }
 
 /* ---- one request ---- */
@@ -3409,6 +3859,16 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_zxdg_toplevel_decoration_v1:
                         status = wayland_decoration_request(c, o, op, a);
                         break;
+                case WLI_wl_data_device_manager:
+                case WLI_wl_data_device:
+                case WLI_wl_data_source:
+                case WLI_wl_data_offer:
+                case WLI_zwp_primary_selection_device_manager_v1:
+                case WLI_zwp_primary_selection_device_v1:
+                case WLI_zwp_primary_selection_source_v1:
+                case WLI_zwp_primary_selection_offer_v1:
+                        status = wayland_data_request(c, o, op, a);
+                        break;
                 default: // pointers, keyboards, outputs and xdg outputs have only a release or a destroy
                         status = WAYLAND_OK;
                         break;
@@ -3450,7 +3910,8 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
 
         if (wayland.host || !host || !host->alloc || !host->release || !host->map || !host->remap || !host->unmap ||
             !host->close || !host->row_open || !host->row_close || !host->row_picture || !host->row_title || !host->row_do ||
-            !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks)
+            !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks ||
+            !host->clip_size || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear)
                 return -1;
         for (unsigned long at = 0; at < sizeof wayland; at++)
                 clear[at] = 0;
@@ -3522,6 +3983,14 @@ WAYLAND_API void wayland_drop(long slot)
         {
                 wayland.host->close(wayland.host->context, c->in_fds[at]);
                 wayland.fds--;
+        }
+        for (long which = 0; which < 2; which++)
+        {
+                // A selection that was this client's stays, as text, and is nobody's; a copy it was in the middle of is ended.
+                if (wayland.selection_owner[which] == c->slot + 1)
+                        wayland.selection_owner[which] = 0;
+                if (c->pending[which])
+                        wayland.host->clip_abort(wayland.host->context, c->slot, which);
         }
         wayland.client[slot] = 0;
         wayland.clients--;

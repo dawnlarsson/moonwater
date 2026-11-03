@@ -7,9 +7,10 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-C TEXT] [-P] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
         only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
+        -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
         -q quiet,
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
         compiled by libxkbcommon and each key says its keysym and its text).
@@ -44,6 +45,12 @@ static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct wl_seat *seat;
 static struct wl_subcompositor *subcompositor;
+static struct wl_data_device_manager *data_manager;
+static struct wl_data_device *data_device;
+static struct wl_data_offer *selection_offer;
+static struct wl_data_source *copy_source;
+static const char *copy_text;
+static int paste_wanted, copy_done, paste_done;
 static struct wl_surface *surface;
 static struct xdg_surface *xdg_surface;
 static struct xdg_toplevel *toplevel;
@@ -355,9 +362,165 @@ static void keyboard_leave(void *d, struct wl_keyboard *k, uint32_t s, struct wl
                 printf("keyboard leave\n"), fflush(stdout);
 }
 
+static void source_target(void *d, struct wl_data_source *source, const char *mime)
+{
+        (void)d; (void)source; (void)mime;
+}
+
+static void source_send(void *d, struct wl_data_source *source, const char *mime, int32_t fd)
+{
+        (void)d; (void)source;
+        if (copy_text && write(fd, copy_text, strlen(copy_text)) < 0)
+                perror("wayland-shm: write");
+        close(fd);
+        printf("sent %s\n", mime);
+        fflush(stdout);
+}
+
+static void source_cancelled(void *d, struct wl_data_source *source)
+{
+        (void)d;
+        printf("cancelled\n");
+        fflush(stdout);
+        wl_data_source_destroy(source);
+        copy_source = 0;
+}
+
+static void source_drop(void *d, struct wl_data_source *source)
+{
+        (void)d; (void)source;
+}
+
+static void source_finished(void *d, struct wl_data_source *source)
+{
+        (void)d; (void)source;
+}
+
+static void source_action(void *d, struct wl_data_source *source, uint32_t action)
+{
+        (void)d; (void)source; (void)action;
+}
+
+static const struct wl_data_source_listener source_listener = {
+    .target = source_target, .send = source_send, .cancelled = source_cancelled, .dnd_drop_performed = source_drop,
+    .dnd_finished = source_finished, .action = source_action};
+
+static void offer_offer(void *d, struct wl_data_offer *offer, const char *mime)
+{
+        (void)d; (void)offer;
+        if (verbose)
+                printf("offer %s\n", mime), fflush(stdout);
+}
+
+static void offer_source_actions(void *d, struct wl_data_offer *offer, uint32_t actions)
+{
+        (void)d; (void)offer; (void)actions;
+}
+
+static void offer_action(void *d, struct wl_data_offer *offer, uint32_t action)
+{
+        (void)d; (void)offer; (void)action;
+}
+
+static const struct wl_data_offer_listener offer_listener = {
+    .offer = offer_offer, .source_actions = offer_source_actions, .action = offer_action};
+
+static void device_data_offer(void *d, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+        (void)d; (void)device;
+        wl_data_offer_add_listener(offer, &offer_listener, 0);
+}
+
+static void device_enter(void *d, struct wl_data_device *device, uint32_t serial, struct wl_surface *su, wl_fixed_t x, wl_fixed_t y,
+                         struct wl_data_offer *offer)
+{
+        (void)d; (void)device; (void)serial; (void)su; (void)x; (void)y; (void)offer;
+}
+
+static void device_leave(void *d, struct wl_data_device *device)
+{
+        (void)d; (void)device;
+}
+
+static void device_motion(void *d, struct wl_data_device *device, uint32_t t, wl_fixed_t x, wl_fixed_t y)
+{
+        (void)d; (void)device; (void)t; (void)x; (void)y;
+}
+
+static void device_drop(void *d, struct wl_data_device *device)
+{
+        (void)d; (void)device;
+}
+
+static void device_selection(void *d, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+        (void)d; (void)device;
+        if (selection_offer)
+                wl_data_offer_destroy(selection_offer);
+        selection_offer = offer;
+        printf("selection %s\n", offer ? "offered" : "none");
+        fflush(stdout);
+}
+
+static const struct wl_data_device_listener device_listener = {
+    .data_offer = device_data_offer, .enter = device_enter, .leave = device_leave, .motion = device_motion, .drop = device_drop,
+    .selection = device_selection};
+
+// A key of the person's: the copy this client was asked to make, or the paste it was asked to do, with that key's serial.
+static void clipboard_key(uint32_t serial)
+{
+        if (copy_text && !copy_done && data_device)
+        {
+                copy_done = 1;
+                copy_source = wl_data_device_manager_create_data_source(data_manager);
+                wl_data_source_add_listener(copy_source, &source_listener, 0);
+                wl_data_source_offer(copy_source, "text/plain;charset=utf-8");
+                wl_data_device_set_selection(data_device, copy_source, serial);
+                printf("copy set\n");
+                fflush(stdout);
+        }
+        else if (paste_wanted && !paste_done && data_device)
+        {
+                int fds[2];
+                char text[256];
+                ssize_t got = 0, more;
+                time_t end = time(0) + 3;
+
+                paste_done = 1;
+                if (!selection_offer || pipe(fds) < 0)
+                {
+                        printf("paste: no selection\n");
+                        fflush(stdout);
+                        return;
+                }
+                wl_data_offer_receive(selection_offer, "text/plain;charset=utf-8", fds[1]);
+                close(fds[1]);
+                wl_display_flush(display);
+                fcntl(fds[0], F_SETFL, O_NONBLOCK);
+                while (time(0) < end && got < (ssize_t)sizeof text - 1)
+                {
+                        more = read(fds[0], text + got, sizeof text - 1 - (size_t)got);
+                        if (more == 0)
+                                break;
+                        if (more > 0)
+                                got += more;
+                        else if (errno == EAGAIN)
+                                usleep(10000);
+                        else
+                                break;
+                }
+                close(fds[0]);
+                text[got] = 0;
+                printf("pasted %zd %s\n", got, text);
+                fflush(stdout);
+        }
+}
+
 static void keyboard_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t, uint32_t key, uint32_t state)
 {
-        (void)d; (void)k; (void)s; (void)t;
+        (void)d; (void)k; (void)t;
+        if (state == 1)
+                clipboard_key(s);
         key_events++;
         if (verbose)
         {
@@ -428,6 +591,8 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
                 wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, version < 6 ? version : 6);
         else if (!strcmp(interface, wl_subcompositor_interface.name))
                 subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
+        else if (!strcmp(interface, wl_data_device_manager_interface.name))
+                data_manager = wl_registry_bind(registry, name, &wl_data_device_manager_interface, version < 3 ? version : 3);
         else if (!strcmp(interface, wl_seat_interface.name))
                 seat = wl_registry_bind(registry, name, &wl_seat_interface, version < 9 ? version : 9);
 }
@@ -446,7 +611,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfduqv")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfduC:Pqv")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -459,6 +624,8 @@ int main(int argc, char **argv)
                 case 'f': fullscreen = 1; break;
                 case 'd': damage_only = 1; break;
                 case 'u': child_wanted = 1; break;
+                case 'C': copy_text = optarg; break;
+                case 'P': paste_wanted = 1; break;
                 case 'q': quiet = 1; break;
                 case 'v': verbose = 1; break;
                 default: return 2;
@@ -480,6 +647,11 @@ int main(int argc, char **argv)
         xdg_wm_base_add_listener(wm_base, &wm_base_listener, 0);
         if (seat)
                 wl_seat_add_listener(seat, &seat_listener, 0);
+        if (seat && data_manager)
+        {
+                data_device = wl_data_device_manager_get_data_device(data_manager, seat);
+                wl_data_device_add_listener(data_device, &device_listener, 0);
+        }
         if (make_buffer(&buffers[0], width, height) < 0 || make_buffer(&buffers[1], width, height) < 0)
         {
                 fprintf(stderr, "wayland-shm: no buffers\n");

@@ -328,6 +328,20 @@ if [ -n "$input" ]; then
                         row FAIL "the compositor survives a person's pointer and keys ($layout)" "$(tail -3 "$work/compositor.log")"
                 fi
         done
+        # The clipboard, end to end: one client copies at a key, another pastes at one.
+        stop
+        rm -f "$work/in.fifo"
+        mkfifo "$work/in.fifo"
+        extra="-i $work/in.fifo -l us"
+        if start; then
+                python3 "$(dirname "$0")/wayland_clip.py" "$work/in.fifo" "$client" "$work" > "$work/clip.out" 2>&1
+                result=$?
+                cut -c1-400 "$work/clip.out"
+                failures=$((failures + result))
+                alive || row FAIL "the compositor survives clients that copy and paste" "$(tail -3 "$work/compositor.log")"
+        else
+                row FAIL "the compositor starts for the clipboard rows" "$(tail -3 "$work/compositor.log")"
+        fi
         extra=
         stop
         start

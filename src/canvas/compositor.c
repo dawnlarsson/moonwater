@@ -11314,21 +11314,32 @@ static void compositor_clip_tell(int row, unsigned int which, int what)
                 compositor_post(row, WINDOW_EVENT_CLIP, 0, (int)which, what);
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_wl_selection(unsigned int which);
+#endif
+
+// One selection let go, and its watchers told.
+static void compositor_clip_clear(unsigned int which)
+{
+        if (compositor_clip.fd[which] >= 0)
+                system_close(compositor_clip.fd[which]);
+        compositor_clip.fd[which] = -1;
+        compositor.table->clip_length[which] = 0;
+        compositor.table->clip_owner[which] = -1;
+        __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
+        for (int row = 0; row < WINDOWS; row++)
+                if (compositor.table->clip_watch[row])
+                        compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_selection(which);
+#endif
+}
+
 // Every selection and the history let go: the service turned off, or `moonwater clipboard clear`.
 static void compositor_clip_wipe(void)
 {
         for (unsigned int which = 0; which < 2; which++)
-        {
-                if (compositor_clip.fd[which] >= 0)
-                        system_close(compositor_clip.fd[which]);
-                compositor_clip.fd[which] = -1;
-                compositor.table->clip_length[which] = 0;
-                compositor.table->clip_owner[which] = -1;
-                __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
-                for (int row = 0; row < WINDOWS; row++)
-                        if (compositor.table->clip_watch[row])
-                                compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
-        }
+                compositor_clip_clear(which);
         for (unsigned int at = 0; at < compositor_clip.history_count; at++)
                 system_close(compositor_clip.history[at]);
         compositor_clip.history_count = 0;
@@ -11425,6 +11436,9 @@ static void compositor_clip_keep(unsigned int which, int opened, unsigned int le
         for (int row = 0; row < WINDOWS; row++)
                 if (compositor.table->clip_watch[row] && row != owner)
                         compositor_clip_tell(row, which, WINDOWS_CLIP_CHANGED);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_selection(which);
+#endif
 }
 
 // What a row's knock may carry for the clipboard: an offer of a copy, a paste asked for.
@@ -14741,7 +14755,7 @@ static b32 compositor_main()
 
         while (running)
         {
-                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32];
+                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 16]; // the last 16: the Wayland shim's transfers
                 unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0;
                 positive now = 0, until = 0;
                 long awaited, wait[2];
@@ -14850,6 +14864,12 @@ static b32 compositor_main()
                         now = clock_monotonic_nanoseconds();
                         frame = now - compositor.presented < compositor.period ? compositor.presented + compositor.period : now;
                         until = !until || frame < until ? frame : until;
+                }
+                // A copy or a paste that stalls is ended when its time is up.
+                if (compositor_wl.started && compositor_wl_due())
+                {
+                        now = clock_monotonic_nanoseconds();
+                        until = !until || compositor_wl_due() < until ? compositor_wl_due() : until;
                 }
 #endif
                 if (compositor.damages)
