@@ -157919,7 +157919,15 @@ static void test_clipboard(void)
                 used = clip_source(&k, 0, "text/plain");
                 clip_set(&k, 0, used, serial);
                 clip_set(&k, 0, used, serial);
-                WLCHECK(refused_with(k.s.c, WLN_wl_data_device_error_used_source), "a source is used once");
+                WLCHECK(k.s.c->errors == 0 && fake.pulls == 1,
+                        "a source that is being read, set again, is no change (a toolkit does after adding a type) (%ld pulls, %s)", fake.pulls,
+                        k.s.c->error_text);
+                clip_finish(&k, 0, "once");
+                clip_set(&k, 0, used, serial);
+                WLCHECK(k.s.c->errors == 0 && fake.pulls == 1, "and so is the source that is the selection");
+                clip_other(0, "other");
+                clip_set(&k, 0, used, serial);
+                WLCHECK(refused_with(k.s.c, WLN_wl_data_device_error_used_source), "but a source that was cancelled is used up");
         }
         wlc_end(k.s.c);
         clip_open(&k);

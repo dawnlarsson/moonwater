@@ -3627,6 +3627,9 @@ static int wayland_set_selection(struct wayland_client *c, struct wayland_object
                 return WAYLAND_OK;
         }
         source = &c->sources[index];
+        // The source that is being read, or is the selection, set again (a toolkit does after adding a type) is no change.
+        if (source->state == 1 || source->state == 2)
+                return WAYLAND_OK;
         if (source->state != 0)
                 return wayland_fail(c, self->id, WLN_wl_data_device_error_used_source, "the source was used before");
         mime = wayland_mime_choice(source->mimes);
