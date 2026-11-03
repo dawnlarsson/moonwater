@@ -58,6 +58,11 @@
 #ifndef MOONWATER_CANVAS_COMPOSITOR
 #define MOONWATER_CANVAS_COMPOSITOR
 
+// The Wayland shim is on unless the build's header says SHELL_NO_WAYLAND (CONFIG_MOONWATER_WAYLAND=n).
+#if !defined(SHELL_NO_WAYLAND) && !defined(CONFIG_MOONWATER_WAYLAND)
+#define CONFIG_MOONWATER_WAYLAND 1
+#endif
+
 /* ---- backend: the look on the CPU ---- */
 
 // The desktop's ink: neutral grey, no hue, and not a kit role. The line round a window, its line with the keys, the

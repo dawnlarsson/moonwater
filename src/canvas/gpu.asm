@@ -550,22 +550,31 @@ scene:
 
 ; a box (256ths: x0 s57, y0 s58, x1 s59, y1 s60, the colour s61, rx s62, ry s63)
 .scene_box:
+	s_bfe_u32	s105, s56, 0x40008
+	s_add_u32	s44, s44, s105
+	s_mov_b32	s104, 0
 	s_lshl_b32	s78, s28, 8
 	s_lshl_b32	s79, s29, 8
 	s_lshl_b32	s80, s40, 8
 	s_lshl_b32	s81, s41, 8
+; the record in s[56:63] (the box, then each of its changes of cover: s104 is the one in hand, s105 how many) against the patch
+.box_enter:
 	s_cmp_le_i32	s59, s57
-	s_cbranch_scc1	.scene_loop
+	s_cbranch_scc1	.box_miss
 	s_cmp_le_i32	s60, s58
-	s_cbranch_scc1	.scene_loop
+	s_cbranch_scc1	.box_miss
 	s_cmp_ge_i32	s78, s59
-	s_cbranch_scc1	.scene_loop
+	s_cbranch_scc1	.box_miss
 	s_cmp_le_i32	s80, s57
-	s_cbranch_scc1	.scene_loop
+	s_cbranch_scc1	.box_miss
 	s_cmp_ge_i32	s79, s60
-	s_cbranch_scc1	.scene_loop
+	s_cbranch_scc1	.box_miss
 	s_cmp_le_i32	s81, s58
-	s_cbranch_scc1	.scene_loop
+	s_cbranch_scc1	.box_miss
+	s_add_i32	s86, s58, s63
+	s_sub_i32	s87, s60, s63
+	s_cmp_lg_u32	s104, 0
+	s_cbranch_scc1	.box_edge
 	s_lshr_b32	s52, s61, 24
 	s_cmp_eq_u32	s52, 0
 	s_cbranch_scc1	.scene_loop
@@ -573,8 +582,8 @@ scene:
 	s_and_b32	s64, s61, 255
 	s_bfe_u32	s65, s61, 0x80008
 	s_bfe_u32	s66, s61, 0x80010
-	s_add_i32	s86, s58, s63
-	s_sub_i32	s87, s60, s63
+	s_cmp_lg_u32	s105, 0
+	s_cbranch_scc1	.box_edge
 	s_cmp_lt_i32	s78, s57
 	s_cbranch_scc1	.box_edge
 	s_cmp_gt_i32	s80, s59
@@ -744,10 +753,58 @@ scene:
 	v_cndmask_b32_e64 v25, 0, v25, s[82:83]
 	v_cndmask_b32_e64 v26, 0, v26, s[82:83]
 	v_cndmask_b32_e64 v27, 0, v27, s[82:83]
-	boxpixel	v5, v24
-	boxpixel	v6, v25
-	boxpixel	v7, v26
-	boxpixel	v8, v27
+	s_cmp_lg_u32	s104, 0
+	s_cbranch_scc1	.box_combine
+	v_mov_b32	v69, v24
+	v_mov_b32	v70, v25
+	v_mov_b32	v71, v26
+	v_mov_b32	v72, v27
+; the next change of the box's cover, if it has one: its record, then its cover as the box's was
+.box_next:
+	s_cmp_ge_u32	s104, s105
+	s_cbranch_scc1	.box_blend
+	s_add_u32	s104, s104, 1
+	s_lshl_b32	s46, s104, 5
+	s_add_u32	s2, s48, s46
+	s_addc_u32	s3, s49, 0
+	s_load_dwordx8	s[56:63], s[2:3], 0x0
+	s_waitcnt	lgkmcnt(0)
+	s_branch	.box_enter
+; a change that misses the patch: a hole takes nothing from the cover, a clip leaves none
+.box_miss:
+	s_cmp_eq_u32	s104, 0
+	s_cbranch_scc1	.scene_loop
+	s_bitcmp1_b32	s56, 0
+	s_cbranch_scc1	.scene_loop
+	s_branch	.box_next
+; kind 8 cuts a hole (the cover less its own, none below none), kind 9 a clip (the product of the two, over a whole pixel's 4096)
+.box_combine:
+	s_bitcmp1_b32	s56, 0
+	s_cbranch_scc1	.box_clip
+	v_sub_nc_u32	v69, v69, v24
+	v_sub_nc_u32	v70, v70, v25
+	v_sub_nc_u32	v71, v71, v26
+	v_sub_nc_u32	v72, v72, v27
+	v_max_i32	v69, 0, v69
+	v_max_i32	v70, 0, v70
+	v_max_i32	v71, 0, v71
+	v_max_i32	v72, 0, v72
+	s_branch	.box_next
+.box_clip:
+	v_mul_u32_u24	v69, v69, v24
+	v_mul_u32_u24	v70, v70, v25
+	v_mul_u32_u24	v71, v71, v26
+	v_mul_u32_u24	v72, v72, v27
+	v_lshrrev_b32	v69, 12, v69
+	v_lshrrev_b32	v70, 12, v70
+	v_lshrrev_b32	v71, 12, v71
+	v_lshrrev_b32	v72, 12, v72
+	s_branch	.box_next
+.box_blend:
+	boxpixel	v5, v69
+	boxpixel	v6, v70
+	boxpixel	v7, v71
+	boxpixel	v8, v72
 	s_branch	.scene_loop
 
 .scene_store:

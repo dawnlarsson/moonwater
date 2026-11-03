@@ -117543,6 +117543,7 @@ static fn bowl_session_prepare(string_address home, string_address runtime) { (v
 static string_address address_to bowl_environment(string_address address_to inherited) { return inherited; }
 #include "../src/canvas/screen.c"
 #include "../src/canvas/font.c"
+#define SHELL_NO_WAYLAND 1 // the shim is on in a build, and these lanes are without the shell's signals it needs; CHECK_wayland holds it
 #include "../src/canvas/compositor.c"
 #include "../src/canvas/ui/features.h"
 #if MOONWATER_UI_ANY
@@ -186017,6 +186018,83 @@ b32 main(void)
                                         }
                         }
                 }
+        }
+
+        // Rings, ripples and rows: the kit's own calls, ui_kit_ring and ui_kit_fill with a clip, on the processor and recorded (the box's record and the
+        // records that change its cover), over rows a list is scrolled under (top and bottom of the ui), against a random picture; a width that is not a
+        // multiple of 4 is for the kernels that cannot, and is refused.
+        {
+                struct ui_scene scene;
+                struct ui rec;
+                positive ring_bad = 0;
+
+                for (int round = 0; round < 40; round++)
+                {
+                        int top = round % 3 ? 0 : (int)(gpu_random() % 200), bottom = round % 3 == 1 ? PH : PH - (int)(gpu_random() % 200);
+
+                        PW = 696;
+                        ui.width = PW, ui.top = top, ui.bottom = bottom, ui.opaque = round & 1;
+                        ui.band_top = ui.band_bottom = 0;
+                        if (round % 5 == 4)
+                                ui.band_top = (int)(gpu_random() % 60), ui.band_bottom = PH - (int)(gpu_random() % 60);
+                        rec = ui;
+                        rec.scene = &scene;
+                        memory_zero(&scene, sizeof(scene));
+                        scene.ops = ops, scene.room = 4 * N;
+                        for (positive i = 0; i < (positive)PP * PH; i++)
+                                pic[i] = gpu_kit_want[i] = gpu_random();
+                        for (int k = 0; k < N; k++)
+                        {
+                                unsigned int kind = gpu_random() % 5, mode = gpu_random() % 8, argb = gpu_random();
+                                int x0 = (int)(gpu_random() % ((PW + 16) * 256)) - 8 * 256, y0 = (int)(gpu_random() % ((PH + 16) * 256)) - 8 * 256;
+                                int w = (int)(gpu_random() % (mode == 0 ? 3 * 256 : mode < 3 ? 40 * 256 : 300 * 256)) - (mode == 7 ? 100 : 0);
+                                int h = (int)(gpu_random() % (mode == 1 ? 3 * 256 : mode < 3 ? 40 * 256 : 200 * 256)) - (mode == 7 ? 100 : 0);
+                                int rx = mode == 4 ? 0 : (int)(gpu_random() % (mode == 5 ? 900 * 256 : 24 * 256)), ry = mode == 4 ? 0 : (int)(gpu_random() % (mode == 6 ? 900 * 256 : 24 * 256));
+                                int thickness = gpu_random() % 3 ? (int)(gpu_random() % (12 * 256)) : (int)(gpu_random() % 600);
+                                struct ui_box box = {x0, y0, x0 + w, y0 + h, rx, ry}, clip;
+
+                                if (gpu_random() % 3 == 0)
+                                        argb |= 0xff000000u;
+                                if (gpu_random() % 11 == 0)
+                                        argb &= 0x00ffffffu;
+                                if (gpu_random() % 16 == 0)
+                                        thickness = -thickness;
+                                clip.x0 = x0 + (int)(gpu_random() % (unsigned int)(w > 0 ? w : 1)) - w / 3, clip.y0 = y0 + (int)(gpu_random() % (unsigned int)(h > 0 ? h : 1)) - h / 3;
+                                clip.x1 = clip.x0 + (w > 0 ? w : 256) / 2 + (int)(gpu_random() % 4096), clip.y1 = clip.y0 + (h > 0 ? h : 256) / 2 + (int)(gpu_random() % 4096);
+                                clip.rx = (int)(gpu_random() % (20 * 256)), clip.ry = (int)(gpu_random() % (20 * 256));
+                                // every so often a wide box with a small clip in it: most of its patches miss the clip
+                                if (k % 16 == 0)
+                                        kind = 2, box = (struct ui_box){20 * 256, 20 * 256, 620 * 256, 170 * 256, 8 * 256, 8 * 256},
+                                        clip = (struct ui_box){300 * 256, 90 * 256, 340 * 256, 110 * 256, 4 * 256, 4 * 256};
+                                // the rectangles, the single pixels and the clear are the kit's other painters of the same picture
+                                if (k % 24 == 5)
+                                        ui_clear(&ui), ui_clear(&rec);
+                                else if (kind == 3)
+                                        ui_fill(&ui, x0 >> 8, y0 >> 8, w >> 8, h >> 8, argb), ui_fill(&rec, x0 >> 8, y0 >> 8, w >> 8, h >> 8, argb);
+                                else if (kind == 4)
+                                        ui_dot(&ui, x0 >> 8, y0 >> 8, argb), ui_dot(&rec, x0 >> 8, y0 >> 8, argb);
+                                else if (kind == 1)
+                                        ui_kit_ring(&ui, &box, thickness, argb), ui_kit_ring(&rec, &box, thickness, argb);
+                                else
+                                        ui_kit_fill(&ui, &box, argb, kind == 2 ? &clip : 0), ui_kit_fill(&rec, &box, argb, kind == 2 ? &clip : 0);
+                        }
+                        check("gpu rings: the records fit", !scene.lost && scene.count >= N / 2);
+                        check("gpu rings: an odd width is refused", !gpu_scene(ops_at, scene.count, bins_at, pic_at, PP, 697, PH, 0, 0, 697, PH));
+                        if (!gpu_scene(ops_at, scene.count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
+                        {
+                                check("gpu rings: the scene finishes", false);
+                                return test_report(null);
+                        }
+                        for (int y = 0; y < PH; y++)
+                                for (int x = 0; x < PW; x++)
+                                {
+                                        checks++;
+                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++failures, ++ring_bad) < 6)
+                                                string_format(log, "  FAIL gpu rings round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                }
+                }
+                ui.top = 0, ui.bottom = PH, ui.width = PW, ui.band_top = ui.band_bottom = 0, ui.opaque = 0;
         }
 
         // 8K: a window's clear and 159 boxes of the sizes cards and buttons have, the radii a card has, a third of them translucent;

@@ -7911,8 +7911,8 @@ static const struct bowl_component bowl_graphics_components[] = {
         name and under the names a menu, a link or another program starts a
         browser by (it is run by the machine's shell, in the person's
         environment). It says in one line when Canvas has no Wayland socket
-        (the shim is built only with CONFIG_MOONWATER_WAYLAND, which is off
-        by default) and starts nothing then. It names the socket as the
+        (the shim is built with CONFIG_MOONWATER_WAYLAND, which is on by
+        default) and starts nothing then. It names the socket as the
         absolute path the shim listens on, marks the launch as the person's
         (MOONWATER_ASKED, which gives the first window the keys), asks for
         Wayland and not X11, and for the browser's own password store: the
@@ -7961,8 +7961,8 @@ static const struct bowl_component bowl_chrome_components[] = {
 
 static string_address bowl_chrome_session[] = {
     "[ -S " BOWL_CHROME_SOCKET " ] || { echo \"chrome: Canvas has no Wayland "
-    "socket (" BOWL_CHROME_SOCKET "): build with CONFIG_MOONWATER_WAYLAND=y "
-    "(off by default) and run moonwater desktop on\" >&2; exit 1; }",
+    "socket (" BOWL_CHROME_SOCKET "): this image was built with "
+    "CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
     "export WAYLAND_DISPLAY=" BOWL_CHROME_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none",
     "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",

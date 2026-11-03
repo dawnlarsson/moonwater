@@ -50,7 +50,10 @@
         A frame recorded for the GPU (src/canvas/gpu.c) in place of being painted, when ui.scene is set: ops of 8 words, and the cover
         bitmaps the text ops hold. A text op is {3 | the bitmap's pitch << 8, x0, y0, x1, y1 (the pixels it covers, cut to what may be
         drawn), the ink, alpha | stroke << 8, the bitmap's place in the GPU's buffer}; its bitmap is the cover of each pixel, one byte,
-        with a border of nothing round it so that the stroke finds its neighbours without a test.
+        with a border of nothing round it so that the stroke finds its neighbours without a test. A box is {2 | the number of records
+        that change its cover << 8, x0, y0, x1, y1 (256ths), the colour, rx, ry} and then those records, each a box in the same terms
+        under a kind of its own: 8 a hole (the cover less the hole's, a ring), 9 a clip (the product of the two covers, a ripple cut to its
+        button, the rows a list is scrolled under). lost is set when a record did not fit: the frame is then the processor's.
 */
 struct ui_scene
 {
@@ -58,6 +61,7 @@ struct ui_scene
         unsigned int count, room;
         unsigned char address_to cover;
         unsigned long used, size, at; // the pool of bitmaps: bytes used, its size, and where it is in the GPU's buffer
+        int lost;
 };
 
 struct ui
@@ -312,12 +316,36 @@ static unsigned int ui_cover(unsigned int tone, unsigned int cover)
         return out;
 }
 
+// A rectangle (pixels, already cut to what may be drawn) recorded for the GPU: the colour as it is when it is opaque or when it is to be written (a
+// fill), laid over what is there when it is not (a tone over; none at all when it has no alpha).
+static void ui_scene_rect(struct ui address_to ui, int x0, int y0, int x1, int y1, unsigned int tone, b32 write)
+{
+        struct ui_scene address_to scene = ui->scene;
+        unsigned int address_to op;
+
+        if (!write && !(tone >> 24))
+                return;
+        if (scene->count >= scene->room)
+        {
+                scene->lost = 1;
+                return;
+        }
+        op = scene->ops + 8 * scene->count++;
+        op[0] = write || tone >> 24 == 255 ? 0 : 1, op[1] = (unsigned int)x0, op[2] = (unsigned int)y0, op[3] = (unsigned int)x1, op[4] = (unsigned int)y1;
+        op[5] = tone, op[6] = op[7] = 0;
+}
+
 static fn ui_dot(struct ui address_to ui, int x, int y, unsigned int tone)
 {
         unsigned int address_to at;
 
         if (x < 0 || x >= ui->width || y < ui->top || y >= ui->bottom || y >= ui->height || !ui_in_band(ui, y))
                 return;
+        if (ui->scene)
+        {
+                ui_scene_rect(ui, x, y, x + 1, y + 1, tone, false);
+                return;
+        }
         at = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)x;
         address_to at = ui_over(tone, address_to at);
 }
@@ -336,7 +364,9 @@ static fn ui_clear(struct ui address_to ui)
                 top = ui->band_top < 0 ? 0 : ui->band_top;
                 bottom = ui->band_bottom > ui->height ? ui->height : ui->band_bottom;
         }
-        if (bottom > top)
+        if (bottom > top && ui->scene)
+                ui_scene_rect(ui, 0, top, ui->width, bottom, ui->opaque ? ui_role_surface() : 0, true);
+        else if (bottom > top)
                 memory_fill_u32_rect(ui->pixels + (unsigned long)top * ui->pitch, (positive)ui->pitch, (positive)ui->width,
                                      (positive)(bottom - top), ui->opaque ? ui_role_surface() : 0);
 }
@@ -372,6 +402,12 @@ static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, 
         }
         // The rows are the picture's: a clip row or a band above the picture's first row is cut to it.
         y = y < 0 ? 0 : y;
+        if (ui->scene)
+        {
+                if (x2 > x && y2 > y)
+                        ui_scene_rect(ui, x, y, x2, y2, tone, false);
+                return;
+        }
         // An opaque tone over a pixel is that tone: the rectangle is one fill.
         if (tone >> 24 == 255)
         {
@@ -733,8 +769,13 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
         from = from < ui->top ? ui->top : from, to = to > ui->bottom ? ui->bottom : to, to = to > ui->height ? ui->height : to;
         if (ui->band_bottom > ui->band_top)
                 from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
-        if (first >= last || from >= to || scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
+        if (first >= last || from >= to)
                 return;
+        if (scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
+        {
+                scene->lost = 1;
+                return;
+        }
         bitmap = scene->cover + scene->used;
         memory_zero(bitmap, bytes);
         for (int row = 0; row < rows; row++)
@@ -2592,6 +2633,50 @@ static inline unsigned int ui_kit_tone(unsigned int argb, unsigned int cover)
         return ui_premultiplied(argb, cover > UI_FULL ? UI_FULL : cover);
 }
 
+// A box, or a ring of it (the box less the box inset by thickness), cut to clip when there is one and to the rows that may be drawn, recorded for the GPU:
+// its record, then the records that change its cover, the hole first, the clips after.
+static void ui_scene_box(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, b32 ring, b32 thickness, const struct ui_box address_to clip)
+{
+        struct ui_scene address_to scene = ui->scene;
+        int from = ui->top < 0 ? 0 : ui->top, to = ui->bottom > ui->height ? ui->height : ui->bottom;
+        unsigned int cut, mods, address_to op;
+
+        if (ui->band_bottom > ui->band_top)
+                from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
+        if (from >= to)
+                return;
+        cut = from > 0 || to < ui->height;
+        mods = (ring != 0) + (clip != 0) + cut;
+        if (scene->count + 1 + mods > scene->room)
+        {
+                scene->lost = 1;
+                return;
+        }
+        op = scene->ops + 8 * scene->count;
+        scene->count += 1 + mods;
+        op[0] = 2u | mods << 8, op[1] = (unsigned int)box->x0, op[2] = (unsigned int)box->y0, op[3] = (unsigned int)box->x1, op[4] = (unsigned int)box->y1;
+        op[5] = argb, op[6] = (unsigned int)box->rx, op[7] = (unsigned int)box->ry;
+        if (ring)
+        {
+                op += 8;
+                op[0] = 8, op[1] = (unsigned int)(box->x0 + thickness), op[2] = (unsigned int)(box->y0 + thickness), op[3] = (unsigned int)(box->x1 - thickness);
+                op[4] = (unsigned int)(box->y1 - thickness), op[5] = 0, op[6] = box->rx > thickness ? (unsigned int)(box->rx - thickness) : 0;
+                op[7] = box->ry > thickness ? (unsigned int)(box->ry - thickness) : 0;
+        }
+        if (clip)
+        {
+                op += 8;
+                op[0] = 9, op[1] = (unsigned int)clip->x0, op[2] = (unsigned int)clip->y0, op[3] = (unsigned int)clip->x1, op[4] = (unsigned int)clip->y1;
+                op[5] = 0, op[6] = (unsigned int)clip->rx, op[7] = (unsigned int)clip->ry;
+        }
+        if (cut)
+        {
+                op += 8;
+                op[0] = 9, op[1] = 0, op[2] = (unsigned int)from << 8, op[3] = (unsigned int)ui->width << 8, op[4] = (unsigned int)to << 8;
+                op[5] = op[6] = op[7] = 0;
+        }
+}
+
 /*
         A box filled with a colour, cut to clip when there is one (a ripple to its
         button): over the picture, in the rows the ui may write. A row in the box's
@@ -2608,6 +2693,11 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
 
         if (!(argb >> 24))
                 return;
+        if (ui->scene)
+        {
+                ui_scene_box(ui, box, argb, false, 0, clip);
+                return;
+        }
         ui_box_radii(box, &rx, &ry);
         if (clip)
                 cut_rx = clip->rx, cut_ry = clip->ry, ui_box_radii(clip, &cut_rx, &cut_ry);
@@ -2681,6 +2771,12 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
         b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8;
 
         b32 ry, inner_ry;
+
+        if (ui->scene)
+        {
+                ui_scene_box(ui, box, argb, true, thickness, 0);
+                return;
+        }
 
         inner.x0 += thickness, inner.y0 += thickness, inner.x1 -= thickness, inner.y1 -= thickness;
         inner.rx = inner.rx > thickness ? inner.rx - thickness : 0;

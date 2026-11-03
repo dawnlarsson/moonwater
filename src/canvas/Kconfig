@@ -45,7 +45,7 @@ menu "Moonwater Canvas"
     config MOONWATER_WAYLAND
         bool "Wayland clients on Canvas's desktop"
         depends on MOONWATER_CANVAS
-        default n
+        default y
         help
           Build the Wayland shim into the compositor (src/canvas/wayland.c
           and wayland_host.c, userspace): the compositor listens on
@@ -53,7 +53,7 @@ menu "Moonwater Canvas"
           clients as it shows its own programs' (a row of the window table
           each), with their keys, pointer, frames, clipboard and sizes.
           It is not kernel code and adds nothing to the kernel's image.
-          Off by default: with it off nothing of it is compiled and nothing
+          On by default: with it off nothing of it is compiled and nothing
           a Wayland client sends can reach the compositor.
 
     config MOONWATER_X11
