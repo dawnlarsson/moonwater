@@ -445,16 +445,45 @@ static const unsigned int gpu_k_glass[] = {
     0x2c161088, 0x3616161d, 0xd76d0008, 0x042dff08, 0x00010001, 0x2c101088, 0x3610101d, 0x2c181288, 0x3618181d, 0xd76d0009,
     0x0431ff09, 0x00010001, 0x2c121288, 0x3612121d, 0x361a081d, 0x2c1c0888, 0x361c1c1d, 0x4a101b08, 0x4a121d09, 0xcc0d4008,
     0x1a003b08, 0xcc0d4009, 0x1a003b09, 0xd76f0004, 0x04211109, 0x4a040219, 0x34040482, 0xdc708000, 0x000a0402, 0xbf810000};
+static const unsigned int gpu_k_scene[] = {
+    0xe0ac0007, 0x0000018c, 0xf4080202, 0xfa000008, 0xf4080302, 0xfa000018, 0x3602008f, 0x2c040084, 0x8f1c8606, 0x8f1d8207,
+    0xbf8cc07f, 0x8010bf0c, 0x90108610, 0x8011bf0e, 0x90118611, 0x90128407, 0x93121012, 0x80120612, 0x8f138312, 0x8014130a,
+    0x8215800b, 0xf404058a, 0xfa000000, 0x93181110, 0x8f188318, 0xbf8cc07f, 0xbf068017, 0xbf8500f8, 0x8f198516, 0x80181918,
+    0x801a180a, 0x821b800b, 0xf40c080d, 0xfa000000, 0xd7460003, 0x00710501, 0x4a08041d, 0x7d88080e, 0xd4c4001e, 0x0202060c,
+    0x87ea1e6a, 0xbe80246a, 0xbf8800e9, 0xd543000a, 0x040c1b04, 0x34141482, 0x4a220681, 0x4a240682, 0x4a260683, 0x8028c01c,
+    0x83a80c28, 0x8029841d, 0x83a90e29, 0xbf8cc07f, 0xbf078020, 0xbf850009, 0xbf081c21, 0xbf850007, 0xbf0a2823, 0xbf850005,
+    0xbf081d22, 0xbf850003, 0xbf0a2924, 0xbf850001, 0xbf820003, 0xdc388000, 0x0508000a, 0xbf8c3f70, 0xbecb03ff, 0x00ff00ff,
+    0xbeac0380, 0xbead0380, 0xbf09172c, 0xbf8500c6, 0x8f2e852c, 0x80302e1a, 0x8231801b, 0xf40c0e18, 0xfa000000, 0x802c812c,
+    0xbf8cc07f, 0xbf0b1c3b, 0xbf85fff5, 0x8032c01c, 0xbf093239, 0xbf85fff2, 0xbf0b1d3c, 0xbf85fff0, 0x8033841d, 0xbf09333a,
+    0xbf85ffed, 0x9034983d, 0xbf068038, 0xbf850002, 0xbf068034, 0xbf85ffe8, 0xbead0381, 0x83b50c3b, 0xd4c3004c, 0x0202083a,
+    0x7d88083c, 0x87cc6a4c, 0xd4c30040, 0x02020639, 0x7d880635, 0x87c06a40, 0x87c04c40, 0xd4c30042, 0x02022239, 0x7d882235,
+    0x87c26a42, 0x87c24c42, 0xd4c30044, 0x02022439, 0x7d882435, 0x87c46a44, 0x87c44c44, 0xd4c30046, 0x02022639, 0x7d882635,
+    0x87c66a46, 0x87c64c46, 0xbf068038, 0xbf84000a, 0x7e1e023d, 0xd5010005, 0x01021f05, 0xd5010006, 0x010a1f06, 0xd5010007,
+    0x01121f07, 0xd5010008, 0x011a1f08, 0xbf82ffc2, 0x80c834ff, 0x000000ff, 0x87494b3d, 0x904a883d, 0x874a4b4a, 0x36280a4b,
+    0x2c2a0a88, 0x362a2a4b, 0xd5430014, 0x03fc9114, 0x007f007f, 0xd5430015, 0x03fc9115, 0x007f007f, 0x2c2c2888, 0x362c2c4b,
+    0xd76d0014, 0x0459ff14, 0x00010001, 0x2c282888, 0x3628284b, 0x2c2c2a88, 0x362c2c4b, 0xd76d0015, 0x0459ff15, 0x00010001,
+    0x2c2a2a88, 0x362a2a4b, 0x4a282849, 0x4a2a2a4a, 0xcc0d4014, 0x1a009714, 0xcc0d4015, 0x1a009715, 0xd76f0017, 0x04511115,
+    0xd5010005, 0x01022f05, 0x36280c4b, 0x2c2a0c88, 0x362a2a4b, 0xd5430014, 0x03fc9114, 0x007f007f, 0xd5430015, 0x03fc9115,
+    0x007f007f, 0x2c2c2888, 0x362c2c4b, 0xd76d0014, 0x0459ff14, 0x00010001, 0x2c282888, 0x3628284b, 0x2c2c2a88, 0x362c2c4b,
+    0xd76d0015, 0x0459ff15, 0x00010001, 0x2c2a2a88, 0x362a2a4b, 0x4a282849, 0x4a2a2a4a, 0xcc0d4014, 0x1a009714, 0xcc0d4015,
+    0x1a009715, 0xd76f0017, 0x04511115, 0xd5010006, 0x010a2f06, 0x36280e4b, 0x2c2a0e88, 0x362a2a4b, 0xd5430014, 0x03fc9114,
+    0x007f007f, 0xd5430015, 0x03fc9115, 0x007f007f, 0x2c2c2888, 0x362c2c4b, 0xd76d0014, 0x0459ff14, 0x00010001, 0x2c282888,
+    0x3628284b, 0x2c2c2a88, 0x362c2c4b, 0xd76d0015, 0x0459ff15, 0x00010001, 0x2c2a2a88, 0x362a2a4b, 0x4a282849, 0x4a2a2a4a,
+    0xcc0d4014, 0x1a009714, 0xcc0d4015, 0x1a009715, 0xd76f0017, 0x04511115, 0xd5010007, 0x01122f07, 0x3628104b, 0x2c2a1088,
+    0x362a2a4b, 0xd5430014, 0x03fc9114, 0x007f007f, 0xd5430015, 0x03fc9115, 0x007f007f, 0x2c2c2888, 0x362c2c4b, 0xd76d0014,
+    0x0459ff14, 0x00010001, 0x2c282888, 0x3628284b, 0x2c2c2a88, 0x362c2c4b, 0xd76d0015, 0x0459ff15, 0x00010001, 0x2c2a2a88,
+    0x362a2a4b, 0x4a282849, 0x4a2a2a4a, 0xcc0d4014, 0x1a009714, 0xcc0d4015, 0x1a009715, 0xd76f0017, 0x04511115, 0xd5010008,
+    0x011a2f08, 0xbf82ff38, 0xbf06802d, 0xbf850002, 0xdc788000, 0x0008050a, 0xbf810000};
 // gpu.asm end
 
-// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (the clang ones, 4 and 5, to be taken over).
+// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4).
 static const struct { const unsigned int *words; unsigned int size; } gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
-    {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}};
+    {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + 256 * 6 <= GPU_DATA - 1024 ? 1 : -1]; // they end before the pixels begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + 256 * 7 <= GPU_DATA - 1024 ? 1 : -1]; // they end before the pixels begin
 
 #define gpu_io(dir, n, size, a) (system_control(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 
@@ -486,7 +515,7 @@ static b32 gpu_start(positive bytes)
 }
 
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
-// s to d, 1 fill d with v, 2 tone v over d, 3 glass: s over g into d (v the light side, x0 y0 where the rect is, for the grain), 4 a scene without boxes, 5 with (gpu_scene picks).
+// s to d, 1 fill d with v, 2 tone v over d, 3 glass: s over g into d (v the light side, x0 y0 where the rect is, for the grain), 4 a scene without boxes, 5 with, 6 without by hand (gpu_scene picks).
 struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows; };
 #define GPU_ARGS ((struct gpu_args address_to)(gpu.at + 128))
 
@@ -533,5 +562,7 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         for (i = 0; i < n; i++)
                 if (ops[8 * i] == 2)
                         a->op = 5;
+        if (a->op == 4 && !(w & 3) && !(pitch & 3) && !(d_at & 15))
+                a->op = 6;
         return gpu_run();
 }

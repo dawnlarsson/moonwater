@@ -185462,7 +185462,10 @@ b32 main(void)
         // 3. A scene: random fills and tones in order over a random picture, ops that run off the edge and ops with no area among them,
         // against the CPU's routines applied in the same order; the whole picture compared.
         {
-                enum { SWD = 997, SHT = 701, SP = 1024, N = 300 };
+                enum { SHT = 701, SP = 1024, N = 300 };
+                for (int pass = 0; pass < 2; pass++)
+                {
+                unsigned int SWD = pass ? 1000 : 997;
                 unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to sd = (unsigned int address_to)((p8 address_to)gpu.at + scene_at);
                 positive bad = 0;
 
@@ -185494,6 +185497,7 @@ b32 main(void)
                                         string_format(log, "  FAIL gpu scene: pixel %p,%p is %p, wanted %p\n", (positive)x, (positive)y, (positive)sd[(positive)y * SP + x],
                                                       (positive)gpu_want[(positive)y * SP + x]);
                         }
+                }
         }
 
         // 4. The same at 8K: a window's clear and 199 more fills and tones, GPU (bins and run, then the run alone) against the CPU applying them, best of 5.
