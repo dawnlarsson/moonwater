@@ -45,6 +45,14 @@
             layout      UTF-8 through lib.util.c's decoder, advances,
                         kerning, a chain of faces for missing glyphs, line
                         metrics, and the terminal's monospace cell
+            bidi        UAX #9 in full on text in logical order (embeddings,
+                        overrides, isolates, brackets, mirroring), checked
+                        against all of BidiTest.txt and BidiCharacterTest.txt
+            shaping     GSUB lookups 1-8 and GPOS 1-9 as HarfBuzz applies
+                        them, for Arabic (joining forms, ligatures, marks
+                        stacked by class, presentation forms for a face with
+                        no layout tables) and for the default features
+                        (Hebrew points): glyph for glyph what hb-shape gives
             turning     a line a quarter turn either way, for a band on the
                         side of a screen, each glyph's coverage turned byte
                         for byte as it is laid
@@ -52,8 +60,10 @@
         Refused at load: CFF and CFF2 outlines, variable fonts (fvar), and
         colour fonts with no outlines (CBDT, sbix). Not done: bytecode hinting
         (outlines are drawn unhinted, then fitted as above), COLR layers (the
-        monochrome base glyphs are drawn), and shaping beyond one glyph per
-        code point.
+        monochrome base glyphs are drawn), shaping of scripts other than
+        Arabic and Hebrew (Latin, Greek, Cyrillic and CJK are a glyph a code
+        point as they always were; Syriac, N'Ko and the Indic scripts are not
+        joined or reordered), and right to left text in the terminal's cells.
 
         THE ARITHMETIC, AND HOW FAR FROM EXACT EACH STEP IS
 
@@ -215,12 +225,49 @@
         which is what makes a glyph one table lookup a pixel; FONT_UNKNOWN
         reads every pixel under the glyph and blends with it instead.
 
+        void font_fallback(font_engine *engine, const font_face *regular,
+                           const font_face *bold)
+                Adds a face behind the caller's chain (up to four, in the order
+                added): a code point no face of the chain has is looked for in
+                them. bold may be null; asked for bold (FONT_BOLD) the slot
+                is the bold, and the regular emboldened by the engine when
+                there is none. A place's face is then count + the slot, which
+                font_face_at turns back into the face for the flags the line
+                was laid out with.
+
+        positive font_segments(font_engine *engine, const font_face *const
+                               *faces, p32 count, const p8 *text, positive length,
+                               p32 size, p32 flags, const p32 *cuts, positive n,
+                               b32 *left, b32 *right, p8 *level)
+                Where n segments of a line (cuts[0..n] ascending byte offsets,
+                0 and length at the ends: the caller's grapheme clusters) sit:
+                left[k] and right[k] in 16.16 pixels from the pen font_draw
+                starts at, level[k] the bidi level. A glyph for several
+                segments is shared among them in equal parts, the first in
+                reading order first; marks go with their base. Answers n, 0
+                for more than 4096 segments or 8192 bytes.
+
+        p32 font_base_level(const p8 *text, positive length, p32 flags)
+        p32 font_is_simple(const p8 *text, positive length)
+                The paragraph level of the first paragraph under the flags (0
+                or 1), and whether the text has nothing right to left, no
+                Arabic number and no directional control: the text every
+                function above lays out a glyph a code point from the left as
+                it always did, unless FONT_RTL is asked.
+
         flags: FONT_UNHINTED draws the outline as the font gives it,
         FONT_DARKEN asks for stem darkening, which font_draw and font_cell
         give dark text on a lighter ground unasked and FONT_UNDARKENED takes
         away, FONT_UNKERNED leaves pairs alone, FONT_OBLIQUE slants the face
         12 degrees for an italic it does not have, FONT_EMBOLDEN thickens it
-        by a 24th of the size for a bold it does not have.
+        by a 24th of the size for a bold it does not have. FONT_RTL makes the
+        paragraph direction right to left, FONT_AUTO takes it from the first
+        strong character (RTL, if given, serving where there is none), and
+        FONT_BOLD asks for the bold of the fallback faces. Text is in logical
+        order and every call lays the whole line, reordered: the glyphs
+        come out, drawn and measured, in the order they read left to right
+        from the pen. Each font_place also says the lift of the glyph (y_offset,
+        16.16, up), the byte its first code point is at and its bidi level.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -243,6 +290,11 @@
 #define FONT_OBLIQUE 8
 #define FONT_EMBOLDEN 16
 #define FONT_UNDARKENED 32
+//      The line's paragraph direction is right to left; the first strong character decides it (the direction above
+//      then serving where there is none); and the fallback faces' bold is asked for.
+#define FONT_RTL 64
+#define FONT_AUTO 128
+#define FONT_BOLD 256
 
 //      Which way font_draw_turned turns a run: the side its glyphs' tops face.
 #define FONT_TOPS_RIGHT 1
@@ -294,13 +346,30 @@
 #define FONT_NEAR 512
 #define FONT_EVENTS 3840
 
+/*      What a line that needs more than a glyph a code point may cost: a paragraph of at most FONT_PARA code points
+        (a longer one is laid as two), shaped FONT_UNIT of them at a time into at most FONT_GLYPHS glyphs. The lookups
+        a shape plan runs, the context a rule may match, how deep a rule may call another lookup, the faces behind the
+        caller's chain, and the work a face's lookups may do for a glyph before they are given up on. */
+#define FONT_PARA 4096
+#define FONT_UNIT 1024
+#define FONT_GLYPHS 4096
+#define FONT_STEPS 64
+#define FONT_MATCH 64
+#define FONT_NESTING 6
+#define FONT_FALLBACKS 4
+#define FONT_PLANS 16
+#define FONT_OPS 2048
+#define FONT_SEGMENT_BYTES 8192
+#define FONT_SEGMENTS 4096
+#define FONT_STACK 125
+
 #define FONT_TAG(a, b, c, d) ((p32)(a) << 24 | (p32)(b) << 16 | (p32)(c) << 8 | (p32)(d))
 
 typedef struct
 {
         const p8 address_to data;
         positive size;
-        positive glyf, glyf_size, loca, hmtx, cmap, lookup_list, kern;
+        positive glyf, glyf_size, loca, hmtx, cmap, lookup_list, kern, gsub, gpos, gdef;
         p32 glyphs, metrics, units, id;
         p16 lookups[FONT_LOOKUPS];
         p8 lookup_count, long_loca, cmap_format, symbol;
@@ -330,8 +399,11 @@ typedef struct
 
 typedef struct
 {
-        p32 glyph, face;
+        p32 glyph;
+        p16 face, level;    // the face's index (FONT_DRAWN for a cell); the bidi level it was laid at, odd reading right to left
         b64 x, advance;     // 16.16: a run of a few thousand glyphs is past 32 bits
+        b32 y_offset;       // 16.16, up: what a mark or a cursive join lifts the glyph by
+        p32 cluster;        // the byte of the text the glyph's first code point is at
 } font_place;
 
 typedef struct
@@ -453,6 +525,56 @@ typedef struct
         font_bitmap box;
 } font_recent;
 
+/*      A glyph on its way through the layout tables: its id, the code point (index in the unit) it came from, the
+        features that apply to it, and what the tables ask of it. props are the GDEF class (2 base, 4 ligature, 8
+        mark) with 16 for a substituted glyph, 32 for a ligated one and 64 for one of a multiple substitution, and a
+        mark's attachment class above; lig is a ligature's id and the component a mark stands in, or its count. */
+typedef struct
+{
+        p32 glyph, cluster, mask, code;
+        p16 props;
+        p8 lig, unicode;
+} font_item;
+
+//      Where the tables put a glyph, in font units: its advance, its offset from the pen, and the glyph it hangs from.
+typedef struct
+{
+        b32 advance, x, y;
+        b16 chain;
+        p8 attach;
+} font_shift;
+
+/*      What a face runs for one script: its GSUB and GPOS lookups in the order they apply (the features' stages,
+        and in a stage by index), each with the glyphs it is for (the mask) and which joiners it may not skip. */
+typedef struct
+{
+        p32 face;
+        p8 kind, fallback, steps[2];
+        p16 mask_of[8];
+        p16 lookup[2][FONT_STEPS], mask[2][FONT_STEPS];
+        p8 manual[2][FONT_STEPS], stage_of[2][FONT_STEPS];
+} font_plan;
+
+typedef struct
+{
+        const font_face address_to regular, address_to bold;
+} font_fallback_slot;
+
+//      One paragraph in hand: the text as code points, then the bidi algorithm's, then its units, then a unit shaped.
+typedef struct
+{
+        p32 code[FONT_PARA], at[FONT_PARA + 1], glyph[FONT_PARA];
+        p8 orig[FONT_PARA], type[FONT_PARA], level[FONT_PARA], base[FONT_PARA], temp[FONT_PARA];
+        p16 match[FONT_PARA], run_of[FONT_PARA], flat[FONT_PARA], run_start[FONT_PARA + 1], seq[FONT_PARA],
+            pair[FONT_PARA];
+        p16 face[FONT_PARA], unit_start[FONT_PARA + 1], unit_order[FONT_PARA], unit_face[FONT_PARA];
+        p8 unit_level[FONT_PARA], unit_shape[FONT_PARA];
+        font_item item[2][FONT_GLYPHS];
+        font_shift shift[FONT_GLYPHS];
+        p8 action[FONT_GLYPHS];
+        b64 span_left[FONT_PARA], span_right[FONT_PARA];
+} font_work;
+
 typedef struct
 {
         p32 hint_until;         // largest size in pixels that is fitted (64, a terminal's largest)
@@ -504,6 +626,14 @@ typedef struct
         font_bitmap run[FONT_RUN];
         b16 run_dx[FONT_RUN], run_dy[FONT_RUN], run_top[FONT_RUN], run_bottom[FONT_RUN];
         p8 strip[FONT_STRIP];
+
+        //      Text that is more than a glyph a code point, last, for the pages of an engine that never meets any
+        //      are never touched: the faces behind the caller's chain, the shape plans made for faces, and the
+        //      paragraph being laid.
+        font_fallback_slot fallback[FONT_FALLBACKS];
+        p32 fallbacks, plan_turn;
+        font_plan plan[FONT_PLANS];
+        font_work work;
 } font_engine;
 
 /*
@@ -669,8 +799,9 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
             FONT_TAG('k', 'e', 'r', 'n'), FONT_TAG('f', 'v', 'a', 'r'),
             FONT_TAG('C', 'F', 'F', ' '), FONT_TAG('C', 'F', 'F', '2'),
             FONT_TAG('C', 'B', 'D', 'T'), FONT_TAG('s', 'b', 'i', 'x'),
+            FONT_TAG('G', 'S', 'U', 'B'), FONT_TAG('G', 'D', 'E', 'F'),
         };
-        enum { CMAP, HEAD, HHEA, HMTX, MAXP, LOCA, GLYF, OS2, POST, GPOS, KERN, FVAR, CFF, CFF2, CBDT, SBIX, TABLES };
+        enum { CMAP, HEAD, HHEA, HMTX, MAXP, LOCA, GLYF, OS2, POST, GPOS, KERN, FVAR, CFF, CFF2, CBDT, SBIX, GSUB, GDEF, TABLES };
         positive at[TABLES] = {0}, length[TABLES] = {0}, sfnt = 0;
 
         *face = (font_face){.data = bytes, .size = size};
@@ -794,7 +925,14 @@ b32 font_load(font_face address_to face, const p8 address_to bytes, positive siz
         }
 
         if (length[GPOS] >= 10)
+        {
+                face->gpos = at[GPOS];
                 font_kern_lookups(face, at[GPOS]);
+        }
+        if (length[GSUB] >= 10)
+                face->gsub = at[GSUB];
+        if (length[GDEF] >= 12)
+                face->gdef = at[GDEF];
 
         if (!face->x_height)
                 face->x_height = (b16)font_height_of(face, font_glyph(face, 'x'));
@@ -924,11 +1062,10 @@ static p32 font_class(const font_face address_to face, positive table, p32 glyph
         return low < count && font_u16(face, at) <= glyph ? font_u16(face, at + 4) : 0;
 }
 
-//      One pair adjustment subtable: whether it applies to the pair, and the
-//      first glyph's x advance from it when it does. A subtable that covers
-//      the first glyph but not the pair lets the next one try.
-static bool font_pair(const font_face address_to face, positive table, p32 left,
-                      p32 right, b32 address_to value)
+//      One pair adjustment subtable: whether it applies to the pair, and where the value records of the two glyphs
+//      are when it does. A subtable that covers the first glyph but not the pair lets the next one try.
+static bool font_pair_at(const font_face address_to face, positive table, p32 left, p32 right, positive address_to first_at,
+                         positive address_to second_at)
 {
         p32 format = font_u16(face, table), first = font_u16(face, table + 4);
         positive record = 2 * (positive)(font_bits(first) + font_bits(font_u16(face, table + 6)));
@@ -963,7 +1100,19 @@ static bool font_pair(const font_face address_to face, positive table, p32 left,
         }
         else
                 return false;
+        *first_at = at;
+        *second_at = at + 2 * (positive)font_bits(first);
+        return true;
+}
 
+//      The first glyph's x advance from it when it applies: kerning.
+static bool font_pair(const font_face address_to face, positive table, p32 left, p32 right, b32 address_to value)
+{
+        positive at, second;
+        p32 first = font_u16(face, table + 4);
+
+        if (!font_pair_at(face, table, left, right, &at, &second))
+                return false;
         if (first & 4)
                 *value += font_i16(face, at + 2 * (positive)font_bits(first & 3));
         return true;
@@ -1029,6 +1178,2943 @@ b32 font_kerning(const font_face address_to face, p32 left, p32 right, p32 size)
         b32 value = font_kerning_units(face, left, right);
 
         return value ? font_fixed(face, value, size) : 0;
+}
+
+/*
+        Unicode, for text that is not left to right and not a glyph a code
+        point. The tables are the UCD's of the version named, as data: the
+        Bidi_Class of every code point, the pairs that mirror and the
+        brackets that pair, how Arabic letters join, the combining classes
+        of the Hebrew and Arabic marks (HarfBuzz's modified ones, which put
+        a shadda before its vowel), the canonical decompositions of the
+        letters those blocks hold precomposed, and the presentation forms a
+        face with no layout tables is shaped by.
+*/
+/* BEGIN GENERATED: Unicode 18.0.0 tables (UCD DerivedBidiClass, BidiMirroring, BidiBrackets, DerivedJoiningType,
+   DerivedCombiningClass, UnicodeData); a table here is data, not code, and is rebuilt from the UCD files. */
+#define FONT_UNICODE "18.0.0"
+
+enum { FONT_BIDI_L = 0, FONT_BIDI_R = 1, FONT_BIDI_AL = 2, FONT_BIDI_EN = 3, FONT_BIDI_ES = 4, FONT_BIDI_ET = 5, FONT_BIDI_AN = 6, FONT_BIDI_CS = 7, FONT_BIDI_NSM = 8, FONT_BIDI_BN = 9, FONT_BIDI_B = 10, FONT_BIDI_S = 11, FONT_BIDI_WS = 12, FONT_BIDI_ON = 13, FONT_BIDI_LRE = 14, FONT_BIDI_LRO = 15, FONT_BIDI_RLE = 16, FONT_BIDI_RLO = 17, FONT_BIDI_PDF = 18, FONT_BIDI_LRI = 19, FONT_BIDI_RLI = 20, FONT_BIDI_FSI = 21, FONT_BIDI_PDI = 22 };
+
+//      Bidi_Class of U+0000 to U+00FF, and from U+0100 on the ranges: (first code point << 5) | class, the last whose first is not above.
+static const p8 font_bidi_flat[256] = {
+    9, 9, 9, 9, 9, 9, 9, 9, 9, 11, 10, 11, 12, 10, 9, 9,
+    9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 11,
+    12, 13, 13, 5, 5, 5, 13, 13, 13, 13, 13, 4, 7, 4, 7, 7,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 7, 13, 13, 13, 13, 13,
+    13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 13, 13, 13, 13, 13,
+    13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 13, 13, 13, 13, 9,
+    9, 9, 9, 9, 9, 10, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    7, 13, 5, 5, 5, 5, 13, 13, 13, 13, 0, 13, 13, 9, 13, 13,
+    5, 5, 3, 3, 13, 0, 13, 13, 13, 3, 0, 13, 13, 13, 13, 13,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+#define FONT_BIDI_RANGES 1225
+static const p32 font_bidi_ranges[1225] = {
+    0x2000, 0x572d, 0x5760, 0x584d, 0x5a00, 0x5a4d, 0x5c00, 0x5cad,
+    0x5dc0, 0x5ded, 0x6008, 0x6e00, 0x6e8d, 0x6ec0, 0x6fcd, 0x6fe0,
+    0x708d, 0x70c0, 0x70ed, 0x7100, 0x7ecd, 0x7ee0, 0x9068, 0x9140,
+    0xb14d, 0xb160, 0xb1ad, 0xb1e5, 0xb201, 0xb228, 0xb7c1, 0xb7e8,
+    0xb801, 0xb828, 0xb861, 0xb888, 0xb8c1, 0xb8e8, 0xb941, 0xc006,
+    0xc0cd, 0xc102, 0xc125, 0xc162, 0xc187, 0xc1a2, 0xc1cd, 0xc208,
+    0xc362, 0xc968, 0xcc06, 0xcd45, 0xcd66, 0xcda2, 0xce08, 0xce22,
+    0xdac8, 0xdba6, 0xdbcd, 0xdbe8, 0xdca2, 0xdce8, 0xdd2d, 0xdd48,
+    0xddc2, 0xde03, 0xdf42, 0xe228, 0xe242, 0xe608, 0xe962, 0xf4c8,
+    0xf622, 0xf801, 0xfd68, 0xfe81, 0xfecd, 0xff41, 0xffa8, 0xffc1,
+    0x102c8, 0x10341, 0x10368, 0x10481, 0x104a8, 0x10501, 0x10528, 0x105c1,
+    0x10b28, 0x10b81, 0x10c02, 0x11206, 0x11242, 0x112e8, 0x11402, 0x11948,
+    0x11c46, 0x11c68, 0x12060, 0x12748, 0x12760, 0x12788, 0x127a0, 0x12828,
+    0x12920, 0x129a8, 0x129c0, 0x12a28, 0x12b00, 0x12c48, 0x12c80, 0x13028,
+    0x13040, 0x13788, 0x137a0, 0x13828, 0x138a0, 0x139a8, 0x139c0, 0x13c48,
+    0x13c80, 0x13e45, 0x13e80, 0x13f65, 0x13f80, 0x13fc8, 0x13fe0, 0x14028,
+    0x14060, 0x14788, 0x147a0, 0x14828, 0x14860, 0x148e8, 0x14920, 0x14968,
+    0x149c0, 0x14a28, 0x14a40, 0x14e08, 0x14e40, 0x14ea8, 0x14ec0, 0x15028,
+    0x15060, 0x15788, 0x157a0, 0x15828, 0x158c0, 0x158e8, 0x15920, 0x159a8,
+    0x159c0, 0x15c48, 0x15c80, 0x15e25, 0x15e40, 0x15f48, 0x16000, 0x16028,
+    0x16040, 0x16788, 0x167a0, 0x167e8, 0x16800, 0x16828, 0x168a0, 0x169a8,
+    0x169c0, 0x16a68, 0x16ae0, 0x16c48, 0x16c80, 0x17048, 0x17060, 0x17808,
+    0x17820, 0x179a8, 0x179c0, 0x17e6d, 0x17f25, 0x17f4d, 0x17f60, 0x18008,
+    0x18020, 0x18088, 0x180a0, 0x18788, 0x187a0, 0x187c8, 0x18820, 0x188c8,
+    0x18920, 0x18948, 0x189c0, 0x18aa8, 0x18ae0, 0x18c48, 0x18c80, 0x18f0d,
+    0x18fe0, 0x19028, 0x19040, 0x19788, 0x197a0, 0x19988, 0x199c0, 0x19c48,
+    0x19c80, 0x1a008, 0x1a040, 0x1a768, 0x1a7a0, 0x1a828, 0x1a8a0, 0x1a9a8,
+    0x1a9c0, 0x1ac48, 0x1ac80, 0x1b028, 0x1b040, 0x1b948, 0x1b960, 0x1ba48,
+    0x1baa0, 0x1bac8, 0x1bae0, 0x1c628, 0x1c640, 0x1c688, 0x1c760, 0x1c7e5,
+    0x1c800, 0x1c8e8, 0x1c9e0, 0x1d628, 0x1d640, 0x1d688, 0x1d7a0, 0x1d908,
+    0x1d9e0, 0x1e308, 0x1e340, 0x1e6a8, 0x1e6c0, 0x1e6e8, 0x1e700, 0x1e728,
+    0x1e74d, 0x1e7c0, 0x1ee28, 0x1efe0, 0x1f008, 0x1f0a0, 0x1f0c8, 0x1f100,
+    0x1f1a8, 0x1f300, 0x1f328, 0x1f7a0, 0x1f8c8, 0x1f8e0, 0x205a8, 0x20620,
+    0x20648, 0x20700, 0x20728, 0x20760, 0x207a8, 0x207e0, 0x20b08, 0x20b40,
+    0x20bc8, 0x20c20, 0x20e28, 0x20ea0, 0x21048, 0x21060, 0x210a8, 0x210e0,
+    0x211a8, 0x211c0, 0x213a8, 0x213c0, 0x26ba8, 0x26c00, 0x2720d, 0x27340,
+    0x2800d, 0x28020, 0x2d00c, 0x2d020, 0x2d36d, 0x2d3a0, 0x2e248, 0x2e2a0,
+    0x2e648, 0x2e680, 0x2ea48, 0x2ea80, 0x2ee48, 0x2ee80, 0x2f688, 0x2f6c0,
+    0x2f6e8, 0x2f7c0, 0x2f8c8, 0x2f8e0, 0x2f928, 0x2fa80, 0x2fb65, 0x2fb80,
+    0x2fba8, 0x2fbc0, 0x2fe0d, 0x2ff40, 0x3000d, 0x30168, 0x301c9, 0x301e8,
+    0x30200, 0x310a8, 0x310e0, 0x31528, 0x31540, 0x32408, 0x32460, 0x324e8,
+    0x32520, 0x32648, 0x32660, 0x32728, 0x32780, 0x3280d, 0x32820, 0x3288d,
+    0x328c0, 0x33bcd, 0x34000, 0x342e8, 0x34320, 0x34368, 0x34380, 0x34ac8,
+    0x34ae0, 0x34b08, 0x34be0, 0x34c08, 0x34c20, 0x34c48, 0x34c60, 0x34ca8,
+    0x34da0, 0x34e68, 0x34fa0, 0x34fe8, 0x35000, 0x35608, 0x35e20, 0x36008,
+    0x36080, 0x36688, 0x366a0, 0x366c8, 0x36740, 0x36d68, 0x36e80, 0x37008,
+    0x37040, 0x37448, 0x374c0, 0x37508, 0x37540, 0x37568, 0x375c0, 0x37cc8,
+    0x37ce0, 0x37d08, 0x37d40, 0x37da8, 0x37dc0, 0x37de8, 0x37e40, 0x38588,
+    0x38680, 0x386c8, 0x38700, 0x39a08, 0x39a60, 0x39a88, 0x39c20, 0x39c48,
+    0x39d20, 0x39da8, 0x39dc0, 0x39e88, 0x39ea0, 0x39f08, 0x39f40, 0x3b808,
+    0x3c000, 0x3f7ad, 0x3f7c0, 0x3f7ed, 0x3f840, 0x3f9ad, 0x3fa00, 0x3fbad,
+    0x3fc00, 0x3fdad, 0x3fe00, 0x3ffad, 0x3ffe0, 0x4000c, 0x40169, 0x401c0,
+    0x401e1, 0x4020d, 0x4050c, 0x4052a, 0x4054e, 0x40570, 0x40592, 0x405af,
+    0x405d1, 0x405e7, 0x40605, 0x406ad, 0x40887, 0x408ad, 0x40bec, 0x40c09,
+    0x40cd3, 0x40cf4, 0x40d15, 0x40d36, 0x40d49, 0x40e03, 0x40e20, 0x40e83,
+    0x40f44, 0x40f8d, 0x40fe0, 0x41003, 0x41144, 0x4118d, 0x41200, 0x41405,
+    0x41a08, 0x41e20, 0x4200d, 0x42040, 0x4206d, 0x420e0, 0x4210d, 0x42140,
+    0x4228d, 0x422a0, 0x422cd, 0x42320, 0x423cd, 0x42480, 0x424ad, 0x424c0,
+    0x424ed, 0x42500, 0x4252d, 0x42540, 0x425c5, 0x425e0, 0x4274d, 0x42780,
+    0x4280d, 0x428a0, 0x4294d, 0x429c0, 0x42a0d, 0x42c00, 0x4312d, 0x43180,
+    0x4320d, 0x44244, 0x44265, 0x4428d, 0x466c0, 0x46f6d, 0x472a0, 0x472cd,
+    0x48540, 0x4880d, 0x48960, 0x48c0d, 0x49103, 0x49380, 0x49d4d, 0x4d580,
+    0x4d5ad, 0x50000, 0x5200d, 0x56e80, 0x56ecd, 0x58000, 0x59cad, 0x59d60,
+    0x59de8, 0x59e40, 0x59f2d, 0x5a000, 0x5afe8, 0x5b000, 0x5bc08, 0x5c00d,
+    0x5cbc0, 0x5cc0d, 0x5cc80, 0x5d00d, 0x5d340, 0x5d36d, 0x5de80, 0x5e00d,
+    0x5fac0, 0x5fe0d, 0x6000c, 0x6002d, 0x600a0, 0x6010d, 0x60420, 0x60548,
+    0x605c0, 0x6060d, 0x60620, 0x606cd, 0x60700, 0x607ad, 0x60800, 0x61328,
+    0x6136d, 0x613a0, 0x6140d, 0x61420, 0x61f6d, 0x61f80, 0x6380d, 0x63cc0,
+    0x63ded, 0x63e00, 0x643ad, 0x643e0, 0x64a0d, 0x64c00, 0x64f8d, 0x64fe0,
+    0x6562d, 0x65800, 0x6598d, 0x65a00, 0x66eed, 0x66f60, 0x67bcd, 0x67c00,
+    0x67fed, 0x68000, 0x9b80d, 0x9c000, 0x14920d, 0x1498e0, 0x14c1ad, 0x14c200,
+    0x14cde8, 0x14ce6d, 0x14ce88, 0x14cfcd, 0x14d000, 0x14d3c8, 0x14d400, 0x14de08,
+    0x14de40, 0x14e00d, 0x14e440, 0x14f10d, 0x14f120, 0x150048, 0x150060, 0x1500c8,
+    0x1500e0, 0x150168, 0x150180, 0x1504a8, 0x1504e0, 0x15050d, 0x150588, 0x1505a0,
+    0x150705, 0x150740, 0x150e8d, 0x150f00, 0x151888, 0x1518c0, 0x151c08, 0x151e40,
+    0x151fe8, 0x152000, 0x1524c8, 0x1525c0, 0x1528e8, 0x152a40, 0x153008, 0x153060,
+    0x153668, 0x153680, 0x1536c8, 0x153740, 0x153788, 0x1537c0, 0x153ca8, 0x153cc0,
+    0x154528, 0x1545e0, 0x154628, 0x154660, 0x1546a8, 0x1546e0, 0x154868, 0x154880,
+    0x154988, 0x1549a0, 0x154f88, 0x154fa0, 0x155608, 0x155620, 0x155648, 0x1556a0,
+    0x1556e8, 0x155720, 0x1557c8, 0x155800, 0x155828, 0x155840, 0x155d88, 0x155dc0,
+    0x155ec8, 0x155ee0, 0x156d4d, 0x156d80, 0x157ca8, 0x157cc0, 0x157d08, 0x157d20,
+    0x157da8, 0x157dc0, 0x1f63a1, 0x1f63c8, 0x1f63e1, 0x1f6524, 0x1f6541, 0x1f6a02,
+    0x1f786d, 0x1f7a62, 0x1fa7cd, 0x1faa02, 0x1fb20d, 0x1fb242, 0x1fb90d, 0x1fba09,
+    0x1fbe02, 0x1fbfad, 0x1fc008, 0x1fc20d, 0x1fc340, 0x1fc408, 0x1fc60d, 0x1fca07,
+    0x1fca2d, 0x1fca47, 0x1fca60, 0x1fca8d, 0x1fcaa7, 0x1fcacd, 0x1fcbe5, 0x1fcc0d,
+    0x1fcc44, 0x1fcc8d, 0x1fcce0, 0x1fcd0d, 0x1fcd25, 0x1fcd6d, 0x1fcd80, 0x1fce02,
+    0x1fdfe9, 0x1fe000, 0x1fe02d, 0x1fe065, 0x1fe0cd, 0x1fe164, 0x1fe187, 0x1fe1a4,
+    0x1fe1c7, 0x1fe203, 0x1fe347, 0x1fe36d, 0x1fe420, 0x1fe76d, 0x1fe820, 0x1feb6d,
+    0x1fecc0, 0x1ffc05, 0x1ffc4d, 0x1ffca5, 0x1ffce0, 0x1ffd0d, 0x1ffde0, 0x1ffe09,
+    0x1fff2d, 0x1fffc9, 0x200000, 0x20202d, 0x202040, 0x20280d, 0x2031a0, 0x20320d,
+    0x2033a0, 0x20340d, 0x203420, 0x203fa8, 0x203fc0, 0x205c08, 0x205c23, 0x205f80,
+    0x206ec8, 0x206f60, 0x210001, 0x2123ed, 0x212401, 0x214028, 0x214081, 0x2140a8,
+    0x2140e1, 0x214188, 0x214201, 0x214708, 0x214761, 0x2147e8, 0x214801, 0x215ca8,
+    0x215ce1, 0x21672d, 0x216801, 0x21a002, 0x21a488, 0x21a502, 0x21a606, 0x21a742,
+    0x21a806, 0x21a941, 0x21ad28, 0x21adcd, 0x21ade1, 0x21cc06, 0x21cfe1, 0x21d568,
+    0x21d5a1, 0x21d802, 0x21d968, 0x21da0d, 0x21db22, 0x21de08, 0x21e001, 0x21e602,
+    0x21e8c8, 0x21ea22, 0x21ee01, 0x21f048, 0x21f0c1, 0x220000, 0x220028, 0x220040,
+    0x220708, 0x2208e0, 0x220a4d, 0x220cc0, 0x220e08, 0x220e20, 0x220e68, 0x220ea0,
+    0x220fe8, 0x221040, 0x221668, 0x2216e0, 0x221728, 0x221760, 0x221848, 0x221860,
+    0x222008, 0x222060, 0x2224e8, 0x222580, 0x2225a8, 0x2226a0, 0x222e68, 0x222e80,
+    0x223008, 0x223040, 0x2236c8, 0x2237e0, 0x223928, 0x2239a0, 0x2239e8, 0x223a00,
+    0x2245e8, 0x224640, 0x224688, 0x2246a0, 0x2246c8, 0x224700, 0x2247c8, 0x2247e0,
+    0x224828, 0x224840, 0x225be8, 0x225c00, 0x225c68, 0x225d60, 0x226008, 0x226040,
+    0x226768, 0x2267a0, 0x226808, 0x226820, 0x226cc8, 0x226da0, 0x226e08, 0x226ea0,
+    0x227768, 0x227820, 0x2279c8, 0x2279e0, 0x227a08, 0x227a20, 0x227a48, 0x227a60,
+    0x227c28, 0x227c60, 0x228708, 0x228800, 0x228848, 0x2288a0, 0x2288c8, 0x2288e0,
+    0x228bc8, 0x228be0, 0x229668, 0x229720, 0x229748, 0x229760, 0x2297e8, 0x229820,
+    0x229848, 0x229880, 0x22b648, 0x22b6c0, 0x22b788, 0x22b7c0, 0x22b7e8, 0x22b820,
+    0x22bb88, 0x22bbc0, 0x22c668, 0x22c760, 0x22c7a8, 0x22c7c0, 0x22c7e8, 0x22c820,
+    0x22cc0d, 0x22cda0, 0x22d568, 0x22d580, 0x22d5a8, 0x22d5c0, 0x22d608, 0x22d6c0,
+    0x22d6e8, 0x22d700, 0x22e3a8, 0x22e3c0, 0x22e3e8, 0x22e400, 0x22e448, 0x22e4c0,
+    0x22e4e8, 0x22e580, 0x2305e8, 0x230700, 0x230728, 0x230760, 0x232768, 0x2327a0,
+    0x2327c8, 0x2327e0, 0x232868, 0x232880, 0x233a88, 0x233b00, 0x233b48, 0x233b80,
+    0x233c08, 0x233c20, 0x234028, 0x2340e0, 0x234128, 0x234160, 0x234668, 0x234720,
+    0x234768, 0x2347e0, 0x2348e8, 0x234900, 0x234a28, 0x234ae0, 0x234b28, 0x234b80,
+    0x235148, 0x2352e0, 0x235308, 0x235340, 0x236c08, 0x236c20, 0x236c48, 0x236ca0,
+    0x236cc8, 0x236ce0, 0x238608, 0x2386e0, 0x238708, 0x2387c0, 0x239248, 0x239500,
+    0x239548, 0x239620, 0x239648, 0x239680, 0x2396a8, 0x2396e0, 0x23a628, 0x23a6e0,
+    0x23a748, 0x23a760, 0x23a788, 0x23a7c0, 0x23a7e8, 0x23a8c0, 0x23a8e8, 0x23a900,
+    0x23b208, 0x23b240, 0x23b2a8, 0x23b2c0, 0x23b2e8, 0x23b300, 0x23be08, 0x23be20,
+    0x23de68, 0x23dea0, 0x23e008, 0x23e040, 0x23e6c8, 0x23e760, 0x23e808, 0x23e820,
+    0x23e848, 0x23e860, 0x23eb48, 0x23eb60, 0x23faad, 0x23fba5, 0x23fc2d, 0x23fe40,
+    0x268808, 0x268820, 0x2688e8, 0x268ac0, 0x2c23c8, 0x2c2540, 0x2c25a8, 0x2c2600,
+    0x2d5e08, 0x2d5ea0, 0x2d6608, 0x2d66e0, 0x2de9e8, 0x2dea00, 0x2df1e8, 0x2df260,
+    0x2dfc4d, 0x2dfc60, 0x2dfc88, 0x2dfca0, 0x3793a8, 0x3793e0, 0x379409, 0x379480,
+    0x39800d, 0x399ac0, 0x399e03, 0x399f4d, 0x399fa0, 0x39a00d, 0x39d680, 0x39d74d,
+    0x39da20, 0x39da4d, 0x39daa0, 0x39dbad, 0x39dfc0, 0x39e008, 0x39e5c0, 0x39e608,
+    0x39e8e0, 0x3a24e8, 0x3a2520, 0x3a2ce8, 0x3a2d40, 0x3a2e69, 0x3a2f68, 0x3a3060,
+    0x3a30a8, 0x3a3180, 0x3a3548, 0x3a35c0, 0x3a3d2d, 0x3a3d60, 0x3a400d, 0x3a4848,
+    0x3a48ad, 0x3a48c0, 0x3a4b68, 0x3a4ba0, 0x3a600d, 0x3a6ae0, 0x3ad82d, 0x3ad840,
+    0x3adb6d, 0x3adb80, 0x3adf6d, 0x3adf80, 0x3ae2ad, 0x3ae2c0, 0x3ae6ad, 0x3ae6c0,
+    0x3ae9ed, 0x3aea00, 0x3aeded, 0x3aee00, 0x3af12d, 0x3af140, 0x3af52d, 0x3af540,
+    0x3af86d, 0x3af880, 0x3af9c3, 0x3b0000, 0x3b4008, 0x3b46e0, 0x3b4768, 0x3b4da0,
+    0x3b4ea8, 0x3b4ec0, 0x3b5088, 0x3b50a0, 0x3b5368, 0x3b5400, 0x3b5428, 0x3b5600,
+    0x3b600d, 0x3b63a0, 0x3c0008, 0x3c00e0, 0x3c0108, 0x3c0320, 0x3c0368, 0x3c0440,
+    0x3c0468, 0x3c04a0, 0x3c04c8, 0x3c0560, 0x3c11e8, 0x3c1200, 0x3c2608, 0x3c26e0,
+    0x3c55c8, 0x3c55e0, 0x3c5d88, 0x3c5e00, 0x3c5fe5, 0x3c6000, 0x3c9d88, 0x3c9e00,
+    0x3cbdc8, 0x3cbe00, 0x3cdc68, 0x3cdc80, 0x3cdcc8, 0x3cdce0, 0x3cddc8, 0x3cde00,
+    0x3cdea8, 0x3cdec0, 0x3d0001, 0x3d1a08, 0x3d1ae1, 0x3d2888, 0x3d2961, 0x3d8e02,
+    0x3d9801, 0x3da002, 0x3daa01, 0x3dc002, 0x3dde0d, 0x3dde42, 0x3de001, 0x3e000d,
+    0x3e0580, 0x3e060d, 0x3e1280, 0x3e140d, 0x3e15e0, 0x3e162d, 0x3e1800, 0x3e182d,
+    0x3e1a00, 0x3e1a2d, 0x3e1ec0, 0x3e2003, 0x3e216d, 0x3e2200, 0x3e25ed, 0x3e2600,
+    0x3e2d4d, 0x3e2e00, 0x3e35ad, 0x3e35c0, 0x3e4c0d, 0x3e4cc0, 0x3e600d, 0x3edb40,
+    0x3edb8d, 0x3edda0, 0x3ede0d, 0x3edfa0, 0x3ee00d, 0x3efb40, 0x3efb6d, 0x3efb80,
+    0x3efc0d, 0x3efd80, 0x3efe0d, 0x3f0180, 0x3f020d, 0x3f0900, 0x3f0a0d, 0x3f0b40,
+    0x3f0c0d, 0x3f1100, 0x3f120d, 0x3f15c0, 0x3f160d, 0x3f1780, 0x3f180d, 0x3f1840,
+    0x3f1a0d, 0x3f1b20, 0x3f200d, 0x3f4b00, 0x3f4c0d, 0x3f4dc0, 0x3f4e0d, 0x3f4fa0,
+    0x3f500d, 0x3f58e0, 0x3f590d, 0x3f5920, 0x3f598d, 0x3f5bc0, 0x3f5bed, 0x3f5d80,
+    0x3f5ded, 0x3f5f60, 0x3f600d, 0x3f7260, 0x3f728d, 0x3f7e03, 0x3f7f4d, 0x3f7f60,
+    0x3fffc9, 0x400000, 0x5fffc9, 0x600000, 0x7fffc9, 0x800000, 0x9fffc9, 0xa00000,
+    0xbfffc9, 0xc00000, 0xdfffc9, 0xe00000, 0xffffc9, 0x1000000, 0x11fffc9, 0x1200000,
+    0x13fffc9, 0x1400000, 0x15fffc9, 0x1600000, 0x17fffc9, 0x1800000, 0x19fffc9, 0x1a00000,
+    0x1bfffc9, 0x1c02008, 0x1c03e09, 0x1c20000, 0x1dfffc9, 0x1e00000, 0x1ffffc9, 0x2000000,
+    0x21fffc9,
+};
+
+//      Bidi_Mirroring_Glyph, the exact pairs: code point and the signed distance to its mirror.
+#define FONT_MIRRORS 364
+static const p32 font_mirror_code[364] = {
+    0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0xab, 0xbb,
+    0xf3a, 0xf3b, 0xf3c, 0xf3d, 0x169b, 0x169c, 0x2039, 0x203a, 0x2045, 0x2046,
+    0x207d, 0x207e, 0x208d, 0x208e, 0x2208, 0x220a, 0x220b, 0x220d, 0x2215, 0x221d,
+    0x221f, 0x2220, 0x2221, 0x2222, 0x2224, 0x223c, 0x223d, 0x2243, 0x2245, 0x224c,
+    0x2252, 0x2253, 0x2254, 0x2255, 0x2264, 0x2265, 0x2266, 0x2267, 0x226a, 0x226b,
+    0x2276, 0x2277, 0x227a, 0x227b, 0x227c, 0x227d, 0x2282, 0x2283, 0x2286, 0x2287,
+    0x228f, 0x2290, 0x2291, 0x2292, 0x2298, 0x22a2, 0x22a3, 0x22a6, 0x22a8, 0x22a9,
+    0x22ab, 0x22b0, 0x22b1, 0x22b2, 0x22b3, 0x22b4, 0x22b5, 0x22b6, 0x22b7, 0x22b8,
+    0x22c9, 0x22ca, 0x22cb, 0x22cc, 0x22cd, 0x22d0, 0x22d1, 0x22d6, 0x22d7, 0x22d8,
+    0x22d9, 0x22da, 0x22db, 0x22dc, 0x22dd, 0x22de, 0x22df, 0x22f0, 0x22f1, 0x22f2,
+    0x22f3, 0x22f4, 0x22f6, 0x22f7, 0x22fa, 0x22fb, 0x22fc, 0x22fd, 0x22fe, 0x2308,
+    0x2309, 0x230a, 0x230b, 0x2329, 0x232a, 0x2768, 0x2769, 0x276a, 0x276b, 0x276c,
+    0x276d, 0x276e, 0x276f, 0x2770, 0x2771, 0x2772, 0x2773, 0x2774, 0x2775, 0x27c3,
+    0x27c4, 0x27c5, 0x27c6, 0x27c8, 0x27c9, 0x27cb, 0x27cd, 0x27d5, 0x27d6, 0x27dc,
+    0x27dd, 0x27de, 0x27e2, 0x27e3, 0x27e4, 0x27e5, 0x27e6, 0x27e7, 0x27e8, 0x27e9,
+    0x27ea, 0x27eb, 0x27ec, 0x27ed, 0x27ee, 0x27ef, 0x2983, 0x2984, 0x2985, 0x2986,
+    0x2987, 0x2988, 0x2989, 0x298a, 0x298b, 0x298c, 0x298d, 0x298e, 0x298f, 0x2990,
+    0x2991, 0x2992, 0x2993, 0x2994, 0x2995, 0x2996, 0x2997, 0x2998, 0x299b, 0x29a0,
+    0x29a3, 0x29a4, 0x29a5, 0x29a8, 0x29a9, 0x29aa, 0x29ab, 0x29ac, 0x29ad, 0x29ae,
+    0x29af, 0x29b8, 0x29c0, 0x29c1, 0x29c4, 0x29c5, 0x29cf, 0x29d0, 0x29d1, 0x29d2,
+    0x29d4, 0x29d5, 0x29d8, 0x29d9, 0x29da, 0x29db, 0x29e8, 0x29e9, 0x29f5, 0x29f8,
+    0x29f9, 0x29fc, 0x29fd, 0x2a2b, 0x2a2c, 0x2a2d, 0x2a2e, 0x2a34, 0x2a35, 0x2a3c,
+    0x2a3d, 0x2a64, 0x2a65, 0x2a79, 0x2a7a, 0x2a7d, 0x2a7e, 0x2a7f, 0x2a80, 0x2a81,
+    0x2a82, 0x2a83, 0x2a84, 0x2a8b, 0x2a8c, 0x2a91, 0x2a92, 0x2a93, 0x2a94, 0x2a95,
+    0x2a96, 0x2a97, 0x2a98, 0x2a99, 0x2a9a, 0x2a9b, 0x2a9c, 0x2aa1, 0x2aa2, 0x2aa6,
+    0x2aa7, 0x2aa8, 0x2aa9, 0x2aaa, 0x2aab, 0x2aac, 0x2aad, 0x2aaf, 0x2ab0, 0x2ab3,
+    0x2ab4, 0x2abb, 0x2abc, 0x2abd, 0x2abe, 0x2abf, 0x2ac0, 0x2ac1, 0x2ac2, 0x2ac3,
+    0x2ac4, 0x2ac5, 0x2ac6, 0x2acd, 0x2ace, 0x2acf, 0x2ad0, 0x2ad1, 0x2ad2, 0x2ad3,
+    0x2ad4, 0x2ad5, 0x2ad6, 0x2ade, 0x2ae3, 0x2ae4, 0x2ae5, 0x2aec, 0x2aed, 0x2aee,
+    0x2af7, 0x2af8, 0x2af9, 0x2afa, 0x2bfe, 0x2e02, 0x2e03, 0x2e04, 0x2e05, 0x2e09,
+    0x2e0a, 0x2e0c, 0x2e0d, 0x2e1c, 0x2e1d, 0x2e20, 0x2e21, 0x2e22, 0x2e23, 0x2e24,
+    0x2e25, 0x2e26, 0x2e27, 0x2e28, 0x2e29, 0x2e55, 0x2e56, 0x2e57, 0x2e58, 0x2e59,
+    0x2e5a, 0x2e5b, 0x2e5c, 0x2e62, 0x2e63, 0x3008, 0x3009, 0x300a, 0x300b, 0x3010,
+    0x3011, 0x3014, 0x3015, 0x3016, 0x3017, 0x3018, 0x3019, 0x301a, 0x301b, 0xfe59,
+    0xfe5a, 0xfe5b, 0xfe5c, 0xfe5d, 0xfe5e, 0xfe64, 0xfe65, 0xff08, 0xff09, 0xff1c,
+    0xff1e, 0xff3b, 0xff3d, 0xff5b, 0xff5d, 0xff5f, 0xff60, 0x1db03, 0x1db04, 0x1db05,
+    0x1db06, 0x1db08, 0x1db09, 0x1db10,
+};
+static const b32 font_mirror_delta[364] = {
+    1, -1, 2, -2, 2, -2, 2, -2, 16, -16, 1, -1,
+    1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1,
+    3, 3, -3, -3, 2016, 112883, 2527, 1923, 1914, 1918, 2250, 1,
+    -1, 138, 7, -7, 1, -1, 1, -1, 1, -1, 1, -1,
+    1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1,
+    1, -1, 1, -1, 1824, 1, -1, 2104, 2108, 2106, 2106, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1316, 1, -1, 1, -1,
+    -138, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 8, 8, 8, 7, 7, -8, -8, -8, -7,
+    -7, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 2, -2, 1, -1, -1316, 1, -1, 1, -1,
+    1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1,
+    1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 3, 1,
+    -1, -3, 1, -1, 1, -1, 1, -1, 1, -1, -1914, -1918,
+    -1923, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, -1824,
+    1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1,
+    1, -1, 1, -1, -2016, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, -2104, -2106, -2108, -2106, 1,
+    -1, -2250, 1, -1, 1, -1, -2527, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1,
+    -1, 2, -2, 2, -2, 2, -2, 1, -1, 1, -1, 1,
+    -1, 1, -1, -112883,
+};
+
+//      Bidi_Paired_Bracket: code point, and its partner with bit 31 set for an opening bracket.
+#define FONT_BRACKETS 130
+static const p32 font_bracket_code[130] = {
+    0x28, 0x29, 0x5b, 0x5d, 0x7b, 0x7d, 0xf3a, 0xf3b, 0xf3c, 0xf3d,
+    0x169b, 0x169c, 0x2045, 0x2046, 0x207d, 0x207e, 0x208d, 0x208e, 0x2308, 0x2309,
+    0x230a, 0x230b, 0x2329, 0x232a, 0x2768, 0x2769, 0x276a, 0x276b, 0x276c, 0x276d,
+    0x276e, 0x276f, 0x2770, 0x2771, 0x2772, 0x2773, 0x2774, 0x2775, 0x27c5, 0x27c6,
+    0x27e6, 0x27e7, 0x27e8, 0x27e9, 0x27ea, 0x27eb, 0x27ec, 0x27ed, 0x27ee, 0x27ef,
+    0x2983, 0x2984, 0x2985, 0x2986, 0x2987, 0x2988, 0x2989, 0x298a, 0x298b, 0x298c,
+    0x298d, 0x298e, 0x298f, 0x2990, 0x2991, 0x2992, 0x2993, 0x2994, 0x2995, 0x2996,
+    0x2997, 0x2998, 0x29d8, 0x29d9, 0x29da, 0x29db, 0x29fc, 0x29fd, 0x2e22, 0x2e23,
+    0x2e24, 0x2e25, 0x2e26, 0x2e27, 0x2e28, 0x2e29, 0x2e55, 0x2e56, 0x2e57, 0x2e58,
+    0x2e59, 0x2e5a, 0x2e5b, 0x2e5c, 0x2e62, 0x2e63, 0x3008, 0x3009, 0x300a, 0x300b,
+    0x300c, 0x300d, 0x300e, 0x300f, 0x3010, 0x3011, 0x3014, 0x3015, 0x3016, 0x3017,
+    0x3018, 0x3019, 0x301a, 0x301b, 0xfe59, 0xfe5a, 0xfe5b, 0xfe5c, 0xfe5d, 0xfe5e,
+    0xff08, 0xff09, 0xff3b, 0xff3d, 0xff5b, 0xff5d, 0xff5f, 0xff60, 0xff62, 0xff63,
+};
+static const p32 font_bracket_pair[130] = {
+    0x80000029, 0x28, 0x8000005d, 0x5b, 0x8000007d, 0x7b, 0x80000f3b, 0xf3a,
+    0x80000f3d, 0xf3c, 0x8000169c, 0x169b, 0x80002046, 0x2045, 0x8000207e, 0x207d,
+    0x8000208e, 0x208d, 0x80002309, 0x2308, 0x8000230b, 0x230a, 0x8000232a, 0x2329,
+    0x80002769, 0x2768, 0x8000276b, 0x276a, 0x8000276d, 0x276c, 0x8000276f, 0x276e,
+    0x80002771, 0x2770, 0x80002773, 0x2772, 0x80002775, 0x2774, 0x800027c6, 0x27c5,
+    0x800027e7, 0x27e6, 0x800027e9, 0x27e8, 0x800027eb, 0x27ea, 0x800027ed, 0x27ec,
+    0x800027ef, 0x27ee, 0x80002984, 0x2983, 0x80002986, 0x2985, 0x80002988, 0x2987,
+    0x8000298a, 0x2989, 0x8000298c, 0x298b, 0x80002990, 0x298f, 0x8000298e, 0x298d,
+    0x80002992, 0x2991, 0x80002994, 0x2993, 0x80002996, 0x2995, 0x80002998, 0x2997,
+    0x800029d9, 0x29d8, 0x800029db, 0x29da, 0x800029fd, 0x29fc, 0x80002e23, 0x2e22,
+    0x80002e25, 0x2e24, 0x80002e27, 0x2e26, 0x80002e29, 0x2e28, 0x80002e56, 0x2e55,
+    0x80002e58, 0x2e57, 0x80002e5a, 0x2e59, 0x80002e5c, 0x2e5b, 0x80002e63, 0x2e62,
+    0x80003009, 0x3008, 0x8000300b, 0x300a, 0x8000300d, 0x300c, 0x8000300f, 0x300e,
+    0x80003011, 0x3010, 0x80003015, 0x3014, 0x80003017, 0x3016, 0x80003019, 0x3018,
+    0x8000301b, 0x301a, 0x8000fe5a, 0xfe59, 0x8000fe5c, 0xfe5b, 0x8000fe5e, 0xfe5d,
+    0x8000ff09, 0xff08, 0x8000ff3d, 0xff3b, 0x8000ff5d, 0xff5b, 0x8000ff60, 0xff5f,
+    0x8000ff63, 0xff62,
+};
+
+//      Joining_Type (0 U, 1 L, 2 R, 3 D or C, 7 T) below U+2100 and in U+FE00-FEFF: (first << 3) | type.
+#define FONT_JOINS 456
+static const p32 font_join_ranges[456] = {
+    0x0, 0x56f, 0x570, 0x1807, 0x1b80, 0x241f, 0x2450, 0x2c8f, 0x2df0, 0x2dff,
+    0x2e00, 0x2e0f, 0x2e18, 0x2e27, 0x2e30, 0x2e3f, 0x2e50, 0x3087, 0x30d8, 0x30e7,
+    0x30e8, 0x3103, 0x3108, 0x3112, 0x3133, 0x313a, 0x3143, 0x314a, 0x3153, 0x317a,
+    0x319b, 0x3242, 0x324b, 0x325f, 0x3300, 0x3373, 0x3387, 0x338a, 0x33a0, 0x33aa,
+    0x33c3, 0x3442, 0x34d3, 0x3602, 0x360b, 0x361a, 0x3663, 0x366a, 0x3673, 0x367a,
+    0x3683, 0x3692, 0x36a0, 0x36aa, 0x36b7, 0x36e8, 0x36ff, 0x3728, 0x373f, 0x3748,
+    0x3757, 0x3772, 0x3780, 0x37d3, 0x37e8, 0x37fb, 0x3800, 0x387f, 0x3882, 0x388f,
+    0x3893, 0x38aa, 0x38d3, 0x38f2, 0x38fb, 0x3942, 0x394b, 0x3952, 0x395b, 0x3962,
+    0x396b, 0x397a, 0x3987, 0x3a58, 0x3a6a, 0x3a73, 0x3aca, 0x3ae3, 0x3b5a, 0x3b6b,
+    0x3b8a, 0x3b93, 0x3b9a, 0x3bab, 0x3bc2, 0x3bd3, 0x3c00, 0x3d37, 0x3d88, 0x3e53,
+    0x3f5f, 0x3fa0, 0x3fd3, 0x3fd8, 0x3fef, 0x3ff0, 0x40b7, 0x40d0, 0x40df, 0x4120,
+    0x412f, 0x4140, 0x414f, 0x4170, 0x4202, 0x420b, 0x4232, 0x4243, 0x424a, 0x4253,
+    0x42a2, 0x42ab, 0x42b2, 0x42cf, 0x42e0, 0x4303, 0x4308, 0x4313, 0x4330, 0x433a,
+    0x4343, 0x434a, 0x4358, 0x4382, 0x441b, 0x4438, 0x444b, 0x4472, 0x447b, 0x4480,
+    0x44bf, 0x4503, 0x4552, 0x4568, 0x4572, 0x457b, 0x458a, 0x459b, 0x45ca, 0x45d3,
+    0x4648, 0x4657, 0x4710, 0x471f, 0x4818, 0x49d7, 0x49d8, 0x49e7, 0x49e8, 0x4a0f,
+    0x4a48, 0x4a6f, 0x4a70, 0x4a8f, 0x4ac0, 0x4b17, 0x4b20, 0x4c0f, 0x4c10, 0x4de7,
+    0x4de8, 0x4e0f, 0x4e28, 0x4e6f, 0x4e70, 0x4f17, 0x4f20, 0x4ff7, 0x4ff8, 0x500f,
+    0x5018, 0x51e7, 0x51e8, 0x520f, 0x5218, 0x523f, 0x5248, 0x525f, 0x5270, 0x528f,
+    0x5290, 0x5387, 0x5390, 0x53af, 0x53b0, 0x540f, 0x5418, 0x55e7, 0x55e8, 0x560f,
+    0x5630, 0x563f, 0x5648, 0x566f, 0x5670, 0x5717, 0x5720, 0x57d7, 0x5800, 0x580f,
+    0x5810, 0x59e7, 0x59e8, 0x59ff, 0x5a00, 0x5a0f, 0x5a28, 0x5a6f, 0x5a70, 0x5a9f,
+    0x5ab8, 0x5b17, 0x5b20, 0x5c17, 0x5c18, 0x5e07, 0x5e08, 0x5e6f, 0x5e70, 0x6007,
+    0x6008, 0x6027, 0x6028, 0x61e7, 0x61e8, 0x61f7, 0x6208, 0x6237, 0x6248, 0x6257,
+    0x6270, 0x62af, 0x62b8, 0x6317, 0x6320, 0x640f, 0x6410, 0x65e7, 0x65e8, 0x65ff,
+    0x6600, 0x6637, 0x6638, 0x6667, 0x6670, 0x6717, 0x6720, 0x6807, 0x6810, 0x69df,
+    0x69e8, 0x6a0f, 0x6a28, 0x6a6f, 0x6a70, 0x6b17, 0x6b20, 0x6c0f, 0x6c10, 0x6e57,
+    0x6e58, 0x6e97, 0x6ea8, 0x6eb7, 0x6eb8, 0x718f, 0x7190, 0x71a7, 0x71d8, 0x723f,
+    0x7278, 0x758f, 0x7590, 0x75a7, 0x75e8, 0x7647, 0x7678, 0x78c7, 0x78d0, 0x79af,
+    0x79b0, 0x79bf, 0x79c0, 0x79cf, 0x79d0, 0x7b8f, 0x7bf8, 0x7c07, 0x7c28, 0x7c37,
+    0x7c40, 0x7c6f, 0x7cc0, 0x7ccf, 0x7de8, 0x7e37, 0x7e38, 0x816f, 0x8188, 0x8197,
+    0x81c0, 0x81cf, 0x81d8, 0x81ef, 0x81f8, 0x82c7, 0x82d0, 0x82f7, 0x8308, 0x838f,
+    0x83a8, 0x8417, 0x8418, 0x842f, 0x8438, 0x846f, 0x8470, 0x84ef, 0x84f0, 0x9aef,
+    0x9b00, 0xb897, 0xb8a8, 0xb997, 0xb9a0, 0xba97, 0xbaa0, 0xbb97, 0xbba0, 0xbda7,
+    0xbdb0, 0xbdbf, 0xbdf0, 0xbe37, 0xbe38, 0xbe4f, 0xbea0, 0xbeef, 0xbef0, 0xc03b,
+    0xc040, 0xc053, 0xc05f, 0xc070, 0xc07f, 0xc080, 0xc103, 0xc3c8, 0xc42f, 0xc43b,
+    0xc54f, 0xc553, 0xc558, 0xc907, 0xc918, 0xc93f, 0xc948, 0xc997, 0xc998, 0xc9cf,
+    0xc9e0, 0xd0bf, 0xd0c8, 0xd0df, 0xd0e0, 0xd2b7, 0xd2b8, 0xd2c7, 0xd2f8, 0xd307,
+    0xd308, 0xd317, 0xd318, 0xd32f, 0xd368, 0xd39f, 0xd3e8, 0xd3ff, 0xd400, 0xd587,
+    0xd788, 0xd807, 0xd820, 0xd9a7, 0xd9a8, 0xd9b7, 0xd9d8, 0xd9e7, 0xd9e8, 0xda17,
+    0xda18, 0xdb5f, 0xdba0, 0xdc07, 0xdc10, 0xdd17, 0xdd30, 0xdd47, 0xdd50, 0xdd5f,
+    0xdd70, 0xdf37, 0xdf38, 0xdf47, 0xdf50, 0xdf6f, 0xdf70, 0xdf7f, 0xdf90, 0xe167,
+    0xe1a0, 0xe1b7, 0xe1c0, 0xe687, 0xe698, 0xe6a7, 0xe708, 0xe717, 0xe748, 0xe76f,
+    0xe770, 0xe7a7, 0xe7a8, 0xe7c7, 0xe7d0, 0xee07, 0xf000, 0x1005f, 0x10060, 0x1006b,
+    0x10077, 0x10080, 0x10157, 0x10178, 0x10307, 0x10328, 0x10357, 0x10380, 0x10687, 0x10788,
+    0x7f007, 0x7f080, 0x7f107, 0x7f180, 0x7f7ff, 0x7f800,
+};
+
+//      HarfBuzz's modified combining class, U+0590 on: (first << 8) | class.
+#define FONT_MCCS 139
+static const p32 font_mccc_ranges[139] = {
+    0x59000, 0x591dc, 0x592e6, 0x596dc, 0x597e6, 0x59ade, 0x59bdc, 0x59ce6, 0x5a2dc, 0x5a8e6,
+    0x5aadc, 0x5abe6, 0x5adde, 0x5aee4, 0x5afe6, 0x5b016, 0x5b10f, 0x5b210, 0x5b311, 0x5b417,
+    0x5b512, 0x5b613, 0x5b714, 0x5b815, 0x5b90e, 0x5bb18, 0x5bc0c, 0x5bd19, 0x5be00, 0x5bf0d,
+    0x5c000, 0x5c10a, 0x5c20b, 0x5c300, 0x5c4e6, 0x5c5dc, 0x5c600, 0x5c715, 0x5c816, 0x5c90c,
+    0x5ca00, 0x610e6, 0x6181f, 0x61920, 0x61a21, 0x61b00, 0x64b1c, 0x64c1d, 0x64d1e, 0x64e1f,
+    0x64f20, 0x65021, 0x6511b, 0x65222, 0x653e6, 0x655dc, 0x657e6, 0x65cdc, 0x65de6, 0x65fdc,
+    0x66000, 0x67023, 0x67100, 0x6d6e6, 0x6dd00, 0x6dfe6, 0x6e3dc, 0x6e4e6, 0x6e500, 0x6e7e6,
+    0x6e900, 0x6eadc, 0x6ebe6, 0x6eddc, 0x6ee00, 0x71124, 0x71200, 0x730e6, 0x731dc, 0x732e6,
+    0x734dc, 0x735e6, 0x737dc, 0x73ae6, 0x73bdc, 0x73de6, 0x73edc, 0x73fe6, 0x742dc, 0x743e6,
+    0x744dc, 0x745e6, 0x746dc, 0x747e6, 0x748dc, 0x749e6, 0x74b00, 0x7ebe6, 0x7f2dc, 0x7f3e6,
+    0x7f400, 0x7fddc, 0x7fe00, 0x816e6, 0x81a00, 0x81be6, 0x82400, 0x825e6, 0x82800, 0x829e6,
+    0x82e00, 0x859dc, 0x85c00, 0x897e6, 0x899dc, 0x89ce6, 0x8a000, 0x8cae6, 0x8cfdc, 0x8d4e6,
+    0x8e200, 0x8e3dc, 0x8e4e6, 0x8e6dc, 0x8e7e6, 0x8e9dc, 0x8eae6, 0x8eddc, 0x8f01c, 0x8f11d,
+    0x8f21e, 0x8f3e6, 0x8f6dc, 0x8f7e6, 0x8f9dc, 0x8fbe6, 0x90000, 0xfb1e1a, 0xfb1f00,
+};
+
+//      Canonical decompositions in the Hebrew and Arabic blocks and their presentation forms: code, first, second (0 for a singleton),
+//      and whether the pair composes (it is not a composition exclusion).
+#define FONT_DECOMPS 42
+static const p16 font_decomp_code[42] = {
+    0x622, 0x623, 0x624, 0x625, 0x626, 0x6c0, 0x6c2, 0x6d3, 0xfb1d, 0xfb1f, 0xfb2a, 0xfb2b, 0xfb2c, 0xfb2d,
+    0xfb2e, 0xfb2f, 0xfb30, 0xfb31, 0xfb32, 0xfb33, 0xfb34, 0xfb35, 0xfb36, 0xfb38, 0xfb39, 0xfb3a, 0xfb3b, 0xfb3c,
+    0xfb3e, 0xfb40, 0xfb41, 0xfb43, 0xfb44, 0xfb46, 0xfb47, 0xfb48, 0xfb49, 0xfb4a, 0xfb4b, 0xfb4c, 0xfb4d, 0xfb4e,
+};
+static const p16 font_decomp_first[42] = {
+    0x627, 0x627, 0x648, 0x627, 0x64a, 0x6d5, 0x6c1, 0x6d2, 0x5d9, 0x5f2, 0x5e9, 0x5e9, 0xfb49, 0xfb49,
+    0x5d0, 0x5d0, 0x5d0, 0x5d1, 0x5d2, 0x5d3, 0x5d4, 0x5d5, 0x5d6, 0x5d8, 0x5d9, 0x5da, 0x5db, 0x5dc,
+    0x5de, 0x5e0, 0x5e1, 0x5e3, 0x5e4, 0x5e6, 0x5e7, 0x5e8, 0x5e9, 0x5ea, 0x5d5, 0x5d1, 0x5db, 0x5e4,
+};
+static const p16 font_decomp_second[42] = {
+    0x653, 0x654, 0x654, 0x655, 0x654, 0x654, 0x654, 0x654, 0x5b4, 0x5b7, 0x5c1, 0x5c2, 0x5c1, 0x5c2,
+    0x5b7, 0x5b8, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc,
+    0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5bc, 0x5b9, 0x5bf, 0x5bf, 0x5bf,
+};
+static const p8 font_decomp_composes[42] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+//      Arabic presentation forms: base letter, then its isolated, final, initial and medial forms (0 for none).
+#define FONT_FORMS 76
+static const p16 font_forms[76][5] = {
+    {0x621, 0xfe80, 0x0, 0x0, 0x0},
+    {0x622, 0xfe81, 0xfe82, 0x0, 0x0},
+    {0x623, 0xfe83, 0xfe84, 0x0, 0x0},
+    {0x624, 0xfe85, 0xfe86, 0x0, 0x0},
+    {0x625, 0xfe87, 0xfe88, 0x0, 0x0},
+    {0x626, 0xfe89, 0xfe8a, 0xfe8b, 0xfe8c},
+    {0x627, 0xfe8d, 0xfe8e, 0x0, 0x0},
+    {0x628, 0xfe8f, 0xfe90, 0xfe91, 0xfe92},
+    {0x629, 0xfe93, 0xfe94, 0x0, 0x0},
+    {0x62a, 0xfe95, 0xfe96, 0xfe97, 0xfe98},
+    {0x62b, 0xfe99, 0xfe9a, 0xfe9b, 0xfe9c},
+    {0x62c, 0xfe9d, 0xfe9e, 0xfe9f, 0xfea0},
+    {0x62d, 0xfea1, 0xfea2, 0xfea3, 0xfea4},
+    {0x62e, 0xfea5, 0xfea6, 0xfea7, 0xfea8},
+    {0x62f, 0xfea9, 0xfeaa, 0x0, 0x0},
+    {0x630, 0xfeab, 0xfeac, 0x0, 0x0},
+    {0x631, 0xfead, 0xfeae, 0x0, 0x0},
+    {0x632, 0xfeaf, 0xfeb0, 0x0, 0x0},
+    {0x633, 0xfeb1, 0xfeb2, 0xfeb3, 0xfeb4},
+    {0x634, 0xfeb5, 0xfeb6, 0xfeb7, 0xfeb8},
+    {0x635, 0xfeb9, 0xfeba, 0xfebb, 0xfebc},
+    {0x636, 0xfebd, 0xfebe, 0xfebf, 0xfec0},
+    {0x637, 0xfec1, 0xfec2, 0xfec3, 0xfec4},
+    {0x638, 0xfec5, 0xfec6, 0xfec7, 0xfec8},
+    {0x639, 0xfec9, 0xfeca, 0xfecb, 0xfecc},
+    {0x63a, 0xfecd, 0xfece, 0xfecf, 0xfed0},
+    {0x641, 0xfed1, 0xfed2, 0xfed3, 0xfed4},
+    {0x642, 0xfed5, 0xfed6, 0xfed7, 0xfed8},
+    {0x643, 0xfed9, 0xfeda, 0xfedb, 0xfedc},
+    {0x644, 0xfedd, 0xfede, 0xfedf, 0xfee0},
+    {0x645, 0xfee1, 0xfee2, 0xfee3, 0xfee4},
+    {0x646, 0xfee5, 0xfee6, 0xfee7, 0xfee8},
+    {0x647, 0xfee9, 0xfeea, 0xfeeb, 0xfeec},
+    {0x648, 0xfeed, 0xfeee, 0x0, 0x0},
+    {0x649, 0xfeef, 0xfef0, 0xfbe8, 0xfbe9},
+    {0x64a, 0xfef1, 0xfef2, 0xfef3, 0xfef4},
+    {0x671, 0xfb50, 0xfb51, 0x0, 0x0},
+    {0x677, 0xfbdd, 0x0, 0x0, 0x0},
+    {0x679, 0xfb66, 0xfb67, 0xfb68, 0xfb69},
+    {0x67a, 0xfb5e, 0xfb5f, 0xfb60, 0xfb61},
+    {0x67b, 0xfb52, 0xfb53, 0xfb54, 0xfb55},
+    {0x67e, 0xfb56, 0xfb57, 0xfb58, 0xfb59},
+    {0x67f, 0xfb62, 0xfb63, 0xfb64, 0xfb65},
+    {0x680, 0xfb5a, 0xfb5b, 0xfb5c, 0xfb5d},
+    {0x683, 0xfb76, 0xfb77, 0xfb78, 0xfb79},
+    {0x684, 0xfb72, 0xfb73, 0xfb74, 0xfb75},
+    {0x686, 0xfb7a, 0xfb7b, 0xfb7c, 0xfb7d},
+    {0x687, 0xfb7e, 0xfb7f, 0xfb80, 0xfb81},
+    {0x688, 0xfb88, 0xfb89, 0x0, 0x0},
+    {0x68c, 0xfb84, 0xfb85, 0x0, 0x0},
+    {0x68d, 0xfb82, 0xfb83, 0x0, 0x0},
+    {0x68e, 0xfb86, 0xfb87, 0x0, 0x0},
+    {0x691, 0xfb8c, 0xfb8d, 0x0, 0x0},
+    {0x698, 0xfb8a, 0xfb8b, 0x0, 0x0},
+    {0x6a4, 0xfb6a, 0xfb6b, 0xfb6c, 0xfb6d},
+    {0x6a6, 0xfb6e, 0xfb6f, 0xfb70, 0xfb71},
+    {0x6a9, 0xfb8e, 0xfb8f, 0xfb90, 0xfb91},
+    {0x6ad, 0xfbd3, 0xfbd4, 0xfbd5, 0xfbd6},
+    {0x6af, 0xfb92, 0xfb93, 0xfb94, 0xfb95},
+    {0x6b1, 0xfb9a, 0xfb9b, 0xfb9c, 0xfb9d},
+    {0x6b3, 0xfb96, 0xfb97, 0xfb98, 0xfb99},
+    {0x6ba, 0xfb9e, 0xfb9f, 0x0, 0x0},
+    {0x6bb, 0xfba0, 0xfba1, 0xfba2, 0xfba3},
+    {0x6be, 0xfbaa, 0xfbab, 0xfbac, 0xfbad},
+    {0x6c0, 0xfba4, 0xfba5, 0x0, 0x0},
+    {0x6c1, 0xfba6, 0xfba7, 0xfba8, 0xfba9},
+    {0x6c5, 0xfbe0, 0xfbe1, 0x0, 0x0},
+    {0x6c6, 0xfbd9, 0xfbda, 0x0, 0x0},
+    {0x6c7, 0xfbd7, 0xfbd8, 0x0, 0x0},
+    {0x6c8, 0xfbdb, 0xfbdc, 0x0, 0x0},
+    {0x6c9, 0xfbe2, 0xfbe3, 0x0, 0x0},
+    {0x6cb, 0xfbde, 0xfbdf, 0x0, 0x0},
+    {0x6cc, 0xfbfc, 0xfbfd, 0xfbfe, 0xfbff},
+    {0x6d0, 0xfbe4, 0xfbe5, 0xfbe6, 0xfbe7},
+    {0x6d2, 0xfbae, 0xfbaf, 0x0, 0x0},
+    {0x6d3, 0xfbb0, 0xfbb1, 0x0, 0x0},
+};
+//      Lam-alef: the alef it joins, then the isolated and final ligature.
+static const p16 font_lam_alef[8][3] = {
+    {0x622, 0xfef5, 0xfef6},
+    {0x623, 0xfef7, 0xfef8},
+    {0x625, 0xfef9, 0xfefa},
+    {0x627, 0xfefb, 0xfefc},
+};
+#define FONT_LAM_ALEFS 4
+/* END GENERATED */
+
+static inline p32 font_bidi_class(p32 code)
+{
+        if (code < 256)
+                return font_bidi_flat[code];
+
+        //      The last range that starts at or below the code point.
+        p32 low = 0, high = FONT_BIDI_RANGES;
+
+        while (high - low > 1)
+        {
+                p32 middle = (low + high) / 2;
+
+                if ((font_bidi_ranges[middle] >> 5) <= code)
+                        low = middle;
+                else
+                        high = middle;
+        }
+        return font_bidi_ranges[low] & 31;
+}
+
+//      The first of count sorted values that is not below code, for the tables of pairs.
+static p32 font_find_code(const p32 address_to values, p32 count, p32 code)
+{
+        p32 low = 0, high = count;
+
+        while (low < high)
+        {
+                p32 middle = (low + high) / 2;
+
+                if (values[middle] < code)
+                        low = middle + 1;
+                else
+                        high = middle;
+        }
+        return low;
+}
+
+//      The code point whose glyph mirrors this one's, or itself.
+static p32 font_mirror_of(p32 code)
+{
+        p32 at = font_find_code(font_mirror_code, FONT_MIRRORS, code);
+
+        return at < FONT_MIRRORS && font_mirror_code[at] == code ? code + (p32)font_mirror_delta[at] : code;
+}
+
+//      Whether a code point is a paired bracket, its partner (the two angle brackets that decompose to the CJK ones
+//      count as those) and whether it opens.
+static inline p32 font_bracket_form(p32 code)
+{
+        return code == 0x2329 ? 0x3008 : code == 0x232a ? 0x3009 : code;
+}
+
+static bool font_bracket(p32 code, p32 address_to partner, bool address_to opens)
+{
+        p32 at = font_find_code(font_bracket_code, FONT_BRACKETS, code);
+
+        if (at >= FONT_BRACKETS || font_bracket_code[at] != code)
+                return false;
+        *partner = font_bracket_form(font_bracket_pair[at] & 0x7fffffff);
+        *opens = font_bracket_pair[at] >> 31;
+        return true;
+}
+
+//      0 not joining, 1 left, 2 right, 3 dual (and the joining causer), 7 transparent.
+static inline p32 font_join_type(p32 code)
+{
+        p32 low = 0, high = FONT_JOINS;
+
+        if (code >= 0x2100 && code < 0xfe00)
+                return 0;
+        while (high - low > 1)
+        {
+                p32 middle = (low + high) / 2;
+
+                if ((font_join_ranges[middle] >> 3) <= code)
+                        low = middle;
+                else
+                        high = middle;
+        }
+        return font_join_ranges[low] & 7;
+}
+
+//      The modified combining class of a mark of the Hebrew and Arabic blocks, 0 for anything else.
+static inline p32 font_mccc(p32 code)
+{
+        p32 low = 0, high = FONT_MCCS;
+
+        if (code < 0x590)
+                return 0;
+        while (high - low > 1)
+        {
+                p32 middle = (low + high) / 2;
+
+                if ((font_mccc_ranges[middle] >> 8) <= code)
+                        low = middle;
+                else
+                        high = middle;
+        }
+        return font_mccc_ranges[low] & 255;
+}
+
+//      The Default_Ignorable_Code_Points a face is not asked for a glyph of (HarfBuzz's set).
+static inline bool font_ignorable(p32 code)
+{
+        if (code < 0x200b)
+                return code == 0x34f || code == 0x61c || code == 0x17b4 || code == 0x17b5 || (code >= 0x180b && code <= 0x180f);
+        if (code < 0x3000)
+                return code <= 0x200f || (code >= 0x202a && code <= 0x202e) || (code >= 0x2060 && code <= 0x206f);
+        return (code >= 0xfe00 && code <= 0xfe0f) || code == 0xfeff || (code >= 0xfff0 && code <= 0xfff8) ||
+               (code >= 0x1d173 && code <= 0x1d17a) || (code >= 0xe0000 && code <= 0xe0fff);
+}
+
+//      Which shaper a code point's script wants: 2 Arabic, 1 the default features (Hebrew), 0 none.
+static inline p32 font_script_of(p32 code)
+{
+        if (code < 0x590)
+                return 0;
+        if (code < 0x600)
+                return 1;
+        if (code < 0x700)
+                return 2;
+        if (code >= 0x750 && code < 0x780)
+                return 2;
+        if (code >= 0x870 && code < 0x900)
+                return 2;
+        if (code >= 0xfb1d && code < 0xfb50)
+                return 1;
+        if ((code >= 0xfb50 && code < 0xfe00) || (code >= 0xfe70 && code < 0xff00) || (code >= 0x1ee00 && code < 0x1ef00))
+                return 2;
+        return 0;
+}
+
+/*
+        The bidirectional algorithm (UAX #9), over code points in logical
+        order, to the letter and in the reference's own order: the paragraph
+        level (P2, P3), explicit levels (X1-X8) to depth 125, the characters
+        X9 takes out, isolating run sequences (X10), weak types (W1-W7),
+        paired brackets (N0), neutrals (N1, N2), implicit levels (I1, I2),
+        and L1. Reordering (L2) is font_reorder, which the units of a line
+        use as well. A character X9 removes has level FONT_GONE.
+*/
+#define FONT_GONE 0xff
+
+static inline bool font_bidi_initiator(p32 type)
+{
+        return type == FONT_BIDI_LRI || type == FONT_BIDI_RLI || type == FONT_BIDI_FSI;
+}
+
+//      Removed by X9: the embeddings and overrides and their ends, and boundary neutrals.
+static inline bool font_bidi_removed(p32 type)
+{
+        return type == FONT_BIDI_LRE || type == FONT_BIDI_RLE || type == FONT_BIDI_LRO || type == FONT_BIDI_RLO ||
+               type == FONT_BIDI_PDF || type == FONT_BIDI_BN;
+}
+
+//      What L1 sets to the paragraph level when it ends a line or comes before a separator.
+static inline bool font_bidi_white(p32 type)
+{
+        return type == FONT_BIDI_WS || font_bidi_initiator(type) || type == FONT_BIDI_PDI || font_bidi_removed(type);
+}
+
+//      Characters that N1 treats alike: the neutrals and the isolate controls.
+static inline bool font_bidi_neutral(p32 type)
+{
+        return type == FONT_BIDI_B || type == FONT_BIDI_S || type == FONT_BIDI_WS || type == FONT_BIDI_ON ||
+               font_bidi_initiator(type) || type == FONT_BIDI_PDI;
+}
+
+//      P2 and P3 over [from, to): 0 if the first strong character not inside an isolate is left to right, 1 if
+//      right to left, -1 if there is none.
+static b32 font_bidi_strong(const p8 address_to orig, p32 from, p32 to)
+{
+        p32 depth = 0;
+
+        for (p32 i = from; i < to; i++)
+        {
+                p32 type = orig[i];
+
+                if (font_bidi_initiator(type))
+                        depth++;
+                else if (type == FONT_BIDI_PDI)
+                        depth -= depth > 0;
+                else if (!depth && type == FONT_BIDI_L)
+                        return 0;
+                else if (!depth && (type == FONT_BIDI_R || type == FONT_BIDI_AL))
+                        return 1;
+        }
+        return -1;
+}
+
+//      Which direction a type counts as in N0, N1 and N2: 0 left to right, 1 right to left (numbers included),
+//      -1 for neither.
+static inline b32 font_bidi_side(p32 type)
+{
+        return type == FONT_BIDI_L ? 0 : type == FONT_BIDI_R || type == FONT_BIDI_EN || type == FONT_BIDI_AN ? 1 : -1;
+}
+
+//      N0 for the sequence in hand: w->temp holds its m types, w->seq the characters, level is its embedding level.
+static fn font_bidi_brackets(font_work address_to w, p32 m, p32 sos, p32 level)
+{
+        struct
+        {
+                p32 form;
+                p32 at;
+        } stack[63];
+        p32 depth = 0, pairs = 0, embedding = level & 1 ? FONT_BIDI_R : FONT_BIDI_L;
+
+        //      BD16: the pairs, in the order their brackets close; a full stack ends the search.
+        for (p32 k = 0; k < m; k++)
+        {
+                p32 partner;
+                bool opens;
+
+                if (w->temp[k] != FONT_BIDI_ON || !font_bracket(w->code[w->seq[k]], &partner, &opens))
+                        continue;
+                if (opens)
+                {
+                        if (depth == 63)
+                                break;
+                        stack[depth].form = partner;
+                        stack[depth++].at = k;
+                        continue;
+                }
+                for (p32 d = depth; d > 0; d--)
+                        if (stack[d - 1].form == font_bracket_form(w->code[w->seq[k]]))
+                        {
+                                w->pair[2 * pairs] = (p16)stack[d - 1].at;
+                                w->pair[2 * pairs + 1] = (p16)k;
+                                pairs++;
+                                depth = d - 1;
+                                break;
+                        }
+        }
+
+        //      In the order their brackets open.
+        for (p32 a = 1; a < pairs; a++)
+        {
+                p16 open = w->pair[2 * a], close = w->pair[2 * a + 1];
+                p32 b = a;
+
+                for (; b > 0 && w->pair[2 * (b - 1)] > open; b--)
+                {
+                        w->pair[2 * b] = w->pair[2 * (b - 1)];
+                        w->pair[2 * b + 1] = w->pair[2 * (b - 1) + 1];
+                }
+                w->pair[2 * b] = open;
+                w->pair[2 * b + 1] = close;
+        }
+
+        for (p32 a = 0; a < pairs; a++)
+        {
+                p32 open = w->pair[2 * a], close = w->pair[2 * a + 1], found = FONT_BIDI_ON, opposite = 0, as;
+
+                for (p32 k = open + 1; k < close; k++)
+                {
+                        b32 side = font_bidi_side(w->temp[k]);
+
+                        if (side < 0)
+                                continue;
+                        if ((side ? FONT_BIDI_R : FONT_BIDI_L) == embedding)
+                        {
+                                found = embedding;
+                                break;
+                        }
+                        opposite = 1;
+                }
+                if (found == FONT_BIDI_ON && !opposite)
+                        continue;
+                if (found == FONT_BIDI_ON)
+                {
+                        //      Only the other direction inside: it decides if what comes before it is that too.
+                        p32 before = sos;
+
+                        for (p32 k = open; k > 0; k--)
+                                if (font_bidi_side(w->temp[k - 1]) >= 0)
+                                {
+                                        before = font_bidi_side(w->temp[k - 1]) ? FONT_BIDI_R : FONT_BIDI_L;
+                                        break;
+                                }
+                        found = before != embedding ? before : embedding;
+                }
+                as = found;
+                w->temp[open] = w->temp[close] = (p8)as;
+
+                //      A mark that followed a bracket (it was a nonspacing mark) takes the bracket's type.
+                for (p32 k = open + 1; k < m && w->orig[w->seq[k]] == FONT_BIDI_NSM; k++)
+                        w->temp[k] = (p8)as;
+                for (p32 k = close + 1; k < m && w->orig[w->seq[k]] == FONT_BIDI_NSM; k++)
+                        w->temp[k] = (p8)as;
+        }
+}
+
+//      One isolating run sequence: W1 to W7, N0 to N2 and I1, I2.
+static fn font_bidi_sequence(font_work address_to w, p32 m, p32 sos, p32 eos, p32 level)
+{
+        p8 address_to t = w->temp;
+        p32 last = sos, embedding = level & 1 ? FONT_BIDI_R : FONT_BIDI_L;
+
+        for (p32 k = 0; k < m; k++)
+                t[k] = w->type[w->seq[k]];
+
+        //      W1: a nonspacing mark takes the type before it, or ON after an isolate control.
+        for (p32 k = 0; k < m; k++)
+                if (t[k] == FONT_BIDI_NSM)
+                        t[k] = (p8)(k ? (font_bidi_initiator(t[k - 1]) || t[k - 1] == FONT_BIDI_PDI ? FONT_BIDI_ON : t[k - 1])
+                                      : sos);
+
+        //      W2: a European number after an Arabic letter is an Arabic number. W3: Arabic letters are R.
+        for (p32 k = 0; k < m; k++)
+        {
+                if (t[k] == FONT_BIDI_L || t[k] == FONT_BIDI_R || t[k] == FONT_BIDI_AL)
+                        last = t[k];
+                else if (t[k] == FONT_BIDI_EN && last == FONT_BIDI_AL)
+                        t[k] = FONT_BIDI_AN;
+        }
+        for (p32 k = 0; k < m; k++)
+                if (t[k] == FONT_BIDI_AL)
+                        t[k] = FONT_BIDI_R;
+
+        //      W4: a single separator between two numbers of one kind.
+        for (p32 k = 1; k + 1 < m; k++)
+        {
+                if (t[k] == FONT_BIDI_ES && t[k - 1] == FONT_BIDI_EN && t[k + 1] == FONT_BIDI_EN)
+                        t[k] = FONT_BIDI_EN;
+                else if (t[k] == FONT_BIDI_CS && t[k - 1] == FONT_BIDI_EN && t[k + 1] == FONT_BIDI_EN)
+                        t[k] = FONT_BIDI_EN;
+                else if (t[k] == FONT_BIDI_CS && t[k - 1] == FONT_BIDI_AN && t[k + 1] == FONT_BIDI_AN)
+                        t[k] = FONT_BIDI_AN;
+        }
+
+        //      W5: terminators next to a European number are European numbers. W6: the rest are neutral.
+        for (p32 k = 0; k < m;)
+        {
+                if (t[k] != FONT_BIDI_ET)
+                {
+                        k++;
+                        continue;
+                }
+                p32 stop = k;
+
+                while (stop < m && t[stop] == FONT_BIDI_ET)
+                        stop++;
+                if ((k && t[k - 1] == FONT_BIDI_EN) || (stop < m && t[stop] == FONT_BIDI_EN))
+                        for (p32 j = k; j < stop; j++)
+                                t[j] = FONT_BIDI_EN;
+                k = stop;
+        }
+        for (p32 k = 0; k < m; k++)
+                if (t[k] == FONT_BIDI_ES || t[k] == FONT_BIDI_ET || t[k] == FONT_BIDI_CS)
+                        t[k] = FONT_BIDI_ON;
+
+        //      W7: a European number after left to right text is left to right.
+        last = sos;
+        for (p32 k = 0; k < m; k++)
+        {
+                if (t[k] == FONT_BIDI_L || t[k] == FONT_BIDI_R)
+                        last = t[k];
+                else if (t[k] == FONT_BIDI_EN && last == FONT_BIDI_L)
+                        t[k] = FONT_BIDI_L;
+        }
+
+        font_bidi_brackets(w, m, sos, level);
+
+        //      N1, N2: a run of neutrals between two of one direction is that, else the embedding's.
+        for (p32 k = 0; k < m;)
+        {
+                if (!font_bidi_neutral(t[k]))
+                {
+                        k++;
+                        continue;
+                }
+                p32 stop = k;
+
+                while (stop < m && font_bidi_neutral(t[stop]))
+                        stop++;
+
+                b32 before = k ? font_bidi_side(t[k - 1]) : sos == FONT_BIDI_R;
+                b32 after = stop < m ? font_bidi_side(t[stop]) : eos == FONT_BIDI_R;
+                p32 as = before >= 0 && before == after ? (before ? FONT_BIDI_R : FONT_BIDI_L) : embedding;
+
+                for (p32 j = k; j < stop; j++)
+                        t[j] = (p8)as;
+                k = stop;
+        }
+
+        //      I1, I2.
+        for (p32 k = 0; k < m; k++)
+        {
+                p32 at = w->seq[k], up = level & 1 ? (t[k] == FONT_BIDI_L || t[k] == FONT_BIDI_EN || t[k] == FONT_BIDI_AN)
+                                         : t[k] == FONT_BIDI_R ? 1 : t[k] == FONT_BIDI_AN || t[k] == FONT_BIDI_EN ? 2 : 0;
+
+                w->level[at] = (p8)(level + up);
+        }
+}
+
+/*
+        Levels for the n code points in w->code, by direction: 0 left to
+        right, 1 right to left, 2 the first strong character with left to
+        right where there is none, 3 the same with right to left. Answers
+        the paragraph level; w->level has each character's, FONT_GONE for
+        one X9 removed.
+*/
+static p32 font_bidi(font_work address_to w, p32 n, p32 direction)
+{
+        struct
+        {
+                p8 level, override, isolate;
+        } stack[FONT_STACK + 2];
+        p32 depth = 0, overflow_isolates = 0, overflow_embeddings = 0, valid_isolates = 0, para, runs = 0, flat = 0;
+
+        for (p32 i = 0; i < n; i++)
+                w->orig[i] = w->type[i] = (p8)font_bidi_class(w->code[i]);
+
+        //      Isolate initiators and the PDIs that close them, by nesting alone.
+        {
+                p32 open = 0;
+
+                for (p32 i = 0; i < n; i++)
+                {
+                        w->match[i] = (p16)n;
+                        if (font_bidi_initiator(w->orig[i]))
+                                w->seq[open++] = (p16)i;
+                        else if (w->orig[i] == FONT_BIDI_PDI && open)
+                        {
+                                p32 from = w->seq[--open];
+
+                                w->match[from] = (p16)i;
+                                w->match[i] = (p16)from;
+                        }
+                }
+        }
+
+        //      P2, P3.
+        if (direction < 2)
+                para = direction;
+        else
+        {
+                b32 strong = font_bidi_strong(w->orig, 0, n);
+
+                para = strong < 0 ? direction - 2 : (p32)strong;
+        }
+
+        //      X1 to X8.
+        stack[0].level = (p8)para;
+        stack[0].override = FONT_BIDI_ON;
+        stack[0].isolate = 0;
+        for (p32 i = 0; i < n; i++)
+        {
+                p32 type = w->orig[i];
+
+                if (type == FONT_BIDI_RLE || type == FONT_BIDI_LRE || type == FONT_BIDI_RLO || type == FONT_BIDI_LRO ||
+                    font_bidi_initiator(type))
+                {
+                        bool isolate = font_bidi_initiator(type);
+                        bool right = type == FONT_BIDI_RLE || type == FONT_BIDI_RLO || type == FONT_BIDI_RLI;
+                        p32 level;
+
+                        if (type == FONT_BIDI_FSI)
+                                right = font_bidi_strong(w->orig, i + 1, w->match[i]) == 1;
+                        w->level[i] = stack[depth].level;
+                        if (isolate && stack[depth].override != FONT_BIDI_ON)
+                                w->type[i] = stack[depth].override;
+                        level = right ? ((p32)stack[depth].level + 1) | 1 : ((p32)stack[depth].level + 2) & ~1u;
+                        if (level <= FONT_STACK && !overflow_isolates && !overflow_embeddings)
+                        {
+                                valid_isolates += isolate;
+                                depth++;
+                                stack[depth].level = (p8)level;
+                                stack[depth].override = type == FONT_BIDI_LRO ? FONT_BIDI_L : type == FONT_BIDI_RLO ? FONT_BIDI_R : FONT_BIDI_ON;
+                                stack[depth].isolate = isolate;
+                                if (!isolate)
+                                        w->level[i] = (p8)level;
+                        }
+                        else if (isolate)
+                                overflow_isolates++;
+                        else if (!overflow_isolates)
+                                overflow_embeddings++;
+                }
+                else if (type == FONT_BIDI_PDI)
+                {
+                        if (overflow_isolates)
+                                overflow_isolates--;
+                        else if (valid_isolates)
+                        {
+                                overflow_embeddings = 0;
+                                while (!stack[depth].isolate)
+                                        depth--;
+                                depth--;
+                                valid_isolates--;
+                        }
+                        w->level[i] = stack[depth].level;
+                        if (stack[depth].override != FONT_BIDI_ON)
+                                w->type[i] = stack[depth].override;
+                }
+                else if (type == FONT_BIDI_PDF)
+                {
+                        w->level[i] = stack[depth].level;
+                        if (overflow_isolates)
+                                ;
+                        else if (overflow_embeddings)
+                                overflow_embeddings--;
+                        else if (!stack[depth].isolate && depth >= 1)
+                                depth--;
+                }
+                else if (type == FONT_BIDI_B)
+                        w->level[i] = (p8)para;
+                else
+                {
+                        w->level[i] = stack[depth].level;
+                        if (stack[depth].override != FONT_BIDI_ON)
+                                w->type[i] = stack[depth].override;
+                }
+        }
+
+        //      X9, X10: the level runs of what is left, and the isolating run sequences they chain into. The levels
+        //      of the explicit rules are kept, for the sequences are cut from them and not from the levels the
+        //      implicit rules give.
+        for (p32 i = 0; i < n; i++)
+                w->base[i] = w->level[i];
+        for (p32 i = 0; i < n; i++)
+        {
+                if (font_bidi_removed(w->orig[i]))
+                        continue;
+                if (!flat || w->base[w->flat[flat - 1]] != w->base[i])
+                        w->run_start[runs++] = (p16)flat;
+                w->run_of[i] = (p16)(runs - 1);
+                w->flat[flat++] = (p16)i;
+        }
+        w->run_start[runs] = (p16)flat;
+
+        for (p32 r = 0; r < runs; r++)
+        {
+                p32 first = w->flat[w->run_start[r]], m = 0, run = r;
+
+                if (w->orig[first] == FONT_BIDI_PDI && w->match[first] != n)
+                        continue;
+                for (;;)
+                {
+                        for (p32 k = w->run_start[run]; k < w->run_start[run + 1]; k++)
+                                w->seq[m++] = w->flat[k];
+
+                        p32 tail = w->seq[m - 1];
+
+                        if (font_bidi_initiator(w->orig[tail]) && w->match[tail] != n)
+                        {
+                                run = w->run_of[w->match[tail]];
+                                continue;
+                        }
+                        break;
+                }
+
+                p32 level = w->base[first], before = para, after = para, tail = w->seq[m - 1];
+
+                if (w->run_start[r])
+                        before = w->base[w->flat[w->run_start[r] - 1]];
+                if (!font_bidi_initiator(w->orig[tail]) && w->run_start[w->run_of[tail] + 1] < flat)
+                        after = w->base[w->flat[w->run_start[w->run_of[tail] + 1]]];
+
+                font_bidi_sequence(w, m, (level > before ? level : before) & 1 ? FONT_BIDI_R : FONT_BIDI_L,
+                                   (level > after ? level : after) & 1 ? FONT_BIDI_R : FONT_BIDI_L, level);
+        }
+
+        //      L1: separators, and whitespace before them and at the end, go to the paragraph level.
+        for (p32 i = 0; i < n; i++)
+                if (w->orig[i] == FONT_BIDI_S || w->orig[i] == FONT_BIDI_B)
+                {
+                        w->level[i] = (p8)para;
+                        for (p32 j = i; j > 0 && font_bidi_white(w->orig[j - 1]); j--)
+                                w->level[j - 1] = (p8)para;
+                }
+        for (p32 j = n; j > 0 && font_bidi_white(w->orig[j - 1]); j--)
+                w->level[j - 1] = (p8)para;
+        for (p32 i = 0; i < n; i++)
+                if (font_bidi_removed(w->orig[i]))
+                        w->level[i] = FONT_GONE;
+        return para;
+}
+
+/*
+        L2 for a row of levels: order[] gets the indices of the entries not
+        FONT_GONE in the order they read on a line, left to right. Reverses
+        from the highest level down to the lowest odd one every run at or
+        above it.
+*/
+static p32 font_reorder(const p8 address_to levels, p32 n, p16 address_to order)
+{
+        p32 count = 0, high = 0, low = 255;
+
+        for (p32 i = 0; i < n; i++)
+                if (levels[i] != FONT_GONE)
+                {
+                        order[count++] = (p16)i;
+                        high = levels[i] > high ? levels[i] : high;
+                        low = (levels[i] & 1) && levels[i] < low ? levels[i] : low;
+                }
+        for (p32 level = high; level >= low && level > 0; level--)
+                for (p32 k = 0; k < count;)
+                {
+                        if (levels[order[k]] < level)
+                        {
+                                k++;
+                                continue;
+                        }
+                        p32 stop = k;
+
+                        while (stop < count && levels[order[stop]] >= level)
+                                stop++;
+                        for (p32 a = k, b = stop - 1; a < b; a++, b--)
+                        {
+                                p16 swap = order[a];
+
+                                order[a] = order[b];
+                                order[b] = swap;
+                        }
+                        k = stop;
+                }
+        return count;
+}
+
+/*
+        The face's layout tables: GDEF's glyph classes and mark sets, GSUB's
+        lookups 1 to 8 and GPOS's 1 to 9 (device tables ignored), applied
+        as HarfBuzz applies them, because that is what the fonts are made
+        and tested against: a buffer of glyphs read forward with an output
+        behind it, every lookup flag and mark filtering set, the skipping of
+        what a lookup ignores, ligature components kept so a mark finds the
+        part of the ligature it belongs to, and a rule's nested lookups
+        run on the glyphs a rule matched, the match shifting as they add and
+        take glyphs away. The tables are the file's, and so every read is
+        bounded and every count is cut to a ceiling: the lookups a plan
+        runs, a rule's context, the depth rules call each other to, the
+        glyphs a buffer holds, and the work a line may do altogether.
+*/
+typedef struct
+{
+        const font_face address_to face;
+        font_item address_to info, address_to out, address_to spare;
+        font_shift address_to shift;
+        p32 len, out_len, idx, cap, table, lookup_mask, lookup_props, nesting, serial;
+        positive lookups;
+        b64 ops;
+        bool output, failed, auto_zwj, auto_zwnj, rtl, classes, attached;
+} font_shaper;
+
+//      What a rule's context element is matched with: a glyph, a class of a class definition, or a coverage.
+typedef struct
+{
+        p32 kind;
+        positive array, base;
+} font_matcher;
+
+enum { FONT_BY_GLYPH, FONT_BY_CLASS, FONT_BY_COVERAGE };
+enum { FONT_ACT_ISOL, FONT_ACT_FINA, FONT_ACT_FIN2, FONT_ACT_FIN3, FONT_ACT_MEDI, FONT_ACT_MED2, FONT_ACT_INIT, FONT_ACT_NONE };
+
+//      GDEF: a glyph's class (0 none, 1 base, 2 ligature, 3 mark, 4 component) and a mark's attachment class.
+static inline p32 font_gdef_class(const font_face address_to face, p32 glyph)
+{
+        positive table = face->gdef, at = table ? font_u16(face, table + 4) : 0;
+
+        return at ? font_class(face, table + at, glyph) : 0;
+}
+
+static inline bool font_gdef_classes(const font_face address_to face)
+{
+        return face->gdef && font_u16(face, face->gdef + 4);
+}
+
+static inline p32 font_gdef_attachment(const font_face address_to face, p32 glyph)
+{
+        positive table = face->gdef, at = table ? font_u16(face, table + 10) : 0;
+
+        return at ? font_class(face, table + at, glyph) : 0;
+}
+
+static bool font_gdef_mark_set(const font_face address_to face, p32 set, p32 glyph)
+{
+        positive table = face->gdef, at = table && font_u32(face, table) >= 0x00010002 ? font_u16(face, table + 12) : 0;
+
+        if (!at || font_u16(face, table + at) != 1 || set >= font_u16(face, table + at + 2))
+                return false;
+
+        positive coverage = font_u32(face, table + at + 4 + 4 * (positive)set);
+
+        return coverage && font_coverage(face, table + at + coverage, glyph) >= 0;
+}
+
+//      The props a glyph starts with: its GDEF class, a mark's attachment class above it.
+static inline p32 font_glyph_props(const font_face address_to face, p32 glyph)
+{
+        p32 klass = font_gdef_class(face, glyph);
+
+        return klass == 1 ? 2 : klass == 2 ? 4 : klass == 3 ? 8 | font_gdef_attachment(face, glyph) << 8 : 0;
+}
+
+#define FONT_PROPS_MARK 8
+#define FONT_PROPS_KEEP (16 | 32 | 64)
+
+static inline p32 font_lig_id(const font_item address_to it)
+{
+        return it->lig >> 5;
+}
+
+static inline p32 font_lig_comp(const font_item address_to it)
+{
+        return it->lig & 0x10 ? 0 : it->lig & 0x0f;
+}
+
+static inline p32 font_lig_count(const font_item address_to it)
+{
+        return it->props & 4 && it->lig & 0x10 ? it->lig & 0x0f : 1;
+}
+
+//      A glyph gets a new class when what it is changes: a substituted one takes its GDEF class again, or the guess.
+static void font_set_class(font_shaper address_to s, font_item address_to it, p32 glyph, p32 guess, bool ligature,
+                           bool component)
+{
+        p32 props = it->props | 16;
+
+        if (ligature)
+                props = (props | 32) & ~(p32)64;
+        if (component)
+                props |= 64;
+        if (s->classes)
+                props = (props & FONT_PROPS_KEEP) | font_glyph_props(s->face, glyph);
+        else if (guess)
+                props = (props & FONT_PROPS_KEEP) | guess;
+        it->props = (p16)props;
+}
+
+/*
+        The buffer. Glyphs are read from info at idx; a lookup that changes
+        the string writes behind it into out, and what it has not reached is
+        copied over when it is done, so a lookup is a pass and not a
+        shuffle. A rule that calls another lookup moves back and forth over
+        the divide.
+*/
+static inline bool font_buffer_room(font_shaper address_to s, p32 more)
+{
+        if (s->out_len + more > s->cap || s->len + more > s->cap)
+                s->failed = true;
+        return !s->failed;
+}
+
+static void font_next_glyph(font_shaper address_to s)
+{
+        if (s->output && font_buffer_room(s, 1))
+                s->out[s->out_len++] = s->info[s->idx];
+        s->idx++;
+}
+
+static void font_skip_glyph(font_shaper address_to s)
+{
+        s->idx++;
+}
+
+//      The current glyph written to the output as glyph, in the place the string is read from.
+static void font_output_glyph(font_shaper address_to s, p32 glyph)
+{
+        if (font_buffer_room(s, 1))
+        {
+                s->out[s->out_len] = s->info[s->idx];
+                s->out[s->out_len++].glyph = glyph;
+        }
+}
+
+static void font_replace_glyph(font_shaper address_to s, p32 glyph)
+{
+        if (s->output)
+                font_output_glyph(s, glyph);
+        else
+                s->info[s->idx].glyph = glyph;
+        s->idx++;
+}
+
+static inline p32 font_behind(const font_shaper address_to s)
+{
+        return s->output ? s->out_len : s->idx;
+}
+
+static void font_clear_output(font_shaper address_to s)
+{
+        s->output = true;
+        s->out_len = s->idx = 0;
+        s->out = s->spare;
+}
+
+//      Everything not reached copied over, and the output made the string.
+static void font_sync(font_shaper address_to s)
+{
+        font_item address_to old = s->info;
+
+        while (s->idx < s->len && !s->failed)
+                font_next_glyph(s);
+        if (!s->failed)
+        {
+                s->info = s->out;
+                s->spare = old;
+                s->len = s->out_len;
+        }
+        s->output = false;
+        s->out_len = s->idx = 0;
+        s->out = s->info;
+}
+
+//      The cursor to position i of what is behind it and what is ahead, moving glyphs between the two.
+static void font_move_to(font_shaper address_to s, p32 i)
+{
+        if (!s->output)
+        {
+                s->idx = i;
+                return;
+        }
+        if (s->out_len < i)
+        {
+                p32 count = i - s->out_len;
+
+                if (!font_buffer_room(s, count) || s->idx + count > s->len)
+                        return;
+                memory_copy(s->out + s->out_len, s->info + s->idx, count * sizeof(font_item));
+                s->idx += count;
+                s->out_len += count;
+        }
+        else if (s->out_len > i)
+        {
+                p32 count = s->out_len - i;
+
+                if (s->idx < count)
+                {
+                        p32 shift = count - s->idx;
+
+                        if (s->len + shift > s->cap)
+                        {
+                                s->failed = true;
+                                return;
+                        }
+                        memory_copy(s->info + s->idx + shift, s->info + s->idx, (s->len - s->idx) * sizeof(font_item));
+                        s->len += shift;
+                        s->idx += shift;
+                }
+                s->idx -= count;
+                s->out_len -= count;
+                memory_copy(s->info + s->idx, s->out + s->out_len, count * sizeof(font_item));
+        }
+}
+
+//      The clusters of [from, to) made one, the lowest.
+static void font_merge(font_shaper address_to s, p32 from, p32 to)
+{
+        p32 low;
+
+        if (to > s->len)
+                to = s->len;
+        if (to < from + 2)
+                return;
+        low = s->info[from].cluster;
+        for (p32 i = from + 1; i < to; i++)
+                low = s->info[i].cluster < low ? s->info[i].cluster : low;
+        for (p32 i = from; i < to; i++)
+                s->info[i].cluster = low;
+}
+
+/*
+        What a lookup skips, and which glyphs the next one of a rule is
+        looked for among. Whether a glyph is let through is the lookup flag
+        (ignore base glyphs, ligatures, marks; a mark attachment class; a
+        mark glyph set) against its GDEF class. Zero width joiners and
+        non-joiners and the other default ignorables are skipped when they
+        do not match, as far as the lookup says so.
+*/
+static bool font_let_through(const font_shaper address_to s, const font_item address_to it, p32 props)
+{
+        p32 glyph_props = it->props;
+
+        if (glyph_props & props & 0xe)
+                return false;
+        if (glyph_props & FONT_PROPS_MARK)
+        {
+                if (props & 0x10)
+                        return font_gdef_mark_set(s->face, props >> 16, it->glyph);
+                if (props & 0xff00)
+                        return (props & 0xff00) == (glyph_props & 0xff00);
+        }
+        return true;
+}
+
+//      0 not skipped, 1 skipped, 2 skipped if it is not what is looked for.
+static p32 font_skip_of(const font_shaper address_to s, const font_item address_to it, bool context, p32 props)
+{
+        bool zwnj = context && s->auto_zwnj, zwj = context || s->auto_zwj;
+
+        if (!font_let_through(s, it, props))
+                return 1;
+        if ((it->unicode & 1) && (zwnj || !(it->unicode & 4)) && (zwj || !(it->unicode & 2)))
+                return 2;
+        return 0;
+}
+
+static bool font_matches(const font_shaper address_to s, const font_matcher address_to m, p32 i, p32 glyph)
+{
+        positive at = m->array + 2 * (positive)i;
+
+        switch (m->kind)
+        {
+        case FONT_BY_GLYPH:
+                return font_u16(s->face, at) == glyph;
+        case FONT_BY_CLASS:
+                return font_class(s->face, m->base, glyph) == font_u16(s->face, at);
+        default:
+        {
+                positive coverage = font_u16(s->face, at);
+
+                return coverage && font_coverage(s->face, m->base + coverage, glyph) >= 0;
+        }
+        }
+}
+
+//      The glyph after *at that is the i'th of a rule, or any glyph the lookup keeps with no matcher, in info.
+static bool font_scan_next(font_shaper address_to s, const font_matcher address_to m, p32 i, bool context, p32 address_to at,
+                           p32 props)
+{
+        for (p32 k = *at + 1; k < s->len; k++)
+        {
+                const font_item address_to it = &s->info[k];
+                p32 skip;
+                bool wanted = context || (it->mask & s->lookup_mask) != 0;
+
+                if (s->ops-- <= 0)
+                {
+                        s->failed = true;
+                        return false;
+                }
+                skip = font_skip_of(s, it, context, props);
+                if (skip == 1)
+                        continue;
+                if (wanted && (m ? font_matches(s, m, i, it->glyph) : skip == 0))
+                {
+                        *at = k;
+                        return true;
+                }
+                if (skip == 0)
+                        return false;
+        }
+        return false;
+}
+
+//      The same going back through what is behind the cursor.
+static bool font_scan_prev(font_shaper address_to s, const font_matcher address_to m, p32 i, bool context, p32 address_to at,
+                           p32 props)
+{
+        for (p32 k = *at; k > 0; k--)
+        {
+                const font_item address_to it = &s->out[k - 1];
+                p32 skip;
+                bool wanted = context || (it->mask & s->lookup_mask) != 0;
+
+                if (s->ops-- <= 0)
+                {
+                        s->failed = true;
+                        return false;
+                }
+                skip = font_skip_of(s, it, context, props);
+                if (skip == 1)
+                        continue;
+                if (wanted && (m ? font_matches(s, m, i, it->glyph) : skip == 0))
+                {
+                        *at = k - 1;
+                        return true;
+                }
+                if (skip == 0)
+                        return false;
+        }
+        return false;
+}
+
+//      The count glyphs of a rule's input, the current one first: where each is, where the match ends, and how many
+//      ligature components it spans. Glyphs attached to different components of a ligature already made do not match.
+static bool font_match_input(font_shaper address_to s, p32 count, const font_matcher address_to m, p32 address_to tail,
+                             p32 address_to positions, p32 address_to total)
+{
+        const font_item address_to cur = &s->info[s->idx];
+        p32 first_id = font_lig_id(cur), first_comp = font_lig_comp(cur), at = s->idx, components = font_lig_count(cur),
+            ligbase = 0;
+
+        if (count > FONT_MATCH || count == 0)
+                return false;
+        positions[0] = s->idx;
+        for (p32 i = 1; i < count; i++)
+        {
+                if (!font_scan_next(s, m, i - 1, false, &at, s->lookup_props))
+                {
+                        *tail = at + 1;
+                        return false;
+                }
+                positions[i] = at;
+
+                p32 this_id = font_lig_id(&s->info[at]), this_comp = font_lig_comp(&s->info[at]);
+
+                if (first_id && first_comp)
+                {
+                        if (first_id != this_id || first_comp != this_comp)
+                        {
+                                if (!ligbase)
+                                {
+                                        p32 j = s->out_len;
+                                        bool found = false;
+
+                                        if (!s->output)
+                                                j = 0;
+                                        while (j && font_lig_id(&s->out[j - 1]) == first_id)
+                                        {
+                                                if (font_lig_comp(&s->out[j - 1]) == 0)
+                                                {
+                                                        j--;
+                                                        found = true;
+                                                        break;
+                                                }
+                                                j--;
+                                        }
+                                        ligbase = found && font_skip_of(s, &s->out[j], false, s->lookup_props) == 1 ? 2 : 1;
+                                }
+                                if (ligbase == 1)
+                                        return false;
+                        }
+                }
+                else if (this_id && this_comp && this_id != first_id)
+                        return false;
+                components += font_lig_count(&s->info[at]);
+        }
+        *tail = at + 1;
+        if (total)
+                *total = components;
+        return true;
+}
+
+//      The count glyphs after position start, each wanted by the matcher; where the match stops.
+static bool font_match_ahead(font_shaper address_to s, p32 count, const font_matcher address_to m, p32 start,
+                             p32 address_to stop)
+{
+        p32 at = start - 1;
+
+        if (count > FONT_MATCH)
+                return false;
+        for (p32 i = 0; i < count; i++)
+                if (!font_scan_next(s, m, i, true, &at, s->lookup_props))
+                        return false;
+        *stop = at + 1;
+        return true;
+}
+
+//      And the count glyphs behind the cursor, nearest first.
+static bool font_match_behind(font_shaper address_to s, p32 count, const font_matcher address_to m)
+{
+        p32 at = font_behind(s);
+
+        if (count > FONT_MATCH)
+                return false;
+        for (p32 i = 0; i < count; i++)
+                if (!font_scan_prev(s, m, i, true, &at, s->lookup_props))
+                        return false;
+        return true;
+}
+
+static bool font_apply_nested(font_shaper address_to s, p32 index);
+
+/*
+        A rule matched at positions[0..count): its lookup records (a place in
+        the match, a lookup) run, each at the glyph that place is now at. A
+        lookup that adds glyphs puts them after that place and the places
+        after it move on; one that takes glyphs away takes places from
+        after it. Ends with the cursor after the match, wherever it grew to.
+*/
+static void font_apply_records(font_shaper address_to s, p32 count, p32 address_to positions, positive records, p32 n,
+                               p32 tail)
+{
+        b32 stop, delta = (b32)font_behind(s) - (b32)s->idx;
+
+        stop = (b32)font_behind(s) + (b32)tail - (b32)s->idx;
+        for (p32 j = 0; j < count; j++)
+                positions[j] = (p32)((b32)positions[j] + delta);
+
+        for (p32 i = 0; i < n && !s->failed; i++)
+        {
+                p32 at = font_u16(s->face, records + 4 * (positive)i), lookup = font_u16(s->face, records + 4 * (positive)i + 2);
+                p32 before = font_behind(s) + (s->len - s->idx);
+                b32 grew;
+
+                if (at >= count || positions[at] >= before)
+                        continue;
+                font_move_to(s, positions[at]);
+                if (s->ops-- <= 0 || s->failed)
+                        break;
+                if (!font_apply_nested(s, lookup))
+                        continue;
+
+                grew = (b32)(font_behind(s) + (s->len - s->idx)) - (b32)before;
+                if (!grew)
+                        continue;
+                stop += grew;
+                if (stop < (b32)positions[at])
+                {
+                        grew += (b32)positions[at] - stop;
+                        stop = (b32)positions[at];
+                }
+
+                p32 next = at + 1;
+
+                if (grew > 0)
+                {
+                        if ((p32)grew + count > FONT_MATCH)
+                                break;
+                }
+                else
+                {
+                        grew = grew > (b32)next - (b32)count ? grew : (b32)next - (b32)count;
+                        next = (p32)((b32)next - grew);
+                }
+                memory_copy(positions + next + grew, positions + next, (count - next) * sizeof(p32));
+                next = (p32)((b32)next + grew);
+                count = (p32)((b32)count + grew);
+                for (p32 j = at + 1; j < next; j++)
+                        positions[j] = positions[j - 1] + 1;
+                for (; next < count; next++)
+                        positions[next] = (p32)((b32)positions[next] + grew);
+        }
+        font_move_to(s, (p32)stop);
+}
+
+//      A context rule: its input matched, then its records.
+static bool font_rule(font_shaper address_to s, p32 count, const font_matcher address_to input, positive records, p32 n)
+{
+        p32 positions[FONT_MATCH], tail;
+
+        if (!font_match_input(s, count, input, &tail, positions, null))
+                return false;
+        font_apply_records(s, count, positions, records, n, tail);
+        return true;
+}
+
+//      A chain rule: input and what follows it, then what comes before.
+static bool font_chain_rule(font_shaper address_to s, const font_matcher address_to behind, p32 back_count,
+                       const font_matcher address_to input, p32 count, const font_matcher address_to ahead, p32 ahead_count,
+                       positive records, p32 n)
+{
+        p32 positions[FONT_MATCH], tail, stop;
+
+        if (!font_match_input(s, count, input, &tail, positions, null) ||
+            !font_match_ahead(s, ahead_count, ahead, tail, &stop) || !font_match_behind(s, back_count, behind))
+                return false;
+        font_apply_records(s, count, positions, records, n, tail);
+        return true;
+}
+
+/*
+        GSUB. One subtable applied at the glyph the cursor is on: true when
+        it substituted, with the cursor past what it consumed.
+*/
+static bool font_ligature(font_shaper address_to s, positive set, p32 index)
+{
+        const font_face address_to face = s->face;
+        positive ligature = set + font_u16(face, set + 2 + 2 * (positive)index);
+        p32 glyph = font_u16(face, ligature), count = font_u16(face, ligature + 2);
+        p32 positions[FONT_MATCH], tail, total = 0;
+        font_matcher input = {FONT_BY_GLYPH, ligature + 4, 0};
+
+        if (!count)
+                return false;
+        if (count == 1)
+        {
+                font_set_class(s, &s->info[s->idx], glyph, 0, false, false);
+                font_replace_glyph(s, glyph);
+                return true;
+        }
+        if (!font_match_input(s, count, &input, &tail, positions, &total))
+                return false;
+
+        /*      The ligature of a base and marks is a base, and one of marks only keeps its id; any other is a new
+                ligature. The marks between the components are given the components they were attached to. */
+        font_item address_to first = &s->info[positions[0]];
+        bool base = (first->props & 2) != 0, mark = (first->props & FONT_PROPS_MARK) != 0;
+
+        font_merge(s, s->idx, tail);
+        for (p32 i = 1; i < count; i++)
+                if (!(s->info[positions[i]].props & FONT_PROPS_MARK))
+                {
+                        base = false;
+                        mark = false;
+                        break;
+                }
+
+        bool made = !base && !mark;
+        p32 id = 0, last_id = font_lig_id(&s->info[s->idx]), last_count = font_lig_count(&s->info[s->idx]), so_far;
+
+        if (made)
+        {
+                id = ++s->serial & 7;
+                if (!id)
+                        id = ++s->serial & 7;
+        }
+        so_far = last_count;
+        if (made)
+                s->info[s->idx].lig = (p8)(id << 5 | 0x10 | (total & 0x0f));
+        font_set_class(s, &s->info[s->idx], glyph, made ? 4 : 0, true, false);
+        font_replace_glyph(s, glyph);
+        for (p32 i = 1; i < count; i++)
+        {
+                while (s->idx < positions[i] && !s->failed)
+                {
+                        if (made)
+                        {
+                                p32 comp = font_lig_comp(&s->info[s->idx]);
+
+                                if (!comp)
+                                        comp = last_count;
+                                s->info[s->idx].lig = (p8)(id << 5 | ((so_far - last_count + (comp < last_count ? comp : last_count)) & 0x0f));
+                        }
+                        font_next_glyph(s);
+                }
+                last_id = font_lig_id(&s->info[s->idx]);
+                last_count = font_lig_count(&s->info[s->idx]);
+                so_far += last_count;
+                s->idx++;
+        }
+        if (made)
+                for (p32 i = s->idx; i < s->len; i++)
+                {
+                        p32 comp = font_lig_comp(&s->info[i]);
+
+                        if (last_id != font_lig_id(&s->info[i]) || !comp)
+                                break;
+                        s->info[i].lig = (p8)(id << 5 | ((so_far - last_count + (comp < last_count ? comp : last_count)) & 0x0f));
+                }
+        return true;
+}
+
+static bool font_gsub_apply(font_shaper address_to s, p32 kind, positive t)
+{
+        const font_face address_to face = s->face;
+        font_item address_to cur = &s->info[s->idx];
+        p32 glyph = cur->glyph, format = font_u16(face, t);
+        b32 ci;
+
+        switch (kind)
+        {
+        case 1:
+        {
+                positive coverage = t + font_u16(face, t + 2);
+                p32 to;
+
+                if ((ci = font_coverage(face, coverage, glyph)) < 0)
+                        return false;
+                if (format == 1)
+                        to = (glyph + (p32)(b16)font_u16(face, t + 4)) & 0xffff;
+                else if (format == 2 && (p32)ci < font_u16(face, t + 4))
+                        to = font_u16(face, t + 6 + 2 * (positive)ci);
+                else
+                        return false;
+                font_set_class(s, cur, to, 0, false, false);
+                font_replace_glyph(s, to);
+                return true;
+        }
+        case 2:
+        case 3:
+        {
+                positive coverage = t + font_u16(face, t + 2);
+                positive set;
+                p32 count;
+
+                if (format != 1 || (ci = font_coverage(face, coverage, glyph)) < 0 || (p32)ci >= font_u16(face, t + 4))
+                        return false;
+                set = t + font_u16(face, t + 6 + 2 * (positive)ci);
+                count = font_u16(face, set);
+                if (kind == 3)
+                {
+                        //      The first alternate: the feature's value is 1.
+                        if (!count)
+                                return false;
+                        p32 to = font_u16(face, set + 2);
+
+                        font_set_class(s, cur, to, 0, false, false);
+                        font_replace_glyph(s, to);
+                        return true;
+                }
+                if (!count)
+                {
+                        font_skip_glyph(s);
+                        return true;
+                }
+                if (count == 1)
+                {
+                        p32 to = font_u16(face, set + 2);
+
+                        font_set_class(s, cur, to, 0, false, false);
+                        font_replace_glyph(s, to);
+                        return true;
+                }
+
+                p32 klass = cur->props & 4 ? 2 : 0, id = font_lig_id(cur);
+
+                if (count > 255)
+                        count = 255;
+                for (p32 i = 0; i < count && !s->failed; i++)
+                {
+                        if (!id)
+                                cur->lig = (p8)(i & 0x0f);
+                        font_set_class(s, cur, font_u16(face, set + 2 + 2 * (positive)i), klass, false, true);
+                        font_output_glyph(s, font_u16(face, set + 2 + 2 * (positive)i));
+                }
+                font_skip_glyph(s);
+                return true;
+        }
+        case 4:
+        {
+                positive coverage = t + font_u16(face, t + 2);
+                positive set;
+                p32 count;
+
+                if (format != 1 || (ci = font_coverage(face, coverage, glyph)) < 0 || (p32)ci >= font_u16(face, t + 4))
+                        return false;
+                set = t + font_u16(face, t + 6 + 2 * (positive)ci);
+                count = font_u16(face, set);
+                for (p32 i = 0; i < count && i < 4096; i++)
+                        if (font_ligature(s, set, i))
+                                return true;
+                return false;
+        }
+        case 5:
+        {
+                positive coverage;
+                positive set;
+                p32 count;
+
+                if (format == 3)
+                {
+                        p32 glyphs = font_u16(face, t + 2), n = font_u16(face, t + 4);
+                        font_matcher input = {FONT_BY_COVERAGE, t + 8, t};
+
+                        coverage = font_u16(face, t + 6);
+                        if (!coverage || font_coverage(face, t + coverage, glyph) < 0)
+                                return false;
+                        return font_rule(s, glyphs, &input, t + 6 + 2 * (positive)glyphs, n);
+                }
+                if (format != 1 && format != 2)
+                        return false;
+                if ((ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0)
+                        return false;
+                if (format == 1)
+                {
+                        if ((p32)ci >= font_u16(face, t + 4))
+                                return false;
+                        set = font_u16(face, t + 6 + 2 * (positive)ci);
+                }
+                else
+                {
+                        p32 klass = font_class(face, t + font_u16(face, t + 4), glyph);
+
+                        if (klass >= font_u16(face, t + 6))
+                                return false;
+                        set = font_u16(face, t + 8 + 2 * (positive)klass);
+                }
+                if (!set)
+                        return false;
+                set += t;
+                count = font_u16(face, set);
+                for (p32 i = 0; i < count && i < 4096; i++)
+                {
+                        positive rule = set + font_u16(face, set + 2 + 2 * (positive)i);
+                        p32 inputs = font_u16(face, rule), n = font_u16(face, rule + 2);
+                        font_matcher input = {format == 1 ? FONT_BY_GLYPH : FONT_BY_CLASS, rule + 4,
+                                              format == 1 ? 0 : t + font_u16(face, t + 4)};
+
+                        s->ops--;
+                        if (font_rule(s, inputs, &input, rule + 4 + 2 * (positive)(inputs ? inputs - 1 : 0), n))
+                                return true;
+                }
+                return false;
+        }
+        case 6:
+        {
+                positive set;
+                p32 count;
+
+                if (format == 3)
+                {
+                        p32 back = font_u16(face, t + 2), inputs = font_u16(face, t + 4 + 2 * (positive)back), ahead, n;
+                        positive behind_at = t + 4, input_at = t + 6 + 2 * (positive)back, ahead_at;
+                        positive first = font_u16(face, input_at);
+                        font_matcher behind = {FONT_BY_COVERAGE, behind_at, t}, input = {FONT_BY_COVERAGE, input_at + 2, t},
+                                     after = {FONT_BY_COVERAGE, 0, t};
+
+                        ahead_at = input_at + 2 * (positive)inputs;
+                        ahead = font_u16(face, ahead_at);
+                        after.array = ahead_at + 2;
+                        n = font_u16(face, ahead_at + 2 + 2 * (positive)ahead);
+                        if (!first || font_coverage(face, t + first, glyph) < 0)
+                                return false;
+                        return font_chain_rule(s, &behind, back, &input, inputs, &after, ahead,
+                                          ahead_at + 4 + 2 * (positive)ahead, n);
+                }
+                if (format != 1 && format != 2)
+                        return false;
+                if ((ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0)
+                        return false;
+                if (format == 1)
+                {
+                        if ((p32)ci >= font_u16(face, t + 4))
+                                return false;
+                        set = font_u16(face, t + 6 + 2 * (positive)ci);
+                }
+                else
+                {
+                        p32 klass = font_class(face, t + font_u16(face, t + 6), glyph);
+
+                        if (klass >= font_u16(face, t + 10))
+                                return false;
+                        set = font_u16(face, t + 12 + 2 * (positive)klass);
+                }
+                if (!set)
+                        return false;
+                set += t;
+                count = font_u16(face, set);
+                for (p32 i = 0; i < count && i < 4096; i++)
+                {
+                        positive rule = set + font_u16(face, set + 2 + 2 * (positive)i);
+                        p32 back = font_u16(face, rule), inputs = font_u16(face, rule + 2 + 2 * (positive)back), ahead, n;
+                        positive input_at = rule + 4 + 2 * (positive)back, ahead_at = input_at + 2 * (positive)(inputs ? inputs - 1 : 0);
+                        p32 kind3 = format == 1 ? FONT_BY_GLYPH : FONT_BY_CLASS;
+                        font_matcher behind = {kind3, rule + 2, format == 1 ? 0 : t + font_u16(face, t + 4)},
+                                     input = {kind3, input_at, format == 1 ? 0 : t + font_u16(face, t + 6)},
+                                     after = {kind3, ahead_at + 2, format == 1 ? 0 : t + font_u16(face, t + 8)};
+
+                        ahead = font_u16(face, ahead_at);
+                        n = font_u16(face, ahead_at + 2 + 2 * (positive)ahead);
+                        s->ops--;
+                        if (font_chain_rule(s, &behind, back, &input, inputs, &after, ahead, ahead_at + 4 + 2 * (positive)ahead, n))
+                                return true;
+                }
+                return false;
+        }
+        case 8:
+        {
+                //      Reverse chaining: one glyph substituted in place, the cursor left where it is.
+                p32 back, ahead, n;
+                positive behind_at = t + 6, ahead_at;
+                font_matcher behind = {FONT_BY_COVERAGE, behind_at, t}, after = {FONT_BY_COVERAGE, 0, t};
+
+                if (format != 1 || s->output || (ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0)
+                        return false;
+                back = font_u16(face, t + 4);
+                ahead_at = behind_at + 2 * (positive)back;
+                ahead = font_u16(face, ahead_at);
+                after.array = ahead_at + 2;
+                n = font_u16(face, ahead_at + 2 + 2 * (positive)ahead);
+                if ((p32)ci >= n || !font_match_ahead(s, ahead, &after, s->idx + 1, &(p32){0}))
+                        return false;
+
+                //      The glyphs behind are looked for in the string itself, which is not an output buffer here.
+                {
+                        p32 at = s->idx;
+
+                        for (p32 i = 0; i < back; i++)
+                                if (!font_scan_prev(s, &behind, i, true, &at, s->lookup_props))
+                                        return false;
+                }
+                p32 to = font_u16(face, ahead_at + 4 + 2 * (positive)ahead + 2 * (positive)ci);
+
+                font_set_class(s, cur, to, 0, false, false);
+                cur->glyph = to;
+                return true;
+        }
+        default:
+                return false;
+        }
+}
+
+/*
+        GPOS. A value record's placement and advance added to a glyph's.
+*/
+static void font_value(const font_face address_to face, positive at, p32 format, font_shift address_to into)
+{
+        if (format & 1)
+                into->x += font_i16(face, at);
+        if (format & 2)
+                into->y += font_i16(face, at + 2 * (positive)font_bits(format & 1));
+        if (format & 4)
+                into->advance += font_i16(face, at + 2 * (positive)font_bits(format & 3));
+}
+
+//      An anchor's coordinates in font units.
+static bool font_anchor(const font_face address_to face, positive at, b32 address_to x, b32 address_to y)
+{
+        if (!at || !font_u16(face, at))
+                return false;
+        *x = font_i16(face, at + 2);
+        *y = font_i16(face, at + 4);
+        return true;
+}
+
+//      Cursive attachment's chain, turned round when a glyph already attached to another is attached to a new one.
+static void font_reverse_cursive(font_shift address_to shift, p32 i, p32 parent)
+{
+        b32 chain = shift[i].chain;
+
+        if (!chain || !(shift[i].attach & 2))
+                return;
+        shift[i].chain = 0;
+
+        p32 j = (p32)((b32)i + chain);
+
+        if (j == parent)
+                return;
+        font_reverse_cursive(shift, j, parent);
+        shift[j].y = -shift[i].y;
+        shift[j].chain = (b16)-chain;
+        shift[j].attach = shift[i].attach;
+}
+
+//      A mark (the glyph the cursor is on) hung from the glyph at base by the anchors its class has there.
+static bool font_attach(font_shaper address_to s, positive marks, p32 mark_index, positive anchors, positive anchor_at,
+                        p32 classes, p32 base)
+{
+        const font_face address_to face = s->face;
+        positive record = marks + 2 + 4 * (positive)mark_index;
+        p32 klass = font_u16(face, record);
+        positive mark_anchor = marks + font_u16(face, record + 2), base_anchor;
+        b32 mx, my, bx, by;
+
+        if (mark_index >= font_u16(face, marks) || klass >= classes)
+                return false;
+        base_anchor = font_u16(face, anchor_at + 2 * (positive)klass);
+        if (!base_anchor || !font_anchor(face, anchors + base_anchor, &bx, &by) ||
+            !font_anchor(face, mark_anchor, &mx, &my))
+                return false;
+
+        font_shift address_to o = &s->shift[s->idx];
+
+        o->x = bx - mx;
+        o->y = by - my;
+        o->attach = 1;
+        o->chain = (b16)((b32)base - (b32)s->idx);
+        s->attached = true;
+        s->idx++;
+        return true;
+}
+
+static bool font_gpos_apply(font_shaper address_to s, p32 kind, positive t)
+{
+        const font_face address_to face = s->face;
+        font_item address_to cur = &s->info[s->idx];
+        p32 glyph = cur->glyph, format = font_u16(face, t);
+        b32 ci;
+
+        switch (kind)
+        {
+        case 1:
+        {
+                p32 value = font_u16(face, t + 4);
+
+                if ((ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0)
+                        return false;
+                if (format == 1)
+                        font_value(face, t + 6, value, &s->shift[s->idx]);
+                else if (format == 2 && (p32)ci < font_u16(face, t + 6))
+                        font_value(face, t + 8 + 2 * (positive)font_bits(value) * (positive)ci, value, &s->shift[s->idx]);
+                else
+                        return false;
+                s->idx++;
+                return true;
+        }
+        case 2:
+        {
+                p32 at = s->idx;
+                positive first, second;
+                p32 one = font_u16(face, t + 4), two = font_u16(face, t + 6);
+
+                if ((ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0 ||
+                    !font_scan_next(s, null, 0, false, &at, s->lookup_props))
+                        return false;
+                if (!font_pair_at(face, t, glyph, s->info[at].glyph, &first, &second))
+                        return false;
+                font_value(face, first, one, &s->shift[s->idx]);
+                font_value(face, second, two, &s->shift[at]);
+                s->idx = two ? at + 1 : at;
+                return true;
+        }
+        case 3:
+        {
+                //      Cursive attachment: the previous glyph's exit anchor meets this glyph's entry anchor.
+                p32 i = s->idx, j = s->idx;
+                positive entry_at, exit_at;
+                b32 pi, ex, ey, nx, ny;
+
+                if (format != 1 || (ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0 ||
+                    (p32)ci >= font_u16(face, t + 4))
+                        return false;
+                entry_at = font_u16(face, t + 6 + 4 * (positive)ci);
+                if (!entry_at || !font_scan_prev(s, null, 0, false, &i, s->lookup_props))
+                        return false;
+                if ((pi = font_coverage(face, t + font_u16(face, t + 2), s->info[i].glyph)) < 0 ||
+                    (p32)pi >= font_u16(face, t + 4))
+                        return false;
+                exit_at = font_u16(face, t + 6 + 4 * (positive)pi + 2);
+                if (!exit_at || !font_anchor(face, t + exit_at, &ex, &ey) || !font_anchor(face, t + entry_at, &nx, &ny))
+                        return false;
+
+                font_shift address_to pos = s->shift;
+                p32 child = i, parent = j;
+                b32 d, y = ny - ey;
+
+                if (!s->rtl)
+                {
+                        pos[i].advance = ex + pos[i].x;
+                        d = nx + pos[j].x;
+                        pos[j].advance -= d;
+                        pos[j].x -= d;
+                }
+                else
+                {
+                        d = ex + pos[i].x;
+                        pos[i].advance -= d;
+                        pos[i].x -= d;
+                        pos[j].advance = nx + pos[j].x;
+                }
+
+                //      The child hangs from the parent; the tree stays on the baseline at its root.
+                if (!(s->lookup_props & 1))
+                {
+                        child = j;
+                        parent = i;
+                        y = -y;
+                }
+                font_reverse_cursive(pos, child, parent);
+                pos[child].attach = 2;
+                pos[child].chain = (b16)((b32)parent - (b32)child);
+                pos[child].y = y;
+                s->attached = true;
+                s->idx++;
+                return true;
+        }
+        case 4:
+        {
+                //      Mark to base: back to the nearest glyph that is not a mark.
+                positive marks, bases;
+                p32 classes, j, base_index;
+
+                if (format != 1 || (ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0)
+                        return false;
+                classes = font_u16(face, t + 6);
+                marks = t + font_u16(face, t + 8);
+                bases = t + font_u16(face, t + 10);
+                for (j = s->idx; j > 0; j--)
+                {
+                        const font_item address_to it = &s->info[j - 1];
+
+                        if (s->ops-- <= 0)
+                        {
+                                s->failed = true;
+                                return false;
+                        }
+                        if (font_skip_of(s, it, false, 8))
+                                continue;
+                        if (!(it->mask & s->lookup_mask))
+                                return false;
+                        break;
+                }
+                if (!j)
+                        return false;
+                j--;
+                if ((b32)(base_index = (p32)font_coverage(face, t + font_u16(face, t + 4), s->info[j].glyph)) < 0 ||
+                    base_index >= font_u16(face, bases))
+                        return false;
+                return font_attach(s, marks, (p32)ci, bases, bases + 2 + 2 * (positive)classes * (positive)base_index, classes, j);
+        }
+        case 5:
+        {
+                positive marks, ligatures, attach;
+                p32 classes, j, comps, comp_index, lig_index, lig_id, mark_id, mark_comp;
+                b32 li;
+
+                if (format != 1 || (ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0)
+                        return false;
+                j = s->idx;
+                if (!font_scan_prev(s, null, 0, false, &j, 8))
+                        return false;
+                if ((li = font_coverage(face, t + font_u16(face, t + 4), s->info[j].glyph)) < 0)
+                        return false;
+                lig_index = (p32)li;
+                classes = font_u16(face, t + 6);
+                marks = t + font_u16(face, t + 8);
+                ligatures = t + font_u16(face, t + 10);
+                if (lig_index >= font_u16(face, ligatures))
+                        return false;
+                attach = ligatures + font_u16(face, ligatures + 2 + 2 * (positive)lig_index);
+                comps = font_u16(face, attach);
+                if (!comps)
+                        return false;
+                lig_id = font_lig_id(&s->info[j]);
+                mark_id = font_lig_id(cur);
+                mark_comp = font_lig_comp(cur);
+                comp_index = lig_id && lig_id == mark_id && mark_comp > 0 ? (comps < mark_comp ? comps : mark_comp) - 1 : comps - 1;
+                return font_attach(s, marks, (p32)ci, attach, attach + 2 + 2 * (positive)classes * (positive)comp_index,
+                                   classes, j);
+        }
+        case 6:
+        {
+                positive marks, others;
+                p32 classes, j = s->idx, id1, id2, comp1, comp2, other_index;
+                b32 oi;
+
+                if (format != 1 || (ci = font_coverage(face, t + font_u16(face, t + 2), glyph)) < 0)
+                        return false;
+                if (!font_scan_prev(s, null, 0, false, &j, s->lookup_props & ~(p32)0xe))
+                        return false;
+                if (!(s->info[j].props & FONT_PROPS_MARK))
+                        return false;
+                id1 = font_lig_id(cur);
+                id2 = font_lig_id(&s->info[j]);
+                comp1 = font_lig_comp(cur);
+                comp2 = font_lig_comp(&s->info[j]);
+                if (id1 == id2 ? id1 && comp1 != comp2 : !((id1 > 0 && !comp1) || (id2 > 0 && !comp2)))
+                        return false;
+                if ((oi = font_coverage(face, t + font_u16(face, t + 4), s->info[j].glyph)) < 0)
+                        return false;
+                other_index = (p32)oi;
+                classes = font_u16(face, t + 6);
+                marks = t + font_u16(face, t + 8);
+                others = t + font_u16(face, t + 10);
+                if (other_index >= font_u16(face, others))
+                        return false;
+                return font_attach(s, marks, (p32)ci, others, others + 2 + 2 * (positive)classes * (positive)other_index,
+                                   classes, j);
+        }
+        case 7:
+        case 8:
+        {
+                //      The same rules as GSUB's 5 and 6, their records naming GPOS lookups.
+                return font_gsub_apply(s, kind - 2, t);
+        }
+        default:
+                return false;
+        }
+}
+
+/*
+        Lookups: a lookup's header, the subtables it tries in order, and the
+        lookup run over the whole string, or on one glyph for a rule that
+        calls it.
+*/
+static bool font_lookup_at(const font_shaper address_to s, p32 index, positive address_to lookup, p32 address_to type,
+                           p32 address_to count, p32 address_to props)
+{
+        const font_face address_to face = s->face;
+        positive list = s->lookups, at;
+
+        if (!list || index >= font_u16(face, list) || !(at = font_u16(face, list + 2 + 2 * (positive)index)))
+                return false;
+        *lookup = list + at;
+        *type = font_u16(face, *lookup);
+        *count = font_u16(face, *lookup + 4);
+        *props = font_u16(face, *lookup + 2);
+        if (*props & 0x10)
+                *props |= font_u16(face, *lookup + 6 + 2 * (positive)*count) << 16;
+        return true;
+}
+
+static bool font_try_subtables(font_shaper address_to s, positive lookup, p32 type, p32 count)
+{
+        const font_face address_to face = s->face;
+        p32 extension = s->table ? 9 : 7;
+
+        for (p32 k = 0; k < count && k < FONT_SUBTABLES; k++)
+        {
+                positive t = lookup + font_u16(face, lookup + 6 + 2 * (positive)k);
+                p32 kind = type;
+
+                if (type == extension)
+                {
+                        if (font_u16(face, t) != 1)
+                                continue;
+                        kind = font_u16(face, t + 2);
+                        t += font_u32(face, t + 4);
+                        if (kind == extension)
+                                continue;
+                }
+                if (s->table ? font_gpos_apply(s, kind, t) : font_gsub_apply(s, kind, t))
+                        return true;
+        }
+        return false;
+}
+
+//      A lookup a rule names, tried once at the glyph the cursor is on.
+static bool font_apply_nested(font_shaper address_to s, p32 index)
+{
+        positive lookup;
+        p32 type, count, props, saved = s->lookup_props;
+        bool done;
+
+        if (s->nesting >= FONT_NESTING || !font_lookup_at(s, index, &lookup, &type, &count, &props) || s->idx >= s->len)
+                return false;
+        s->nesting++;
+        s->lookup_props = props;
+        done = font_let_through(s, &s->info[s->idx], props) && font_try_subtables(s, lookup, type, count);
+        s->lookup_props = saved;
+        s->nesting--;
+        return done;
+}
+
+//      A lookup over the whole string, for the glyphs whose mask has a bit of mask.
+static void font_apply_string(font_shaper address_to s, p32 index, p32 mask, p32 manual)
+{
+        positive lookup;
+        p32 type, count, props;
+        bool reverse;
+
+        if (!s->len || !mask || !font_lookup_at(s, index, &lookup, &type, &count, &props))
+                return;
+        s->lookup_mask = mask;
+        s->lookup_props = props;
+        s->auto_zwj = !(manual & 1);
+        s->auto_zwnj = !(manual & 2);
+        reverse = !s->table && (type == 8 || (type == 7 && count && font_u16(s->face, lookup + 6) &&
+                                              font_u16(s->face, lookup + font_u16(s->face, lookup + 6) + 2) == 8));
+        if (reverse)
+        {
+                for (b32 i = (b32)s->len - 1; i >= 0 && s->ops-- > 0 && !s->failed; i--)
+                {
+                        s->idx = (p32)i;
+                        if ((s->info[i].mask & mask) && font_let_through(s, &s->info[i], props))
+                                font_try_subtables(s, lookup, type, count);
+                }
+                return;
+        }
+        if (!s->table)
+                font_clear_output(s);
+        else
+        {
+                s->output = false;
+                s->out = s->info;
+        }
+        s->idx = 0;
+        while (s->idx < s->len && !s->failed && s->ops-- > 0)
+        {
+                font_item address_to cur = &s->info[s->idx];
+
+                if (!((cur->mask & mask) && font_let_through(s, cur, props) && font_try_subtables(s, lookup, type, count)))
+                        font_next_glyph(s);
+        }
+        if (!s->table)
+                font_sync(s);
+}
+
+/*
+        The plan a face has for a script: which lookups run and in what
+        order. HarfBuzz's: features are asked for in stages (the Arabic
+        joining forms each their own, with rlig and then calt and rclt after
+        them), the lookups of a stage run by index, and a glyph is given a
+        bit of the mask for each form it is to have; GPOS runs the lookups
+        of all its features at once, by index.
+*/
+typedef struct
+{
+        p32 tag;
+        p16 mask;
+        p8 stage, manual;
+} font_feature;
+
+typedef struct
+{
+        p16 lookup, mask;
+        p8 stage, manual;
+} font_step;
+
+//      Which glyphs a feature's lookups are for: 0 all of them, then the joining forms, then rtlm.
+#define FONT_MASK_FORM(action) (2u << (action))
+#define FONT_MASK_RTLM 256u
+
+static p32 font_features(p32 kind, bool rtl, font_feature address_to out)
+{
+        p32 n = 0;
+        static const p32 common[] = {FONT_TAG('a', 'b', 'v', 'm'), FONT_TAG('b', 'l', 'w', 'm'), FONT_TAG('c', 'l', 'i', 'g'),
+                                     FONT_TAG('c', 'u', 'r', 's'), FONT_TAG('d', 'i', 's', 't'), FONT_TAG('k', 'e', 'r', 'n'),
+                                     FONT_TAG('l', 'i', 'g', 'a'), FONT_TAG('m', 'a', 'r', 'k'), FONT_TAG('m', 'k', 'm', 'k')};
+        static const p32 forms[] = {FONT_TAG('i', 's', 'o', 'l'), FONT_TAG('f', 'i', 'n', 'a'), FONT_TAG('f', 'i', 'n', '2'),
+                                    FONT_TAG('f', 'i', 'n', '3'), FONT_TAG('m', 'e', 'd', 'i'), FONT_TAG('m', 'e', 'd', '2'),
+                                    FONT_TAG('i', 'n', 'i', 't')};
+        bool arabic = kind == 2;
+
+        out[n++] = (font_feature){FONT_TAG('r', 'v', 'r', 'n'), 0, 0, 0};
+        if (rtl)
+        {
+                out[n++] = (font_feature){FONT_TAG('r', 't', 'l', 'a'), 0, 1, 0};
+                out[n++] = (font_feature){FONT_TAG('r', 't', 'l', 'm'), FONT_MASK_RTLM, 1, 0};
+        }
+        else
+        {
+                out[n++] = (font_feature){FONT_TAG('l', 't', 'r', 'a'), 0, 1, 0};
+                out[n++] = (font_feature){FONT_TAG('l', 't', 'r', 'm'), 0, 1, 0};
+        }
+        out[n++] = (font_feature){FONT_TAG('c', 'c', 'm', 'p'), 0, arabic ? 2 : 1, 0};
+        out[n++] = (font_feature){FONT_TAG('l', 'o', 'c', 'l'), 0, arabic ? 2 : 1, 0};
+        if (arabic)
+        {
+                for (p32 i = 0; i < 7; i++)
+                        out[n++] = (font_feature){forms[i], (p16)FONT_MASK_FORM(i), (p8)(3 + i), 0};
+                out[n++] = (font_feature){FONT_TAG('r', 'l', 'i', 'g'), 0, 10, 1};
+                out[n++] = (font_feature){FONT_TAG('r', 'c', 'l', 't'), 0, 11, 1};
+                out[n++] = (font_feature){FONT_TAG('c', 'a', 'l', 't'), 0, 11, 1};
+                out[n++] = (font_feature){FONT_TAG('m', 's', 'e', 't'), 0, 12, 0};
+        }
+        else
+        {
+                out[n++] = (font_feature){FONT_TAG('r', 'l', 'i', 'g'), 0, 1, 0};
+                out[n++] = (font_feature){FONT_TAG('r', 'c', 'l', 't'), 0, 1, 0};
+                out[n++] = (font_feature){FONT_TAG('c', 'a', 'l', 't'), 0, 1, 0};
+        }
+        for (p32 i = 0; i < sizeof(common) / sizeof(common[0]); i++)
+                out[n++] = (font_feature){common[i], 0, arabic ? 12 : 1,
+                                          (p8)(common[i] == FONT_TAG('m', 'a', 'r', 'k') || common[i] == FONT_TAG('m', 'k', 'm', 'k') ? 3 : 0)};
+        return n;
+}
+
+//      The script's default language system in one of the tables, for the script tags this kind of text goes by and
+//      then DFLT, dflt and latn, or 0.
+static positive font_language(const font_face address_to face, positive table, p32 kind)
+{
+        positive scripts = table + font_u16(face, table + 4);
+        p32 count = font_u16(face, scripts);
+        p32 tags[4] = {kind == 2 ? FONT_TAG('a', 'r', 'a', 'b') : FONT_TAG('h', 'e', 'b', 'r'), FONT_TAG('D', 'F', 'L', 'T'),
+                       FONT_TAG('d', 'f', 'l', 't'), FONT_TAG('l', 'a', 't', 'n')};
+
+        if (count > 1024)
+                count = 1024;
+        for (p32 t = 0; t < 4; t++)
+                for (p32 i = 0; i < count; i++)
+                {
+                        positive record = scripts + 2 + 6 * (positive)i;
+
+                        if (font_u32(face, record) == tags[t])
+                        {
+                                positive script = scripts + font_u16(face, record + 4), language = font_u16(face, script);
+
+                                return language ? script + language : 0;
+                        }
+                }
+        return 0;
+}
+
+//      The plan for a table (0 GSUB, 1 GPOS) of the face: lookups by stage and index, with what they are for.
+static fn font_plan_table(const font_face address_to face, font_plan address_to plan, p32 table, p32 kind, bool rtl)
+{
+        positive base = table ? face->gpos : face->gsub, features, langsys;
+        font_feature wanted[40];
+        p32 n = font_features(kind, rtl, wanted), found = 0, count;
+        font_step step[2 * FONT_STEPS];
+
+        if (!base || font_u16(face, base) != 1)
+                return;
+        langsys = font_language(face, base, kind);
+        features = base + font_u16(face, base + 6);
+        if (!langsys)
+                return;
+        count = font_u16(face, langsys + 4);
+        if (count > 4096)
+                count = 4096;
+        for (p32 w = 0; w < n; w++)
+                for (p32 i = 0; i < count; i++)
+                {
+                        positive feature = features + 2 + 6 * (positive)font_u16(face, langsys + 6 + 2 * (positive)i);
+                        positive params;
+
+                        if (font_u32(face, feature) != wanted[w].tag)
+                                continue;
+                        params = features + font_u16(face, feature + 4);
+                        for (p32 k = 0, lookups = font_u16(face, params + 2); k < lookups && found < 2 * FONT_STEPS; k++)
+                        {
+                                step[found].lookup = (p16)font_u16(face, params + 4 + 2 * (positive)k);
+                                step[found].mask = wanted[w].mask ? wanted[w].mask : 1;
+                                step[found].stage = table ? 0 : wanted[w].stage;
+                                step[found].manual = wanted[w].manual;
+                                found++;
+                        }
+                        break;
+                }
+
+        //      By stage, then index; the same lookup asked for twice in a stage is one step for either's glyphs.
+        for (p32 a = 1; a < found; a++)
+        {
+                font_step one = step[a];
+                p32 b = a;
+
+                for (; b > 0 && (step[b - 1].stage > one.stage ||
+                                 (step[b - 1].stage == one.stage && step[b - 1].lookup > one.lookup)); b--)
+                        step[b] = step[b - 1];
+                step[b] = one;
+        }
+        for (p32 a = 0, out = 0; a < found; a++)
+        {
+                if (out && plan->lookup[table][out - 1] == step[a].lookup && plan->stage_of[table][out - 1] == step[a].stage)
+                {
+                        plan->mask[table][out - 1] |= step[a].mask;
+                        plan->manual[table][out - 1] |= step[a].manual;
+                        continue;
+                }
+                if (out == FONT_STEPS)
+                        break;
+                plan->lookup[table][out] = step[a].lookup;
+                plan->mask[table][out] = step[a].mask;
+                plan->manual[table][out] = step[a].manual;
+                plan->stage_of[table][out++] = step[a].stage;
+                plan->steps[table] = (p8)out;
+        }
+}
+
+static font_plan address_to font_plan_for(font_engine address_to e, const font_face address_to face, p32 kind, bool rtl)
+{
+        p32 key = kind | (rtl ? 4 : 0);
+        font_plan address_to plan;
+
+        for (p32 i = 0; i < FONT_PLANS; i++)
+                if (e->plan[i].face == face->id && e->plan[i].kind == key)
+                        return &e->plan[i];
+        plan = &e->plan[e->plan_turn++ % FONT_PLANS];
+        memory_zero(plan, sizeof(*plan));
+        plan->face = face->id;
+        plan->kind = (p8)key;
+        for (p32 action = 0; action < 7; action++)
+                plan->mask_of[action] = (p16)FONT_MASK_FORM(action);
+        font_plan_table(face, plan, 0, kind, rtl);
+        font_plan_table(face, plan, 1, kind, rtl);
+
+        //      Without any of the joining forms in the face, the letters take their presentation forms instead.
+        if (kind == 2)
+        {
+                static const p32 forms[] = {FONT_TAG('i', 's', 'o', 'l'), FONT_TAG('f', 'i', 'n', 'a'), FONT_TAG('m', 'e', 'd', 'i'),
+                                            FONT_TAG('i', 'n', 'i', 't')};
+                bool any = false;
+                positive langsys = face->gsub && font_u16(face, face->gsub) == 1 ? font_language(face, face->gsub, kind) : 0;
+
+                if (langsys)
+                        for (p32 i = 0, count = font_u16(face, langsys + 4); i < count && i < 4096 && !any; i++)
+                        {
+                                positive feature = face->gsub + font_u16(face, face->gsub + 6) + 2 +
+                                                   6 * (positive)font_u16(face, langsys + 6 + 2 * (positive)i);
+
+                                for (p32 f = 0; f < 4; f++)
+                                        any = any || font_u32(face, feature) == forms[f];
+                        }
+                plan->fallback = !any;
+        }
+        return plan;
+}
+
+/*
+        Shaping a unit: the code points of one face, one level and one
+        script, as the glyphs the face's tables make of them. The steps are
+        HarfBuzz's, in its order: a glyph for each code point (the mirror
+        glyph for a bracket in right to left text, the pieces of a letter
+        the face has only decomposed), combining marks put in order by
+        class (Arabic's modifier marks first among their class), Arabic
+        letters given the form their neighbours ask for, the GSUB lookups
+        of the plan, the advances and GPOS's lookups, marks given no width
+        of their own, and the offsets of what hangs from what settled.
+*/
+static const p8 font_join_state[3][4][3] = {
+    //      from a letter that does not join on: after a non-joining letter, or a right joining one
+    {{FONT_ACT_NONE, FONT_ACT_NONE, 0}, {FONT_ACT_NONE, FONT_ACT_ISOL, 1}, {FONT_ACT_NONE, FONT_ACT_ISOL, 0}, {FONT_ACT_NONE, FONT_ACT_ISOL, 1}},
+    //      after a letter in its isolated form that joins on
+    {{FONT_ACT_NONE, FONT_ACT_NONE, 0}, {FONT_ACT_NONE, FONT_ACT_ISOL, 1}, {FONT_ACT_INIT, FONT_ACT_FINA, 0}, {FONT_ACT_INIT, FONT_ACT_FINA, 2}},
+    //      after a letter in its final form that joins on
+    {{FONT_ACT_NONE, FONT_ACT_NONE, 0}, {FONT_ACT_NONE, FONT_ACT_ISOL, 1}, {FONT_ACT_MEDI, FONT_ACT_FINA, 0}, {FONT_ACT_MEDI, FONT_ACT_FINA, 2}},
+};
+
+//      Which form each letter of the unit takes. A mark the joining passes through has none.
+static fn font_joining(const font_item address_to items, p32 n, p8 address_to action)
+{
+        p32 state = 0, prev = 0xffffffffu;
+
+        for (p32 i = 0; i < n; i++)
+        {
+                p32 type = font_join_type(items[i].code);
+
+                if (type == 7)
+                {
+                        action[i] = FONT_ACT_NONE;
+                        continue;
+                }
+
+                const p8 address_to step = font_join_state[state][type];
+
+                if (step[0] != FONT_ACT_NONE && prev != 0xffffffffu)
+                        action[prev] = step[0];
+                action[i] = step[1];
+                prev = i;
+                state = step[2];
+        }
+}
+
+//      The code point the presentation form of a letter is, in the form an action asks for, or 0.
+static p32 font_presentation(p32 code, p32 action)
+{
+        p32 low = 0, high = FONT_FORMS, column = action == FONT_ACT_ISOL ? 1 : action == FONT_ACT_FINA ? 2
+                                                  : action == FONT_ACT_INIT ? 3 : action == FONT_ACT_MEDI ? 4 : 0;
+
+        while (low < high && column)
+        {
+                p32 middle = (low + high) / 2;
+
+                if (font_forms[middle][0] < code)
+                        low = middle + 1;
+                else
+                        high = middle;
+        }
+        return column && low < FONT_FORMS && font_forms[low][0] == code ? font_forms[low][column] : 0;
+}
+
+//      Modifier combining marks: the marks of the Arabic block that sit nearest the base among those of their class.
+static inline bool font_arabic_modifier(p32 code)
+{
+        return code == 0x654 || code == 0x655 || code == 0x658 || code == 0x6dc || code == 0x6e3 || code == 0x6e7 ||
+               code == 0x6e8 || (code >= 0x8ca && code <= 0x8cb) || (code >= 0x8cd && code <= 0x8cf) || code == 0x8d3 ||
+               code == 0x8f3;
+}
+
+//      Runs of marks put in order by modified combining class, and for Arabic the modifier marks moved first
+//      among those of the classes 220 and 230.
+static fn font_order_marks(font_item address_to items, p32 n, bool arabic)
+{
+        for (p32 i = 0; i < n;)
+        {
+                if (!font_mccc(items[i].code))
+                {
+                        i++;
+                        continue;
+                }
+
+                p32 stop = i + 1;
+
+                while (stop < n && font_mccc(items[stop].code))
+                        stop++;
+                if (stop - i > 1 && stop - i <= 32)
+                {
+                        for (p32 a = i + 1; a < stop; a++)
+                        {
+                                font_item one = items[a];
+                                p32 b = a;
+
+                                for (; b > i && font_mccc(items[b - 1].code) > font_mccc(one.code); b--)
+                                        items[b] = items[b - 1];
+                                items[b] = one;
+                        }
+                        if (arabic)
+                        {
+                                p32 at = i, from = i;
+
+                                for (p32 cc = 220; cc <= 230; cc += 10)
+                                {
+                                        while (from < stop && font_mccc(items[from].code) < cc)
+                                                from++;
+                                        if (from == stop)
+                                                break;
+                                        if (font_mccc(items[from].code) > cc)
+                                                continue;
+
+                                        p32 to = from;
+
+                                        while (to < stop && font_mccc(items[to].code) == cc && font_arabic_modifier(items[to].code))
+                                                to++;
+                                        if (from == to)
+                                                continue;
+
+                                        font_item moved[32];
+
+                                        memory_copy(moved, items + from, (to - from) * sizeof(font_item));
+                                        memory_copy(items + at + (to - from), items + at, (from - at) * sizeof(font_item));
+                                        memory_copy(items + at, moved, (to - from) * sizeof(font_item));
+                                        at += to - from;
+                                        from = to;
+                                }
+                        }
+                }
+                i = stop;
+        }
+}
+
+//      The code point a base and a mark compose to, if they do and the face has a glyph for it: a mark that follows its
+//      base, or follows marks of a smaller class, is folded into it (the maddah above an alef is the alef with madda).
+static fn font_compose(font_shaper address_to s)
+{
+        p32 out = 1, starter = 0;
+
+        for (p32 i = 1; i < s->len; i++)
+        {
+                font_item cur = s->info[i];
+                p32 composed = 0, glyph = 0;
+
+                if ((cur.unicode & 8) && (starter == out - 1 || font_mccc(s->info[out - 1].code) < font_mccc(cur.code)))
+                {
+                        for (p32 row = 0; row < FONT_DECOMPS && !composed; row++)
+                                if (font_decomp_composes[row] && font_decomp_first[row] == s->info[starter].code &&
+                                    font_decomp_second[row] == cur.code)
+                                        composed = font_decomp_code[row];
+                        glyph = composed ? font_glyph(s->face, composed) : 0;
+                }
+                if (glyph)
+                {
+                        for (p32 k = starter; k < out; k++)
+                                s->info[k].cluster = s->info[k].cluster < cur.cluster ? s->info[k].cluster : cur.cluster;
+                        s->info[starter].code = composed;
+                        s->info[starter].glyph = glyph;
+                        s->info[starter].unicode &= (p8)~8;
+                        s->info[starter].props = (p16)(s->classes ? font_glyph_props(s->face, glyph) : 2);
+                        continue;
+                }
+                s->info[out++] = cur;
+                if (!font_mccc(cur.code))
+                        starter = out - 1;
+        }
+        if (s->len)
+                s->len = out;
+}
+
+//      The canonical decomposition of a code point in the Hebrew and Arabic blocks, as the index of its row, or -1.
+static b32 font_decomposition(p32 code)
+{
+        p32 low = 0, high = FONT_DECOMPS;
+
+        while (low < high)
+        {
+                p32 middle = (low + high) / 2;
+
+                if (font_decomp_code[middle] < code)
+                        low = middle + 1;
+                else
+                        high = middle;
+        }
+        return low < FONT_DECOMPS && font_decomp_code[low] == code ? (b32)low : -1;
+}
+
+//      A code point as an item of the string: its glyph, or the glyphs of its decomposition if the face has none.
+static fn font_push(font_shaper address_to s, p32 code, p32 draw, bool rtlm, p32 cluster, p32 depth)
+{
+        const font_face address_to face = s->face;
+        p32 glyph = font_glyph(face, draw);
+
+        if (!glyph && depth < 3 && !font_ignorable(draw))
+        {
+                b32 at = font_decomposition(draw);
+
+                if (at >= 0)
+                {
+                        font_push(s, font_decomp_first[at], font_decomp_first[at], rtlm, cluster, depth + 1);
+                        if (font_decomp_second[at])
+                                font_push(s, font_decomp_second[at], font_decomp_second[at], rtlm, cluster, depth + 1);
+                        return;
+                }
+        }
+        if (s->len >= s->cap)
+        {
+                s->failed = true;
+                return;
+        }
+
+        font_item address_to it = &s->info[s->len++];
+        bool mark = font_mccc(code) != 0 || font_bidi_class(code) == FONT_BIDI_NSM;
+
+        it->glyph = glyph;
+        it->cluster = cluster;
+        it->mask = 1 | (rtlm ? FONT_MASK_RTLM : 0);
+        it->code = code;
+        it->props = (p16)(s->classes ? font_glyph_props(face, glyph) : mark ? 8 : 2);
+        it->lig = 0;
+        it->unicode = (p8)((font_ignorable(code) ? 1 : 0) | (code == 0x200d ? 2 : 0) | (code == 0x200c ? 4 : 0) | (mark ? 8 : 0));
+}
+
+//      Where the cursive and mark attachments left each glyph, settled from the roots out: a glyph hangs from the
+//      glyph before it (or, joined cursively, after it), and takes on that glyph's offset and the advances between.
+static fn font_settle(font_shift address_to shift, p32 len, p16 address_to path, bool rtl)
+{
+        for (p32 i = 0; i < len; i++)
+        {
+                p32 top = 0, at = i;
+
+                while (shift[at].chain && top < FONT_GLYPHS)
+                {
+                        b32 parent = (b32)at + shift[at].chain;
+
+                        shift[at].chain = 0;
+                        if (parent < 0 || (p32)parent >= len)
+                                break;
+                        path[top++] = (p16)at;
+                        at = (p32)parent;
+                }
+
+                p32 parent = at;
+
+                while (top)
+                {
+                        p32 child = path[--top];
+
+                        if (shift[child].attach & 2)
+                                shift[child].y += shift[parent].y;
+                        else
+                        {
+                                shift[child].x += shift[parent].x;
+                                shift[child].y += shift[parent].y;
+                                if (!rtl)
+                                        for (p32 k = parent; k < child; k++)
+                                                shift[child].x -= shift[k].advance;
+                                else
+                                        for (p32 k = parent + 1; k < child + 1; k++)
+                                                shift[child].x += shift[k].advance;
+                        }
+                        parent = child;
+                }
+        }
+}
+
+static void font_run_plan(font_shaper address_to s, const font_plan address_to plan, p32 table)
+{
+        const font_face address_to face = s->face;
+        positive base = table ? face->gpos : face->gsub;
+
+        s->table = table;
+        s->lookups = base && font_u16(face, base) == 1 ? base + font_u16(face, base + 8) : 0;
+        for (p32 step = 0; step < plan->steps[table] && !s->failed; step++)
+                font_apply_string(s, plan->lookup[table][step], plan->mask[table][step], plan->manual[table][step]);
+}
+
+/*
+        The unit of w->code[first, first + n) shaped by the face as kind (2
+        Arabic, 1 the default features), read in logical order whatever
+        its direction. The glyphs come back in logical order in *result, in
+        font units: w->shift has each one's advance and offsets. Ignorable
+        code points are shaped (the joining sees them) and dropped at the
+        end, the way a face hides them.
+*/
+static p32 font_shape_unit(font_engine address_to e, const font_face address_to face, p32 kind, bool rtl, p32 first, p32 n,
+                      font_item address_to address_to result)
+{
+        font_work address_to w = &e->work;
+        const font_plan address_to plan = font_plan_for(e, face, kind, rtl);
+        font_shaper s = {.face = face, .info = w->item[0], .out = w->item[0], .spare = w->item[1], .shift = w->shift,
+                         .cap = FONT_GLYPHS, .rtl = rtl, .classes = font_gdef_classes(face)};
+
+        s.ops = (b64)FONT_OPS * n + 65536;
+        for (p32 i = 0; i < n && !s.failed; i++)
+        {
+                p32 code = w->code[first + i], draw = code;
+                bool rtlm = false;
+
+                if (w->level[first + i] == FONT_GONE)
+                        continue;
+                if (rtl)
+                {
+                        p32 mirror = font_mirror_of(code);
+
+                        if (mirror != code && font_glyph(face, mirror))
+                                draw = mirror;
+                        else
+                                rtlm = true;
+                }
+                font_push(&s, code, draw, rtlm, first + i, 0);
+        }
+        font_order_marks(s.info, s.len, kind == 2);
+        font_compose(&s);
+
+        if (kind == 2)
+        {
+                p8 address_to action = w->action;
+
+                font_joining(s.info, s.len, action);
+                for (p32 i = 0; i < s.len; i++)
+                        if (action[i] != FONT_ACT_NONE)
+                                s.info[i].mask |= plan->mask_of[action[i]];
+
+                //      A face with none of the joining forms gets the presentation forms of the letters, and lam
+                //      with an alef after it their ligature.
+                if (plan->fallback)
+                        for (p32 i = 0; i < s.len; i++)
+                        {
+                                p32 glyph = 0, form = font_presentation(s.info[i].code, action[i]);
+
+                                if (s.info[i].code == 0x644)
+                                {
+                                        p32 next = i + 1;
+
+                                        while (next < s.len && font_join_type(s.info[next].code) == 7)
+                                                next++;
+                                        for (p32 a = 0; next < s.len && a < FONT_LAM_ALEFS; a++)
+                                                if (font_lam_alef[a][0] == s.info[next].code)
+                                                {
+                                                        bool alone = action[i] == FONT_ACT_ISOL || action[i] == FONT_ACT_INIT;
+
+                                                        if ((glyph = font_glyph(face, font_lam_alef[a][alone ? 1 : 2])))
+                                                        {
+                                                                s.info[next].glyph = 0;
+                                                                s.info[next].unicode |= 1;
+                                                        }
+                                                        break;
+                                                }
+                                }
+                                if (!glyph && form)
+                                        glyph = font_glyph(face, form);
+                                if (glyph)
+                                {
+                                        s.info[i].glyph = glyph;
+                                        if (s.classes)
+                                                s.info[i].props = (p16)font_glyph_props(face, glyph);
+                                }
+                        }
+        }
+
+        font_run_plan(&s, plan, 0);
+
+        //      Advances, then GPOS.
+        for (p32 i = 0; i < s.len; i++)
+        {
+                s.shift[i].advance = (b32)font_advance_units(face, s.info[i].glyph);
+                s.shift[i].x = s.shift[i].y = 0;
+                s.shift[i].chain = 0;
+                s.shift[i].attach = 0;
+        }
+        s.out = s.info;
+        s.output = false;
+        s.failed = false;
+        s.attached = false;
+        font_run_plan(&s, plan, 1);
+
+        for (p32 i = 0; i < s.len; i++)
+                if (s.info[i].props & FONT_PROPS_MARK)
+                        s.shift[i].advance = 0;
+        for (p32 i = 0; i < s.len; i++)
+                if (s.info[i].unicode & 1)
+                        s.shift[i].advance = 0;
+        if (s.attached)
+                font_settle(s.shift, s.len, w->pair, rtl);
+
+        //      Ignorable code points are hidden: gone from the line, and from its widths.
+        p32 kept = 0;
+
+        for (p32 i = 0; i < s.len; i++)
+                if (!(s.info[i].unicode & 1))
+                {
+                        s.info[kept] = s.info[i];
+                        s.shift[kept++] = s.shift[i];
+                }
+        *result = s.info;
+        return kept;
 }
 
 //      Whole pixels from 16.16, up or to the nearest, for the cell.
@@ -5137,16 +8223,624 @@ static inline b32 font_eighths(b64 pen)
         return (b32)(((b64)pen * FONT_PHASES + 0x8000) >> 16);
 }
 
+/*
+        Text that is not one glyph a code point left to right. The faces
+        behind the caller's chain are added with font_fallback, a regular
+        and its bold (or none): a code point no face of the chain has is
+        looked for in them, in the order they were added, and a place's face
+        is then count + the slot. Whether it is the bold of the slot is the
+        flags' FONT_BOLD, so a line is drawn with the flags it was laid out
+        with; a slot with no bold is the regular, embolden by the engine.
+*/
+fn font_fallback(font_engine address_to e, const font_face address_to regular, const font_face address_to bold)
+{
+        if (regular && e->fallbacks < FONT_FALLBACKS)
+                e->fallback[e->fallbacks++] = (font_fallback_slot){regular, bold};
+}
+
+//      The face a place names: the chain's, or a slot's.
+static inline const font_face address_to font_face_at(const font_engine address_to e,
+                                                       const font_face address_to const address_to faces, p32 count,
+                                                       p32 index, p32 flags)
+{
+        if (index < count)
+                return faces[index];
+        if (index - count >= e->fallbacks)
+                return faces[0];
+
+        const font_fallback_slot address_to slot = &e->fallback[index - count];
+
+        return (flags & FONT_BOLD) && slot->bold ? slot->bold : slot->regular;
+}
+
+//      The synthetic bold a slot without one is given when bold is asked for.
+static inline p32 font_synthetic(const font_engine address_to e, p32 count, p32 index, p32 flags)
+{
+        return (flags & FONT_BOLD) && index >= count && index - count < e->fallbacks && !e->fallback[index - count].bold
+                   ? FONT_EMBOLDEN
+                   : 0;
+}
+
+//      The faces behind the chain laid after it, so that the loops read one chain: the caller's, then each slot's regular
+//      or, asked for bold, its bold. (A slot with no bold gets the engine's synthetic bold, which the loops of plain text
+//      do not give: asked for bold with one of those behind the chain, they hand the line to the whole engine.)
+#define FONT_CHAIN 12
+
+static inline p32 font_extend(const font_engine address_to e, const font_face address_to const address_to faces, p32 count,
+                              p32 flags, const font_face address_to address_to into)
+{
+        if (count + e->fallbacks > FONT_CHAIN)
+                return 0;
+        for (p32 i = 0; i < count; i++)
+                into[i] = faces[i];
+        for (p32 slot = 0; slot < e->fallbacks; slot++)
+                into[count + slot] = font_face_at(e, faces, count, count + slot, flags);
+        return count + e->fallbacks;
+}
+
+//      Whether some slot would be drawn emboldened by the engine for these flags.
+static bool font_slots_synthetic(const font_engine address_to e, p32 flags)
+{
+        for (p32 slot = 0; slot < e->fallbacks; slot++)
+                if ((flags & FONT_BOLD) && !e->fallback[slot].bold)
+                        return true;
+        return false;
+}
+
+/*
+        Whether a text can be laid as it always was, a glyph a code point
+        from the left: none of its code points is right to left, an Arabic
+        number, or a directional control. Lead bytes under 0xd6 are code
+        points under U+0580 and need no look; the rest are decoded unless
+        they are in a block that has none (U+1000 to U+1FFF, U+3000 to
+        U+EFFF), and the controls of U+2000 to U+2FFF are four bytes' look.
+*/
+static inline bool font_bidi_plain(p32 type)
+{
+        return !(type == FONT_BIDI_R || type == FONT_BIDI_AL || type == FONT_BIDI_AN || type >= FONT_BIDI_LRE);
+}
+
+//      The bytes of a word that are at least n (0x80 to 0xff), as their top bits: a byte is when its top bit is set and
+//      its low seven bits, with 0x80 - (n & 0x7f) added, carry into the top bit.
+static inline p64 font_bytes_from(p64 word, p64 n)
+{
+        return ((word & 0x7f7f7f7f7f7f7f7full) + (0x80 - (n & 0x7f)) * 0x0101010101010101ull) & word & 0x8080808080808080ull;
+}
+
+//      From byte at on, which is not a lead byte under 0xd6 in a word of eight: one at a time, and the ones that might
+//      be right to left decoded.
+static COLD p32 font_plain_from(const p8 address_to text, positive length, positive at)
+{
+        while (at < length)
+        {
+                positive stop = at + 8 <= length ? at + 8 : length;
+
+                if (stop - at == 8)
+                {
+                        p64 word;
+
+                        memory_copy_apart(&word, text + at, 8);
+
+                        //      The lead bytes from 0xd6 up that might be right to left, not those of U+1000 to U+1FFF
+                        //      (0xe1) and U+3000 to U+EFFF (0xe3 to 0xee), so that CJK is eight bytes' look.
+                        if (!(font_bytes_from(word, 0xd6) & ~(font_bytes_from(word, 0xe1) & ~font_bytes_from(word, 0xe2)) &
+                              ~(font_bytes_from(word, 0xe3) & ~font_bytes_from(word, 0xef))))
+                        {
+                                at = stop;
+                                continue;
+                        }
+                }
+                while (at < stop)
+                {
+                        p32 lead = text[at];
+
+                        if (lead < 0xd6 || lead == 0xe1 || (lead >= 0xe3 && lead <= 0xee))
+                        {
+                                at++;
+                                continue;
+                        }
+                        if (lead == 0xe2)
+                        {
+                                p32 second = at + 1 < length ? text[at + 1] : 0, third = at + 2 < length ? text[at + 2] : 0;
+
+                                if ((second == 0x80 && (third == 0x8f || (third >= 0xaa && third <= 0xae))) ||
+                                    (second == 0x81 && third >= 0xa6 && third <= 0xa9))
+                                        return 0;
+                                at++;
+                                continue;
+                        }
+
+                        p32 code;
+
+                        at = font_decode(text, length, at, &code);
+                        if (!font_bidi_plain(font_bidi_class(code)))
+                                return 0;
+                }
+        }
+        return 1;
+}
+
+static inline p32 font_plain(const p8 address_to text, positive length)
+{
+        positive at = 0;
+
+        //      Eight bytes at a time while none is a lead byte of U+0580 or above: Latin, Greek and Cyrillic are that.
+        for (; at + 8 <= length; at += 8)
+        {
+                p64 word;
+
+                __builtin_memcpy(&word, text + at, 8);
+                if (font_bytes_from(word, 0xd6))
+                        return font_plain_from(text, length, at);
+        }
+        for (; at < length; at++)
+                if (text[at] >= 0xd6)
+                        return font_plain_from(text, length, at);
+        return 1;
+}
+
+p32 font_is_simple(const p8 address_to text, positive length)
+{
+        return font_plain(text, length);
+}
+
+//      The paragraph level the first paragraph of a text has under the flags: 0 or 1.
+p32 font_base_level(const p8 address_to text, positive length, p32 flags)
+{
+        p32 fallback = flags & FONT_RTL ? 1 : 0, depth = 0;
+
+        if (!(flags & FONT_AUTO))
+                return fallback;
+        for (positive at = 0; at < length;)
+        {
+                p32 code, type;
+
+                at = font_decode(text, length, at, &code);
+                type = font_bidi_class(code);
+                if (font_bidi_initiator(type))
+                        depth++;
+                else if (type == FONT_BIDI_PDI)
+                        depth -= depth > 0;
+                else if (!depth && type == FONT_BIDI_L)
+                        return 0;
+                else if (!depth && (type == FONT_BIDI_R || type == FONT_BIDI_AL))
+                        return 1;
+                else if (type == FONT_BIDI_B)
+                        break;
+        }
+        return fallback;
+}
+
+static inline bool font_complex(const p8 address_to text, positive length, p32 flags)
+{
+        return (flags & FONT_RTL) || !font_plain(text, length);
+}
+
+//      The same question of one code point, for the loops that read a code point at a time: under U+0590 it is no, and
+//      so for the blocks that hold no right to left or directional character (U+1000 to U+1FFF, U+3000 to U+FAFF, the
+//      Hangul and the rest to U+FB1C, the emoji of the astral planes).
+static inline bool font_complex_code(p32 code)
+{
+        if (code < 0x590 || (code >= 0x1000 && code < 0x2000) || (code >= 0x3000 && code < 0xfb1d) || code >= 0x1f000)
+                return false;
+        return !font_bidi_plain(font_bidi_class(code));
+}
+
+/*
+        A line of text laid by the whole engine: split in paragraphs, each
+        given its levels, cut in units of one face, one level and one
+        script, the units put in reading order and each shaped, and every
+        glyph handed to what the line is for (the places of font_layout,
+        the pixels of font_draw, the pen of font_extent, the edges of
+        font_segments) in the order it reads on the line, left to right,
+        with the pen carrying on from one paragraph to the next.
+*/
+enum { FONT_FLOW_EXTENT, FONT_FLOW_PLACES, FONT_FLOW_DRAW, FONT_FLOW_SEGMENTS };
+
+typedef struct
+{
+        font_engine address_to e;
+        const font_face address_to address_to faces;
+        const font_face address_to chain[FONT_CHAIN];
+        p32 count, base, size, flags, mode, turn, style, strength, colour, background;
+        const font_target address_to target;
+        b32 x, baseline;
+        b64 pen, cell;
+        font_place address_to out;
+        positive room, placed;
+        const p32 address_to cuts;
+        positive segments;
+        b32 address_to left, address_to right;
+        p8 address_to level;
+} font_flow;
+
+#define FONT_NO_EDGE 0x7fffffff
+
+//      A glyph handed on: where its origin is (the pen and its offset) and how far it moves the pen.
+static fn font_flow_glyph(font_flow address_to f, p32 glyph, p32 face, b64 advance, b64 x_offset, b32 y_offset, p32 cluster,
+                          p32 level)
+{
+        font_engine address_to e = f->e;
+        b64 at = f->pen + x_offset;
+
+        switch (f->mode)
+        {
+        case FONT_FLOW_PLACES:
+                if (f->placed < f->room)
+                        f->out[f->placed++] = (font_place){glyph, (p16)face, (p16)level, at, advance, y_offset, e->work.at[cluster]};
+                break;
+        case FONT_FLOW_DRAW:
+        {
+                b32 eighth = font_eighths((b64)f->x + at);
+
+                if (face == FONT_DRAWN)
+                {
+                        font_metrics cell = font_metrics_at(f->faces[0], f->size);
+                        font_bitmap box = font_cached(e, null, glyph, (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
+
+                        if (f->turn)
+                                font_blend_turned(e, f->target, f->turn, eighth >> 3, f->baseline - cell.baseline, box,
+                                                  f->colour, f->background, f->strength);
+                        else
+                                font_blend(e, f->target, eighth >> 3, f->baseline - cell.baseline, box, f->colour,
+                                           f->background, f->strength);
+                }
+                else
+                {
+                        const font_face address_to one = f->faces[face];
+                        font_bitmap box = font_cached(e, one, glyph, f->size, (p32)eighth & 7,
+                                                      f->style | font_synthetic(e, f->base, face, f->flags), 0);
+                        b32 lift = (b32)(((b64)y_offset + 0x8000) >> 16);
+
+                        if (f->turn)
+                                font_blend_turned(e, f->target, f->turn, (eighth >> 3) + box.left, f->baseline - box.top - lift,
+                                                  box, f->colour, f->background, f->strength);
+                        else
+                                font_blend(e, f->target, (eighth >> 3) + box.left, f->baseline - box.top - lift, box,
+                                           f->colour, f->background, f->strength);
+                }
+                break;
+        }
+        case FONT_FLOW_SEGMENTS:
+        {
+                font_work address_to w = &e->work;
+
+                if (f->pen < w->span_left[cluster])
+                        w->span_left[cluster] = f->pen;
+                if (f->pen + advance > w->span_right[cluster])
+                        w->span_right[cluster] = f->pen + advance;
+                break;
+        }
+        default:
+                break;
+        }
+        f->pen += advance;
+}
+
+//      The category a code point has for itemising: 2 Arabic, 1 Hebrew (the default features), 3 a letter of another
+//      script, 0 neutral: it goes with whatever surrounds it.
+static inline p32 font_unit_class(p32 code, p32 type)
+{
+        p32 script = font_script_of(code);
+
+        if (script)
+                return script;
+        return type == FONT_BIDI_WS || type == FONT_BIDI_ON || type == FONT_BIDI_ES || type == FONT_BIDI_ET ||
+                       type == FONT_BIDI_CS || type == FONT_BIDI_EN || type == FONT_BIDI_S || type == FONT_BIDI_B ||
+                       type == FONT_BIDI_BN || type == FONT_BIDI_NSM || type == FONT_BIDI_PDI || font_bidi_initiator(type)
+                   ? 0
+                   : 3;
+}
+
+//      One unit, hidden by none of the above: its glyphs handed on.
+static fn font_flow_unit(font_flow address_to f, p32 first, p32 stop, p32 face, p32 shape, p32 level)
+{
+        font_engine address_to e = f->e;
+        font_work address_to w = &e->work;
+        const font_face address_to one = f->faces[face == FONT_DRAWN ? 0 : face];
+        bool rtl = level & 1;
+
+        if ((shape == 1 || shape == 2) && face != FONT_DRAWN)
+        {
+                font_item address_to items;
+                p32 n = font_shape_unit(e, one, shape, rtl, first, stop - first, &items);
+
+                for (p32 j = 0; j < n; j++)
+                {
+                        p32 k = rtl ? n - 1 - j : j;
+
+                        font_flow_glyph(f, items[k].glyph, face, font_fixed(one, w->shift[k].advance, f->size),
+                                        font_fixed(one, w->shift[k].x, f->size), font_fixed(one, w->shift[k].y, f->size),
+                                        items[k].cluster, level);
+                }
+                return;
+        }
+
+        //      A glyph a code point, kerned with the glyph beside it on the line: a unit is one face.
+        p32 n = 0, last = 0;
+        bool kerned = false;
+
+        for (p32 i = first; i < stop; i++)
+                if (w->level[i] != FONT_GONE && !font_ignorable(w->code[i]))
+                        w->pair[n++] = (p16)i;
+        for (p32 j = 0; j < n; j++)
+        {
+                p32 i = w->pair[rtl ? n - 1 - j : j], glyph = w->glyph[i];
+                b64 advance;
+
+                if (face == FONT_DRAWN)
+                {
+                        if (!f->cell)
+                                f->cell = (b64)font_metrics_at(f->faces[0], f->size).cell_width << 16;
+                        advance = f->cell;
+                }
+                else
+                {
+                        if (kerned && !(f->flags & FONT_UNKERNED))
+                                f->pen += font_kern(e, one, last, glyph, f->size);
+                        advance = font_advance(one, glyph, f->size);
+                }
+                font_flow_glyph(f, glyph, face, advance, 0, 0, i, level);
+                last = glyph;
+                kerned = face != FONT_DRAWN;
+        }
+}
+
+//      The segments' edges from the spans the glyphs of a paragraph left: each cluster's extent shared out among the
+//      segments it covers, the first in reading order taking the part first in reading order.
+static fn font_flow_close(font_flow address_to f, p32 n)
+{
+        font_work address_to w = &f->e->work;
+        p32 segment = 0;
+
+        for (p32 i = 0; i < n; i++)
+        {
+                while (segment + 1 < f->segments && f->cuts[segment + 1] <= w->at[i])
+                        segment++;
+                w->pair[i] = (p16)segment;
+        }
+        for (p32 i = 0; i < n; i++)
+        {
+                if (w->span_right[i] < w->span_left[i])
+                        continue;
+
+                p32 stop = i + 1;
+
+                while (stop < n && w->span_right[stop] < w->span_left[stop])
+                        stop++;
+
+                p32 first = w->pair[i], last = w->pair[stop - 1], parts = last - first + 1, lvl = w->level[i];
+                b64 low = w->span_left[i], width = w->span_right[i] - w->span_left[i];
+
+                for (p32 k = first; k <= last; k++)
+                {
+                        p32 part = lvl & 1 ? last - k : k - first;
+                        b64 a = low + width * part / parts, b = low + width * (part + 1) / parts;
+                        b32 ca = a > 0x7ffffffe ? 0x7ffffffe : a < -0x7ffffffe ? -0x7ffffffe : (b32)a;
+                        b32 cb = b > 0x7ffffffe ? 0x7ffffffe : b < -0x7ffffffe ? -0x7ffffffe : (b32)b;
+
+                        if (f->left[k] == FONT_NO_EDGE)
+                        {
+                                f->left[k] = ca;
+                                f->right[k] = cb;
+                                f->level[k] = (p8)lvl;
+                        }
+                        else
+                        {
+                                f->left[k] = ca < f->left[k] ? ca : f->left[k];
+                                f->right[k] = cb > f->right[k] ? cb : f->right[k];
+                        }
+                }
+                i = stop - 1;
+        }
+}
+
+//      One paragraph, from byte at: how far it went.
+static positive font_flow_paragraph(font_flow address_to f, const p8 address_to text, positive length, positive at)
+{
+        font_engine address_to e = f->e;
+        font_work address_to w = &e->work;
+        p32 n = 0, units = 0, prev = 0xffffffffu, direction, ucat = 0, carry;
+
+        while (at < length && n < FONT_PARA)
+        {
+                w->at[n] = (p32)at;
+                at = font_decode(text, length, at, &w->code[n]);
+                if (font_bidi_class(w->code[n++]) == FONT_BIDI_B)
+                        break;
+        }
+        w->at[n] = (p32)at;
+        direction = f->flags & FONT_AUTO ? (f->flags & FONT_RTL ? 3 : 2) : f->flags & FONT_RTL ? 1 : 0;
+        carry = font_bidi(w, n, direction);
+
+        //      The boundary neutrals X9 takes out (the joiners among them) are not taken out of the shaping, which
+        //      needs them to join or not to join the letters beside them: they go with the character before.
+        for (p32 i = 0; i < n; i++)
+                if (w->level[i] != FONT_GONE)
+                        carry = w->level[i];
+                else if (w->orig[i] == FONT_BIDI_BN)
+                        w->level[i] = (p8)carry;
+
+        //      Each code point's face and glyph: the chain's, else a fallback's; a mirrored bracket's mirror where the
+        //      face has it; a mark or an ignorable one the face of the character it follows.
+        for (p32 i = 0; i < n; i++)
+        {
+                p32 code = w->code[i], face, glyph;
+
+                if (w->level[i] == FONT_GONE)
+                        continue;
+                font_find(e, f->faces, f->count, code, &face, &glyph);
+                if (prev != 0xffffffffu && w->level[prev] == w->level[i] && w->face[prev] != FONT_DRAWN &&
+                    (font_ignorable(code) || w->orig[i] == FONT_BIDI_NSM))
+                {
+                        const font_face address_to one = f->faces[w->face[prev]];
+                        p32 own = font_glyph(one, code);
+
+                        if (own || font_ignorable(code))
+                        {
+                                face = w->face[prev];
+                                glyph = own;
+                        }
+                }
+                if ((w->level[i] & 1) && face != FONT_DRAWN)
+                {
+                        p32 mirror = font_mirror_of(code), mirrored = mirror != code ? font_glyph(f->faces[face], mirror) : 0;
+
+                        glyph = mirrored ? mirrored : glyph;
+                }
+                w->face[i] = (p16)face;
+                w->glyph[i] = glyph;
+                prev = i;
+        }
+
+        //      Units: runs of one face, one level and one script, neutrals going with their neighbours.
+        for (p32 i = 0; i < n; i++)
+        {
+                p32 klass;
+
+                if (w->level[i] == FONT_GONE)
+                        continue;
+                klass = font_unit_class(w->code[i], w->orig[i]);
+                if (units && w->unit_level[units - 1] == w->level[i] && w->unit_face[units - 1] == w->face[i] &&
+                    (klass == 0 || ucat == 0 || klass == ucat) && i - w->unit_start[units - 1] < FONT_UNIT)
+                {
+                        ucat = ucat ? ucat : klass;
+                        w->unit_shape[units - 1] = (p8)ucat;
+                        continue;
+                }
+                w->unit_start[units] = (p16)i;
+                w->unit_level[units] = w->level[i];
+                w->unit_face[units] = w->face[i];
+                ucat = klass;
+                w->unit_shape[units++] = (p8)ucat;
+        }
+        w->unit_start[units] = (p16)n;
+
+        if (f->mode == FONT_FLOW_SEGMENTS)
+                for (p32 i = 0; i < n; i++)
+                {
+                        w->span_left[i] = 0x7fffffffffffffffll;
+                        w->span_right[i] = -0x7fffffffffffffffll;
+                }
+
+        //      Reading order of the units, and each handed on.
+        {
+                p16 address_to order = w->unit_order;
+                p32 count = font_reorder(w->unit_level, units, order);
+
+                for (p32 k = 0; k < count; k++)
+                {
+                        p32 u = order[k];
+
+                        font_flow_unit(f, w->unit_start[u], w->unit_start[u + 1], w->unit_face[u], w->unit_shape[u],
+                                       w->unit_level[u]);
+                }
+        }
+        if (f->mode == FONT_FLOW_SEGMENTS)
+                font_flow_close(f, n);
+        return at;
+}
+
+static b64 font_flow_run(font_flow address_to f, const p8 address_to text, positive length)
+{
+        positive at = 0;
+
+        f->pen = 0;
+        while (at < length && f->count)
+                at = font_flow_paragraph(f, text, length, at);
+        return f->pen;
+}
+
+//      A flow over the caller's chain and the faces behind it.
+static fn font_flow_start(font_flow address_to f, font_engine address_to e, const font_face address_to const address_to faces,
+                          p32 count, p32 flags, p32 size, p32 mode)
+{
+        p32 n = font_extend(e, faces, count, flags, f->chain);
+
+        if (!n)
+        {
+                n = count < FONT_CHAIN ? count : FONT_CHAIN;
+                for (p32 i = 0; i < n; i++)
+                        f->chain[i] = faces[i];
+        }
+        f->e = e;
+        f->faces = (const font_face address_to address_to)f->chain;
+        f->count = n;
+        f->base = count;
+        f->flags = flags;
+        f->size = size;
+        f->mode = mode;
+}
+
+//      The whole engine's line for each of the callers below, apart from them so that the loops they take for text that
+//      is not that stay as small as they were.
+static __attribute__((noinline)) positive font_layout_flow(font_engine address_to e,
+                                                          const font_face address_to const address_to faces, p32 count,
+                                                          const p8 address_to text, positive length, p32 size, p32 flags,
+                                                          font_place address_to out, positive room)
+{
+        font_flow flow = {0};
+
+        font_flow_start(&flow, e, faces, count, flags, size, FONT_FLOW_PLACES);
+        flow.out = out;
+        flow.room = room;
+        font_flow_run(&flow, text, length);
+        return flow.placed;
+}
+
+static __attribute__((noinline)) b64 font_draw_flow(font_engine address_to e, const font_face address_to const address_to faces,
+                                                    p32 count, const p8 address_to text, positive length, p32 size,
+                                                    p32 flags, p32 turn, p32 style, p32 strength,
+                                                    const font_target address_to target, b32 x, b32 baseline, p32 colour,
+                                                    p32 background)
+{
+        font_flow flow = {0};
+
+        font_flow_start(&flow, e, faces, count, flags, size, FONT_FLOW_DRAW);
+        flow.turn = turn;
+        flow.style = style;
+        flow.strength = strength;
+        flow.target = target;
+        flow.x = x;
+        flow.baseline = baseline;
+        flow.colour = colour;
+        flow.background = background;
+        return font_flow_run(&flow, text, length);
+}
+
+static __attribute__((noinline)) b64 font_extent_flow(font_engine address_to e,
+                                                      const font_face address_to const address_to faces, p32 count,
+                                                      const p8 address_to text, positive length, p32 size, p32 flags)
+{
+        font_flow flow = {0};
+
+        font_flow_start(&flow, e, faces, count, flags, size, FONT_FLOW_EXTENT);
+        return font_flow_run(&flow, text, length);
+}
+
 positive font_layout(font_engine address_to e, const font_face address_to const address_to faces,
                      p32 count, const p8 address_to text, positive length, p32 size,
                      p32 flags, font_place address_to out, positive room)
 {
+        const font_face address_to extended[FONT_CHAIN];
         positive placed = 0, at = 0;
         b64 pen = 0;
 
+        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+                return font_layout_flow(e, faces, count, text, length, size, flags, out, room);
+        if (__builtin_expect(e->fallbacks != 0, 0))
+        {
+                p32 total = font_extend(e, faces, count, flags, extended);
+
+                if (total)
+                {
+                        faces = (const font_face address_to const address_to)extended;
+                        count = total;
+                }
+        }
         while (at < length && placed < room && count)
         {
-                p32 code, face, glyph;
+                p32 code, face, glyph, from = (p32)at;
 
                 at = font_decode(text, length, at, &code);
                 font_find(e, faces, count, code, &face, &glyph);
@@ -5156,7 +8850,7 @@ positive font_layout(font_engine address_to e, const font_face address_to const 
 
                 b64 advance = face == FONT_DRAWN ? (b64)font_metrics_at(faces[0], size).cell_width << 16
                                                  : font_advance(faces[face], glyph, size);
-                out[placed++] = (font_place){glyph, face, pen, advance};
+                out[placed++] = (font_place){glyph, (p16)face, 0, pen, advance, 0, from};
                 pen += advance;
         }
         return placed;
@@ -5167,9 +8861,10 @@ b64 font_draw(font_engine address_to e, const font_face address_to const address
               const font_target address_to target, b32 x, b32 baseline, p32 colour,
               p32 background)
 {
+        const font_face address_to extended[FONT_CHAIN];
         positive at = 0;
         b64 pen = 0;
-        font_place last = {0, FONT_DRAWN, 0, 0};
+        p32 last_glyph = 0, last_face = FONT_DRAWN;
 
         flags = font_polarity(flags, colour, background);
         p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
@@ -5180,35 +8875,47 @@ b64 font_draw(font_engine address_to e, const font_face address_to const address
         //      14 px fell across two grey columns at most phases.
         style |= style & 1 ? 4 : 0;
 
+        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+                return font_draw_flow(e, faces, count, text, length, size, flags, 0, style, strength, target, x, baseline,
+                                      colour, background);
+        if (__builtin_expect(e->fallbacks != 0, 0))
+        {
+                p32 total = font_extend(e, faces, count, flags, extended);
+
+                if (total)
+                {
+                        faces = (const font_face address_to const address_to)extended;
+                        count = total;
+                }
+        }
         while (at < length && count)
         {
-                font_place place;
+                p32 code, face, glyph;
+                b64 advance;
 
-                at = font_decode(text, length, at, &place.glyph);
-                font_find(e, faces, count, place.glyph, &place.face, &place.glyph);
-                if (place.face != FONT_DRAWN && last.face == place.face && !(flags & FONT_UNKERNED))
-                        pen += font_kern(e, faces[place.face], last.glyph, place.glyph, size);
+                at = font_decode(text, length, at, &code);
+                font_find(e, faces, count, code, &face, &glyph);
+                if (face != FONT_DRAWN && last_face == face && !(flags & FONT_UNKERNED))
+                        pen += font_kern(e, faces[face], last_glyph, glyph, size);
 
                 b32 eighth = font_eighths((b64)x + pen);
-                if (place.face == FONT_DRAWN)
+                if (face == FONT_DRAWN)
                 {
                         font_metrics cell = font_metrics_at(faces[0], size);
-                        font_bitmap box = font_cached(e, null, place.glyph,
-                                                      (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
-                        place.advance = cell.cell_width << 16;
-                        font_blend(e, target, eighth >> 3, baseline - cell.baseline, box, colour, background,
-                                   strength);
+                        font_bitmap box = font_cached(e, null, glyph, (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0,
+                                                      0);
+                        advance = cell.cell_width << 16;
+                        font_blend(e, target, eighth >> 3, baseline - cell.baseline, box, colour, background, strength);
                 }
                 else
                 {
-                        font_bitmap box = font_cached(e, faces[place.face], place.glyph, size,
-                                                      (p32)eighth & 7, style, 0);
-                        place.advance = font_advance(faces[place.face], place.glyph, size);
-                        font_blend(e, target, (eighth >> 3) + box.left, baseline - box.top, box, colour,
-                                   background, strength);
+                        font_bitmap box = font_cached(e, faces[face], glyph, size, (p32)eighth & 7, style, 0);
+                        advance = font_advance(faces[face], glyph, size);
+                        font_blend(e, target, (eighth >> 3) + box.left, baseline - box.top, box, colour, background, strength);
                 }
-                pen += place.advance;
-                last = place;
+                pen += advance;
+                last_glyph = glyph;
+                last_face = face;
         }
         return pen;
 }
@@ -5224,44 +8931,59 @@ b64 font_draw_turned(font_engine address_to e, const font_face address_to const 
                      p32 count, const p8 address_to text, positive length, p32 size, p32 flags, p32 turn,
                      const font_target address_to target, b32 x, b32 baseline, p32 colour, p32 background)
 {
+        const font_face address_to extended[FONT_CHAIN];
         positive at = 0;
         b64 pen = 0;
-        font_place last = {0, FONT_DRAWN, 0, 0};
+        p32 last_glyph = 0, last_face = FONT_DRAWN;
 
         turn = turn == FONT_TOPS_LEFT ? FONT_TOPS_LEFT : FONT_TOPS_RIGHT;
         flags = font_polarity(flags, colour, background);
         p32 style = font_style(e, size, flags), strength = font_strength(e, size, flags);
 
         style |= style & 1 ? 4 : 0;
+        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+                return font_draw_flow(e, faces, count, text, length, size, flags, turn, style, strength, target, x, baseline,
+                                      colour, background);
+        if (__builtin_expect(e->fallbacks != 0, 0))
+        {
+                p32 total = font_extend(e, faces, count, flags, extended);
+
+                if (total)
+                {
+                        faces = (const font_face address_to const address_to)extended;
+                        count = total;
+                }
+        }
         while (at < length && count)
         {
-                font_place place;
+                p32 code, face, glyph;
+                b64 advance;
 
-                at = font_decode(text, length, at, &place.glyph);
-                font_find(e, faces, count, place.glyph, &place.face, &place.glyph);
-                if (place.face != FONT_DRAWN && last.face == place.face && !(flags & FONT_UNKERNED))
-                        pen += font_kern(e, faces[place.face], last.glyph, place.glyph, size);
+                at = font_decode(text, length, at, &code);
+                font_find(e, faces, count, code, &face, &glyph);
+                if (face != FONT_DRAWN && last_face == face && !(flags & FONT_UNKERNED))
+                        pen += font_kern(e, faces[face], last_glyph, glyph, size);
 
                 b32 eighth = font_eighths((b64)x + pen);
-                if (place.face == FONT_DRAWN)
+                if (face == FONT_DRAWN)
                 {
                         font_metrics cell = font_metrics_at(faces[0], size);
-                        font_bitmap box = font_cached(e, null, place.glyph,
-                                                      (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0, 0);
-                        place.advance = cell.cell_width << 16;
-                        font_blend_turned(e, target, turn, eighth >> 3, baseline - cell.baseline, box, colour,
-                                          background, strength);
+                        font_bitmap box = font_cached(e, null, glyph, (p32)cell.cell_width << 16 | (p32)cell.cell_height, 0, 0,
+                                                      0);
+                        advance = cell.cell_width << 16;
+                        font_blend_turned(e, target, turn, eighth >> 3, baseline - cell.baseline, box, colour, background,
+                                          strength);
                 }
                 else
                 {
-                        font_bitmap box = font_cached(e, faces[place.face], place.glyph, size,
-                                                      (p32)eighth & 7, style, 0);
-                        place.advance = font_advance(faces[place.face], place.glyph, size);
-                        font_blend_turned(e, target, turn, (eighth >> 3) + box.left, baseline - box.top, box,
-                                          colour, background, strength);
+                        font_bitmap box = font_cached(e, faces[face], glyph, size, (p32)eighth & 7, style, 0);
+                        advance = font_advance(faces[face], glyph, size);
+                        font_blend_turned(e, target, turn, (eighth >> 3) + box.left, baseline - box.top, box, colour, background,
+                                          strength);
                 }
-                pen += place.advance;
-                last = place;
+                pen += advance;
+                last_glyph = glyph;
+                last_face = face;
         }
         return pen;
 }
@@ -5271,23 +8993,105 @@ b64 font_draw_turned(font_engine address_to e, const font_face address_to const 
 b64 font_extent(font_engine address_to e, const font_face address_to const address_to faces,
                 p32 count, const p8 address_to text, positive length, p32 size, p32 flags)
 {
+        const font_face address_to extended[FONT_CHAIN];
         positive at = 0;
         b64 pen = 0;
-        font_place last = {0, FONT_DRAWN, 0, 0};
+        p32 last_glyph = 0, last_face = FONT_DRAWN;
 
+        if (font_complex(text, length, flags) || (__builtin_expect(e->fallbacks != 0, 0) && font_slots_synthetic(e, flags)))
+                return font_extent_flow(e, faces, count, text, length, size, flags);
+        if (__builtin_expect(e->fallbacks != 0, 0))
+        {
+                p32 total = font_extend(e, faces, count, flags, extended);
+
+                if (total)
+                {
+                        faces = (const font_face address_to const address_to)extended;
+                        count = total;
+                }
+        }
         while (at < length && count)
         {
-                font_place place;
+                p32 code, face, glyph;
 
-                at = font_decode(text, length, at, &place.glyph);
-                font_find(e, faces, count, place.glyph, &place.face, &place.glyph);
-                if (place.face != FONT_DRAWN && last.face == place.face && !(flags & FONT_UNKERNED))
-                        pen += font_kern(e, faces[place.face], last.glyph, place.glyph, size);
-                pen += place.face == FONT_DRAWN ? font_metrics_at(faces[0], size).cell_width << 16
-                                                : font_advance(faces[place.face], place.glyph, size);
-                last = place;
+                at = font_decode(text, length, at, &code);
+                font_find(e, faces, count, code, &face, &glyph);
+                if (face != FONT_DRAWN && last_face == face && !(flags & FONT_UNKERNED))
+                        pen += font_kern(e, faces[face], last_glyph, glyph, size);
+                pen += face == FONT_DRAWN ? font_metrics_at(faces[0], size).cell_width << 16
+                                          : font_advance(faces[face], glyph, size);
+                last_glyph = glyph;
+                last_face = face;
         }
         return pen;
+}
+
+/*
+        Where the n segments of a line are on it, for a caret and for
+        hit-testing. cuts[0..n] are ascending byte offsets, cuts[0] 0 and
+        cuts[n] the length, and segment k is the text from cuts[k] to
+        cuts[k + 1]: the caller's grapheme clusters, which this does not
+        look for. left[k] and right[k] are its edges in 16.16 pixels from
+        the pen the line starts at (font_draw's), and level[k] the bidi level
+        it is laid at, odd reading right to left. A glyph that stands for
+        several segments (a lam-alef ligature, a ligature of two clusters)
+        is shared among them in equal parts, the first in reading order
+        having the first part; marks belong to the cluster they hang from,
+        and a segment of nothing a glyph stands for (a joiner, a control)
+        has no width and sits at the edge of the segment before it. Answers
+        n, or 0 for more than FONT_SEGMENTS segments or FONT_SEGMENT_BYTES
+        bytes, which the caller lays out some other way.
+*/
+positive font_segments(font_engine address_to e, const font_face address_to const address_to faces, p32 count,
+                       const p8 address_to text, positive length, p32 size, p32 flags, const p32 address_to cuts, positive n,
+                       b32 address_to left, b32 address_to right, p8 address_to level)
+{
+        font_flow flow = {0};
+        p8 base = (p8)font_base_level(text, length, flags);
+
+        if (!n || n > FONT_SEGMENTS || length > FONT_SEGMENT_BYTES || !count)
+                return 0;
+        font_flow_start(&flow, e, faces, count, flags, size, FONT_FLOW_SEGMENTS);
+        flow.cuts = cuts;
+        flow.segments = n;
+        flow.left = left;
+        flow.right = right;
+        flow.level = level;
+        for (positive k = 0; k < n; k++)
+        {
+                left[k] = FONT_NO_EDGE;
+                right[k] = 0;
+                level[k] = base;
+        }
+        font_flow_run(&flow, text, length);
+
+        //      A segment no glyph stands for sits at the end of the one before it, or the start of the one after.
+        for (positive k = 0; k < n; k++)
+        {
+                if (left[k] != FONT_NO_EDGE)
+                        continue;
+
+                positive other = k;
+                b32 edge = 0;
+
+                if (k)
+                {
+                        edge = level[k - 1] & 1 ? left[k - 1] : right[k - 1];
+                        level[k] = level[k - 1];
+                }
+                else
+                {
+                        while (other < n && left[other] == FONT_NO_EDGE)
+                                other++;
+                        if (other < n)
+                        {
+                                edge = level[other] & 1 ? right[other] : left[other];
+                                level[k] = level[other];
+                        }
+                }
+                left[k] = right[k] = edge;
+        }
+        return n;
 }
 
 //      A rectangle of a cell's ground.

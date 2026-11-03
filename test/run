@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang wayland"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged clang wayland"
 
 describe()
 {
@@ -261,6 +261,7 @@ describe()
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
         font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
+        font_shape) echo "the text engine's right to left half: the bidirectional algorithm against samples of the Unicode tests, Arabic and Hebrew shaping against HarfBuzz's glyphs, mixed lines, carets, and hostile layout tables against a guard page" ;;
         tensor) echo "the f32 transformer kernels against a double-precision model: every count, guard pages, in place, each x86 tier, and riscv64 with no V and V at 128, 256, 512 and 1024 bits" ;;
         cli)      echo "the moonwater command in a namespace: every verb, every zone it names, what it writes, and argument vectors drawn from its usage" ;;
         script)   echo "every verb as the machine script runs it, with no terminal and nothing on its input: bounded, asking nothing, and the same twice" ;;
@@ -313,7 +314,7 @@ seam_lanes()
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine cli script bowl storage_io storage_format" ;;
-        desktop) echo "term edit editing font canvas sleep wayland" ;;
+        desktop) echo "term edit editing font font_shape canvas sleep wayland" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
         *) return 1 ;;
@@ -3900,6 +3901,13 @@ lane_font()
         esac
         return "$font_outcome"
 }
+
+#
+#       The right to left half of the same engine (src/canvas/font.c): the
+#       bidirectional algorithm, Arabic and Hebrew shaping, the lines and
+#       carets it makes, on the three machines.
+#
+lane_font_shape() { freestanding_checks_lane font_shape font_shape; }
 
 #
 #       A check section on the three machines, and then on riscv64 five more
