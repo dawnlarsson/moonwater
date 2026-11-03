@@ -20476,6 +20476,10 @@ time.sleep(0.5)
 width, height, w10 = picture("m10-preview-landed")
 out.append(("W4.5 held at the left edge, the half it will take is tinted beside the window; let go, the window fills it",
             "%s %s" % ("tinted" if w9(900, 80) not in ("1e1e1e", "996633") else w9(900, 80), w10(900, 80)), "tinted 996633"))
+#   The tint is over the window held as well, which it was not: a pixel of the window 57 px right of the pointer is its colour with
+#   the tint over it, and neither its own colour, nor the desktop's, nor the tinted desktop's.
+out.append(("W4.6 and the tint is over the window held too: its pixel is its own colour tinted",
+            "tinted" if w9(60, 500) not in ("996633", "1e1e1e", w9(900, 80)) else w9(60, 500), "tinted"))
 #   Back to the right half, clear of the first window's corners for the rows after; the snap assist that offers the first
 #   window for the left half goes at a key, or a press on its corner would place it there.
 with_alt(drag_to, 500, 12, 2557, 500)
