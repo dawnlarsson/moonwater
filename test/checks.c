@@ -119892,23 +119892,111 @@ static void check_dropdown_labels(void)
 }
 
 /*
-        A menu that the wheel turns is drawn again as it is turned: the wheel moves the top item and not the hot one, so the picture
-        the compositor shows is presented from the pump (ui_popup_pump), or the menu stays as it was until the pointer moves.
+        A dropdown's selected item, read back from the menu's picture: the label on the highlight it is drawn on, hovered (or chosen
+        by the keys) and pressed (the press's ripple over the highlight at its peak). A glass menu on a light ground and on a dark
+        one, and an opaque menu in the light theme and the dark. Each label reads at UI_READABLE (4.7:1) or more on its highlight.
 */
-static void check_popup_wheel(void)
+static unsigned int dropdown_label_ratio(const unsigned int address_to picture, unsigned int under, int top, int row)
+{
+    int left = UI_MENU_PAD + UI_MENU_INSET;
+    unsigned int background = ui_over(picture[(top + row / 2) * 600 + left - 2], under), best = 0;
+
+    for (int yy = top + row / 4; yy < top + 3 * row / 4; yy++)
+        for (int xx = left; xx < left + 40; xx++)
+        {
+            unsigned int r = ui_contrast(ui_over(picture[yy * 600 + xx], under), background);
+
+            best = r > best ? r : best;
+        }
+    return best;
+}
+
+static void check_dropdown_selected(void)
+{
+    static unsigned int picture[600 * 300];
+    static struct ui_popmenu m;
+    static const unsigned int grounds[4] = {0xf7f7f8u, 0x101012u, 0xf7f7f8u, 0x18181bu};
+    static const int glass[4] = {1, 1, 0, 0};
+    unsigned int ratio[4][2];
+
+    for (int k = 0; k < 4; k++)
+    {
+        struct ui g = terminal.ui;
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+        unsigned int under = 0xff000000u | grounds[k];
+        int row, y;
+
+        g.scale = 100;
+        g.regular = g.bold = terminal.plain[0];
+        g.scratch = null, g.scratch_width = 0, g.scratch_scale = 0;
+        ui_scratch_fit(&g, 640);
+        g.band_top = g.band_bottom = 0;
+        g.glass = glass[k], g.opaque = !glass[k];
+        ui_kit_theme(grounds[k] > 0x808080u ? UI_THEME_LIGHT : UI_THEME_DARK, UI_ACCENT_DAWN, 0);
+        ui_kit.shown = ui_kit.to; // the theme as it is now, not eased from the last one
+        ui_kit_settle();
+        ui_inks(&g, grounds[k]);
+        if (!glass[k])
+            under = 0xff000000u | ui_role(UI_SURFACE);
+        m.count = 0;
+        ui_popmenu_add(&m, "Copy", null, 0, 1);
+        ui_popmenu_add(&m, "Paste", null, 0, 2);
+        ui_popmenu_add(&m, "Select all", null, 0, 3);
+        m.hot = 1, m.touch = 0, m.top = 0, m.typed_length = 0;
+        m.ripple.live = 0, m.ripple_at = -1, m.moving = 0;
+        memory_zero(&m.press, sizeof(m.press));
+        ui_popmenu_size(&g, &m, 300);
+        row = ui_popmenu_row(&g, &m), y = UI_MENU_PAD * g.scale / 100 + row;
+        memory_zero(picture, sizeof(picture));
+        ui_begin(&g, picture, 600, m.width, m.height);
+        ui_popmenu_draw(&g, &m);
+        ratio[k][0] = dropdown_label_ratio(picture, under, y, row);
+        // Pressed on the item: the ripple is drawn at its peak (a little over 300 ms from the press), over the highlight.
+        ui_kit.now = 1000000000ll;
+        ui_popmenu_event(&g, &m, &press, m.width / 2, y + row / 2);
+        memory_zero(picture, sizeof(picture));
+        ui_begin(&g, picture, 600, m.width, m.height);
+        ui_popmenu_draw(&g, &m);
+        ui_kit.now += 300000000ll;
+        memory_zero(picture, sizeof(picture));
+        ui_begin(&g, picture, 600, m.width, m.height);
+        ui_popmenu_draw(&g, &m);
+        ratio[k][1] = dropdown_label_ratio(picture, under, y, row);
+    }
+    check("dropdown selected: a glass menu on a light ground, the hovered item's label reads on its highlight (4.7:1 or more)",
+          ratio[0][0] >= UI_READABLE);
+    check("dropdown selected: a glass menu on a light ground, the pressed item's label reads on its ripple (4.7:1 or more)",
+          ratio[0][1] >= UI_READABLE);
+    check("dropdown selected: a glass menu on a dark ground, the hovered item's label reads on its highlight (4.7:1 or more)",
+          ratio[1][0] >= UI_READABLE);
+    check("dropdown selected: a glass menu on a dark ground, the pressed item's label reads on its ripple (4.7:1 or more)",
+          ratio[1][1] >= UI_READABLE);
+    check("dropdown selected: an opaque menu in the light theme, the hovered item's label reads on its highlight (4.7:1 or more)",
+          ratio[2][0] >= UI_READABLE);
+    check("dropdown selected: an opaque menu in the light theme, the pressed item's label reads on its ripple (4.7:1 or more)",
+          ratio[2][1] >= UI_READABLE);
+    check("dropdown selected: an opaque menu in the dark theme, the hovered item's label reads on its highlight (4.7:1 or more)",
+          ratio[3][0] >= UI_READABLE);
+    check("dropdown selected: an opaque menu in the dark theme, the pressed item's label reads on its ripple (4.7:1 or more)",
+          ratio[3][1] >= UI_READABLE);
+}
+
+/*
+        A dropdown closes when it is scrolled. A wheel or a touchpad's scroll over the menu's own window closes it (the menu's row
+        answers UI_MENU_GONE, as Escape does), and a scroll the app's window receives closes it too (ui_popup_scroll), once: a
+        second one finds it closed. A motion that is not a scroll leaves it open.
+*/
+static void check_dropdown_scroll(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
-    static unsigned int expect[GLASS_SIDE * GLASS_SIDE];
     static struct ui_popup popup;
-    static const char *const names[20] = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-                                          "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
-                                          "eighteen", "nineteen", "twenty"};
     struct window_row parent_row;
-    struct ui parent_ui = terminal.ui;
-    struct ui picture_ui;
     struct windows address_to table;
-    const unsigned int *front;
-    int differ = 0, drawn = 0;
+    struct ui parent_ui = terminal.ui;
+    struct window_event wheel = {WINDOW_EVENT_WHEEL, 0, 120, 0}, sideways = {WINDOW_EVENT_WHEEL, 0, 120, 1};
+    struct window_event motion = {WINDOW_EVENT_MOTION, 0, 5, 5};
+    int answer[3] = {UI_MENU_NOTHING, UI_MENU_NOTHING, UI_MENU_NOTHING}, again = UI_MENU_NOTHING, kept = UI_MENU_NOTHING;
+    b32 shown[3] = {false, false, false}, closed[3] = {false, false, false}, kept_open = false;
 
     for (int row = 0; row < WINDOWS; row++)
         compositor_popup_parent[row] = -1;
@@ -119922,7 +120010,7 @@ static void check_popup_wheel(void)
     compositor.scanout_pitch = GLASS_SIDE * 4;
     if (!glass_table_map())
     {
-        check("popup wheel: the table is mapped", false);
+        check("dropdown scroll: the table is mapped", false);
         return;
     }
     table = compositor.table;
@@ -119934,19 +120022,59 @@ static void check_popup_wheel(void)
     glass_paint(1, 0, 0, 120, 80, 0, true);
     compositor_present();
     compositor_focus(1);
-
     parent_ui.scale = 100;
     parent_ui.regular = parent_ui.bold = terminal.plain[0];
     parent_ui.scratch = null, parent_ui.scratch_width = 0, parent_ui.scratch_scale = 0;
     memory_zero(&parent_row, sizeof(parent_row));
     parent_row.table = table;
     parent_row.row = 1;
-
+    for (int round = 0; round < 3; round++)
+    {
+        windows_reset_row(table, 3);
+        __atomic_store_n(&table->pid[3], 1u, __ATOMIC_RELEASE);
+        memory_zero(&popup, sizeof(popup));
+        ui_popmenu_add(&popup.menu, "Copy", null, 0, 1);
+        ui_popmenu_add(&popup.menu, "Paste", null, 0, 2);
+        ui_popmenu_add(&popup.menu, "Select all", null, 0, 3);
+        popup.own.table = table;
+        popup.own.row = 3;
+        popup.own.door = -1;
+        popup.own.wake = -1;
+        popup.own.buffer = compositor.buffer;
+        popup.own.stride = GLASS_SIDE;
+        popup.own.output_width = popup.own.output_height = GLASS_SIDE;
+        shown[round] = ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0) && popup.open;
+        compositor_take(3);
+        compositor_present();
+        ui_popup_pump(&popup);
+        if (round == 0)
+        {
+            // A wheel over the menu: the compositor sends it to the menu's own row.
+            compositor_post(3, WINDOW_EVENT_WHEEL, 0, 120, 0);
+            answer[0] = ui_popup_pump(&popup);
+        }
+        else if (round == 1)
+        {
+            // A touchpad's sideways scroll over the menu.
+            compositor_post(3, WINDOW_EVENT_WHEEL, 0, 120, 1);
+            answer[1] = ui_popup_pump(&popup);
+        }
+        else
+        {
+            // A scroll the app's window receives (the app's loop asks ui_popup_scroll), then one more: the menu is closed by the first.
+            answer[2] = ui_popup_scroll(&popup, &wheel);
+            again = ui_popup_scroll(&popup, &sideways);
+        }
+        closed[round] = !popup.open;
+        popup.open = false;
+        compositor_popup_leave(3);
+        compositor_leave(3);
+    }
+    // A motion is not a scroll: the menu stays open over it.
     windows_reset_row(table, 3);
     __atomic_store_n(&table->pid[3], 1u, __ATOMIC_RELEASE);
-    memory_zero(&popup.menu, sizeof(popup.menu));
-    for (int at = 0; at < 20; at++)
-        ui_popmenu_add(&popup.menu, names[at], null, 0, at + 1);
+    memory_zero(&popup, sizeof(popup));
+    ui_popmenu_add(&popup.menu, "Copy", null, 0, 1);
     popup.own.table = table;
     popup.own.row = 3;
     popup.own.door = -1;
@@ -119954,44 +120082,20 @@ static void check_popup_wheel(void)
     popup.own.buffer = compositor.buffer;
     popup.own.stride = GLASS_SIDE;
     popup.own.output_width = popup.own.output_height = GLASS_SIDE;
-    if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
-    {
-        check("popup wheel: the menu opens", false);
-        return;
-    }
-    compositor_take(3);
-    compositor_present();
-    for (int round = 0; round < 3; round++)
-    {
-        compositor_take(3);
-        compositor_present();
-        ui_popup_pump(&popup);
-    }
-    compositor_take(3);
-    compositor_present();
-
-    // The wheel turns the menu a row with the pointer where it was: no item's hot changes, and the top item must still show.
-    popup.menu.hot = -1;
-    compositor_post(3, WINDOW_EVENT_WHEEL, 0, -120, 0);
-    ui_popup_pump(&popup);
-    compositor_take(3);
-    compositor_present();
-    picture_ui = popup.ui;
-    memory_zero(expect, sizeof(expect));
-    ui_begin(&picture_ui, expect, GLASS_SIDE, popup.menu.width, popup.menu.height);
-    ui_popmenu_draw(&picture_ui, &popup.menu);
-    front = windows_pixels(&popup.own, (unsigned int)popup.shown);
-    for (int y = 0; y < popup.menu.height; y++)
-        for (int x = 0; x < popup.menu.width; x++)
-        {
-            drawn += expect[y * GLASS_SIDE + x] != 0;
-            differ += front[y * GLASS_SIDE + x] != expect[y * GLASS_SIDE + x];
-        }
-    check("popup wheel: a wheel that turns the menu a row moves its top item, and the picture shows the menu as it was turned",
-          popup.menu.top == 1 && drawn > 0 && differ == 0);
+    ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0);
+    kept = ui_popup_scroll(&popup, &motion);
+    kept_open = popup.open;
     popup.open = false;
     compositor_popup_leave(3);
     compositor_leave(3);
+
+    check("dropdown scroll: a menu is open before each scroll, so each one is a close", shown[0] && shown[1] && shown[2]);
+    check("dropdown scroll: a wheel over the menu's own window closes it, answered as Escape is (UI_MENU_GONE)",
+          closed[0] && answer[0] == UI_MENU_GONE);
+    check("dropdown scroll: a touchpad's sideways scroll over the menu closes it too", closed[1] && answer[1] == UI_MENU_GONE);
+    check("dropdown scroll: a scroll the app's window receives closes its open menu, and a second scroll finds it closed",
+          closed[2] && answer[2] == UI_MENU_GONE && again == UI_MENU_NOTHING);
+    check("dropdown scroll: a motion that is not a scroll leaves the menu open", kept == UI_MENU_NOTHING && kept_open);
 }
 
 static void check_popup_reopen(void)
@@ -141265,9 +141369,10 @@ b32 main()
         check_compositor_popup_press(0);
         check_compositor_popup_press(1);
         check_popup_reopen();
-        check_popup_wheel();
         check_popup_ground_steady();
         check_dropdown_labels();
+        check_dropdown_selected();
+        check_dropdown_scroll();
         check_compositor_popup_grip(0);
         check_compositor_popup_grip(1);
         check_compositor_popup_holds();

@@ -5805,9 +5805,10 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
         A menu chooses on a release, as a button does: a press on an item shows it pressed, and the release chooses it when it
         is over that same item. A press released anywhere else chooses nothing. The hot item (the hand's or the keys') is lit.
         A menu whose items do not all show has the kit's bar down its right, which a held thumb drags and a press on the
-        track pages; the wheel turns it a row. The keys while it is open: Up and Down (wrapping), Home, End, Page Up and Page
-        Down move the hot item over what can be chosen; Enter and Space choose; Right answers a submenu's item and Left and
-        Escape close; a letter chooses a mnemonic, else goes to the first item the letters typed so far start.
+        track pages. A scroll (the wheel or a touchpad's) closes it, anywhere: the content it lay over has moved away. The keys while
+        it is open: Up and Down (wrapping), Home, End, Page Up and Page Down move the hot item over what can be chosen; Enter and
+        Space choose; Right answers a submenu's item and Left and Escape close; a letter chooses a mnemonic, else goes to the
+        first item the letters typed so far start.
 */
 #define UI_MENU_ITEMS 40
 #define UI_WORD 64           // a word a page keeps (a choice's name, a row's)
@@ -6002,7 +6003,10 @@ static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_t
         dot.x0 = (b32)(((cx - radius) * ui->scale / 100) >> 22), dot.x1 = (b32)(((cx + radius) * ui->scale / 100) >> 22);
         dot.y0 = y * 256 + (b32)(((cy - radius) * ui->scale / 100) >> 22), dot.y1 = y * 256 + (b32)(((cy + radius) * ui->scale / 100) >> 22);
         dot.rx = dot.ry = (b32)((radius * ui->scale / 100) >> 22);
-        ui_kit_fill(ui, &dot, ui_mix(ui_role(UI_ON_SURFACE), (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), &rect);
+        // The press sinks the item toward the ground it lies on (the glass's, or the surface's): the label is paired with the
+        // highlight's ink, so a press that brightened the highlight would take the label's contrast below UI_READABLE.
+        ui_kit_fill(ui, &dot, ui_mix(ui->glass ? 0xff000000u | (ui->ground & 0xffffffu) : ui_role(UI_SURFACE),
+                                     (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), &rect);
 }
 
 static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
@@ -6028,12 +6032,12 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         y += ui_popmenu_tall(ui, m, at);
                         continue;
                 }
-                // The press's ripple first, cut to the rect (a clip writes what it does not cover, so the rect is laid over it after);
-                // then the hover rect, the one element the item has.
+                // The hot item's rect: ui_fill lays a premultiplied tone, and the well is straight (its alpha is its cover), so it is
+                // premultiplied first. The press's ripple is laid over it, cut to the rect, and sinks toward the ground (ui_popmenu_ripple).
+                if (ui_popmenu_choosable(m, at) && at == m->hot)
+                        ui_fill(ui, 0, y, m->width, ui_popmenu_row(ui, m), ui_premultiplied(ui_well(ui, UI_SELECTION, 28), UI_FULL));
                 if (at == m->ripple_at)
                         ui_popmenu_ripple(ui, m, y);
-                if (ui_popmenu_choosable(m, at) && at == m->hot)
-                        ui_fill(ui, 0, y, m->width, ui_popmenu_row(ui, m), ui_well(ui, UI_SELECTION, 40));
                 ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
                 if (item->flags & UI_MENU_HEADER)
                         ui_kit_text(ui, (UI_MENU_PAD + 12) * ui->scale / 100, baseline, shown, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
@@ -6113,7 +6117,7 @@ static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu addre
 }
 
 /*
-        An event of the menu's row: the id of the item chosen, UI_MENU_NOTHING, UI_MENU_GONE (Escape, Left, the compositor
+        An event of the menu's row: the id of the item chosen, UI_MENU_NOTHING, UI_MENU_GONE (Escape, Left, a scroll, the compositor
         asking it to go), or UI_MENU_OPEN for a submenu's item (its id in hot's item). x and y are the menu's own device pixels.
 */
 #define UI_MENU_NOTHING (-1)
@@ -6189,13 +6193,9 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         m->hot = at;
                 return UI_MENU_NOTHING;
         }
-        if (event->type == WINDOW_EVENT_WHEEL && !event->b)
-        {
-                m->top += event->a < 0 ? 1 : -1;
-                m->top = m->top < 0 ? 0 : m->top > m->count - m->rows_shown ? (m->count - m->rows_shown > 0 ? m->count - m->rows_shown : 0) : m->top;
-                m->scroll.scroll = ui_popmenu_offset(ui, m, m->top);
-                return UI_MENU_NOTHING;
-        }
+        // A scroll (the wheel's or a touchpad's) over the menu closes it, as a scroll anywhere does (ui_popup_scroll).
+        if (event->type == WINDOW_EVENT_WHEEL)
+                return UI_MENU_GONE;
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
         {
                 int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1, clicked;
@@ -6359,6 +6359,19 @@ static fn ui_popup_close(struct ui_popup address_to p)
         if (p->open)
                 windows_leave(&p->own);
         p->open = false;
+}
+
+/*
+        The kit's default for a scroll: a wheel or a touchpad's scroll that the app's window receives closes its open popup, as
+        Escape does, and the answer is UI_MENU_GONE for the app (the app's loop calls this on each event it reads, once). A menu
+        that stayed open would float over content the scroll has moved away from.
+*/
+static int ui_popup_scroll(struct ui_popup address_to p, const struct window_event address_to event)
+{
+        if (!p->open || event->type != WINDOW_EVENT_WHEEL)
+                return UI_MENU_NOTHING;
+        ui_popup_close(p);
+        return UI_MENU_GONE;
 }
 
 // The popup's events: the id chosen (the popup closed), UI_MENU_GONE when it went, UI_MENU_NOTHING otherwise.
@@ -7719,8 +7732,18 @@ static int ui_app_run(struct ui_app address_to app)
                 if (app->pass)
                         app->pass();
                 while (running && windows_event(app->own, &event))
+                {
+                        // A scroll over the window closes its open popup before the app has the scroll (ui_popup_scroll).
+                        if (app->popup)
+                        {
+                                int gone = ui_popup_scroll(app->popup, &event);
+
+                                if (gone != UI_MENU_NOTHING && app->chose)
+                                        app->chose(gone);
+                        }
                         if (!app->event(&event))
                                 running = false;
+                }
                 if (app->popup && app->popup->open)
                 {
                         int chosen = ui_popup_pump(app->popup);
