@@ -3429,7 +3429,7 @@ static fn settings_group_choose(int group)
         settings.map.keys = false;
         settings.feed_due = 0;
         settings_filter_clear();
-        settings.list.scroll.scroll = 0;
+        ui_scroll_set(&settings.list.scroll, 0);
         ui_confirm_drop(&settings.confirm);
         settings_refilter();
         if (settings.list.count)
@@ -3581,7 +3581,7 @@ static fn settings_filter_asked(p32 asks)
                 settings_dirty();
                 return;
         }
-        settings.list.scroll.scroll = 0;
+        ui_scroll_set(&settings.list.scroll, 0);
         settings.pane = 1;
         settings_refilter();
         if (settings.list.count)

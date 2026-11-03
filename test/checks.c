@@ -128676,6 +128676,26 @@ static fn settings_column_fit_check(void)
         check("settings column: the group column's view ends at the window's bottom edge, where the body does, at 520 and 560", ends);
 }
 
+/*
+        Choosing a group while the list is moving (a glide, or a spring it had from a pull at its end) puts the list at its top
+        and stops it there: the jump is the scroll's, so the glide's aim and position are cleared with the scroll. A write to the
+        scroll alone left the glide running, and its next frame put the list back where it had been.
+*/
+static fn settings_group_glide_check(void)
+{
+        struct ui_scroll address_to list = &settings.list.scroll;
+        int other;
+
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.ui.scale = 100;
+        settings_size(SETTINGS_WIDTH, 300);
+        other = settings.group == 0 ? 1 : 0;
+        list->scroll = 50, list->at = 50 << 8, list->aim = 200 << 8, list->gliding = 1;
+        settings_group_choose(other);
+        check("settings groups: choosing a group while the list glides puts the list at its top and stops the glide",
+              list->scroll == 0 && list->at == 0 && list->aim == 0 && !list->gliding);
+}
+
 // The group column (the settings' tabs on end) squashes at its ends like a list: a wheel turn at its bottom stretches it from that
 // edge, a finger pulled past its top or bottom stretches it from that edge, and its items are drawn through the stretch.
 static fn settings_column_check(void)
@@ -129596,6 +129616,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_fit_check();
         settings_column_check();
         settings_column_fit_check();
+        settings_group_glide_check();
         settings_end_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_frames_gallery();
