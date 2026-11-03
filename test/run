@@ -23093,7 +23093,9 @@ fi
 #       finger's; the mark of canvas touch (on by default) is drawn round a finger held down and is gone a second after
 #       it lifts; a window taken by its top follows the finger with all of its line lit; a finger 12 px outside a
 #       window's left edge takes the edge, which is lit while held; a finger held still is the right button; two moved
-#       down together are the wheel up. MOONWATER_TOUCH_PICTURES names a directory the pictures are kept in, as PNGs.
+#       down together are the wheel up; a finger held on a word of the settings' filter selects it (PRIMARY), shows its handles and
+#       actions bar, and a handle moved along takes the next word in (F1.11 to F1.14). MOONWATER_TOUCH_PICTURES names a directory the
+#       pictures are kept in, as PNGs.
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = f1 ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/f1-answers" 2>"$work/f1-why" <<'PY'
 import os, re, shutil, subprocess, sys, time
@@ -23283,6 +23285,66 @@ up(1)
 time.sleep(0.5)
 turns = sum(int(v) for v in re.findall(r"surface: wheel (-?\d+) 0", told("ub")))
 out.append(("F1.10 two fingers moved 96 px down together are two notches of the wheel up", str(turns), "240"))
+
+#   A finger's selection in the settings' filter, as a person's hand makes it: a word typed, a finger held on one of them selects it and
+#   its lift offers the word as PRIMARY (F1.11); the picture has the selection's actions bar under it, in the surface's highest layer
+#   (F1.12), and a handle at each end, knobs under the line (F1.13); a finger on the end's handle moved along the line takes the
+#   next word in (F1.14).
+shell.run("moonwater settings", 15)
+until(lambda: len(pids("settings")) == 1, 15)
+time.sleep(2.5)
+swin = place(pids("settings")[0]) if pids("settings") else None
+if swin:
+    wx, wy, ww, wh = swin
+    f = ww / 700.0
+    fx0, fx1, fy0 = int(wx + ww - 252 * f), int(wx + ww - 62 * f), int(wy + 8 * f)
+    mid = int(fy0 + 22 * f)
+    knob_y = int(fy0 + 38 * f)
+    moveto(wx + ww + 60, wy + wh + 60)
+    type_text("alpha beta gamma")
+    time.sleep(0.8)
+    rgb = picture("f1-select-typed", (fx0 - 20, fy0 - 10, fx1 - fx0 + 40, int(150 * f)))
+    face = rgb(fx0 + 4, knob_y)
+    bar_ink = (0x2a, 0x2a, 0x30)
+
+    def under_bar(rgb):
+        return sum(1 for y in range(int(fy0 + 50 * f), int(fy0 + 100 * f), 2) for x in range(fx0 - int(120 * f), fx1, 2) if rgb(x, y) == bar_ink)
+
+    def knobs(rgb):
+        xs = [x for x in range(fx0, fx1) if rgb(x, knob_y) != face]
+        found = []
+        for x in xs:
+            if found and x - found[-1][-1] <= 2:
+                found[-1].append(x)
+            else:
+                found.append([x])
+        return [(c[0] + c[-1]) // 2 for c in found]
+
+    unbarred = under_bar(rgb)
+    beta = int(fx0 + (14 + 6 * 7 + 12) * f)
+    down(beta, mid)
+    time.sleep(0.9)
+    up()
+    time.sleep(0.6)
+    rgb = picture("f1-select-held", (fx0 - 20, fy0 - 10, fx1 - fx0 + 40, int(150 * f)))
+    primary = shell.run("moonwater clipboard get primary", 15)[0].strip()
+    out.append(("F1.11 a finger held on a word of the settings' filter selects it, and the lift offers it as PRIMARY", primary, "beta"))
+    out.append(("F1.12 the picture has the actions bar under the selection: its surface in the rows below the field",
+                "yes" if under_bar(rgb) > unbarred + int(400 * f * f) else "no: %d against %d" % (under_bar(rgb), unbarred), "yes"))
+    handles = knobs(rgb)
+    out.append(("F1.13 and a handle at each end, a knob under the line", "two" if len(handles) == 2 and handles[1] - handles[0] > 10 else "%s" % handles, "two"))
+    if len(handles) == 2:
+        down(handles[1], knob_y)
+        slide(handles[1], knob_y, fx0 + int(150 * f), knob_y, steps=8)
+        up()
+        time.sleep(0.6)
+        primary = shell.run("moonwater clipboard get primary", 15)[0].strip()
+        out.append(("F1.14 a finger on the end's handle moved along the line takes the next word in, and the lift offers both", primary, "beta gamma"))
+        picture("f1-select-moved", (fx0 - 20, fy0 - 10, fx1 - fx0 + 40, int(150 * f)))
+    key("esc")
+    time.sleep(0.5)
+else:
+    out.append(("F1.11 the settings window is on the screen", "not found", "found"))
 
 #   The handles for the pictures: each edge and corner held by the mouse and by a finger.
 if keep:
