@@ -14350,6 +14350,12 @@ static void compositor_band_room(void)
         records: what a test types and points with when there is no hardware
         to do it.
 */
+#ifdef CONFIG_MOONWATER_WAYLAND
+// The Wayland shim: the protocol (wayland.c) and the compositor's side of it, the socket and the host (wayland_host.c).
+#include "wayland.c"
+#include "wayland_host.c"
+#endif
+
 static b32 compositor_main()
 {
         b32 status;
@@ -14444,6 +14450,9 @@ static b32 compositor_main()
                         compositor_hand_back();
                 return 1;
         }
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_start();
+#endif
         // The theme goes in the table it now has.
         compositor_theme_read();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
@@ -14460,8 +14469,8 @@ static b32 compositor_main()
 
         while (running)
         {
-                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS];
-                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0;
+                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32];
+                unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0;
                 positive now = 0, until = 0;
                 long awaited, wait[2];
 
@@ -14489,6 +14498,10 @@ static b32 compositor_main()
                         clip_at = count;
                         wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
                 }
+#ifdef CONFIG_MOONWATER_WAYLAND
+                wayland_at = count;
+                count = compositor_wl_poll(wanted, count);
+#endif
 
                 // With nothing to show or time the wait is for ever. With
                 // something to show it is until a frame has gone by since the
@@ -14556,6 +14569,17 @@ static b32 compositor_main()
                         until = !until || minute < until ? minute : until;
                 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // A client that asked for a frame is told of one a frame's time after the last, whether or not anything was drawn.
+                if (compositor_wl.started && wayland_frame_wanted() && !compositor.damages)
+                {
+                        positive frame;
+
+                        now = clock_monotonic_nanoseconds();
+                        frame = now - compositor.presented < compositor.period ? compositor.presented + compositor.period : now;
+                        until = !until || frame < until ? frame : until;
+                }
+#endif
                 if (compositor.damages)
                 {
                         positive frame;
@@ -14596,6 +14620,10 @@ static b32 compositor_main()
                         if (wanted[doors + row].returned)
                                 compositor_door((int)row, wanted[doors + row].returned);
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+                if (wayland_at && compositor_wl.started)
+                        compositor_wl_pass(wanted + wayland_at);
+#endif
                 if (card_at && wanted[card_at].returned)
                         compositor_card_read();
                 if (clip_at && wanted[clip_at].returned)
@@ -14628,6 +14656,11 @@ static b32 compositor_main()
                 if (compositor.band && taskbar_tick())
                         compositor_tabs_changed();
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // The windows' clients are told of what changed, before the frame is drawn: no event waits for it.
+                compositor_wl_wake();
+#endif
+
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.
                 if (compositor.damages)
@@ -14647,13 +14680,28 @@ static b32 compositor_main()
                                         compositor_latency(1, compositor.motion_ts, clock_monotonic_nanoseconds());
                                         compositor.motion_ts = 0;
                                 }
+#ifdef CONFIG_MOONWATER_WAYLAND
+                                compositor_wl_frame();
+#endif
                         }
                 }
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // Callbacks that waited for a frame and no frame was drawn for: the frame's time has gone by all the same.
+                else if (compositor_wl.started && wayland_frame_wanted() &&
+                         clock_monotonic_nanoseconds() - compositor.presented >= compositor.period)
+                {
+                        compositor.presented = clock_monotonic_nanoseconds();
+                        compositor_wl_frame();
+                }
+#endif
 
                 // One knock a window a pass, however much it was given.
                 compositor_knock();
         }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_stop();
+#endif
         compositor_table_drop();
         string_format(log, "compositor: %p pixels composed, the plane was given %p shapes and %p moves and refused %p times\n",
                       (positive)compositor.painted, (positive)compositor.cursor.paints, (positive)compositor.cursor.moves,

@@ -1162,8 +1162,9 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 wayland.row_client[s->row] = c->slot;
                 wayland.row_surface[s->row] = wayland_surface_index(c, s);
                 wayland.rows++;
-                if (s->title[0])
-                        wayland.host->row_title(wayland.host->context, s->row, s->title, 0);
+                // The tab says the title, or what the program is called when it has set none.
+                if (s->title[0] || s->app_id[0])
+                        wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
                 if (wayland.host->row_facts(wayland.host->context, s->row, &facts) >= 0)
                         wayland_surface_screens(c, s, wayland_screen_at(facts.x, facts.y));
         }
@@ -1888,6 +1889,8 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_set_app_id:
                 wayland_text(s->app_id, a[0].text, a[0].length);
+                if (row >= 0 && !s->title[0])
+                        wayland.host->row_title(wayland.host->context, row, s->app_id, 0);
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_show_window_menu:
                 return WAYLAND_OK;

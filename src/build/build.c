@@ -4202,6 +4202,9 @@ static bool build_moon_builtins_all;
         the floodlight harness fails the build if the two differ.
 */
 static bool build_moon_floodlight;
+//      The Wayland shim, off unless the .config says CONFIG_MOONWATER_WAYLAND=y: the shell's compositor is built with it
+//      and the header says so, so the compositor and the checks read one switch.
+static bool build_moon_wayland;
 static string_address build_floodlight_policy;
 static string_address const build_floodlight_switches[] = {
     "AWK_SPAWN", "SHELL_ESCAPES", "FIND_EXEC", "FIND_DELETE", "FIND_WRITE",
@@ -4269,6 +4272,7 @@ static fn build_components(string_address config)
         build_moon_tools_all = true;
         build_moon_builtins_all = true;
         build_moon_floodlight = true;
+        build_moon_wayland = false;
         build_floodlight_policy = null;
         build_switch_count = 0;
 
@@ -4393,6 +4397,8 @@ static fn build_components(string_address config)
                         build_moon_builtins_all = on;
                 else if (memory_is_word(name, length, "FLOODLIGHT"))
                         build_moon_floodlight = on;
+                else if (memory_is_word(name, length, "WAYLAND"))
+                        build_moon_wayland = on;
                 else if ((string_has_prefix(name, "TOOL_") ||
                           string_has_prefix(name, "BUILTIN_") ||
                           string_has_prefix(name, "FLOODLIGHT_")) &&
@@ -4534,6 +4540,9 @@ static string_address build_config_header(string_address from,
         //      register is built, and every switch that is y. The shell reads
         //      the switches only when the string is defined and takes an
         //      absent one as off, so the two always travel together.
+        if (build_moon_wayland)
+                text = build_join(text, "#define CONFIG_MOONWATER_WAYLAND 1\n", null);
+
         if (build_moon_floodlight)
         {
                 text = build_join(text, "#define CONFIG_MOONWATER_FLOODLIGHT_POLICY ",

@@ -155532,6 +155532,18 @@ static void test_text(void)
                         "a character is not cut in half (%zu)", strlen(fake.row[0].title));
         }
         wlc_end(c);
+
+        /* a window with no title is called what its program is called, until it sets a title */
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        WLCHECK(fake.row[0].title[0] == 0, "no title, no app id: no text");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_app_id, "foot");
+        WLCHECK(!strcmp(fake.row[0].title, "foot"), "the app id is the tab's text when there is no title (%s)", fake.row[0].title);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, "shell");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_app_id, "bar");
+        WLCHECK(!strcmp(fake.row[0].title, "shell"), "and the title wins once it is set");
+        wlc_end(c);
         leak_check("text");
         wayland_stop();
 }
