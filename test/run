@@ -18750,7 +18750,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, d1, d2, u1, f1, c1, e1, i1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, l2, w1, p1, k1, g1, t1, x1, d1, d2, u1, f1, c1, e1, i1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -24421,6 +24421,270 @@ else
                 same "$name" "$want" "$got"
         done < "$work/l1-answers"
         sed -n 's/^l1 /  canvas       /p' "$work/l1-why"
+fi
+fi
+
+#       The panel's launcher button and the launcher's power buttons (src/canvas/ui/taskbar.c, launcher.c and the kit's ui_buttons)
+#       on a plain boot's desktop, one guest for what leaves the screen as it was and one for each thing that ends the guest (a
+#       guest this row starts, and the only one it powers off). `moonwater taskbar launcher on` puts a button at the left end of the
+#       bottom panel; a press on it opens the launcher above it, and the next press puts it away; the launcher's key still opens
+#       it in the middle; at each other position of the panel it opens beside the button, all of it on the screen, and a list that
+#       grows keeps its bottom at the panel. Then the power buttons: Shift-Tab gives them the keys, the first Enter arms Power off
+#       and an Enter held down (the kernel repeats it) confirms nothing, the next Enter powers the guest off; Restart is Tab and two
+#       Enters, and its guest ends the same way, with a reset (SHUTDOWN's reason, guest-reset) and not a power off.
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = l2 ]; then
+PYTHONPATH=$work python3 - "$image" > "$work/l2-answers" 2>"$work/l2-why" <<'PY'
+import json, os, re, socket, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/l2"
+os.makedirs(work, exist_ok=True)
+out = []
+
+def boot(tag):
+    ser = work + "/ser-" + tag
+    guest = Guest(desktop(image) + [
+        "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+        "-no-reboot", "-display", "none",
+        "-append", "console=ttyS0 drm_client_lib.active= printk.time=1 moonwater.cursor_plane=0"],
+        work + "/qmp-" + tag, work + "/mon-" + tag, work, sockets=(ser,))
+    time.sleep(25)
+    shell = Shell(ser)
+    shell.ready()
+    return guest, shell
+
+def pids(shell, name):
+    listed = shell.run("grep -l '^%s$' /proc/[0-9]*/comm | sed 's#/proc/\\([0-9]*\\)/comm#\\1#'" % name, 20)[0].split()
+    return [pid for pid in listed if shell.run("cut -d' ' -f3 /proc/%s/stat" % pid, 20)[0].strip() != "Z"]
+
+def click(x, y):
+    moveto(x, y)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.05)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(0.3)
+
+def changed_box(a, b, w, region):
+    """The box of the pixels that differ between two screens inside region (x0, y0, x1, y1), or None."""
+    x0, y0, x1, y1 = region
+    xs, ys = [], []
+    for y in range(y0, y1):
+        if a[(y * w + x0) * 3:(y * w + x1) * 3] == b[(y * w + x0) * 3:(y * w + x1) * 3]:
+            continue
+        for x in range(x0, x1):
+            o = (y * w + x) * 3
+            if a[o:o + 3] != b[o:o + 3]:
+                xs.append(x)
+                ys.append(y)
+    return (min(xs), min(ys), max(xs) + 1, max(ys) + 1) if xs else None
+
+def longest_run(counts, least):
+    best, start = (0, 0), None
+    for at in range(len(counts) + 1):
+        on = at < len(counts) and counts[at] >= least
+        if on and start is None:
+            start = at
+        elif not on and start is not None:
+            best = max(best, (at - start, start))
+            start = None
+    return (best[1], best[1] + best[0]) if best[0] else (None, 0)
+
+def bounds(open_name, before_name, after_name):
+    """What the launcher put on the screen: the pixels that differ with it up from before and after it, as the launcher's own row finds it."""
+    w, h, opened = load(open_name)
+    _, _, before = load(before_name)
+    _, _, after = load(after_name)
+    rows, cols = [0] * h, [0] * w
+    for y in range(h):
+        first, last = y * w * 3, (y + 1) * w * 3
+        if opened[first:last] == before[first:last]:
+            continue
+        for x in range(w):
+            o = first + x * 3
+            if opened[o:o + 3] != before[o:o + 3] and before[o:o + 3] == after[o:o + 3]:
+                rows[y] += 1
+                cols[x] += 1
+    y0, y1 = longest_run(rows, 150)
+    x0, x1 = longest_run(cols, 60)
+    return (x0, y0, x1, y1) if x0 is not None and y0 is not None else None
+
+def inside(b):
+    return b is not None and b[0] >= 0 and b[1] >= 0 and b[2] <= W and b[3] <= H
+
+def near(a, b, tolerance):
+    return a is not None and abs(a - b) <= tolerance
+
+guest, shell = boot("a")
+until(lambda: len(pids(shell, "terminal")) == 1, 60)
+time.sleep(2)
+
+#   The button, off and on: what changes at the left end of the bottom panel is a square a tab high.
+shot("l2-off", 1)
+shell.run("moonwater taskbar launcher on", 10)
+time.sleep(2.5)
+shot("l2-on", 1)
+w, h, off = load("l2-off")
+_, _, on = load("l2-on")
+button = changed_box(off, on, w, (0, H - 60, 120, H))
+square = button is not None and 16 <= button[2] - button[0] <= 28 and 16 <= button[3] - button[1] <= 28 and button[0] <= 10 and button[3] >= H - 2
+out.append(("L2.1 launcher on puts a tab-high square at the left end of the bottom panel",
+            "square" if square else str(button), "square"))
+bx, by = ((button[0] + button[2]) // 2, (button[1] + button[3]) // 2) if button else (14, H - 12)
+
+#   A press on it: one launcher, above the button and on the screen, its bottom at the panel; the next press puts it away.
+def launcher_up():
+    return len(pids(shell, "launcher")) == 1
+
+click(bx, by)
+opened, _ = until(launcher_up, 10)
+time.sleep(1.5)
+shot("l2-open", 1)
+click(bx, by)
+closed, _ = until(lambda: not pids(shell, "launcher"), 10)
+time.sleep(1.5)
+shot("l2-closed", 1)
+beside = bounds("l2-open", "l2-on", "l2-closed")
+placed = (beside is not None and inside(beside) and near(beside[0], button[0] if button else 4, 8) and near(beside[3], H - 24, 4) and
+          beside[2] - beside[0] > 400)
+out.append(("L2.2 a press on the button opens one launcher above it, on the screen, and a second press puts it away",
+            "%s %s %s" % ("opened" if opened else "not up", "placed" if placed else str(beside), "closed" if closed else "still up"),
+            "opened placed closed"))
+
+#   The list grows as a letter is typed, and the bar keeps its bottom at the panel (it is put again with each new height).
+click(bx, by)
+until(launcher_up, 10)
+time.sleep(1.5)
+type_text("l")
+time.sleep(2)
+shot("l2-grown", 1)
+key("esc")
+until(lambda: not pids(shell, "launcher"), 10)
+time.sleep(1.5)
+shot("l2-closed2", 1)
+grown = bounds("l2-grown", "l2-on", "l2-closed2")
+keeps = (grown is not None and beside is not None and inside(grown) and near(grown[3], beside[3], 3) and grown[1] < beside[1] - 40 and
+         near(grown[0], beside[0], 3))
+out.append(("L2.3 a list that grows keeps the bar's bottom at the panel and grows it upward",
+            "kept" if keeps else "%s from %s" % (grown, beside), "kept"))
+
+#   The key still opens it in the middle, with the button on.
+chord("meta_l", "spc")
+opened_key, _ = until(launcher_up, 10)
+time.sleep(1.5)
+shot("l2-key", 1)
+key("esc")
+until(lambda: not pids(shell, "launcher"), 10)
+time.sleep(1.5)
+shot("l2-closed3", 1)
+middle = bounds("l2-key", "l2-on", "l2-closed3")
+out.append(("L2.4 the key still opens the launcher in the middle of the screen with the button on",
+            "centred" if opened_key and middle and abs((middle[0] + middle[2]) / 2 - W / 2) < W * 0.03 else "%s %s" % (opened_key, middle), "centred"))
+
+#   The other positions: the launcher beside the button, all of it on the screen, its edge at the panel's.
+for place, where, check_box, want in (
+        ("top", lambda: (14, 11), lambda b: near(b[1], 24, 4) and near(b[0], 4, 8), "below the panel at the button"),
+        ("left", lambda: (11, 14), lambda b: near(b[0], 24, 4) and near(b[1], 4, 8), "beside the panel at the button's top"),
+        ("right", lambda: (W - 12, 14), lambda b: near(b[2], W - 24, 4) and near(b[1], 4, 8), "beside the panel at the button's top")):
+    shell.run("moonwater taskbar position %s" % place, 10)
+    time.sleep(2.5)
+    shot("l2-%s-before" % place, 1)
+    x, y = where()
+    click(x, y)
+    up, _ = until(launcher_up, 10)
+    time.sleep(1.5)
+    shot("l2-%s-open" % place, 1)
+    click(x, y)
+    gone, _ = until(lambda: not pids(shell, "launcher"), 10)
+    time.sleep(1.5)
+    shot("l2-%s-after" % place, 1)
+    found = bounds("l2-%s-open" % place, "l2-%s-before" % place, "l2-%s-after" % place)
+    good = up and gone and found is not None and inside(found) and check_box(found)
+    out.append(("L2.5 with the panel at the %s a press on its button opens the launcher %s, on the screen, and the next press puts it away" % (place, want),
+                "placed" if good else "%s %s %s" % (up, gone, found), "placed"))
+shell.run("moonwater taskbar position bottom", 10)
+time.sleep(2.5)
+
+#   Power off. Shift-Tab gives the buttons the keys; the first Enter arms Power off, an Enter held down for two seconds (the
+#   kernel's repeats) confirms nothing and the guest is up after it; the next Enter powers the guest off.
+click(bx, by)
+until(launcher_up, 10)
+time.sleep(1.5)
+chord("shift", "tab")
+time.sleep(0.5)
+#   A guest that ends under the held key (a repeat that confirmed) closes the sockets this drives: that is a guest that is gone,
+#   and not a row that did not run.
+try:
+    send([press("ret", True)])
+    time.sleep(2.5)
+    send([press("ret", False)])
+    time.sleep(1)
+    alive = shell.run("echo alive", 10)[0] == "alive" and launcher_up() and guest.poll() is None
+except Exception:
+    alive = False
+out.append(("L2.6 an Enter held down on an armed Power off confirms nothing: the guest and the launcher are up after it",
+            "up" if alive else "gone", "up"))
+try:
+    shell.sock.close()
+    key("ret")
+except Exception:
+    pass
+try:
+    guest.wait(40)
+    ended = "powered off" if guest.returncode == 0 else "exit %s" % guest.returncode
+except Exception:
+    ended = "still running"
+    guest.kill()
+out.append(("L2.7 the next Enter powers the guest off", ended, "powered off"))
+
+#   Restart. Tab to it, two Enters, and the guest resets: -no-reboot ends it, and the shutdown it says is a reset.
+guest, shell = boot("b")
+until(lambda: len(pids(shell, "terminal")) == 1, 60)
+time.sleep(2)
+chord("meta_l", "spc")
+until(launcher_up, 10)
+time.sleep(1.5)
+chord("shift", "tab")
+key("tab")
+key("ret")
+time.sleep(1)
+armed_alive = shell.run("echo alive", 10)[0] == "alive" and launcher_up()
+shell.sock.close()
+key("ret")
+reasons = []
+guest.qmp.settimeout(40)
+try:
+    while True:
+        line = guest.qf.readline()
+        if not line:
+            break
+        event = json.loads(line)
+        if event.get("event") == "SHUTDOWN":
+            reasons.append(event["data"].get("reason"))
+except Exception:
+    pass
+try:
+    guest.wait(20)
+except Exception:
+    guest.kill()
+out.append(("L2.8 Restart takes Tab and two Enters, the first arms it and the guest is up after it, and the second resets the guest",
+            "%s %s" % ("armed" if armed_alive else "not armed", ",".join(reasons) or "no shutdown"), "armed guest-reset"))
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+PY
+if [ ! -s "$work/l2-answers" ]; then
+        same "the launcher button boot answered" "yes" "no"
+        sed 's/^/    /' "$work/l2-why" | tail -8
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/l2-answers"
 fi
 fi
 
