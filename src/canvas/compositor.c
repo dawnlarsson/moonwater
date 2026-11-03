@@ -8802,6 +8802,7 @@ static void compositor_want(int row, int width, int height)
 
 static void compositor_resize_begin(int row, unsigned int edges);
 static void compositor_hold_take(int at, int row);
+static unsigned int compositor_tile_cells(unsigned int how);
 
 // The window on the far side of row's edge (one edge: a corner is the window's own) that meets it edge to edge with the
 // same extent along it, or COMPOSITOR_NONE.
@@ -8989,6 +8990,12 @@ static void compositor_shared_move(void)
         compositor_mark_shared(lo, hi, vertical);
 }
 
+/*
+        A resize takes hold of an edge (or a corner). A tile resized stays a tile: its screen's edges stay its own (no grip,
+        no line kept off them, so nothing moves by a pixel when the hand takes it), and it keeps the rectangle it had before
+        it was first arranged, which a drag away or a restore gives back, as a tile only moved between its neighbours does.
+        A window filling its screen resized floats.
+*/
 static void compositor_resize_begin(int row, unsigned int edges)
 {
         compositor_hold_take(0, row);
@@ -8999,7 +9006,8 @@ static void compositor_resize_begin(int row, unsigned int edges)
         compositor.resize_h = (int)compositor.h[row];
         compositor.press_x = compositor.pointer_x;
         compositor.press_y = compositor.pointer_y;
-        compositor.arranged[row] = COMPOSITOR_FLOATING;
+        if (!compositor_tile_cells(compositor.arranged[row]))
+                compositor.arranged[row] = COMPOSITOR_FLOATING;
         compositor.edges[row] = edges;
         compositor.far_x[row] = compositor.x[row] + (int)compositor.w[row];
         compositor.far_y[row] = compositor.y[row] + (int)compositor.h[row];
@@ -11806,18 +11814,10 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 compositor_lit(COMPOSITOR_NONE, 0, 0);
         if (resized >= 0)
                 compositor_mark_clear();
-        // The two of a shared edge are let go where the hand left them: the rectangle a drag away from either returns to.
+        // The two of a shared edge are let go where the hand left them, each still what it filled and remembering the rectangle
+        // it had before (compositor_resize_begin).
         if (resized >= 0 && compositor.shared_row >= 0)
-        {
-                for (int each = 0; each < 2; each++)
-                {
-                        int row = each ? compositor.shared_hi : compositor.shared_lo;
-
-                        compositor.saved_x[row] = compositor.x[row], compositor.saved_y[row] = compositor.y[row];
-                        compositor.saved_w[row] = compositor.w[row], compositor.saved_h[row] = compositor.h[row];
-                }
                 compositor.shared_row = COMPOSITOR_NONE;
-        }
         // A button is let go in the window it was pressed in: a second button pressed over another window while the
         // first is held is that window's, and the first's release is the one that window held the grab for.
         if (index < 8 && (compositor.button_down >> index & 1))

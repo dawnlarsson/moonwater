@@ -123371,6 +123371,52 @@ static void check_compositor_restore_glide(void)
 }
 
 /*
+        A tile resized stays a tile: the left half's inner edge taken and moved leaves its screen's edges where they were (it
+        does not move a pixel off them as a floating window's line would), it is still the left half, and it remembers the
+        rectangle from before it was arranged, which a drag away gives back. Two tiles resized by the edge they share stay
+        tiles and keep theirs too.
+*/
+static void check_compositor_tile_resize(void)
+{
+    if (!layout_table_map(256))
+    {
+        check("tile resize: the table is mapped", false);
+        return;
+    }
+    restore_fresh();
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    screens_hand(130, 100, 1);
+    check("tile resize: (the left half's inner edge is taken)", compositor.resize == 1);
+    screens_hand(150, 100, 0);
+    check("tile resize: moved 20 px it is still the left half, its screen's edges where they were, 148 wide",
+          layout_is(1, COMPOSITOR_LEFT, 0, 0, 148, 256));
+    screens_hand(150, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("tile resize: let go, it is still the left half and remembers the rectangle from before it was arranged",
+          compositor.arranged[1] == COMPOSITOR_LEFT && restore_kept_is(1, 60, 60, 100, 80));
+    screens_hand(64, 10, 1);
+    screens_hand(100, 120, 0);
+    check("tile resize: dragged away, it is that rectangle's size", compositor.w[1] == 100 && compositor.h[1] == 80);
+    screens_hand(100, 120, -1);
+    compositor.press = COMPOSITOR_NONE;
+
+    /* Two tiles side by side, resized by the edge they share. */
+    restore_fresh();
+    layout_show(2, 150, 150, 90, 60);
+    compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stacked = 2;
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    compositor_arrange(2, COMPOSITOR_RIGHT);
+    screens_hand(128, 128, 1);
+    screens_hand(148, 128, 0);
+    check("tile resize: (the shared edge is taken by both)", compositor.shared_row >= 0 && compositor.w[1] == 148 && compositor.x[2] == 148);
+    screens_hand(148, 128, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("tile resize: let go, both are still tiles and each remembers its own rectangle from before",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.arranged[2] == COMPOSITOR_RIGHT && restore_kept_is(1, 60, 60, 100, 80) &&
+              restore_kept_is(2, 150, 150, 90, 60));
+}
+
+/*
         A window dragged under the grid is over it: the grid's tints are the wallpaper's, and the window being moved is not
         tinted where the grid's row lies across it.
 */
@@ -142421,6 +142467,7 @@ b32 main()
         check_compositor_screen_chord();
         check_compositor_preview_motion();
         check_compositor_restore_glide();
+        check_compositor_tile_resize();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
