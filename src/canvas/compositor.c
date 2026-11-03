@@ -3138,6 +3138,11 @@ static struct
         unsigned char glide[WINDOWS];
         int glide_from[WINDOWS][4];
         positive glide_at[WINDOWS];
+        // Where the window was put when its glide began: a window moved since (a hand, a placement) takes where it glides
+        // from along with it. And the window the hand holds that glides all the same, plus one (0 for none): a tile torn
+        // off, shrinking to its own size about the hand (compositor_float_for_drag).
+        int glide_base[WINDOWS][2];
+        int drag_glide;
         unsigned int made[WINDOWS];     // the order the windows first showed in, which their tabs are in
         int x[WINDOWS], y[WINDOWS];
         unsigned int w[WINDOWS], h[WINDOWS], front[WINDOWS], state[WINDOWS]; // w and h as it is shown
@@ -3790,6 +3795,14 @@ static int compositor_glides(void)
         return compositor.table && !compositor.table->motion;
 }
 
+// Where a window glides from now: where it began, moved by as much as the window was moved since (compositor.glide_base).
+static void compositor_glide_origin(int row, int *from)
+{
+        memory_copy(from, compositor.glide_from[row], sizeof(compositor.glide_from[row]));
+        from[0] += compositor.x[row] - compositor.glide_base[row][0];
+        from[1] += compositor.y[row] - compositor.glide_base[row][1];
+}
+
 static void compositor_glide_damage(int row, const int *from)
 {
         int line = compositor_frame_line(row), x1 = from[0] < compositor.x[row] ? from[0] : compositor.x[row],
@@ -3800,43 +3813,64 @@ static void compositor_glide_damage(int row, const int *from)
         compositor_damage(x1 - line, y1 - line, x2 - x1 + 2 * line, y2 - y1 + 2 * line);
 }
 
+// A glide's whole span damaged: from where it glides from now to where the window is.
+static void compositor_glide_damage_now(int row)
+{
+        int from[4];
+
+        compositor_glide_origin(row, from);
+        compositor_glide_damage(row, from);
+}
+
 // How far a glide that began at `at` is, Q30 on the kit's ease: none before its first present (at 0).
 static b64 compositor_glide_done(positive at)
 {
         return at ? ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - at), COMPOSITOR_GLIDE_NS)) : 0;
 }
 
-static void compositor_glide_start(int row, const int *from)
+// A glide from `from` to where the window is now, begun at its next present.
+static void compositor_glide_begin(int row, const int *from)
 {
-        int drawn[4];
-
-        if (!compositor_glides() || row < 0 || !compositor.showing[row] || row == compositor.drag)
-                return;
-        // Still gliding toward from: it is drawn between where it glided from and there, and goes on from that.
-        if (compositor.glide[row])
-        {
-                b64 done = compositor_glide_done(compositor.glide_at[row]);
-
-                for (int k = 0; k < 4; k++)
-                        drawn[k] = compositor.glide_from[row][k] +
-                                   (int)(((long long)(from[k] - compositor.glide_from[row][k]) * (long long)done) / (long long)UI_ONE);
-                compositor_glide_damage(row, compositor.glide_from[row]);
-                from = drawn;
-        }
         memory_copy(compositor.glide_from[row], from, sizeof(compositor.glide_from[row]));
+        compositor.glide_base[row][0] = compositor.x[row], compositor.glide_base[row][1] = compositor.y[row];
         compositor.glide[row] = 1;
         compositor.glide_at[row] = 0;
         compositor_glide_damage(row, from);
 }
 
+static void compositor_glide_start(int row, const int *from)
+{
+        int drawn[4], origin[4];
+
+        if (!compositor_glides() || row < 0 || !compositor.showing[row] || row == compositor.drag)
+                return;
+        // Still gliding toward from: it is drawn between where it glided from and there, and goes on from that. Where it glided
+        // from moved with the window up to from, where it was put before this change (the window is already where it goes).
+        if (compositor.glide[row])
+        {
+                b64 done = compositor_glide_done(compositor.glide_at[row]);
+
+                memory_copy(origin, compositor.glide_from[row], sizeof(origin));
+                origin[0] += from[0] - compositor.glide_base[row][0];
+                origin[1] += from[1] - compositor.glide_base[row][1];
+                for (int k = 0; k < 4; k++)
+                        drawn[k] = origin[k] + (int)(((long long)(from[k] - origin[k]) * (long long)done) / (long long)UI_ONE);
+                compositor_glide_damage(row, origin);
+                from = drawn;
+        }
+        compositor.drag_glide = compositor.drag_glide == row + 1 ? 0 : compositor.drag_glide;
+        compositor_glide_begin(row, from);
+}
+
 // A window's rectangle as it is in the frame: where it glides from, to where it is, by the ease of the time since its first present.
 static void compositor_glide_frame(int row, struct compositor_frame *frame)
 {
-        const int *from = compositor.glide_from[row];
+        int from[4];
         long long to[4] = {compositor.x[row], compositor.y[row], (long long)compositor.w[row], (long long)compositor.h[row]};
         long long at[4];
         b64 done = compositor_glide_done(compositor.glide_at[row]);
 
+        compositor_glide_origin(row, from);
         for (int k = 0; k < 4; k++)
                 at[k] = from[k] + ((long long)(to[k] - from[k]) * (long long)done) / (long long)UI_ONE;
         frame->x = (int)at[0], frame->y = (int)at[1], frame->width = (int)at[2], frame->height = (int)at[3];
@@ -3858,15 +3892,17 @@ static void compositor_glide_keep(void)
                 now = clock_monotonic_nanoseconds();
                 if (!compositor.glide_at[row])
                         compositor.glide_at[row] = now;
-                if (!compositor_visible((int)row) || row == (unsigned int)compositor.drag || now - compositor.glide_at[row] >= COMPOSITOR_GLIDE_NS)
+                if (!compositor_visible((int)row) || (row == (unsigned int)compositor.drag && compositor.drag_glide != (int)row + 1) ||
+                    now - compositor.glide_at[row] >= COMPOSITOR_GLIDE_NS)
                 {
                         // Where it was is drawn again too: the last picture of it was at the glide's place, not its own.
-                        compositor_glide_damage((int)row, compositor.glide_from[row]);
+                        compositor_glide_damage_now((int)row);
                         compositor.glide[row] = 0;
+                        compositor.drag_glide = compositor.drag_glide == (int)row + 1 ? 0 : compositor.drag_glide;
                         compositor_damage_row((int)row);
                         continue;
                 }
-                compositor_glide_damage((int)row, compositor.glide_from[row]);
+                compositor_glide_damage_now((int)row);
         }
 }
 
@@ -4041,7 +4077,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         compositor.table->window_scale[row] = (unsigned int)frame->scale;
         compositor_land_frame(row, frame);
-        if (compositor.glide[row] && !compositor.landing[row] && row != compositor.drag)
+        if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))
                 compositor_glide_frame(row, frame);
         // The edge or corner the hand holds or is over, or all of the line of a window being moved.
         if (row == compositor.lit_row && line)
@@ -9667,9 +9703,17 @@ static void compositor_float_for_drag(int row)
         grab = compositor_fit(grab, 0, width - 1);
         at = compositor_fit(at, 0, height - 1);
 
-        // Taken by the hand, it is not gliding any more: it is where the hand has it, and where it glided from is drawn again.
+        /*
+                It shrinks to its own size about the hand: it glides from the tile as it is drawn, moved by as much as the hand
+                has moved since the press (so the point pressed is under the pointer), to its own size, and the glide follows
+                the hand (compositor_glide_origin). The point pressed keeps its share of both, so it stays under the pointer
+                all the way. Reduced motion is its size at once.
+        */
+        struct compositor_frame drawn;
+
+        compositor_frame_of(row, &drawn);
         if (compositor.glide[row])
-                compositor_glide_damage(row, compositor.glide_from[row]);
+                compositor_glide_damage_now(row);
         compositor.glide[row] = 0;
         compositor_damage_row(row);
         compositor.arranged[row] = COMPOSITOR_FLOATING;
@@ -9682,6 +9726,14 @@ static void compositor_float_for_drag(int row)
         // screen's again to snap.
         compositor.drag_x = grab;
         compositor.drag_y = at;
+        if (compositor_glides())
+        {
+                int from[4] = {drawn.x + compositor.pointer_x - compositor.press_x, drawn.y + compositor.pointer_y - compositor.press_y,
+                               drawn.width, drawn.height};
+
+                compositor_glide_begin(row, from);
+                compositor.drag_glide = row + 1;
+        }
 }
 
 /*

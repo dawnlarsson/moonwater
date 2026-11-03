@@ -123318,6 +123318,59 @@ static void check_compositor_preview_motion(void)
 }
 
 /*
+        A tile torn off shrinks to its own size about the hand: at its first frame it is the tile as it was, moved by the hand
+        since the press so the point pressed is under the pointer; half way it is between the two with the pointer at the same
+        share of its width and the same distance from its top; the hand moving on takes the glide with it; at the end it is
+        the window's own rectangle. Reduced motion is the size at once.
+*/
+static void check_compositor_restore_glide(void)
+{
+    struct compositor_frame frame;
+    positive now;
+
+    if (!layout_table_map(256))
+    {
+        check("restore glide: the table is mapped", false);
+        return;
+    }
+    restore_fresh();
+    compositor.table->motion = 0;
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    compositor.glide[1] = 0;
+    screens_hand(128, 10, 1);
+    screens_hand(128, 30, 0);
+    compositor_frame_of(1, &frame);
+    check("restore glide: torn off, its first frame is the tile moved by the hand, the point pressed under the pointer",
+          compositor.glide[1] && compositor.drag_glide == 2 && frame.x == 0 && frame.y == 20 && frame.width == 256 && frame.height == 256);
+    now = clock_monotonic_nanoseconds();
+    compositor.glide_at[1] = now - UI_WINDOW_NS / 2;
+    compositor_frame_of(1, &frame);
+    check("restore glide: half way it is between the tile and its size, the pointer at half its width and 10 px from its top",
+          frame.width > 100 && frame.width < 256 && frame.x + frame.width / 2 - 128 <= 1 && 128 - (frame.x + frame.width / 2) <= 1 &&
+              frame.y == 20);
+    screens_hand(138, 40, 0);
+    compositor_frame_of(1, &frame);
+    check("restore glide: the hand moving on takes the glide with it", frame.x + frame.width / 2 - 138 <= 1 &&
+                                                                          138 - (frame.x + frame.width / 2) <= 1 && frame.y == 30);
+    compositor.glide_at[1] = now - UI_WINDOW_NS - 1;
+    compositor_glide_keep();
+    compositor_frame_of(1, &frame);
+    check("restore glide: at the end it is the window's own rectangle, and the glide is over",
+          !compositor.glide[1] && !compositor.drag_glide && frame.x == 138 - 50 && frame.y == 30 && frame.width == 100 && frame.height == 80);
+    screens_hand(138, 40, -1);
+    compositor.press = COMPOSITOR_NONE;
+
+    restore_fresh();
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    screens_hand(128, 10, 1);
+    screens_hand(128, 30, 0);
+    compositor_frame_of(1, &frame);
+    check("restore glide: reduced motion, it is its own size at once", !compositor.glide[1] && frame.width == 100 && frame.x == 78);
+    screens_hand(128, 30, -1);
+    compositor.press = COMPOSITOR_NONE;
+}
+
+/*
         A window dragged under the grid is over it: the grid's tints are the wallpaper's, and the window being moved is not
         tinted where the grid's row lies across it.
 */
@@ -142367,6 +142420,7 @@ b32 main()
         check_compositor_cancel();
         check_compositor_screen_chord();
         check_compositor_preview_motion();
+        check_compositor_restore_glide();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
