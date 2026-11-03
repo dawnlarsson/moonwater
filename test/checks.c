@@ -189849,6 +189849,9 @@ b32 main(void)
                                 for (positive i = 0; i < (positive)pitch * (unsigned int)f->height; i++)
                                         region[used + i] = gpu_random();
                                 used += (pitch * (unsigned int)f->height + 15) & ~15u;
+                                // the line lit where the hand holds it, on some windows: an edge, two that meet, all of it
+                                if (gpu_random() % 3 == 0)
+                                        f->lit = (gpu_random() % 5 == 0 ? 16u : 0u) | gpu_random() % 16, f->lit_ink = gpu_random() | 0xff000000u;
                                 // a close button (and the minimise beside it) on most windows, where it lies wholly in the picture
                                 if (gpu_random() % 4)
                                 {

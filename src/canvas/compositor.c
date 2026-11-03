@@ -1102,6 +1102,27 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
         return true;
 }
 
+// What of the line is lit (compositor_lit_line), over the line between the corner squares: the same bands as fills in the lit ink.
+static void compositor_gpu_lit(const struct compositor_frame *f, int ox, int oy, int ow, int oh, int r, int b)
+{
+        unsigned int lit = f->lit & COMPOSITOR_LIT_ALL ? 15u : f->lit;
+        int across = lit & (COMPOSITOR_LIT_LEFT | COMPOSITOR_LIT_RIGHT), down = lit & (COMPOSITOR_LIT_TOP | COMPOSITOR_LIT_BOTTOM);
+        int corner = across && down && !(f->lit & COMPOSITOR_LIT_ALL), reach = COMPOSITOR_LIT_REACH * f->scale / 100;
+        int wide = ow - 2 * r, tall = oh - 2 * r;
+        int seg_w = corner && reach < wide ? reach : wide, seg_h = corner && reach < tall ? reach : tall;
+        int from_x = corner && (lit & COMPOSITOR_LIT_RIGHT) ? ox + ow - r - seg_w : ox + r;
+        int from_y = corner && (lit & COMPOSITOR_LIT_BOTTOM) ? oy + oh - r - seg_h : oy + r;
+
+        if (lit & COMPOSITOR_LIT_TOP)
+                compositor_gpu_rect(0, from_x, oy, from_x + seg_w, oy + b, f->lit_ink, 0, 0, 0);
+        if (lit & COMPOSITOR_LIT_BOTTOM)
+                compositor_gpu_rect(0, from_x, oy + oh - b, from_x + seg_w, oy + oh, f->lit_ink, 0, 0, 0);
+        if (lit & COMPOSITOR_LIT_LEFT)
+                compositor_gpu_rect(0, ox, from_y, ox + b, from_y + seg_h, f->lit_ink, 0, 0, 0);
+        if (lit & COMPOSITOR_LIT_RIGHT)
+                compositor_gpu_rect(0, ox + ow - b, from_y, ox + ow, from_y + seg_h, f->lit_ink, 0, 0, 0);
+}
+
 // What is inside a frame's line, in a rectangle of it: the picture's pixels copied, or the tab's one ink.
 static void compositor_gpu_contents(const struct compositor_frame *f, unsigned int tab, int x0, int y0, int x1, int y1)
 {
@@ -1119,7 +1140,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
 
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
-        if ((!f->builtin && (!f->pixels || !gpu_va(f->pixels))) || compositor_scaled(f) || f->lit || f->preview[0] || f->preview[1] || f->preview[2] ||
+        if ((!f->builtin && (!f->pixels || !gpu_va(f->pixels))) || compositor_scaled(f) || f->preview[0] || f->preview[1] || f->preview[2] ||
             f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || g->count + 40 > g->room)
                 return false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
@@ -1130,6 +1151,8 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 compositor_gpu_rect(0, ox + r, y + h, ox + ow - r, y + h + b, f->edge, 0, 0, 0);
                 compositor_gpu_rect(0, ox, oy + r, ox + b, oy + oh - r, f->edge, 0, 0, 0);
                 compositor_gpu_rect(0, x + w, oy + r, x + w + b, oy + oh - r, f->edge, 0, 0, 0);
+                if (f->lit)
+                        compositor_gpu_lit(f, ox, oy, ow, oh, r, b);
         }
         if (!r)
         {
@@ -1143,12 +1166,12 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         {
                 int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
                 int sx1 = cx > x ? cx : x, sx2 = cx + r < x + w ? cx + r : x + w, sy1 = cy > y ? cy : y, sy2 = cy + r < y + h ? cy + r : y + h;
-                unsigned int edge_table, content_table;
+                unsigned int edge_table, content_table, edge = compositor_corner_lit(f, corner) && f->lit ? f->lit_ink : f->edge;
 
                 if (f->square & (1 << corner))
                 {
                         if (b)
-                                compositor_gpu_rect(0, cx, cy, cx + r, cy + r, f->edge, 0, 0, 0);
+                                compositor_gpu_rect(0, cx, cy, cx + r, cy + r, edge, 0, 0, 0);
                         compositor_gpu_contents(f, tab, sx1, sy1, sx2, sy2);
                         continue;
                 }
@@ -1157,7 +1180,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 if ((b && !edge_table) || (ri && !content_table))
                         return false;
                 if (b)
-                        compositor_gpu_rect(5, cx, cy, cx + r, cy + r, f->edge & 0xffffffu, 0, edge_table, r);
+                        compositor_gpu_rect(5, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
                 if (ri && sx2 > sx1 && sy2 > sy1)
                         compositor_gpu_rect(5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         }
