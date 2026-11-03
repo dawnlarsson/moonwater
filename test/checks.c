@@ -127099,7 +127099,7 @@ static fn check_settings(string_address regular, string_address bold)
                                   settings_rows[colour].kind == SETTINGS_FIELD && !(settings_rows[colour].flags & SETTINGS_INK) &&
                                   settings_rows[size].kind == SETTINGS_CHOICE && settings_rows[look].kind == SETTINGS_CHOICE &&
                                   settings_group_of(colour) == settings_group_of(ink) &&
-                                  settings_group_of(size) == settings_group_of(ink) && settings_group_of(look) == settings_group_of(ink) &&
+                                  settings_group_of(size) == settings_group_of(look) && settings_group_of(size) != settings_group_of(ink) &&
                                   settings_same_verb(&settings_rows[ink], &settings_rows[colour]) &&
                                   !settings_same_verb(&settings_rows[size], &settings_rows[look]) &&
                                   !settings_same_verb(&settings_rows[ink], &settings_rows[size]) &&
@@ -127735,7 +127735,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.editing = -1;
                         settings.filter_length = 0;
                         settings.filter[0] = 0;
-                        settings.group = 0;
+                        settings.group = settings_group_of(kb);
                         settings.pane = 1;
                         settings.child = 1;
                         settings.queued = 0;
@@ -127778,7 +127778,8 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(UI_KEY_TAB);
                         settings_menu_press(UI_KEY_TAB);
                         check("settings: the list takes every key: no group is chosen, no row moved, nothing is typed as a filter",
-                              settings.choice == kb && settings.pane == 1 && settings.group == 0 && !settings.filter_length && settings.queued == 0);
+                              settings.choice == kb && settings.pane == 1 && settings.group == settings_group_of(kb) && !settings.filter_length &&
+                                  settings.queued == 0);
                         check("settings: Escape closes it and leaves the row as it was, and keeps the window",
                               settings_menu_press(UI_KEY_ESCAPE) && settings.choice < 0 && settings.queued == 0 &&
                                   string_equals((string_address)settings.value[kb], (string_address) "uk"));
@@ -127818,7 +127819,8 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_press(UI_KEY_ENTER);
                         settings_menu_gone();
                         check("settings: a press outside the list asks it to go: no change, no group chosen, nothing activated",
-                              settings.choice < 0 && settings.queued == 0 && settings.group == 0 && settings.pane == 1 && settings.editing < 0);
+                              settings.choice < 0 && settings.queued == 0 && settings.group == settings_group_of(kb) && settings.pane == 1 &&
+                                  settings.editing < 0);
                         // A mouse's press on a row that the compositor takes back (a release with WINDOW_KEY_CANCEL) is no click: the
                         // row's list does not open. Let go unmoved, the same press opens it.
                         {
@@ -127971,6 +127973,10 @@ static fn check_settings(string_address regular, string_address bold)
                                           string_equals((string_address)settings.queue[0].value, (string_address) "20ff00"));
                                 settings.queued = 0;
 
+                                // The pointer's rows are the Input group's.
+                                settings.group = settings_group_of(size);
+                                settings_refilter();
+                                settings.pane = 1;
                                 settings.list.focus = size;
                                 settings.state[size] = SETTINGS_READ;
                                 string_copy_bounded((string_address)settings.value[size], (string_address) "auto", SETTINGS_VALUE);
@@ -127992,6 +127998,9 @@ static fn check_settings(string_address regular, string_address bold)
                                           string_equals((string_address)settings.queue[0].value, (string_address) "dark"));
                                 settings.queued = 0;
 
+                                // With the ink's group shown, what is typed lists the rows of the other group too.
+                                settings.group = settings_group_of(ink);
+                                settings_refilter();
                                 for (const char address_to c = "cursor"; address_to c; c++)
                                         settings_type_code((unsigned char)address_to c);
                                 check("settings: typing cursor lists the pointer's rows, from whatever group is shown, and not the ink's",
@@ -129723,6 +129732,183 @@ static fn check_display_section(void)
         settings.map.display = -1;
 }
 
+// What is typed in the filter, as the keys would have left it: folded to lower case, and the rows that have it listed.
+static fn settings_groups_filter(const char address_to text, positive length)
+{
+        length = length < sizeof(settings.filter) ? length : sizeof(settings.filter) - 1;
+        for (positive at = 0; at < length; at++)
+                settings.filter[at] = (char)(text[at] >= 'A' && text[at] <= 'Z' ? text[at] + 32 : text[at]);
+        settings.filter[length] = 0;
+        settings.filter_length = length;
+        settings_rebuild();
+}
+
+static int settings_groups_named(const char address_to name)
+{
+        for (int at = 0; at < settings_groups(); at++)
+                if (string_equals((string_address)settings_group_name(at), (string_address)name))
+                        return at;
+        return -1;
+}
+
+/*
+        Where the rows are listed. A row is in the group a person looks for it in, by what it does and not by the program that
+        applies it: the keyboard, the mouse, the pointer and touch are Input, how the desktop is drawn is Canvas, the clock and its
+        zone are Time, and the screens are Display. The Canvas header went with the row it was on (the removed Scale) and left
+        the desktop's colour, theme, caret, pointer, clipboard and windows listed under Machine, with the keyboard and the zone.
+        Every row of the table is checked by its verb's family, the moved ones by name, and each is found in its group and by
+        the filter, which lists the rows of every group.
+*/
+static fn check_settings_groups(void)
+{
+        static const char address_to names[] = {"Machine", "Canvas", "Display", "Input", "Taskbar", "Time",
+                                                "Network", "Wi-Fi", "Bluetooth", "USB", "Power", "Boot"};
+        static const struct
+        {
+                const char address_to words[3];
+                const char address_to group;
+        } families[] = {
+            {{"name"}, "Machine"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
+            {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"},
+            {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"},
+            {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
+            {{"canvas", "wheel"}, "Input"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"},
+            {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
+            {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"wifi"}, "Wi-Fi"},
+            {{"bluetooth"}, "Bluetooth"}, {{"usb"}, "USB"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
+            {{"cpu"}, "Power"}, {{"bind"}, "Boot"}};
+        static const struct
+        {
+                const char address_to label;
+                const char address_to group;
+        } placed[] = {
+            {"Keyboard", "Input"}, {"Key repeat delay (ms, or default)", "Input"},
+            {"Key repeat rate (per second, off or default)", "Input"}, {"Mouse sensitivity (percent, or default)", "Input"},
+            {"Mouse acceleration", "Input"}, {"Smooth mouse wheel", "Input"}, {"Cursor size", "Input"}, {"Cursor look", "Input"},
+            {"Shake the pointer to find it", "Input"}, {"Large pointer stays (ms, or default)", "Input"},
+            {"Predict touch and pen", "Input"}, {"Show touch area", "Input"}, {"Time zone", "Time"},
+            {"Background", "Canvas"}, {"Background colour (rrggbb or default)", "Canvas"}, {"Theme", "Canvas"},
+            {"Accent", "Canvas"}, {"Accent colour (rrggbb or reset)", "Canvas"}, {"Motion", "Canvas"},
+            {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Open windows where they were last put", "Canvas"},
+            {"Clipboard", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"}, {"Clipboard limit (MiB)", "Canvas"},
+            {"Screen", "Display"}, {"Screen modes", "Display"}, {"Brightness", "Display"}};
+        const int count = (int)(sizeof(names) / sizeof(names[0]));
+        b32 order = settings_groups() == count + 1, family = true, by_name = true, listed = true, apart = true, found = true,
+            every = true, bare = true, screens = true;
+
+        for (int at = 0; at < count && at < settings_groups(); at++)
+                order &= string_equals((string_address)settings_group_name(at), (string_address)names[at]);
+        order &= string_equals((string_address)settings_group_name(settings_groups() - 1), (string_address)SETTINGS_ALL_HEADER);
+        check("settings groups: Machine, Canvas, Display, Input, Taskbar, Time, Network, Wi-Fi, Bluetooth, USB, Power, Boot, then All commands", order);
+
+        // Each row in the group of its verb's family: the groups are what the rows do.
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const struct settings_row address_to row = &settings_rows[at];
+                const char address_to group = settings_group_name(settings_group_of((int)at));
+
+                for (positive of = 0; of < sizeof(families) / sizeof(families[0]); of++)
+                {
+                        positive word = 0;
+                        const char address_to wanted = families[of].group;
+
+                        if (!row->read[0])
+                                break;
+                        while (word < 3 && families[of].words[word] && row->read[word] &&
+                               string_equals((string_address)row->read[word], (string_address)families[of].words[word]))
+                                word++;
+                        if (word == 0 || (word < 3 && families[of].words[word]))
+                                continue;
+                        if (!string_equals((string_address)group, (string_address)wanted))
+                        {
+                                family = false;
+                                string_format(log, "  settings groups: %s (%s) is listed under %s, and its verb is %s's\n",
+                                              (string_address)row->label, (string_address)row->read[0], (string_address)group, (string_address)wanted);
+                        }
+                        break;
+                }
+                if (row->output && !string_equals((string_address)group, (string_address) "Display"))
+                        screens = false;
+        }
+        check("settings groups: every row is in the group of what its verb does (the keyboard's, the mouse's, the pointer's, the clock's)", family);
+        check("settings groups: no row of the display options is listed under Machine, or anywhere but Display", screens);
+
+        settings.ui.scale = 100;
+        settings.view = 0, settings.editing = -1, settings.choice = -1, settings.pane = 1;
+        settings.filter_length = 0, settings.filter[0] = 0;
+        for (positive at = 0; at < sizeof(placed) / sizeof(placed[0]); at++)
+        {
+                int row = settings_row_named(placed[at].label), want = settings_groups_named(placed[at].group);
+                const char address_to first = placed[at].label;
+                positive word = 0;
+
+                if (!string_equals((string_address)settings_rows[row].label, (string_address)placed[at].label) || want < 0)
+                {
+                        by_name = false;
+                        continue;
+                }
+                by_name &= settings_group_of(row) == want;
+                settings.filter_length = 0, settings.filter[0] = 0;
+                settings.group = want;
+                settings_rebuild();
+                listed &= settings_pos(row) >= 0;
+                // Listed under the group's own name, and not under Machine (the first group) unless it is Machine's.
+                settings.group = 0;
+                settings_rebuild();
+                apart &= (settings_pos(row) >= 0) == (want == 0);
+                // Found by the filter from the group it is not in: by the first word of its label.
+                while (first[word] && first[word] != ' ')
+                        word++;
+                settings_groups_filter(first, word);
+                found &= settings_pos(row) >= 0;
+                settings.filter_length = 0, settings.filter[0] = 0;
+        }
+        check("settings groups: the rows moved out of Machine are named in the groups of what they do (Input, Canvas, Time, Display)", by_name);
+        check("settings groups: each is listed when its group is chosen", listed);
+        check("settings groups: and none of them is listed under Machine", apart);
+        check("settings groups: and the filter finds each by the first word of its label, from the group chosen", found);
+
+        // Machine holds only what the machine is called.
+        settings.group = 0;
+        settings.filter_length = 0, settings.filter[0] = 0;
+        settings_rebuild();
+        for (int at = 0; at < settings.list.count; at++)
+        {
+                const struct settings_row address_to row = settings.list.id[at] < SETTINGS_ANY ? &settings_rows[settings.list.id[at]] : null;
+
+                bare &= row && row->read[0] && (string_equals((string_address)row->read[0], (string_address) "name") ||
+                                                string_equals((string_address)row->read[0], (string_address) "machine"));
+        }
+        check("settings groups: the rows listed under Machine are the machine's name, and nothing of the desktop, the keyboard, the clock or the screens",
+              bare && settings.list.count > 0);
+
+        // The filter lists the rows of every group: each row by the first word of its label, and each group's rows by its name.
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const char address_to label = settings_rows[at].label;
+                positive word = 0;
+
+                while (label[word] && label[word] != ' ')
+                        word++;
+                settings_groups_filter(label, word);
+                every &= settings_pos((int)at) >= 0;
+        }
+        for (int group = 0; group < settings_groups() - 1; group++)
+        {
+                const char address_to name = settings_group_name(group);
+
+                settings_groups_filter(name, string_length((string_address)name));
+                for (positive at = 0; at < SETTINGS_ROWS; at++)
+                        if (settings_group_of((int)at) == group)
+                                every &= settings_pos((int)at) >= 0;
+        }
+        check("settings groups: the filter lists every row of every group, by a word of its label and by its group's name", every);
+
+        settings.filter_length = 0, settings.filter[0] = 0;
+        settings.group = 0;
+        settings_refilter();
+}
+
 /*
         The page's search field, as the settings frames just drew it: the kit's field, UI_FIELD_H high, wholly inside the
         title band (UI_PAGE_TOP from the window's top, and not under the window's top inset), and clear of the close button
@@ -129799,6 +129985,8 @@ static fn check_settings_frames(string_address regular, string_address bold)
         check_settings_search();
 
         settings_frames_scenario((string_address) "Canvas, Space and Down every 33 ms, answered at 25", false, false,
+                                 "Open windows where they were last put", UI_KEY_SPACE, UI_KEY_DOWN, 6, 33, 25);
+        settings_frames_scenario((string_address) "Input, Space and Down every 33 ms, answered at 25", false, false,
                                  "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 6, 33, 25);
         settings_frames_scenario((string_address) "switches, Space and Down every 33 ms, answered at 25", true, false,
                                  "Shake the pointer to find it", UI_KEY_SPACE, UI_KEY_DOWN, 12, 33, 25);
@@ -129828,16 +130016,23 @@ static fn check_settings_frames(string_address regular, string_address bold)
                                     SETTINGS_VALUE);
         }
         {
-                int canvas = settings_group_of(settings_row_named("Scale"));
+                // Canvas holds the desktop's drawing; the pointer, the wheel and touch are Input's, so Input has its own scripts.
+                int canvas = settings_group_of(settings_row_named("Background")), input = settings_group_of(settings_row_named("Cursor size"));
                 static const struct settings_frames_step hover[] = {
-                    {0, SF_ROW, "Scale", 450, 0}, {30, SF_ROW, "Background", 450, 0},
+                    {0, SF_ROW, "Background", 450, 0}, {30, SF_ROW, "Background colour (rrggbb or default)", 450, 0},
                     {90, SF_ROW, "Theme", 300, 0}, {120, SF_ROW, "Accent", 300, 0}, {150, SF_ROW, "Motion", 300, 0},
-                    {180, SF_ROW, "Cursor size", 450, 0}, {400, SF_ROW, "Cursor look", 450, 0}, {420, SF_ROW, "Scale", 450, 0}};
+                    {180, SF_ROW, "Caret blink speed", 450, 0}, {400, SF_ROW, "Caret thickness", 450, 0}, {420, SF_ROW, "Background", 450, 0}};
                 static const struct settings_frames_step press[] = {
+                    {0, SF_KEY, null, UI_KEY_END, 0},
+                    {5, SF_ROW, "Open windows where they were last put", 200, 0}, {20, SF_DOWN, null, 0, 0}, {140, SF_UP, null, 0, 0},
+                    {200, SF_ANSWER, null, 0, 0}, {260, SF_ROW, "Clipboard", 600, 0}, {280, SF_DOWN, null, 0, 0},
+                    {300, SF_UP, null, 0, 0}, {320, SF_ROW, "Clipboard", 400, 0}, {330, SF_DOWN, null, 0, 0}, {340, SF_UP, null, 0, 0},
+                    {360, SF_ANSWER, null, 0, 0}, {380, SF_ANSWER, null, 0, 0}};
+                static const struct settings_frames_step input_press[] = {
                     {0, SF_KEY, null, UI_KEY_END, 0},
                     {5, SF_ROW, "Shake the pointer to find it", 200, 0}, {20, SF_DOWN, null, 0, 0}, {140, SF_UP, null, 0, 0},
                     {200, SF_ANSWER, null, 0, 0}, {260, SF_ROW, "Show touch area", 600, 0}, {280, SF_DOWN, null, 0, 0},
-                    {300, SF_UP, null, 0, 0}, {320, SF_ROW, "Clipboard", 400, 0}, {330, SF_DOWN, null, 0, 0}, {340, SF_UP, null, 0, 0},
+                    {300, SF_UP, null, 0, 0}, {320, SF_ROW, "Smooth mouse wheel", 400, 0}, {330, SF_DOWN, null, 0, 0}, {340, SF_UP, null, 0, 0},
                     {360, SF_ANSWER, null, 0, 0}, {380, SF_ANSWER, null, 0, 0}};
                 static const struct settings_frames_step parts[] = {
                     {0, SF_PART, "Theme", 0, 0}, {20, SF_DOWN, null, 0, 0}, {60, SF_UP, null, 0, 0}, {90, SF_ANSWER, null, 0, 0},
@@ -129861,15 +130056,15 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {230, SF_GROUP, null, 6, 0}, {240, SF_DOWN, null, 0, 0}, {250, SF_UP, null, 0, 0}, {260, SF_GROUP, null, 1, 0},
                     {270, SF_DOWN, null, 0, 0}, {300, SF_UP, null, 0, 0}, {500, SF_GROUP, null, 0, 0}};
                 static const struct settings_frames_step theme[] = {
-                    {0, SF_ROW, "Scale", 450, 0}, {20, SF_KEY, null, UI_KEY_DOWN, 0}, {40, SF_THEME, null, UI_THEME_LIGHT, 0},
+                    {0, SF_ROW, "Background", 450, 0}, {20, SF_KEY, null, UI_KEY_DOWN, 0}, {40, SF_THEME, null, UI_THEME_LIGHT, 0},
                     {60, SF_ROW, "Background", 450, 0}, {100, SF_DOWN, null, 0, 0}, {120, SF_UP, null, 0, 0},
                     {300, SF_THEME, null, UI_THEME_DARK, 0}, {320, SF_THEME, null, UI_THEME_DARK, 0x40c0ff}, {340, SF_GROUP, null, 2, 0},
                     {350, SF_DOWN, null, 0, 0}, {360, SF_UP, null, 0, 0}, {700, SF_THEME, null, UI_THEME_DARK, 0}};
                 static const struct settings_frames_step pull[] = {
-                    {0, SF_FINGER_DOWN, "Scale", 0, 0}, {20, SF_FINGER_MOVE, null, 10, 0}, {40, SF_FINGER_MOVE, null, 25, 0},
+                    {0, SF_FINGER_DOWN, "Background", 0, 0}, {20, SF_FINGER_MOVE, null, 10, 0}, {40, SF_FINGER_MOVE, null, 25, 0},
                     {60, SF_FINGER_MOVE, null, 45, 0}, {80, SF_FINGER_MOVE, null, 70, 0}, {100, SF_FINGER_MOVE, null, 95, 0},
                     {140, SF_FINGER_MOVE, null, 100, 0}, {300, SF_FINGER_MOVE, null, 60, 0}, {360, SF_FINGER_MOVE, null, 20, 0},
-                    {420, SF_FINGER_UP, null, 0, 0}, {900, SF_FINGER_DOWN, "Time zone", 0, 0}, {920, SF_FINGER_MOVE, null, -20, 0},
+                    {420, SF_FINGER_UP, null, 0, 0}, {900, SF_FINGER_DOWN, "Clipboard", 0, 0}, {920, SF_FINGER_MOVE, null, -20, 0},
                     {940, SF_FINGER_MOVE, null, -60, 0}, {960, SF_FINGER_MOVE, null, -110, 0}, {1000, SF_FINGER_MOVE, null, -150, 0},
                     {1200, SF_FINGER_MOVE, null, -90, 0}, {1260, SF_FINGER_UP, null, 0, 0}};
                 static const struct settings_frames_step card_pull[] = {
@@ -129880,10 +130075,14 @@ static fn check_settings_frames(string_address regular, string_address bold)
                     {900, SF_FINGER_UP, null, 0, 0}};
                 static const struct settings_frames_step size[] = {
                     {0, SF_KEY, null, UI_KEY_END, 0},
-                    {5, SF_ROW, "Shake the pointer to find it", 600, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
+                    {5, SF_ROW, "Open windows where they were last put", 600, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
                     {40, SF_ANSWER, null, 0, 0}, {60, SF_SIZE, null, 640, 470}, {90, SF_GROUP, null, 5, 0}, {100, SF_DOWN, null, 0, 0},
                     {120, SF_SIZE, null, 690, 515}, {130, SF_UP, null, 0, 0}, {300, SF_SIZE, null, SETTINGS_WIDTH, SETTINGS_HEIGHT}};
                 static const struct settings_frames_step menu[] = {
+                    {0, SF_ROW, "Caret blink speed", 450, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
+                    {60, SF_KEY, null, UI_KEY_DOWN, 0}, {80, SF_KEY, null, UI_KEY_DOWN, 0}, {200, SF_KEY, null, UI_KEY_ENTER, 0},
+                    {220, SF_ANSWER, null, 0, 0}, {300, SF_KEY, null, UI_KEY_ENTER, 0}, {320, SF_KEY, null, UI_KEY_ESCAPE, 0}};
+                static const struct settings_frames_step input_menu[] = {
                     {0, SF_ROW, "Cursor size", 450, 0}, {10, SF_DOWN, null, 0, 0}, {30, SF_UP, null, 0, 0},
                     {60, SF_KEY, null, UI_KEY_DOWN, 0}, {80, SF_KEY, null, UI_KEY_DOWN, 0}, {200, SF_KEY, null, UI_KEY_ENTER, 0},
                     {220, SF_ANSWER, null, 0, 0}, {300, SF_KEY, null, UI_KEY_ENTER, 0}, {320, SF_KEY, null, UI_KEY_ESCAPE, 0}};
@@ -129899,6 +130098,8 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 settings_frames_play((string_address) "a finger pulls the rows past their ends and lets go", canvas, pull, sizeof(pull) / sizeof(pull[0]));
                 settings_frames_play((string_address) "a finger pulls the card past its ends and lets go", canvas, card_pull, sizeof(card_pull) / sizeof(card_pull[0]));
                 settings_frames_play((string_address) "a choice's menu", canvas, menu, sizeof(menu) / sizeof(menu[0]));
+                settings_frames_play((string_address) "Input: switches pressed and let go", input, input_press, sizeof(input_press) / sizeof(input_press[0]));
+                settings_frames_play((string_address) "Input: a choice's menu", input, input_menu, sizeof(input_menu) / sizeof(input_menu[0]));
         }
         }
         settings.ui.scale = 100;
@@ -142893,6 +143094,7 @@ b32 main()
 #if MOONWATER_UI_SETTINGS
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                        program_argument_count() > 4 ? program_argument(4) : null);
+        check_settings_groups();
         check_settings_keys();
         check_settings_frames(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
                               program_argument_count() > 4 ? program_argument(4) : null);

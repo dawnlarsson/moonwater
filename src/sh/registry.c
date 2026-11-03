@@ -155,6 +155,14 @@ struct settings_row
         the rows after it; the order is the window's, and the main page of the
         command shows the rows of a verb in this order too. The labels are
         what the window and its lane find a row by.
+
+        The groups, most used first: Machine (its name), Canvas (how the
+        desktop is drawn and what its windows keep), Display (the screens),
+        Input (the keyboard, the mouse, the pointer and touch), Taskbar (the
+        panel), Time (the clock, its zone and where it is set from), Network, Wi-Fi,
+        Bluetooth, USB, Power and Boot. A row is in the group a person looks
+        for it in, by what it does and not by the program that applies it: the
+        pointer's size is an Input row though the compositor draws it.
 */
 #define SETTING_UNWRAP(...) __VA_ARGS__
 // A plain row: group, label, window kind and flags, verb words in brackets, key, choices, then the rest by name.
@@ -165,23 +173,7 @@ struct settings_row
 static const struct settings_row settings_rows[] = {
     {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0, null,
      .usage = "name [NEW|random]", .help = "what this machine is called, like space-wizard"},
-    //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
-    //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
-    {null, "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it", 0, null,
-     .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it [us]"},
-    SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "delay"), "delay ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_DELAY_PATH,
-                      .standard = "250", .unit = "ms", .low = 100, .high = 2000,
-                      .usage = "keyboard repeat delay [MS|default]",
-                      .help = "how long a key is held before it repeats, 100 to 2000 ms [250]"),
-    SETTING_PLAIN_ROW(null, "Key repeat rate (per second, off or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "rate"), "rate ", "off",
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_RATE_PATH,
-                      .standard = "30", .unit = "per second", .low = 1, .high = 100,
-                      .usage = "keyboard repeat rate [PER-SECOND|off|default]",
-                      .help = "repeats a second of a held key, 1 to 100, or none [30]"),
-    {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0, null,
-     .usage = "timezone [ZONE|list]", .help = "IANA name, country, +1 or POSIX; manual"},
-    SETTING_PLAIN_ROW(null, "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
+    SETTING_PLAIN_ROW("Canvas", "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
                       "default black dark-grey slate midnight-blue forest plum light-grey white",
                       .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",
                       .need = "how Canvas draws", .refusal = "background is a colour like 1e1e1e, or default, not %s\n",
@@ -208,12 +200,6 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "motion is full or reduced, not %s\n",
                       .usage = "canvas motion [full|reduced]",
                       .help = "reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]"),
-    //  The wheel's glide (ui_scroll_wheel, every region the wheel turns): on, a notch glides to its row over a short time and a
-    //  fast spin travels further; off, a notch moves a whole row at once.
-    SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
-                      .usage = "canvas wheel smooth [on|off]",
-                      .help = "a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]"),
     //  The caret of every text field and the terminal (ui.c's ui_caret_wave): how it blinks, and how wide it is. Off is solid.
     SETTING_PLAIN_ROW(null, "Caret blink speed", SETTINGS_CHOICE, 0, ("canvas", "caret", "blink"), "blink ", "slow normal fast off",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CARET_BLINK_PATH, .standard = "normal", .reset = "normal",
@@ -225,39 +211,11 @@ static const struct settings_row settings_rows[] = {
                       .need = "how Canvas draws", .refusal = "caret thickness is thin, normal or thick, not %s\n",
                       .usage = "canvas caret thickness [thin|normal|thick]",
                       .help = "how wide the caret is: 1, 2 or 3 pixels at 100%; a block cursor is a whole cell [normal]"),
-    SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
-                      .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
-                      .usage = "canvas cursor [size [N|auto]|look [light|dark|auto]]", .help = "the pointer: size 1 to 4, colours [auto]"),
-    SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
-                      .refusal = "cursor look is light, dark or auto, not %s\n"),
-    SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_PATH, .standard = "on", .need = "how Canvas draws",
-                      .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),
-    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_FIELD, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
-                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_DELAY_PATH,
-                      .standard = "1200", .unit = "ms", .low = 100, .high = 10000, .need = "how Canvas draws",
-                      .usage = "canvas cursor shake delay [MS|default]",
-                      .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
-    //  The prediction a frame ahead (compositor.c's predict): a finger or a pen is delivered where it will be. The mouse
-    //  pointer is always predicted, so it has no row.
-    SETTING_PLAIN_ROW(null, "Predict touch and pen", SETTINGS_SWITCH, 0, ("canvas", "predict", "touch"), "touch ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_PREDICT_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
-                      .usage = "canvas predict touch [on|off]",
-                      .help = "a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]"),
     //  Read by the compositor when a window opens and when the hand lets one go, so it is never stale and has no live.
     SETTING_PLAIN_ROW(null, "Open windows where they were last put", SETTINGS_SWITCH, 0, ("canvas", "windows", "remember"), "remember ", null,
                       .path = SETTING_WINDOWS_REMEMBER_PATH, .standard = "on", .need = "how Canvas draws",
                       .usage = "canvas windows remember [on|off]",
                       .help = "a window opens where the hand last put it, kept across boots [on]"),
-    //  On by default (the owner's call): a finger hides what it presses, and the mark says where the screen read it. It
-    //  is drawn for a touch screen's fingers alone, never for a mouse, a pad or a pen, and costs nothing with no finger
-    //  down or fading.
-    SETTING_PLAIN_ROW(null, "Show touch area", SETTINGS_SWITCH, 0, ("canvas", "touch"), "touch ", null,
-                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
-                      .usage = "canvas touch [on|off]",
-                      .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
     //  The clipboard, an OS service of the compositor's (.github/SECURITY.md): off empties both selections and the
     //  history and refuses every copy; the history is copies kept in the compositor's memory and never on a disk, none
     //  by default, since a clipboard that remembers is a clipboard that leaks what was copied an hour ago.
@@ -290,13 +248,61 @@ static const struct settings_row settings_rows[] = {
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
     {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0, null,
      .usage = "brightness [N%|+N|-N]", .help = "the screen backlight"},
-    SETTING_PLAIN_ROW("Mouse", "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,
+    //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
+    //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
+    {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it", 0, null,
+     .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it [us]"},
+    SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "delay"), "delay ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_DELAY_PATH,
+                      .standard = "250", .unit = "ms", .low = 100, .high = 2000,
+                      .usage = "keyboard repeat delay [MS|default]",
+                      .help = "how long a key is held before it repeats, 100 to 2000 ms [250]"),
+    SETTING_PLAIN_ROW(null, "Key repeat rate (per second, off or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "rate"), "rate ", "off",
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_RATE_PATH,
+                      .standard = "30", .unit = "per second", .low = 1, .high = 100,
+                      .usage = "keyboard repeat rate [PER-SECOND|off|default]",
+                      .help = "repeats a second of a held key, 1 to 100, or none [30]"),
+    SETTING_PLAIN_ROW(null, "Mouse sensitivity (percent, or default)", SETTINGS_FIELD, 0, ("mouse", "sensitivity"), "sensitivity ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SENSITIVITY_PATH,
                       .standard = "100", .unit = "percent", .low = 10, .high = 500,
                       .usage = "mouse sensitivity [PERCENT|default]", .help = "how far the pointer goes for the hand, 10 to 500 percent [100]"),
     SETTING_PLAIN_ROW(null, "Mouse acceleration", SETTINGS_SWITCH, 0, ("mouse", "acceleration"), "acceleration ", null,
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_ACCELERATION_PATH, .standard = "on",
                       .usage = "mouse acceleration [on|off]", .help = "the pointer outruns a fast hand; off is one to one [on]"),
+    //  The wheel's glide (ui_scroll_wheel, every region the wheel turns): on, a notch glides to its row over a short time and a
+    //  fast spin travels further; off, a notch moves a whole row at once.
+    SETTING_PLAIN_ROW(null, "Smooth mouse wheel", SETTINGS_SWITCH, 0, ("canvas", "wheel", "smooth"), "smooth ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_WHEEL_SMOOTH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas wheel smooth [on|off]",
+                      .help = "a notch glides to its row, and a fast spin travels further; off moves a whole row at once [on]"),
+    SETTING_PLAIN_ROW(null, "Cursor size", SETTINGS_CHOICE, 0, ("canvas", "cursor", "size"), "size ", "auto 1 2 3 4",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_SIZE_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
+                      .refusal = "cursor size is auto or a number from 1 to 4, not %s\n",
+                      .usage = "canvas cursor [size [N|auto]|look [light|dark|auto]]", .help = "the pointer: size 1 to 4, colours [auto]"),
+    SETTING_PLAIN_ROW(null, "Cursor look", SETTINGS_CHOICE, 0, ("canvas", "cursor", "look"), "look ", "auto light dark",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CURSOR_LOOK_PATH, .standard = "auto", .reset = "auto", .need = "how Canvas draws",
+                      .refusal = "cursor look is light, dark or auto, not %s\n"),
+    SETTING_PLAIN_ROW(null, "Shake the pointer to find it", SETTINGS_SWITCH, 0, ("canvas", "cursor", "shake"), "shake ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas cursor shake [on|off]", .help = "a shake of the hand makes the pointer large for a moment [on]"),
+    SETTING_PLAIN_ROW(null, "Large pointer stays (ms, or default)", SETTINGS_FIELD, 0, ("canvas", "cursor", "shake", "delay"), "delay ", null,
+                      .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_SHAKE_DELAY_PATH,
+                      .standard = "1200", .unit = "ms", .low = 100, .high = 10000, .need = "how Canvas draws",
+                      .usage = "canvas cursor shake delay [MS|default]",
+                      .help = "how long it stays large after the last shake, 100 to 10000 ms [1200]"),
+    //  The prediction a frame ahead (compositor.c's predict): a finger or a pen is delivered where it will be. The mouse
+    //  pointer is always predicted, so it has no row.
+    SETTING_PLAIN_ROW(null, "Predict touch and pen", SETTINGS_SWITCH, 0, ("canvas", "predict", "touch"), "touch ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_PREDICT_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas predict touch [on|off]",
+                      .help = "a finger or a pen is taken a frame ahead of where it is, to the windows it reaches [on]"),
+    //  On by default (the owner's call): a finger hides what it presses, and the mark says where the screen read it. It
+    //  is drawn for a touch screen's fingers alone, never for a mouse, a pad or a pen, and costs nothing with no finger
+    //  down or fading.
+    SETTING_PLAIN_ROW(null, "Show touch area", SETTINGS_SWITCH, 0, ("canvas", "touch"), "touch ", null,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TOUCH_PATH, .standard = "on", .need = "how Canvas draws",
+                      .usage = "canvas touch [on|off]",
+                      .help = "a circle under each finger on a touch screen, fading for a second after it lifts [on]"),
     SETTING_PLAIN_ROW("Taskbar", "Taskbar position", SETTINGS_CHOICE, 0, ("taskbar", "position"), "position ", "bottom top left right",
                       .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_POSITION_PATH, .standard = "bottom", .reset = "bottom",
                       .need = "how Canvas draws", .refusal = "taskbar position is bottom, top, left or right, not %s\n",
@@ -321,6 +327,8 @@ static const struct settings_row settings_rows[] = {
      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_TASKBAR_TRAY_PATH},
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0, null,
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
+    {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0, null,
+     .usage = "timezone [ZONE|list]", .help = "IANA name, country, +1 or POSIX; manual"},
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
      null, .usage = "time [sync]", .help = "the clock; sync sets it and the zone now"},
     {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0, null,

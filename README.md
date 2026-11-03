@@ -235,7 +235,7 @@ be written to /root, or finds a policy there it cannot read (which it does not w
 force from /run until the machine restarts, and `usb` says why.
 
 `moonwater settings` opens the same command as a window on the desktop: the groups
-(machine, canvas, mouse, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are
+(machine, canvas, display, input, taskbar, time, network, Wi-Fi, Bluetooth, USB, power, boot, and all commands) are
 listed at the left and the rows of the one chosen at the right, each row a setting a
 person flips, and under All commands a row to every line of `moonwater help`, so no
 verb is out of its reach. Tab goes between the groups and the rows, the arrow keys
