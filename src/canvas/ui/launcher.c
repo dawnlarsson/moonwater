@@ -929,6 +929,7 @@ static long launcher_tick(long timeout, long address_to other)
         timeout = ui_text_timeout(&launcher.ui, launcher_field(), timeout, now, &redraw);
         if (redraw)
                 launcher.dirty = true;
+        return timeout;
 }
 
 static struct ui_app launcher_app = {
