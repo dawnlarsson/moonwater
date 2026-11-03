@@ -2424,8 +2424,9 @@ static unsigned int compositor_snap_side(unsigned int touch, unsigned int near, 
         is edge pixels inside the screen's (the dead zone), which is held (the touched edges of the last frame). An axis the
         window spans, with both its edges touched, takes no snap. A corner is the quarter of its two edges when one of them
         is touched and the other is within corner pixels of the screen's corner: it wins over the edge that is touched. Else a
-        touched top is the whole screen, a bottom the bottom half, and a left or right side that half. free is the edges
-        that may be snapped to (compositor_snap_free). touch is set to the edges touched now, for the next frame's held.
+        touched top is the whole screen, and a left or right side that half. The bottom alone is no target: only its two
+        corners are, so a tall window set low is not taken by the edge it rests on. free is the edges that may be snapped to
+        (compositor_snap_free). touch is set to the edges touched now, for the next frame's held.
 */
 static unsigned int compositor_snap_rule(const int *box, const int *screen, unsigned int free, unsigned int held, int edge, int corner,
                                          unsigned int *touch)
@@ -2460,8 +2461,6 @@ static unsigned int compositor_snap_rule(const int *box, const int *screen, unsi
         }
         if (contact & COMPOSITOR_SNAP_TOP)
                 return COMPOSITOR_MAXIMIZED;
-        if (contact & COMPOSITOR_SNAP_BOTTOM)
-                return COMPOSITOR_BOTTOM;
         if (contact & COMPOSITOR_SNAP_LEFT)
                 return COMPOSITOR_LEFT;
         if (contact & COMPOSITOR_SNAP_RIGHT)
@@ -9222,14 +9221,15 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
         return added;
 }
 
-// The snap assist and the grid as a drag's pointer is at x, y with its target: the grid is up on the screen the pointer is
-// on at the top edge, and the assist shows over a target (how, on screen), or stays armed (compositor_preview).
+// The grid as a drag's pointer is at x, y: up on the screen the pointer is on at the top edge. The snap assist is not shown
+// during a drag, only the preview: the thumbnails are offered after the drop (compositor_release_as).
 static void compositor_overlays_drag(int row, int x, int y, unsigned int how, int screen)
 {
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
         int at = compositor_screen_at(screens, count, x, y);
 
+        (void)row, (void)how, (void)screen;
         compositor_overlays_damage();
 
         // Up by the top band, and kept up while the pointer is in its row of tiles, so a drop there can take a region.
@@ -9242,16 +9242,6 @@ static void compositor_overlays_drag(int row, int x, int y, unsigned int how, in
         }
         else
                 compositor.grid_on = 0;
-        if (how != COMPOSITOR_FLOATING)
-        {
-                compositor.assist_on = 1;
-                compositor.assist_row = row;
-                compositor.assist_how = how;
-                compositor.assist_screen = screen;
-        }
-        else if (!compositor.assist_armed)
-                compositor.assist_on = 0;
-        compositor_assist_refresh();
         compositor_overlays_damage();
 }
 
@@ -10896,10 +10886,13 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
         int count, target;
 
-        if (compositor.assist_armed && value && code == CK_KEY_ESC)
+        // The snap assist offered after a drop goes at any key that is not a modifier: Escape is only that, and any other key
+        // goes on to the window that has the keys, as it would have.
+        if (compositor.assist_armed && value == 1 && !bit)
         {
                 compositor_assist_close();
-                return;
+                if (code == CK_KEY_ESC)
+                        return;
         }
 
         if (bit)
@@ -10908,6 +10901,10 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor.held[at] |= (unsigned char)bit;
                 else
                         compositor.held[at] &= (unsigned char)~bit;
+                // A modifier is part of what a drag snaps to (Control is no snap): its target is read again now, not at the
+                // next motion.
+                if (compositor.drag >= 0)
+                        compositor_preview(compositor.drag);
         }
 
         modifiers = compositor_modifiers();
@@ -11161,7 +11158,8 @@ static void compositor_motion(void)
 /*
         Where a drag ended, read as an arrangement: the window's own rectangle, on the screen it is mostly on, and the edges of
         that screen it touches (compositor_snap_rule). The pointer is not read: the hand moves the window and the window is
-        what snaps. The edges touched last frame are the dead zone's (compositor.snap_held).
+        what snaps. The edges touched last frame are the dead zone's (compositor.snap_held). Control held is no snap at all, so a
+        window can be set flush against an edge; let go of it and the edges count again.
 */
 static unsigned int compositor_snap(const int *box, unsigned int *touch, int *screen)
 {
@@ -11171,7 +11169,8 @@ static unsigned int compositor_snap(const int *box, unsigned int *touch, int *sc
 
         *touch = 0;
         *screen = at;
-        if (at < 0 || compositor_screen_cover(screens[at], box[0], box[1], box[2], box[3]) <= 0)
+        if (at < 0 || compositor_screen_cover(screens[at], box[0], box[1], box[2], box[3]) <= 0 ||
+            (compositor_modifiers() & WINDOW_KEY_CONTROL))
                 return COMPOSITOR_FLOATING;
         free = compositor_snap_free(screens, count, box, at);
         return compositor_snap_rule(box, screens[at], free, compositor.snap_held, COMPOSITOR_SNAP_EDGE * compositor_output_scale(at) / 100,
@@ -11301,6 +11300,8 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                         compositor_assist_refresh();
                         if (!compositor.assist_count)
                                 compositor_assist_close();
+                        // They come up now, not during the drag: where they are is drawn for the next present.
+                        compositor_overlays_damage();
                 }
         }
         if (compositor.grid_on)

@@ -118283,13 +118283,10 @@ static void check_compositor_screens(void)
     compositor.press = COMPOSITOR_NONE;
     screens_hand(compositor.x[2] + 5, compositor.y[2] + 4, 1);
     screens_hand(150, 190, 0);
-    check("snap: the bottom band shows the bottom half",
-          compositor.preview_row == 2 && compositor.preview[0] == 0 && compositor.preview[1] == SCREENS_A_H / 2 &&
-              compositor.preview[2] == SCREENS_A_W && compositor.preview[3] == SCREENS_A_H - SCREENS_A_H / 2);
+    check("snap: the bottom edge alone shows no target (only its corners are targets)", compositor.preview[2] == 0);
     screens_hand(150, 190, -1);
-    check("snap: let go on the bottom band, the window takes the bottom half",
-          compositor.arranged[2] == COMPOSITOR_BOTTOM && compositor.x[2] == 0 && compositor.y[2] == SCREENS_A_H / 2 &&
-              table->want_width[2] == SCREENS_A_W && table->want_height[2] == SCREENS_A_H - SCREENS_A_H / 2);
+    check("snap: let go on the bottom edge, the window stays floating where the hand put it",
+          compositor.arranged[2] == COMPOSITOR_FLOATING && compositor.preview[2] == 0);
     //  A window the card shows straight has its newest picture taken into its other buffer and held for the flip
     //  that lets go of the one shown (flip_row its row). The screens taken again before that flip show the
     //  compositor's scanout (compositor_scanout_own, then the crtcs set and compositor_flip_done), and with two
@@ -122186,8 +122183,8 @@ static void check_compositor_push(void)
     push_drag(60, 60, 80, 20, &how, &shown);
     check("push: a window pushed to the top edge, touching it, is maximized", how == COMPOSITOR_MAXIMIZED && shown);
     push_drag(60, 60, 80, 196, &how, &shown);
-    check("push: a window pushed to the bottom edge, touching it, takes the bottom half",
-          how == COMPOSITOR_BOTTOM && shown);
+    check("push: a window pushed to the bottom edge, touching it, is no target: the bottom alone is not one",
+          how == COMPOSITOR_FLOATING && !shown);
     push_drag(60, 60, 30, 20, &how, &shown);
     check("push: a window pushed into the top left corner, its top touching and its left 10 px off, takes that quarter",
           how == COMPOSITOR_TOP_LEFT && shown);
@@ -122297,10 +122294,11 @@ static void check_compositor_seam(void)
               compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor_screen_of(1) == 1 && compositor.x[1] == part[0] && compositor.y[1] == part[1]);
 
         seam_reset(start_x, start_y);
-        seam_drop(start_x, start_y, layout ? 100 : 480, 237);
-        compositor_screen_part(compositor.screen[1], COMPOSITOR_BOTTOM, part);
-        check("seam: onto the far bottom edge of the second display it takes its bottom half there",
-              compositor.arranged[1] == COMPOSITOR_BOTTOM && compositor_screen_of(1) == 1 && compositor.y[1] == part[1] && compositor.x[1] == part[0]);
+        seam_drop(start_x, start_y, layout ? 0 : SCREENS_W - 1, 237);
+        compositor_screen_part(compositor.screen[1], layout ? COMPOSITOR_BOTTOM_LEFT : COMPOSITOR_BOTTOM_RIGHT, part);
+        check("seam: into the far bottom corner of the second display it takes that quarter there",
+              compositor.arranged[1] == (layout ? COMPOSITOR_BOTTOM_LEFT : COMPOSITOR_BOTTOM_RIGHT) && compositor_screen_of(1) == 1 &&
+                  compositor.y[1] == part[1] && compositor.x[1] == part[0]);
 
         seam_reset(start_x, start_y);
         seam_drop(start_x, start_y, layout ? SCREENS_W - 3 : 2, 100);
@@ -122311,9 +122309,15 @@ static void check_compositor_seam(void)
 
         seam_reset(start_x, start_y);
         seam_drop(start_x, start_y, layout ? 400 : 100, SCREENS_A_H - 3);
-        compositor_screen_part(compositor.screen[0], COMPOSITOR_BOTTOM, part);
-        check("seam: onto the bottom edge of the first display, which no screen is under, it takes its bottom half",
-              compositor.arranged[1] == COMPOSITOR_BOTTOM && compositor_screen_of(1) == 0 && compositor.y[1] == part[1]);
+        check("seam: onto the bottom edge of the first display alone, it is no target and stays on that display",
+              compositor.arranged[1] == COMPOSITOR_FLOATING && compositor_screen_of(1) == 0);
+
+        seam_reset(start_x, start_y);
+        seam_drop(start_x, start_y, layout ? SCREENS_W - 1 : 2, SCREENS_A_H - 3);
+        compositor_screen_part(compositor.screen[0], layout ? COMPOSITOR_BOTTOM_RIGHT : COMPOSITOR_BOTTOM_LEFT, part);
+        check("seam: into the outer bottom corner of the first display, which no screen is under, it takes that quarter",
+              compositor.arranged[1] == (layout ? COMPOSITOR_BOTTOM_RIGHT : COMPOSITOR_BOTTOM_LEFT) && compositor_screen_of(1) == 0 &&
+                  compositor.y[1] == part[1] && compositor.x[1] == part[0]);
 
         seam_reset(start_x, start_y);
         seam_drop(start_x, start_y, layout ? 258 : SCREENS_A_W - 2, 100);
@@ -122390,14 +122394,27 @@ static void check_compositor_assist(void)
               compositor.table->want_width[2] == 128 && !compositor.assist_armed && !compositor.assist_on);
     compositor_press(COMPOSITOR_BTN_LEFT, 0);
 
-    /* Over the target while the drag is held, the assist shows before the drop, and a drop elsewhere arranges nothing. */
+    /* Over the target while the drag is held, only the preview shows: the thumbnails are offered after the drop. */
     assist_fresh();
     screens_hand(80, 64, 1);
     screens_hand(0, 100, 0);
-    check("assist: a drag held over the left edge shows the thumbnails before the drop, not yet armed",
-          compositor.assist_on && !compositor.assist_armed && compositor.assist_count == 2 && compositor.preview[2] == 128);
+    check("assist: a drag held over the left edge shows the preview and no thumbnail; the assist waits for the drop",
+          !compositor.assist_on && !compositor.assist_armed && compositor.assist_count == 0 && compositor.preview[2] == 128);
     screens_hand(0, 100, -1);
     compositor.press = COMPOSITOR_NONE;
+    check("assist: and the drop offers them", compositor.assist_armed && compositor.assist_count == 2);
+
+    /* Any key that is not a modifier takes the assist away; a modifier alone does not. */
+    assist_fresh();
+    layout_drop(1, 20, 4, 0, 100);
+    compositor_key(0, 42, 1, 0); /* left Shift */
+    compositor_key(0, 42, 0, 0);
+    check("assist: a modifier alone keeps the thumbnails", compositor.assist_armed && compositor.assist_count == 2);
+    compositor_key(0, 30, 1, 0); /* A */
+    compositor_key(0, 30, 0, 0);
+    check("assist: any other key takes the thumbnails away and places nothing",
+          !compositor.assist_armed && !compositor.assist_on && compositor.arranged[2] == COMPOSITOR_FLOATING &&
+              compositor.arranged[3] == COMPOSITOR_FLOATING);
 
     /* A click elsewhere takes the assist away, and the press is still the window's own. */
     assist_fresh();
@@ -122684,11 +122701,10 @@ static int snap_rect_is(const int *rect)
 
 static void check_compositor_snap_trigger(void)
 {
-    static const struct { int x, y; int rect[4]; } contact[4] = {
+    static const struct { int x, y; int rect[4]; } contact[3] = {
         {0, 60, {0, 0, 128, 256}},     /* left, touched at 0 px */
         {156, 60, {128, 0, 128, 256}}, /* right */
         {60, 0, {0, 0, 256, 256}},     /* top: maximized */
-        {60, 176, {0, 128, 256, 128}}, /* bottom */
     };
     int every = 1, rect[4];
 
@@ -122697,13 +122713,13 @@ static void check_compositor_snap_trigger(void)
         check("snap trigger: the table is mapped", false);
         return;
     }
-    for (int each = 0; each < 4; each++)
+    for (int each = 0; each < 3; each++)
     {
         snap_fresh();
         snap_hand(1, contact[each].x, contact[each].y, 50, 40);
         every = every && snap_rect_is(contact[each].rect);
     }
-    check("snap contact: each edge touched at 0 px shows its target at the first frame, exactly", every);
+    check("snap contact: the left, the right and the top touched at 0 px show their target at the first frame, exactly", every);
 
     snap_fresh();
     snap_hand(1, 5, 60, 50, 40);
@@ -122824,6 +122840,47 @@ static void check_compositor_snap_trigger(void)
         check("snap frames: while the target is touched the frame is tinted, and after the let go no frame has any of the tint",
               drawn > 0 && after == 0);
     }
+}
+
+/*
+        The snap's edges: the bottom alone is no target (only its corners are), so a tall window set low is not taken by the
+        edge it rests on; and Control held during a drag is no snap at all, so a window can be set flush against an edge,
+        while letting go of Control brings the target back at once, with no motion.
+*/
+static void check_compositor_snap_edges(void)
+{
+    int rect[4];
+
+    if (!layout_table_map(256))
+    {
+        check("snap edges: the table is mapped", false);
+        return;
+    }
+    snap_fresh();
+    snap_hand(1, 60, 176, 50, 40);
+    check("snap edges: the bottom edge touched alone shows no target", compositor.preview[2] == 0);
+    snap_let_go(60, 176, 50, 40);
+    check("snap edges: and the let go leaves the window floating where the hand put it, its line on the screen's last row",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 60 && compositor.y[1] == 175);
+
+    snap_fresh();
+    snap_hand(1, 0, 176, 50, 40);
+    rect[0] = 0, rect[1] = 128, rect[2] = 128, rect[3] = 128;
+    check("snap edges: the bottom touching with the left touching too is the bottom left quarter", snap_rect_is(rect));
+    snap_let_go(0, 176, 50, 40);
+
+    snap_fresh();
+    compositor.held[0] |= CK_HELD_LCONTROL;
+    snap_hand(1, 0, 60, 50, 40);
+    check("snap edges: Control held, the left edge touched shows no target", compositor.preview[2] == 0);
+    compositor_key(0, 29, 0, 0); /* left Control let go, the hand still */
+    check("snap edges: Control let go with the hand still, the target is shown at once", compositor.preview[2] == 128);
+    compositor_key(0, 29, 1, 0);
+    check("snap edges: Control held again, it is gone at once", compositor.preview[2] == 0);
+    snap_let_go(0, 60, 50, 40);
+    check("snap edges: let go with Control held, the window stays flush against the edge (its line on the first column), floating",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 1 && compositor.y[1] == 60);
+    compositor_key(0, 29, 0, 0);
 }
 
 /*
@@ -141552,6 +141609,7 @@ b32 main()
         check_compositor_glide();
         check_compositor_preview_at_once();
         check_compositor_snap_trigger();
+        check_compositor_snap_edges();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
