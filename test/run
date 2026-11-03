@@ -23308,14 +23308,14 @@ if swin:
     type_text("alpha beta gamma")
     time.sleep(0.8)
     rgb = picture("f1-select-typed", (fx0 - 20, fy0 - 10, fx1 - fx0 + 40, int(150 * f)))
-    face = rgb(fx0 + 4, knob_y)
     bar_ink = (0x2a, 0x2a, 0x30)
 
     def under_bar(rgb):
         return sum(1 for y in range(int(fy0 + 50 * f), int(fy0 + 100 * f), 2) for x in range(fx0 - int(120 * f), fx1, 2) if rgb(x, y) == bar_ink)
 
     def knobs(rgb):
-        xs = [x for x in range(fx0, fx1) if rgb(x, knob_y) != face]
+        # The knobs are the accent (white on the standard theme) on the row under the line; the finger's own mark there is faint.
+        xs = [x for x in range(fx0, fx1) if sum(rgb(x, knob_y)) > 650]
         found = []
         for x in xs:
             if found and x - found[-1][-1] <= 2:
