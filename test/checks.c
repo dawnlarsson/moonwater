@@ -123564,6 +123564,42 @@ static void check_compositor_overlay_fade(void)
     compositor_overlays_keep();
     check("overlay fade: faded out, the thumbnails are none", compositor.assist_count == 0);
 
+    /* Drawn only where damage says, as the loop does: a fade that ends draws where it was once more, so no faint last frame
+       of it stays on the screen. */
+    layout_setup(256, 1);
+    compositor.table->motion = 0;
+    assist_fresh();
+    compositor.showing[3] = 0;
+    layout_paint(2, picture);
+    layout_drop(1, 20, 4, 0, 100);
+    compositor_damage(0, 0, 256, 256);
+    compositor_present(); /* the fade in starts */
+    compositor.overlay_at = clock_monotonic_nanoseconds() - COMPOSITOR_SNAP_FADE_NS - 1;
+    compositor_overlays_keep(); /* and is over */
+    compositor_damage(0, 0, 256, 256);
+    compositor_present();
+    at = assist_row_at(2);
+    {
+        int rect[4] = {compositor.assist_rect[at][0], compositor.assist_rect[at][1], compositor.assist_rect[at][2],
+                       compositor.assist_rect[at][3]};
+        unsigned int left = 0;
+
+        compositor_assist_close();
+        compositor_present();
+        compositor.overlay_at = clock_monotonic_nanoseconds() - COMPOSITOR_SNAP_FADE_NS / 2;
+        compositor_overlays_keep();
+        compositor_present();
+        compositor.overlay_at = clock_monotonic_nanoseconds() - COMPOSITOR_SNAP_FADE_NS - 1;
+        compositor_overlays_keep();
+        compositor_present();
+        for (int y = rect[1]; y < rect[1] + rect[3]; y++)
+            for (int x = rect[0]; x < rect[0] + rect[2]; x++)
+                if (x < (int)compositor.x[2] - 2 || x >= (int)(compositor.x[2] + compositor.w[2]) + 2 || y < (int)compositor.y[2] - 2 ||
+                    y >= (int)(compositor.y[2] + compositor.h[2]) + 2) /* the window itself lies there too */
+                    left += (layout_pixels[y * 256 + x] & 0xffffffu) != (ground & 0xffffffu);
+        check("overlay fade: a fade that ends draws where it was once more: nothing of the thumbnail is left on the screen", left == 0);
+    }
+
     /* The grid: a tile's line is the snap's colour at its full strength, outside the tile where the wallpaper is. */
     layout_setup(256, 1);
     compositor.table->motion = 1;

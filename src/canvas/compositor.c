@@ -92,11 +92,13 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
         The snap's look, in one place. A snap preview is the selection's colour at COMPOSITOR_SNAP_PERCENT (more on a light
         wallpaper, up to COMPOSITOR_SNAP_PERCENT_MOST), its colour deepened till its edge reads COMPOSITOR_SNAP_READ
         (compositor_snap_ink; ui_contrast's hundredths, so 300 is 3 to 1). A tile, a thumbnail and a grid tile have the
-        window's line and corners, and their fades run COMPOSITOR_SNAP_FADE_NS, the same time both ways.
+        window's line and corners, and their fades run COMPOSITOR_SNAP_FADE_NS, the same time both ways. A tile's preview
+        has the window's corners and a line of the tint at COMPOSITOR_SNAP_LINE percent of the tint's own strength.
 */
 #define COMPOSITOR_SNAP_PERCENT 40
 #define COMPOSITOR_SNAP_PERCENT_MOST 60
 #define COMPOSITOR_SNAP_READ 300
+#define COMPOSITOR_SNAP_LINE 200
 #define COMPOSITOR_SNAP_FADE_NS (120 * UI_MS)
 // The grid's tiles: the gap between them, which a thumbnail keeps from its cell's edges too; a tile's tint, white at a quarter;
 // and the tint of a region a window fills, black at a half (it is shown taken, not hidden).
@@ -3583,6 +3585,7 @@ static unsigned int compositor_snap(const int *box, unsigned int *touch, int *sc
 static void compositor_assist_refresh(void);
 static int compositor_overlays_up(void);
 static void compositor_overlays_damage(void);
+static void compositor_overlays_damage_all(void);
 static int compositor_overlays_shown(void);
 static void compositor_overlay_fade(unsigned int goal);
 static unsigned int compositor_overlays(struct compositor_frame *frames, unsigned int at);
@@ -4094,7 +4097,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         }
         // The snap preview is the dragged window's: drawn under it, where it is drawn now (compositor_preview_shown), shaped as
         // the window will be there -- a tile with the window's corners and a line, filling the screen square -- at the scale of
-        // the screen it is on, its line the tint's colour at twice its strength (compositor_scene).
+        // the screen it is on, its line the tint's colour at COMPOSITOR_SNAP_LINE percent of its strength (compositor_scene).
         if (row == compositor.preview_draw - 1)
         {
                 int rect[4];
@@ -4109,7 +4112,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                         int square = compositor.preview_how == COMPOSITOR_MAXIMIZED || compositor.preview_how == COMPOSITOR_ROOM;
 
                         a = (ink >> 24) * alpha / 100;
-                        edge = (ink >> 24) * 2 > 255 ? 255 : (ink >> 24) * 2;
+                        edge = (ink >> 24) * COMPOSITOR_SNAP_LINE / 100 > 255 ? 255 : (ink >> 24) * COMPOSITOR_SNAP_LINE / 100;
                         memory_copy(frame->preview, rect, sizeof(rect));
                         frame->preview_ink = (ink & 0xffffffu) | a << 24;
                         frame->preview_radius = square ? 0 : UI_RADIUS * scale / 100;
@@ -9532,6 +9535,8 @@ static void compositor_overlays_keep(void)
                 compositor_overlays_damage();
                 return;
         }
+        // Faded: where they were is drawn once more, or the faint last frame of the fade stays on the screen.
+        compositor_overlays_damage_all();
         if (!compositor.overlays_up)
                 compositor.assist_count = 0;
         compositor.overlay_at = 0;
@@ -9545,12 +9550,13 @@ static unsigned int compositor_snap_edge(unsigned int percent)
         return ui_mix(ink, percent > 100 ? 100 : percent, ground) & 0xffffffu;
 }
 
-// The rectangles the overlays are drawn in now: each thumbnail's, and the grid's row while it is up or fading out.
-static int compositor_overlay_boxes(int boxes[COMPOSITOR_ASSIST_MAX + 1][4])
+// The rectangles the overlays are drawn in now: each thumbnail's, and the grid's row while it is up or fading out (or, with
+// all, wherever they were last, shown or not).
+static int compositor_overlay_boxes_of(int boxes[COMPOSITOR_ASSIST_MAX + 1][4], int all)
 {
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
-        int n = 0, first[4], last[4], shown = compositor_overlays_shown();
+        int n = 0, first[4], last[4], shown = all || compositor_overlays_shown();
 
         for (int thumb = 0; shown && thumb < compositor.assist_count; thumb++)
         {
@@ -9575,13 +9581,24 @@ static int compositor_overlay_boxes(int boxes[COMPOSITOR_ASSIST_MAX + 1][4])
         return n;
 }
 
-static void compositor_overlays_damage(void)
+static void compositor_overlays_damage_of(int all)
 {
         int boxes[COMPOSITOR_ASSIST_MAX + 1][4];
-        int n = compositor_overlay_boxes(boxes);
+        int n = compositor_overlay_boxes_of(boxes, all);
 
         for (int at = 0; at < n; at++)
                 compositor_damage(boxes[at][0], boxes[at][1], boxes[at][2], boxes[at][3]);
+}
+
+static void compositor_overlays_damage(void)
+{
+        compositor_overlays_damage_of(0);
+}
+
+// Where the overlays were last, shown or not: what a fade that has ended draws once more.
+static void compositor_overlays_damage_all(void)
+{
+        compositor_overlays_damage_of(1);
 }
 
 // Whether the snap assist or the grid is up: what the frames of a present add (compositor_overlays).
