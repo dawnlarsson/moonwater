@@ -18750,7 +18750,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, d1, u1, f1, c1, e1, i1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, d1, d2, u1, f1, c1, e1, i1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -21782,6 +21782,76 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/d1-answers"
+fi
+fi
+
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = d2 ]; then
+#       A screen's refresh rate, set while the desktop runs: canvas display NAME refresh HZ|preferred. A screen forced to
+#       1920 by 1080 lists 60 and 50 Hz there (the first is its preferred). Each change of the mode is the screens taken
+#       again, which the compositor says (a line of its log a time); a preferred rate asked of a screen at 50 Hz took
+#       nothing, because the mode a screen has is the one it was switched to and that was kept.
+PYTHONPATH=$work python3 - "$image" > "$work/d2-answers" 2>"$work/d2-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/d2"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 printk.time=1 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0 "
+               "video=Virtual-1:1920x1080"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+shell.run("rm -f /root/canvas.displays; /compositor -f /usr/share/fonts/inter/Inter-Regular.ttf > /tmp/c.log 2>&1 & "
+          "echo $! > /tmp/c.pid; echo started", 10)
+until(lambda: "yes" in shell.run("[ -e /run/moonwater/windows ] && echo yes || echo no", 10)[0], 30)
+time.sleep(2)
+
+def taken():
+    return len(re.findall(r"compositor: screen ", shell.run("cat /tmp/c.log", 10)[0]))
+
+def taken_becomes(count, seconds=6):
+    until(lambda: taken() >= count, seconds)
+    time.sleep(1)
+    return taken()
+
+out.append(("d2.1 the screens are taken once at the start", taken(), 1))
+shell.run("moonwater canvas display Virtual-1 refresh 50", 15)
+out.append(("d2.2 a rate the screen lists, asked while the desktop runs, takes the screens again", taken_becomes(2), 2))
+shell.run("moonwater canvas display Virtual-1 refresh preferred", 15)
+out.append(("d2.3 and the preferred rate after it takes them again: the screen goes back to its first mode", taken_becomes(3), 3))
+shell.run("moonwater canvas display Virtual-1 refresh 50", 15)
+out.append(("d2.4 and 50 again", taken_becomes(4), 4))
+shell.run("moonwater canvas display Virtual-1 refresh 60", 15)
+out.append(("d2.5 and 60 by its number", taken_becomes(5), 5))
+shell.run("moonwater canvas display Virtual-1 refresh preferred", 15)
+time.sleep(4)
+out.append(("d2.6 and the preferred rate at the preferred mode takes nothing", taken(), 5))
+out.append(("d2.7 and the compositor is still there", shell.run("[ -d /proc/$(cat /tmp/c.pid) ] && echo yes || echo no", 10)[0], "yes"))
+
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/d2-answers" ]; then
+        same "the display refresh boot answered" "yes" "no"
+        sed 's/^/    /' "$work/d2-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/d2-answers"
 fi
 fi
 

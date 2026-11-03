@@ -1269,14 +1269,15 @@ static const struct windows_display *windows_display_of(const struct windows_dis
 
 /*
         The mode a screen is driven at for a rate the displays file asks for: the first of its modes (count of them, each
-        its width, height and rate in modes[i][0..2], in the order the screen lists them) that is width by height at hz.
+        its width, height and rate in modes[i][0..2], in the order the screen lists them) that is width by height at hz;
+        no hz (0) is the preferred rate, the first it lists at that size, which is the rate the settings recommend.
         Answers its index, or count when the screen lists none, and the screen keeps the mode it has.
 */
 static unsigned int windows_mode_at(const unsigned int (*modes)[3], unsigned int count, unsigned int width,
                                     unsigned int height, unsigned int hz)
 {
         for (unsigned int at = 0; at < count; at++)
-                if (modes[at][0] == width && modes[at][1] == height && modes[at][2] == hz)
+                if (modes[at][0] == width && modes[at][1] == height && (!hz || modes[at][2] == hz))
                         return at;
         return count;
 }

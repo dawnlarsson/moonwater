@@ -6570,7 +6570,9 @@ static unsigned int compositor_said(char *line, unsigned int at, const char *tex
 /*
         The mode a screen is driven at for the rate its displays line asks for: the first mode it lists at the size it
         has now and that rate (windows_mode_at), in mode. A rate no mode of the screen has keeps the mode it has, and
-        the kernel log says so. A screen with no line, or a preferred rate, keeps its mode.
+        the kernel log says so. A screen with no line keeps its mode. A preferred rate is the first mode it lists at
+        that size, which a screen at another rate than it goes back to: the mode it has is the one it was switched to,
+        so keeping that was no switch back (the settings' first rate, the recommended one, never took after another).
 */
 static void compositor_refresh_pick(const char *name, unsigned int count, const struct compositor_mode *modes,
                                     struct compositor_mode *mode)
@@ -6581,7 +6583,7 @@ static void compositor_refresh_pick(const char *name, unsigned int count, const 
         char line[160];
         unsigned int length;
 
-        if (!display || !display->refresh)
+        if (!display)
                 return;
         for (at = 0; at < count && at < 128; at++)
                 rates[at][0] = modes[at].hdisplay, rates[at][1] = modes[at].vdisplay, rates[at][2] = modes[at].vrefresh;
@@ -6591,6 +6593,8 @@ static void compositor_refresh_pick(const char *name, unsigned int count, const 
                 *mode = modes[at];
                 return;
         }
+        if (!display->refresh)
+                return;
         length = compositor_said(line, 0, "compositor: canvas.displays: no mode of ");
         length = compositor_said(line, length, name);
         length = compositor_said(line, length, " at ");

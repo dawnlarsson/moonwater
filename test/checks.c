@@ -118865,6 +118865,64 @@ static void check_compositor_turn(void)
 }
 
 /*
+        The rate a screen's line asks, taken as the screen's mode: a rate is the first mode the screen lists at the size it
+        has and that rate, and the preferred rate (what the settings' first, recommended rate writes) is the first it lists
+        at that size. The mode the screen has is the one it was switched to, so keeping it for a preferred rate was no
+        switch back: the first change worked and the recommended rate never took after another. A screen with no line keeps
+        its mode.
+*/
+static void check_compositor_refresh(void)
+{
+    static const unsigned int listed[4][3] = {{1920, 1080, 60}, {1920, 1080, 50}, {1280, 720, 60}, {1280, 720, 50}};
+    struct compositor_mode modes[4], mode;
+
+    memory_zero(modes, sizeof(modes));
+    for (unsigned int at = 0; at < 4; at++)
+    {
+        modes[at].hdisplay = (unsigned short)listed[at][0], modes[at].vdisplay = (unsigned short)listed[at][1];
+        modes[at].vrefresh = listed[at][2], modes[at].clock = 100000 + at;
+    }
+    check("refresh: the preferred rate is the first mode the screen lists at the size, and a size it does not list has none",
+          windows_mode_at(listed, 4, 1920, 1080, 0) == 0 && windows_mode_at(listed, 4, 1280, 720, 0) == 2 &&
+              windows_mode_at(listed, 4, 1024, 768, 0) == 4 && windows_mode_at(listed, 4, 1920, 1080, 50) == 1);
+
+    memory_zero(compositor_display, sizeof(compositor_display));
+    memory_copy(compositor_display[0].name, "A-1", 4);
+    compositor_displays = 1;
+
+    compositor_display[0].refresh = 50;
+    mode = modes[0];
+    compositor_refresh_pick("A-1", 4, modes, &mode);
+    check("refresh: a rate a line asks is the mode at it", mode.vrefresh == 50 && mode.clock == modes[1].clock);
+
+    // The screen is at the 50 Hz mode now, and the line is the recommended rate again.
+    compositor_display[0].refresh = 0;
+    mode = modes[1];
+    compositor_refresh_pick("A-1", 4, modes, &mode);
+    check("refresh: the preferred rate a screen at another rate is asked goes back to the first mode it lists at the size",
+          mode.vrefresh == 60 && mode.clock == modes[0].clock);
+    mode = modes[3];
+    compositor_refresh_pick("A-1", 4, modes, &mode);
+    check("refresh: at another size it is that size's first", mode.vrefresh == 60 && mode.hdisplay == 1280 && mode.clock == modes[2].clock);
+    mode = modes[0];
+    compositor_refresh_pick("A-1", 4, modes, &mode);
+    check("refresh: a screen already at its first mode keeps it", mode.clock == modes[0].clock);
+
+    compositor_display[0].refresh = 60;
+    mode = modes[1];
+    compositor_refresh_pick("A-1", 4, modes, &mode);
+    check("refresh: and a rate asked by number after another is as it was", mode.vrefresh == 60 && mode.clock == modes[0].clock);
+
+    compositor_display[0].refresh = 0;
+    mode = modes[1];
+    compositor_refresh_pick("B-1", 4, modes, &mode);
+    check("refresh: a screen with no line keeps the mode it has", mode.clock == modes[1].clock);
+
+    compositor_displays = 0;
+    memory_zero(compositor_display, sizeof(compositor_display));
+}
+
+/*
         The snap preview is a tint on its target and on nothing else. Over the desktop, the target is the kit's selection
         at its own alpha; the window dragged is as it is over the tint, and a window above it is as it is too. Everything
         else is the desktop, untouched.
@@ -143627,6 +143685,7 @@ b32 main()
         check_compositor_scales();
         check_compositor_corner_scales();
         check_compositor_turn();
+        check_compositor_refresh();
         check_compositor_preview();
         check_compositor_snap_tint();
         check_compositor_preview_held();
