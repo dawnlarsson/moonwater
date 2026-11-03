@@ -1534,7 +1534,7 @@ static fn settings_layout(void)
         settings.page.damaged = settings_changed;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
-        settings.page.bottom = settings.height; // the content runs to the window's bottom edge
+        ui_page_set_bottom(&settings.page, settings.height); // the content runs to the window's bottom edge
         {
                 int top = settings.page.top;
 

@@ -7384,6 +7384,15 @@ static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_t
         ui_scroll_clamp(&p->column_scroll);
 }
 
+// A page's bottom edge moved from the layout's (an app's body runs to the window's edge): the column's view follows it, so its
+// scroll range ends where its drawing does.
+static fn ui_page_set_bottom(struct ui_page address_to p, int bottom)
+{
+        p->bottom = bottom;
+        p->column_scroll.height = p->column_scroll.view = p->bottom - p->top;
+        ui_scroll_clamp(&p->column_scroll);
+}
+
 // The group under a point of the window, or -1.
 static int ui_page_column_hit(const struct ui address_to ui, const struct ui_page address_to p, int x, int y)
 {

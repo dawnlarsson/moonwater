@@ -128495,6 +128495,24 @@ static fn settings_fit_check(void)
         check("settings list: a list whose rows fit its window does not scroll and shows no bar, at any window height", seen > 0 && still);
 }
 
+// The group column's view ends where the page's body does: the window's bottom edge, with the rows that fit above it. The
+// column ended at the status band's top while the body ran to the edge, so 40 pixels of scroll range sat under the last group.
+static fn settings_column_fit_check(void)
+{
+        struct ui_scroll address_to col = &settings.page.column_scroll;
+        int heights[2] = {520, 560};
+        b32 ends = true;
+
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.ui.scale = 100;
+        for (int k = 0; k < 2; k++)
+        {
+                settings_size(SETTINGS_WIDTH, (unsigned int)heights[k]);
+                ends = ends && settings.page.bottom == settings.height && col->y + col->view == settings.page.bottom;
+        }
+        check("settings column: the group column's view ends at the window's bottom edge, where the body does, at 520 and 560", ends);
+}
+
 // The group column (the settings' tabs on end) squashes at its ends like a list: a wheel turn at its bottom stretches it from that
 // edge, a finger pulled past its top or bottom stretches it from that edge, and its items are drawn through the stretch.
 static fn settings_column_check(void)
@@ -129414,6 +129432,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_size(SETTINGS_WIDTH, 300);
         settings_fit_check();
         settings_column_check();
+        settings_column_fit_check();
         settings_end_check();
         settings_size(SETTINGS_WIDTH, SETTINGS_HEIGHT);
         settings_frames_gallery();
