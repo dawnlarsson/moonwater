@@ -126757,6 +126757,27 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_menu_gone();
                         check("settings: a press outside the list asks it to go: no change, no group chosen, nothing activated",
                               settings.choice < 0 && settings.queued == 0 && settings.group == 0 && settings.pane == 1 && settings.editing < 0);
+                        // A mouse's press on a row that the compositor takes back (a release with WINDOW_KEY_CANCEL) is no click: the
+                        // row's list does not open. Let go unmoved, the same press opens it.
+                        {
+                                struct window_event over = {WINDOW_EVENT_MOTION, 0, 0, 0};
+                                struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                                struct window_event taken = {WINDOW_EVENT_BUTTON, WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0};
+                                struct window_event lift = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                                int pos = settings_pos(kb);
+
+                                over.a = (settings.page.left + settings.page.right) / 2;
+                                over.b = ui_list_row_y(&settings.list, pos) + ui_px(&settings.ui, UI_ROW) / 2;
+                                settings_event(&over);
+                                settings_event(&land);
+                                settings_event(&taken);
+                                check("settings: a mouse's press the compositor takes back opens nothing, and is no click",
+                                      settings.choice < 0 && settings.queued == 0 && !settings.press.down);
+                                settings_event(&land);
+                                settings_event(&lift);
+                                check("settings: a mouse's press and lift on a choice row, unmoved, opens its list", settings.choice == kb);
+                                settings_menu_gone();
+                        }
 
 #ifdef UI_TARGET
                         /*

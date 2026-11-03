@@ -4327,10 +4327,11 @@ static fn settings_press_slide(int x, int y)
                 settings_dirty();
 }
 
-// A mouse's release with a row's press held: done where it went down, if the release is on that row too.
-static fn settings_press_up(void)
+// A mouse's release with a row's press held: done where it went down, if the release is on that row too; one the compositor
+// took back (WINDOW_KEY_CANCEL) is no click, and does nothing.
+static fn settings_press_up(b32 cancelled)
 {
-        int clicked = ui_press_end(&settings.press, false), x = settings.page.pointer_x, y = settings.page.pointer_y;
+        int clicked = ui_press_end(&settings.press, cancelled), x = settings.page.pointer_x, y = settings.page.pointer_y;
 
         ui_list_let_go(&settings.ui, &settings.list);
         settings_dirty();
@@ -4555,7 +4556,7 @@ static b32 settings_event(const struct window_event address_to event)
                         ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, settings.page.pointer_x, settings.page.pointer_y, false);
                         settings_dirty();
                         if (!(event->flags & WINDOW_KEY_TOUCH) && settings.press.down)
-                                settings_press_up();
+                                settings_press_up((event->flags & WINDOW_KEY_CANCEL) != 0);
                 }
                 if (event->flags & WINDOW_KEY_TOUCH)
                 {
