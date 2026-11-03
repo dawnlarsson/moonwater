@@ -8927,11 +8927,12 @@ static void compositor_want(int row, int width, int height)
 }
 
 /*
-        A shared edge: windows that meet along one line, a divider (compositor_divider_of). A press on the middle half of
-        it (compositor_shared_at) takes all of them: compositor_shared_begin takes hold of each, and compositor_shared_move
-        grows one side as the other shrinks, so they go on meeting. The indicator (compositor_mark_shared) is a tint across
-        that middle half, COMPOSITOR_SHARED_MARK logical pixels either side of the line, over the topmost of them; it is
-        shown while the pointer is over the line (compositor_shared_hover) and while it is held.
+        A shared edge: windows that meet along one line, a divider (compositor_divider_of). A press anywhere along it, from
+        one end of the line to the other (compositor_shared_at), takes all of them: compositor_shared_begin takes hold of
+        each, and compositor_shared_move grows one side as the other shrinks, so they go on meeting. A corner of a window
+        (an edge of it that is on two sides) keeps its own resize, as a single window's does. The indicator
+        (compositor_mark_shared) is a tint across the whole line, COMPOSITOR_SHARED_MARK logical pixels either side of it, over
+        the topmost of the windows; it is shown while the pointer is over the line (compositor_shared_hover) and while it is held.
 */
 
 static void compositor_resize_begin(int row, unsigned int edges);
@@ -9051,18 +9052,22 @@ static int compositor_divider_of(int row, unsigned int edge, struct compositor_d
         return 1;
 }
 
-// The indicator's rectangle across a divider (vertical: one that runs down): the middle half of the span its windows cover.
+// The indicator's rectangle across a divider (vertical: one that runs down): the whole span its windows cover, from one
+// end of the line to the other, and COMPOSITOR_SHARED_MARK logical pixels (at the scale of its windows' screen, a pixel at
+// the least) either side of the line.
 static void compositor_shared_strip(const struct compositor_divider *d, int *rect)
 {
-        int s = COMPOSITOR_SHARED_MARK * compositor.scale / 100, span = d->to - d->from;
+        int row = d->hi_row >= 0 ? d->hi_row : d->lo_row, scale = row >= 0 ? compositor_row_scale(row) : compositor.scale;
+        int s = COMPOSITOR_SHARED_MARK * scale / 100, span = d->to - d->from;
 
+        s = s < 1 ? 1 : s;
         if (d->vertical)
-                rect[0] = d->line - s, rect[1] = d->from + span / 4, rect[2] = 2 * s, rect[3] = span - 2 * (span / 4);
+                rect[0] = d->line - s, rect[1] = d->from, rect[2] = 2 * s, rect[3] = span;
         else
-                rect[0] = d->from + span / 4, rect[1] = d->line - s, rect[2] = span - 2 * (span / 4), rect[3] = 2 * s;
+                rect[0] = d->from, rect[1] = d->line - s, rect[2] = span, rect[3] = 2 * s;
 }
 
-// Whether row's edge is on a divider with the point on its middle half, and the divider.
+// Whether row's edge is on a divider with the point along it (anywhere from one end to the other), and the divider.
 static int compositor_shared_at(int row, unsigned int edge, int x, int y, struct compositor_divider *d)
 {
         int rect[4];
@@ -9109,7 +9114,7 @@ static void compositor_mark_shared(const struct compositor_divider *d)
         compositor.mark_rows = d->lo | d->hi;
 }
 
-// The indicator while no button is held: over a divider's middle half under the pointer, and none otherwise.
+// The indicator while no button is held: over a divider under the pointer, and none otherwise.
 static void compositor_shared_hover(int under)
 {
         unsigned int edge = under < 0 || compositor.grab >= 0 || compositor.touching ? 0
@@ -9131,7 +9136,7 @@ static void compositor_shared_divider(struct compositor_divider *d)
 }
 
 /*
-        A press on a divider's middle half takes all of its windows: row, pressed on its edge, is resized with the others,
+        A press along a divider takes all of its windows: row, pressed on its edge, is resized with the others,
         each holding its far edge (the low side's left or top, the high side's right or bottom) while the line moves. Each
         keeps what it fills -- a window that floats has an outline the screen keeps in view, which would take them off the
         line -- and the rectangle it had before. Answers 0 when there is no divider here, and the press is row's own.

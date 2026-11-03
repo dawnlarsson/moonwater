@@ -119186,10 +119186,10 @@ static void check_compositor_preview_held(void)
 }
 
 /*
-        A shared edge: two windows that meet edge to edge with the same extent take a press on the middle half of their
-        edge as one resize, one grown as the other shrinks and both still meeting. The indicator is a tint across that
-        middle half and nowhere else. An edge that does not meet exactly, a press off the middle, and a corner are the
-        window's own.
+        A shared edge: two windows that meet edge to edge with the same extent take a press anywhere along their edge, from
+        one end to the other, as one resize, one grown as the other shrinks and both still meeting. The indicator is a tint
+        across the whole of that edge and nowhere else. An edge that does not meet exactly, and a corner, are the window's
+        own.
 */
 #define SHARED_W 640
 #define SHARED_H 400
@@ -119238,6 +119238,7 @@ static void check_compositor_shared(void)
     compositor.scanout = scanout;
     compositor.scanout_pitch = SHARED_W * 4;
     compositor.outputs = 1;
+    compositor.output[0].scale = 100;
     compositor.screen[0][2] = SHARED_W, compositor.screen[0][3] = SHARED_H;
     compositor.stride = compositor.most_w = SHARED_W;
     compositor.room_h = compositor.most_h = SHARED_H;
@@ -119266,18 +119267,29 @@ static void check_compositor_shared(void)
     check("shared: an edge that meets with a different extent is not shared", compositor_meets(3, COMPOSITOR_EDGE_LEFT) == COMPOSITOR_NONE);
     compositor.h[3] = SHARED_H;
 
-    /* Hovering the middle half shows the indicator over the topmost of the two; off the middle it is gone. */
+    /* Hovering the edge shows the indicator over the topmost of the two, the same strip along the whole of it. */
     screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 0);
-    check("shared: over the middle half the indicator is the strip across the edge, over the topmost window",
+    check("shared: over the edge the indicator is the strip across all of it, from its top end to its bottom end, over the topmost window",
           compositor.mark_row == 3 && compositor.mark_with == 2 && compositor.mark[0] == SHARED_W / 2 - 2 &&
-              compositor.mark[1] == SHARED_H / 4 && compositor.mark[2] == 4 && compositor.mark[3] == SHARED_H / 2);
-    screens_hand(SHARED_W / 2 + 1, 20, 0);
-    check("shared: over the top quarter of the edge there is no indicator", compositor.mark[2] == 0 && compositor.mark_row == COMPOSITOR_NONE);
+              compositor.mark[1] == 0 && compositor.mark[2] == 4 && compositor.mark[3] == SHARED_H);
+    {
+        int same = 1;
+        static const int along[] = {0, 3, 20, SHARED_H / 4 - 1, SHARED_H - 21, SHARED_H - 2, SHARED_H - 1};
 
-    /* A press on the middle half takes both: the one pressed, and the window it is shared with. */
+        for (unsigned int at = 0; at < array_count(along); at++)
+        {
+            screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 0);
+            screens_hand(SHARED_W / 2 + 1, along[at], 0);
+            same &= compositor.mark_row == 3 && compositor.mark[0] == SHARED_W / 2 - 2 && compositor.mark[1] == 0 &&
+                    compositor.mark[2] == 4 && compositor.mark[3] == SHARED_H;
+        }
+        check("shared: and it is the same strip over the first row of the edge, the top quarter, the last quarter and the last row", same);
+    }
+
+    /* A press anywhere along the edge takes both: the one pressed, and the window it is shared with. */
     screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 0);
     screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 1);
-    check("shared: a press on the middle half resizes both: the one pressed and the one it shares its edge with",
+    check("shared: a press on the edge resizes both: the one pressed and the one it shares its edge with",
           compositor.resize == 3 && compositor.shared_row == 2 && compositor.shared_lo == 2 && compositor.shared_hi == 3 &&
               compositor.edges[2] == COMPOSITOR_EDGE_RIGHT && compositor.edges[3] == COMPOSITOR_EDGE_LEFT);
     screens_hand(SHARED_W / 2 + 21, SHARED_H / 2, 0);
@@ -119292,7 +119304,7 @@ static void check_compositor_shared(void)
     check("shared: let go, the resize ends and the indicator goes",
           compositor.resize == COMPOSITOR_NONE && compositor.mark[2] == 0 && compositor.mark_row == COMPOSITOR_NONE);
 
-    /* The indicator is drawn on that edge's middle half and nowhere else: the scene with it and without it differ there only. */
+    /* The indicator is drawn on that edge's whole length and nowhere else: the scene with it and without it differ there only. */
     compositor_arrange(2, COMPOSITOR_LEFT);
     compositor_arrange(3, COMPOSITOR_RIGHT);
     screens_hand(SHARED_W / 2 + 1, SHARED_H / 2, 0);
@@ -119314,21 +119326,43 @@ static void check_compositor_shared(void)
                 if (x < mark[0] || x >= mark[0] + mark[2] || y < mark[1] || y >= mark[1] + mark[3])
                     outside++;
             }
-    check("shared: the indicator changes pixels on the edge's middle half, and no pixel outside it",
+    check("shared: the indicator changes pixels on the edge's whole length, and no pixel outside it",
           differs > 0 && outside == 0 && differs <= mark[2] * mark[3]);
+    check("shared: and it changes the first row and the last row of the edge, which the middle half left as they were",
+          marked[0 * SHARED_W + SHARED_W / 2] != plain[0 * SHARED_W + SHARED_W / 2] &&
+              marked[(SHARED_H - 1) * SHARED_W + SHARED_W / 2] != plain[(SHARED_H - 1) * SHARED_W + SHARED_W / 2] &&
+              marked[20 * SHARED_W + SHARED_W / 2 - 1] != plain[20 * SHARED_W + SHARED_W / 2 - 1]);
 
-    /* A press on the top quarter of the edge is the window's own resize: it moves one edge and takes none across. */
-    screens_hand(SHARED_W / 2 + 1, 20, 1);
-    check("shared: a press off the middle half is the window's own resize", compositor.resize == 3 && compositor.shared_row == COMPOSITOR_NONE);
-    screens_hand(SHARED_W / 2 + 1, 20, -1);
+    /* A press at the top quarter, the first row and the last row of the edge takes both as it does in the middle: the screen's
+       own top and bottom are no grip of a window, so the end of the edge there is not a corner. */
+    {
+        static const int along[] = {20, 0, SHARED_H - 1, SHARED_H - 30};
+        int all = 1;
+
+        for (unsigned int at = 0; at < array_count(along); at++)
+        {
+            screens_hand(SHARED_W / 2 + 1, along[at], 1);
+            all &= compositor.resize == 3 && compositor.shared_row == 2 && compositor.edges[2] == COMPOSITOR_EDGE_RIGHT &&
+                   compositor.edges[3] == COMPOSITOR_EDGE_LEFT;
+            screens_hand(SHARED_W / 2 + 1, along[at], -1);
+            compositor.press = COMPOSITOR_NONE;
+        }
+        check("shared: a press on the top quarter, the first row, the last row and the last quarter of the edge takes both windows", all);
+    }
 
     /* Two quarters, one above the other, meet on a horizontal edge: its middle half is shared the same way. */
     compositor_arrange(2, COMPOSITOR_TOP_LEFT);
     compositor_arrange(3, COMPOSITOR_BOTTOM_LEFT);
     screens_hand(SHARED_W / 4, SHARED_H / 2 + 1, 0);
-    check("shared: two quarters one above the other share their horizontal edge, and its middle half shows the indicator",
-          compositor.mark_row == 3 && compositor.mark_with == 2 && compositor.mark[0] == SHARED_W / 8 &&
-              compositor.mark[1] == SHARED_H / 2 - 2 && compositor.mark[2] == SHARED_W / 4 && compositor.mark[3] == 4);
+    check("shared: two quarters one above the other share their horizontal edge, and all of it shows the indicator",
+          compositor.mark_row == 3 && compositor.mark_with == 2 && compositor.mark[0] == 0 &&
+              compositor.mark[1] == SHARED_H / 2 - 2 && compositor.mark[2] == SHARED_W / 2 && compositor.mark[3] == 4);
+    screens_hand(1, SHARED_H / 2 + 1, 1);
+    check("shared: a press on the first column of that edge takes both quarters too, the screen's own left being no grip",
+          compositor.resize == 3 && compositor.shared_row == 2 && compositor.shared_vertical == 0);
+    screens_hand(1, SHARED_H / 2 + 1, -1);
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(SHARED_W / 4, SHARED_H / 2 + 1, 0);
     screens_hand(SHARED_W / 4, SHARED_H / 2 + 1, 1);
     check("shared: a press on it takes both quarters, and dragged down the upper grows as the lower shrinks",
           compositor.resize == 3 && compositor.shared_row == 2 && compositor.shared_lo == 2 && compositor.shared_vertical == 0 &&
@@ -124222,8 +124256,9 @@ static void check_compositor_tile_resize(void)
 /*
         A divider of more than two tiles moves as one: the left half beside the two right quarters share one line, and the
         right quarters' left edge taken and moved widens the left half and narrows both quarters, so no gap or overlap opens
-        and what a click finds follows them; its indicator spans the middle half of the whole line; let go, all three are
-        still tiles keeping their rectangles; Escape during it puts all three back.
+        and what a click finds follows them; its indicator spans the whole line, and a press anywhere along it takes all
+        three, but at the corner of a quarter where the line meets the edge between the two quarters, which is that
+        quarter's own corner; let go, all three are still tiles keeping their rectangles; Escape during it puts all three back.
 */
 static void divider_fresh(void)
 {
@@ -124245,8 +124280,8 @@ static void check_compositor_divider(void)
     }
     divider_fresh();
     screens_hand(126, 100, 0);
-    check("divider: the pointer on the line shows the indicator over the middle half of all of it, not of one quarter",
-          compositor.mark[2] > 0 && compositor.mark[1] == 64 && compositor.mark[3] == 128 && compositor.mark_rows == 14u);
+    check("divider: the pointer on the line shows the indicator over all of it, from the top of the screen to its bottom, not one quarter's",
+          compositor.mark[2] > 0 && compositor.mark[1] == 0 && compositor.mark[3] == 256 && compositor.mark_rows == 14u);
     screens_hand(126, 100, 1);
     screens_hand(146, 100, 0);
     check("divider: moved 20 px, the left half is 20 wider and both right quarters 20 narrower, meeting it",
@@ -124260,6 +124295,59 @@ static void check_compositor_divider(void)
           compositor.arranged[1] == COMPOSITOR_LEFT && compositor.arranged[2] == COMPOSITOR_TOP_RIGHT &&
               compositor.arranged[3] == COMPOSITOR_BOTTOM_RIGHT && restore_kept_is(1, 60, 60, 100, 80) && restore_kept_is(3, 150, 160, 90, 60));
 
+    // A press at the first row, the quarter points and the last quarter of the line takes all three, and at the corner where the
+    // line meets the edge between the quarters it is the quarter's own (a corner keeps priority, as a single window's does).
+    // (The tray's tab is over the bottom of the screen's middle, where the line ends: nothing is pressed there but the tab.)
+    {
+        static const int along[] = {0, 1, 40, 100, 127 - 8, 130, 190, 210};
+        int all = 1, ends = 1;
+
+        for (unsigned int at = 0; at < array_count(along); at++)
+        {
+            int hover, took;
+
+            divider_fresh();
+            screens_hand(126, along[at], 0);
+            hover = compositor.mark[2] > 0 && compositor.mark[1] == 0 && compositor.mark[3] == 256;
+            ends &= hover;
+            screens_hand(126, along[at], 1);
+            took = compositor.resize >= 0 && compositor.shared_row >= 0 &&
+                   (compositor.shared_lo_set | compositor.shared_hi_set) == 14u;
+            all &= took;
+            if (!hover || !took)
+                string_format(log, "  divider: at y %p: mark %p %p %p, resize %p, shared %p, rows %p\n", (positive)along[at],
+                              (positive)compositor.mark[1], (positive)compositor.mark[3], (positive)compositor.mark_rows,
+                              (positive)compositor.resize, (positive)compositor.shared_row,
+                              (positive)(compositor.shared_lo_set | compositor.shared_hi_set));
+            screens_hand(126, along[at], -1);
+            compositor.press = COMPOSITOR_NONE;
+        }
+        check("divider: the indicator is the whole line wherever along it the pointer is, from the first row of the screen to the last", ends);
+        check("divider: a press on the first row, the top quarter, the middle of each quarter and the last quarter of the line "
+              "takes all three tiles", all);
+    }
+    {
+        int corner;
+
+        divider_fresh();
+        screens_hand(129, 127, 0);
+        screens_hand(129, 127, 1);
+        corner = compositor.resize == 3 && compositor.shared_row == COMPOSITOR_NONE &&
+                 compositor.edges[3] == (COMPOSITOR_EDGE_LEFT | COMPOSITOR_EDGE_TOP);
+        screens_hand(129, 127, -1);
+        compositor.press = COMPOSITOR_NONE;
+        divider_fresh();
+        compositor.stack[1] = 3, compositor.stack[2] = 2;
+        screens_hand(129, 127, 0);
+        screens_hand(129, 127, 1);
+        corner &= compositor.resize == 2 && compositor.shared_row == COMPOSITOR_NONE &&
+                  compositor.edges[2] == (COMPOSITOR_EDGE_LEFT | COMPOSITOR_EDGE_BOTTOM);
+        screens_hand(129, 127, -1);
+        compositor.press = COMPOSITOR_NONE;
+        check("divider: where the line meets the edge between the two quarters each quarter's corner is its own resize, not the line's",
+              corner);
+    }
+
     divider_fresh();
     screens_hand(126, 100, 1);
     screens_hand(146, 100, 0);
@@ -124270,6 +124358,74 @@ static void check_compositor_divider(void)
                                                                layout_is(3, COMPOSITOR_BOTTOM_RIGHT, 128, 128, 128, 128));
     screens_hand(146, 100, -1);
     compositor.press = COMPOSITOR_NONE;
+}
+
+/*
+        The indicator of a divider is drawn at the scale of the screen its tiles are on, whole pixels and one at the least on
+        either side of the line, and as long as the line: two halves at 50, 75, 100 and 200 percent, and two screens at 100
+        and 200 percent, the halves of each.
+*/
+static void check_compositor_divider_scales(void)
+{
+    static const int scales[] = {50, 75, 100, 200};
+    unsigned int widths = ~0u, extents = ~0u;
+    int on_two;
+
+    if (!layout_table_map(512))
+    {
+        check("divider scales: the table is mapped", false);
+        return;
+    }
+    for (unsigned int at = 0; at < array_count(scales); at++)
+    {
+        int half = 2 * scales[at] / 100 > 1 ? 2 * scales[at] / 100 : 1;
+
+        layout_setup(512, 1);
+        compositor.table->motion = 1;
+        compositor.scale = scales[at];
+        layout_show(1, 60, 60, 100, 80);
+        layout_show(2, 150, 150, 90, 60);
+        compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stacked = 2;
+        compositor_arrange(1, COMPOSITOR_LEFT);
+        compositor_arrange(2, COMPOSITOR_RIGHT);
+        screens_hand(255, 100, 0);
+        widths &= compositor.mark[2] == 2 * half && compositor.mark[0] == 256 - half ? ~0u : ~(1u << at);
+        extents &= compositor.mark[1] == 0 && compositor.mark[3] == 512 ? ~0u : ~(1u << at);
+        if (compositor.mark[2] != 2 * half || compositor.mark[1] != 0 || compositor.mark[3] != 512)
+            string_format(log, "  divider scales: %p percent: mark %p %p %p %p\n", (positive)scales[at], (positive)compositor.mark[0],
+                          (positive)compositor.mark[1], (positive)compositor.mark[2], (positive)compositor.mark[3]);
+    }
+    check("divider scales: the indicator is a pixel or more either side of the line, 2 logical pixels at the scale (1 at 50 and 75 percent, "
+          "2 at 100, 4 at 200)", widths == ~0u);
+    check("divider scales: and as long as the line at every scale", extents == ~0u);
+
+    layout_setup(512, 1);
+    compositor.table->motion = 1;
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
+    compositor.output[0].scale = 100, compositor.output[1].scale = 200;
+    for (unsigned int row = 0; row < WINDOWS; row++)
+        compositor.wake[row] = -1;
+    layout_show(1, 10, 10, 100, 80);
+    layout_show(2, 20, 20, 100, 80);
+    layout_show(3, 150, 150, 90, 60);
+    layout_show(4, 160, 160, 90, 60);
+    compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stack[2] = 3, compositor.stack[3] = 4, compositor.stacked = 4;
+    compositor_arrange_on(1, COMPOSITOR_LEFT, 0);
+    compositor_arrange_on(2, COMPOSITOR_RIGHT, 0);
+    compositor_arrange_on(3, COMPOSITOR_LEFT, 1);
+    compositor_arrange_on(4, COMPOSITOR_RIGHT, 1);
+    screens_hand(127, 100, 0);
+    on_two = compositor.mark[2] == 4 && compositor.mark[1] == 0 && compositor.mark[3] == 256;
+    screens_hand(383, 100, 0);
+    on_two &= compositor.mark[2] == 8 && compositor.mark[0] == 384 - 4 && compositor.mark[1] == 0 && compositor.mark[3] == 256;
+    if (!on_two)
+        string_format(log, "  divider scales: two screens: mark %p %p %p %p\n", (positive)compositor.mark[0], (positive)compositor.mark[1],
+                      (positive)compositor.mark[2], (positive)compositor.mark[3]);
+    check("divider scales: on two screens at 100 and 200 percent the halves of each have the indicator at their own screen's scale "
+          "(4 and 8 px across), the length of their line",
+          on_two);
 }
 
 /*
@@ -143724,6 +143880,7 @@ b32 main()
         check_compositor_restore_glide();
         check_compositor_tile_resize();
         check_compositor_divider();
+        check_compositor_divider_scales();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
