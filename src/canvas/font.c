@@ -3146,14 +3146,20 @@ static bool font_gsub_apply(font_shaper address_to s, p32 kind, positive t)
 /*
         GPOS. A value record's placement and advance added to a glyph's.
 */
+//      Sums that a table can apply as often as the work allows are taken modulo 2^32, which is defined.
+static inline b32 font_wrap(b32 a, b32 b)
+{
+        return (b32)((p32)a + (p32)b);
+}
+
 static void font_value(const font_face address_to face, positive at, p32 format, font_shift address_to into)
 {
         if (format & 1)
-                into->x += font_i16(face, at);
+                into->x = font_wrap(into->x, font_i16(face, at));
         if (format & 2)
-                into->y += font_i16(face, at + 2 * (positive)font_bits(format & 1));
+                into->y = font_wrap(into->y, font_i16(face, at + 2 * (positive)font_bits(format & 1)));
         if (format & 4)
-                into->advance += font_i16(face, at + 2 * (positive)font_bits(format & 3));
+                into->advance = font_wrap(into->advance, font_i16(face, at + 2 * (positive)font_bits(format & 3)));
 }
 
 //      An anchor's coordinates in font units.
@@ -3279,17 +3285,17 @@ static bool font_gpos_apply(font_shaper address_to s, p32 kind, positive t)
 
                 if (!s->rtl)
                 {
-                        pos[i].advance = ex + pos[i].x;
-                        d = nx + pos[j].x;
-                        pos[j].advance -= d;
-                        pos[j].x -= d;
+                        pos[i].advance = font_wrap(ex, pos[i].x);
+                        d = font_wrap(nx, pos[j].x);
+                        pos[j].advance = font_wrap(pos[j].advance, (b32)(0u - (p32)d));
+                        pos[j].x = font_wrap(pos[j].x, (b32)(0u - (p32)d));
                 }
                 else
                 {
-                        d = ex + pos[i].x;
-                        pos[i].advance -= d;
-                        pos[i].x -= d;
-                        pos[j].advance = nx + pos[j].x;
+                        d = font_wrap(ex, pos[i].x);
+                        pos[i].advance = font_wrap(pos[i].advance, (b32)(0u - (p32)d));
+                        pos[i].x = font_wrap(pos[i].x, (b32)(0u - (p32)d));
+                        pos[j].advance = font_wrap(nx, pos[j].x);
                 }
 
                 //      The child hangs from the parent; the tree stays on the baseline at its root.
@@ -4081,17 +4087,17 @@ static fn font_settle(font_shift address_to shift, p32 len, p16 address_to path,
                         p32 child = path[--top];
 
                         if (shift[child].attach & 2)
-                                shift[child].y += shift[parent].y;
+                                shift[child].y = font_wrap(shift[child].y, shift[parent].y);
                         else
                         {
-                                shift[child].x += shift[parent].x;
-                                shift[child].y += shift[parent].y;
+                                shift[child].x = font_wrap(shift[child].x, shift[parent].x);
+                                shift[child].y = font_wrap(shift[child].y, shift[parent].y);
                                 if (!rtl)
                                         for (p32 k = parent; k < child; k++)
-                                                shift[child].x -= shift[k].advance;
+                                                shift[child].x = font_wrap(shift[child].x, (b32)(0u - (p32)shift[k].advance));
                                 else
                                         for (p32 k = parent + 1; k < child + 1; k++)
-                                                shift[child].x += shift[k].advance;
+                                                shift[child].x = font_wrap(shift[child].x, shift[k].advance);
                         }
                         parent = child;
                 }
