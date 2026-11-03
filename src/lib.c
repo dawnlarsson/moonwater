@@ -25409,7 +25409,8 @@ __asm__(
     //
     //       memory_runs_u32 -- x0 rows, x1 from, x2 from_stride in words, x3 width in words, x4 height. The x86_64
     //       block carries the contract. A chunk of 16 words is four q registers compared with its first word
-    //       (ld1r), the four results anded and reduced to a byte by uminv: 255 is flat. x9 is the chunk a run
+    //       (ld1r), the four results anded and reduced to a byte by uminv: 255 is flat; a kernel build has no vector
+    //       registers and compares eight doublewords against the first word twice over. x9 is the chunk a run
     //       began at (-1 for none), w10 its colour, x7 the chunk, w8 the runs written, x6 the chunk's address.
     //
 #define RUNS_CLOSE_ARM64                                                                                        \
@@ -25420,10 +25421,18 @@ __asm__(
     "cbz x4, 9f\n   lsr x3, x3, #4\n   mov x5, #4095\n   cmp x3, x5\n   csel x3, x3, x5, ls\n   lsl x2, x2, #2\n"
     "1:  mov x6, x1\n   mov x7, #0\n   mov w8, #0\n   mov x9, #-1\n   mov w10, #0\n   cbz x3, 7f\n"
     "2:  cmp x7, x3\n   b.hs 6f\n"
+#ifndef KERNEL_MODE
     "ldp q0, q1, [x6]\n   ldp q2, q3, [x6, #32]\n   ld1r {v4.4s}, [x6]\n"
     "cmeq v0.4s, v0.4s, v4.4s\n   cmeq v1.4s, v1.4s, v4.4s\n   cmeq v2.4s, v2.4s, v4.4s\n   cmeq v3.4s, v3.4s, v4.4s\n"
     "and v0.16b, v0.16b, v1.16b\n   and v2.16b, v2.16b, v3.16b\n   and v0.16b, v0.16b, v2.16b\n   uminv b0, v0.16b\n   umov w11, v0.b[0]\n"
     "cmp w11, #255\n   b.ne 4f\n"
+#else
+    "ldr w11, [x6]\n   orr x14, x11, x11, lsl #32\n"
+    "ldp x12, x13, [x6]\n   cmp x12, x14\n   ccmp x13, x14, #0, eq\n   b.ne 4f\n"
+    "ldp x12, x13, [x6, #16]\n   cmp x12, x14\n   ccmp x13, x14, #0, eq\n   b.ne 4f\n"
+    "ldp x12, x13, [x6, #32]\n   cmp x12, x14\n   ccmp x13, x14, #0, eq\n   b.ne 4f\n"
+    "ldp x12, x13, [x6, #48]\n   cmp x12, x14\n   ccmp x13, x14, #0, eq\n   b.ne 4f\n"
+#endif
     "ldr w11, [x6]\n   cmn x9, #1\n   b.eq 5f\n   cmp w11, w10\n   b.eq 3f\n"
     RUNS_CLOSE_ARM64
     "5:  mov x9, x7\n   mov w10, w11\n"
