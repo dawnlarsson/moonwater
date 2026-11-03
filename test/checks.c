@@ -124472,6 +124472,31 @@ static void scroll_field_drawn(struct ui address_to wui, struct ui_text address_
     ui_text_close(t);
 }
 
+/*
+        The caret's blink as the loop wakes it: each wait ends at the change it was asked for and 100 microseconds late, as a
+        sleep does. A fade begins and ends on a solid or a gone cover (its smoothstep is 0 or FULL at its ends), and a wake that
+        read one of those as "flat" slept the whole fade, so the caret snapped. Over a cycle and a half the fades are drawn.
+*/
+static void caret_fade_check(void)
+{
+    positive since = 1000000000ull, now = since, due = 0, stop = since + 1500000000ull;
+    unsigned int saved = ui_kit.caret_speed;
+    int mids = 0;
+
+    ui_kit.caret_speed = UI_CARET_NORMAL;
+    while (now < stop)
+    {
+        unsigned int cover = ui_caret_at(now, since, since, &due);
+
+        mids += cover > 0 && cover < UI_CARET_FULL;
+        if (!due)
+            break;
+        now = due + 100000;
+    }
+    ui_kit.caret_speed = saved;
+    check("caret: a fade is drawn, not skipped: it has at least 8 covers between solid and gone over a cycle and a half", mids >= 8);
+}
+
 static void check_field_drag_drawn(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -138457,6 +138482,7 @@ static fn field_check(struct ui address_to wui)
         check_touch_path(wui);
         check_select_scroll(wui);
         check_field_drag_drawn(wui);
+        caret_fade_check();
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {

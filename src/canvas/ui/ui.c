@@ -8527,8 +8527,17 @@ static unsigned int ui_caret_wave(b64 q, b64 cycle)
         return ui_caret_ramp(q - (cycle - reach), edge, 1);
 }
 
-// The ns from q until the cover can next change: to the next fade while it is solid or gone, and a frame's step while it fades.
-static b64 ui_caret_until(b64 q, b64 cycle, unsigned int cover)
+// Whether the cover is flat at q: solid or gone, away from the fades. A fade starts and ends on a solid or a gone cover, so the
+// cover's value does not say it: a wake there must wait for the fade's steps, not for its far end.
+static b32 ui_caret_flat(b64 q, b64 cycle)
+{
+        b64 half = cycle / 2, reach = half * UI_CARET_EDGE_PERCENT / 100 / 2;
+
+        return (q >= reach && q < half - reach) || (q >= half + reach && q < cycle - reach);
+}
+
+// The ns from q until the cover can next change: to the next fade while it is flat, and a frame's step while it fades.
+static b64 ui_caret_until(b64 q, b64 cycle)
 {
         b64 half = cycle / 2, reach = half * UI_CARET_EDGE_PERCENT / 100 / 2, stops[4] = {reach, half - reach, half + reach, cycle - reach};
         b64 next = cycle - q;
@@ -8536,7 +8545,7 @@ static b64 ui_caret_until(b64 q, b64 cycle, unsigned int cover)
         for (positive k = 0; k < 4; k++)
                 if (stops[k] > q && stops[k] - q < next)
                         next = stops[k] - q;
-        if (cover == 0 || cover == UI_CARET_FULL || next < UI_CARET_STEP_NS)
+        if (ui_caret_flat(q, cycle) || next < UI_CARET_STEP_NS)
                 return next;
         return UI_CARET_STEP_NS;
 }
@@ -8568,7 +8577,7 @@ static unsigned int ui_caret_at(positive now, positive since, positive awake, po
                 return UI_CARET_FULL;
         q = now < since ? cycle / 4 : (now - since + cycle / 4) % cycle;
         cover = ui_caret_wave(q, cycle);
-        *due = now + ui_caret_until(q, cycle, cover);
+        *due = now + ui_caret_until(q, cycle);
         // The caret stops at ten seconds, whatever phase it is in: the wait ends there, so a caret gone then is drawn then.
         if (now >= awake && awake + UI_TEXT_BLINK_FOR_NS < *due)
                 *due = awake + UI_TEXT_BLINK_FOR_NS;
