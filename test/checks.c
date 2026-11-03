@@ -143650,6 +143650,26 @@ static fn check_field_hands(string_address regular)
                 launcher_event(&release);
                 launcher_typed('k');
                 check("launcher: a drag across the field selects it, and a key types over it", launcher_holds("k"));
+                // A finger's long press in the field selects its word, and the picture the launcher draws has the handles and the
+                // actions bar over it (it draws the field's overlay last): the one kit rule, in this window.
+                {
+                        const unsigned int held = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD;
+                        struct window_event at = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, left + 4, y}, down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0},
+                                            taken = {WINDOW_EVENT_BUTTON, held | WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0}, right = {WINDOW_EVENT_BUTTON, held | WINDOW_KEY_DOWN, UI_POINTER_RIGHT, 0},
+                                            right_up = {WINDOW_EVENT_BUTTON, held, UI_POINTER_RIGHT, 0};
+
+                        launcher_type_text("lsof");
+                        launcher_draw((unsigned int address_to)pixels);
+                        launcher_event(&at);
+                        launcher_event(&down);
+                        launcher_event(&taken);
+                        launcher_event(&right);
+                        launcher_event(&right_up);
+                        launcher_event(&taken);
+                        launcher_draw((unsigned int address_to)pixels);
+                        check("launcher: a finger's long press in the field selects its word, and the picture shows its handles and the actions bar",
+                              launcher_holds("lsof") && launcher.field.handles && launcher.field.bar_up && launcher.field.bar_count == 3);
+                }
                 // A row runs on its release, where its press went down: a press shows the row pressed and runs nothing, a
                 // press slid off the row shows none and a release off it runs nothing, and a release on the row runs it.
                 {
@@ -143739,6 +143759,23 @@ static fn check_field_hands(string_address regular)
                         settings_type_code('x');
                         check("settings: a click in the name's field puts the caret there, and a key types there",
                               settings.editing == name && settings_holds("patient-x-cricket") && settings_caret() == 9);
+                        // A finger's long press in the name's field selects its word, and the picture has its handles and bar over the rows.
+                        {
+                                const unsigned int held = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD;
+                                struct window_event at = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y}, down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0},
+                                                    taken = {WINDOW_EVENT_BUTTON, held | WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0}, right = {WINDOW_EVENT_BUTTON, held | WINDOW_KEY_DOWN, UI_POINTER_RIGHT, 0},
+                                                    right_up = {WINDOW_EVENT_BUTTON, held, UI_POINTER_RIGHT, 0};
+
+                                settings_event(&at);
+                                settings_event(&down);
+                                settings_event(&taken);
+                                settings_event(&right);
+                                settings_event(&right_up);
+                                settings_event(&taken);
+                                settings_draw_rows((unsigned int address_to)pixels, 0, 0);
+                                check("settings: a finger's long press in the name's field selects a word, and the picture shows its handles and the actions bar",
+                                      settings.editing == name && settings.edit.handles && settings.edit.bar_up && settings.edit.bar_count >= 3);
+                        }
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter sets the name to what the field holds",
                               settings.editing < 0 && settings.queued == 1 && settings.queue[0].row == name &&
