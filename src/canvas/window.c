@@ -567,6 +567,9 @@ static inline int window_key(struct window *window, struct window_key *key)
 #define WINDOW_EVENT_MOTION 2u
 #define WINDOW_EVENT_BUTTON 3u
 #define WINDOW_EVENT_WHEEL 4u
+// A wheel event's flag: its a is a trackpad's motion in 120ths of a notch, as a notch's is, but not taken as notches: the region
+// moves one for one with it, at its own scale (ui_wheel_turn), and no glide is put on it.
+#define WINDOW_WHEEL_PRECISE 4096u
 /*
         The clipboard's news, a the selection (WINDOWS_CLIP_CLIPBOARD or WINDOWS_CLIP_PRIMARY) and b what happened: another
         window copied (CHANGED: a window that asked to watch hears it, and is told no text), the paste this window asked

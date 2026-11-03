@@ -434,6 +434,8 @@ static b32 terminal_extent(unsigned int address_to first, unsigned int address_t
         return address_to total > ROWS;
 }
 
+static void terminal_bar_follow(void);
+
 static b32 terminal_view_live(void)
 {
         if (terminal.view == TERMINAL_LIVE)
@@ -441,11 +443,13 @@ static b32 terminal_view_live(void)
 
         terminal.view = TERMINAL_LIVE;
         terminal.view_skip = 0;
+        terminal_bar_follow();
         return true;
 }
 
-// The view put where a count of rows above it says; false when it did not move.
-static b32 terminal_view_set(unsigned int above)
+// The view put where a count of rows above it says, and nothing else; false when it did not move. The kit's bar is the one that
+// moves it while the wheel or a finger does (terminal_bar_out), so this is the only setter those paths use.
+static b32 terminal_view_put(unsigned int above)
 {
         unsigned int was = terminal.view, was_skip = terminal.view_skip;
         unsigned int at, run = 0, live_skip, skip = 0;
@@ -476,6 +480,16 @@ static b32 terminal_view_set(unsigned int above)
         }
 
         return terminal.view != was || terminal.view_skip != was_skip;
+}
+
+// The view put where a count of rows above it says, and the kit's bar put where the view is; false when it did not move.
+static b32 terminal_view_set(unsigned int above)
+{
+        b32 moved = terminal_view_put(above);
+
+        if (moved)
+                terminal_bar_follow();
+        return moved;
 }
 
 // The wheel, in lines: positive is back through what has been said.
@@ -538,13 +552,82 @@ static struct ui terminal_kit(unsigned int address_to whole)
 // and grab stay as the kit keeps them, from one frame to the next.
 static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned int total)
 {
+        int cell = (int)terminal.cell_h;
+
         terminal.bar.x = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100;
         terminal.bar.y = 0;
         terminal.bar.height = (int)terminal.height;
         terminal.bar.inset = UI_CLOSE_BOTTOM;
-        terminal.bar.content = (int)total;
-        terminal.bar.view = (int)shown;
-        terminal.bar.scroll = (int)first;
+        terminal.bar.content = (int)total * cell;
+        terminal.bar.view = (int)shown * cell;
+        terminal.bar.bounds = 1;
+        terminal.bar.scale = terminal_scale();
+        terminal.bar.unit = 0;
+        // Where the view is, unless the kit is moving the bar (a wheel's glide, a finger's hold or throw): then the kit's place stands.
+        if (!ui_scroll_going(&terminal.bar) && terminal.bar.scroll != (int)first * cell)
+                ui_scroll_set(&terminal.bar, (int)first * cell);
+}
+
+// The kit's bar follows the view: placed where the view's first row is, in pixels.
+static void terminal_bar_follow(void)
+{
+        unsigned int first, shown, total;
+
+        if (!terminal_extent(&first, &shown, &total) || total <= shown)
+                return;
+        terminal_bar_place(first, shown, total);
+        ui_scroll_set(&terminal.bar, (int)first * (int)terminal.cell_h);
+}
+
+// The view is where the kit's bar is, to the nearest row (a row is a cell's height): the grid's only rounding of the kit's offset.
+static b32 terminal_bar_out(void)
+{
+        int cell = (int)terminal.cell_h, at = terminal.bar.scroll < 0 ? 0 : terminal.bar.scroll;
+
+        return terminal_view_put((unsigned int)((at + cell / 2) / cell));
+}
+
+// A wheel's turn (a notch, or a trackpad's pixels) turns the scrollback's bar through the kit's one wheel default.
+static void terminal_bar_turn(const struct window_event address_to event, b32 address_to dirty)
+{
+        struct ui kit = terminal.ui;
+        unsigned int first, shown, total;
+
+        kit.scale = terminal_scale();
+        if (!terminal_extent(&first, &shown, &total) || total <= shown)
+                return;
+        terminal_bar_place(first, shown, total);
+        if (ui_wheel_turn(&kit, &terminal.bar, event))
+        {
+                terminal_bar_out();
+                *dirty = true;
+        }
+}
+
+// A finger's pixels move the bar one for one (the finger's drag is the kit's), and its lift throws it on the kit's throw.
+static void terminal_bar_drag(int pixels, b32 address_to dirty)
+{
+        unsigned int first, shown, total;
+
+        if (!pixels || !terminal_extent(&first, &shown, &total) || total <= shown)
+                return;
+        terminal_bar_place(first, shown, total);
+        ui_scroll_drag(&terminal.bar, -pixels);
+        if (terminal_bar_out())
+                *dirty = true;
+}
+
+// The kit's motion, a frame: the glide, the hand's release or the spring, and the view with it.
+static void terminal_bar_step(void)
+{
+        struct ui kit = terminal.ui;
+
+        kit.scale = terminal_scale();
+        ui_kit.now = (b64)clock_monotonic_nanoseconds();
+        ui_kit.busy = 0;
+        ui_scroll_glide(&kit, &terminal.bar);
+        if (terminal_bar_out())
+                terminal.dirty = true;
 }
 
 // What the bar is drawn in beyond its place: held and hovered, the two states the kit draws it in.
@@ -588,9 +671,9 @@ static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 touch, b32
         *moved = terminal_bar_key() != lit;
         if (scroll < 0)
                 return false;
-        most = (int)(total - shown);
+        most = (int)(total - shown) * (int)terminal.cell_h;
         scroll = scroll > most ? most : scroll < 0 ? 0 : scroll;
-        *moved = terminal_view_set((unsigned int)scroll) || *moved;
+        *moved = terminal_view_put((unsigned int)(scroll / (int)terminal.cell_h)) || *moved;
         return true;
 }
 
@@ -2095,6 +2178,11 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                         ui_drag_start(&terminal.fling, terminal.finger_press.y, clock_monotonic_nanoseconds());
                 if (!terminal.finger_press.dragged)
                         return true;
+                if (!alternate)
+                {
+                        terminal_bar_drag(ui_drag_follow(&terminal.fling, terminal.pointer_y, clock_monotonic_nanoseconds()), dirty);
+                        return true;
+                }
                 return terminal_finger_scroll(master, ui_drag_follow(&terminal.fling, terminal.pointer_y, clock_monotonic_nanoseconds()),
                                               dirty, &moved);
         }
@@ -2107,6 +2195,8 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         if (event->flags & WINDOW_KEY_DOWN)
         {
                 ui_drag_stop(&terminal.fling);
+                if (!alternate)
+                        ui_scroll_stop(&terminal.bar);
                 ui_press_begin(&terminal.finger_press, terminal.pointer_x, terminal.pointer_y, 0, true);
                 terminal.finger_left = 0;
                 return true;
@@ -2117,7 +2207,18 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         clicked = ui_press_end(&terminal.finger_press, (event->flags & WINDOW_KEY_CANCEL) != 0) >= 0;
         if (dragged)
         {
-                ui_drag_let_go(&terminal.fling, clock_monotonic_nanoseconds());
+                positive now = clock_monotonic_nanoseconds();
+
+                if (!alternate)
+                {
+                        // The fitted velocity of the finger's last reports, down the screen positive: the bar's way is the opposite.
+                        long speed = ui_drag_velocity(&terminal.fling, now);
+
+                        ui_scroll_let_go(&terminal.bar, speed >= UI_DRAG_THROW || speed <= -UI_DRAG_THROW, -speed);
+                        terminal.dirty = true;
+                        return true;
+                }
+                ui_drag_let_go(&terminal.fling, now);
                 return true;
         }
         if (!clicked)
@@ -2765,6 +2866,11 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         return sent;
                 }
                 terminal.wheel_notches = 0;
+                if (!alternate)
+                {
+                        terminal_bar_turn(event, dirty);
+                        return true;
+                }
 
                 long scaled = (long)steps * TERMINAL_WHEEL_LINES + terminal.wheel_remainder;
                 int lines = (int)(scaled / 120);
@@ -3254,7 +3360,14 @@ static long terminal_tick(long timeout, long address_to other)
         if (hold >= 0 && (timeout < 0 || hold < timeout))
                 timeout = hold;
 
-        // The view a finger threw goes on a frame at a time, slowing, until it is still or at an end of the scrollback.
+        // The kit's motion of the scrollback (a wheel's glide, a finger's throw, a pull's spring) goes on a frame at a time.
+        if (ui_scroll_going(&terminal.bar))
+        {
+                terminal_bar_step();
+                timeout = timeout < 0 || timeout > UI_DRAG_FRAME_NS ? UI_DRAG_FRAME_NS : timeout;
+        }
+
+        // The view a finger threw on the alternate screen goes on a frame at a time, slowing, until it is still.
         if (terminal.fling.flying)
         {
                 b32 moved = true;

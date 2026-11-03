@@ -12688,7 +12688,21 @@ static int compositor_picture_under(int x, int y)
 // the pointer last moved (compositor.hover): a menu or a terminal that a key opened, a window closed or moved or
 // raised by the keys, and the desktop before the first motion all lie under a pointer that has not moved, and a wheel
 // sent to the window it last moved over scrolled that one, or nothing.
+static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags);
+
+// A notch's wheel: 120ths of a notch, taken as notches by the region (a glide).
 static void compositor_wheel(int v120, int horizontal)
+{
+        compositor_wheel_flags(v120, horizontal, 0);
+}
+
+// A trackpad's two fingers: the same 120ths, flagged precise, so the region moves one for one with them (WINDOW_WHEEL_PRECISE).
+static void compositor_wheel_precise(int v120, int horizontal)
+{
+        compositor_wheel_flags(v120, horizontal, WINDOW_WHEEL_PRECISE);
+}
+
+static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
 {
         int row = compositor.grab;
 
@@ -12708,7 +12722,7 @@ static void compositor_wheel(int v120, int horizontal)
         // What became of it, for moonwater debug.
         if (row < 0)
                 compositor.table->wheel_nowhere++;
-        else if (compositor_post(row, WINDOW_EVENT_WHEEL, 0, v120, horizontal))
+        else if (compositor_post(row, WINDOW_EVENT_WHEEL, flags, v120, horizontal))
                 compositor.table->wheel_sent++;
         else
                 compositor.table->wheel_full++;
@@ -12734,9 +12748,9 @@ static void compositor_pad_apply(unsigned int at, positive now)
                 compositor.table->input_wheel_used[at]++;
                 compositor.table->input_wheel_last[at] = now;
                 if (y)
-                        compositor_wheel(y, 0);
+                        compositor_wheel_precise(y, 0);
                 if (x)
-                        compositor_wheel(x, 1);
+                        compositor_wheel_precise(x, 1);
         }
 }
 
