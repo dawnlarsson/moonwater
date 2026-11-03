@@ -2891,6 +2891,7 @@ struct compositor_touch
         int start_x, start_y;    // where the first finger went down, in the space
         positive start_ns, two_ns;
         int closing;             // the window whose close button the finger went down on, which a tap closes
+        int resumed;             // the press is being made again without the close button (compositor_touch_resume)
         int mid_x, mid_y;        // two fingers: their middle, where the wheel last counted from
         int left_x, left_y;      // and what the wheel has not yet turned, in 120ths times the pixels of a notch
         int two_moved;
@@ -2954,10 +2955,12 @@ struct compositor_poll
 /*
         A finger on a touch screen, in logical pixels and nanoseconds. It is wider than a pixel and shakes as it lands,
         so what it takes is wider than what a pointer takes: a window's edge is COMPOSITOR_TOUCH_GRIP outside it and
-        COMPOSITOR_TOUCH_GRIP_IN inside (the top as a pointer's, where the titlebar is), a corner is
-        COMPOSITOR_TOUCH_CORNER along either edge from it, a tab reaches COMPOSITOR_TOUCH_TAB further toward the middle of
-        its screen and to half the gap either side, and the close button is the finger's within COMPOSITOR_TOUCH_CLOSE
-        of its middle. It moves nothing until it is UI_SLOP from where it went down, so a tap is a click
+        COMPOSITOR_TOUCH_GRIP_IN inside (the top as a pointer's, where the titlebar is), a corner is UI_TARGET each way
+        (compositor_corner_reach, the kit's one rule for a finger's target, ui_reach_hit) and COMPOSITOR_TOUCH_CORNER along
+        either edge from it, a tab reaches COMPOSITOR_TOUCH_TAB further toward the middle of its screen and to half the gap
+        either side, and the close and the minimise button are the finger's within COMPOSITOR_TOUCH_BUTTON_SLOP of their disc
+        (the window goes when the finger lifts from the X: one that moves past the slop was making the press the corner or the
+        titlebar gives, and makes it). It moves nothing until it is UI_SLOP from where it went down, so a tap is a click
         where it landed and not a drag. Held COMPOSITOR_TOUCH_HOLD_NS without moving it is a long press: the right button,
         flagged WINDOW_KEY_HOLD, and then the finger may move on, the pointer following it, until it lifts, which ends the
         press with a release (CANCEL and HOLD) in the window it landed on. Two fingers lifted within COMPOSITOR_TOUCH_TAP_NS
@@ -2967,8 +2970,10 @@ struct compositor_poll
 #define COMPOSITOR_TOUCH_GRIP 16
 #define COMPOSITOR_TOUCH_GRIP_IN 8
 #define COMPOSITOR_TOUCH_CORNER 24
+// The close and the minimise button of a window, to a finger: the disc and this much more on every side, in logical pixels. The
+// corner is a finger's UI_TARGET, and wins everywhere in it but the disc (compositor_corner_reach, compositor_on_close).
+#define COMPOSITOR_TOUCH_BUTTON_SLOP 4
 #define COMPOSITOR_TOUCH_TAB 20
-#define COMPOSITOR_TOUCH_CLOSE 22
 #define COMPOSITOR_TOUCH_HOLD_NS 400000000ull
 #define COMPOSITOR_TOUCH_TAP_NS 400000000ull
 #define COMPOSITOR_TOUCH_WHEEL 48
@@ -8861,6 +8866,32 @@ static int compositor_screen_of(int row)
                                                    (int)compositor.h[row]);
 }
 
+/*
+        The corner of a window a finger is on, its two edges (CP_EDGE_*), or 0. A corner's own shape is the pointer's, grip
+        outside the window and in inside it each way; a finger's reach is that shape grown to at least least each way
+        (ui_reach_hit, UI_TARGET at the scale), about its middle, which is where the finger's whole hand lands on a corner. A
+        window too small for two corners' targets apart gives the point to the corner nearest it.
+*/
+static unsigned int compositor_corner_reach(int px, int py, int x1, int y1, int x2, int y2, int grip, int in, int least)
+{
+        unsigned int found = 0;
+        long long best = -1;
+
+        for (unsigned int corner = 0; corner < 4; corner++)
+        {
+                int right = corner & 1, down = corner >> 1 & 1;
+                int cx = right ? x2 : x1, cy = down ? y2 : y1;
+                int x = right ? x2 - in : x1 - grip, y = down ? y2 - in : y1 - grip;
+                long long dx = px - cx, dy = py - cy, far = dx * dx + dy * dy;
+
+                if (!ui_reach_hit(1, least, px, py, x, y, grip + in, grip + in) || (best >= 0 && far >= best))
+                        continue;
+                best = far;
+                found = (right ? CP_EDGE_RIGHT : CP_EDGE_LEFT) | (down ? CP_EDGE_BOTTOM : CP_EDGE_TOP);
+        }
+        return found;
+}
+
 // Whether a point is in the band at a window's edges that resizes it -- just inside its contents, its line,
 // and past it -- and which edges.
 static unsigned int compositor_edge_zone(int row, int x, int y)
@@ -8878,6 +8909,16 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
                                                  COMPOSITOR_GRIP_IN * compositor.scale / 100,
                                                  touch ? COMPOSITOR_TOUCH_CORNER * compositor.scale / 100 : 0);
 
+        // A finger's corner is a target of UI_TARGET each way, and wins where it is: a corner is the window's own resize.
+        if (touch)
+        {
+                unsigned int corner = compositor_corner_reach(x, y, compositor.x[row], compositor.y[row], x2, y2,
+                                                              COMPOSITOR_GRIP * compositor.scale / 100 + compositor_line(row),
+                                                              COMPOSITOR_GRIP_IN * compositor.scale / 100,
+                                                              UI_TARGET * compositor.scale / 100);
+
+                edges = corner ? corner : edges;
+        }
         if (!edges)
                 return 0;
 
@@ -12245,22 +12286,20 @@ static void compositor_release(unsigned int code, int snap)
 }
 
 /*
-        Whether a point is on a window's close button: its box, or for a finger within COMPOSITOR_TOUCH_CLOSE of its
-        middle, which is wider than the box and still inside the window's top.
+        Whether a point is on a window's close button: its box, or for a finger the box and COMPOSITOR_TOUCH_BUTTON_SLOP more
+        on every side (ui_reach_hit), and no further: the corner of the window it sits in is the finger's own, a target of
+        UI_TARGET (compositor_corner_reach), and wins everywhere in it but the disc. None for a press being made again
+        without its buttons (compositor_touch_resume).
 */
 static int compositor_on_close(int row, int x, int y)
 {
         struct compositor_frame frame;
-        int bx, by, side, reach;
+        int bx, by, side;
 
         compositor_frame_of(row, &frame);
-        if (!compositor_close_box(&frame, &bx, &by, &side))
+        if (compositor.touch.resumed || !compositor_close_box(&frame, &bx, &by, &side))
                 return 0;
-        if (!compositor.touching)
-                return x >= bx && x < bx + side && y >= by && y < by + side;
-        reach = COMPOSITOR_TOUCH_CLOSE * compositor.scale / 100;
-        return x >= bx + side / 2 - reach && x < bx + side / 2 + reach && y >= compositor.y[row] &&
-               y < by + side / 2 + reach && x < compositor.x[row] + (int)compositor.w[row];
+        return ui_reach_hit(compositor.touching, side + 2 * (COMPOSITOR_TOUCH_BUTTON_SLOP * frame.scale / 100), x, y, bx, by, side, side);
 }
 
 /*
@@ -12277,9 +12316,9 @@ static int compositor_on_minimize(int row, int x, int y)
         int bx, by, side;
 
         compositor_frame_of(row, &frame);
-        if (!compositor_minimize_box(&frame, &bx, &by, &side))
+        if (compositor.touch.resumed || !compositor_minimize_box(&frame, &bx, &by, &side))
                 return 0;
-        return x >= bx && x < bx + side && y >= by && y < by + side;
+        return ui_reach_hit(compositor.touching, side + 2 * (COMPOSITOR_TOUCH_BUTTON_SLOP * frame.scale / 100), x, y, bx, by, side, side);
 }
 
 static int compositor_minimize_press(unsigned int code, int down)
@@ -12443,8 +12482,9 @@ static void compositor_button(unsigned int code, int down)
 
                 /*
                         A finger on the close button: the window goes when the finger lifts from it without
-                        moving (compositor_touch_report), so a drag that starts on the X closes nothing. The X
-                        is a finger's before the edge it is beside, which a finger's grip reaches inside.
+                        moving (compositor_touch_report), and one that moves past the slop was making the press the
+                        corner or the titlebar gives (compositor_touch_resume). The X is the finger's only within its
+                        disc and a little more; the rest of the corner is the corner's.
                 */
                 if (compositor.touching && !alt && code == COMPOSITOR_BTN_LEFT &&
                     compositor_on_close(under, compositor.pointer_x, compositor.pointer_y))
@@ -13274,6 +13314,19 @@ static void compositor_touch_motion(int x, int y, positive now)
         compositor.touching = 0;
 }
 
+/*
+        A finger that went down on the close button and moved past the slop was not pressing it: the press the window would
+        have had there without the button is made now, from where the finger went down (the pointer is still there, a
+        finger's motion waits for the slop), so the corner it is in is resized and the titlebar it is on is taken to move, and
+        what the finger does next is that.
+*/
+static void compositor_touch_resume(void)
+{
+        compositor.touch.resumed = 1;
+        compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor.touch.resumed = 0;
+}
+
 // The left press taken back: a release that says it was no click, for a finger that became two or was held.
 static void compositor_touch_cancel(void)
 {
@@ -13414,8 +13467,13 @@ static void compositor_touch_report(unsigned int at, positive now)
                         if (!touch->moved &&
                             compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale / 100))
                         {
+                                int pending = touch->closing;
+
                                 touch->moved = 1;
                                 touch->closing = COMPOSITOR_NONE;
+                                // A press on the X that moves is no press of it: the press it was under the X is made.
+                                if (pending >= 0)
+                                        compositor_touch_resume();
                         }
                         if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
                                 compositor_touch_motion(x, y, now);

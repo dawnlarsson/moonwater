@@ -125776,7 +125776,7 @@ static void check_compositor_touch_hold(void)
     compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1024;
     touch_clock = 1000000;
     touch_down = 0;
-    touch_one(80, 80, false);
+    touch_one(80, 82, false); /* (just under the window's top left corner's target, which a finger 19 px in along both edges is in) */
     check("touch hold: a finger down on a window's top starts its drag", compositor.drag == 1);
 
     /* Up to the top edge: the window's top touches, and the maximized target shows. */
@@ -126546,22 +126546,156 @@ static void check_compositor_touch(void)
         compositor_present();
     }
 
-    /* The close button: a finger that lands on it closes nothing until it lifts there, and one dragged off it nothing. */
+    /* The close button: a finger that lands on it closes nothing until it lifts there, and one dragged off it nothing (it resizes
+       the corner it is in, which is restored here). */
     {
         int bx = compositor.x[2] + (int)compositor.w[2] - UI_CLOSE_IN - UI_CLOSE / 2;
         int by = compositor.y[2] + UI_CLOSE_IN + UI_CLOSE / 2;
+        int keep_x = compositor.x[2], keep_y = compositor.y[2], keep_w = (int)compositor.w[2], keep_h = (int)compositor.h[2];
 
         touch_one(bx, by, false);
         unchanged = !(table->state[2] & WINDOW_CLOSING);
         touch_one(bx - 40, by + 2, false);
         touch_one(bx - 40, by + 2, true);
         unchanged = unchanged && !(table->state[2] & WINDOW_CLOSING);
-        touch_one(bx + 1, by + 12, false);
-        touch_one(bx + 1, by + 12, true);
-        check("touch: the close button closes when the finger lifts from it, wider than the X, and not when it lands or is dragged off",
+        compositor_want(2, keep_w, keep_h);
+        compositor.w[2] = (unsigned int)keep_w, compositor.h[2] = (unsigned int)keep_h;
+        compositor_put(2, keep_x, keep_y);
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+        touch_one(bx + 1, by + 9, false);
+        touch_one(bx + 1, by + 9, true);
+        check("touch: the close button closes when the finger lifts from it, a little wider than the X (4 px), and not when it lands or is dragged off",
               unchanged && (table->state[2] & WINDOW_CLOSING));
         table->state[2] &= ~WINDOW_CLOSING;
         compositor.state[2] &= ~WINDOW_CLOSING;
+    }
+
+    /*
+        A finger's corner is the kit's target, UI_TARGET each way (about 9 mm), and the close and minimise buttons are the
+        finger's only inside their disc and COMPOSITOR_TOUCH_BUTTON_SLOP more: the rest of the corner is the corner's. At each of
+        the four corners, at 50, 100 and 200 percent, the points at the edges of the corner's target are that corner and the points
+        past them are not; a pointer's corner is its own few pixels. A finger beside the X in the corner resizes; one that lands on
+        the X and moves past the slop resizes from where it landed, and closes nothing; one that lifts there closes; one that lands
+        7 px below the X's disc, past the slop, neither closes nor resizes; and the minimise button is the finger's within the slop
+        of its disc and, past it, the window's top.
+    */
+    {
+        static const int scales[] = {50, 100, 200};
+        unsigned int targets = ~0u, pointer = ~0u;
+        int x1 = compositor.x[1], y1 = compositor.y[1], x2 = x1 + (int)compositor.w[1], y2 = y1 + (int)compositor.h[1];
+
+        for (unsigned int at = 0; at < array_count(scales); at++)
+        {
+            int s = scales[at], least = UI_TARGET * s / 100, line = s / 100 > 1 ? s / 100 : 1, grip = 6 * s / 100 + line;
+            int in = 2 * s / 100, before = (least - (grip + in)) / 2;
+
+            compositor.scale = s;
+            for (unsigned int corner = 0; corner < 4; corner++)
+            {
+                int right = corner & 1, down = corner >> 1, cx = right ? x2 : x1, cy = down ? y2 : y1;
+                int lo_x = right ? cx - in - before : cx - grip - before, lo_y = down ? cy - in - before : cy - grip - before;
+                unsigned int bits = (right ? COMPOSITOR_EDGE_RIGHT : COMPOSITOR_EDGE_LEFT) | (down ? COMPOSITOR_EDGE_BOTTOM : COMPOSITOR_EDGE_TOP);
+                int in_x = right ? lo_x : lo_x + least - 1, in_y = down ? lo_y : lo_y + least - 1;
+                int out_x = right ? lo_x + least - 1 : lo_x, out_y = down ? lo_y + least - 1 : lo_y;
+                int ok;
+
+                compositor.touching = 1;
+                ok = compositor_edge_zone(1, in_x, in_y) == bits && compositor_edge_zone(1, out_x, out_y) == bits &&
+                     compositor_edge_zone(1, in_x, out_y) == bits && compositor_edge_zone(1, out_x, in_y) == bits &&
+                     compositor_edge_zone(1, right ? lo_x - 1 : lo_x + least, in_y) != bits &&
+                     compositor_edge_zone(1, in_x, down ? lo_y - 1 : lo_y + least) != bits;
+                compositor.touching = 0;
+                pointer &= compositor_edge_zone(1, in_x, in_y) != bits ? ~0u : ~(1u << (at * 4 + corner));
+                targets &= ok ? ~0u : ~(1u << (at * 4 + corner));
+                if (!ok)
+                    string_format(log, "  touch corner: %p percent, corner %p: not a target of %p each way\n", (positive)s,
+                                  (positive)corner, (positive)least);
+            }
+        }
+        compositor.scale = 100;
+        check("touch: a finger's corner is UI_TARGET each way: the points at the edges of the target are the corner and the ones past it "
+              "are not, at each of the four corners at 50, 100 and 200 percent",
+              targets == ~0u);
+        check("touch: a pointer's corner is its own few pixels, not the finger's target: 18 px in along both edges is no corner",
+              pointer == ~0u);
+    }
+    {
+        struct compositor_frame frame;
+        int bx, by, side, mx, my, mside, cx, cy, mcx, mcy, resized, before_w = (int)compositor.w[2], before_h = (int)compositor.h[2];
+        int closed, beside, below, x0 = compositor.x[2], y0 = compositor.y[2];
+
+        compositor_present();
+        compositor_frame_of(2, &frame);
+        compositor_close_box(&frame, &bx, &by, &side);
+        cx = bx + side / 2, cy = by + side / 2;
+
+        // Beside the X in the corner, the last column of the window and 10 px down, past the X and its slop: the corner, which the X no longer takes.
+        touch_one(compositor.x[2] + (int)compositor.w[2] - 1, compositor.y[2] + 10, false);
+        beside = compositor.resize == 2 && compositor.edges[2] == (COMPOSITOR_EDGE_RIGHT | COMPOSITOR_EDGE_TOP) &&
+                 !(table->state[2] & WINDOW_CLOSING);
+        touch_one(compositor.x[2] + (int)compositor.w[2] - 1, compositor.y[2] + 10, true);
+        check("touch: a finger beside the X, in the window's top right corner, takes the corner to resize and not the close button", beside);
+
+        // On the X, moved past the slop: the corner's resize from where the finger landed, and nothing closed.
+        touch_one(cx, cy, false);
+        resized = compositor.resize == COMPOSITOR_NONE && !(table->state[2] & WINDOW_CLOSING);
+        touch_one(cx + 20, cy, false);
+        resized = resized && compositor.resize == 2 && compositor.edges[2] == (COMPOSITOR_EDGE_RIGHT | COMPOSITOR_EDGE_TOP) &&
+                  (int)compositor.w[2] == before_w + 20 && (int)compositor.h[2] == before_h;
+        touch_one(cx + 20, cy + 10, false);
+        resized = resized && (int)compositor.h[2] == before_h - 10 && compositor.y[2] == y0 + 10;
+        touch_one(cx + 20, cy + 10, true);
+        resized = resized && !(table->state[2] & WINDOW_CLOSING);
+        check("touch: a finger that lands on the X and moves past the slop resizes the corner from where it landed (wider, then shorter "
+              "from the top) and closes nothing, neither when it moves nor when it lifts",
+              resized);
+        compositor_want(2, before_w, before_h);
+        compositor.w[2] = (unsigned int)before_w, compositor.h[2] = (unsigned int)before_h;
+        compositor_put(2, x0, y0);
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+
+        // On the X and lifted there: closed. On the slop's edge too, and a hand's width below it neither closes nor resizes.
+        touch_one(cx, cy, false);
+        touch_one(cx, cy, true);
+        closed = (table->state[2] & WINDOW_CLOSING) != 0;
+        table->state[2] &= ~WINDOW_CLOSING;
+        compositor.state[2] &= ~WINDOW_CLOSING;
+        touch_one(cx, by + side + 3, false);
+        touch_one(cx, by + side + 3, true);
+        closed = closed && (table->state[2] & WINDOW_CLOSING) != 0;
+        table->state[2] &= ~WINDOW_CLOSING;
+        compositor.state[2] &= ~WINDOW_CLOSING;
+        touch_one(cx, by + side + 7, false);
+        below = compositor.resize == COMPOSITOR_NONE && !(table->state[2] & WINDOW_CLOSING);
+        touch_one(cx, by + side + 7, true);
+        below = below && !(table->state[2] & WINDOW_CLOSING);
+        check("touch: the X closes when a finger lifts on its disc or within the slop of it, and a finger 7 px below the disc, past the "
+              "slop, closes nothing",
+              closed && below);
+
+        // The minimise button: a finger's within the slop of its disc, and past it the window's top, which a finger takes to move it.
+        compositor_frame_of(1, &frame);
+        compositor_minimize_box(&frame, &mx, &my, &mside);
+        mcx = mx - 3, mcy = my + mside / 2;
+        touch_one(mcx, mcy, false);
+        closed = (compositor.state[1] & WINDOW_MINIMIZED) != 0;
+        touch_one(mcx, mcy, true);
+        compositor.state[1] &= ~WINDOW_MINIMIZED;
+        compositor.table->state[1] = compositor.state[1];
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
+        touch_one(mx - 6, mcy, false);
+        below = compositor.drag == 1 && !(compositor.state[1] & WINDOW_MINIMIZED);
+        touch_one(mx - 6, mcy, true);
+        below = below && !(compositor.state[1] & WINDOW_MINIMIZED);
+        check("touch: the minimise button is a finger's within the slop of its disc (3 px beside it puts the window away) and not past it "
+              "(6 px beside it is the window's top, taken to move it)",
+              closed && below);
+        compositor_put(1, 50, 30);
+        compositor_damage(0, 0, GLASS_SIDE, GLASS_SIDE);
+        compositor_present();
     }
 
     /* Two fingers: the press is taken back, and moved down together they are the wheel up; tapped, the right button. */

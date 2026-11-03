@@ -79,6 +79,23 @@
 #define UI_CLOSE 14
 #define UI_CLOSE_IN 5
 #define UI_CLOSE_BOTTOM (UI_CLOSE + UI_CLOSE_IN)
+#define UI_TARGET 44 // a finger's least target in logical pixels: about 9 mm at the 96 to 120 dpi of most screens
+
+/*
+        A finger's target, the one rule: a finger on a touch screen is wider than a pointer and shakes as it lands, so what it
+        presses is the shape grown about its middle to at least `least` device pixels each way where it is smaller (the kit's
+        targets take UI_TARGET at the scale, ui_hit; a window's close button its disc and a little more); a pointer presses
+        the shape as it is drawn. Whether px, py is on the shape x, y, width by height, for a finger or a pointer alike:
+        only the size of the target differs.
+*/
+static inline int ui_reach_hit(int touch, int least, int px, int py, int x, int y, int width, int height)
+{
+        if (touch && width < least)
+                x -= (least - width) / 2, width = least;
+        if (touch && height < least)
+                y -= (least - height) / 2, height = least;
+        return px >= x && px < x + width && py >= y && py < y + height;
+}
 
 struct ui_theme
 {

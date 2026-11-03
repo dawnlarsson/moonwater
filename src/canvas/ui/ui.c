@@ -867,7 +867,6 @@ static int ui_px(const struct ui address_to ui, int logical)
 
         How pressed looks is the kit's state layer: a list's row shows it (ui_list's down), a menu's choice too.
 */
-#define UI_TARGET 44 // a finger's least target in logical pixels: about 9 mm at the 96 to 120 dpi of most screens
 #define UI_FIELD_H UI_TARGET // every text field's height: a field is a touch target, the same in every window
 
 struct ui_press
@@ -978,16 +977,11 @@ static void ui_confirm_line(char address_to into, positive room, const char addr
 
 static b32 ui_kit_touch; // the event is a finger's (WINDOW_KEY_TOUCH): what it can press is at least UI_TARGET each way
 
-// Whether px, py hits a shape x, y, width by height: a finger's reach is the shape grown to UI_TARGET each way where it is smaller.
+// Whether px, py hits a shape x, y, width by height: a finger's reach is the shape grown to UI_TARGET each way where it is smaller
+// (ui_reach_hit, theme.h's rule, which the compositor's resize corners and buttons take too).
 static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int x, int y, int width, int height)
 {
-        int least = touch ? UI_TARGET * ui->scale / 100 : 0;
-
-        if (width < least)
-                x -= (least - width) / 2, width = least;
-        if (height < least)
-                y -= (least - height) / 2, height = least;
-        return px >= x && px < x + width && py >= y && py < y + height;
+        return ui_reach_hit(touch, UI_TARGET * ui->scale / 100, px, py, x, y, width, height);
 }
 
 /*
