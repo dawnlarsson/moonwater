@@ -3213,10 +3213,11 @@ static struct
         // one it had before it was first arranged. A drop on a target keeps it, so a restore puts back where the window was
         // before the drag, not where it was let go against the edge, and snaps in a row keep the first one.
         int drag_keep[4];
-        // What a drag or a resize took hold of, for Escape or a right press to put back (compositor_hold_cancel): each row
-        // plus one (0 for none; a shared edge holds two), its rectangle and what it filled at the press.
-        int hold_row[2], hold_rect[2][4];
-        unsigned int hold_how[2];
+        // What a drag or a resize took hold of, for Escape or a right press to put back (compositor_hold_cancel): the rows, a
+        // bit each (a divider holds all of its windows), and each one's rectangle and what it filled at the press.
+        unsigned int hold_rows;
+        int hold_rect[WINDOWS][4];
+        unsigned int hold_how[WINDOWS];
         // The snap assist (compositor_assist_refresh): up over a drag's target, or armed after its drop until a click or Escape;
         // the row snapped, the region it took and its screen; the thumbnails, each its row, its tile and its rectangle.
         int assist_on, assist_armed, assist_row, assist_screen, assist_count;
@@ -3236,8 +3237,14 @@ static struct
         // A shared edge's resize (compositor_shared_begin): the window on its other side (COMPOSITOR_NONE for a resize of
         // one), the low side's and the high side's (left or top), whether the edge runs down, and the size each had.
         int shared_row, shared_lo, shared_hi, shared_vertical, shared_size[2];
-        // The shared edge's indicator (compositor_mark_set): the rectangle, the window it is drawn over and the other.
+        // All the windows of a divider's resize (compositor_divider), a bit each, the low side's and the high side's, and the
+        // size each had across the line at the press.
+        unsigned int shared_lo_set, shared_hi_set;
+        int shared_sizes[WINDOWS];
+        // The shared edge's indicator (compositor_mark_set): the rectangle, the window it is drawn over and the other, and all
+        // the windows of its divider, a bit each.
         int mark_row, mark_with, mark[4];
+        unsigned int mark_rows;
         int pointer_x, pointer_y;
         struct compositor_keymap keymap;
         // The keys whose press went to keys_to, one bit a code: their repeats and
@@ -8793,11 +8800,11 @@ static void compositor_want(int row, int width, int height)
 }
 
 /*
-        A shared edge: two windows that meet edge to edge with the same extent along it. A press on the middle half of
-        it (compositor_shared_at) takes both: compositor_shared_begin floats them, and compositor_shared_move grows one
-        as the other shrinks, so they go on meeting. The indicator (compositor_mark_shared) is a tint across that middle
-        half, COMPOSITOR_SHARED_MARK logical pixels either side of the edge, over the topmost of the two; it is shown
-        while the pointer is over the edge (compositor_shared_hover) and while the edge is held.
+        A shared edge: windows that meet along one line, a divider (compositor_divider_of). A press on the middle half of
+        it (compositor_shared_at) takes all of them: compositor_shared_begin takes hold of each, and compositor_shared_move
+        grows one side as the other shrinks, so they go on meeting. The indicator (compositor_mark_shared) is a tint across
+        that middle half, COMPOSITOR_SHARED_MARK logical pixels either side of the line, over the topmost of them; it is
+        shown while the pointer is over the line (compositor_shared_hover) and while it is held.
 */
 
 static void compositor_resize_begin(int row, unsigned int edges);
@@ -8830,54 +8837,113 @@ static int compositor_meets(int row, unsigned int edge)
         return COMPOSITOR_NONE;
 }
 
-// The two windows of row's shared edge: lo on the left or top, hi on the right or bottom. Answers 0 when it is not shared.
-static int compositor_shared_pair(int row, unsigned int edge, int *lo, int *hi)
+/*
+        A divider: the line one window's edge lies on and every window whose edge lies on it too, reached along the line by
+        overlapping -- the left half's right edge and both right quarters' left edges are one divider, which moves as one,
+        so no gap or overlap opens between tiles and what a click finds follows them. lo is the windows on the left or top
+        (their right or bottom on the line), hi those on the right or bottom, a bit each; lo_row and hi_row one of each, the
+        window held and the one across that meets it where there is one. Windows that are no tile share a line only two at a
+        time, edge to edge with the same extent (compositor_meets); tiles, every tile of the screen on the line.
+*/
+struct compositor_divider
 {
-        int other = compositor_meets(row, edge);
+        unsigned int lo, hi;
+        int lo_row, hi_row, vertical, line, from, to; // the line, and the span of it the windows cover
+};
 
-        if (other == COMPOSITOR_NONE)
+// The line and the span of a divider's windows, from where they are now.
+static void compositor_divider_measure(struct compositor_divider *d)
+{
+        int first = 1;
+
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                int a, b;
+
+                if (!((d->lo | d->hi) >> row & 1))
+                        continue;
+                a = d->vertical ? compositor.y[row] : compositor.x[row];
+                b = a + (int)(d->vertical ? compositor.h[row] : compositor.w[row]);
+                if (first || a < d->from)
+                        d->from = a;
+                if (first || b > d->to)
+                        d->to = b;
+                if (d->hi >> row & 1)
+                        d->line = d->vertical ? compositor.x[row] : compositor.y[row];
+                first = 0;
+        }
+}
+
+static int compositor_divider_of(int row, unsigned int edge, struct compositor_divider *d)
+{
+        int other = compositor_meets(row, edge), high = edge == COMPOSITOR_EDGE_LEFT || edge == COMPOSITOR_EDGE_TOP;
+        int vertical = edge == COMPOSITOR_EDGE_LEFT || edge == COMPOSITOR_EDGE_RIGHT, screen = compositor_screen_of(row), grew = 1;
+        int line, from, to;
+
+        if (edge != COMPOSITOR_EDGE_LEFT && edge != COMPOSITOR_EDGE_RIGHT && edge != COMPOSITOR_EDGE_TOP && edge != COMPOSITOR_EDGE_BOTTOM)
                 return 0;
-        *lo = edge == COMPOSITOR_EDGE_RIGHT || edge == COMPOSITOR_EDGE_BOTTOM ? row : other;
-        *hi = *lo == row ? other : row;
+        line = vertical ? compositor.x[row] + (high ? 0 : (int)compositor.w[row]) : compositor.y[row] + (high ? 0 : (int)compositor.h[row]);
+        from = vertical ? compositor.y[row] : compositor.x[row];
+        to = from + (int)(vertical ? compositor.h[row] : compositor.w[row]);
+        d->vertical = vertical;
+        d->lo = high ? 0 : 1u << row, d->hi = high ? 1u << row : 0;
+        d->lo_row = high ? other : row, d->hi_row = high ? row : other;
+        while (grew && compositor_tile_cells(compositor.arranged[row]))
+        {
+                grew = 0;
+                for (int each = 0; each < WINDOWS; each++)
+                {
+                        int near, far, a, b;
+
+                        if (((d->lo | d->hi) >> each & 1) || !compositor_visible(each) || compositor_popup_parent[each] >= 0 ||
+                            !compositor_tile_cells(compositor.arranged[each]) || compositor_screen_of(each) != screen)
+                                continue;
+                        near = vertical ? compositor.x[each] : compositor.y[each];
+                        far = near + (int)(vertical ? compositor.w[each] : compositor.h[each]);
+                        a = vertical ? compositor.y[each] : compositor.x[each];
+                        b = a + (int)(vertical ? compositor.h[each] : compositor.w[each]);
+                        if (a >= to || b <= from || (near != line && far != line))
+                                continue;
+                        if (far == line)
+                                d->lo |= 1u << each, d->lo_row = d->lo_row >= 0 ? d->lo_row : each;
+                        else
+                                d->hi |= 1u << each, d->hi_row = d->hi_row >= 0 ? d->hi_row : each;
+                        from = a < from ? a : from;
+                        to = b > to ? b : to;
+                        grew = 1;
+                }
+        }
+        // No tile across it: a pair edge to edge with the same extent, whatever the two are, or nothing.
+        if (!d->lo || !d->hi)
+        {
+                if (other == COMPOSITOR_NONE)
+                        return 0;
+                d->lo = 1u << (high ? other : row), d->hi = 1u << (high ? row : other);
+        }
+        compositor_divider_measure(d);
         return 1;
 }
 
-// The indicator's rectangle across the edge between lo and hi (vertical: one that runs down): its middle half.
-static void compositor_shared_strip(int lo, int hi, int vertical, int *rect)
+// The indicator's rectangle across a divider (vertical: one that runs down): the middle half of the span its windows cover.
+static void compositor_shared_strip(const struct compositor_divider *d, int *rect)
 {
-        int s = COMPOSITOR_SHARED_MARK * compositor.scale / 100;
+        int s = COMPOSITOR_SHARED_MARK * compositor.scale / 100, span = d->to - d->from;
 
-        if (vertical)
-        {
-                int h = (int)compositor.h[lo];
-
-                rect[0] = compositor.x[hi] - s, rect[1] = compositor.y[lo] + h / 4, rect[2] = 2 * s, rect[3] = h - 2 * (h / 4);
-        }
+        if (d->vertical)
+                rect[0] = d->line - s, rect[1] = d->from + span / 4, rect[2] = 2 * s, rect[3] = span - 2 * (span / 4);
         else
-        {
-                int w = (int)compositor.w[lo];
-
-                rect[0] = compositor.x[lo] + w / 4, rect[1] = compositor.y[hi] - s, rect[2] = w - 2 * (w / 4), rect[3] = 2 * s;
-        }
+                rect[0] = d->from + span / 4, rect[1] = d->line - s, rect[2] = span - 2 * (span / 4), rect[3] = 2 * s;
 }
 
-// Whether row's edge is a shared one with the point on its middle half: its two windows, and whether it runs down.
-static int compositor_shared_at(int row, unsigned int edge, int x, int y, int *lo, int *hi, int *vertical)
+// Whether row's edge is on a divider with the point on its middle half, and the divider.
+static int compositor_shared_at(int row, unsigned int edge, int x, int y, struct compositor_divider *d)
 {
         int rect[4];
 
-        if (!edge || (edge & (edge - 1)) || !compositor_shared_pair(row, edge, lo, hi))
+        if (!edge || (edge & (edge - 1)) || !compositor_divider_of(row, edge, d))
                 return 0;
-        *vertical = edge == COMPOSITOR_EDGE_LEFT || edge == COMPOSITOR_EDGE_RIGHT;
-        compositor_shared_strip(*lo, *hi, *vertical, rect);
-        return *vertical ? y >= rect[1] && y < rect[1] + rect[3] : x >= rect[0] && x < rect[0] + rect[2];
-}
-
-// The edge across from one of a window's edges: the window on the other side of a left edge has its right there.
-static unsigned int compositor_edge_opposite(unsigned int edge)
-{
-        return edge == COMPOSITOR_EDGE_LEFT ? COMPOSITOR_EDGE_RIGHT : edge == COMPOSITOR_EDGE_RIGHT ? COMPOSITOR_EDGE_LEFT
-             : edge == COMPOSITOR_EDGE_TOP ? COMPOSITOR_EDGE_BOTTOM : COMPOSITOR_EDGE_TOP;
+        compositor_shared_strip(d, rect);
+        return d->vertical ? y >= rect[1] && y < rect[1] + rect[3] : x >= rect[0] && x < rect[0] + rect[2];
 }
 
 // The indicator's rectangle over the window row, the window it meets being with (rect none for none), damaged where it
@@ -8900,94 +8966,129 @@ static void compositor_mark_clear(void)
         int none[4] = {0, 0, 0, 0};
 
         compositor_mark_set(COMPOSITOR_NONE, COMPOSITOR_NONE, none);
+        compositor.mark_rows = 0;
 }
 
-// The indicator of the shared edge between lo and hi, over the topmost of the two (so nothing above it covers it).
-static void compositor_mark_shared(int lo, int hi, int vertical)
+// The indicator of a divider, over the topmost of its windows (so nothing above it covers it); the other is the one across.
+static void compositor_mark_shared(const struct compositor_divider *d)
 {
-        int rect[4], top = hi, with = lo;
+        int rect[4], top = d->hi_row, with = d->lo_row;
 
-        compositor_shared_strip(lo, hi, vertical, rect);
+        compositor_shared_strip(d, rect);
         for (unsigned int at = 0; at < compositor.stacked; at++)
-                if (compositor.stack[at] == lo || compositor.stack[at] == hi)
-                        top = compositor.stack[at], with = top == lo ? hi : lo;
+                if ((d->lo | d->hi) >> compositor.stack[at] & 1)
+                        top = compositor.stack[at], with = d->lo >> top & 1 ? d->hi_row : d->lo_row;
         compositor_mark_set(top, with, rect);
+        compositor.mark_rows = d->lo | d->hi;
 }
 
-// The indicator while no button is held: over a shared edge's middle half under the pointer, and none otherwise.
+// The indicator while no button is held: over a divider's middle half under the pointer, and none otherwise.
 static void compositor_shared_hover(int under)
 {
         unsigned int edge = under < 0 || compositor.grab >= 0 || compositor.touching ? 0
                             : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
-        int lo, hi, vertical;
+        struct compositor_divider d;
 
-        if (compositor_shared_at(under, edge, compositor.pointer_x, compositor.pointer_y, &lo, &hi, &vertical))
-                compositor_mark_shared(lo, hi, vertical);
+        if (compositor_shared_at(under, edge, compositor.pointer_x, compositor.pointer_y, &d))
+                compositor_mark_shared(&d);
         else
                 compositor_mark_clear();
 }
 
-// A press on a shared edge's middle half takes both windows: row, pressed on its edge, is resized with the window on
-// the far side. Answers 0 when the edge is not shared here, and the press is row's own.
+// The divider being resized, from the windows it took at the press.
+static void compositor_shared_divider(struct compositor_divider *d)
+{
+        d->lo = compositor.shared_lo_set, d->hi = compositor.shared_hi_set;
+        d->lo_row = compositor.shared_lo, d->hi_row = compositor.shared_hi, d->vertical = compositor.shared_vertical;
+        compositor_divider_measure(d);
+}
+
+/*
+        A press on a divider's middle half takes all of its windows: row, pressed on its edge, is resized with the others,
+        each holding its far edge (the low side's left or top, the high side's right or bottom) while the line moves. Each
+        keeps what it fills -- a window that floats has an outline the screen keeps in view, which would take them off the
+        line -- and the rectangle it had before. Answers 0 when there is no divider here, and the press is row's own.
+*/
 static int compositor_shared_begin(int row, unsigned int edge)
 {
-        int lo, hi, vertical, other;
+        struct compositor_divider d;
+        unsigned int was = compositor.arranged[row], all;
+        unsigned int lo_edge, hi_edge;
 
-        if (!compositor_shared_at(row, edge, compositor.pointer_x, compositor.pointer_y, &lo, &hi, &vertical))
+        if (!compositor_shared_at(row, edge, compositor.pointer_x, compositor.pointer_y, &d))
                 return 0;
-        other = lo == row ? hi : lo;
-        // Both keep the arrangement they have: a window that floats has an outline the screen keeps in view, which
-        // would take the two off the edge they share. Where they are let go is the rectangle a drag away returns to.
+        all = d.lo | d.hi;
+        lo_edge = d.vertical ? COMPOSITOR_EDGE_RIGHT : COMPOSITOR_EDGE_BOTTOM;
+        hi_edge = d.vertical ? COMPOSITOR_EDGE_LEFT : COMPOSITOR_EDGE_TOP;
+        compositor_resize_begin(row, edge);
+        compositor.arranged[row] = was;
+        compositor.shared_row = d.lo >> row & 1 ? d.hi_row : d.lo_row;
+        compositor.shared_lo = d.lo_row, compositor.shared_hi = d.hi_row;
+        compositor.shared_lo_set = d.lo, compositor.shared_hi_set = d.hi;
+        compositor.shared_vertical = d.vertical;
+        for (int each = 0; each < WINDOWS; each++)
         {
-                unsigned int was_row = compositor.arranged[row], was_other = compositor.arranged[other];
-
-                compositor_resize_begin(row, edge);
-                compositor.arranged[row] = was_row;
-                compositor.arranged[other] = was_other;
-                compositor_hold_take(1, other);
+                if (!(all >> each & 1))
+                        continue;
+                compositor.shared_sizes[each] = d.vertical ? (int)compositor.w[each] : (int)compositor.h[each];
+                if (each == row)
+                        continue;
+                compositor_hold_take(1, each);
+                compositor_damage_row(each);
+                compositor.edges[each] = d.lo >> each & 1 ? lo_edge : hi_edge;
+                compositor.far_x[each] = compositor.x[each] + (int)compositor.w[each];
+                compositor.far_y[each] = compositor.y[each] + (int)compositor.h[each];
+                compositor_damage_row(each);
         }
-        compositor.shared_row = other;
-        compositor.shared_lo = lo;
-        compositor.shared_hi = hi;
-        compositor.shared_vertical = vertical;
-        compositor.shared_size[0] = vertical ? (int)compositor.w[lo] : (int)compositor.h[lo];
-        compositor.shared_size[1] = vertical ? (int)compositor.w[hi] : (int)compositor.h[hi];
-        // The other takes the edge across from the hand's: the one it shares with the hand's window.
-        compositor_damage_row(other);
-        compositor.edges[other] = compositor_edge_opposite(edge);
-        compositor.far_x[other] = compositor.x[other] + (int)compositor.w[other];
-        compositor.far_y[other] = compositor.y[other] + (int)compositor.h[other];
-        compositor_damage_row(other);
-        compositor_mark_shared(lo, hi, vertical);
+        if (compositor.shared_lo >= 0 && compositor.shared_hi >= 0)
+                compositor.shared_size[0] = compositor.shared_sizes[compositor.shared_lo],
+                compositor.shared_size[1] = compositor.shared_sizes[compositor.shared_hi];
+        compositor_mark_shared(&d);
         return 1;
 }
 
-// The shared edge moved by the pointer's travel since the press, both windows kept to the least and most a window is,
-// so they go on meeting: the low side's far edge stays and the high side's near edge moves with the one before it.
+/*
+        The divider moved by the pointer's travel since the press, every window of it kept to the least and most a window
+        is, so they go on meeting: the low side's far edges stay and the high side's near edges move with the line.
+*/
 static void compositor_shared_move(void)
 {
-        int lo = compositor.shared_lo, hi = compositor.shared_hi, vertical = compositor.shared_vertical;
+        int vertical = compositor.shared_vertical, travel = vertical ? compositor.pointer_x - compositor.press_x
+                                                                         : compositor.pointer_y - compositor.press_y;
         int least = (vertical ? WINDOW_MIN_WIDTH : WINDOW_MIN_HEIGHT) * compositor.scale / 100;
-        int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(lo);
-        int lo_size = compositor.shared_size[0], hi_size = compositor.shared_size[1];
-        int d = vertical ? compositor.pointer_x - compositor.press_x : compositor.pointer_y - compositor.press_y;
-        int low = least - lo_size > hi_size - most ? least - lo_size : hi_size - most;
-        int high = most - lo_size < hi_size - least ? most - lo_size : hi_size - least;
+        int low = -2147483647, high = 2147483647;
+        unsigned int all = compositor.shared_lo_set | compositor.shared_hi_set;
+        struct compositor_divider d;
 
+        for (int each = 0; each < WINDOWS; each++)
+        {
+                int size = compositor.shared_sizes[each];
+                int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(each);
+
+                if (!(all >> each & 1))
+                        continue;
+                if (compositor.shared_lo_set >> each & 1)
+                        low = least - size > low ? least - size : low, high = most - size < high ? most - size : high;
+                else
+                        low = size - most > low ? size - most : low, high = size - least < high ? size - least : high;
+        }
         if (low > high)
                 return;
-        d = d < low ? low : d > high ? high : d;
-        if (vertical)
+        travel = travel < low ? low : travel > high ? high : travel;
+        for (int each = 0; each < WINDOWS; each++)
         {
-                compositor_want(lo, lo_size + d, (int)compositor.h[lo]);
-                compositor_want(hi, hi_size - d, (int)compositor.h[hi]);
+                int size;
+
+                if (!(all >> each & 1))
+                        continue;
+                size = compositor.shared_sizes[each] + (compositor.shared_lo_set >> each & 1 ? travel : -travel);
+                if (vertical)
+                        compositor_want(each, size, (int)compositor.h[each]);
+                else
+                        compositor_want(each, (int)compositor.w[each], size);
         }
-        else
-        {
-                compositor_want(lo, (int)compositor.w[lo], lo_size + d);
-                compositor_want(hi, (int)compositor.w[hi], hi_size - d);
-        }
-        compositor_mark_shared(lo, hi, vertical);
+        compositor_shared_divider(&d);
+        compositor_mark_shared(&d);
 }
 
 /*
@@ -9097,15 +9198,16 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
         rectangle and what it filled, the remembered rectangle untouched -- gliding there from where it is, and the hand
         holds nothing. Its preview, the grid and its lit line go with it; the press is no half of a double click.
 */
-static void compositor_hold_take(int at, int row)
+// row taken hold of: the first of a hold (first, which forgets the last one's) or one more of it.
+static void compositor_hold_take(int more, int row)
 {
         int rect[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
 
-        compositor.hold_row[at] = row + 1;
-        memory_copy(compositor.hold_rect[at], rect, sizeof(rect));
-        compositor.hold_how[at] = compositor.arranged[row];
-        if (!at)
-                compositor.hold_row[1] = 0;
+        if (!more)
+                compositor.hold_rows = 0;
+        compositor.hold_rows |= 1u << row;
+        memory_copy(compositor.hold_rect[row], rect, sizeof(rect));
+        compositor.hold_how[row] = compositor.arranged[row];
 }
 
 static int compositor_hold_cancel(void)
@@ -9117,14 +9219,10 @@ static int compositor_hold_cancel(void)
         compositor.press = COMPOSITOR_NONE;
         compositor_mark_clear();
         compositor_lit(COMPOSITOR_NONE, 0, 0);
-        for (int at = 0; at < 2; at++)
-        {
-                int row = compositor.hold_row[at] - 1;
-
-                if (row >= 0 && compositor.showing[row])
-                        compositor_set_rect(row, compositor.hold_how[at], compositor.hold_rect[at]);
-                compositor.hold_row[at] = 0;
-        }
+        for (int row = 0; row < WINDOWS; row++)
+                if ((compositor.hold_rows >> row & 1) && compositor.showing[row])
+                        compositor_set_rect(row, compositor.hold_how[row], compositor.hold_rect[row]);
+        compositor.hold_rows = 0;
         return 1;
 }
 
@@ -10437,12 +10535,11 @@ static void compositor_leave(int row)
                         compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
                 compositor.preview_draw = 0;
         }
-        for (int at = 0; at < 2; at++)
-                compositor.hold_row[at] = compositor.hold_row[at] == row + 1 ? 0 : compositor.hold_row[at];
-        if (compositor.mark_row == row || compositor.mark_with == row)
+        compositor.hold_rows &= ~(1u << row);
+        if (compositor.mark_row == row || compositor.mark_with == row || (compositor.mark_rows >> row & 1))
                 compositor_mark_clear();
-        // A window that meets the one resized, and goes, ends the resize: the other is no longer taken with it.
-        if (compositor.shared_row == row)
+        // A window of the divider resized, going, ends the resize: the others are no longer taken with it.
+        if (compositor.shared_row >= 0 && ((compositor.shared_lo_set | compositor.shared_hi_set) >> row & 1))
                 compositor.shared_row = COMPOSITOR_NONE, compositor.resize = COMPOSITOR_NONE;
         compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
         compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;

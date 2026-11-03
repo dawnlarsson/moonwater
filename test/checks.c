@@ -123417,6 +123417,59 @@ static void check_compositor_tile_resize(void)
 }
 
 /*
+        A divider of more than two tiles moves as one: the left half beside the two right quarters share one line, and the
+        right quarters' left edge taken and moved widens the left half and narrows both quarters, so no gap or overlap opens
+        and what a click finds follows them; its indicator spans the middle half of the whole line; let go, all three are
+        still tiles keeping their rectangles; Escape during it puts all three back.
+*/
+static void divider_fresh(void)
+{
+    restore_fresh();
+    layout_show(2, 150, 20, 90, 60);
+    layout_show(3, 150, 160, 90, 60);
+    compositor.stack[0] = 1, compositor.stack[1] = 2, compositor.stack[2] = 3, compositor.stacked = 3;
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    compositor_arrange(2, COMPOSITOR_TOP_RIGHT);
+    compositor_arrange(3, COMPOSITOR_BOTTOM_RIGHT);
+}
+
+static void check_compositor_divider(void)
+{
+    if (!layout_table_map(256))
+    {
+        check("divider: the table is mapped", false);
+        return;
+    }
+    divider_fresh();
+    screens_hand(126, 100, 0);
+    check("divider: the pointer on the line shows the indicator over the middle half of all of it, not of one quarter",
+          compositor.mark[2] > 0 && compositor.mark[1] == 64 && compositor.mark[3] == 128 && compositor.mark_rows == 14u);
+    screens_hand(126, 100, 1);
+    screens_hand(146, 100, 0);
+    check("divider: moved 20 px, the left half is 20 wider and both right quarters 20 narrower, meeting it",
+          layout_is(1, COMPOSITOR_LEFT, 0, 0, 148, 256) && layout_is(2, COMPOSITOR_TOP_RIGHT, 148, 0, 108, 128) &&
+              layout_is(3, COMPOSITOR_BOTTOM_RIGHT, 148, 128, 108, 128));
+    check("divider: a click finds them where they are: the point just right of the line is the bottom right quarter's",
+          compositor_under(150, 200, &(int){0}) == 3);
+    screens_hand(146, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("divider: let go, all three are still tiles keeping the rectangles from before",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.arranged[2] == COMPOSITOR_TOP_RIGHT &&
+              compositor.arranged[3] == COMPOSITOR_BOTTOM_RIGHT && restore_kept_is(1, 60, 60, 100, 80) && restore_kept_is(3, 150, 160, 90, 60));
+
+    divider_fresh();
+    screens_hand(126, 100, 1);
+    screens_hand(146, 100, 0);
+    compositor_key(0, CK_KEY_ESC, 1, 0);
+    compositor_key(0, CK_KEY_ESC, 0, 0);
+    check("divider: Escape during it puts all three back", layout_is(1, COMPOSITOR_LEFT, 0, 0, 128, 256) &&
+                                                               layout_is(2, COMPOSITOR_TOP_RIGHT, 128, 0, 128, 128) &&
+                                                               layout_is(3, COMPOSITOR_BOTTOM_RIGHT, 128, 128, 128, 128));
+    screens_hand(146, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+}
+
+/*
         A window dragged under the grid is over it: the grid's tints are the wallpaper's, and the window being moved is not
         tinted where the grid's row lies across it.
 */
@@ -142468,6 +142521,7 @@ b32 main()
         check_compositor_preview_motion();
         check_compositor_restore_glide();
         check_compositor_tile_resize();
+        check_compositor_divider();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
