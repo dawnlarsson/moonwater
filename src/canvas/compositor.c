@@ -3119,6 +3119,10 @@ static struct
         unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)
         int drag_x, drag_y;
         int drag_moved; // the window being moved has moved: only then is where it is let go an arrangement
+        // The floating rectangle the window being moved is remembered by, taken at the press: its own if it floated, else the
+        // one it had before it was first arranged. A drop on a target keeps it, so a restore puts back where the window was
+        // before the drag, not where it was let go against the edge, and snaps in a row keep the first one.
+        int drag_keep[4];
         // The snap assist (compositor_assist_refresh): up over a drag's target, or armed after its drop until a click or Escape;
         // the row snapped, the region it took and its screen; the thumbnails, each its row, its tile and its rectangle.
         int assist_on, assist_armed, assist_row, assist_screen, assist_count;
@@ -3133,7 +3137,7 @@ static struct
         // overlay_from toward overlay_goal percent since overlay_at, and are drawn while they are up or fading out.
         unsigned int overlays_up, overlay_from, overlay_goal;
         positive overlay_at;
-        // The window being resized, how large it was and where the hand took hold.
+        // The window being resized, how large it was and where the hand took hold (press_x, press_y: a drag's too).
         int resize_w, resize_h, press_x, press_y;
         // A shared edge's resize (compositor_shared_begin): the window on its other side (COMPOSITOR_NONE for a resize of
         // one), the low side's and the high side's (left or top), whether the edge runs down, and the size each had.
@@ -9337,20 +9341,25 @@ static void compositor_float(int row)
 }
 
 /*
-        Taking an arranged window takes the window it was: back to the size
-        it had, under the hand where the hand had it, at the same share of
-        its width and height, so taking the right side does not make the
-        window jump until its left is under the pointer.
+        Taking an arranged window takes the window it was: back to the size it had, under the hand where the hand had it.
+        Where the press took it (press_x, press_y) keeps its share of the width, so taking the right side does not make the
+        window jump until its left is under the pointer; taken by its top, it keeps its distance from the top (the top is
+        the same height whatever the window's size), and taken lower down (Alt) its share of the height. The pointer is
+        always on the window it takes.
 */
 static void compositor_float_for_drag(int row)
 {
         int least_w = WINDOW_MIN_WIDTH * compositor.scale / 100, least_h = WINDOW_MIN_HEIGHT * compositor.scale / 100;
         int width = (int)compositor.saved_w[row] < least_w ? least_w : (int)compositor.saved_w[row];
         int height = (int)compositor.saved_h[row] < least_h ? least_h : (int)compositor.saved_h[row];
-        int grab = (int)((long)(compositor.pointer_x - compositor.x[row]) * width /
-                         (compositor.w[row] ? (int)compositor.w[row] : 1));
-        int at = (int)((long)(compositor.pointer_y - compositor.y[row]) * height /
-                       (compositor.h[row] ? (int)compositor.h[row] : 1));
+        int in_x = compositor.press_x - compositor.x[row], in_y = compositor.press_y - compositor.y[row];
+        int grab = (int)((long)in_x * width / (compositor.w[row] ? (int)compositor.w[row] : 1));
+        int at = in_y < COMPOSITOR_GRAB * compositor.scale / 100
+                     ? in_y
+                     : (int)((long)in_y * height / (compositor.h[row] ? (int)compositor.h[row] : 1));
+
+        grab = compositor_fit(grab, 0, width - 1);
+        at = compositor_fit(at, 0, height - 1);
 
         // Taken by the hand, it is not gliding any more: it is where the hand has it, and where it glided from is drawn again.
         if (compositor.glide[row])
@@ -9362,6 +9371,11 @@ static void compositor_float_for_drag(int row)
         compositor_put(row, compositor.pointer_x - grab, compositor.pointer_y - at);
         compositor_damage_row(row);
         compositor_want(row, width, height);
+        // The hand holds it by the grab, wherever the screen's edge keeps the window: read from the place the window was kept
+        // at, a tile torn off by the edge of the screen would slide under the pointer, and its edge would never reach the
+        // screen's again to snap.
+        compositor.drag_x = grab;
+        compositor.drag_y = at;
 }
 
 /*
@@ -11167,13 +11181,17 @@ static void compositor_motion(void)
         {
                 int row = compositor.drag;
 
-                // Taken by the hand and moved: a window that fills a place is the window it was, under
-                // the hand, from the first motion (a press that does not move it is half a double click).
+                // Taken by the hand and moved: a window that fills a place is the window it was, under the hand, once the
+                // hand is UI_SLOP from where it pressed (in its own scale). Short of that it is still a press -- a click, or
+                // half a double click with a shaking hand -- and nothing moves.
                 if (compositor.arranged[row] != COMPOSITOR_FLOATING)
                 {
+                        long dx = compositor.pointer_x - compositor.press_x, dy = compositor.pointer_y - compositor.press_y;
+                        long slop = (long)UI_SLOP * compositor_row_scale(row) / 100;
+
+                        if (dx * dx + dy * dy < slop * slop)
+                                return;
                         compositor_float_for_drag(row);
-                        compositor.drag_x = compositor.pointer_x - compositor.x[row];
-                        compositor.drag_y = compositor.pointer_y - compositor.y[row];
                 }
 
                 // Kept on the output as it is moved, as when it was placed.
@@ -11334,6 +11352,10 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 if (how != COMPOSITOR_FLOATING)
                 {
                         compositor_arrange_on(dragged, how, screen);
+                        // The rectangle a restore puts back is the one from before the drag (compositor.drag_keep).
+                        compositor.saved_x[dragged] = compositor.drag_keep[0], compositor.saved_y[dragged] = compositor.drag_keep[1];
+                        compositor.saved_w[dragged] = (unsigned int)compositor.drag_keep[2];
+                        compositor.saved_h[dragged] = (unsigned int)compositor.drag_keep[3];
                         // The others of the screen are offered the space the drop left, until a click or Escape.
                         compositor.assist_on = compositor.assist_armed = 1;
                         compositor.assist_row = dragged;
@@ -11636,6 +11658,22 @@ static void compositor_button(unsigned int code, int down)
                         compositor.drag_moved = 0;
                         compositor.drag_x = compositor.pointer_x - compositor.x[under];
                         compositor.drag_y = compositor.pointer_y - compositor.y[under];
+                        compositor.press_x = compositor.pointer_x;
+                        compositor.press_y = compositor.pointer_y;
+                        // What a drop on a target keeps for a restore: where it floats now, or where it floated before.
+                        if (compositor.arranged[under] == COMPOSITOR_FLOATING)
+                        {
+                                int keep[4] = {compositor.x[under], compositor.y[under], (int)compositor.w[under], (int)compositor.h[under]};
+
+                                memory_copy(compositor.drag_keep, keep, sizeof(keep));
+                        }
+                        else
+                        {
+                                int keep[4] = {compositor.saved_x[under], compositor.saved_y[under], (int)compositor.saved_w[under],
+                                               (int)compositor.saved_h[under]};
+
+                                memory_copy(compositor.drag_keep, keep, sizeof(keep));
+                        }
                         // The window is in the hand: all of its line is lit until it is let go.
                         compositor_lit(under, COMPOSITOR_LIT_ALL, 1);
                         return;

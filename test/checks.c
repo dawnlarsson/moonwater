@@ -122727,9 +122727,13 @@ static void snap_hand(int row, int box_x, int box_y, int grab_x, int grab_y)
 {
     if (compositor.drag != row)
     {
+        int keep[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+
         compositor.drag = row;
         compositor.drag_moved = 0;
         compositor.drag_x = grab_x, compositor.drag_y = grab_y;
+        compositor.press_x = compositor.x[row] + grab_x, compositor.press_y = compositor.y[row] + grab_y;
+        memory_copy(compositor.drag_keep, keep, sizeof(keep)); /* what a press keeps for a restore: where it floats */
         compositor.button_down = 1;
         compositor.button_row[0] = row;
     }
@@ -122929,6 +122933,100 @@ static void check_compositor_snap_edges(void)
     check("snap edges: let go with Control held, the window stays flush against the edge (its line on the first column), floating",
           compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 1 && compositor.y[1] == 60);
     compositor_key(0, 29, 0, 0);
+}
+
+/*
+        Restoring a snapped window. A filled window pressed on its top moves nothing until the hand is UI_SLOP from the
+        press, so a click with a shaking hand, or a double click, is never a tear off; past it the window is its remembered
+        size under the pointer, the grab keeping its share of the width and, on the top, its distance from the top (taken
+        lower down with Alt, its share of the height). A drop on a target keeps the rectangle the window had before the
+        drag, not the one it was let go at against the edge, and snaps in a row keep the first one.
+*/
+static void restore_fresh(void)
+{
+    layout_setup(256, 1);
+    compositor.table->motion = 1;
+    layout_show(1, 60, 60, 100, 80);
+    compositor.stack[0] = 1, compositor.stacked = 1;
+}
+
+static int restore_kept_is(int row, int x, int y, int width, int height)
+{
+    return compositor.saved_x[row] == x && compositor.saved_y[row] == y && (int)compositor.saved_w[row] == width &&
+           (int)compositor.saved_h[row] == height;
+}
+
+static void check_compositor_restore(void)
+{
+    if (!layout_table_map(256))
+    {
+        check("restore: the table is mapped", false);
+        return;
+    }
+    restore_fresh();
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    screens_hand(128, 10, 1);
+    screens_hand(131, 14, 0);
+    check("restore slop: a filled window pressed on its top and moved 5 px, under the slop, is still filled and not moved",
+          compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor.x[1] == 0 && compositor.y[1] == 0 && compositor.w[1] == 256);
+    screens_hand(128, 30, 0);
+    check("restore slop: past the slop it is torn off at its remembered size",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.w[1] == 100 && compositor.h[1] == 80);
+    check("restore grab: the grab keeps its share of the width (128 of 256 is 50 of 100) and its 10 px from the top",
+          compositor.x[1] == 128 - 50 && compositor.y[1] == 30 - 10);
+    screens_hand(128, 30, -1);
+    compositor.press = COMPOSITOR_NONE;
+
+    /* A double click with a shaking hand: a 3 px jitter between the press and the release is still a click. */
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    screens_hand(128, 10, 1);
+    screens_hand(130, 12, 0);
+    screens_hand(130, 12, -1);
+    check("restore slop: a click with a 3 px shake on a filled window's top leaves it filled",
+          compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor.w[1] == 256);
+    screens_hand(130, 12, 1);
+    check("restore slop: and the second click of the pair gives back its own rectangle",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 78 && compositor.y[1] == 20 && compositor.w[1] == 100);
+    screens_hand(130, 12, -1);
+    compositor.press = COMPOSITOR_NONE;
+
+    /* Taken lower down with Alt: its share of the height as well. */
+    compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+    compositor.held[0] |= CK_HELD_ALT;
+    screens_hand(128, 128, 1);
+    screens_hand(128, 160, 0);
+    check("restore grab: taken lower down with Alt, it keeps its share of the height too (128 of 256 is 40 of 80)",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 128 - 50 && compositor.y[1] == 160 - 40);
+    screens_hand(128, 160, -1);
+    compositor.held[0] &= ~CK_HELD_ALT;
+    compositor.press = COMPOSITOR_NONE;
+
+    /* Dragged from the middle onto the left edge: the rectangle kept is the one before the drag. */
+    restore_fresh();
+    screens_hand(80, 64, 1);
+    screens_hand(0, 100, 0);
+    screens_hand(0, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("restore keep: dropped on the left edge, it keeps the rectangle it had before the drag, not the one let go at the edge",
+          compositor.arranged[1] == COMPOSITOR_LEFT && restore_kept_is(1, 60, 60, 100, 80));
+    compositor_float(1);
+    check("restore keep: and a restore puts it back there", compositor.x[1] == 60 && compositor.y[1] == 60 && compositor.w[1] == 100);
+
+    /* Snaps in a row keep the first: left, then torn off and dropped on the right edge. */
+    screens_hand(80, 64, 1);
+    screens_hand(0, 100, 0);
+    screens_hand(0, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+    screens_hand(64, 10, 1);
+    screens_hand(250, 100, 0);
+    check("restore grab: torn off by the screen's right edge, the hand keeps its grab (50 px in) though the screen keeps the "
+          "window, and the window's edge past the screen's shows the right half",
+          compositor.drag_x == 50 && compositor.drag_y == 10 && compositor.preview_row == 1 && compositor.preview[0] == 128 &&
+              compositor.preview[2] == 128);
+    screens_hand(250, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("restore keep: snapped left, torn off and dropped on the right, it still keeps the rectangle from before the first snap",
+          compositor.arranged[1] == COMPOSITOR_RIGHT && restore_kept_is(1, 60, 60, 100, 80));
 }
 
 /*
@@ -141661,6 +141759,7 @@ b32 main()
         check_compositor_preview_at_once();
         check_compositor_snap_trigger();
         check_compositor_snap_edges();
+        check_compositor_restore();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
