@@ -95,6 +95,39 @@ else
         row FAIL "the window is on the screen at the size it drew" "box $*"
 fi
 
+# A subsurface is part of the window's picture: 64 by 48 in its own colour, 10 and 20 into the window.
+"$client" -n 1000000 -s -u -w 320 -h 240 -q > /dev/null 2>&1 &
+shown=$!
+sleep 1
+set -- $(box)
+wx=$1
+wy=$2
+sub=$(python3 - "$work/scan.img" 800 600 << 'PY'
+import sys
+raw = open(sys.argv[1], 'rb').read()
+w, h = int(sys.argv[2]), int(sys.argv[3])
+x1, y1, x2, y2, n = w, h, -1, -1, 0
+for y in range(h):
+    row = raw[y * w * 4:(y + 1) * w * 4]
+    for x in range(w):
+        if row[x * 4:x * 4 + 3] == b'\x20\xff\x10':
+            n += 1
+            x1, y1, x2, y2 = min(x1, x), min(y1, y), max(x2, x), max(y2, y)
+print(x1, y1, x2, y2, n)
+PY
+)
+kill "$shown" 2> /dev/null
+wait "$shown" 2> /dev/null
+set -- $sub
+# The window's line is one pixel round the picture, so its picture begins at the box's corner or one in.
+dx=$(($1 - wx))
+dy=$(($2 - wy))
+if [ "$5" = 3072 ] && [ $(($3 - $1 + 1)) = 64 ] && [ $(($4 - $2 + 1)) = 48 ] && [ $dx -ge 10 ] && [ $dx -le 11 ] && [ $dy -ge 20 ] && [ $dy -le 21 ]; then
+        row ok "a subsurface is on the screen at its place in the window ($sub in the window at $wx,$wy)"
+else
+        row FAIL "a subsurface is on the screen at its place in the window" "window $wx,$wy, subsurface $sub"
+fi
+
 # Damage only: the same picture comes of drawing a rectangle at a time.
 out=$("$client" -n 20 -w 200 -h 120 -d 2>&1)
 case $out in

@@ -40,6 +40,13 @@ static struct
         unsigned char asked[WAYLAND_CLIENTS]; // the connection's first window has been opened, so its launch is not read again
         int started, handler;
         unsigned long frames;
+        // The picture being laid on each window: whether one is begun, the buffer of the table it goes in, what it has touched so
+        // far, and whether all of it is changed.
+        struct
+        {
+                unsigned char open, touched, full, which;
+                int x1, y1, x2, y2;
+        } laying[WINDOWS];
         // The keymap of each layout, made when a keyboard first needs it: a sealed file of xkb's text, kept for as long as the
         // compositor runs, and the layout the clients were last told.
         int keymap[16];
@@ -461,6 +468,7 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                 if (!__atomic_compare_exchange_n(&table->pid[row], &none, WINDOWS_TAKING, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
                         continue;
                 windows_reset_row(table, (unsigned int)row);
+                compositor_wl.laying[row].open = 0;
                 // A client draws its own frame, and keeps the whole of its picture, the top included.
                 table->glass[row] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB;
                 // The person's own launch takes the keys with its first window, as a program of the compositor's does.
@@ -489,73 +497,153 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
 static void compositor_wl_row_close(void *context, int row)
 {
         (void)context;
+        if (row >= 0 && row < WINDOWS)
+                compositor_wl.laying[row].open = 0;
         compositor_clip_leave(row);
         compositor_popup_leave(row);
         compositor_leave(row);
 }
 
 /*
-        A client's buffer, the rows that changed, into the row's picture: written in place into the buffer the compositor
-        shows, because it is this process that reads it, and into the other when the card is reading that one (the whole
-        of it then). The table is then as a program leaves it after a picture, and the row is taken at once.
+        One pixel of a picture laid over another, both premultiplied: the channels of the one over are kept and the other's let
+        through by what it does not cover. The result is opaque, as a window's picture is.
 */
+static unsigned int compositor_wl_over(unsigned int over, unsigned int under)
+{
+        unsigned int through = 255u - (over >> 24), out = 0xff000000u;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                unsigned int sum = ((over >> shift) & 255u) + ((((under >> shift) & 255u) * through + 127u) / 255u);
+
+                out |= (sum > 255u ? 255u : sum) << shift;
+        }
+        return out;
+}
+
+/*
+        A client's buffer, the rows that changed, into the row's picture. A window's picture is made of one or more of these
+        (the window's own buffer and the subsurfaces over it), so they are laid one after another into the buffer of the table
+        the compositor will show, and the row is taken once, when the last of them is down, with what they touched as its damage.
+
+        The buffer is written in place, because it is this process that reads it, and the other buffer when the card is reading
+        this one (a window that is scanned out by itself), seeded from the one shown unless the first picture covers it. Whatever
+        goes into the other buffer is a window the compositor has to compose again from the start.
+*/
+static void compositor_wl_laid(int row, long x1, long y1, long x2, long y2)
+{
+        if (compositor_wl.laying[row].touched)
+        {
+                x1 = x1 < compositor_wl.laying[row].x1 ? x1 : compositor_wl.laying[row].x1;
+                y1 = y1 < compositor_wl.laying[row].y1 ? y1 : compositor_wl.laying[row].y1;
+                x2 = x2 > compositor_wl.laying[row].x2 ? x2 : compositor_wl.laying[row].x2;
+                y2 = y2 > compositor_wl.laying[row].y2 ? y2 : compositor_wl.laying[row].y2;
+        }
+        compositor_wl.laying[row].touched = 1;
+        compositor_wl.laying[row].x1 = (int)x1;
+        compositor_wl.laying[row].y1 = (int)y1;
+        compositor_wl.laying[row].x2 = (int)x2;
+        compositor_wl.laying[row].y2 = (int)y2;
+}
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         struct windows *table = compositor.table;
-        unsigned int width = (unsigned int)picture->width, height = (unsigned int)picture->height;
-        unsigned int which = compositor.showing[row] ? compositor.front[row] & 1u : 0;
         unsigned long pitch = (unsigned long)compositor_stride();
-        long x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-        int full = (int)picture->full || !picture->damages;
+        long width = picture->row_width, height = picture->row_height;
+        long count = picture->full || !picture->damages ? 1 : picture->damages;
         unsigned int *to;
 
         (void)context;
-        width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
-        height = height > (unsigned int)compositor_most_height() ? (unsigned int)compositor_most_height() : height;
-        if (compositor.showing[row] && (table->pinned[row] || compositor.direct_row == row))
+        if (row < 0 || row >= WINDOWS || !table)
+                return -1;
+        width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
+        height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
+        if (!compositor_wl.laying[row].open)
         {
-                which ^= 1u;
-                full = 1;
-        }
-        to = (unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + which) * compositor.buffer);
-        if (full)
-        {
-                memory_copy_rect_u32(to, pitch, (const unsigned int *)picture->pixels, (unsigned long)picture->stride / 4, width, height);
-                x2 = (long)width;
-                y2 = (long)height;
-        }
-        else
-                for (long at = 0; at < picture->damages; at++)
-                {
-                        long left = picture->damage[at].x, top = picture->damage[at].y;
-                        long right = left + picture->damage[at].width, bottom = top + picture->damage[at].height;
+                unsigned int shown = compositor.showing[row] ? compositor.front[row] & 1u : 0;
+                int pinned = compositor.showing[row] && (table->pinned[row] || compositor.direct_row == row);
+                int covers = picture->pixels && !picture->blend && !picture->dest_x && !picture->dest_y && picture->width >= width &&
+                             picture->height >= height && (picture->full || !picture->damages);
 
-                        right = right > (long)width ? (long)width : right;
-                        bottom = bottom > (long)height ? (long)height : bottom;
+                compositor_wl.laying[row].open = 1;
+                compositor_wl.laying[row].touched = 0;
+                compositor_wl.laying[row].full = (unsigned char)pinned;
+                compositor_wl.laying[row].which = (unsigned char)(shown ^ (unsigned int)pinned);
+                if (pinned && !covers)
+                        memory_copy_rect_u32((unsigned int *)((char *)table + compositor.pixels +
+                                                              ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer),
+                                             pitch,
+                                             (const unsigned int *)((char *)table + compositor.pixels +
+                                                                    ((unsigned long)row * 2 + shown) * compositor.buffer),
+                                             pitch, (unsigned long)width, (unsigned long)height);
+        }
+        to = (unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer);
+        if (picture->pixels)
+        {
+                if (count > WAYLAND_DAMAGE)
+                        count = WAYLAND_DAMAGE;
+                for (long at = 0; at < count; at++)
+                {
+                        long left = 0, top = 0, right = picture->width, bottom = picture->height;
+                        long x = picture->dest_x, y = picture->dest_y;
+
+                        if (!picture->full && picture->damages)
+                        {
+                                left = picture->damage[at].x;
+                                top = picture->damage[at].y;
+                                right = left + picture->damage[at].width;
+                                bottom = top + picture->damage[at].height;
+                        }
+                        // Within the buffer, then within the window, with the source moving as the place does.
+                        left = left < 0 ? 0 : left;
+                        top = top < 0 ? 0 : top;
+                        right = right > picture->width ? picture->width : right;
+                        bottom = bottom > picture->height ? picture->height : bottom;
+                        if (x + left < 0)
+                                left = -x;
+                        if (y + top < 0)
+                                top = -y;
+                        if (x + right > width)
+                                right = width - x;
+                        if (y + bottom > height)
+                                bottom = height - y;
                         if (right <= left || bottom <= top)
                                 continue;
-                        memory_copy_rect_u32(to + (unsigned long)top * pitch + (unsigned long)left, pitch,
-                                             (const unsigned int *)(picture->pixels + top * picture->stride) + left,
-                                             (unsigned long)picture->stride / 4, (unsigned long)(right - left), (unsigned long)(bottom - top));
-                        if (x2 == 0 && y2 == 0)
-                                x1 = left, y1 = top, x2 = right, y2 = bottom;
+                        if (picture->blend)
+                                for (long r = top; r < bottom; r++)
+                                {
+                                        const unsigned int *from = (const unsigned int *)(picture->pixels + r * picture->stride);
+                                        unsigned int *into = to + (unsigned long)(y + r) * pitch + (unsigned long)x;
+
+                                        for (long c = left; c < right; c++)
+                                                into[c] = compositor_wl_over(from[c], into[c]);
+                                }
                         else
-                        {
-                                x1 = left < x1 ? left : x1;
-                                y1 = top < y1 ? top : y1;
-                                x2 = right > x2 ? right : x2;
-                                y2 = bottom > y2 ? bottom : y2;
-                        }
+                                memory_copy_rect_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
+                                                     (const unsigned int *)(picture->pixels + top * picture->stride) + left,
+                                                     (unsigned long)picture->stride / 4, (unsigned long)(right - left),
+                                                     (unsigned long)(bottom - top));
+                        compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
                 }
-        if (compositor_wl_cut(picture->pixels))
-                return -1;
-        table->width[row] = width;
-        table->height[row] = height;
-        table->buffer_index[row] = which;
-        table->damage_x[row] = (int)x1;
-        table->damage_y[row] = (int)y1;
-        table->damage_width[row] = full ? 0 : (int)(x2 - x1);
-        table->damage_height[row] = full ? 0 : (int)(y2 - y1);
+                if (compositor_wl_cut(picture->pixels))
+                {
+                        compositor_wl.laying[row].open = 0;
+                        return -1;
+                }
+        }
+        if (!picture->last)
+                return 0;
+        if (width != (long)table->width[row] || height != (long)table->height[row] || !compositor_wl.laying[row].touched)
+                compositor_wl.laying[row].full = 1;
+        table->width[row] = (unsigned int)width;
+        table->height[row] = (unsigned int)height;
+        table->buffer_index[row] = compositor_wl.laying[row].which;
+        table->damage_x[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].x1;
+        table->damage_y[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].y1;
+        table->damage_width[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].x2 - compositor_wl.laying[row].x1;
+        table->damage_height[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].y2 - compositor_wl.laying[row].y1;
+        compositor_wl.laying[row].open = 0;
         __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
         compositor_take(row);
         return 0;

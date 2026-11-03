@@ -7,9 +7,10 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
-        only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -q quiet,
+        only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
+        -q quiet,
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
         compiled by libxkbcommon and each key says its keysym and its text).
         Exit 0 once the frames are drawn, 1 on a protocol error or a connection that ends, 2 when it cannot start.
@@ -42,6 +43,7 @@ static struct wl_compositor *compositor;
 static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct wl_seat *seat;
+static struct wl_subcompositor *subcompositor;
 static struct wl_surface *surface;
 static struct xdg_surface *xdg_surface;
 static struct xdg_toplevel *toplevel;
@@ -49,7 +51,7 @@ static struct wl_callback *frame_callback;
 static struct buffer buffers[2];
 
 static int width = 320, height = 240, frames_wanted = 60, frames, configures, acked, closed, quiet, still, damage_only;
-static int maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1, verbose;
+static int child_wanted, maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1, verbose;
 static const char *title = "wayland-shm", *app_id = "wayland-shm";
 
 static void say(const char *what, long value)
@@ -378,7 +380,7 @@ static void keyboard_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t,
 
 static void keyboard_modifiers(void *d, struct wl_keyboard *k, uint32_t s, uint32_t a, uint32_t b, uint32_t c, uint32_t g)
 {
-        (void)d; (void)k; (void)s;
+        (void)d; (void)k; (void)s; (void)g;
 #ifdef HAVE_XKB
         if (xkb_st)
                 xkb_state_update_mask(xkb_st, a, b, c, 0, 0, g);
@@ -424,6 +426,8 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
                 shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
         else if (!strcmp(interface, xdg_wm_base_interface.name))
                 wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, version < 6 ? version : 6);
+        else if (!strcmp(interface, wl_subcompositor_interface.name))
+                subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
         else if (!strcmp(interface, wl_seat_interface.name))
                 seat = wl_registry_bind(registry, name, &wl_seat_interface, version < 9 ? version : 9);
 }
@@ -442,7 +446,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdqv")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfduqv")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -454,6 +458,7 @@ int main(int argc, char **argv)
                 case 'm': maximize = 1; break;
                 case 'f': fullscreen = 1; break;
                 case 'd': damage_only = 1; break;
+                case 'u': child_wanted = 1; break;
                 case 'q': quiet = 1; break;
                 case 'v': verbose = 1; break;
                 default: return 2;
@@ -493,6 +498,28 @@ int main(int argc, char **argv)
         if (fullscreen)
                 xdg_toplevel_set_fullscreen(toplevel, 0);
         wl_surface_commit(surface);
+        if (child_wanted)
+        {
+                // A subsurface the window shows at once, not held for the window's commit.
+                struct buffer picture;
+                struct wl_surface *child;
+                struct wl_subsurface *sub;
+
+                if (!subcompositor || make_buffer(&picture, 64, 48) < 0)
+                {
+                        fprintf(stderr, "wayland-shm: no subcompositor\n");
+                        return 2;
+                }
+                for (int at = 0; at < 64 * 48; at++)
+                        ((unsigned *)picture.data)[at] = 0xff10ff20u;
+                child = wl_compositor_create_surface(compositor);
+                sub = wl_subcompositor_get_subsurface(subcompositor, child, surface);
+                wl_subsurface_set_position(sub, 10, 20);
+                wl_subsurface_set_desync(sub);
+                wl_surface_attach(child, picture.buffer, 0, 0);
+                wl_surface_damage_buffer(child, 0, 0, 64, 48);
+                wl_surface_commit(child);
+        }
         while (!closed && frames < frames_wanted && wl_display_dispatch(display) != -1)
                 ;
         if (wl_display_get_error(display))

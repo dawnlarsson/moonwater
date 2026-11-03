@@ -154557,26 +154557,52 @@ static int fake_row_picture(void *context, int row, const struct wayland_picture
         struct fake_row *r = &fake.row[row];
 
         (void)context;
-        r->picture_w = picture->width;
-        r->picture_h = picture->height;
-        r->width = picture->width;
-        r->height = picture->height;
-        r->pictures++;
-        if (picture->full || !picture->damages)
+        r->width = picture->row_width;
+        r->height = picture->row_height;
+        r->picture_w = picture->row_width;
+        r->picture_h = picture->row_height;
+        if (picture->pixels)
         {
-                for (long y = 0; y < picture->height && y < FAKE_H; y++)
-                        for (long x = 0; x < picture->width && x < FAKE_W; x++)
-                                r->pixels[y * FAKE_W + x] = ((const unsigned *)(picture->pixels + y * picture->stride))[x];
-                return 0;
-        }
-        for (long at = 0; at < picture->damages; at++)
-        {
-                const struct wayland_rect *d = &picture->damage[at];
+                long count = picture->full || !picture->damages ? 1 : picture->damages;
 
-                for (long y = d->y; y < d->y + d->height && y < FAKE_H; y++)
-                        for (long x = d->x; x < d->x + d->width && x < FAKE_W; x++)
-                                r->pixels[y * FAKE_W + x] = ((const unsigned *)(picture->pixels + y * picture->stride))[x];
+                for (long at = 0; at < count; at++)
+                {
+                        long x0 = 0, y0 = 0, x1 = picture->width, y1 = picture->height;
+
+                        if (!picture->full && picture->damages)
+                        {
+                                x0 = picture->damage[at].x;
+                                y0 = picture->damage[at].y;
+                                x1 = x0 + picture->damage[at].width;
+                                y1 = y0 + picture->damage[at].height;
+                        }
+                        for (long y = y0; y < y1; y++)
+                                for (long x = x0; x < x1; x++)
+                                {
+                                        long dx = picture->dest_x + x, dy = picture->dest_y + y;
+                                        unsigned source = ((const unsigned *)(picture->pixels + y * picture->stride))[x];
+
+                                        if (dx < 0 || dy < 0 || dx >= FAKE_W || dy >= FAKE_H || dx >= r->width || dy >= r->height)
+                                                continue;
+                                        if (picture->blend)
+                                        {
+                                                unsigned alpha = source >> 24, under = r->pixels[dy * FAKE_W + dx], out = 0xff000000u;
+
+                                                for (int shift = 0; shift < 24; shift += 8)
+                                                {
+                                                        unsigned s8 = (source >> shift) & 255, u8 = (under >> shift) & 255;
+
+                                                        out |= (s8 + (u8 * (255 - alpha) + 127) / 255) << shift;
+                                                }
+                                                r->pixels[dy * FAKE_W + dx] = out;
+                                        }
+                                        else
+                                                r->pixels[dy * FAKE_W + dx] = source;
+                                }
+                }
         }
+        if (picture->last)
+                r->pictures++;
         return 0;
 }
 
@@ -155031,6 +155057,7 @@ static void session_open(struct session *s)
         s->wm_base = wl_global(s->c, s->registry, WLI_xdg_wm_base, 6);
         s->seat = wl_global(s->c, s->registry, WLI_wl_seat, 9);
         s->output = wl_global(s->c, s->registry, WLI_wl_output, 4);
+        wl_global(s->c, s->registry, WLI_wl_subcompositor, 1);
 }
 
 /* A toplevel, configured and acknowledged, with a buffer of 32 by 24 of one colour shown. */
@@ -156654,6 +156681,491 @@ static void test_seat(void)
         wayland_stop();
 }
 
+
+/* A buffer of one colour, on a pool of its own: its id. */
+static unsigned long wl_buffer_of(struct session *t, long width, long height, unsigned colour, long format)
+{
+        struct wlc *c = t->c;
+        long bytes = width * height * 4, fd = wl_file(bytes, 0);
+        unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1), buffer = wlc_id(c, WLI_wl_buffer, 1);
+        unsigned *pixels = malloc((size_t)bytes);
+
+        for (long at = 0; at < width * height; at++)
+                pixels[at] = colour;
+        wl_file_put(fd, 0, pixels, bytes);
+        free(pixels);
+        wlc_send(c, t->shm, WLQ_wl_shm_create_pool, pool, fd, bytes);
+        close((int)fd);
+        wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, buffer, 0L, width, height, width * 4, format);
+        wlc_send(c, pool, WLQ_wl_shm_pool_destroy);
+        return buffer;
+}
+
+struct tree
+{
+        struct session s;
+        unsigned long subcompositor, child, sub;
+};
+
+/* A window of 32 by 24 in 0xff202020 with a subsurface of 8 by 8 in 0xff00ff00 at (4, 4), made and committed in step. */
+static void tree_open(struct tree *t, int desync)
+{
+        struct wlc *c;
+        unsigned long buffer;
+
+        session_open(&t->s);
+        c = t->s.c;
+        t->subcompositor = wl_global(c, t->s.registry, WLI_wl_subcompositor, 1);
+        session_window(&t->s, 0xff202020);
+        t->child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, t->s.compositor, WLQ_wl_compositor_create_surface, t->child);
+        t->sub = wlc_id(c, WLI_wl_subsurface, 1);
+        wlc_send(c, t->subcompositor, WLQ_wl_subcompositor_get_subsurface, t->sub, t->child, t->s.surface);
+        wlc_send(c, t->sub, WLQ_wl_subsurface_set_position, 4L, 4L);
+        if (desync)
+                wlc_send(c, t->sub, WLQ_wl_subsurface_set_desync);
+        buffer = wl_buffer_of(&t->s, 8, 8, 0xff00ff00, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, t->child, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, t->child, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+        wlc_send(c, t->child, WLQ_wl_surface_commit);
+}
+
+static void test_subsurfaces(void)
+{
+        struct tree t;
+        struct wlc *c;
+        unsigned long buffer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* synchronized: shown with the parent's commit, and not before */
+        tree_open(&t, 0);
+        c = t.s.c;
+        WLCHECK(c->errors == 0, "a subsurface is made (%s)", c->error_text);
+        WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0xff202020, "a synchronized subsurface's commit shows nothing yet");
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0xff00ff00 && fake.row[0].pixels[3 * FAKE_W + 3] == 0xff202020 &&
+                    fake.row[0].pixels[12 * FAKE_W + 12] == 0xff202020,
+                "the parent's commit lays it at its place and no further");
+        wlc_forget(c);
+        /* a second commit of it replaces the picture and lets the first go */
+        buffer = wl_buffer_of(&t.s, 8, 8, 0xff0000ff, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, t.child, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        WLCHECK(wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 0, "the picture it holds is not let go before its parent shows the next");
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0xff0000ff && wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 1,
+                "shown at the parent's commit, and the first picture is let go");
+        wlc_end(c);
+
+        /* desynchronized: at once */
+        tree_open(&t, 1);
+        c = t.s.c;
+        WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0xff00ff00, "a desynchronized subsurface shows at its own commit");
+        /* the parent drawn over it again: the subsurface is laid back on */
+        {
+                unsigned long over = wl_buffer_of(&t.s, 32, 24, 0xff808080, WLN_wl_shm_format_xrgb8888);
+
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach, over, 0L, 0L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        }
+        WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0xff00ff00 && fake.row[0].pixels[20 * FAKE_W + 20] == 0xff808080,
+                "the root drawn over it is drawn, and the subsurface is laid on it again");
+        /* taken off: what it covered is the root's again */
+        wlc_send(c, t.child, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].pixels[5 * FAKE_W + 5] == 0xff808080, "a null buffer takes it off and the root shows where it was");
+        wlc_end(c);
+
+        /* moved: drawn at the new place, the old place the root's */
+        tree_open(&t, 1);
+        c = t.s.c;
+        {
+                unsigned long over = wl_buffer_of(&t.s, 32, 24, 0xff808080, WLN_wl_shm_format_xrgb8888);
+
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach, over, 0L, 0L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        }
+        wlc_send(c, t.sub, WLQ_wl_subsurface_set_position, 16L, 10L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].pixels[12 * FAKE_W + 18] == 0xff00ff00 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff808080,
+                "a subsurface moved at its parent's commit is where it was put and the place it left is the root's");
+        wlc_end(c);
+
+        /* translucent: laid over, not copied */
+        tree_open(&t, 1);
+        c = t.s.c;
+        {
+                unsigned long ghost = wl_buffer_of(&t.s, 8, 8, 0x80000000, WLN_wl_shm_format_argb8888);
+
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach,
+                         wl_buffer_of(&t.s, 32, 24, 0xff808080, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                wlc_send(c, t.child, WLQ_wl_surface_attach, ghost, 0L, 0L);
+                wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+                wlc_send(c, t.child, WLQ_wl_surface_commit);
+        }
+        {
+                unsigned pixel = fake.row[0].pixels[5 * FAKE_W + 5];
+
+                WLCHECK((pixel & 0xff) >= 0x3f && (pixel & 0xff) <= 0x41, "an ARGB subsurface is laid over what is under it (%#x)", pixel);
+        }
+        wlc_end(c);
+
+        /* order: the later sibling is on top, and place_below puts it under */
+        tree_open(&t, 1);
+        c = t.s.c;
+        {
+                unsigned long other = wlc_id(c, WLI_wl_surface, 6), other_sub = wlc_id(c, WLI_wl_subsurface, 1);
+
+                wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, other);
+                wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, other_sub, other, t.s.surface);
+                wlc_send(c, other_sub, WLQ_wl_subsurface_set_desync);
+                wlc_send(c, other_sub, WLQ_wl_subsurface_set_position, 6L, 6L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                wlc_send(c, other, WLQ_wl_surface_attach, wl_buffer_of(&t.s, 8, 8, 0xffff0000, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                wlc_send(c, other, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+                wlc_send(c, other, WLQ_wl_surface_commit);
+                WLCHECK(fake.row[0].pixels[8 * FAKE_W + 8] == 0xffff0000, "of two overlapping subsurfaces the later is on top");
+                wlc_send(c, other_sub, WLQ_wl_subsurface_place_below, t.child);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                WLCHECK(fake.row[0].pixels[8 * FAKE_W + 8] == 0xff00ff00 && c->errors == 0, "placed below its sibling it is under it (%s)", c->error_text);
+                wlc_send(c, other_sub, WLQ_wl_subsurface_place_above, t.s.surface);
+                WLCHECK(c->errors == 0, "above the parent is a place");
+                wlc_send(c, other_sub, WLQ_wl_subsurface_place_above, wlc_id(c, WLI_wl_surface, 6));
+        }
+        WLCHECK(c->errors == 1, "a place above a surface that is nobody's sibling is refused (%s)", c->error_text);
+        wlc_end(c);
+
+        /* the rules of making one */
+        session_open(&t.s);
+        c = t.s.c;
+        t.subcompositor = wl_global(c, t.s.registry, WLI_wl_subcompositor, 1);
+        t.child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, t.child);
+        wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, wlc_id(c, WLI_wl_subsurface, 1), t.child, t.child);
+        WLCHECK(refused_with(c, WLN_wl_subcompositor_error_bad_surface), "a surface is not its own subsurface");
+        wlc_end(c);
+        session_open(&t.s);
+        session_window(&t.s, 0xff000000);
+        c = t.s.c;
+        t.subcompositor = wl_global(c, t.s.registry, WLI_wl_subcompositor, 1);
+        t.child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, t.child);
+        wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, wlc_id(c, WLI_wl_subsurface, 1), t.s.surface, t.child);
+        WLCHECK(refused_with(c, WLN_wl_subcompositor_error_bad_surface), "a window's surface cannot become a subsurface");
+        wlc_end(c);
+        session_open(&t.s);
+        c = t.s.c;
+        t.subcompositor = wl_global(c, t.s.registry, WLI_wl_subcompositor, 1);
+        {
+                unsigned long a = wlc_id(c, WLI_wl_surface, 6), b = wlc_id(c, WLI_wl_surface, 6);
+
+                wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, a);
+                wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, b);
+                wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, wlc_id(c, WLI_wl_subsurface, 1), a, b);
+                wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, wlc_id(c, WLI_wl_subsurface, 1), b, a);
+        }
+        WLCHECK(c->errors == 1, "a subsurface cycle is refused");
+        wlc_end(c);
+
+        /* a surface that has a subsurface object takes no second; one whose object was destroyed takes a new one and shows again */
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, wlc_id(c, WLI_wl_subsurface, 1), t.child, t.s.surface);
+        WLCHECK(refused_with(c, WLN_wl_subcompositor_error_bad_surface), "a surface that has its subsurface takes no second");
+        wlc_end(c);
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.sub, WLQ_wl_subsurface_destroy);
+        wlc_forget(c);
+        t.sub = wlc_id(c, WLI_wl_subsurface, 1);
+        wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, t.sub, t.child, t.s.surface);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_set_position, 10L, 10L);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_set_desync);
+        buffer = wl_buffer_of(&t.s, 8, 8, 0xff123456, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, t.child, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_damage_buffer, 0L, 0L, 8L, 8L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].pixels[12 * FAKE_W + 12] == 0xff123456,
+                "a surface whose subsurface was destroyed is made one again and is shown (%s)", c->error_text);
+        wlc_end(c);
+
+        /* destroyed in every order: the subsurface object, its surface, the parent first */
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.sub, WLQ_wl_subsurface_destroy);
+        WLCHECK(c->errors == 0, "a subsurface destroyed");
+        wlc_send(c, t.child, WLQ_wl_surface_destroy);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0, "and its surface, and the parent goes on");
+        wlc_end(c);
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.s.surface, WLQ_wl_surface_destroy);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_set_position, 1L, 1L);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_destroy);
+        WLCHECK(c->errors == 0, "a subsurface whose parent is gone is inert (%s)", c->error_text);
+        wlc_end(c);
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.child, WLQ_wl_surface_destroy);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_set_sync);
+        WLCHECK(c->errors == 0, "a subsurface's object outliving its surface is inert");
+        wlc_end(c);
+        /* the parent's window destroyed while a subsurface holds a picture: all comes back */
+        tree_open(&t, 1);
+        c = t.s.c;
+        wlc_send(c, t.s.toplevel, WLQ_xdg_toplevel_destroy);
+        wlc_end(c);
+
+        /* a picture's buffer destroyed while it is held: shown still, the record freed when it is let go */
+        tree_open(&t, 1);
+        c = t.s.c;
+        buffer = wl_buffer_of(&t.s, 32, 24, 0xff808080, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, buffer, WLQ_wl_buffer_destroy);
+        wlc_send(c, t.child, WLQ_wl_surface_attach, 0UL, 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff808080,
+                "a destroyed buffer that was the picture still draws the root (%s)", c->error_text);
+        {
+                long live = fake.maps - fake.unmaps;
+
+                buffer = wl_buffer_of(&t.s, 32, 24, 0xff404040, WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.maps - fake.unmaps == live,
+                        "and its record and its mapping go when the next picture replaces it (%ld mapped, %ld before)", fake.maps - fake.unmaps, live);
+        }
+        wlc_end(c);
+
+        /* a subsurface committed before its window is shown is shown with it */
+        session_open(&t.s);
+        c = t.s.c;
+        t.subcompositor = wl_global(c, t.s.registry, WLI_wl_subcompositor, 1);
+        t.s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, t.s.surface);
+        t.child = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_surface, t.child);
+        t.sub = wlc_id(c, WLI_wl_subsurface, 1);
+        wlc_send(c, t.subcompositor, WLQ_wl_subcompositor_get_subsurface, t.sub, t.child, t.s.surface);
+        wlc_send(c, t.sub, WLQ_wl_subsurface_set_desync);
+        wlc_send(c, t.child, WLQ_wl_surface_attach, wl_buffer_of(&t.s, 8, 8, 0xff00ff00, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+        wlc_send(c, t.child, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && !fake.row[0].used, "a subsurface of a window not shown shows nothing and is no error");
+        wlc_end(c);
+
+        /* the pointer picks the topmost subsurface that shows where it is, in that surface's own pixels */
+        {
+                struct wl_event_seen *e;
+                unsigned long pointer;
+
+                tree_open(&t, 1);
+                c = t.s.c;
+                pointer = wlc_id(c, WLI_wl_pointer, 9);
+                wlc_send(c, t.s.seat, WLQ_wl_seat_get_pointer, pointer);
+                wlc_forget(c);
+                wayland_pointer_to(0, 6, 7);
+                wlc_pump(c);
+                e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+                WLCHECK(e && e->u[1] == t.child && e->u[2] == 2 * 256 && e->u[3] == 3 * 256, "over a subsurface the pointer enters it, at its own place in it");
+                wlc_forget(c);
+                wayland_pointer_motion(0, 20, 20);
+                wlc_pump(c);
+                e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_leave);
+                WLCHECK(e && e->u[1] == t.child, "moving off it is a leave of it");
+                e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+                WLCHECK(e && e->u[1] == t.s.surface && e->u[2] == 20 * 256, "and an enter of the window's own surface");
+                /* a subsurface with an input region of nothing takes no pointer */
+                {
+                        unsigned long region = wlc_id(c, WLI_wl_region, 6);
+
+                        wlc_send(c, t.s.compositor, WLQ_wl_compositor_create_region, region);
+                        wlc_send(c, t.child, WLQ_wl_surface_set_input_region, region);
+                        wlc_forget(c);
+                        wayland_pointer_motion(0, 6, 7);
+                        wlc_pump(c);
+                        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_motion);
+                        WLCHECK(e && wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_enter) == 0, "a surface whose input region is empty is passed through");
+                }
+                wlc_end(c);
+        }
+
+        /* frame callbacks of a subsurface wait for the window's frame, with its parent's */
+        tree_open(&t, 1);
+        c = t.s.c;
+        {
+                unsigned long callback = wlc_id(c, WLI_wl_callback, 1);
+
+                wlc_send(c, t.child, WLQ_wl_surface_frame, callback);
+                wlc_send(c, t.child, WLQ_wl_surface_commit);
+                WLCHECK(wayland_frame_wanted() && wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 0, "a subsurface's frame callback waits");
+                wayland_frame();
+                wlc_pump(c);
+                WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "and is answered with the window's frame");
+        }
+        wlc_end(c);
+        leak_check("subsurfaces");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
+/*
+        Trees of surfaces: made, hung from each other (and from themselves, and in rings), drawn on, moved, ordered,
+        synchronized and desynchronized, and taken apart by random steps, with the pointer moving over them and the
+        window woken between. What each step shows is the rows above's; what is asked here is that nothing fails, no event
+        is malformed, and every buffer, mapping and window comes back.
+*/
+static void test_tree_fuzz(long rounds)
+{
+        enum { SURFACES = 8, BUFFERS = 5 };
+        struct session s;
+        struct wlc *c = 0;
+        unsigned long surface[SURFACES], sub[SURFACES], buffer[BUFFERS], subcompositor = 0;
+        long trees = 0, made = 0, drawn = 0, malformed = 0;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        for (long round = 0; round < rounds; round++)
+        {
+                long i = (long)(wl_random() % SURFACES), j = (long)(wl_random() % SURFACES), b = (long)(wl_random() % BUFFERS);
+
+                if (!c || wayland_dead(c->slot) || round % 250 == 0)
+                {
+                        if (c)
+                        {
+                                malformed += c->malformed;
+                                wlc_end(c);
+                        }
+                        session_open(&s);
+                        c = s.c;
+                        subcompositor = wl_global(c, s.registry, WLI_wl_subcompositor, 1);
+                        session_window(&s, 0xff303030);
+                        memset(surface, 0, sizeof surface);
+                        memset(sub, 0, sizeof sub);
+                        memset(buffer, 0, sizeof buffer);
+                        surface[0] = s.surface;
+                        wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, wlc_id(c, WLI_wl_pointer, 9));
+                        trees++;
+                }
+                switch (wl_random() % 17)
+                {
+                case 0:
+                case 1:
+                        if (i && !surface[i])
+                        {
+                                surface[i] = wlc_id(c, WLI_wl_surface, 6);
+                                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surface[i]);
+                        }
+                        break;
+                case 2:
+                case 3:
+                        // Mostly from another surface than itself, which is a fault of the client and the end of it.
+                        if (j == i && wl_random() % 16)
+                                j = (j + 1) % SURFACES;
+                        if (i && surface[i] && !sub[i] && surface[j])
+                        {
+                                sub[i] = wlc_id(c, WLI_wl_subsurface, 1);
+                                if (wlc_send(c, subcompositor, WLQ_wl_subcompositor_get_subsurface, sub[i], surface[i], surface[j]) >= 0)
+                                        made++;
+                        }
+                        break;
+                case 4:
+                        buffer[b] = wl_buffer_of(&s, 4 + (long)(wl_random() % 28), 4 + (long)(wl_random() % 20), 0xff000000u | (unsigned)wl_random(),
+                                                 wl_random() & 1 ? WLN_wl_shm_format_argb8888 : WLN_wl_shm_format_xrgb8888);
+                        break;
+                case 5:
+                case 6:
+                case 7:
+                        // A null buffer takes the window off, and it needs a configure before it shows again: only a subsurface is taken off here.
+                        if (surface[i] && (buffer[b] || i))
+                        {
+                                wlc_send(c, surface[i], WLQ_wl_surface_attach, buffer[b] && (!i || wl_random() % 8) ? buffer[b] : 0UL, 0L, 0L);
+                                wlc_send(c, surface[i], WLQ_wl_surface_damage_buffer, 0L, 0L, 40L, 30L);
+                                if (wlc_send(c, surface[i], WLQ_wl_surface_commit) >= 0)
+                                        drawn++;
+                        }
+                        break;
+                case 8:
+                        if (surface[i])
+                                wlc_send(c, surface[i], WLQ_wl_surface_commit);
+                        break;
+                case 9:
+                        if (sub[i])
+                                wlc_send(c, sub[i], WLQ_wl_subsurface_set_position, (long)(wl_random() % 40) - 8, (long)(wl_random() % 40) - 8);
+                        break;
+                case 10:
+                        if (sub[i] && surface[j])
+                                wlc_send(c, sub[i], wl_random() & 1 ? WLQ_wl_subsurface_place_above : WLQ_wl_subsurface_place_below, surface[j]);
+                        break;
+                case 11:
+                        if (sub[i])
+                                wlc_send(c, sub[i], wl_random() & 1 ? WLQ_wl_subsurface_set_sync : WLQ_wl_subsurface_set_desync);
+                        break;
+                case 12:
+                        if (sub[i])
+                        {
+                                wlc_send(c, sub[i], WLQ_wl_subsurface_destroy);
+                                sub[i] = 0;
+                        }
+                        break;
+                case 13:
+                        if (i && surface[i])
+                        {
+                                wlc_send(c, surface[i], WLQ_wl_surface_destroy);
+                                surface[i] = 0;
+                        }
+                        break;
+                case 14:
+                        if (buffer[b])
+                        {
+                                wlc_send(c, buffer[b], WLQ_wl_buffer_destroy);
+                                buffer[b] = 0;
+                        }
+                        break;
+                case 15:
+                        if (wl_random() & 1)
+                                wayland_pointer_to(0, (long)(wl_random() % 44) - 6, (long)(wl_random() % 36) - 6);
+                        else
+                                wayland_pointer_motion(0, (long)(wl_random() % 44) - 6, (long)(wl_random() % 36) - 6);
+                        break;
+                default:
+                        for (int row = 0; row < WAYLAND_ROWS; row++)
+                                if (fake.row[row].used)
+                                {
+                                        fake.row[row].states = (long)(wl_random() & 0x1f);
+                                        fake.row[row].width_asked = (long)(wl_random() % 60);
+                                        wayland_row_wake(row);
+                                }
+                        wayland_frame();
+                        break;
+                }
+                if (round % 8 == 0 && c && !wayland_dead(c->slot))
+                        wlc_pump(c);
+        }
+        if (c)
+        {
+                malformed += c->malformed;
+                wlc_end(c);
+        }
+        WLCHECK(malformed == 0, "every event of the tree fuzz was well-formed (%ld malformed)", malformed);
+        WLCHECK(made > 0 && drawn > 0 && trees > 1, "the tree fuzz hung subsurfaces and drew on surfaces (%ld, %ld, %ld trees)", made, drawn, trees);
+        leak_check("tree fuzz");
+        WLCHECK(fds_balanced(), "every descriptor of the tree fuzz was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+        printf("CHECK_wayland tree fuzz: %ld rounds, %ld subsurfaces, %ld commits, %ld trees\n", rounds, made, drawn, trees);
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -156670,6 +157182,8 @@ int main(int argc, char **argv)
         test_wire();
         test_caps();
         test_seat();
+        test_subsurfaces();
+        test_tree_fuzz(rounds);
         test_fuzz(rounds);
         test_raw(rounds);
         printf("CHECK_wayland: %u checks, %u failures\n", wl_checks, wl_failures);
