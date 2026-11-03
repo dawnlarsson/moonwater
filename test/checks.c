@@ -117181,7 +117181,7 @@ b32 main()
 }
 #endif
 
-#if defined(CHECK_terminal) || defined(CHECK_kit_frames)
+#if defined(CHECK_terminal) || defined(CHECK_kit_frames) || defined(CHECK_gpu_kit)
 #include "../src/lib.util.c"
 #include "../src/moonwater/spark.c"
 #include "../src/canvas/window.c"
@@ -185558,6 +185558,80 @@ b32 main(void)
         return test_report(null);
 }
 #endif /* CHECK_gpu */
+
+#ifdef CHECK_gpu_kit
+#include "../src/canvas/gpu.c"
+/*
+        The kit's anti-aliased box on the GPU against ui_kit_fill, the painter it replaces: rounds of random boxes laid in order
+        over a random picture, in 256ths, off every edge, thin as a hair, wider than tall, with radii past the half (CSS
+        scales them), none at all, no area, and every alpha, the whole picture compared after each round. Needs an amdgpu
+        render node; without one it says so and passes.
+*/
+static unsigned int gpu_seed = 88172645u;
+static unsigned int gpu_random(void)
+{
+        gpu_seed ^= gpu_seed << 13, gpu_seed ^= gpu_seed >> 17, gpu_seed ^= gpu_seed << 5;
+        return gpu_seed;
+}
+
+static unsigned int gpu_kit_want[700 * 420];
+
+b32 main(void)
+{
+        enum { PW = 697, PH = 419, PP = 700, N = 64, ROUNDS = 40 };
+        positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
+        unsigned int address_to pic, address_to ops;
+        struct ui ui;
+        positive bad = 0;
+
+        if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20)))
+        {
+                string_format(log, "gpu: no amdgpu render node, skipped\n");
+                return test_report(null);
+        }
+        pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at), ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = gpu_kit_want, ui.pitch = PP, ui.width = PW, ui.height = PH, ui.top = 0, ui.bottom = PH, ui.scale = 100;
+        for (int round = 0; round < ROUNDS; round++)
+        {
+                for (positive i = 0; i < (positive)PP * PH; i++)
+                        pic[i] = gpu_kit_want[i] = gpu_random();
+                for (int k = 0; k < N; k++)
+                {
+                        unsigned int address_to q = ops + 8 * k, mode = gpu_random() % 8;
+                        int x0 = (int)(gpu_random() % ((PW + 16) * 256)) - 8 * 256, y0 = (int)(gpu_random() % ((PH + 16) * 256)) - 8 * 256;
+                        int w = (int)(gpu_random() % (mode == 0 ? 3 * 256 : mode < 3 ? 40 * 256 : 400 * 256)) - (mode == 7 ? 100 : 0);
+                        int h = (int)(gpu_random() % (mode == 1 ? 3 * 256 : mode < 3 ? 40 * 256 : 300 * 256)) - (mode == 7 ? 100 : 0);
+                        int rx = mode == 4 ? 0 : (int)(gpu_random() % (mode == 5 ? 900 * 256 : 24 * 256)), ry = mode == 4 ? 0 : (int)(gpu_random() % (mode == 6 ? 900 * 256 : 24 * 256));
+                        unsigned int argb = gpu_random();
+                        struct ui_box box;
+
+                        if (gpu_random() % 3 == 0)
+                                argb |= 0xff000000u;
+                        if (gpu_random() % 11 == 0)
+                                argb &= 0x00ffffffu;
+                        box.x0 = x0, box.y0 = y0, box.x1 = x0 + w, box.y1 = y0 + h, box.rx = rx, box.ry = ry;
+                        q[0] = 2, q[1] = (unsigned int)box.x0, q[2] = (unsigned int)box.y0, q[3] = (unsigned int)box.x1, q[4] = (unsigned int)box.y1, q[5] = argb, q[6] = (unsigned int)rx,
+                        q[7] = (unsigned int)ry;
+                        ui_kit_fill(&ui, &box, argb, 0);
+                }
+                if (!gpu_scene(ops_at, N, bins_at, pic_at, PP, PW, PH))
+                {
+                        check("gpu kit: the scene finishes", false);
+                        return test_report(null);
+                }
+                for (int y = 0; y < PH; y++)
+                        for (int x = 0; x < PW; x++)
+                        {
+                                checks++;
+                                if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++failures, ++bad) < 6)
+                                        string_format(log, "  FAIL gpu kit round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                      (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                        }
+        }
+        return test_report(null);
+}
+#endif /* CHECK_gpu_kit */
 
 #ifdef COVERAGE_hook
 /*
