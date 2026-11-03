@@ -124497,6 +124497,34 @@ static void caret_fade_check(void)
     check("caret: a fade is drawn, not skipped: it has at least 8 covers between solid and gone over a cycle and a half", mids >= 8);
 }
 
+/*
+        A code view under a finger: a drag of 5 pixels a report, 60 reports, is 300 pixels, and the view moves the lines they make.
+        A report short of a line used to round to no line, and the drag scrolled nothing unless each report was a line or more.
+*/
+static void check_code_finger(struct ui address_to wui)
+{
+    static struct ui_text view;
+    struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+    struct window_event move = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+    struct window_event up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0};
+    int x = SCROLL_CODE_LEFT + 40, y = SCROLL_CODE_TOP + SCROLL_CODE_HEIGHT / 2;
+    p64 before;
+    long lines, want;
+
+    scroll_setup(0);
+    scroll_code(wui, &view, 0);
+    before = view.top_line;
+    ui_text_event(wui, &view, &press, x, y);
+    for (int step = 1; step <= 60; step++)
+        ui_text_event(wui, &view, &move, x, y - 5 * step);
+    lines = (long)view.top_line - (long)before;
+    want = 300 / (long)view.line_height;
+    check("code view: a finger dragged 300 pixels up, in reports of 5, scrolls the lines that makes",
+          view.line_height > 5 && lines >= want - 1 && lines <= want + 1);
+    ui_text_event(wui, &view, &up, x, y - 300);
+    ui_text_close(&view);
+}
+
 static void check_field_drag_drawn(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -138483,6 +138511,7 @@ static fn field_check(struct ui address_to wui)
         check_select_scroll(wui);
         check_field_drag_drawn(wui);
         caret_fade_check();
+        check_code_finger(wui);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {

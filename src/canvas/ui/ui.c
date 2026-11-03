@@ -8065,6 +8065,7 @@ struct ui_text
         p64 drag_start, drag_end;
         p64 box_line, box_column;
         struct ui_drag kinetic;
+        int finger_left;                        // the finger's or throw's pixels not yet a line, up positive
         positive blink_at;                      // where the caret's phase restarted (ui_text_wake): a key or a move
         unsigned int caret_fade;                // how far the caret has faded: 0 solid, UI_CARET_FULL gone (0 new, so drawn)
         p32 asks, command;
@@ -9042,6 +9043,16 @@ static fn ui_text_extend(struct ui address_to ui, struct ui_text address_to t, p
         ui_text_wake(t);
 }
 
+// The lines a finger's or a throw's pixels make, up positive: the rest is kept for the next move, so a report shorter than a line
+// still scrolls once the pixels add up to one.
+static long ui_text_lines_moved(struct ui_text address_to t, int up)
+{
+        long pending = (long)t->finger_left + up, lines = t->line_height > 0 ? pending / t->line_height : 0;
+
+        t->finger_left = t->line_height > 0 ? (int)(pending - lines * t->line_height) : 0;
+        return lines;
+}
+
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
         b32 inside = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
@@ -9140,6 +9151,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         if (ui_text_handle_grab(ui, t, x, y))
                                 return UI_TEXT_MOVED;
                         ui_drag_start(&t->kinetic, y, now);
+                        t->finger_left = 0;
                         if (on)
                                 ui_press_begin(&t->tap, x, y, 0, true);
                         else
@@ -9196,10 +9208,11 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         {
                 if (t->touch)
                 {
-                        int moved = ui_drag_follow(&t->kinetic, y, now), lines = t->line_height ? -moved / t->line_height : 0;
+                        int moved = ui_drag_follow(&t->kinetic, y, now);
+                        long lines = ui_text_lines_moved(t, -moved);
+                        b64 to = (b64)t->top_line + lines;
 
                         ui_press_move(ui, &t->tap, x, y);
-                        b64 to = (b64)t->top_line + lines;
 
                         if (lines)
                                 t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
@@ -9231,7 +9244,8 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
 // A thrown finger's scroll, a frame at a time: whether it still moves.
 static b32 ui_text_fling(struct ui_text address_to t, positive now)
 {
-        int moved = ui_drag_step(&t->kinetic, now), lines = t->line_height ? -moved / t->line_height : 0;
+        int moved = ui_drag_step(&t->kinetic, now);
+        long lines = ui_text_lines_moved(t, -moved);
         b64 to = (b64)t->top_line + lines;
 
         if (lines)
