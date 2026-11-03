@@ -10964,12 +10964,63 @@ static unsigned int compositor_modifiers(void)
         the keys; with none, a key gives them to the topmost.
 */
 /*
-        The tiling chords, built in: Super with Left or Right puts the window with the keys on the half of its screen at
-        that side, Super with Up fills the screen, and Super with Down gives back the rectangle it had before it was put
-        on one (compositor_float). They are the arrangements a drag's snap makes (compositor_arrange, compositor_screen_part),
-        so a window tiled by a key and one let go at an edge are the same rectangle. A chord the machine script binds never
-        gets here (compositor_key runs the script's first), so a user's binding of the same keys takes them.
+        The tiling chords, built in: Super with an arrow walks the window with the keys through the arrangements a drag's
+        snap makes (compositor_arrange, compositor_screen_part), so a window tiled by a key and one let go at an edge are the
+        same rectangle. One step a press, and the same step from the same place every time:
+
+                floating        Left, Right: that half      Up: fill            Down: nothing
+                a half          Up: its top quarter         Down: its bottom quarter
+                                toward the other side: back to the rectangle it had (the chord that put it there, undone)
+                a top quarter   Down: its half              Up: fill            toward the other side: the other top quarter
+                a low quarter   Up: its half                toward the other side: the other low quarter
+                filled          Down: back to its rectangle                     Left, Right: that half
+
+        and any other press is nothing: Down never puts a window away, and Left or Right never takes it off its screen
+        (Super and Shift with Left or Right does that, compositor_screen_chord). A chord the machine script binds never gets
+        here (compositor_key runs the script's first), so a user's binding of the same keys takes them.
 */
+static unsigned int compositor_chord_next(unsigned int how, unsigned int code)
+{
+        int filled = how == COMPOSITOR_MAXIMIZED || how == COMPOSITOR_ROOM;
+
+        if (code == CK_KEY_LEFT || code == CK_KEY_RIGHT)
+        {
+                int left = code == CK_KEY_LEFT;
+
+                if (how == COMPOSITOR_FLOATING || filled)
+                        return left ? COMPOSITOR_LEFT : COMPOSITOR_RIGHT;
+                if (how == (left ? COMPOSITOR_RIGHT : COMPOSITOR_LEFT))
+                        return COMPOSITOR_FLOATING;
+                if (how == (left ? COMPOSITOR_TOP_RIGHT : COMPOSITOR_TOP_LEFT))
+                        return left ? COMPOSITOR_TOP_LEFT : COMPOSITOR_TOP_RIGHT;
+                if (how == COMPOSITOR_BOTTOM || how == (left ? COMPOSITOR_BOTTOM_RIGHT : COMPOSITOR_BOTTOM_LEFT))
+                        return left ? COMPOSITOR_BOTTOM_LEFT : COMPOSITOR_BOTTOM_RIGHT;
+                return how;
+        }
+        if (code == CK_KEY_UP)
+                switch (how)
+                {
+                case COMPOSITOR_FLOATING: case COMPOSITOR_TOP_LEFT: case COMPOSITOR_TOP_RIGHT: case COMPOSITOR_BOTTOM:
+                        return COMPOSITOR_MAXIMIZED;
+                case COMPOSITOR_LEFT: return COMPOSITOR_TOP_LEFT;
+                case COMPOSITOR_RIGHT: return COMPOSITOR_TOP_RIGHT;
+                case COMPOSITOR_BOTTOM_LEFT: return COMPOSITOR_LEFT;
+                case COMPOSITOR_BOTTOM_RIGHT: return COMPOSITOR_RIGHT;
+                default: return how;
+                }
+        if (code == CK_KEY_DOWN)
+                switch (how)
+                {
+                case COMPOSITOR_MAXIMIZED: case COMPOSITOR_ROOM: return COMPOSITOR_FLOATING;
+                case COMPOSITOR_LEFT: return COMPOSITOR_BOTTOM_LEFT;
+                case COMPOSITOR_RIGHT: return COMPOSITOR_BOTTOM_RIGHT;
+                case COMPOSITOR_TOP_LEFT: return COMPOSITOR_LEFT;
+                case COMPOSITOR_TOP_RIGHT: return COMPOSITOR_RIGHT;
+                default: return how;
+                }
+        return how;
+}
+
 static void compositor_tile_chord(unsigned int code)
 {
         int row = compositor.focus;
@@ -10977,18 +11028,61 @@ static void compositor_tile_chord(unsigned int code)
 
         if (row < 0 || !compositor_visible(row) || compositor.cycle)
                 return;
-        switch (code)
-        {
-        case CK_KEY_LEFT: how = COMPOSITOR_LEFT; break;
-        case CK_KEY_RIGHT: how = COMPOSITOR_RIGHT; break;
-        case CK_KEY_UP: how = COMPOSITOR_MAXIMIZED; break;
-        case CK_KEY_DOWN:
-                compositor_float(row);
+        how = compositor_chord_next(compositor.arranged[row], code);
+        if (how == compositor.arranged[row])
                 return;
-        default:
+        if (how == COMPOSITOR_FLOATING)
+                compositor_float(row);
+        else
+                compositor_arrange(row, how);
+}
+
+/*
+        Super and Shift with Left or Right: the window with the keys to the next screen that way -- the nearest whose left
+        edge is at or past this one's right (or whose right is at or before its left), the one most level with it of two as
+        near -- keeping what it fills there, a floating one its share of the room as a screen's carry does (and the
+        rectangle a restore puts back goes with it). There is no wrap at the last screen. Its scale is the new screen's.
+*/
+static void compositor_screen_chord(unsigned int code)
+{
+        int row = compositor.focus, from, to = -1, right = code == CK_KEY_RIGHT;
+        long long best = -1, level = 0;
+        unsigned int count, how;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        if (row < 0 || !compositor_visible(row) || compositor.cycle || count < 2)
+                return;
+        from = compositor_screen_of(row);
+        for (unsigned int at = 0; at < count; at++)
+        {
+                const int *s = screens[at], *f = screens[from];
+                long long gap = right ? (long long)s[0] - (f[0] + f[2]) : (long long)f[0] - (s[0] + s[2]);
+                long long off = ((long long)s[1] * 2 + s[3]) - ((long long)f[1] * 2 + f[3]);
+
+                off = off < 0 ? -off : off;
+                if ((int)at == from || gap < 0)
+                        continue;
+                if (best < 0 || gap < best || (gap == best && off < level))
+                        best = gap, level = off, to = (int)at;
+        }
+        if (to < 0)
+                return;
+        how = compositor.arranged[row];
+        {
+                int keep_x = compositor.saved_x[row], keep_y = compositor.saved_y[row];
+
+                compositor_screen_carry(screens[from], screens[to], &keep_x, &keep_y, (int)compositor.saved_w[row], (int)compositor.saved_h[row]);
+                compositor.saved_x[row] = keep_x, compositor.saved_y[row] = keep_y;
+        }
+        if (how == COMPOSITOR_FLOATING)
+        {
+                int rect[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+
+                compositor_screen_carry(screens[from], screens[to], &rect[0], &rect[1], rect[2], rect[3]);
+                compositor_set_rect(row, COMPOSITOR_FLOATING, rect);
                 return;
         }
-        compositor_arrange(row, how);
+        compositor_arrange_on(row, how == COMPOSITOR_ROOM ? COMPOSITOR_MAXIMIZED : how, to);
 }
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
@@ -11068,12 +11162,20 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         return;
                 }
 
-        // Super alone with an arrow (or Down): the tiling chords, which the script's bindings above have had first say.
+        // Super alone with an arrow: the tiling chords, which the script's bindings above have had first say; and Super and
+        // Shift with Left or Right, a window to the next screen.
         if ((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) == WINDOW_KEY_SUPER &&
             (code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP || code == CK_KEY_DOWN))
         {
                 if (value == 1)
                         compositor_tile_chord(code);
+                return;
+        }
+        if ((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) == (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT) &&
+            (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
+        {
+                if (value == 1)
+                        compositor_screen_chord(code);
                 return;
         }
 

@@ -121928,19 +121928,49 @@ static void check_compositor_tiling(void)
           compositor.arranged[1] == COMPOSITOR_LEFT && compositor.x[1] == 0 && compositor.y[1] == 0 &&
               table->want_width[1] == (unsigned int)half);
     compositor_key(0, CK_KEY_RIGHT, 1, 0);
+    check("tiling: Super and Right on the left half undoes it: the rectangle the window had",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50 && compositor.y[1] == 30 &&
+              table->want_width[1] == 120 && table->want_height[1] == 80);
+    compositor_key(0, CK_KEY_RIGHT, 1, 0);
     check("tiling: Super and Right puts it on the right half, its left edge at the middle",
           compositor.arranged[1] == COMPOSITOR_RIGHT && compositor.x[1] == half && table->want_width[1] == (unsigned int)half);
     compositor_key(0, CK_KEY_UP, 1, 0);
-    check("tiling: Super and Up fills the screen", compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor.x[1] == 0 &&
-                                                       table->want_width[1] == GLASS_SIDE && table->want_height[1] == GLASS_SIDE);
+    check("tiling: Super and Up on the right half is its top quarter",
+          compositor.arranged[1] == COMPOSITOR_TOP_RIGHT && compositor.x[1] == half && compositor.y[1] == 0 &&
+              table->want_width[1] == (unsigned int)half && table->want_height[1] == (unsigned int)half);
+    compositor_key(0, CK_KEY_LEFT, 1, 0);
+    check("tiling: Super and Left on the top right quarter is the top left one", compositor.arranged[1] == COMPOSITOR_TOP_LEFT &&
+                                                                                  compositor.x[1] == 0 && compositor.y[1] == 0);
     compositor_key(0, CK_KEY_DOWN, 1, 0);
-    check("tiling: Super and Down gives back the rectangle the window had before it was tiled",
+    check("tiling: Super and Down on the top left quarter is the left half", compositor.arranged[1] == COMPOSITOR_LEFT &&
+                                                                              table->want_height[1] == GLASS_SIDE);
+    compositor_key(0, CK_KEY_DOWN, 1, 0);
+    check("tiling: Super and Down on the left half is its bottom quarter",
+          compositor.arranged[1] == COMPOSITOR_BOTTOM_LEFT && compositor.y[1] == half);
+    compositor_key(0, CK_KEY_DOWN, 1, 0);
+    check("tiling: Super and Down on the bottom quarter is nothing", compositor.arranged[1] == COMPOSITOR_BOTTOM_LEFT);
+    compositor_key(0, CK_KEY_UP, 1, 0);
+    compositor_key(0, CK_KEY_LEFT, 1, 0);
+    check("tiling: Super and Up on it is the left half again, and Left on the left half is nothing: it stays on its screen",
+          compositor.arranged[1] == COMPOSITOR_LEFT && compositor.x[1] == 0);
+    compositor_key(0, CK_KEY_UP, 1, 0);
+    compositor_key(0, CK_KEY_UP, 1, 0);
+    check("tiling: Super and Up twice from the left half is its top quarter and then the whole screen",
+          compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor.x[1] == 0 && table->want_width[1] == GLASS_SIDE &&
+              table->want_height[1] == GLASS_SIDE);
+    compositor_key(0, CK_KEY_DOWN, 1, 0);
+    check("tiling: Super and Down on the filled window gives back the rectangle the window had before it was tiled",
           compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50 && compositor.y[1] == 30 &&
               table->want_width[1] == 120 && table->want_height[1] == 80);
+    compositor_key(0, CK_KEY_DOWN, 1, 0);
+    check("tiling: Super and Down on a floating window is nothing: it is not put away",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50 && !(compositor.state[1] & WINDOW_MINIMIZED) &&
+              compositor_visible(1));
 
     compositor.held[0] = CK_HELD_LSUPER | CK_HELD_LSHIFT;
     compositor_key(0, CK_KEY_LEFT, 1, 0);
-    check("tiling: Shift with Super and Left is no tiling", compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50);
+    check("tiling: Shift with Super and Left is no tiling, and with one screen moves nothing",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 50);
     compositor.held[0] = CK_HELD_LSUPER;
 
     compositor_keys.count = 1;
@@ -123084,6 +123114,46 @@ static void check_compositor_cancel(void)
           compositor.resize == COMPOSITOR_NONE && compositor.table->want_width[1] == 100 && compositor.x[1] == 60);
     screens_hand(60 + 100 + 2 + 40, 100, -1);
     compositor.press = COMPOSITOR_NONE;
+}
+
+/*
+        Super and Shift with Left or Right takes the window with the keys to the next screen that way: floating at its share
+        of the room, a tile as the same tile there, its remembered rectangle carried with it, and no wrap past the last
+        screen. Two screens side by side, A at the left and B at the right, each 256 by 256.
+*/
+static void check_compositor_screen_chord(void)
+{
+    if (!layout_table_map(512))
+    {
+        check("screen chord: the table is mapped", false);
+        return;
+    }
+    layout_setup(512, 1);
+    compositor.table->motion = 1;
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
+    layout_show(1, 10, 20, 100, 40);
+    compositor.stack[0] = 1, compositor.stacked = 1;
+    compositor_focus(1);
+    compositor.held[0] = CK_HELD_LSUPER | CK_HELD_LSHIFT;
+    compositor_key(0, CK_KEY_RIGHT, 1, 0);
+    check("screen chord: floating, it goes to the screen on the right at its share of the room",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor_screen_of(1) == 1 && compositor.x[1] == 256 + 10 &&
+              compositor.y[1] == 20);
+    compositor_key(0, CK_KEY_RIGHT, 1, 0);
+    check("screen chord: past the last screen there is no wrap", compositor_screen_of(1) == 1 && compositor.x[1] == 266);
+    compositor.held[0] = CK_HELD_LSUPER;
+    compositor_key(0, CK_KEY_LEFT, 1, 0);
+    check("screen chord: (Super and Left: the left half of the right screen)", layout_is(1, COMPOSITOR_LEFT, 256, 0, 128, 256));
+    compositor.held[0] = CK_HELD_LSUPER | CK_HELD_LSHIFT;
+    compositor_key(0, CK_KEY_LEFT, 1, 0);
+    check("screen chord: a tile goes as the same tile, the left half of the left screen",
+          layout_is(1, COMPOSITOR_LEFT, 0, 0, 128, 256) && compositor_screen_of(1) == 0);
+    compositor.held[0] = CK_HELD_LSUPER;
+    compositor_key(0, CK_KEY_RIGHT, 1, 0);
+    check("screen chord: and its remembered rectangle came with it there and back: undone, it is where it floated on the left screen",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 10 && compositor.y[1] == 20 && compositor_screen_of(1) == 0);
 }
 
 /*
@@ -141818,6 +141888,7 @@ b32 main()
         check_compositor_snap_edges();
         check_compositor_restore();
         check_compositor_cancel();
+        check_compositor_screen_chord();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();
