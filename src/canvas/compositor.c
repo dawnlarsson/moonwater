@@ -12137,6 +12137,8 @@ static void compositor_screen_chord(unsigned int code)
 #ifdef CONFIG_MOONWATER_WAYLAND
 // A key a client's window reads as it is, from the keymap it was sent (wayland_host.c): true when the key was the client's.
 static int compositor_wl_key(unsigned int code, int value);
+static int compositor_wl_hold_counts(int dx, int dy, positive now);
+static void compositor_wl_hold_keep(void);
 #endif
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
@@ -13336,11 +13338,19 @@ static int compositor_report(positive now, positive stamp)
                 int dx = compositor.raw_x, dy = compositor.raw_y, gain;
 
                 compositor.raw_x = compositor.raw_y = 0;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // A client's window holds the pointer locked: the hand's counts are its, and the pointer does not move.
+                if (compositor_wl_hold_counts(dx, dy, now))
+                        return moved;
+#endif
                 gain = compositor_gain_wanted(compositor_gain_of(dx, dy, now - compositor.stamp), compositor.flat,
                                               compositor.sensitivity);
                 compositor.stamp = now;
                 compositor.real_x += compositor_accel(dx, &compositor.accel_x, gain);
                 compositor.real_y += compositor_accel(dy, &compositor.accel_y, gain);
+#ifdef CONFIG_MOONWATER_WAYLAND
+                compositor_wl_hold_keep();
+#endif
                 compositor_predict_mouse(stamp, now);
                 moved = 1;
         }

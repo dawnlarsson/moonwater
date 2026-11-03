@@ -75,6 +75,7 @@ static struct
                 unsigned long done, total;
                 positive deadline;
         } transfer[COMPOSITOR_WL_TRANSFERS];
+        int hold_row, hold;             // the window that holds the pointer, and how: 0 free, 1 locked, 2 confined
         int dmabuf_table;               // the file of format and modifier pairs the feedback names, made the first time
         unsigned long render;           // the render node clients allocate on (a dev_t), found the first time; 1 when there is none
         positive slow_until[WAYLAND_CLIENTS];
@@ -918,6 +919,49 @@ static long compositor_wl_locks(void *context)
         return compositor.keymap.caps ? 2 : 0;
 }
 
+/* ---- games: the pointer held by a client's window ---- */
+
+/*
+        A client's window holds the pointer when the shim says so (a lock or a confinement, which the shim ends the moment the window
+        is not under the pointer or does not have the keys, so the person can always leave). Locked, the hand's counts are the
+        client's as they come, unaccelerated, and the pointer is neither moved nor drawn (it is drawn again where it stopped when the
+        lock ends); confined, the pointer moves as ever and is kept inside the window.
+*/
+static void compositor_wl_pointer_hold(void *context, long row, long mode)
+{
+        (void)context;
+        compositor_wl.hold_row = (int)row;
+        compositor_wl.hold = (int)mode;
+        compositor.touch.hidden = mode == 1;
+        compositor_cursor_move();
+}
+
+// The hand's counts, to the window that holds the pointer locked; 1 when they went there and the pointer is not to move.
+static int compositor_wl_hold_counts(int dx, int dy, positive now)
+{
+        if (compositor_wl.hold != 1 || compositor_wl.hold_row < 0)
+                return 0;
+        wayland_pointer_relative(compositor_wl.hold_row, dx, dy, (long)(now / 1000));
+        return 1;
+}
+
+// A pointer confined to a window, moved, is put back inside it.
+static void compositor_wl_hold_keep(void)
+{
+        int row = compositor_wl.hold_row;
+
+        if (compositor_wl.hold != 2 || row < 0)
+                return;
+        if (compositor.real_x < compositor.x[row])
+                compositor.real_x = compositor.x[row];
+        if (compositor.real_x > compositor.x[row] + (int)compositor.w[row] - 1)
+                compositor.real_x = compositor.x[row] + (int)compositor.w[row] - 1;
+        if (compositor.real_y < compositor.y[row])
+                compositor.real_y = compositor.y[row];
+        if (compositor.real_y > compositor.y[row] + (int)compositor.h[row] - 1)
+                compositor.real_y = compositor.y[row] + (int)compositor.h[row] - 1;
+}
+
 /* ---- dma-bufs ---- */
 
 /*
@@ -1437,6 +1481,7 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_repeat,
     compositor_wl_seat,
     compositor_wl_locks,
+    compositor_wl_pointer_hold,
     compositor_wl_dmabuf_info,
     compositor_wl_dmabuf_table,
     compositor_wl_dmabuf_map,
@@ -1496,6 +1541,7 @@ static void compositor_wl_start(void)
         compositor_wl.started = 1;
         for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
                 compositor_wl.transfer[at].in = compositor_wl.transfer[at].out = compositor_wl.transfer[at].keep = -1;
+        compositor_wl.hold_row = -1;
         // A paste's reader that has gone is an error of the write, not a signal that ends the compositor.
         system_signal_install(COMPOSITOR_WL_SIGPIPE, 1, 0, 0, null);
         // The handler of a pool cut under a read: SA_SIGINFO and SA_NODEFER, with the library's restorer.

@@ -154874,6 +154874,7 @@ static struct fake_host_state
         char clip_text[2][64];
         // dma-bufs: whether the fake takes any, how many pictures were read through a descriptor, whether the next is skipped
         long dmabuf_off, syncs, skip_next, dmabuf_maps;
+        long hold_row, hold_mode, holds; // the window that holds the pointer and how
         int dmabuf_table_fd;
 } fake;
 
@@ -155237,10 +155238,18 @@ static void *fake_dmabuf_map(void *context, long fd, long size)
         return at;
 }
 
+static void fake_pointer_hold(void *context, long row, long mode)
+{
+        (void)context;
+        fake.hold_row = row;
+        fake.hold_mode = mode;
+        fake.holds++;
+}
+
 static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
-    fake_locks, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
+    fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
     fake_clip_clear};
 
 /* ---- a client that builds its requests from the table ---- */
@@ -155593,7 +155602,7 @@ static void wl_file_put(long fd, long offset, const void *bytes, long count)
 struct session
 {
         struct wlc *c;
-        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback, data, primary, dmabuf;
+        unsigned long registry, compositor, shm, wm_base, seat, output, pool, buffer, surface, xdg, toplevel, callback, data, primary, dmabuf, relative, constraints, idle, shortcuts, tearing;
         long fd;
 };
 
@@ -155626,6 +155635,11 @@ static void session_open(struct session *s)
         s->data = wl_global(s->c, s->registry, WLI_wl_data_device_manager, 3);
         s->primary = wl_global(s->c, s->registry, WLI_zwp_primary_selection_device_manager_v1, 1);
         s->dmabuf = wl_global(s->c, s->registry, WLI_zwp_linux_dmabuf_v1, 4);
+        s->relative = wl_global(s->c, s->registry, WLI_zwp_relative_pointer_manager_v1, 1);
+        s->constraints = wl_global(s->c, s->registry, WLI_zwp_pointer_constraints_v1, 1);
+        s->idle = wl_global(s->c, s->registry, WLI_zwp_idle_inhibit_manager_v1, 1);
+        s->shortcuts = wl_global(s->c, s->registry, WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1);
+        s->tearing = wl_global(s->c, s->registry, WLI_wp_tearing_control_manager_v1, 1);
 }
 
 /* A toplevel, configured and acknowledged, with a buffer of 32 by 24 of one colour shown. */
@@ -155666,6 +155680,7 @@ static void wl_reset(void)
         if (fake.dmabuf_table_fd > 0)
                 close(fake.dmabuf_table_fd);
         memset(&fake, 0, sizeof fake);
+        fake.hold_row = -1;
         fake.caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
         fake.screen = (struct wayland_screen){0, 0, 1280, 720, 100, 60000, 340, 190, "Virtual-1"};
 }
@@ -158810,6 +158825,227 @@ static void test_dmabuf(void)
         wayland_stop();
 }
 
+/* ---- games: the pointer held, motion without a place ---- */
+
+struct gamec
+{
+        struct clipc k;
+        unsigned long pointer, relative;
+};
+
+/* A client with a window and a keyboard, a pointer, and the managers a game binds. */
+static void game_open(struct gamec *g)
+{
+        struct wlc *c;
+
+        clip_open(&g->k);
+        c = g->k.s.c;
+        g->pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, g->k.s.seat, WLQ_wl_seat_get_pointer, g->pointer);
+        g->k.s.relative = wl_global(c, g->k.s.registry, WLI_zwp_relative_pointer_manager_v1, 1);
+        g->k.s.constraints = wl_global(c, g->k.s.registry, WLI_zwp_pointer_constraints_v1, 1);
+        g->k.s.idle = wl_global(c, g->k.s.registry, WLI_zwp_idle_inhibit_manager_v1, 1);
+        g->k.s.shortcuts = wl_global(c, g->k.s.registry, WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1);
+        g->k.s.tearing = wl_global(c, g->k.s.registry, WLI_wp_tearing_control_manager_v1, 1);
+        g->relative = 0;
+}
+
+static unsigned long game_lock(struct gamec *g, int confine, long lifetime)
+{
+        struct wlc *c = g->k.s.c;
+        unsigned long object = wlc_id(c, confine ? WLI_zwp_confined_pointer_v1 : WLI_zwp_locked_pointer_v1, 1);
+
+        wlc_send(c, g->k.s.constraints, confine ? WLQ_zwp_pointer_constraints_v1_confine_pointer : WLQ_zwp_pointer_constraints_v1_lock_pointer, object,
+                 g->k.s.surface, g->pointer, 0UL, lifetime);
+        return object;
+}
+
+static void test_games(void)
+{
+        struct gamec a, b, d;
+        struct wlc *ca, *cb, *cd;
+        struct wl_event_seen *e;
+        unsigned long second, rel, inhibitor;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        game_open(&a);
+        game_open(&b);
+        ca = a.k.s.c;
+        cb = b.k.s.c;
+        WLCHECK(a.k.s.relative && a.k.s.constraints && a.k.s.idle && a.k.s.shortcuts && a.k.s.tearing, "the games' globals are offered");
+
+        /* relative motion of the pointer over a window: the places it moved, as moved */
+        wayland_keyboard_to(a.k.row);
+        wayland_pointer_to(a.k.row, 5, 5);
+        rel = wlc_id(ca, WLI_zwp_relative_pointer_v1, 1);
+        wlc_send(ca, a.k.s.relative, WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer, rel, a.pointer);
+        wlc_forget(ca);
+        wayland_pointer_motion(a.k.row, 9, 12);
+        wlc_pump(ca);
+        e = wlc_take(ca, WLI_zwp_relative_pointer_v1, WLE_zwp_relative_pointer_v1_relative_motion);
+        WLCHECK(e && e->u[2] == 4 * 256 && e->u[3] == 7 * 256 && e->u[4] == e->u[2] && e->u[5] == e->u[3],
+                "motion of the pointer is relative motion, the places it moved, accelerated or not the same");
+
+        /* a lock holds while the window is under the pointer and has the keys, and the hand's counts are the client's */
+        game_lock(&a, 0, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
+        wlc_pump(ca);
+        e = wlc_take(ca, WLI_zwp_locked_pointer_v1, WLE_zwp_locked_pointer_v1_locked);
+        WLCHECK(e && fake.hold_row == a.k.row && fake.hold_mode == 1, "a lock on the window under the pointer that has the keys holds it (%ld, mode %ld)",
+                fake.hold_row, fake.hold_mode);
+        wlc_forget(ca);
+        wayland_pointer_relative(a.k.row, 5, -3, 7000);
+        wlc_pump(ca);
+        e = wlc_take(ca, WLI_zwp_relative_pointer_v1, WLE_zwp_relative_pointer_v1_relative_motion);
+        WLCHECK(e && e->u[0] == 0 && e->u[1] == 7000 && e->u[2] == 5 * 256 && e->u[3] == (0xffffffffUL & (unsigned long)(-3 * 256)),
+                "the hand's counts of a locked pointer are relative motion, with the time in microseconds");
+        WLCHECK(wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_motion) == 0, "and no motion of a place");
+
+        /* Alt-Tab to another window ends it, and it holds again when its window has the keys again (persistent) */
+        wlc_forget(ca);
+        wayland_keyboard_to(b.k.row);
+        wlc_pump(ca);
+        e = wlc_take(ca, WLI_zwp_locked_pointer_v1, WLE_zwp_locked_pointer_v1_unlocked);
+        WLCHECK(e && fake.hold_mode == 0, "the keys going to another window let the pointer go and say so");
+        wlc_forget(ca);
+        wayland_keyboard_to(a.k.row);
+        wlc_pump(ca);
+        e = wlc_take(ca, WLI_zwp_locked_pointer_v1, WLE_zwp_locked_pointer_v1_locked);
+        WLCHECK(e && fake.hold_mode == 1, "a persistent lock holds again when its window has the keys again");
+        wlc_forget(ca);
+        wayland_pointer_to(a.k.row, -1, -1);
+        wayland_pointer_to(-1, 0, 0);
+        wlc_pump(ca);
+        WLCHECK(wlc_count(ca, WLI_zwp_locked_pointer_v1, WLE_zwp_locked_pointer_v1_unlocked) == 1 && fake.hold_mode == 0,
+                "the pointer leaving the window lets it go");
+        wayland_pointer_to(a.k.row, 5, 5);
+
+        /* a second constraint on the surface is the client's error */
+        game_lock(&a, 1, WLN_zwp_pointer_constraints_v1_lifetime_oneshot);
+        WLCHECK(refused_with(ca, WLN_zwp_pointer_constraints_v1_error_already_constrained), "a surface with a constraint takes no second");
+
+        /* a lock destroyed while it holds lets the pointer go, with no event of its own */
+        wlc_end(cb);
+        game_open(&b);
+        cb = b.k.s.c;
+        wayland_keyboard_to(b.k.row);
+        wayland_pointer_to(b.k.row, 3, 3);
+        second = game_lock(&b, 0, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
+        WLCHECK(fake.hold_row == b.k.row && fake.hold_mode == 1, "another client's window holds it, now that it is the one with the keys");
+        wlc_forget(cb);
+        wlc_send(cb, second, WLQ_zwp_locked_pointer_v1_destroy);
+        WLCHECK(fake.hold_mode == 0 && wlc_count(cb, WLI_zwp_locked_pointer_v1, WLE_zwp_locked_pointer_v1_unlocked) == 0 && cb->errors == 0,
+                "a lock that is destroyed lets the pointer go");
+
+        /* a one-shot lock is over the first time it is let go; a confinement holds the window the same way */
+        second = game_lock(&b, 0, WLN_zwp_pointer_constraints_v1_lifetime_oneshot);
+        WLCHECK(fake.hold_mode == 1, "a one-shot lock holds");
+        wayland_keyboard_to(a.k.row);
+        wayland_keyboard_to(b.k.row);
+        WLCHECK(fake.hold_mode == 0, "and does not hold again after the keys went away: it was one-shot");
+        wlc_send(cb, second, WLQ_zwp_locked_pointer_v1_destroy);
+        second = game_lock(&b, 1, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
+        wlc_pump(cb);
+        e = wlc_take(cb, WLI_zwp_confined_pointer_v1, WLE_zwp_confined_pointer_v1_confined);
+        WLCHECK(e && fake.hold_mode == 2 && fake.hold_row == b.k.row, "a confinement holds the window, mode 2");
+        wlc_send(cb, second, WLQ_zwp_confined_pointer_v1_destroy);
+
+        /* the surface gone while it is held, and the client gone while it is held */
+        second = game_lock(&b, 0, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
+        WLCHECK(fake.hold_mode == 1, "a lock again");
+        {
+                long held = wayland.constraints;
+
+                wlc_send(cb, b.k.s.surface, WLQ_wl_surface_destroy);
+                WLCHECK(wayland.constraints == held - 1, "the constraint of a destroyed surface is gone");
+        }
+        WLCHECK(fake.hold_mode == 0 && cb->errors == 0,
+                "the surface that is destroyed while it is held lets the pointer go (%s)", cb->error_text);
+        wlc_end(cb);
+        game_open(&b);
+        cb = b.k.s.c;
+        wayland_keyboard_to(b.k.row);
+        wayland_pointer_to(b.k.row, 3, 3);
+        game_lock(&b, 0, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
+        WLCHECK(fake.hold_mode == 1, "and again");
+        wlc_end(cb);
+        WLCHECK(fake.hold_mode == 0 && fake.hold_row < 0, "a client that goes while it holds the pointer lets it go");
+
+        /* the rules: a lifetime that is neither, the number of constraints and relative pointers */
+        game_open(&d);
+        cd = d.k.s.c;
+        {
+                unsigned long bad = wlc_id(cd, WLI_zwp_locked_pointer_v1, 1);
+
+                wlc_send(cd, d.k.s.constraints, WLQ_zwp_pointer_constraints_v1_lock_pointer, bad, d.k.s.surface, d.pointer, 0UL, 7L);
+                WLCHECK(cd->errors == 1 && cd->error_code == WAYLAND_INVALID_METHOD, "a lifetime that is neither is refused");
+        }
+        wlc_end(cd);
+        game_open(&d);
+        cd = d.k.s.c;
+        for (int at = 0; at < WAYLAND_CONSTRAINTS + 1 && !cd->errors; at++)
+        {
+                unsigned long surface = wlc_id(cd, WLI_wl_surface, 6), object = wlc_id(cd, WLI_zwp_locked_pointer_v1, 1);
+
+                wlc_send(cd, d.k.s.compositor, WLQ_wl_compositor_create_surface, surface);
+                wlc_send(cd, d.k.s.constraints, WLQ_zwp_pointer_constraints_v1_lock_pointer, object, surface, d.pointer, 0UL, 2L);
+        }
+        WLCHECK(cd->errors == 1 && cd->error_code == WAYLAND_NO_MEMORY, "a client holds at most eight constraints (%s)", cd->error_text);
+        wlc_end(cd);
+        game_open(&d);
+        cd = d.k.s.c;
+        for (int at = 0; at < WAYLAND_RELATIVES + 1 && !cd->errors; at++)
+                wlc_send(cd, d.k.s.relative, WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer, wlc_id(cd, WLI_zwp_relative_pointer_v1, 1), d.pointer);
+        WLCHECK(cd->errors == 1 && cd->error_code == WAYLAND_NO_MEMORY, "and at most eight relative pointers");
+        wlc_end(cd);
+
+        /* what a game asks that the desktop does not do: taken, and nothing happens */
+        game_open(&d);
+        cd = d.k.s.c;
+        inhibitor = wlc_id(cd, WLI_zwp_idle_inhibitor_v1, 1);
+        wlc_send(cd, d.k.s.idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, inhibitor, d.k.s.surface);
+        wlc_send(cd, inhibitor, WLQ_zwp_idle_inhibitor_v1_destroy);
+        WLCHECK(cd->errors == 0, "an idle inhibitor is taken and let go (%s)", cd->error_text);
+        inhibitor = wlc_id(cd, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1);
+        wlc_forget(cd);
+        wlc_send(cd, d.k.s.shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, inhibitor, d.k.s.surface, d.k.s.seat);
+        wayland_keyboard_to(d.k.row);
+        wlc_pump(cd);
+        WLCHECK(cd->errors == 0 && wlc_count(cd, WLI_zwp_keyboard_shortcuts_inhibitor_v1, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active) == 0,
+                "a shortcuts inhibitor is taken and never active: the compositor's chords are not a client's");
+        wlc_send(cd, d.k.s.shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, wlc_id(cd, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1),
+                 d.k.s.surface, d.k.s.seat);
+        WLCHECK(refused_with(cd, WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited), "a surface has one inhibitor");
+        wlc_end(cd);
+        game_open(&d);
+        cd = d.k.s.c;
+        {
+                unsigned long control = wlc_id(cd, WLI_wp_tearing_control_v1, 1);
+
+                wlc_send(cd, d.k.s.tearing, WLQ_wp_tearing_control_manager_v1_get_tearing_control, control, d.k.s.surface);
+                wlc_send(cd, control, WLQ_wp_tearing_control_v1_set_presentation_hint, (long)WLN_wp_tearing_control_v1_presentation_hint_async);
+                WLCHECK(cd->errors == 0, "tearing control is taken, and the hint (%s)", cd->error_text);
+                wlc_send(cd, control, WLQ_wp_tearing_control_v1_set_presentation_hint, 9L);
+                WLCHECK(cd->errors == 1 && cd->error_code == WAYLAND_INVALID_METHOD, "a hint that is neither is refused");
+        }
+        wlc_end(cd);
+        game_open(&d);
+        cd = d.k.s.c;
+        {
+                unsigned long control = wlc_id(cd, WLI_wp_tearing_control_v1, 1);
+
+                wlc_send(cd, d.k.s.tearing, WLQ_wp_tearing_control_manager_v1_get_tearing_control, control, d.k.s.surface);
+                wlc_send(cd, d.k.s.tearing, WLQ_wp_tearing_control_manager_v1_get_tearing_control, wlc_id(cd, WLI_wp_tearing_control_v1, 1), d.k.s.surface);
+                WLCHECK(refused_with(cd, WLN_wp_tearing_control_manager_v1_error_tearing_control_exists), "a surface has one tearing control");
+        }
+        wlc_end(cd);
+        wlc_end(ca);
+        leak_check("games");
+        WLCHECK(fake.hold_mode == 0, "nothing is held when everything is gone");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -158830,6 +159066,7 @@ int main(int argc, char **argv)
         test_geometry();
         test_cursor();
         test_dmabuf();
+        test_games();
         test_tree_fuzz(rounds);
         test_clipboard();
         test_clip_fuzz(rounds);

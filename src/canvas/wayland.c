@@ -97,6 +97,8 @@
 #define WAYLAND_FEEDBACKS 8          // zwp_linux_dmabuf_feedback_v1 one client holds
 #define WAYLAND_DMABUFS 48           // buffers made of dma-bufs one client has (each holds a descriptor)
 #define WAYLAND_DMABUFS_ALL 192      // and all clients together
+#define WAYLAND_CONSTRAINTS 8        // pointer locks and confinements one client holds
+#define WAYLAND_RELATIVES 8          // relative pointers one client holds
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
 #define WAYLAND_FOURCC_XRGB8888 0x34325258UL
 #define WAYLAND_MODIFIER_INVALID 0x00ffffffffffffffUL
@@ -236,6 +238,9 @@ struct wayland_host
         // dma-bufs. dmabuf_info is what is taken (0 for nothing, which keeps zwp_linux_dmabuf_v1 from being offered), dmabuf_table the
         // file of format and modifier pairs the feedback names (the host's: the shim never closes it, -1 for none), dmabuf_map a
         // descriptor that is a dma-buf of at least size bytes, mapped read-only (0 for a refusal; the descriptor stays the caller's).
+        // The pointer held by a client's window: mode 1 is locked (the hand's counts are the client's, unaccelerated, through
+        // wayland_pointer_relative, and the pointer is not drawn or moved), 2 is confined to the window, 0 is free. One at a time.
+        void (*pointer_hold)(void *context, long row, long mode);
         long (*dmabuf_info)(void *context, struct wayland_dmabuf_info *info);
         long (*dmabuf_table)(void *context, long *size);
         void *(*dmabuf_map)(void *context, long fd, long size);
@@ -314,6 +319,7 @@ struct wayland_surface
         unsigned short sub_parent, held;
         unsigned int sub_id, cached;
         long sub_x, sub_y, pend_x, pend_y, sub_order;
+        unsigned char tearing, shortcuts; // a tearing control and a shortcuts inhibitor it has
         unsigned char sub_sync, sub_dirty, pend_pos, need_full, input_none, shown_full, translucent;
         long translucent_x, translucent_y, translucent_w, translucent_h; // where a translucent picture was laid
         struct wayland_rect shown_rect;
@@ -378,6 +384,15 @@ struct wayland_offer
         unsigned long serial;
 };
 
+// A pointer lock or confinement: its kind (1 lock, 2 confine), whether it holds the pointer now, whether it ends with its first
+// deactivation, and the surface it is of (an index and one).
+struct wayland_constraint
+{
+        unsigned int id;
+        unsigned char live, kind, active, oneshot;
+        unsigned short surface;
+};
+
 // A zwp_linux_buffer_params_v1: the planes it was given, up to four, and whether it made its buffer.
 struct wayland_params
 {
@@ -412,6 +427,9 @@ struct wayland_client
         struct wayland_params params[WAYLAND_PARAMS];
         unsigned int feedback_id[WAYLAND_FEEDBACKS];
         unsigned char feedbacks, dmabufs;
+        struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
+        unsigned int relative_id[WAYLAND_RELATIVES];
+        unsigned char relatives;
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
         unsigned short index[WAYLAND_IDS];
         unsigned short server_index[WAYLAND_SERVER_IDS];
@@ -443,6 +461,7 @@ static struct
         unsigned long selection_serial[2];
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
+        long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
 } wayland;
 
 /* ---- the wire ---- */
@@ -781,6 +800,11 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_zwp_primary_selection_device_manager_v1, 1},
     {WLI_wp_cursor_shape_manager_v1, 2},
     {WLI_zwp_linux_dmabuf_v1, 4},
+    {WLI_zwp_relative_pointer_manager_v1, 1},
+    {WLI_zwp_pointer_constraints_v1, 1},
+    {WLI_zwp_idle_inhibit_manager_v1, 1},
+    {WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1},
+    {WLI_wp_tearing_control_manager_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -997,6 +1021,9 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
 }
 
 /* A row given up, whatever its window was. */
+static void wayland_constraints_update(void);
+static void wayland_relative_send(struct wayland_client *c, long scale, long dx, long dy, long udx, long udy, long micro);
+
 static void wayland_row_release(struct wayland_client *c, struct wayland_surface *s)
 {
         if (s->row < 0)
@@ -1010,6 +1037,7 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         wayland.rows--;
         s->row = -1;
         s->flags &= ~(unsigned)WAYLAND_SURFACE_MAPPED;
+        wayland_constraints_update();
         (void)c;
 }
 
@@ -1506,8 +1534,11 @@ static void wayland_sub_drop(struct wayland_client *c, struct wayland_surface *s
 }
 
 /* A surface gone, in whatever order: its window, its callbacks, and the objects that named it inert. */
+static void wayland_constraints_drop(struct wayland_client *c, long surface);
+
 static void wayland_surface_drop(struct wayland_client *c, struct wayland_surface *s)
 {
+        wayland_constraints_drop(c, wayland_surface_index(c, s));
         wayland_sub_drop(c, s);
         wayland_row_release(c, s);
         for (long at = 0; at < s->callbacks; at++)
@@ -3053,6 +3084,7 @@ WAYLAND_API void wayland_pointer_to(long row, long x, long y)
                 wayland_pointer_leave_all(old, was);
         wayland.pointer_row = is ? row : -1;
         wayland.pointer_surface = is ? wayland_surface_index(now, is) : -1;
+        wayland_constraints_update();
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
@@ -3067,7 +3099,7 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
 {
         struct wayland_client *c;
         struct wayland_surface *root, *s;
-        long time, slots[WAYLAND_SEATS], count, sx = 0, sy = 0;
+        long time, slots[WAYLAND_SEATS], count, sx = 0, sy = 0, old_x = wayland.pointer_x, old_y = wayland.pointer_y;
 
         if (!wayland.host || row != wayland.pointer_row || !(root = wayland_row_surface(row, &c)))
                 return;
@@ -3088,6 +3120,8 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
                 wayland_end(&e);
                 wayland_pointer_frame(c, slots[at]);
         }
+        // The places the hand moved, to the client's relative pointers: as moved, the same accelerated or not.
+        wayland_relative_send(c, s->scale, x - old_x, y - old_y, x - old_x, y - old_y, time * 1000);
 }
 
 /* A button of the pointer, by its Linux code, pressed or let go. A press is the serial a client may name to ask for a move. */
@@ -3290,6 +3324,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
                 }
         }
         wayland.keyboard_row = is ? row : -1;
+        wayland_constraints_update();
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
@@ -4190,6 +4225,256 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
         return WAYLAND_OK;
 }
 
+/* ---- games: the pointer held, motion without a place, and what a game asks of the desktop ---- */
+
+/*
+        A game takes the pointer for its camera: zwp_pointer_constraints_v1 locks it (the pointer stays where it is, is not
+        drawn, and the hand's counts go to the game, through zwp_relative_pointer_v1, as they are, unaccelerated) or confines
+        it to the window. A lock or confinement holds only while its window is under the pointer and has the keys, so
+        Alt-Tab, a click elsewhere, the window going or its client going end it at once, and the compositor's own chords are
+        taken before any client sees them: no client can keep the pointer from the person. One holds at a time, the first of the
+        clients in order that qualifies. A one-shot constraint ends the first time it is let go, a persistent one holds again
+        when its window qualifies again. A confinement is to the whole window whatever region was named, which the protocol
+        allows. Relative motion is also sent for every move of the pointer over a client's window, as the places differ.
+        Idle inhibitors are taken and do nothing (the compositor has no idle to inhibit), a keyboard shortcuts inhibitor is
+        taken and never made active (the compositor's chords are not a client's to take), and tearing control is taken and does
+        nothing (frames are paced to the screen). Each of those is one a surface.
+*/
+
+// Relative motion to the relative pointers of a client, in the surface's units: the places of the hand, accelerated or not.
+static void wayland_relative_send(struct wayland_client *c, long scale, long dx, long dy, long udx, long udy, long micro)
+{
+        for (long at = 0; at < c->relatives; at++)
+        {
+                long slot = wayland_slot_of(c, c->relative_id[at]);
+                struct wayland_event e;
+
+                if (slot < 0 || c->objects[slot].iface != WLI_zwp_relative_pointer_v1)
+                        continue;
+                e = wayland_begin(c, c->relative_id[at], WLE_zwp_relative_pointer_v1_relative_motion);
+                wayland_word(&e, (unsigned long)micro >> 32);
+                wayland_word(&e, (unsigned long)micro & 0xffffffffUL);
+                wayland_word(&e, wayland_fixed(dx, scale));
+                wayland_word(&e, wayland_fixed(dy, scale));
+                wayland_word(&e, wayland_fixed(udx, scale));
+                wayland_word(&e, wayland_fixed(udy, scale));
+                wayland_end(&e);
+        }
+}
+
+// The hand's counts, to the client whose window holds the pointer locked.
+WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long micro)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
+
+        if (!wayland.host || !s || row != wayland.hold_row || wayland.hold_mode != 1)
+                return;
+        wayland_relative_send(c, s->scale, dx, dy, dx, dy, micro);
+}
+
+static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)
+{
+        struct wayland_event e;
+
+        if (wayland_slot_of(c, con->id) < 0)
+                return;
+        if (con->kind == 1)
+                e = wayland_begin(c, con->id, on ? WLE_zwp_locked_pointer_v1_locked : WLE_zwp_locked_pointer_v1_unlocked);
+        else
+                e = wayland_begin(c, con->id, on ? WLE_zwp_confined_pointer_v1_confined : WLE_zwp_confined_pointer_v1_unconfined);
+        wayland_end(&e);
+}
+
+// A constraint let go of: it says so (unless its object is going), and a one-shot one is over.
+static void wayland_constraint_release(struct wayland_client *c, struct wayland_constraint *con, int say)
+{
+        if (con->active && say)
+                wayland_constraint_event(c, con, 0);
+        con->active = 0;
+        if (con->oneshot || !say)
+        {
+                con->live = 0;
+                wayland.constraints--;
+        }
+}
+
+/*
+        Which constraint holds the pointer: the first, of the clients in order, whose window is under the pointer and has the
+        keys. The others that held it are let go, the one that qualifies is told it holds, and the host is told what is held.
+*/
+static void wayland_constraints_update(void)
+{
+        long client = -1, chosen = -1, row = -1, mode = 0;
+
+        if (!wayland.host || (!wayland.constraints && !wayland.hold_mode))
+                return;
+        for (long slot = 0; slot < WAYLAND_CLIENTS && chosen < 0; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                for (long at = 0; c && at < WAYLAND_CONSTRAINTS && chosen < 0; at++)
+                {
+                        struct wayland_constraint *con = &c->constraints[at];
+                        struct wayland_surface *surface = con->live && con->surface ? &c->surfaces[con->surface - 1] : 0;
+                        struct wayland_surface *root = surface && surface->live ? wayland_root_of(c, surface) : 0;
+
+                        if (root && root->row >= 0 && root->row == wayland.pointer_row && root->row == wayland.keyboard_row)
+                        {
+                                client = slot;
+                                chosen = at;
+                                row = root->row;
+                                mode = con->kind;
+                        }
+                }
+        }
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                for (long at = 0; c && at < WAYLAND_CONSTRAINTS; at++)
+                        if (c->constraints[at].live && c->constraints[at].active && !(slot == client && at == chosen))
+                                wayland_constraint_release(c, &c->constraints[at], 1);
+        }
+        if (chosen >= 0 && !wayland.client[client]->constraints[chosen].active)
+        {
+                wayland.client[client]->constraints[chosen].active = 1;
+                wayland_constraint_event(wayland.client[client], &wayland.client[client]->constraints[chosen], 1);
+        }
+        if (row != wayland.hold_row || mode != wayland.hold_mode)
+        {
+                wayland.hold_row = row;
+                wayland.hold_mode = mode;
+                wayland.host->pointer_hold(wayland.host->context, row, mode);
+        }
+}
+
+// A surface that is going: its constraints go, and what they held is let go.
+static void wayland_constraints_drop(struct wayland_client *c, long surface)
+{
+        for (long at = 0; at < WAYLAND_CONSTRAINTS; at++)
+                if (c->constraints[at].live && c->constraints[at].surface == surface + 1)
+                        wayland_constraint_release(c, &c->constraints[at], 0);
+        wayland_constraints_update();
+}
+
+static int wayland_games_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_surface *surface;
+
+        switch (self->iface)
+        {
+        case WLI_zwp_relative_pointer_manager_v1:
+                if (op == WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer)
+                {
+                        if (c->relatives >= WAYLAND_RELATIVES)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many relative pointers");
+                        c->relative_id[c->relatives++] = c->objects[a[0].slot].id;
+                }
+                return WAYLAND_OK;
+        case WLI_zwp_relative_pointer_v1:
+                for (long at = 0; at < c->relatives; at++)
+                        if (c->relative_id[at] == self->id)
+                        {
+                                c->relative_id[at] = c->relative_id[--c->relatives];
+                                break;
+                        }
+                return WAYLAND_OK;
+        case WLI_zwp_pointer_constraints_v1:
+        {
+                long index = -1;
+
+                if (op == WLQ_zwp_pointer_constraints_v1_destroy)
+                        return WAYLAND_OK;
+                surface = wayland_surface_of(c, a[1].slot);
+                if (!surface)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                if (a[4].u != WLN_zwp_pointer_constraints_v1_lifetime_oneshot && a[4].u != WLN_zwp_pointer_constraints_v1_lifetime_persistent)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the lifetime is oneshot or persistent");
+                for (long at = 0; at < WAYLAND_CONSTRAINTS; at++)
+                {
+                        if (c->constraints[at].live && c->constraints[at].surface == wayland_surface_index(c, surface) + 1)
+                                return wayland_fail(c, self->id, WLN_zwp_pointer_constraints_v1_error_already_constrained,
+                                                    "the surface is constrained already");
+                        if (!c->constraints[at].live && index < 0)
+                                index = at;
+                }
+                if (index < 0)
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many pointer constraints");
+                c->constraints[index].id = c->objects[a[0].slot].id;
+                c->constraints[index].live = 1;
+                c->constraints[index].active = 0;
+                c->constraints[index].kind = op == WLQ_zwp_pointer_constraints_v1_lock_pointer ? 1 : 2;
+                c->constraints[index].oneshot = a[4].u == WLN_zwp_pointer_constraints_v1_lifetime_oneshot;
+                c->constraints[index].surface = (unsigned short)(wayland_surface_index(c, surface) + 1);
+                c->objects[a[0].slot].link = (short)index;
+                wayland.constraints++;
+                wayland_constraints_update();
+                return WAYLAND_OK;
+        }
+        case WLI_zwp_locked_pointer_v1:
+        case WLI_zwp_confined_pointer_v1:
+                // set_region and set_cursor_position_hint are taken: the whole window is what a hold is, and the pointer is
+                // drawn by the compositor.
+                if (op == WLQ_zwp_locked_pointer_v1_destroy)
+                {
+                        struct wayland_constraint *con = &c->constraints[self->link];
+
+                        if (con->live)
+                        {
+                                wayland_constraint_release(c, con, 0);
+                                wayland_constraints_update();
+                        }
+                }
+                return WAYLAND_OK;
+        case WLI_zwp_keyboard_shortcuts_inhibit_manager_v1:
+                if (op == WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts)
+                {
+                        surface = wayland_surface_of(c, a[1].slot);
+                        if (!surface)
+                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                        if (surface->shortcuts)
+                                return wayland_fail(c, self->id, WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited,
+                                                    "the surface has an inhibitor");
+                        surface->shortcuts = 1;
+                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                }
+                return WAYLAND_OK;
+        case WLI_zwp_keyboard_shortcuts_inhibitor_v1:
+                surface = wayland_surface_of(c, self - c->objects);
+                if (surface)
+                        surface->shortcuts = 0;
+                return WAYLAND_OK;
+        case WLI_wp_tearing_control_manager_v1:
+                if (op == WLQ_wp_tearing_control_manager_v1_get_tearing_control)
+                {
+                        surface = wayland_surface_of(c, a[1].slot);
+                        if (!surface)
+                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                        if (surface->tearing)
+                                return wayland_fail(c, self->id, WLN_wp_tearing_control_manager_v1_error_tearing_control_exists,
+                                                    "the surface has a tearing control");
+                        surface->tearing = 1;
+                        c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
+                        c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                }
+                return WAYLAND_OK;
+        case WLI_wp_tearing_control_v1:
+                if (op == WLQ_wp_tearing_control_v1_destroy)
+                {
+                        surface = wayland_surface_of(c, self - c->objects);
+                        if (surface)
+                                surface->tearing = 0;
+                }
+                else if (a[0].u > WLN_wp_tearing_control_v1_presentation_hint_async)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "no such presentation hint");
+                return WAYLAND_OK;
+        default:
+                return WAYLAND_OK;
+        }
+}
+
 /* ---- one request ---- */
 
 /*
@@ -4387,6 +4672,19 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_zxdg_toplevel_decoration_v1:
                         status = wayland_decoration_request(c, o, op, a);
                         break;
+                case WLI_zwp_relative_pointer_manager_v1:
+                case WLI_zwp_relative_pointer_v1:
+                case WLI_zwp_pointer_constraints_v1:
+                case WLI_zwp_locked_pointer_v1:
+                case WLI_zwp_confined_pointer_v1:
+                case WLI_zwp_idle_inhibit_manager_v1:
+                case WLI_zwp_idle_inhibitor_v1:
+                case WLI_zwp_keyboard_shortcuts_inhibit_manager_v1:
+                case WLI_zwp_keyboard_shortcuts_inhibitor_v1:
+                case WLI_wp_tearing_control_manager_v1:
+                case WLI_wp_tearing_control_v1:
+                        status = wayland_games_request(c, o, op, a);
+                        break;
                 case WLI_zwp_linux_dmabuf_v1:
                 case WLI_zwp_linux_buffer_params_v1:
                 case WLI_zwp_linux_dmabuf_feedback_v1:
@@ -4449,7 +4747,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
             !host->close || !host->row_open || !host->row_close || !host->row_picture || !host->row_title || !host->row_do ||
             !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks ||
             !host->clip_size || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear || !host->dmabuf_info ||
-            !host->dmabuf_table || !host->dmabuf_map)
+            !host->dmabuf_table || !host->dmabuf_map || !host->pointer_hold)
                 return -1;
         for (unsigned long at = 0; at < sizeof wayland; at++)
                 clear[at] = 0;
@@ -4461,6 +4759,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         if (wayland.screens < 0)
                 wayland.screens = 0;
         wayland_dmabuf_load();
+        wayland.hold_row = -1;
         return 0;
 }
 
@@ -4521,6 +4820,12 @@ WAYLAND_API void wayland_drop(long slot)
         for (long at = 0; at < WAYLAND_PARAMS; at++)
                 if (c->params[at].live)
                         wayland_params_free(c, &c->params[at]);
+        for (long at = 0; at < WAYLAND_CONSTRAINTS; at++)
+                if (c->constraints[at].live)
+                {
+                        c->constraints[at].live = 0;
+                        wayland.constraints--;
+                }
         for (long at = 0; at < WAYLAND_BUFFERS; at++)
                 if (c->buffers[at].live)
                         wayland.buffers--;

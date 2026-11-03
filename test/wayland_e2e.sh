@@ -381,6 +381,26 @@ if [ -n "$input" ]; then
         else
                 row FAIL "the compositor starts for the clipboard rows" "$(tail -3 "$work/compositor.log")"
         fi
+        # A pointer lock, end to end: a client that locks the pointer is told the hand's counts as they come.
+        if "$client" -L -n 1 -s -w 64 -h 64 -q > /dev/null 2>&1; then
+                stop
+                rm -f "$work/in.fifo"
+                mkfifo "$work/in.fifo"
+                extra="-i $work/in.fifo -l us"
+                if start; then
+                        MOONWATER_ASKED=1 "$client" -L -v -n 1000000 -s -w 320 -h 240 > "$work/game.log" 2>&1 &
+                        shown=$!
+                        python3 "$(dirname "$0")/wayland_game.py" "$work/in.fifo" "$work/game.log" > "$work/game.out" 2>&1
+                        result=$?
+                        cut -c1-400 "$work/game.out"
+                        failures=$((failures + result))
+                        kill "$shown" 2> /dev/null
+                        wait "$shown" 2> /dev/null
+                        alive || row FAIL "the compositor survives a client that locks the pointer" "$(tail -3 "$work/compositor.log")"
+                else
+                        row FAIL "the compositor starts for the pointer lock rows" "$(tail -3 "$work/compositor.log")"
+                fi
+        fi
         extra=
         stop
         start

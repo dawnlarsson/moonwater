@@ -7,10 +7,11 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-C TEXT] [-P] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-L] [-C TEXT] [-P] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
         only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
-        -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
+        -L lock the pointer and say each relative motion (built with -DHAVE_GAMES: the relative pointer and pointer constraints
+        protocols), -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
         there are none, -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
         -q quiet,
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
@@ -29,6 +30,10 @@
 #include <wayland-client.h>
 #ifdef HAVE_XKB
 #include <xkbcommon/xkbcommon.h>
+#endif
+#ifdef HAVE_GAMES
+#include "pointer-constraints-client.h"
+#include "relative-pointer-client.h"
 #endif
 #ifdef HAVE_DMABUF
 #include <gbm.h>
@@ -61,7 +66,38 @@ static struct wl_subcompositor *subcompositor;
 static struct zwp_linux_dmabuf_v1 *dmabuf_global;
 static struct gbm_device *gbm;
 #endif
-static int use_dmabuf;
+static int use_dmabuf, use_lock;
+#ifdef HAVE_GAMES
+static struct zwp_relative_pointer_manager_v1 *relative_manager;
+static struct zwp_pointer_constraints_v1 *constraints_global;
+static struct wl_pointer *held_pointer;
+
+static void relative_motion(void *d, struct zwp_relative_pointer_v1 *r, uint32_t hi, uint32_t lo, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t udx,
+                            wl_fixed_t udy)
+{
+        (void)d; (void)r; (void)hi; (void)lo; (void)udx; (void)udy;
+        printf("relative %d %d\n", wl_fixed_to_int(dx), wl_fixed_to_int(dy));
+        fflush(stdout);
+}
+
+static const struct zwp_relative_pointer_v1_listener relative_listener = {relative_motion};
+
+static void lock_locked(void *d, struct zwp_locked_pointer_v1 *l)
+{
+        (void)d; (void)l;
+        printf("locked\n");
+        fflush(stdout);
+}
+
+static void lock_unlocked(void *d, struct zwp_locked_pointer_v1 *l)
+{
+        (void)d; (void)l;
+        printf("unlocked\n");
+        fflush(stdout);
+}
+
+static const struct zwp_locked_pointer_v1_listener lock_listener = {lock_locked, lock_unlocked};
+#endif
 static struct wl_data_device_manager *data_manager;
 static struct wl_data_device *data_device;
 static struct wl_data_offer *selection_offer;
@@ -634,7 +670,14 @@ static void seat_capabilities(void *data, struct wl_seat *s, uint32_t caps)
 {
         (void)data;
         if (caps & WL_SEAT_CAPABILITY_POINTER)
-                wl_pointer_add_listener(wl_seat_get_pointer(s), &pointer_listener, 0);
+        {
+                struct wl_pointer *pointer = wl_seat_get_pointer(s);
+
+                wl_pointer_add_listener(pointer, &pointer_listener, 0);
+#ifdef HAVE_GAMES
+                held_pointer = pointer;
+#endif
+        }
         if (caps & WL_SEAT_CAPABILITY_KEYBOARD)
                 wl_keyboard_add_listener(wl_seat_get_keyboard(s), &keyboard_listener, 0);
 }
@@ -659,6 +702,12 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
                 wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, version < 6 ? version : 6);
         else if (!strcmp(interface, wl_subcompositor_interface.name))
                 subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
+#ifdef HAVE_GAMES
+        else if (!strcmp(interface, zwp_relative_pointer_manager_v1_interface.name))
+                relative_manager = wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1);
+        else if (!strcmp(interface, zwp_pointer_constraints_v1_interface.name))
+                constraints_global = wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1);
+#endif
 #ifdef HAVE_DMABUF
         else if (!strcmp(interface, zwp_linux_dmabuf_v1_interface.name))
                 dmabuf_global = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, version < 4 ? version : 4);
@@ -683,7 +732,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubC:Pqv")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubLC:Pqv")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -697,6 +746,7 @@ int main(int argc, char **argv)
                 case 'd': damage_only = 1; break;
                 case 'u': child_wanted = 1; break;
                 case 'b': use_dmabuf = 1; break;
+                case 'L': use_lock = 1; break;
                 case 'C': copy_text = optarg; break;
                 case 'P': paste_wanted = 1; break;
                 case 'q': quiet = 1; break;
@@ -752,6 +802,30 @@ int main(int argc, char **argv)
         xdg_surface_add_listener(xdg_surface, &surface_listener, 0);
         toplevel = xdg_surface_get_toplevel(xdg_surface);
         xdg_toplevel_add_listener(toplevel, &toplevel_listener, 0);
+#ifdef HAVE_GAMES
+        if (use_lock)
+                wl_display_roundtrip(display); // the seat tells its pointer
+        if (use_lock && relative_manager && constraints_global && held_pointer)
+        {
+                struct zwp_locked_pointer_v1 *lock = zwp_pointer_constraints_v1_lock_pointer(constraints_global, surface, held_pointer, 0,
+                                                                                            ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+
+                zwp_locked_pointer_v1_add_listener(lock, &lock_listener, 0);
+                zwp_relative_pointer_v1_add_listener(zwp_relative_pointer_manager_v1_get_relative_pointer(relative_manager, held_pointer),
+                                                     &relative_listener, 0);
+        }
+        else if (use_lock)
+        {
+                fprintf(stderr, "wayland-shm: no relative pointer or pointer constraints\n");
+                return 2;
+        }
+#else
+        if (use_lock)
+        {
+                fprintf(stderr, "wayland-shm: built without the games' protocols\n");
+                return 2;
+        }
+#endif
         xdg_toplevel_set_title(toplevel, title);
         xdg_toplevel_set_app_id(toplevel, app_id);
         if (maximize)

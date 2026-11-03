@@ -6451,11 +6451,24 @@ lane_wayland()
                         wayland-scanner client-header "$wayland_dmabuf_xml" "$work/client/linux-dmabuf-client.h" &&
                                 wayland-scanner private-code "$wayland_dmabuf_xml" "$work/client/linux-dmabuf-code.c" || wayland_dmabuf=
                 fi
+                # With the relative pointer and pointer constraints XML the client can lock the pointer too (-L).
+                wayland_games=
+                wayland_games_dir=$(pkg-config --variable=pkgdatadir wayland-protocols 2> /dev/null)/unstable
+                wayland_games_code=
+                if [ -r "$wayland_games_dir/relative-pointer/relative-pointer-unstable-v1.xml" ] &&
+                        [ -r "$wayland_games_dir/pointer-constraints/pointer-constraints-unstable-v1.xml" ]; then
+                        wayland_games="-DHAVE_GAMES"
+                        wayland_games_code="$work/client/relative-pointer-code.c $work/client/pointer-constraints-code.c"
+                        wayland-scanner client-header "$wayland_games_dir/relative-pointer/relative-pointer-unstable-v1.xml" "$work/client/relative-pointer-client.h" &&
+                                wayland-scanner private-code "$wayland_games_dir/relative-pointer/relative-pointer-unstable-v1.xml" "$work/client/relative-pointer-code.c" &&
+                                wayland-scanner client-header "$wayland_games_dir/pointer-constraints/pointer-constraints-unstable-v1.xml" "$work/client/pointer-constraints-client.h" &&
+                                wayland-scanner private-code "$wayland_games_dir/pointer-constraints/pointer-constraints-unstable-v1.xml" "$work/client/pointer-constraints-code.c" || wayland_games=
+                fi
                 # shellcheck disable=SC2046
                 wayland_row client-build sh -c "wayland-scanner client-header '$wayland_xml' '$work/client/xdg-shell-client.h' &&
                         wayland-scanner private-code '$wayland_xml' '$work/client/xdg-shell-code.c' &&
-                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb $wayland_dmabuf test/wayland_shm.c '$work/client/xdg-shell-code.c' \
-                        ${wayland_dmabuf:+$wayland_dmabuf_code} \
+                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb $wayland_dmabuf $wayland_games test/wayland_shm.c '$work/client/xdg-shell-code.c' \
+                        ${wayland_dmabuf:+$wayland_dmabuf_code} ${wayland_games:+$wayland_games_code} \
                         $(pkg-config --cflags --libs wayland-client) $wayland_dmabuf_libs -o '$work/client/wayland-shm'"
                 if [ -x "$work/client/wayland-shm" ] && freestanding programs/shell.c "$work/shell-wayland" "" -DCONFIG_MOONWATER_WAYLAND; then
                         wayland_e2e=0
