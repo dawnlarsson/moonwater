@@ -694,6 +694,10 @@ static void terminal_caret_step(positive now, long address_to timeout)
         }
         if (!shown || !terminal.focused)
                 return;
+        // The wait ends where the cover changes, and an idle terminal has nothing else to draw it: the caret is repainted then,
+        // as the frame would make it, or it stays at the cover the last frame drew (gone, in the off phase).
+        if (terminal.shown >= 0 && (terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at(now)) != terminal.caret_cover[terminal.shown])
+                terminal.dirty = true;
         ui_caret_at(now, terminal.caret_since, terminal.caret_awake, &due);
         if (due && (*timeout < 0 || (long)(due - now) < *timeout))
                 *timeout = (long)(due - now);

@@ -139012,6 +139012,18 @@ static fn check_caret_terminal(void)
                 check("terminal caret: between the two, the block is the blend at its cover",
                       at_mid == terminal_blend(terminal_default_paper() & 0xffffffu, terminal_default_ink() & 0xffffffu, cover_mid));
         }
+        // A wait that ends where the cover changes repaints the caret: an idle terminal has no key or output to draw it, and the
+        // caret stayed gone from the frame that drew it in its off phase.
+        {
+                positive when = clock_monotonic_nanoseconds(), later = when + (positive)cycle / 2 + 5000000ull;
+                long timeout = -1;
+
+                terminal_caret_step(when, &timeout);
+                terminal.caret_since = when, terminal.caret_awake = when;
+                terminal.dirty = false;
+                terminal_caret_step(later, &timeout);
+                check("terminal caret: the wait that ends where the cover changes repaints it, with nothing else to draw", terminal.dirty);
+        }
         terminal.caret_since = since, terminal.caret_awake = awake;
 
         // The settings come from the kit alone: terminal.c asks ui_caret_at and ui_caret_thick, and reads no setting of its own.
