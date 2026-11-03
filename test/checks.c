@@ -137303,6 +137303,35 @@ static fn editor_disk_check(struct ui address_to wui);
 static fn editor_edge_check(struct ui address_to wui);
 static fn editor_readonly_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
+static fn popmenu_bar_check(struct ui address_to wui);
+
+/*
+        A dropdown's bar: a thumb pressed and dragged down 100 pixels moves the menu's top with it. The bar's answer is the
+        scroll it asks for, and that is what the menu takes; a menu that kept the old scroll drew the bar moving and the items not.
+*/
+static fn popmenu_bar_check(struct ui address_to wui)
+{
+        static struct ui_popmenu m;
+        long pixels = ui_map(400 * 400 * 4);
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+        struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+        struct window_event motion = {WINDOW_EVENT_MOTION, 0, 0, 0};
+        int top, length, x, y, shown = 0;
+
+        ui_begin(wui, (unsigned int address_to)pixels, 400, 400, 400);
+        memory_zero(&m, sizeof(m));
+        for (int at = 0; at < 40; at++)
+                ui_popmenu_add(&m, "Item", null, 0, at + 1);
+        ui_popmenu_size(wui, &m, 300);
+        shown = ui_scroll_thumb(wui, &m.scroll, &top, &length);
+        check("popup menu: a long menu has a bar, with its thumb in the track", shown && length > 0 && length < m.scroll.view);
+        x = m.scroll.x + 1, y = top + length / 2;
+        ui_popmenu_event(wui, &m, &press, x, y);
+        ui_popmenu_event(wui, &m, &motion, x, y + 100);
+        ui_popmenu_event(wui, &m, &release, x, y + 100);
+        check("popup menu: a thumb dragged 100 pixels down moves the menu's top with it", m.top > 0 && m.scroll.scroll > 0);
+        compositor_call(syscall(munmap), (positive)pixels, 400 * 400 * 4, 0, 0, 0, 0);
+}
 
 /*
         ui_over, the blend every piece of the kit lays on a picture, is one body of assembly per architecture; the C it
@@ -137767,6 +137796,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_edge_check(&wui);
         editor_readonly_check(&wui);
         field_check(&wui);
+        popmenu_bar_check(&wui);
         ui_over_check();
         ui_edge_row_check();
 }

@@ -6140,10 +6140,15 @@ static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
 */
 static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu address_to m, int type, int x, int y, b32 down)
 {
+        int scroll;
+
         if (m->scroll.content <= m->scroll.view && !m->scroll.held)
                 return false;
-        if (ui_scroll_pointer(ui, &m->scroll, type, x, y, down, m->touch) < 0)
+        scroll = ui_scroll_pointer(ui, &m->scroll, type, x, y, down, m->touch);
+        if (scroll < 0)
                 return false;
+        if (!m->scroll.dragging)
+                ui_scroll_set(&m->scroll, scroll);
         ui_popmenu_sync(ui, m);
         return true;
 }
