@@ -185589,7 +185589,7 @@ b32 main(void)
         struct ui ui;
         positive bad = 0;
 
-        if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20)))
+        if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {
                 string_format(log, "gpu: no amdgpu render node, skipped\n");
                 return test_report(null);
@@ -185634,6 +185634,71 @@ b32 main(void)
                                         string_format(log, "  FAIL gpu kit round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
                                                       (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
                         }
+        }
+
+        // Text: runs painted by ui_run_in on the processor, the same runs recorded (the font engine's coverage, packed to bytes) and drawn by the GPU, a window's
+        // clear first; every size, ink, alpha, stroke and clip, over a random ground. Needs the face (argument 3); without it the rows are skipped.
+        if (program_argument_count() > 3)
+        {
+                enum { TW = 696, TH = 220, TP = 700, RUNS = 40, TROUNDS = 30 };
+                static font_engine engine;
+                static p8 atlas[512 * 512];
+                static font_face face;
+                static unsigned int scratch[TW * UI_SCRATCH_ROWS], want_text[TP * TH];
+                static const char *const words[] = {"Settings", "Display and brightness", "The quick brown fox jumps over the lazy dog 0123456789",
+                                                    "Wi-Fi   Bluetooth   USB", "Zwischenablage \xc3\x9f \xc3\xbc \xc3\xb6 \xc3\xa9", "AaBbCc", "WWWW iiii llll", "[x] (y) {z} 100%"};
+                positive size = 0, bytes_of_face = compositor_map_file(program_argument(3), &size);
+                positive text_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), tpic_at = text_at, tops_at = tpic_at + (positive)TP * TH * 4,
+                         tcover_at = tops_at + (1 << 20), tbins_at = tcover_at + (8 << 20);
+                unsigned int address_to tpic = (unsigned int address_to)((p8 address_to)gpu.at + tpic_at), address_to tops = (unsigned int address_to)((p8 address_to)gpu.at + tops_at);
+                struct ui_scene scene;
+                struct ui cpu, rec;
+                const font_face address_to faces[2] = {&face, &face};
+                positive text_bad = 0;
+
+                if (bytes_of_face && font_load(&face, (const p8 address_to)bytes_of_face, size, 0) == 0)
+                {
+                        font_start(&engine, atlas, 512, 512);
+                        memory_zero(&cpu, sizeof(cpu));
+                        cpu.engine = &engine, cpu.regular = cpu.bold = &face, cpu.scratch = scratch, cpu.scratch_width = TW, cpu.scale = 100;
+                        cpu.width = TW, cpu.height = TH, cpu.top = 0, cpu.bottom = TH, cpu.pitch = TP, cpu.pixels = want_text;
+                        rec = cpu;
+                        rec.scene = &scene;
+                        for (int round = 0; round < TROUNDS; round++)
+                        {
+                                unsigned int ground = gpu_random() | 0xff000000u;
+
+                                memory_zero(&scene, sizeof(scene));
+                                scene.ops = tops + 8, scene.room = 512, scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + tcover_at), scene.size = 8 << 20, scene.at = tcover_at;
+                                for (positive i = 0; i < (positive)TP * TH; i++)
+                                        want_text[i] = ground, tpic[i] = 0x12345678u;
+                                tops[0] = 0, tops[1] = tops[2] = 0, tops[3] = TW, tops[4] = TH, tops[5] = ground, tops[6] = tops[7] = 0;
+                                for (int k = 0; k < RUNS; k++)
+                                {
+                                        const char *word = words[gpu_random() % (sizeof(words) / sizeof(words[0]))];
+                                        int size_px = 10 + (int)(gpu_random() % 30), x = (int)(gpu_random() % (TW + 80)) - 60, baseline = (int)(gpu_random() % (TH + 30)) - 5;
+                                        int low = gpu_random() % 4 ? 0 : (int)(gpu_random() % (TW / 2)), high = gpu_random() % 4 ? TW : TW / 2 + (int)(gpu_random() % (TW / 2));
+                                        unsigned int colour = gpu_random() & 0xffffffu, alpha = gpu_random() % 3 ? 255 : gpu_random() & 255, stroke = gpu_random() % 4 ? 0 : 1 + gpu_random() % 255;
+
+                                        ui_run_in(&cpu, faces, x, baseline, (string_address)word, size_px, colour, alpha, low, high, stroke);
+                                        ui_run_in(&rec, faces, x, baseline, (string_address)word, size_px, colour, alpha, low, high, stroke);
+                                }
+                                check("gpu text: the runs were recorded", scene.count > 10);
+                                if (!gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH))
+                                {
+                                        check("gpu text: the scene finishes", false);
+                                        break;
+                                }
+                                for (int y = 0; y < TH; y++)
+                                        for (int x = 0; x < TW; x++)
+                                        {
+                                                checks++;
+                                                if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++failures, ++text_bad) < 6)
+                                                        string_format(log, "  FAIL gpu text round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                      (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                        }
+                        }
+                }
         }
 
         // 8K: a window's clear and 159 boxes of the sizes cards and buttons have, the radii a card has, a third of them translucent;

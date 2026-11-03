@@ -284,6 +284,40 @@ glass:
 	v_cndmask_b32_e64 \o, \o, v23, s[88:89]
 .endm
 
+; \out = ui_tone(the op's colour, \a): the colour premultiplied at the alpha \a (0 to 255) (the colour's blue, green, red in s94, s95, s96)
+.macro tonev out, a
+	v_lshrrev_b32	v53, 7, \a
+	v_add_nc_u32	v53, \a, v53
+	v_mad_u32_u24	v54, s94, v53, 128
+	v_lshrrev_b32	v54, 8, v54
+	v_mad_u32_u24	v55, s95, v53, 128
+	v_lshrrev_b32	v55, 8, v55
+	v_mad_u32_u24	v56, s96, v53, 128
+	v_lshrrev_b32	v56, 8, v56
+	v_lshl_or_b32	v54, v55, 8, v54
+	v_lshl_or_b32	v54, v56, 16, v54
+	v_lshl_or_b32	\out, \a, 24, v54
+.endm
+
+; one pixel of a text run (ui_run_in's walk): its cover \cov and its neighbours' (\lf \rt \up \dn), the stroke's share of the strongest neighbour
+; (stroke s80), the cover at the alpha (s52) as a tone, laid over \o where the pixel is in the run (\mk)
+.macro textpixel o, cov, lf, rt, up, dn, mk
+	v_max_u32	v50, \lf, \rt
+	v_max_u32	v50, v50, \up
+	v_max_u32	v50, v50, \dn
+	v_mul_u32_u24	v50, v50, s80
+	v_lshrrev_b32	v50, 7, v50
+	v_add_nc_u32	v51, \cov, v50
+	v_min_u32	v51, 255, v51
+	v_mul_u32_u24	v52, v51, s52
+	v_lshrrev_b32	v57, 8, v52
+	v_add3_u32	v52, v52, v57, 1
+	v_lshrrev_b32	v52, 8, v52
+	tonev		v58, v52
+	overv		v59, \o, v58
+	v_cndmask_b32_e64 \o, \o, v59, \mk
+.endm
+
 ; op 6: a scene, from the patch (x0, y0 in the arguments, in patches of 64 pixels by 4 rows) on for the grid's size, so that a part of the picture is drawn alone (records of 8 words in the lists: 0 fill, 1 tone over, 2 box as ui_kit_fill takes it with its radii already scaled as CSS draws them),
 ; a wave a patch of 64 pixels by 4 rows, a lane four pixels in a row (v5 to v8), each written once; the width and the pitch a multiple of 4.
 ; The wave leaves if its 64-pixel square has no op, does not read the picture when the first op holds the patch, and skips an op that misses it.
@@ -296,6 +330,7 @@ scene:
 	s_load_dwordx4	s[8:11], s[4:5], 0x8
 	s_load_dwordx4	s[12:15], s[4:5], 0x18
 	s_load_dwordx2	s[2:3], s[4:5], 0x30
+	s_load_dwordx2	s[102:103], s[4:5], 0x0
 	v_and_b32	v1, 15, v0
 	v_lshrrev_b32	v2, 4, v0
 	s_waitcnt	lgkmcnt(0)
@@ -395,8 +430,11 @@ scene:
 	s_load_dwordx8	s[56:63], s[48:49], 0x0
 	s_add_u32	s44, s44, 1
 	s_waitcnt	lgkmcnt(0)
-	s_cmp_eq_u32	s56, 2
+	s_and_b32	s47, s56, 0xff
+	s_cmp_eq_u32	s47, 2
 	s_cbranch_scc1	.scene_box
+	s_cmp_eq_u32	s47, 3
+	s_cbranch_scc1	.scene_text
 	s_cmp_le_u32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -443,6 +481,71 @@ scene:
 	v_cndmask_b32_e64 v7, v7, v23, s[68:69]
 	over		v23, v8
 	v_cndmask_b32_e64 v8, v8, v23, s[70:71]
+	s_branch	.scene_loop
+
+; a text run (3 | the pitch << 8, x0, y0, x1, y1, the ink, alpha | stroke << 8, the bitmap's place from the buffer's start): the cover of each pixel is
+; a byte of the bitmap, with a border of nothing round it; each lane reads its four bytes and the ones beside and above and below by unaligned dwords
+.scene_text:
+	s_cmp_le_u32	s59, s28
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s50, s28, 64
+	s_cmp_ge_u32	s57, s50
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_u32	s60, s29
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s51, s29, 4
+	s_cmp_ge_u32	s58, s51
+	s_cbranch_scc1	.scene_loop
+	s_and_b32	s52, s62, 0xff
+	s_cmp_eq_u32	s52, 0
+	s_cbranch_scc1	.scene_loop
+	s_mov_b32	s45, 1
+	s_bfe_u32	s80, s62, 0x80008
+	s_lshr_b32	s81, s56, 8
+	s_and_b32	s94, s61, 255
+	s_bfe_u32	s95, s61, 0x80008
+	s_bfe_u32	s96, s61, 0x80010
+	s_min_u32	s53, s59, s12
+	v_cmp_le_u32_e64 s[76:77], s58, v4
+	v_cmp_gt_u32	vcc, s60, v4
+	s_and_b64	s[76:77], s[76:77], vcc
+	s_and_saveexec_b64 s[92:93], s[76:77]
+	s_cbranch_execz	.text_done
+	v_subrev_nc_u32	v30, s58, v4
+	v_mad_u32_u24	v30, v30, s81, s63
+	v_subrev_nc_u32	v31, s57, v3
+	v_add_nc_u32	v30, v30, v31
+	v_subrev_nc_u32	v32, s81, v30
+	v_add_nc_u32	v33, s81, v30
+	global_load_dword v34, v30, s[102:103] offset:-1
+	global_load_dword v35, v30, s[102:103] offset:3
+	global_load_dword v36, v32, s[102:103]
+	global_load_dword v37, v33, s[102:103]
+	s_waitcnt	vmcnt(0)
+	v_bfe_u32	v74, v34, 0, 8
+	v_bfe_u32	v70, v34, 8, 8
+	v_bfe_u32	v71, v34, 16, 8
+	v_bfe_u32	v72, v34, 24, 8
+	v_bfe_u32	v73, v35, 0, 8
+	v_bfe_u32	v75, v35, 8, 8
+	v_bfe_u32	v76, v36, 0, 8
+	v_bfe_u32	v77, v36, 8, 8
+	v_bfe_u32	v78, v36, 16, 8
+	v_bfe_u32	v79, v36, 24, 8
+	v_bfe_u32	v80, v37, 0, 8
+	v_bfe_u32	v81, v37, 8, 8
+	v_bfe_u32	v82, v37, 16, 8
+	v_bfe_u32	v83, v37, 24, 8
+	inside		s[82:83], v3
+	inside		s[84:85], v17
+	inside		s[86:87], v18
+	inside		s[88:89], v19
+	textpixel	v5, v70, v74, v71, v76, v80, s[82:83]
+	textpixel	v6, v71, v70, v72, v77, v81, s[84:85]
+	textpixel	v7, v72, v71, v73, v78, v82, s[86:87]
+	textpixel	v8, v73, v72, v75, v79, v83, s[88:89]
+.text_done:
+	s_mov_b64	exec, s[92:93]
 	s_branch	.scene_loop
 
 ; a box (256ths: x0 s57, y0 s58, x1 s59, y1 s60, the colour s61, rx s62, ry s63)
@@ -676,4 +779,4 @@ kernel copy, 8, 24
 kernel fill, 8, 24
 kernel tone, 10, 28
 kernel glass, 16, 32
-kernel scene, 72, 104
+kernel scene, 88, 106

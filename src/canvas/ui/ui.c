@@ -46,6 +46,20 @@
 #define UI_INSET 14    // a row's text in from its edges
 #define UI_SCRATCH_ROWS 96
 
+/*
+        A frame recorded for the GPU (src/canvas/gpu.c) in place of being painted, when ui.scene is set: ops of 8 words, and the cover
+        bitmaps the text ops hold. A text op is {3 | the bitmap's pitch << 8, x0, y0, x1, y1 (the pixels it covers, cut to what may be
+        drawn), the ink, alpha | stroke << 8, the bitmap's place in the GPU's buffer}; its bitmap is the cover of each pixel, one byte,
+        with a border of nothing round it so that the stroke finds its neighbours without a test.
+*/
+struct ui_scene
+{
+        unsigned int address_to ops;
+        unsigned int count, room;
+        unsigned char address_to cover;
+        unsigned long used, size, at; // the pool of bitmaps: bytes used, its size, and where it is in the GPU's buffer
+};
+
 struct ui
 {
         unsigned int address_to pixels; // premultiplied ARGB, pitch pixels a row
@@ -67,6 +81,7 @@ struct ui
         b32 opaque;                     // a window of the kit's surface, not glass: cleared to the theme's surface
         int scratch_scale;              // the scale ui_scratch_fit mapped the scratch at, 0 for a scratch the caller gave
         b32 glass;                      // a glass window (WINDOW_GLASS): its pieces are the ground's inks, ui_text_colour and ui_well
+        struct ui_scene address_to scene; // when set, a text run is recorded into it and not painted
 };
 
 /*
@@ -705,6 +720,37 @@ __asm__(
 );
 #endif
 
+// A text run recorded for the GPU: its coverage (the scratch's green byte, as the ink's cover) as a bitmap with a border, and an op for it.
+static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, int pen_x, int first, int last, unsigned int colour, unsigned int alpha,
+                          b32 light, unsigned int stroke)
+{
+        struct ui_scene address_to scene = ui->scene;
+        int from = top, to = top + rows, pitch = wide + 2;
+        unsigned long bytes = (unsigned long)pitch * (unsigned long)(rows + 2);
+        unsigned char address_to bitmap;
+        unsigned int address_to op;
+
+        from = from < ui->top ? ui->top : from, to = to > ui->bottom ? ui->bottom : to, to = to > ui->height ? ui->height : to;
+        if (ui->band_bottom > ui->band_top)
+                from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
+        if (first >= last || from >= to || scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
+                return;
+        bitmap = scene->cover + scene->used;
+        memory_zero(bitmap, bytes);
+        for (int row = 0; row < rows; row++)
+                for (int column = 0; column < wide; column++)
+                {
+                        unsigned int value = ui->scratch[(unsigned long)row * (unsigned long)wide + (unsigned long)column] >> 8 & 255;
+
+                        bitmap[(unsigned long)(row + 1) * (unsigned long)pitch + (unsigned long)column + 1] = (unsigned char)(light ? value : 255 - value);
+                }
+        op = scene->ops + 8 * scene->count++;
+        op[0] = 3u | (unsigned int)pitch << 8, op[1] = (unsigned int)(pen_x + first), op[2] = (unsigned int)from, op[3] = (unsigned int)(pen_x + last), op[4] = (unsigned int)to;
+        op[5] = colour, op[6] = (alpha > 255 ? 255 : alpha) | (stroke > 255 ? 255 : stroke) << 8;
+        op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)(1 + from - top) * (unsigned long)pitch + (unsigned long)(1 + first));
+        scene->used += (bytes + 15) & ~15ul;
+}
+
 static int ui_run_in(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
                      string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
                      unsigned int stroke)
@@ -752,6 +798,11 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
                         first = -pen_x;
                 if (ui->width - pen_x < last)
                         last = ui->width - pen_x;
+                if (ui->scene)
+                {
+                        ui_scene_text(ui, wide, rows, top, pen_x, first, last, colour, alpha, light, stroke);
+                        return width;
+                }
 #if X64
                 {
                         struct ui_walk walk = {.scratch = ui->scratch, .wide = wide, .rows = rows, .top = top, .first = first,
