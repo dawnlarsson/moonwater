@@ -9783,7 +9783,10 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         if (t->mode == UI_TEXT_FIELD)
         {
                 t->top = y + (height - t->line_height) / 2, t->bottom = t->top + t->line_height;
-                ui_text_reveal(ui, t);
+                // A drag past the field's edge is the tick's to scroll (ui_text_autoscroll): a draw in the middle of it does not
+                // reveal the point, which sits past the edge, or the view would jump a quarter of the field at every draw.
+                if (!(t->dragging && t->scroll_past))
+                        ui_text_reveal(ui, t);
         }
         // A code view's caret is in sight in the box it is drawn in: a box that changed size since the last draw (a window
         // shrunk, a zoom) reveals it once. The first draw leaves the view where it was put (a restored scroll), and a draw

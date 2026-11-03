@@ -124434,6 +124434,57 @@ static void scroll_field_touch(struct ui address_to wui, struct ui_text address_
     ui_text_close(t);
 }
 
+/*
+        A field's drag past its right edge, with the app drawing between the events and the ticks: the view does not jump. The
+        drag's point is not revealed while it is past the edge (the tick scrolls it), so a draw in the middle of the drag leaves
+        the view where it was, and each tick moves it a few pixels, never a quarter of the field.
+*/
+static void scroll_field_drawn(struct ui address_to wui, struct ui_text address_to t, const struct window_row address_to own, int target_x,
+                               int *drawn_moved, int *largest)
+{
+    int px = 0, py = 0, y = SCROLL_FIELD_TOP + SCROLL_FIELD_HEIGHT / 2, x = SCROLL_FIELD_LEFT + 40, prev;
+    positive now = 1000000000ull;
+    b32 redraw = false;
+
+    scroll_field(wui, t, own, 0);
+    scroll_point(SCROLL_LEFT + x, SCROLL_TOP + y);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    scroll_point(SCROLL_LEFT + target_x, SCROLL_TOP + y);
+    compositor_motion();
+    scroll_drain(wui, t, own, &px, &py, 1);
+    ui_text_draw(wui, t, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
+    *drawn_moved = (int)t->scroll_x;
+    prev = (int)t->scroll_x;
+    *largest = 0;
+    for (int step = 1; step <= 12; step++)
+    {
+        int jump;
+
+        ui_text_autoscroll(wui, t, now + (positive)step * 16000000ull, &redraw);
+        ui_text_draw(wui, t, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
+        jump = (int)t->scroll_x - prev;
+        *largest = jump > *largest ? jump : *largest;
+        prev = (int)t->scroll_x;
+    }
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    scroll_drain(wui, t, own, &px, &py, 1);
+    ui_text_close(t);
+}
+
+static void check_field_drag_drawn(struct ui address_to wui)
+{
+    static struct ui_text view;
+    static struct window_row own;
+    int drawn_moved = -1, largest = -1;
+
+    scroll_setup(0);
+    own.table = compositor.table, own.row = 1, own.door = -1;
+    scroll_field_drawn(wui, &view, &own, SCROLL_FIELD_LEFT + SCROLL_FIELD_WIDTH + 10, &drawn_moved, &largest);
+    check("field drag: a draw in the middle of a drag past the right edge does not reveal the point, and the view stays", drawn_moved == 0);
+    check("field drag: drawn between the ticks, the view moves a few pixels a tick, not a quarter of the field", largest >= 0 && largest <= 4);
+}
+
 static void check_select_scroll(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -138405,6 +138456,7 @@ static fn field_check(struct ui address_to wui)
         touch_scroll_check(wui);
         check_touch_path(wui);
         check_select_scroll(wui);
+        check_field_drag_drawn(wui);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {
