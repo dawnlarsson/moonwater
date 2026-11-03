@@ -442,6 +442,8 @@ scene:
 	s_cbranch_scc1	.scene_image
 	s_cmp_eq_u32	s47, 5
 	s_cbranch_scc1	.scene_mix
+	s_cmp_eq_u32	s47, 6
+	s_cbranch_scc1	.scene_close
 	s_cmp_le_u32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -523,6 +525,98 @@ scene:
 	v_cndmask_b32_e64 v42, \o, v42, s[96:97]
 	v_cndmask_b32_e64 \o, \o, v42, \mk
 .endm
+
+; one pixel of a close button's halo (compositor_close_draw): the window's own pixel \under (not the picture's under it) mixed towards window_mix (under, tone, 140) by the halo \cv
+; (0 to 255), where the mask \mk has it and the halo is not none, the result without alpha (the tone's parts in s98 and s99: the tone's red and blue, its green, times 140 and 128
+; in both sixteen-bit lanes)
+.macro closepixel o, cv, under, mk
+	v_and_b32	v48, 0x00ffffff, \under
+	v_and_b32	v49, s75, v48
+	v_lshrrev_b32	v50, 8, v48
+	v_and_b32	v50, s75, v50
+	v_mad_u32_u24	v49, v49, 116, s98
+	v_lshrrev_b32	v49, 8, v49
+	v_and_b32	v49, s75, v49
+	v_mad_u32_u24	v50, v50, 116, s99
+	v_lshrrev_b32	v50, 8, v50
+	v_and_b32	v50, s75, v50
+	v_lshl_or_b32	v51, v50, 8, v49
+	mixpixel	v48, \cv, v51, \mk
+	v_cmp_ne_u32_e64 s[90:91], 0, \cv
+	s_and_b64	s[90:91], s[90:91], \mk
+	v_cndmask_b32_e64 \o, \o, v48, s[90:91]
+.endm
+
+; a close button's halo (6 | the button's side << 8 | the picture's pitch << 16, x0, y0, x1, y1 the button in pixels, the place from the buffer's start of the side by side
+; bytes of the halo's covers, the picture's address at x0, y0 in two words: the first and the high byte of the second, and the tone in the rest of it)
+.scene_close:
+	s_cmp_le_u32	s59, s28
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s50, s28, 64
+	s_cmp_ge_u32	s57, s50
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_u32	s60, s29
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s51, s29, 4
+	s_cmp_ge_u32	s58, s51
+	s_cbranch_scc1	.scene_loop
+	s_mov_b32	s45, 1
+	s_min_u32	s53, s59, s12
+	v_cmp_le_u32_e64 s[76:77], s58, v4
+	v_cmp_gt_u32	vcc, s60, v4
+	s_and_b64	s[76:77], s[76:77], vcc
+	inside		s[82:83], v3
+	inside		s[84:85], v17
+	inside		s[86:87], v18
+	inside		s[88:89], v19
+	s_bfe_u32	s80, s56, 0x80008
+	s_lshr_b32	s81, s56, 16
+	s_lshr_b32	s100, s63, 8
+	s_and_b32	s101, s63, 0xff
+	s_and_b32	s98, s100, s75
+	s_mul_i32	s98, s98, 140
+	s_add_u32	s98, s98, 0x00800080
+	s_lshr_b32	s99, s100, 8
+	s_and_b32	s99, s99, s75
+	s_mul_i32	s99, s99, 140
+	s_add_u32	s99, s99, 0x00800080
+	v_subrev_nc_u32	v30, s58, v4
+	v_mad_u32_u24	v31, v30, s80, s61
+	v_subrev_nc_u32	v32, s57, v3
+	v_add_nc_u32	v31, v31, v32
+	s_mov_b64	s[92:93], exec
+	s_or_b64	s[90:91], s[82:83], s[84:85]
+	s_or_b64	s[90:91], s[90:91], s[86:87]
+	s_or_b64	s[90:91], s[90:91], s[88:89]
+	s_and_b64	exec, s[92:93], s[90:91]
+	global_load_dword v34, v31, s[102:103]
+	s_mov_b64	exec, s[92:93]
+	v_mul_lo_u32	v35, v30, s81
+	v_add_nc_u32	v35, v35, v32
+	v_lshlrev_b32	v35, 2, v35
+	v_ashrrev_i32	v36, 31, v35
+	v_add_co_u32	v32, vcc, s62, v35
+	v_mov_b32	v33, s101
+	v_add_co_ci_u32	v33, vcc, v33, v36, vcc
+	s_and_b64	exec, s[92:93], s[82:83]
+	global_load_dword v64, v[32:33], off
+	s_and_b64	exec, s[92:93], s[84:85]
+	global_load_dword v65, v[32:33], off offset:4
+	s_and_b64	exec, s[92:93], s[86:87]
+	global_load_dword v66, v[32:33], off offset:8
+	s_and_b64	exec, s[92:93], s[88:89]
+	global_load_dword v67, v[32:33], off offset:12
+	s_mov_b64	exec, s[92:93]
+	s_waitcnt	vmcnt(0)
+	v_bfe_u32	v60, v34, 0, 8
+	v_bfe_u32	v61, v34, 8, 8
+	v_bfe_u32	v62, v34, 16, 8
+	v_bfe_u32	v63, v34, 24, 8
+	closepixel	v5, v60, v64, s[82:83]
+	closepixel	v6, v61, v65, s[84:85]
+	closepixel	v7, v62, v66, s[86:87]
+	closepixel	v8, v63, v67, s[88:89]
+	s_branch	.scene_loop
 
 ; a mix (5 | the cover's pitch << 8 | the ink's pitch << 16, x0, y0, x1, y1 in pixels, the place of the cover byte at x0, y0 from the buffer's start, the ink's address in
 ; two words, or the ink's colour in the first when the ink's pitch is 0): memory_mix_u32_row over the rectangle, the covers a table of bytes in the buffer

@@ -985,22 +985,36 @@ struct compositor_gscene
 };
 static struct compositor_gscene compositor_gscene;
 
+// The pool's table for a key (a size of bytes): its place from the buffer's start and, when it is new, where to fill it; none when the pool is full.
+static unsigned int compositor_gpu_slot(int r, int b, int corner, int content, unsigned int size, unsigned char **fill)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+
+        *fill = 0;
+        for (unsigned int k = 0; k < g->kept; k++)
+                if (g->table[k].r == r && g->table[k].b == b && g->table[k].corner == corner && g->table[k].content == content)
+                        return g->table[k].at;
+        if (g->kept == COMPOSITOR_GPU_TABLES || g->tables_used + size > g->tables_size)
+                return 0;
+        *fill = g->tables + g->tables_used;
+        g->table[g->kept].r = r, g->table[g->kept].b = b, g->table[g->kept].corner = corner, g->table[g->kept].content = content;
+        g->table[g->kept++].at = g->tables_at + g->tables_used;
+        g->tables_used += (size + 15) & ~15u;
+        return g->table[g->kept - 1].at;
+}
+
 // The cover table of a corner's square (r by r bytes, rows from the square's top): the line's outside (content 0), or the picture's inside it (content 1), as
 // compositor_corner_rows reads the masks, flipped and mirrored so that the square is read from its own top left. Its place from the buffer's start, 0 for none.
 static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
 {
-        struct compositor_gscene *g = &compositor_gscene;
         int ri = r > b ? r - b : 0, right = corner & 1, down = (corner & 2) != 0;
         const unsigned char *outer = right ? compositor_corner_mirror(r) : compositor_corner_mask(r);
         const unsigned char *inner = ri ? (right ? compositor_corner_mirror(ri) : compositor_corner_mask(ri)) : 0;
         unsigned char *table;
+        unsigned int at = compositor_gpu_slot(r, b, corner, content, (unsigned int)(r * r), &table);
 
-        for (unsigned int k = 0; k < g->kept; k++)
-                if (g->table[k].r == r && g->table[k].b == b && g->table[k].corner == corner && g->table[k].content == content)
-                        return g->table[k].at;
-        if (g->kept == COMPOSITOR_GPU_TABLES || g->tables_used + (unsigned int)(r * r) > g->tables_size)
-                return 0;
-        table = g->tables + g->tables_used;
+        if (!table)
+                return at;
         for (int row = 0; row < r; row++)
                 for (int col = 0; col < r; col++)
                 {
@@ -1015,10 +1029,24 @@ static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
                         }
                         table[row * r + col] = cover;
                 }
-        g->table[g->kept].r = r, g->table[g->kept].b = b, g->table[g->kept].corner = corner, g->table[g->kept].content = content;
-        g->table[g->kept++].at = g->tables_at + g->tables_used;
-        g->tables_used += (unsigned int)(r * r + 15) & ~15u;
-        return g->table[g->kept - 1].at;
+        return at;
+}
+
+// A close button's table (side by side bytes): the halo's covers (which 0) or the strokes' (which 1), in 255ths as the processor mixes them (the samples of sixteen).
+static unsigned int compositor_gpu_close_table(int side, int half, int which)
+{
+        unsigned char *table;
+        unsigned int at = compositor_gpu_slot(side, half, 4, 2 + which, (unsigned int)(side * side), &table);
+
+        for (int y = 0; table && y < side; y++)
+                for (int x = 0; x < side; x++)
+                {
+                        unsigned int halo, cross;
+
+                        compositor_close_sample(side, half, x, y, &halo, &cross);
+                        table[y * side + x] = (unsigned char)((which ? cross : halo) * 255 / 16);
+                }
+        return at;
 }
 
 // One record: the rectangle cut to the picture, none when nothing is left. A fill writes the colour; a copy takes the picture's pixels from the frame, at the
@@ -1047,6 +1075,33 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
         g->count++;
 }
 
+// The close button and the minimise button over a window's pixels (compositor_close_draw, compositor_minimize_draw): the halo mixes the window's own pixels towards
+// their mix with a tone and the strokes mix the ink over that; the dash is a fill. False when the button is not wholly in the picture (the processor draws it cut).
+static b32 compositor_gpu_buttons(const struct compositor_frame *f)
+{
+        int bx, by, side, mx, my, in = COMPOSITOR_MINIMIZE_IN * f->scale / 100, half = compositor_px1(f->scale);
+        unsigned int mean = f->close_mean, ink = window_contrast(mean), tone = window_light(mean) ? 0xffffffu : compositor_ink_shadow();
+        unsigned int halo, cross;
+        positive at;
+        unsigned int *op = compositor_gscene.ops + 8 * compositor_gscene.count;
+
+        if (!compositor_close_box(f, &bx, &by, &side))
+                return true;
+        if (bx < 0 || by < 0 || bx + side > (int)compositor_gscene.width || by + side > (int)compositor_gscene.height || side > 255 || f->pitch > 65535)
+                return false;
+        halo = compositor_gpu_close_table(side, half, 0), cross = compositor_gpu_close_table(side, half, 1);
+        if (!halo || !cross)
+                return false;
+        at = gpu_va(f->pixels) + 4ull * ((positive)(by - f->y) * f->pitch + (positive)(bx - f->x));
+        op[0] = 6u | (unsigned int)side << 8 | (unsigned int)f->pitch << 16, op[1] = (unsigned int)bx, op[2] = (unsigned int)by, op[3] = (unsigned int)(bx + side);
+        op[4] = (unsigned int)(by + side), op[5] = halo, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32) | tone << 8;
+        compositor_gscene.count++;
+        compositor_gpu_rect(5, bx, by, bx + side, by + side, ink, 0, cross, side);
+        if (compositor_minimize_box(f, &mx, &my, &side))
+                compositor_gpu_rect(0, mx + in, my + side / 2 - half, mx + in + side - 2 * in, my + side / 2 + half, ink, 0, 0, 0);
+        return true;
+}
+
 // What is inside a frame's line, in a rectangle of it: the picture's pixels copied, or the tab's one ink.
 static void compositor_gpu_contents(const struct compositor_frame *f, unsigned int tab, int x0, int y0, int x1, int y1)
 {
@@ -1064,7 +1119,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
 
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
-        if ((!f->builtin && (!f->pixels || !gpu_va(f->pixels))) || compositor_scaled(f) || f->lit || f->close || f->preview[0] || f->preview[1] || f->preview[2] ||
+        if ((!f->builtin && (!f->pixels || !gpu_va(f->pixels))) || compositor_scaled(f) || f->lit || f->preview[0] || f->preview[1] || f->preview[2] ||
             f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || g->count + 40 > g->room)
                 return false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
@@ -1079,7 +1134,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         if (!r)
         {
                 compositor_gpu_contents(f, tab, x, y, x + w, y + h);
-                return true;
+                return compositor_gpu_buttons(f);
         }
         compositor_gpu_contents(f, tab, x + ri, y, x + w - ri, y + h);
         compositor_gpu_contents(f, tab, x, y + ri, x + ri, y + h - ri);
@@ -1106,7 +1161,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 if (ri && sx2 > sx1 && sy2 > sy1)
                         compositor_gpu_rect(5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         }
-        return true;
+        return compositor_gpu_buttons(f);
 }
 
 // The frames, in order, over a ground: the scene's records; false (and none) if any is not one the GPU draws.

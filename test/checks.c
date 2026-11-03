@@ -187135,6 +187135,17 @@ b32 main(void)
                                 for (positive i = 0; i < (positive)pitch * (unsigned int)f->height; i++)
                                         region[used + i] = gpu_random();
                                 used += (pitch * (unsigned int)f->height + 15) & ~15u;
+                                // a close button (and the minimise beside it) on most windows, where it lies wholly in the picture
+                                if (gpu_random() % 4)
+                                {
+                                        int bx, by, side;
+
+                                        f->close = 1, f->close_mean = gpu_random() & 0xffffffu;
+                                        if (gpu_random() % 3 == 0)
+                                                f->scale = 100 + 25 * (int)(gpu_random() % 5);
+                                        if (!compositor_close_box(f, &bx, &by, &side) || bx < 0 || by < 0 || bx + side > 696 || by + side > PH)
+                                                f->close = 0;
+                                }
                         }
                         memory_fill_u32_rect(gpu_kit_want, PP, 696, PH, ground);
                         for (int k = 0; k < count; k++)
