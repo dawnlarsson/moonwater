@@ -3362,6 +3362,7 @@ static struct
         unsigned int owner;
         unsigned int at_real;
         int touching;
+        int retracting; // a finger's or a pen's lead is being taken away (compositor_predict_clear): the windows are not told
         /*
                 The marks of the fingers (`moonwater canvas touch on`, spots_on), one a slot of the touch screen being
                 touched: where each is on the space, on 1 while its finger is down and 2 while it fades from lifted,
@@ -8729,6 +8730,9 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         // What a finger did says so: a program may scroll what a finger drags where a mouse would select.
         if (compositor.touching && type != WINDOW_EVENT_KEY)
                 flags |= WINDOW_KEY_TOUCH;
+        // A lead taken away is a place and no step of the hand's (WINDOW_KEY_SETTLE).
+        if (compositor.retracting && type == WINDOW_EVENT_MOTION)
+                flags |= WINDOW_KEY_SETTLE;
         // The right button of a long press says so, which a program may take as its own (WINDOW_KEY_HOLD).
         if (compositor.touch.holding && type == WINDOW_EVENT_BUTTON)
                 flags |= WINDOW_KEY_HOLD;
@@ -12909,7 +12913,12 @@ static void compositor_predict_clear(unsigned int cls)
         compositor.kept_y = compositor.real_y;
         compositor_pointer_shown();
         compositor.touching = cls == COMPOSITOR_PREDICT_TOUCH;
+        // The cursor, a window in the hand and the windows told go back to the real place; the motion the windows are told says it is
+        // no step the hand made (WINDOW_KEY_SETTLE), since a window that reads a flick off its moves (the kit's throw) takes a step
+        // back at the lift, the retraction of the lead, for the finger turning.
+        compositor.retracting = 1;
         compositor_motion();
+        compositor.retracting = 0;
         compositor.touching = 0;
 }
 

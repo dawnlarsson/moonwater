@@ -984,6 +984,7 @@ static void ui_confirm_line(char address_to into, positive room, const char addr
 }
 
 static b32 ui_kit_touch; // the event is a finger's (WINDOW_KEY_TOUCH): what it can press is at least UI_TARGET each way
+static b32 ui_kit_retract; // the event is a hand's lead taken away (WINDOW_KEY_SETTLE): a place and no step the hand made
 
 // Whether px, py hits a shape x, y, width by height: a finger's reach is the shape grown to UI_TARGET each way where it is smaller
 // (ui_reach_hit, theme.h's rule, which the compositor's resize corners and buttons take too).
@@ -1040,6 +1041,14 @@ static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
 {
         int moved = at - drag->last;
         long gap = now > drag->at ? (long)(now - drag->at) : 0;
+
+        // The compositor's taking back of the finger's lead (at its lift, or in a frame with no report) puts the hand where it is: the
+        // list goes with it, but it is no report of how fast the finger goes, and a step back at the lift read as the finger turning.
+        if (ui_kit_retract)
+        {
+                drag->last = at;
+                return moved;
+        }
 
         {
                 // Reports handed over together (a window that was busy, or a compositor that joins what came within a frame) carry
@@ -4934,6 +4943,7 @@ static struct ui_control address_to ui_kit_held;
 static fn ui_event_context(const struct window_event address_to event)
 {
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+        ui_kit_retract = event->type == WINDOW_EVENT_MOTION && (event->flags & WINDOW_KEY_SETTLE) != 0;
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
         ui_kit.now = (b64)clock_monotonic_nanoseconds();
 }

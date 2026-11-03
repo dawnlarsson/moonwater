@@ -111,6 +111,13 @@
         long press as its own, as a terminal selects the word under it, where a click would open a menu.
 */
 #define WINDOW_KEY_HOLD 2048u
+/*
+        A motion that is no step the hand made: a finger's or a pen's lead (the place it was told at, a frame ahead of where it is)
+        taken away at its lift or in a frame with no report, so the window knows where the hand is. It is a place and not a speed: a
+        program that reads the hand's velocity off its moves leaves it out (the kit does, ui_drag_follow), as the step back it is
+        would read as the hand turning.
+*/
+#define WINDOW_KEY_SETTLE 4096u
 
 struct window_key
 {

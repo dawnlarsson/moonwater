@@ -126375,6 +126375,73 @@ static void check_field_drag_drawn(struct ui address_to wui)
     check("field drag: drawn between the ticks, the view moves a few pixels a tick, not a quarter of the field", largest >= 0 && largest <= 4);
 }
 
+/*
+        A fast finger's drag on a window and its lift, as the window is told them: the finger is led a frame ahead (the pointer a
+        finger moves is where it will be, by a few pixels), and at the lift the lead is taken away, which tells the window where the
+        hand is (the predict rows). That motion is a step back, and no step the hand made: it says so (WINDOW_KEY_SETTLE), and a
+        window that reads the finger's velocity off its moves leaves it out (ui_kit_retract, ui_drag_follow). Without the flag the
+        velocity at the lift was read through that last step back, which is the finger turning, and a flick threw nothing (read off a
+        booted guest: the terminal's scrollback, 92 and 0 a second for a finger that moved at 2500 and 1250). The window here reads
+        each event as it comes, as an idle program does: no move it is told steps back but the one that is flagged, and that one is told.
+*/
+static void check_flick_lift(void)
+{
+    struct windows address_to table;
+    struct window_row own;
+    struct window_event event;
+    int last = -1, back = 0, motions = 0, settled = 0;
+
+    scroll_setup(1);
+    table = compositor.table;
+    own.table = table, own.row = 1, own.door = -1;
+    for (int step = 0; step <= 11; step++)
+    {
+        if (step < 11)
+            touch_one(100, 60 + step * 12, false);
+        else
+            touch_one(100, 60 + 10 * 12, true);
+        while (windows_event(&own, &event))
+            if (event.type == WINDOW_EVENT_MOTION)
+            {
+                if (event.flags & WINDOW_KEY_SETTLE)
+                    settled++;
+                else
+                    back += last >= 0 && event.b < last;
+                if (!(event.flags & WINDOW_KEY_SETTLE))
+                    last = event.b;
+                motions++;
+            }
+    }
+    check("flick: the lead's retraction at a fast finger's lift is told to the window, flagged as no step the hand made, and no other move steps back",
+          motions >= 5 && settled >= 1 && back == 0);
+}
+
+// The velocity at the lift, with the lead's retraction coming as the finger's next report would (a report later, as it did on the
+// guest: 8 ms on, then the lift): read as a place (flagged) it changes nothing, and read as a step it is the finger turning.
+static void check_flick_retract(void)
+{
+    struct ui_drag drag;
+    positive start = 1000000000ull, ms = 1000000ull;
+    long plain, flagged, unflagged;
+
+    ui_drag_start(&drag, 100, start);
+    for (int k = 1; k <= 12; k++)
+        ui_drag_follow(&drag, 100 + 20 * k, start + (positive)k * 8 * ms);
+    plain = ui_drag_velocity(&drag, start + 104 * ms + 200000ull);
+    ui_kit_retract = true;
+    ui_drag_follow(&drag, 100 + 20 * 12 - 4, start + 104 * ms);
+    ui_kit_retract = false;
+    flagged = ui_drag_velocity(&drag, start + 104 * ms + 200000ull);
+    ui_drag_start(&drag, 100, start);
+    for (int k = 1; k <= 12; k++)
+        ui_drag_follow(&drag, 100 + 20 * k, start + (positive)k * 8 * ms);
+    ui_drag_follow(&drag, 100 + 20 * 12 - 4, start + 104 * ms);
+    unflagged = ui_drag_velocity(&drag, start + 104 * ms + 200000ull);
+    check("flick: a lead's retraction flagged as a place leaves the velocity at the lift as it was (within a fifth)",
+          plain > 2000 && flagged * 5 >= plain * 4 && flagged * 5 <= plain * 6);
+    check("flick: and the same step read as a move of the finger's takes most of it away, which is what the flag is for", unflagged * 3 < plain);
+}
+
 static void check_select_scroll(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -142506,6 +142573,8 @@ static fn field_check(struct ui address_to wui)
         touch_scroll_check(wui);
         check_touch_path(wui);
         check_select_scroll(wui);
+        check_flick_lift();
+        check_flick_retract();
         check_field_drag_drawn(wui);
         caret_fade_check();
         check_code_finger(wui);
