@@ -124502,6 +124502,33 @@ static void caret_fade_check(void)
 }
 
 /*
+        A flick is the same flick at any scale: a finger's speed is in device pixels, and so is the list, so the throw's time
+        constant is the list's length in logical pixels (UI_FLING_NS_PER_PX a logical pixel). It was the list's device length,
+        which doubled the throw at 200 percent: the same flick of 1000 logical pixels a second over a 3000 logical pixel list
+        went twice as far in logical pixels.
+*/
+static void fling_scale_check(void)
+{
+    static const int scales[2] = {100, 200};
+    b64 distance[2];
+
+    for (int k = 0; k < 2; k++)
+    {
+        struct ui_scroll s;
+        int scale = scales[k];
+
+        memory_zero(&s, sizeof(s));
+        s.scale = scale, s.bounds = 1;
+        s.content = 3000 * scale / 100, s.view = 400 * scale / 100;
+        s.dragging = 1;
+        ui_scroll_let_go(&s, 1, 1000 * scale / 100);
+        distance[k] = (s.aim - s.at) * 100 / ((b64)scale * UI_SCROLL_SCALE);
+    }
+    check("fling: the same flick of the same list goes the same logical distance at 100 and 200 percent (within 5 percent)",
+          distance[0] > 0 && distance[1] > 0 && (distance[1] - distance[0]) * 20 <= distance[0] && (distance[0] - distance[1]) * 20 <= distance[0]);
+}
+
+/*
         A switch dragged sideways and then taken back by the compositor (a second finger, a long press for the right button):
         what the drag stretched springs home as a release's does, from the stretch it had, and no value changes.
 */
@@ -138570,6 +138597,7 @@ static fn field_check(struct ui address_to wui)
         caret_fade_check();
         check_code_finger(wui);
         switch_cancel_check(wui);
+        fling_scale_check();
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {

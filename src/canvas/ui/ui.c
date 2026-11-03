@@ -5579,10 +5579,11 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
         }
         if (thrown)
         {
-                // A flick's throw: its speed falls by e in a time that grows with the region's length (UI_FLING_NS_PER_PX), so a
-                // long list travels further than a short one for the same flick; the glide stops at the region's ends (ui_scroll_fit)
+                // A flick's throw: its speed falls by e in a time that grows with the region's length in logical pixels
+                // (UI_FLING_NS_PER_PX a pixel), so a long list travels further than a short one for the same flick, and the
+                // same flick travels the same distance at any scale; the glide stops at the region's ends (ui_scroll_fit)
                 // and never passes its aim (ui_scroll_limit).
-                b64 tau = (b64)(s->content > 0 ? s->content : 1) * UI_FLING_NS_PER_PX;
+                b64 tau = (b64)(s->content > 0 ? s->content : 1) * 100 / (s->scale > 0 ? s->scale : 100) * UI_FLING_NS_PER_PX;
 
                 s->speed = (b64)speed * UI_SCROLL_SCALE;
                 ui_scroll_glide_to(s, s->at + s->speed * tau / 1000000000ll, tau);
