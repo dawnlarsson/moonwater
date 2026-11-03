@@ -29,6 +29,10 @@ editor_untitled	8b58	sem título
 editor_write_beside	ec75	não foi possível gravar ao lado do arquivo
 editor_writes_over_changed	df15	sobrescreve a alteração no disco (Ctrl+R lê de novo)
 editor_writes_over_readonly	e22f	sobrescreve um arquivo somente leitura
+launcher_power_off	ae2f	Desligar
+launcher_power_off_armed	a48f	desligar
+launcher_restart	ed8c	Reiniciar
+launcher_restart_armed	11ec	reiniciar
 menu_copy	43e0	&Copiar
 menu_cut	5c17	Recor&tar
 menu_delete	1e3e	&Excluir

@@ -29,6 +29,10 @@ editor_untitled	8b58	namnlös
 editor_write_beside	ec75	kunde inte skriva bredvid filen
 editor_writes_over_changed	df15	skriver över ändringen på disken (Ctrl+R läser om den)
 editor_writes_over_readonly	e22f	skriver över en skrivskyddad fil
+launcher_power_off	ae2f	Stäng av
+launcher_power_off_armed	a48f	stäng av
+launcher_restart	ed8c	Starta om
+launcher_restart_armed	11ec	starta om
 menu_copy	43e0	Ko&piera
 menu_cut	5c17	&Klipp ut
 menu_delete	1e3e	&Ta bort

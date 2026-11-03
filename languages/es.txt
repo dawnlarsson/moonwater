@@ -29,6 +29,10 @@ editor_untitled	8b58	sin título
 editor_write_beside	ec75	no se pudo escribir junto al archivo
 editor_writes_over_changed	df15	sobrescribe el cambio del disco (Ctrl+R lo lee de nuevo)
 editor_writes_over_readonly	e22f	sobrescribe un archivo de solo lectura
+launcher_power_off	ae2f	Apagar
+launcher_power_off_armed	a48f	apagar
+launcher_restart	ed8c	Reiniciar
+launcher_restart_armed	11ec	reiniciar
 menu_copy	43e0	&Copiar
 menu_cut	5c17	Cor&tar
 menu_delete	1e3e	&Eliminar

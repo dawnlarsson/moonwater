@@ -29,6 +29,10 @@ editor_untitled	8b58	без назви
 editor_write_beside	ec75	не вдалося записати поруч із файлом
 editor_writes_over_changed	df15	перезапише зміну на диску (Ctrl+R читає знову)
 editor_writes_over_readonly	e22f	перезапише файл лише для читання
+launcher_power_off	ae2f	Вимкнути
+launcher_power_off_armed	a48f	вимкнути
+launcher_restart	ed8c	Перезавантажити
+launcher_restart_armed	11ec	перезавантажити
 menu_copy	43e0	Копіювати
 menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити

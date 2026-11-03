@@ -29,6 +29,10 @@ editor_untitled	8b58	untitled
 editor_write_beside	ec75	could not write beside the file
 editor_writes_over_changed	df15	writes over the change on disk (Ctrl+R reads it again)
 editor_writes_over_readonly	e22f	writes over a read-only file
+launcher_power_off	ae2f	Power off
+launcher_power_off_armed	a48f	power off
+launcher_restart	ed8c	Restart
+launcher_restart_armed	11ec	restart
 menu_copy	43e0	&Copy
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete

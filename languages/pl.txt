@@ -29,6 +29,10 @@ editor_untitled	8b58	bez nazwy
 editor_write_beside	ec75	nie można zapisać obok pliku
 editor_writes_over_changed	df15	nadpisuje zmianę na dysku (Ctrl+R wczytuje ponownie)
 editor_writes_over_readonly	e22f	nadpisuje plik tylko do odczytu
+launcher_power_off	ae2f	Wyłącz
+launcher_power_off_armed	a48f	wyłącz
+launcher_restart	ed8c	Uruchom ponownie
+launcher_restart_armed	11ec	uruchom ponownie
 menu_copy	43e0	&Kopiuj
 menu_cut	5c17	&Wytnij
 menu_delete	1e3e	&Usuń

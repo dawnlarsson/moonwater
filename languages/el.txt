@@ -29,6 +29,10 @@ editor_untitled	8b58	χωρίς τίτλο
 editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλα στο αρχείο
 editor_writes_over_changed	df15	αντικαθιστά την αλλαγή στον δίσκο (το Ctrl+R το διαβάζει ξανά)
 editor_writes_over_readonly	e22f	αντικαθιστά αρχείο μόνο για ανάγνωση
+launcher_power_off	ae2f	Τερματισμός
+launcher_power_off_armed	a48f	τερματισμός
+launcher_restart	ed8c	Επανεκκίνηση
+launcher_restart_armed	11ec	επανεκκίνηση
 menu_copy	43e0	Αντιγραφή
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή

@@ -29,6 +29,10 @@ editor_untitled	8b58	senza titolo
 editor_write_beside	ec75	impossibile scrivere accanto al file
 editor_writes_over_changed	df15	sovrascrive la modifica sul disco (Ctrl+R la rilegge)
 editor_writes_over_readonly	e22f	sovrascrive un file di sola lettura
+launcher_power_off	ae2f	Spegni
+launcher_power_off_armed	a48f	spegni
+launcher_restart	ed8c	Riavvia
+launcher_restart_armed	11ec	riavvia
 menu_copy	43e0	&Copia
 menu_cut	5c17	&Taglia
 menu_delete	1e3e	&Elimina

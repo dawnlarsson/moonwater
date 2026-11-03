@@ -96,14 +96,14 @@ struct launcher_program
         unsigned char mono;            // it is drawn in the monospace face
 };
 
-// The power buttons, left to right: what each is called, says when it is armed, and starts (the machine's own stop).
+// The power buttons, left to right: the ids of what each is called and says when it is armed, and what it starts (the machine's own stop).
 #define LAUNCHER_POWERS 2
 static const struct launcher_power
 {
-        const char address_to label;
-        const char address_to says;
+        unsigned int label, says;
         const char address_to command;
-} launcher_powers[LAUNCHER_POWERS] = {{"Power off", "power off", "poweroff"}, {"Restart", "restart", "reboot"}};
+} launcher_powers[LAUNCHER_POWERS] = {{LANGUAGE_launcher_power_off, LANGUAGE_launcher_power_off_armed, "poweroff"},
+                                      {LANGUAGE_launcher_restart, LANGUAGE_launcher_restart_armed, "reboot"}};
 
 // The desktop's own programs, in the order they are listed.
 static const struct launcher_program launcher_programs[] = {
@@ -799,9 +799,9 @@ static fn launcher_layout(void)
                 launcher.list.damaged = launcher_damaged;
                 launcher.list.hover = launcher.list.down = -1;
         }
-        if (!launcher.power.count)
-                for (int at = 0; at < LAUNCHER_POWERS; at++)
-                        ui_buttons_set(&launcher.power, at, launcher_powers[at].label, launcher_powers[at].says);
+        // The words are asked each time: a language chosen while the bar is up is the next picture's.
+        for (int at = 0; at < LAUNCHER_POWERS; at++)
+                ui_buttons_set(&launcher.power, at, language_text(launcher_powers[at].label), language_text(launcher_powers[at].says));
         launcher.list.count = (int)launcher.entries;
         for (int at = 0; at < launcher.list.count; at++)
                 launcher.list.id[at] = (unsigned short)at;

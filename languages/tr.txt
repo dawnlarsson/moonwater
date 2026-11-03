@@ -29,6 +29,10 @@ editor_untitled	8b58	adsız
 editor_write_beside	ec75	dosyanın yanına yazılamadı
 editor_writes_over_changed	df15	diskteki değişikliğin üzerine yazar (Ctrl+R yeniden okur)
 editor_writes_over_readonly	e22f	salt okunur bir dosyanın üzerine yazar
+launcher_power_off	ae2f	Kapat
+launcher_power_off_armed	a48f	kapat
+launcher_restart	ed8c	Yeniden başlat
+launcher_restart_armed	11ec	yeniden başlat
 menu_copy	43e0	&Kopyala
 menu_cut	5c17	K&es
 menu_delete	1e3e	&Sil

@@ -29,6 +29,10 @@ editor_untitled	8b58	unbenannt
 editor_write_beside	ec75	neben der Datei konnte nicht geschrieben werden
 editor_writes_over_changed	df15	überschreibt die Änderung auf dem Datenträger (Ctrl+R liest neu)
 editor_writes_over_readonly	e22f	überschreibt eine schreibgeschützte Datei
+launcher_power_off	ae2f	Ausschalten
+launcher_power_off_armed	a48f	ausschalten
+launcher_restart	ed8c	Neu starten
+launcher_restart_armed	11ec	neu starten
 menu_copy	43e0	&Kopieren
 menu_cut	5c17	A&usschneiden
 menu_delete	1e3e	&Löschen
