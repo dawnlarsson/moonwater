@@ -23271,9 +23271,9 @@ time.sleep(0.9)
 up()
 time.sleep(0.4)
 heard = told("ub")
-out.append(("F1.9 a finger held still is the right button, its left press taken back",
+out.append(("F1.9 a finger held still is the right button, its left press taken back, and the lift of the finger is a held release",
             " ".join("%s/%s" % b for b in re.findall(r"surface: button (\d+) (\d+)", heard)),
-            "272/513 272/1536 273/513 273/512"))
+            "272/513 272/3584 273/2561 273/2560 272/3584"))
 shell.run(": > /tmp/ub.out", 10)
 down(bx + 200, by + 100, 0, 5)
 down(bx + 300, by + 100, 1, 6)
@@ -23301,6 +23301,10 @@ if swin:
     mid = int(fy0 + 22 * f)
     knob_y = int(fy0 + 38 * f)
     moveto(wx + ww + 60, wy + wh + 60)
+    # A tap on the window's title gives it the keys (a window is raised and focused by a press on it), as the s1 guest does with the mouse.
+    down(wx + int(120 * f), wy + int(34 * f))
+    up()
+    time.sleep(0.6)
     type_text("alpha beta gamma")
     time.sleep(0.8)
     rgb = picture("f1-select-typed", (fx0 - 20, fy0 - 10, fx1 - fx0 + 40, int(150 * f)))
