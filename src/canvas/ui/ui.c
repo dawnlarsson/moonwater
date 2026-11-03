@@ -6173,6 +6173,9 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         {
                 int at = x >= 0 && x < m->width ? ui_popmenu_at(ui, m, y) : -1;
 
+                // A finger's press that moves past the slop is a drag, and its lift chooses nothing (the kit's press rule).
+                if (m->press.down && (event->flags & WINDOW_KEY_TOUCH))
+                        ui_press_move(ui, &m->press, x, y);
                 if (!ui_popmenu_bar(ui, m, WINDOW_EVENT_MOTION, x, y, false))
                         m->hot = at;
                 return UI_MENU_NOTHING;

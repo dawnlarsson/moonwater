@@ -139562,6 +139562,31 @@ static fn menu_defaults_check(struct ui address_to wui)
                 chosen_taken = ui_popmenu_event(wui, &m, &taken, x, y1);
                 check("menu: a press taken back chooses nothing, and shows nothing pressed", chosen_taken == UI_MENU_NOTHING && !m.press.down);
         }
+        // A finger's press is the kit's press: moved past the slop it is a drag, and a lift back on the item it went down on is no click.
+        {
+                struct window_event touch_press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+                struct window_event touch_lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0};
+                struct window_event touch_move = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+                int dragged_back, tapped, trow, tpad, tx, ty1, ty2;
+                static struct ui_popmenu t;
+
+                memory_zero(&t, sizeof(t));
+                t.touch = true;
+                ui_popmenu_add(&t, "Copy", null, 0, 1);
+                ui_popmenu_add(&t, "Paste", null, 0, 2);
+                ui_popmenu_add(&t, "Select all", null, 0, 3);
+                ui_popmenu_size(wui, &t, 0);
+                trow = ui_popmenu_row(wui, &t), tpad = UI_MENU_PAD * wui->scale / 100, tx = t.width / 2;
+                ty1 = tpad + trow + trow / 2, ty2 = tpad + 2 * trow + trow / 2;
+                ui_popmenu_event(wui, &t, &touch_press, tx, ty1);
+                ui_popmenu_event(wui, &t, &touch_move, tx, ty2);
+                ui_popmenu_event(wui, &t, &touch_move, tx, ty1);
+                dragged_back = ui_popmenu_event(wui, &t, &touch_lift, tx, ty1);
+                check("menu: a finger dragged past the slop and back to its item chooses nothing (a drag is no click)", dragged_back == UI_MENU_NOTHING);
+                ui_popmenu_event(wui, &t, &touch_press, tx, ty1);
+                tapped = ui_popmenu_event(wui, &t, &touch_lift, tx, ty1);
+                check("menu: a finger's press and lift on an item, unmoved, chooses it", tapped == 2);
+        }
         // Drawn opaque (the menu's own face is what that would show), it has no face: the glass is what is under it.
         menu_defaults_items(wui, &m);
         {
