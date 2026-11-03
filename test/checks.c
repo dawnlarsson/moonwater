@@ -124954,6 +124954,23 @@ static void check_ui_press(void)
               ui_hit(&ui, true, 90, 95, 100, 100, 20, 20) && !ui_hit(&ui, false, 90, 95, 100, 100, 20, 20) &&
                   ui_hit(&ui, false, 105, 105, 100, 100, 20, 20) && !ui_hit(&ui, true, 85, 95, 100, 100, 20, 20));
 
+        // A finger's press on a button is the kit's press too: moved past the slop and back, its lift clicks nothing; unmoved, it does.
+        {
+                static struct ui_control button;
+                struct ui_control address_to got_drag, address_to got_tap;
+
+                memory_zero(&button, sizeof(button));
+                button.kind = UI_BUTTON, button.label = "Go", button.x = 10, button.y = 10, button.w = 100, button.h = 48;
+                ui_control_start(&button);
+                ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_BUTTON, 40, 30, true, WINDOW_KEY_TOUCH);
+                ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_MOTION, 40, 200, false, WINDOW_KEY_TOUCH);
+                ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_MOTION, 40, 30, false, WINDOW_KEY_TOUCH);
+                got_drag = ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_BUTTON, 40, 30, false, WINDOW_KEY_TOUCH);
+                ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_BUTTON, 40, 30, true, WINDOW_KEY_TOUCH);
+                got_tap = ui_kit_pointer(&ui, &button, 1, WINDOW_EVENT_BUTTON, 40, 30, false, WINDOW_KEY_TOUCH);
+                check("ui press: a finger's press on a button dragged past the slop and back is no click", got_drag == null);
+                check("ui press: a finger's press and lift on a button, unmoved, clicks it", got_tap == &button);
+        }
         ui_drag_start(&drag, 0, now);
         for (int step = 1; step <= 5; step++)
                 moved += ui_drag_follow(&drag, step * 10, now += 10000000ull);

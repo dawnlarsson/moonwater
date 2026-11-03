@@ -882,11 +882,17 @@ static fn ui_press_begin(struct ui_press address_to press, int x, int y, int tar
         press->down = true, press->touch = touch, press->dragged = false;
 }
 
+// Whether x, y is past the slop from x0, y0: the one slop of every press (UI_SLOP logical pixels at the scale).
+static b32 ui_press_past(const struct ui address_to ui, int x0, int y0, int x, int y)
+{
+        long dx = (long)x - x0, dy = (long)y - y0, slop = UI_SLOP * (long)ui->scale / 100;
+
+        return dx * dx + dy * dy >= slop * slop;
+}
+
 static b32 ui_press_move(const struct ui address_to ui, struct ui_press address_to press, int x, int y)
 {
-        long dx = (long)x - press->x, dy = (long)y - press->y, slop = UI_SLOP * (long)ui->scale / 100;
-
-        if (press->down && !press->dragged && dx * dx + dy * dy >= slop * slop)
+        if (press->down && !press->dragged && ui_press_past(ui, press->x, press->y, x, y))
                 press->dragged = true;
         return press->down && press->dragged;
 }
@@ -4822,6 +4828,9 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         b64 ldx = ui_qdiv(ui_q(dx), ui_q(ui->scale) / 100), ldy = ui_qdiv(ui_q(dy), ui_q(ui->scale) / 100);
 
                         c->pointer_x = x, c->pointer_y = y;
+                        // A finger that moves past the slop is a drag: what it lifts on is no click (the kit's press rule).
+                        if (ui_kit_touch && !c->moved && ui_press_past(ui, c->press_x, c->press_y, x, y))
+                                c->moved = 1;
                         if (c->kind == UI_BUTTON)
                         {
                                 ui_squish_move(&c->squish, ui_squash_of(ldx, ldy));
@@ -4988,13 +4997,13 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 if (c->kind == UI_BUTTON)
                 {
                         ui_squish_release(&c->squish);
-                        if (ui_control_hit(ui, c, x, y) >= 0)
+                        if (!c->moved && ui_control_hit(ui, c, x, y) >= 0)
                                 changed = c;
                 }
                 else if (c->kind == UI_TABS)
                 {
                         ui_squish_release(&c->squish);
-                        if (ui_control_hit(ui, c, x, y) == c->item)
+                        if (!c->moved && ui_control_hit(ui, c, x, y) == c->item)
                         {
                                 ui_tabs_choose(ui, c, c->item);
                                 changed = c;
