@@ -23112,8 +23112,8 @@ fi
 #       it lifts; a window taken by its top follows the finger with all of its line lit; a finger 12 px outside a
 #       window's left edge takes the edge, which is lit while held; a finger held still is the right button; two moved
 #       down together are the wheel up; a finger held on a word of the settings' filter selects it (PRIMARY), shows its handles and
-#       actions bar, and a handle moved along takes the next word in (F1.11 to F1.14). MOONWATER_TOUCH_PICTURES names a directory the
-#       pictures are kept in, as PNGs.
+#       actions bar, and a handle moved along takes the next word in (F1.11 to F1.14); a flick down the terminal's scrollback is thrown, the
+#       view going on after the lift (F1.15, F1.16). MOONWATER_TOUCH_PICTURES names a directory the pictures are kept in, as PNGs.
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = f1 ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/f1-answers" 2>"$work/f1-why" <<'PY'
 import os, re, shutil, subprocess, sys, time
@@ -23215,6 +23215,53 @@ debug = shell.run("moonwater debug", 15)[0]
 kinds = re.search(r"(?i)multitouch[^\n]*\n\s*([^\n]*)", debug)
 out.append(("F1.1 moonwater debug lists QEMU's multitouch device as a touch screen, not a tablet",
             kinds.group(1).strip() if kinds else "not listed", "a touch screen"))
+
+#   A flick on the terminal's scrollback is thrown (F1.15, F1.16): a finger dragged down the terminal's scrollback, fast and lifted,
+#   leaves the view going on, the bar's thumb moving on after the lift as a wheel's glide does. The view is read off the thumb in the
+#   window's right margin (its top row), just after the lift and three seconds on; the thumb of a thrown view has moved on by
+#   a good many pixels, and one that stopped with the finger by a few (the compositor's retraction of the finger's lead, a
+#   step back no hand made, was told to the window before the lift, and the throw read it as the finger turning).
+tpids = pids("terminal")
+twin = place(tpids[0]) if tpids else None
+
+def quick(name):
+    shot(name, 0.05)
+    width, _, data = load(name)
+    return lambda x, y: tuple(data[(y * width + x) * 3:(y * width + x) * 3 + 3])
+
+def thumb_top(rgb, win):
+    x = win[0] + win[2] - 5
+    column = [rgb(x, y) for y in range(win[1] + 30, win[1] + win[3] - 10)]
+    paper = max(set(column), key=column.count)
+    rows = [win[1] + 30 + i for i, c in enumerate(column) if c != paper]
+    return rows[0] if rows else None
+
+def flick_terminal(win, gap, steps, step_px):
+    fx, fy = win[0] + 40, win[1] + win[3] // 3
+    send(finger(fx, fy, 0, 1, "begin"))
+    time.sleep(0.05)
+    for n in range(1, steps + 1):
+        send(finger(fx, fy + n * step_px, 0, 1, "update"))
+        time.sleep(gap)
+    send([mtt("end", 0, -1)])
+    just = thumb_top(quick("f1-flick-just"), win)
+    time.sleep(3.5)
+    later = thumb_top(quick("f1-flick-later"), win)
+    return just, later
+
+if twin:
+    shell.run("seq 1 3000 > /dev/pts/0", 30)
+    time.sleep(2.5)
+    thumb_top(quick("f1-flick-settled"), twin)
+    for label, gap, steps, step_px, least in (("F1.15 a fast flick (2500 px a second) down the terminal's scrollback is thrown", 0.008, 12, 20, 12),
+                                              ("F1.16 and a flick at a touch screen's 60 reports a second", 0.016, 12, 20, 6)):
+        key("shift")
+        time.sleep(1.5)
+        just, later = flick_terminal(twin, gap, steps, step_px)
+        out.append((label + ": its thumb goes on by %d px or more after the lift" % least,
+                    "thrown" if just is not None and later is not None and abs(later - just) >= least else "stopped with the finger: thumb %s then %s" % (just, later), "thrown"))
+else:
+    out.append(("F1.15 the terminal's window is on the screen", "not found", "found"))
 
 a = surface(1300, 300, 600, 400, "336699", "ua")
 b = surface(2000, 300, 450, 400, "996633", "ub")
