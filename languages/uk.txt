@@ -5,12 +5,39 @@ action_copy	3664	Копіювати
 action_cut	5863	Вирізати
 action_paste	0288	Вставити
 action_select_all	3b12	Вибрати все
+editor_changed_on_disk	3e0f	змінено на диску: Ctrl+R читає знову
+editor_closes_unsaved	fcb8	закриває, відкидаючи незбережені зміни
+editor_encoding_bom	c0d7	UTF-8 з BOM
+editor_find_hint	d17a	Знайти
+editor_find_replace_hint	3693	Знайти/Замінити на
+editor_indent_spaces	9db9	Пробіли: %d
+editor_indent_tab	d9a7	Таб: %d
+editor_line_hint	f547	Рядок
+editor_no_file_name	c863	немає імені файлу: запустіть редактор з іменем
+editor_no_match	7de7	немає збігів
+editor_not_regular	5955	не звичайний файл: відхилено
+editor_pattern_bad	5d57	шаблон не компілюється
+editor_position	3696	Рд %1$d, Стп %2$d
+editor_replace_usage	c677	заміна — ЗНАЙТИ/ЗАМІНА
+editor_replaced	1128	замінено: %d
+editor_save_failed	069d	не вдалося зберегти: файл не змінився
+editor_saved	9f44	збережено
+editor_selected	a686	(виділено: %d)
+editor_selected_carets	7e02	(виділено: %d, курсори)
+editor_unsaved	c014	незбережені зміни: збережіть їх або закрийте кожну, двічі натиснувши Ctrl+W
+editor_untitled	8b58	без назви
+editor_write_beside	ec75	не вдалося записати поруч із файлом
+editor_writes_over_changed	df15	перезапише зміну на диску (Ctrl+R читає знову)
+editor_writes_over_readonly	e22f	перезапише файл лише для читання
 menu_copy	43e0	Копіювати
 menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити
+menu_find	1fa6	Знайти
+menu_go_to_line	bc96	Перейти до рядка
 menu_paste	6854	Вставити
 menu_redo	ac45	Повторити
 menu_select_all	f6f6	Вибрати все
+menu_toggle_comment	92ac	Закоментувати/розкоментувати
 menu_undo	b9d3	Скасувати
 ui_confirm_again	b3ff	натисніть ще раз для підтвердження: 
 ui_field_digits	f52b	число складається з цифр
@@ -69,6 +96,7 @@ ui_field_full	fe02	більше не вміщається
 =New USB devices	c15c	Нові USB-пристрої
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
 =Other devices	8362	Інші пристрої
+=Plain Text	2bbe	Звичайний текст
 =Power	a5e6	Живлення
 =Power profile	8def	Профіль живлення
 =Predict touch and pen	e2b7	Передбачати дотик і перо

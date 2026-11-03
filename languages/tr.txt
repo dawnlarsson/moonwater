@@ -5,12 +5,39 @@ action_copy	3664	Kopyala
 action_cut	5863	Kes
 action_paste	0288	Yapıştır
 action_select_all	3b12	Tümünü Seç
+editor_changed_on_disk	3e0f	diskte değişti: Ctrl+R yeniden okur
+editor_closes_unsaved	fcb8	kaydedilmemiş değişiklikleri atıp kapatır
+editor_encoding_bom	c0d7	BOM'lu UTF-8
+editor_find_hint	d17a	Bul
+editor_find_replace_hint	3693	Bul/Şununla değiştir
+editor_indent_spaces	9db9	Boşluk: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Satır
+editor_no_file_name	c863	dosya adı yok: düzenleyiciyi bir adla başlatın
+editor_no_match	7de7	eşleşme yok
+editor_not_regular	5955	normal bir dosya değil: reddedildi
+editor_pattern_bad	5d57	desen derlenmiyor
+editor_position	3696	Sat %1$d, Sütun %2$d
+editor_replace_usage	c677	değiştirme ARANAN/YERİNE biçimindedir
+editor_replaced	1128	%d değiştirildi
+editor_save_failed	069d	kaydedilemedi: dosya eskisi gibi
+editor_saved	9f44	kaydedildi
+editor_selected	a686	(%d seçili)
+editor_selected_carets	7e02	(%d seçili, imleçler)
+editor_unsaved	c014	kaydedilmemiş değişiklikler: kaydedin veya her birini iki kez Ctrl+W ile kapatın
+editor_untitled	8b58	adsız
+editor_write_beside	ec75	dosyanın yanına yazılamadı
+editor_writes_over_changed	df15	diskteki değişikliğin üzerine yazar (Ctrl+R yeniden okur)
+editor_writes_over_readonly	e22f	salt okunur bir dosyanın üzerine yazar
 menu_copy	43e0	&Kopyala
 menu_cut	5c17	K&es
 menu_delete	1e3e	&Sil
+menu_find	1fa6	&Bul
+menu_go_to_line	bc96	S&atıra Git
 menu_paste	6854	Ya&pıştır
 menu_redo	ac45	&Yinele
 menu_select_all	f6f6	&Tümünü Seç
+menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
 ui_confirm_again	b3ff	onaylamak için tekrar basın: 
 ui_field_digits	f52b	bir sayı rakamlardan oluşur
@@ -69,6 +96,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =New USB devices	c15c	Yeni USB aygıtları
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
 =Other devices	8362	Diğer aygıtlar
+=Plain Text	2bbe	Düz Metin
 =Power	a5e6	Güç
 =Power profile	8def	Güç profili
 =Predict touch and pen	e2b7	Dokunma ve kalemi tahmin et

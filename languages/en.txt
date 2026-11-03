@@ -5,12 +5,39 @@ action_copy	3664	Copy
 action_cut	5863	Cut
 action_paste	0288	Paste
 action_select_all	3b12	Select All
+editor_changed_on_disk	3e0f	changed on disk: Ctrl+R reads it again
+editor_closes_unsaved	fcb8	closes the unsaved changes
+editor_encoding_bom	c0d7	UTF-8 with BOM
+editor_find_hint	d17a	Find
+editor_find_replace_hint	3693	Find/Replace with
+editor_indent_spaces	9db9	Spaces: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Line
+editor_no_file_name	c863	no file name: start the editor with one
+editor_no_match	7de7	no match
+editor_not_regular	5955	not a regular file: refused
+editor_pattern_bad	5d57	the pattern does not compile
+editor_position	3696	Ln %1$d, Col %2$d
+editor_replace_usage	c677	replace is FIND/REPLACEMENT
+editor_replaced	1128	%d replaced
+editor_save_failed	069d	the save failed: the file is as it was
+editor_saved	9f44	saved
+editor_selected	a686	(%d selected)
+editor_selected_carets	7e02	(%d selected, carets)
+editor_unsaved	c014	unsaved changes: save them, or close each with Ctrl+W twice
+editor_untitled	8b58	untitled
+editor_write_beside	ec75	could not write beside the file
+editor_writes_over_changed	df15	writes over the change on disk (Ctrl+R reads it again)
+editor_writes_over_readonly	e22f	writes over a read-only file
 menu_copy	43e0	&Copy
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete
+menu_find	1fa6	&Find
+menu_go_to_line	bc96	&Go to Line
 menu_paste	6854	&Paste
 menu_redo	ac45	&Redo
 menu_select_all	f6f6	Select &All
+menu_toggle_comment	92ac	Toggle Co&mment
 menu_undo	b9d3	&Undo
 ui_confirm_again	b3ff	press again to confirm: 
 ui_field_digits	f52b	a number is digits
@@ -69,6 +96,7 @@ ui_field_full	fe02	that is as much as it holds
 =New USB devices	c15c	New USB devices
 =Open windows where they were last put	8711	Open windows where they were last put
 =Other devices	8362	Other devices
+=Plain Text	2bbe	Plain Text
 =Power	a5e6	Power
 =Power profile	8def	Power profile
 =Predict touch and pen	e2b7	Predict touch and pen

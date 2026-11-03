@@ -5,12 +5,39 @@ action_copy	3664	Αντιγραφή
 action_cut	5863	Αποκοπή
 action_paste	0288	Επικόλληση
 action_select_all	3b12	Επιλογή όλων
+editor_changed_on_disk	3e0f	άλλαξε στον δίσκο: το Ctrl+R το διαβάζει ξανά
+editor_closes_unsaved	fcb8	κλείνει και απορρίπτει τις μη αποθηκευμένες αλλαγές
+editor_encoding_bom	c0d7	UTF-8 με BOM
+editor_find_hint	d17a	Εύρεση
+editor_find_replace_hint	3693	Εύρεση/Αντικατάσταση με
+editor_indent_spaces	9db9	Κενά: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Γραμμή
+editor_no_file_name	c863	χωρίς όνομα αρχείου: ξεκινήστε τον επεξεργαστή με ένα
+editor_no_match	7de7	καμία αντιστοιχία
+editor_not_regular	5955	όχι κανονικό αρχείο: απορρίφθηκε
+editor_pattern_bad	5d57	το μοτίβο δεν μεταγλωττίζεται
+editor_position	3696	Γρ %1$d, Στ %2$d
+editor_replace_usage	c677	η αντικατάσταση είναι ΑΝΑΖΗΤΗΣΗ/ΑΝΤΙΚΑΤΑΣΤΑΣΗ
+editor_replaced	1128	αντικαταστάθηκαν: %d
+editor_save_failed	069d	η αποθήκευση απέτυχε: το αρχείο είναι όπως ήταν
+editor_saved	9f44	αποθηκεύτηκε
+editor_selected	a686	(επιλέχθηκαν %d)
+editor_selected_carets	7e02	(επιλέχθηκαν %d, δρομείς)
+editor_unsaved	c014	μη αποθηκευμένες αλλαγές: αποθηκεύστε τις ή κλείστε κάθε αρχείο με Ctrl+W δύο φορές
+editor_untitled	8b58	χωρίς τίτλο
+editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλα στο αρχείο
+editor_writes_over_changed	df15	αντικαθιστά την αλλαγή στον δίσκο (το Ctrl+R το διαβάζει ξανά)
+editor_writes_over_readonly	e22f	αντικαθιστά αρχείο μόνο για ανάγνωση
 menu_copy	43e0	Αντιγραφή
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή
+menu_find	1fa6	Εύρεση
+menu_go_to_line	bc96	Μετάβαση στη γραμμή
 menu_paste	6854	Επικόλληση
 menu_redo	ac45	Επανάληψη
 menu_select_all	f6f6	Επιλογή όλων
+menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
 ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
 ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
@@ -69,6 +96,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =New USB devices	c15c	Νέες συσκευές USB
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
 =Other devices	8362	Άλλες συσκευές
+=Plain Text	2bbe	Απλό κείμενο
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
 =Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας

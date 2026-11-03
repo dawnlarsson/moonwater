@@ -5,12 +5,39 @@ action_copy	3664	Копировать
 action_cut	5863	Вырезать
 action_paste	0288	Вставить
 action_select_all	3b12	Выделить всё
+editor_changed_on_disk	3e0f	изменён на диске: Ctrl+R читает заново
+editor_closes_unsaved	fcb8	закрывает, отбрасывая несохранённые изменения
+editor_encoding_bom	c0d7	UTF-8 с BOM
+editor_find_hint	d17a	Найти
+editor_find_replace_hint	3693	Найти/Заменить на
+editor_indent_spaces	9db9	Пробелы: %d
+editor_indent_tab	d9a7	Таб: %d
+editor_line_hint	f547	Строка
+editor_no_file_name	c863	нет имени файла: запустите редактор с именем
+editor_no_match	7de7	нет совпадений
+editor_not_regular	5955	не обычный файл: отказано
+editor_pattern_bad	5d57	шаблон не компилируется
+editor_position	3696	Стр %1$d, Стлб %2$d
+editor_replace_usage	c677	замена — НАЙТИ/ЗАМЕНА
+editor_replaced	1128	заменено: %d
+editor_save_failed	069d	не удалось сохранить: файл не изменился
+editor_saved	9f44	сохранено
+editor_selected	a686	(выделено: %d)
+editor_selected_carets	7e02	(выделено: %d, курсоры)
+editor_unsaved	c014	несохранённые изменения: сохраните их или закройте каждую, дважды нажав Ctrl+W
+editor_untitled	8b58	без имени
+editor_write_beside	ec75	не удалось записать рядом с файлом
+editor_writes_over_changed	df15	перезапишет изменение на диске (Ctrl+R читает заново)
+editor_writes_over_readonly	e22f	перезапишет файл только для чтения
 menu_copy	43e0	Копировать
 menu_cut	5c17	Вырезать
 menu_delete	1e3e	Удалить
+menu_find	1fa6	Найти
+menu_go_to_line	bc96	Перейти к строке
 menu_paste	6854	Вставить
 menu_redo	ac45	Повторить
 menu_select_all	f6f6	Выделить всё
+menu_toggle_comment	92ac	Закомментировать/раскомментировать
 menu_undo	b9d3	Отменить
 ui_confirm_again	b3ff	нажмите ещё раз для подтверждения: 
 ui_field_digits	f52b	число состоит из цифр
@@ -69,6 +96,7 @@ ui_field_full	fe02	больше не помещается
 =New USB devices	c15c	Новые USB-устройства
 =Open windows where they were last put	8711	Открывать окна там, где их оставили
 =Other devices	8362	Другие устройства
+=Plain Text	2bbe	Простой текст
 =Power	a5e6	Питание
 =Power profile	8def	Профиль питания
 =Predict touch and pen	e2b7	Предсказывать касание и перо

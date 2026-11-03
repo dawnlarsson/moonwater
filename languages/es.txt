@@ -5,12 +5,39 @@ action_copy	3664	Copiar
 action_cut	5863	Cortar
 action_paste	0288	Pegar
 action_select_all	3b12	Seleccionar todo
+editor_changed_on_disk	3e0f	cambiado en el disco: Ctrl+R lo lee de nuevo
+editor_closes_unsaved	fcb8	cierra los cambios sin guardar
+editor_encoding_bom	c0d7	UTF-8 con BOM
+editor_find_hint	d17a	Buscar
+editor_find_replace_hint	3693	Buscar/Reemplazar por
+editor_indent_spaces	9db9	Espacios: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Línea
+editor_no_file_name	c863	sin nombre de archivo: inicie el editor con uno
+editor_no_match	7de7	sin coincidencias
+editor_not_regular	5955	no es un archivo normal: rechazado
+editor_pattern_bad	5d57	el patrón no se compila
+editor_position	3696	Ln %1$d, Col %2$d
+editor_replace_usage	c677	reemplazar es BUSCAR/REEMPLAZO
+editor_replaced	1128	%d reemplazados
+editor_save_failed	069d	no se pudo guardar: el archivo sigue como estaba
+editor_saved	9f44	guardado
+editor_selected	a686	(%d seleccionados)
+editor_selected_carets	7e02	(%d seleccionados, cursores)
+editor_unsaved	c014	cambios sin guardar: guardarlos, o cerrar cada uno con Ctrl+W dos veces
+editor_untitled	8b58	sin título
+editor_write_beside	ec75	no se pudo escribir junto al archivo
+editor_writes_over_changed	df15	sobrescribe el cambio del disco (Ctrl+R lo lee de nuevo)
+editor_writes_over_readonly	e22f	sobrescribe un archivo de solo lectura
 menu_copy	43e0	&Copiar
 menu_cut	5c17	Cor&tar
 menu_delete	1e3e	&Eliminar
+menu_find	1fa6	&Buscar
+menu_go_to_line	bc96	&Ir a la línea
 menu_paste	6854	&Pegar
 menu_redo	ac45	&Rehacer
 menu_select_all	f6f6	Seleccionar t&odo
+menu_toggle_comment	92ac	Alternar co&mentario
 menu_undo	b9d3	&Deshacer
 ui_confirm_again	b3ff	pulse de nuevo para confirmar: 
 ui_field_digits	f52b	un número son dígitos
@@ -69,6 +96,7 @@ ui_field_full	fe02	no cabe más
 =New USB devices	c15c	Dispositivos USB nuevos
 =Open windows where they were last put	8711	Abrir las ventanas donde se dejaron
 =Other devices	8362	Otros dispositivos
+=Plain Text	2bbe	Texto sin formato
 =Power	a5e6	Energía
 =Power profile	8def	Perfil de energía
 =Predict touch and pen	e2b7	Predecir el tacto y el lápiz

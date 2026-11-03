@@ -5,12 +5,39 @@ action_copy	3664	Kopiuj
 action_cut	5863	Wytnij
 action_paste	0288	Wklej
 action_select_all	3b12	Zaznacz wszystko
+editor_changed_on_disk	3e0f	zmieniono na dysku: Ctrl+R wczytuje ponownie
+editor_closes_unsaved	fcb8	zamyka i odrzuca niezapisane zmiany
+editor_encoding_bom	c0d7	UTF-8 z BOM
+editor_find_hint	d17a	Znajdź
+editor_find_replace_hint	3693	Znajdź/Zamień na
+editor_indent_spaces	9db9	Spacje: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Wiersz
+editor_no_file_name	c863	brak nazwy pliku: uruchom edytor z nazwą
+editor_no_match	7de7	brak dopasowania
+editor_not_regular	5955	to nie jest zwykły plik: odrzucono
+editor_pattern_bad	5d57	wzorzec nie kompiluje się
+editor_position	3696	Wrs %1$d, Kol %2$d
+editor_replace_usage	c677	zamiana to SZUKANE/ZAMIENNIK
+editor_replaced	1128	zamieniono: %d
+editor_save_failed	069d	zapis się nie udał: plik jest bez zmian
+editor_saved	9f44	zapisano
+editor_selected	a686	(zaznaczono: %d)
+editor_selected_carets	7e02	(zaznaczono: %d, kursory)
+editor_unsaved	c014	niezapisane zmiany: zapisz je lub zamknij każdą dwukrotnie Ctrl+W
+editor_untitled	8b58	bez nazwy
+editor_write_beside	ec75	nie można zapisać obok pliku
+editor_writes_over_changed	df15	nadpisuje zmianę na dysku (Ctrl+R wczytuje ponownie)
+editor_writes_over_readonly	e22f	nadpisuje plik tylko do odczytu
 menu_copy	43e0	&Kopiuj
 menu_cut	5c17	&Wytnij
 menu_delete	1e3e	&Usuń
+menu_find	1fa6	Zna&jdź
+menu_go_to_line	bc96	Prz&ejdź do wiersza
 menu_paste	6854	Wk&lej
 menu_redo	ac45	&Ponów
 menu_select_all	f6f6	&Zaznacz wszystko
+menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
 ui_confirm_again	b3ff	naciśnij ponownie, aby potwierdzić: 
 ui_field_digits	f52b	liczba składa się z cyfr
@@ -69,6 +96,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =New USB devices	c15c	Nowe urządzenia USB
 =Open windows where they were last put	8711	Otwieraj okna tam, gdzie je ostatnio zostawiono
 =Other devices	8362	Inne urządzenia
+=Plain Text	2bbe	Zwykły tekst
 =Power	a5e6	Zasilanie
 =Power profile	8def	Profil zasilania
 =Predict touch and pen	e2b7	Przewiduj dotyk i rysik

@@ -5,12 +5,39 @@ action_copy	3664	Copia
 action_cut	5863	Taglia
 action_paste	0288	Incolla
 action_select_all	3b12	Seleziona tutto
+editor_changed_on_disk	3e0f	modificato sul disco: Ctrl+R lo rilegge
+editor_closes_unsaved	fcb8	chiude scartando le modifiche non salvate
+editor_encoding_bom	c0d7	UTF-8 con BOM
+editor_find_hint	d17a	Trova
+editor_find_replace_hint	3693	Trova/Sostituisci con
+editor_indent_spaces	9db9	Spazi: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Riga
+editor_no_file_name	c863	nessun nome di file: avviare l'editor con uno
+editor_no_match	7de7	nessuna corrispondenza
+editor_not_regular	5955	non è un file normale: rifiutato
+editor_pattern_bad	5d57	il motivo non si compila
+editor_position	3696	Ri %1$d, Col %2$d
+editor_replace_usage	c677	sostituire è TROVA/SOSTITUZIONE
+editor_replaced	1128	%d sostituiti
+editor_save_failed	069d	salvataggio non riuscito: il file è com'era
+editor_saved	9f44	salvato
+editor_selected	a686	(%d selezionati)
+editor_selected_carets	7e02	(%d selezionati, cursori)
+editor_unsaved	c014	modifiche non salvate: salvarle, oppure chiudere ognuna con Ctrl+W due volte
+editor_untitled	8b58	senza titolo
+editor_write_beside	ec75	impossibile scrivere accanto al file
+editor_writes_over_changed	df15	sovrascrive la modifica sul disco (Ctrl+R la rilegge)
+editor_writes_over_readonly	e22f	sovrascrive un file di sola lettura
 menu_copy	43e0	&Copia
 menu_cut	5c17	&Taglia
 menu_delete	1e3e	&Elimina
+menu_find	1fa6	Tr&ova
+menu_go_to_line	bc96	&Vai alla riga
 menu_paste	6854	&Incolla
 menu_redo	ac45	&Ripeti
 menu_select_all	f6f6	Seleziona t&utto
+menu_toggle_comment	92ac	Attiva/disattiva co&mmento
 menu_undo	b9d3	&Annulla
 ui_confirm_again	b3ff	premi di nuovo per confermare: 
 ui_field_digits	f52b	un numero è fatto di cifre
@@ -69,6 +96,7 @@ ui_field_full	fe02	non ce ne sta di più
 =New USB devices	c15c	Nuovi dispositivi USB
 =Open windows where they were last put	8711	Apri le finestre dove sono state lasciate
 =Other devices	8362	Altri dispositivi
+=Plain Text	2bbe	Testo semplice
 =Power	a5e6	Alimentazione
 =Power profile	8def	Profilo energetico
 =Predict touch and pen	e2b7	Prevedi tocco e penna

@@ -5,12 +5,39 @@ action_copy	3664	Copiar
 action_cut	5863	Recortar
 action_paste	0288	Colar
 action_select_all	3b12	Selecionar tudo
+editor_changed_on_disk	3e0f	alterado no disco: Ctrl+R lê de novo
+editor_closes_unsaved	fcb8	fecha e descarta as alterações não salvas
+editor_encoding_bom	c0d7	UTF-8 com BOM
+editor_find_hint	d17a	Procurar
+editor_find_replace_hint	3693	Procurar/Substituir por
+editor_indent_spaces	9db9	Espaços: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Linha
+editor_no_file_name	c863	sem nome de arquivo: inicie o editor com um
+editor_no_match	7de7	nenhuma correspondência
+editor_not_regular	5955	não é um arquivo normal: recusado
+editor_pattern_bad	5d57	o padrão não compila
+editor_position	3696	Ln %1$d, Col %2$d
+editor_replace_usage	c677	substituir é PROCURAR/SUBSTITUIÇÃO
+editor_replaced	1128	%d substituídos
+editor_save_failed	069d	falha ao salvar: o arquivo está como estava
+editor_saved	9f44	salvo
+editor_selected	a686	(%d selecionados)
+editor_selected_carets	7e02	(%d selecionados, cursores)
+editor_unsaved	c014	alterações não salvas: salve-as, ou feche cada uma com Ctrl+W duas vezes
+editor_untitled	8b58	sem título
+editor_write_beside	ec75	não foi possível gravar ao lado do arquivo
+editor_writes_over_changed	df15	sobrescreve a alteração no disco (Ctrl+R lê de novo)
+editor_writes_over_readonly	e22f	sobrescreve um arquivo somente leitura
 menu_copy	43e0	&Copiar
 menu_cut	5c17	Recor&tar
 menu_delete	1e3e	&Excluir
+menu_find	1fa6	&Procurar
+menu_go_to_line	bc96	&Ir para a linha
 menu_paste	6854	Co&lar
 menu_redo	ac45	&Refazer
 menu_select_all	f6f6	Selecionar t&udo
+menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
 ui_confirm_again	b3ff	pressione novamente para confirmar: 
 ui_field_digits	f52b	um número é feito de dígitos
@@ -69,6 +96,7 @@ ui_field_full	fe02	não cabe mais que isso
 =New USB devices	c15c	Novos dispositivos USB
 =Open windows where they were last put	8711	Abrir janelas onde foram deixadas
 =Other devices	8362	Outros dispositivos
+=Plain Text	2bbe	Texto simples
 =Power	a5e6	Energia
 =Power profile	8def	Perfil de energia
 =Predict touch and pen	e2b7	Prever toque e caneta

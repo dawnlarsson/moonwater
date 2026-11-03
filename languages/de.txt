@@ -5,12 +5,39 @@ action_copy	3664	Kopieren
 action_cut	5863	Ausschneiden
 action_paste	0288	Einfügen
 action_select_all	3b12	Alles auswählen
+editor_changed_on_disk	3e0f	auf dem Datenträger geändert: Ctrl+R liest neu
+editor_closes_unsaved	fcb8	schließt und verwirft die ungespeicherten Änderungen
+editor_encoding_bom	c0d7	UTF-8 mit BOM
+editor_find_hint	d17a	Suchen
+editor_find_replace_hint	3693	Suchen/Ersetzen durch
+editor_indent_spaces	9db9	Leerzeichen: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Zeile
+editor_no_file_name	c863	kein Dateiname: den Editor mit einem starten
+editor_no_match	7de7	kein Treffer
+editor_not_regular	5955	keine normale Datei: abgelehnt
+editor_pattern_bad	5d57	das Muster lässt sich nicht übersetzen
+editor_position	3696	Z %1$d, Sp %2$d
+editor_replace_usage	c677	Ersetzen heißt SUCHEN/ERSATZ
+editor_replaced	1128	%d ersetzt
+editor_save_failed	069d	Speichern fehlgeschlagen: die Datei ist unverändert
+editor_saved	9f44	gespeichert
+editor_selected	a686	(%d ausgewählt)
+editor_selected_carets	7e02	(%d ausgewählt, Textcursor)
+editor_unsaved	c014	ungespeicherte Änderungen: speichern, oder jede mit zweimal Ctrl+W schließen
+editor_untitled	8b58	unbenannt
+editor_write_beside	ec75	neben der Datei konnte nicht geschrieben werden
+editor_writes_over_changed	df15	überschreibt die Änderung auf dem Datenträger (Ctrl+R liest neu)
+editor_writes_over_readonly	e22f	überschreibt eine schreibgeschützte Datei
 menu_copy	43e0	&Kopieren
 menu_cut	5c17	A&usschneiden
 menu_delete	1e3e	&Löschen
+menu_find	1fa6	&Suchen
+menu_go_to_line	bc96	&Gehe zu Zeile
 menu_paste	6854	&Einfügen
 menu_redo	ac45	&Wiederholen
 menu_select_all	f6f6	Alles &auswählen
+menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
 ui_confirm_again	b3ff	zur Bestätigung erneut drücken: 
 ui_field_digits	f52b	eine Zahl besteht aus Ziffern
@@ -69,6 +96,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =New USB devices	c15c	Neue USB-Geräte
 =Open windows where they were last put	8711	Fenster dort öffnen, wo sie zuletzt lagen
 =Other devices	8362	Andere Geräte
+=Plain Text	2bbe	Nur-Text
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofil
 =Predict touch and pen	e2b7	Berührung und Stift vorhersagen

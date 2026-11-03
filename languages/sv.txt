@@ -5,12 +5,39 @@ action_copy	3664	Kopiera
 action_cut	5863	Klipp ut
 action_paste	0288	Klistra in
 action_select_all	3b12	Markera allt
+editor_changed_on_disk	3e0f	ändrad på disken: Ctrl+R läser om den
+editor_closes_unsaved	fcb8	stänger och släpper de osparade ändringarna
+editor_encoding_bom	c0d7	UTF-8 med BOM
+editor_find_hint	d17a	Sök
+editor_find_replace_hint	3693	Sök/Ersätt med
+editor_indent_spaces	9db9	Mellanslag: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Rad
+editor_no_file_name	c863	inget filnamn: starta redigeraren med ett
+editor_no_match	7de7	ingen träff
+editor_not_regular	5955	ingen vanlig fil: avvisad
+editor_pattern_bad	5d57	mönstret går inte att kompilera
+editor_position	3696	Rad %1$d, Kol %2$d
+editor_replace_usage	c677	ersätt är SÖK/ERSÄTTNING
+editor_replaced	1128	%d ersatta
+editor_save_failed	069d	sparandet misslyckades: filen är som den var
+editor_saved	9f44	sparad
+editor_selected	a686	(%d markerade)
+editor_selected_carets	7e02	(%d markerade, markörer)
+editor_unsaved	c014	osparade ändringar: spara dem, eller stäng var och en med Ctrl+W två gånger
+editor_untitled	8b58	namnlös
+editor_write_beside	ec75	kunde inte skriva bredvid filen
+editor_writes_over_changed	df15	skriver över ändringen på disken (Ctrl+R läser om den)
+editor_writes_over_readonly	e22f	skriver över en skrivskyddad fil
 menu_copy	43e0	Ko&piera
 menu_cut	5c17	&Klipp ut
 menu_delete	1e3e	&Ta bort
+menu_find	1fa6	&Sök
+menu_go_to_line	bc96	Gå till &rad
 menu_paste	6854	Kl&istra in
 menu_redo	ac45	&Gör om
 menu_select_all	f6f6	&Markera allt
+menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
 ui_confirm_again	b3ff	tryck igen för att bekräfta: 
 ui_field_digits	f52b	ett tal består av siffror
@@ -69,6 +96,7 @@ ui_field_full	fe02	mer ryms inte
 =New USB devices	c15c	Nya USB-enheter
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
 =Other devices	8362	Andra enheter
+=Plain Text	2bbe	Oformaterad text
 =Power	a5e6	Ström
 =Power profile	8def	Strömprofil
 =Predict touch and pen	e2b7	Förutse touch och penna

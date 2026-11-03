@@ -143028,9 +143028,12 @@ static b32 lcheck_drawn(const font_face address_to face, const char address_to t
 }
 
 // The menus whose mnemonics must differ: each is its ids, ended by -1.
-static const int lcheck_menus[][10] = {
+static const int lcheck_menus[][12] = {
     {LANGUAGE_menu_cut, LANGUAGE_menu_copy, LANGUAGE_menu_paste, LANGUAGE_menu_delete, LANGUAGE_menu_undo, LANGUAGE_menu_redo,
      LANGUAGE_menu_select_all, -1},
+    // The editor's: the kit's seven, then find, go to a line and the comment.
+    {LANGUAGE_menu_cut, LANGUAGE_menu_copy, LANGUAGE_menu_paste, LANGUAGE_menu_delete, LANGUAGE_menu_undo, LANGUAGE_menu_redo,
+     LANGUAGE_menu_select_all, LANGUAGE_menu_find, LANGUAGE_menu_go_to_line, LANGUAGE_menu_toggle_comment, -1},
 };
 
 // Whether a word of a row's choices is one the window shows as words (not a number, a layout code, a language or a display mode).
@@ -143143,11 +143146,12 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         lcheck_braces(said->text, said->text_length, &sum, &braces);
                         lcheck_braces(mine->text, mine->text_length, &theirs_sum, &theirs_braces);
                         bad_specs += sum != theirs_sum || braces != theirs_braces;
-                        // A mnemonic is kept or dropped, never moved off an ASCII letter, and a blank at the end is English's.
+                        // A mnemonic is kept or dropped, never moved off an ASCII letter, and a blank at either end is English's.
                         lcheck_mnemonic(said->text, said->text_length, &marks);
                         bad_menus += lcheck_mnemonic(mine->text, mine->text_length, &theirs_marks) == 1 || theirs_marks > marks;
                         bad_text += (said->text_length && said->text[said->text_length - 1] == ' ') !=
                                     (mine->text_length && mine->text[mine->text_length - 1] == ' ');
+                        bad_text += (said->text_length && said->text[0] == ' ') != (mine->text_length && mine->text[0] == ' ');
                         bad_glyphs += !lcheck_drawn(regular, mine->text, mine->text_length) ||
                                       !lcheck_drawn(bold, mine->text, mine->text_length);
                 }
@@ -143192,7 +143196,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c"};
-static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c"};
+static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c", "src/canvas/ui/editor.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -143257,7 +143261,7 @@ static b32 lcheck_not_text(const char address_to lit, positive length)
         }
         if (!letters || lit[0] == '/' || lit[0] == '.' || lit[0] == '-' || lcheck_has(lit, length, "/proc") || lcheck_has(lit, length, "/sys") ||
             lcheck_has(lit, length, "/dev") || lcheck_has(lit, length, "\\033") || lcheck_has(lit, length, "\\x1b") ||
-            lcheck_has(lit, length, "\\n") || lcheck_has(lit, length, "\\t"))
+            lcheck_has(lit, length, "\\n") || lcheck_has(lit, length, "\\t") || lcheck_has(lit, length, "+"))
                 return true;
         if (blank)
                 return false;
@@ -143526,6 +143530,80 @@ static fn language_runtime_check(void)
         }
 }
 
+#if MOONWATER_UI_EDITOR
+/*
+        The editor's words. The status bar's text, made by editor_status_text from the table, is the text it was made of before
+        there was a table, written out here the way it was (the reference), for every encoding, line end, language and indent,
+        selection and caret place: English is the same bytes. And a language taken says it in that language, the bar and a
+        status line alike.
+*/
+static positive editor_status_reference(char address_to text, struct doc address_to doc)
+{
+        p64 caret = doc->selections[doc->primary].active, line = doc_line_of(doc, caret);
+        positive at = 0, selected = 0;
+
+        for (positive s = 0; s < doc->selection_count; s++)
+                selected += doc_sel_end(&doc->selections[s]) - doc_sel_start(&doc->selections[s]);
+        at += (positive)string_length(string_copy((string_address)text, (string_address) "Ln "));
+        at += positive_into_string((string_address)text + at, (positive)(line + 1));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address) ", Col "));
+        at += positive_into_string((string_address)text + at, (positive)(doc_column(doc, caret) + 1));
+        if (selected)
+        {
+                at += (positive)string_length(string_copy((string_address)text + at, (string_address) "  ("));
+                at += positive_into_string((string_address)text + at, selected);
+                at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->selection_count > 1 ? " selected, carets)" : " selected)")));
+        }
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->bom ? "    UTF-8 with BOM    " : "    UTF-8    ")));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->eol == DOC_EOL_CRLF ? "CRLF    " : doc->eol == DOC_EOL_CR ? "CR    " : "LF    ")));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address)doc_languages[doc->language].name));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->insert_spaces ? "    Spaces: " : "    Tab: ")));
+        at += positive_into_string((string_address)text + at, doc->tab_size);
+        text[at] = 0;
+        return at;
+}
+
+static fn editor_words_check(void)
+{
+        static struct ui_text view;
+        static const unsigned char eols[3] = {DOC_EOL_LF, DOC_EOL_CRLF, DOC_EOL_CR};
+        char now[256], before[256];
+        positive different = 0, made = 0;
+        struct doc address_to doc = &view.doc;
+
+        language_take(0);
+        ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to) "alpha beta\ngamma delta\n", 23, ui_text_keymap());
+        for (unsigned int variant = 0; variant < 216; variant++)
+        {
+                doc->bom = variant & 1, doc->eol = eols[variant / 2 % 3], doc->insert_spaces = variant / 6 & 1;
+                doc->language = variant / 12 % 3, doc->tab_size = 2 + variant / 36;
+                doc_select_set(doc, 0, variant % 5);
+                if (variant % 7 == 0)
+                        doc_select_add(doc, 11, 16);
+                editor_status_text(now, sizeof(now), doc);
+                editor_status_reference(before, doc);
+                made++;
+                different += !!string_compare_max((string_address)now, (string_address)before, sizeof(now));
+        }
+        check("editor words: the status bar says what it said before the table, over every encoding, line end, language, indent and selection",
+              made == 216 && !different);
+        doc->bom = 0, doc->eol = DOC_EOL_LF, doc->insert_spaces = 1, doc->language = 0, doc->tab_size = 4;
+        doc_select_set(doc, 0, 0);
+        language_take('d' | 'e' << 8);
+        editor_status_text(now, sizeof(now), doc);
+        check("editor words: in German the same bar says its words in German",
+              !string_compare_max((string_address)now, (string_address) "Z 1, Sp 1    UTF-8    LF    Nur-Text    Leerzeichen: 4", sizeof(now)));
+        editor.count = 0, editor.status[0] = 0;
+        editor_open((string_address) "/dev/null");
+        check("editor words: a status line is said in the language taken", !string_compare_max((string_address)editor.status, (string_address) "keine normale Datei: abgelehnt", 64));
+        language_take(0);
+        editor.status[0] = 0;
+        editor_open((string_address) "/dev/null");
+        check("editor words: and in English once it is taken again", !string_compare_max((string_address)editor.status, (string_address) "not a regular file: refused", 64));
+        ui_text_close(&view);
+}
+#endif
+
 static fn language_check(void)
 {
         font_face regular, bold;
@@ -143548,6 +143626,9 @@ static fn language_check(void)
         language_sources_check();
         lcheck_close(&lcheck_english);
         language_runtime_check();
+#if MOONWATER_UI_EDITOR
+        editor_words_check();
+#endif
 }
 #endif
 

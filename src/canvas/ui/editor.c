@@ -107,7 +107,7 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
         if (fstat((b32)handle, address_of facts) < 0 || (facts.st_mode & 0170000) != 0100000)
         {
                 system_close(handle);
-                string_copy_bounded((string_address)editor.status, (string_address) "not a regular file: refused", sizeof(editor.status));
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_not_regular), sizeof(editor.status));
                 return false;
         }
         // The path the descriptor really names: a link's target, which a save then writes.
@@ -179,7 +179,7 @@ static b32 editor_save(struct editor_tab address_to tab)
 
         if (!length)
         {
-                string_copy_bounded((string_address)editor.status, (string_address) "no file name: start the editor with one", sizeof(editor.status));
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_no_file_name), sizeof(editor.status));
                 return false;
         }
         while (slash && tab->path[slash - 1] != '/')
@@ -191,7 +191,7 @@ static b32 editor_save(struct editor_tab address_to tab)
         handle = system_open_at_mode(AT_FDCWD, (string_address)temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, tab->mode ? tab->mode : 0644);
         if (handle < 0)
         {
-                string_copy_bounded((string_address)editor.status, (string_address) "could not write beside the file", sizeof(editor.status));
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_write_beside), sizeof(editor.status));
                 return false;
         }
         if (tab->view.doc.bom)
@@ -210,7 +210,7 @@ static b32 editor_save(struct editor_tab address_to tab)
         if (!ok || system_call_5(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)tab->path, 0) < 0)
         {
                 system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0);
-                string_copy_bounded((string_address)editor.status, (string_address) "the save failed: the file is as it was", sizeof(editor.status));
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_save_failed), sizeof(editor.status));
                 return false;
         }
         handle = system_open_at(AT_FDCWD, (string_address)tab->path, FILE_READ | O_CLOEXEC);
@@ -220,7 +220,7 @@ static b32 editor_save(struct editor_tab address_to tab)
                 system_close(handle);
         doc_mark_saved(&tab->view.doc);
         tab->changed_on_disk = false;
-        string_copy_bounded((string_address)editor.status, (string_address) "saved", sizeof(editor.status));
+        string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_saved), sizeof(editor.status));
         return true;
 }
 
@@ -307,7 +307,7 @@ static fn editor_close_tab_asked(void)
         }
         if (!ui_confirm_ask(&editor.confirm, DOC_CMD_CLOSE, ""))
         {
-                ui_confirm_line(line, sizeof(line), "closes the unsaved changes");
+                ui_confirm_line(line, sizeof(line), WORDS(editor_closes_unsaved));
                 string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
                 return;
         }
@@ -332,7 +332,7 @@ static fn editor_save_asked(void)
         }
         if (!ui_confirm_ask(&editor.confirm, DOC_CMD_SAVE, ""))
         {
-                ui_confirm_line(line, sizeof(line), tab->changed_on_disk ? "writes over the change on disk (Ctrl+R reads it again)" : "writes over a read-only file");
+                ui_confirm_line(line, sizeof(line), tab->changed_on_disk ? WORDS(editor_writes_over_changed) : WORDS(editor_writes_over_readonly));
                 string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
                 return;
         }
@@ -345,7 +345,7 @@ static void editor_closing(void)
         for (int at = 0; at < editor.count; at++)
                 if (doc_dirty(&editor.tabs[at].view.doc))
                 {
-                        string_copy_bounded((string_address)editor.status, (string_address) "unsaved changes: save them, or close each with Ctrl+W twice", sizeof(editor.status));
+                        string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_unsaved), sizeof(editor.status));
                         editor.dirty = true;
                         return;
                 }
@@ -393,7 +393,7 @@ static fn editor_find_step(b32 back)
 
         if (!doc_find_set(&editor.search, query, length, editor.find_flags))
         {
-                string_copy_bounded((string_address)editor.status, (string_address) "the pattern does not compile", sizeof(editor.status));
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_pattern_bad), sizeof(editor.status));
                 return;
         }
         if (doc_find_next(&view->doc, &editor.search, from, back, true, &start, &finish))
@@ -403,7 +403,7 @@ static fn editor_find_step(b32 back)
                 editor.status[0] = 0;
         }
         else
-                string_copy_bounded((string_address)editor.status, (string_address) "no match", sizeof(editor.status));
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_no_match), sizeof(editor.status));
 }
 
 // What the find bar's Enter does: find, replace every match with what follows a / in the field, or go to its line.
@@ -434,12 +434,10 @@ static fn editor_find_enter(b32 back)
                 if (slash < length && doc_find_set(&editor.search, text, slash, editor.find_flags))
                 {
                         replaced = doc_replace_all(&view->doc, &editor.search, text + slash + 1, length - slash - 1);
-                        editor.status[0] = 0;
-                        positive_into_string((string_address)editor.status, replaced);
-                        string_copy((string_address)editor.status + string_length((string_address)editor.status), (string_address) " replaced");
+                        language_format((char address_to)editor.status, sizeof(editor.status), WORDS(editor_replaced), (long)replaced);
                 }
                 else
-                        string_copy_bounded((string_address)editor.status, (string_address) "replace is FIND/REPLACEMENT", sizeof(editor.status));
+                        string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_replace_usage), sizeof(editor.status));
                 return;
         }
         editor_find_step(back);
@@ -461,9 +459,9 @@ static fn editor_menu_open(int x, int y)
         m->count = 0;
         ui_text_menu_items(m, view, false);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, "&Find", "Ctrl+F", 0, EDITOR_MENU_FIND);
-        ui_popmenu_add(m, "&Go to Line", "Ctrl+G", 0, EDITOR_MENU_LINE);
-        ui_popmenu_add(m, "Toggle Co&mment", "Ctrl+/", 0, EDITOR_MENU_COMMENT);
+        ui_popmenu_add(m, WORDS(menu_find), "Ctrl+F", 0, EDITOR_MENU_FIND);
+        ui_popmenu_add(m, WORDS(menu_go_to_line), "Ctrl+G", 0, EDITOR_MENU_LINE);
+        ui_popmenu_add(m, WORDS(menu_toggle_comment), "Ctrl+/", 0, EDITOR_MENU_COMMENT);
         editor.menu.field = view;
         ui_popup_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
 }
@@ -502,7 +500,7 @@ static fn editor_tabs_layout(struct ui address_to ui)
                 for (const char address_to s = editor.tabs[at].path; *s; s++)
                         if (*s == '/')
                                 name = s + 1;
-                c->items[at] = name[0] ? name : "untitled";
+                c->items[at] = name[0] ? name : WORDS(editor_untitled);
         }
         c->at = editor.tab;
 }
@@ -552,6 +550,35 @@ static b32 editor_tabs_event(const struct window_event address_to event)
         return event->type == WINDOW_EVENT_BUTTON;
 }
 
+/*
+        The status bar's text: where the caret is, what is selected, and the file's encoding, line ends, language and indent,
+        each said by the table and set apart by four blanks. Here and not in editor_draw so a check can ask it in any language.
+*/
+static positive editor_status_text(char address_to text, positive room, struct doc address_to doc)
+{
+        p64 caret = doc->selections[doc->primary].active, line = doc_line_of(doc, caret);
+        positive at = 0, selected = 0;
+
+        for (positive s = 0; s < doc->selection_count; s++)
+                selected += doc_sel_end(&doc->selections[s]) - doc_sel_start(&doc->selections[s]);
+        at += language_format(text, room, WORDS(editor_position), (long)(line + 1), (long)(doc_column(doc, caret) + 1));
+        if (selected)
+        {
+                at += (positive)string_length(string_copy((string_address)text + at, (string_address) "  "));
+                at += language_format(text + at, room - at, doc->selection_count > 1 ? WORDS(editor_selected_carets) : WORDS(editor_selected), (long)selected);
+        }
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->bom ? WORDS(editor_encoding_bom) : "UTF-8")));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->eol == DOC_EOL_CRLF ? "CRLF" : doc->eol == DOC_EOL_CR ? "CR" : "LF")));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address)language_of(doc_languages[doc->language].name)));
+        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "    "));
+        at += language_format(text + at, room - at, doc->insert_spaces ? WORDS(editor_indent_spaces) : WORDS(editor_indent_tab), (long)doc->tab_size);
+        text[at] = 0;
+        return at;
+}
+
 static fn editor_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &editor.ui;
@@ -566,7 +593,7 @@ static fn editor_draw(unsigned int address_to pixels)
         if (find)
         {
                 struct ui_control address_to c = &editor.find_control;
-                static const char address_to const hints[4] = {"", "Find", "Find/Replace with", "Line"};
+                const char address_to hints[4] = {"", WORDS(editor_find_hint), WORDS(editor_find_replace_hint), WORDS(editor_line_hint)};
 
                 c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
                 c->x = UI_GAP2, c->y = (tabs + ui_px(ui, UI_GAP1)) * 100 / ui->scale, c->w = editor.width * 100 / ui->scale - 2 * UI_GAP2, c->h = UI_FIELD_H;
@@ -579,35 +606,16 @@ static fn editor_draw(unsigned int address_to pixels)
         // The status bar.
         {
                 struct doc address_to doc = &tab->view.doc;
-                p64 caret = doc->selections[doc->primary].active, line = doc_line_of(doc, caret);
                 char text[256];
-                positive at = 0, selected = 0;
                 int y = editor.height - bar;
 
-                for (positive s = 0; s < doc->selection_count; s++)
-                        selected += doc_sel_end(&doc->selections[s]) - doc_sel_start(&doc->selections[s]);
                 ui_fill(ui, 0, y, editor.width, bar, ui_role(UI_SURFACE_CONTAINER) | 0xff000000u);
-                at += (positive)string_length(string_copy((string_address)text, (string_address) "Ln "));
-                at += positive_into_string((string_address)text + at, (positive)(line + 1));
-                at += (positive)string_length(string_copy((string_address)text + at, (string_address) ", Col "));
-                at += positive_into_string((string_address)text + at, (positive)(doc_column(doc, caret) + 1));
-                if (selected)
-                {
-                        at += (positive)string_length(string_copy((string_address)text + at, (string_address) "  ("));
-                        at += positive_into_string((string_address)text + at, selected);
-                        at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->selection_count > 1 ? " selected, carets)" : " selected)")));
-                }
-                at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->bom ? "    UTF-8 with BOM    " : "    UTF-8    ")));
-                at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->eol == DOC_EOL_CRLF ? "CRLF    " : doc->eol == DOC_EOL_CR ? "CR    " : "LF    ")));
-                at += (positive)string_length(string_copy((string_address)text + at, (string_address)doc_languages[doc->language].name));
-                at += (positive)string_length(string_copy((string_address)text + at, (string_address)(doc->insert_spaces ? "    Spaces: " : "    Tab: ")));
-                at += positive_into_string((string_address)text + at, doc->tab_size);
-                text[at] = 0;
+                editor_status_text(text, sizeof(text), doc);
                 ui_kit_text(ui, ui_px(ui, UI_INSET), ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM),
                             (string_address)text, UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
                 if (tab->changed_on_disk || editor.status[0])
                 {
-                        const char address_to say = tab->changed_on_disk ? "changed on disk: Ctrl+R reads it again" : editor.status;
+                        const char address_to say = tab->changed_on_disk ? WORDS(editor_changed_on_disk) : editor.status;
 
                         ui_kit_text(ui, editor.width - ui_px(ui, UI_INSET) - ui_kit_measure(ui, (string_address)say, UI_LABEL_MEDIUM),
                                     ui_kit_baseline(ui, y + (bar - ui_px(ui, ui_types[UI_LABEL_MEDIUM].line)) / 2, UI_LABEL_MEDIUM), (string_address)say, UI_LABEL_MEDIUM,
@@ -776,6 +784,13 @@ static long editor_tick(long timeout, long address_to other)
         return timeout;
 }
 
+// The status line says what happened in the language of that moment, so a change of language ends it.
+static fn editor_language(void)
+{
+        editor.status[0] = 0;
+        editor.dirty = true;
+}
+
 static int editor_start(void)
 {
         struct windows address_to table = editor.own.table;
@@ -790,6 +805,7 @@ static int editor_start(void)
                         break;
         if (!editor.count)
                 editor_open(null);
+        language_listen(editor_language);
         editor.tab = 0;
         editor.dirty = true;
         return -1;

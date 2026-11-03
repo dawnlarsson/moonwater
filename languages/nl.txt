@@ -5,12 +5,39 @@ action_copy	3664	Kopiëren
 action_cut	5863	Knippen
 action_paste	0288	Plakken
 action_select_all	3b12	Alles selecteren
+editor_changed_on_disk	3e0f	gewijzigd op schijf: Ctrl+R leest opnieuw
+editor_closes_unsaved	fcb8	sluit en gooit de niet-opgeslagen wijzigingen weg
+editor_encoding_bom	c0d7	UTF-8 met BOM
+editor_find_hint	d17a	Zoeken
+editor_find_replace_hint	3693	Zoeken/Vervangen door
+editor_indent_spaces	9db9	Spaties: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	Regel
+editor_no_file_name	c863	geen bestandsnaam: start de editor met een naam
+editor_no_match	7de7	geen overeenkomst
+editor_not_regular	5955	geen gewoon bestand: geweigerd
+editor_pattern_bad	5d57	het patroon is ongeldig
+editor_position	3696	Rg %1$d, Kol %2$d
+editor_replace_usage	c677	vervangen is ZOEK/VERVANGING
+editor_replaced	1128	%d vervangen
+editor_save_failed	069d	opslaan mislukt: het bestand is ongewijzigd
+editor_saved	9f44	opgeslagen
+editor_selected	a686	(%d geselecteerd)
+editor_selected_carets	7e02	(%d geselecteerd, cursors)
+editor_unsaved	c014	niet-opgeslagen wijzigingen: sla ze op, of sluit elk met tweemaal Ctrl+W
+editor_untitled	8b58	naamloos
+editor_write_beside	ec75	kon niet naast het bestand schrijven
+editor_writes_over_changed	df15	overschrijft de wijziging op schijf (Ctrl+R leest opnieuw)
+editor_writes_over_readonly	e22f	overschrijft een alleen-lezen bestand
 menu_copy	43e0	Ko&piëren
 menu_cut	5c17	&Knippen
 menu_delete	1e3e	&Verwijderen
+menu_find	1fa6	&Zoeken
+menu_go_to_line	bc96	&Ga naar regel
 menu_paste	6854	P&lakken
 menu_redo	ac45	Op&nieuw
 menu_select_all	f6f6	&Alles selecteren
+menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
 ui_confirm_again	b3ff	druk nogmaals om te bevestigen: 
 ui_field_digits	f52b	een getal bestaat uit cijfers
@@ -69,6 +96,7 @@ ui_field_full	fe02	meer past er niet in
 =New USB devices	c15c	Nieuwe USB-apparaten
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
 =Other devices	8362	Andere apparaten
+=Plain Text	2bbe	Platte tekst
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofiel
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen
