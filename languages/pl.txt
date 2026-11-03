@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
 menu_zoom_in	5bcf	&Powiększ
 menu_zoom_out	9234	Pom&niejsz
+settings_already_joined	71fb	już połączono z %s
+settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty
+settings_asks_first	e9bd	pyta najpierw
+settings_busy	34e0	moonwater jest zajęty: poprzednie zmiany nie są jeszcze gotowe
+settings_cannot_join	dfa4	moonwater nie może spełnić wymagań tej sieci
+settings_cannot_run	954f	nie można uruchomić polecenia moonwater
+settings_card_back	db52	Escape lub kliknięcie wraca
+settings_card_stopped	e24d	zatrzymano: Escape lub kliknięcie wraca
 settings_device_name	5f12	Nazwa urządzenia
+settings_done	8071	gotowe
+settings_edit_keys	d161	Enter ustawia, Escape zostawia bez zmian, kliknięcie obok też ustawia
 settings_filter_hint	4aa0	Wpisz, aby filtrować
+settings_forget	5220	zapomnij %s
+settings_help_more	93ec	moonwater help podaje więcej, niż wymienia Wszystkie polecenia: pierwszy wiersz uruchamia dowolne polecenie
+settings_identify_screens	8be8	Zidentyfikuj ekrany
+settings_item_add	fbef	Enter zapamiętuje nazwę urządzenia; radio włącza się dla tego, co się sparuje
+settings_item_ask	6aad	Enter prosi o hasło i łączy
+settings_item_cannot	e643	moonwater nie może spełnić wymagań tej sieci
+settings_item_joined	0fb8	połączono: Delete zapomina
+settings_item_kept	33d9	zapamiętane po nazwie: Delete zapomina
+settings_item_open	4429	Enter łączy i zapisuje
+settings_item_saved	3ffd	zapisano: Enter ponownie prosi o hasło, Delete zapomina
+settings_joined	1050	połączono
+settings_kept	4759	zapamiętane
+settings_menu_keys	5546	Góra i Dół wybierają, Enter ustawia, Escape zostawia
+settings_name_chars	58a2	nazwa składa się z liter, cyfr i myślników
+settings_name_long	f2c0	nazwa ma mniej niż 32 znaki
+settings_not_here	4e20	nie ma tego na tej maszynie
+settings_nothing_kept	85a2	nic nie wpisano: wartość pozostaje
+settings_nothing_matches	14e9	Nic nie pasuje do wpisanego tekstu
+settings_nothing_typed	edce	nic nie wpisano
+settings_refused	454b	moonwater odmówił
 settings_run_any	3ffd	Uruchom dowolne polecenie moonwater
+settings_running	d0e2	uruchomiono %s (Escape przerywa)
+settings_saved	9f44	zapisano
+settings_stopped	f34e	zatrzymano
+settings_too_long	fed7	moonwater trwał zbyt długo i został zatrzymany
+settings_too_many	db0e	to więcej słów, niż przyjmuje polecenie
+settings_type_command	75f8	wpisz polecenie: czasownik, potem to, co następuje
+settings_type_device	63e0	wpisz nazwę urządzenia: Enter zapamiętuje, Escape zostawia
+settings_type_passphrase	ca95	wpisz hasło: Enter łączy, Escape zostawia
+settings_unknown	9fb9	nieznane
+settings_verb_hint	05aa	CZASOWNIK [ARGUMENTY]
 terminal_exited_press_to_close	a8cf	zakończono ze statusem %d, naciśnij klawisz, aby zamknąć
 terminal_press_to_close	080d	naciśnij klawisz, aby zamknąć
 tray_am	0d13	AM
@@ -112,6 +152,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Identify	033d	Identyfikuj
 =In range and saved	7941	W zasięgu i zapisane
 =Input	e11b	Wprowadzanie
+=Keep a device by its name	9c51	Zapamiętaj urządzenie po nazwie
 =Keep the lowest-delay sample	d8b9	Zachowuj próbkę o najmniejszym opóźnieniu
 =Kernel log	e57a	Dziennik jądra
 =Key repeat delay (ms, or default)	4eb7	Opóźnienie powtarzania klawiszy (ms lub default)

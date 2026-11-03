@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
 menu_zoom_in	5bcf	&Inzoomen
 menu_zoom_out	9234	&Uitzoomen
+settings_already_joined	71fb	al verbonden met %s
+settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
+settings_asks_first	e9bd	vraagt eerst
+settings_busy	34e0	moonwater is bezig: de vorige wijzigingen zijn nog niet klaar
+settings_cannot_join	dfa4	moonwater kan niet voldoen aan wat dat netwerk vraagt
+settings_cannot_run	954f	de moonwater-opdracht kon niet worden uitgevoerd
+settings_card_back	db52	Escape of een klik gaat terug
+settings_card_stopped	e24d	gestopt: Escape of een klik gaat terug
 settings_device_name	5f12	Naam van het apparaat
+settings_done	8071	klaar
+settings_edit_keys	d161	Enter stelt het in, Escape laat het zoals het was, een klik ernaast stelt het ook in
 settings_filter_hint	4aa0	Typ om te filteren
+settings_forget	5220	%s vergeten
+settings_help_more	93ec	moonwater help vermeldt meer dan Alle opdrachten toont: de eerste rij voert elke opdracht uit
+settings_identify_screens	8be8	Schermen identificeren
+settings_item_add	fbef	Enter bewaart de naam van een apparaat; de radio gaat aan voor wat koppelt
+settings_item_ask	6aad	Enter vraagt om het wachtwoord en verbindt
+settings_item_cannot	e643	moonwater kan niet voldoen aan wat dit netwerk vraagt
+settings_item_joined	0fb8	verbonden: Delete vergeet het
+settings_item_kept	33d9	bewaard op naam: Delete vergeet het
+settings_item_open	4429	Enter verbindt en bewaart het
+settings_item_saved	3ffd	opgeslagen: Enter vraagt het wachtwoord opnieuw, Delete vergeet het
+settings_joined	1050	verbonden
+settings_kept	4759	bewaard
+settings_menu_keys	5546	Omhoog en Omlaag kiezen, Enter stelt in, Escape laat
+settings_name_chars	58a2	een naam bestaat uit letters, cijfers en streepjes
+settings_name_long	f2c0	een naam is korter dan 32 tekens
+settings_not_here	4e20	niet op deze machine
+settings_nothing_kept	85a2	niets getypt: de waarde blijft
+settings_nothing_matches	14e9	Niets komt overeen met de invoer
+settings_nothing_typed	edce	niets getypt
+settings_refused	454b	moonwater weigerde
 settings_run_any	3ffd	Een willekeurige moonwater-opdracht uitvoeren
+settings_running	d0e2	%s wordt uitgevoerd (Escape stopt het)
+settings_saved	9f44	opgeslagen
+settings_stopped	f34e	gestopt
+settings_too_long	fed7	moonwater deed er te lang over en werd gestopt
+settings_too_many	db0e	dat zijn meer woorden dan een opdracht aankan
+settings_type_command	75f8	typ een opdracht: het werkwoord, dan wat volgt
+settings_type_device	63e0	typ de naam van een apparaat: Enter bewaart hem, Escape laat het
+settings_type_passphrase	ca95	typ het wachtwoord: Enter verbindt, Escape laat het
+settings_unknown	9fb9	onbekend
+settings_verb_hint	05aa	WERKWOORD [ARGUMENTEN]
 terminal_exited_press_to_close	a8cf	beëindigd met status %d, druk op een toets om te sluiten
 terminal_press_to_close	080d	druk op een toets om te sluiten
 tray_am	0d13	a.m.
@@ -112,6 +152,7 @@ ui_field_full	fe02	meer past er niet in
 =Identify	033d	Identificeren
 =In range and saved	7941	In bereik en opgeslagen
 =Input	e11b	Invoer
+=Keep a device by its name	9c51	Een apparaat op naam bewaren
 =Keep the lowest-delay sample	d8b9	Monster met laagste vertraging bewaren
 =Kernel log	e57a	Kernellogboek
 =Key repeat delay (ms, or default)	4eb7	Vertraging toetsherhaling (ms of default)

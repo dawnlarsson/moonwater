@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
 menu_zoom_in	5bcf	&Vergrößern
 menu_zoom_out	9234	Verk&leinern
+settings_already_joined	71fb	bereits verbunden mit %s
+settings_any_text	89dc	ein beliebiger Befehl, wie die Wörter nach moonwater: sein Verb, dann seine Argumente
+settings_asks_first	e9bd	fragt zuerst
+settings_busy	34e0	moonwater ist beschäftigt: die vorherigen Änderungen sind noch nicht fertig
+settings_cannot_join	dfa4	moonwater kann nicht erfüllen, was dieses Netzwerk verlangt
+settings_cannot_run	954f	der moonwater-Befehl ließ sich nicht ausführen
+settings_card_back	db52	Escape oder ein Klick geht zurück
+settings_card_stopped	e24d	angehalten: Escape oder ein Klick geht zurück
 settings_device_name	5f12	Name des Geräts
+settings_done	8071	erledigt
+settings_edit_keys	d161	Enter übernimmt es, Escape lässt es, ein Klick daneben übernimmt es auch
 settings_filter_hint	4aa0	Zum Filtern tippen
+settings_forget	5220	%s vergessen
+settings_help_more	93ec	moonwater help nennt mehr, als Alle Befehle auflistet: die erste Zeile führt jeden Befehl aus
+settings_identify_screens	8be8	Bildschirme identifizieren
+settings_item_add	fbef	Enter merkt sich den Namen eines Geräts; das Funkmodul schaltet sich für Kopplungen ein
+settings_item_ask	6aad	Enter fragt nach dem Passwort und verbindet
+settings_item_cannot	e643	moonwater kann nicht erfüllen, was dieses Netzwerk verlangt
+settings_item_joined	0fb8	verbunden: Delete vergisst es
+settings_item_kept	33d9	nach Namen gemerkt: Delete vergisst es
+settings_item_open	4429	Enter verbindet und speichert es
+settings_item_saved	3ffd	gespeichert: Enter fragt das Passwort erneut, Delete vergisst es
+settings_joined	1050	verbunden
+settings_kept	4759	gemerkt
+settings_menu_keys	5546	Auf und Ab wählen, Enter übernimmt, Escape lässt es
+settings_name_chars	58a2	ein Name besteht aus Buchstaben, Ziffern und Bindestrichen
+settings_name_long	f2c0	ein Name ist kürzer als 32 Zeichen
+settings_not_here	4e20	nicht auf diesem Gerät
+settings_nothing_kept	85a2	nichts eingegeben: der Wert bleibt
+settings_nothing_matches	14e9	Nichts passt zur Eingabe
+settings_nothing_typed	edce	nichts eingegeben
+settings_refused	454b	moonwater hat abgelehnt
 settings_run_any	3ffd	Beliebigen moonwater-Befehl ausführen
+settings_running	d0e2	%s läuft (Escape bricht ab)
+settings_saved	9f44	gespeichert
+settings_stopped	f34e	angehalten
+settings_too_long	fed7	moonwater brauchte zu lange und wurde angehalten
+settings_too_many	db0e	das sind mehr Wörter, als ein Befehl annimmt
+settings_type_command	75f8	einen Befehl eingeben: sein Verb, dann was folgt
+settings_type_device	63e0	den Namen eines Geräts eingeben: Enter merkt ihn sich, Escape lässt es
+settings_type_passphrase	ca95	das Passwort eingeben: Enter verbindet, Escape lässt es
+settings_unknown	9fb9	unbekannt
+settings_verb_hint	05aa	VERB [ARGUMENTE]
 terminal_exited_press_to_close	a8cf	beendet mit Status %d, zum Schließen eine Taste drücken
 terminal_press_to_close	080d	zum Schließen eine Taste drücken
 tray_am	0d13	AM
@@ -112,6 +152,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Identify	033d	Identifizieren
 =In range and saved	7941	In Reichweite und gespeichert
 =Input	e11b	Eingabe
+=Keep a device by its name	9c51	Ein Gerät nach Namen merken
 =Keep the lowest-delay sample	d8b9	Die Probe mit der geringsten Verzögerung behalten
 =Kernel log	e57a	Kernel-Protokoll
 =Key repeat delay (ms, or default)	4eb7	Verzögerung der Tastenwiederholung (ms oder default)

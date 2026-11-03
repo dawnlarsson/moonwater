@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Toggle Co&mment
 menu_undo	b9d3	&Undo
 menu_zoom_in	5bcf	Zoom &In
 menu_zoom_out	9234	Zoom &Out
+settings_already_joined	71fb	already joined to %s
+settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
+settings_asks_first	e9bd	asks first
+settings_busy	34e0	moonwater is busy: the changes before this one are not done
+settings_cannot_join	dfa4	moonwater cannot join what that network asks for
+settings_cannot_run	954f	the moonwater command could not be run
+settings_card_back	db52	Escape or a press goes back
+settings_card_stopped	e24d	stopped: Escape or a press goes back
 settings_device_name	5f12	Name of the device
+settings_done	8071	done
+settings_edit_keys	d161	Enter sets it, Escape keeps it, a click outside sets it too
 settings_filter_hint	4aa0	Type to filter
+settings_forget	5220	forget %s
+settings_help_more	93ec	moonwater help says more than All commands lists: the first row runs any command
+settings_identify_screens	8be8	Identify screens
+settings_item_add	fbef	Enter keeps the name of a device; the radio goes on for what pairs
+settings_item_ask	6aad	Enter asks for its passphrase and joins it
+settings_item_cannot	e643	moonwater cannot join what this network asks for
+settings_item_joined	0fb8	joined: Delete forgets it
+settings_item_kept	33d9	kept by its name: Delete forgets it
+settings_item_open	4429	Enter joins it, and saves it
+settings_item_saved	3ffd	saved: Enter types its passphrase again, Delete forgets it
+settings_joined	1050	joined
+settings_kept	4759	kept
+settings_menu_keys	5546	Up and Down choose, Enter sets it, Escape leaves it
+settings_name_chars	58a2	a name is letters, digits and hyphens
+settings_name_long	f2c0	a name is under 32 characters
+settings_not_here	4e20	not on this machine
+settings_nothing_kept	85a2	nothing typed: the value is kept
+settings_nothing_matches	14e9	Nothing matches what is typed
+settings_nothing_typed	edce	nothing typed
+settings_refused	454b	moonwater refused
 settings_run_any	3ffd	Run any moonwater command
+settings_running	d0e2	running %s (Escape stops it)
+settings_saved	9f44	saved
+settings_stopped	f34e	stopped
+settings_too_long	fed7	moonwater took too long, and was stopped
+settings_too_many	db0e	that is more words than one command takes
+settings_type_command	75f8	type a command: its verb, then what follows it
+settings_type_device	63e0	type the name of a device: Enter keeps it, Escape leaves it
+settings_type_passphrase	ca95	type its passphrase: Enter joins it, Escape leaves it
+settings_unknown	9fb9	unknown
+settings_verb_hint	05aa	VERB [ARGUMENTS]
 terminal_exited_press_to_close	a8cf	exited with status %d, press a key to close
 terminal_press_to_close	080d	press a key to close
 tray_am	0d13	AM
@@ -112,6 +152,7 @@ ui_field_full	fe02	that is as much as it holds
 =Identify	033d	Identify
 =In range and saved	7941	In range and saved
 =Input	e11b	Input
+=Keep a device by its name	9c51	Keep a device by its name
 =Keep the lowest-delay sample	d8b9	Keep the lowest-delay sample
 =Kernel log	e57a	Kernel log
 =Key repeat delay (ms, or default)	4eb7	Key repeat delay (ms, or default)

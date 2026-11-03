@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
 menu_zoom_in	5bcf	Μεγέθυνση
 menu_zoom_out	9234	Σμίκρυνση
+settings_already_joined	71fb	ήδη συνδεδεμένο με %s
+settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα
+settings_asks_first	e9bd	ρωτά πρώτα
+settings_busy	34e0	το moonwater είναι απασχολημένο: οι προηγούμενες αλλαγές δεν έχουν ολοκληρωθεί
+settings_cannot_join	dfa4	το moonwater δεν μπορεί να συνδεθεί σε ό,τι ζητά αυτό το δίκτυο
+settings_cannot_run	954f	η εντολή moonwater δεν μπόρεσε να εκτελεστεί
+settings_card_back	db52	Το Escape ή ένα κλικ επιστρέφει
+settings_card_stopped	e24d	διακόπηκε: το Escape ή ένα κλικ επιστρέφει
 settings_device_name	5f12	Όνομα της συσκευής
+settings_done	8071	έγινε
+settings_edit_keys	d161	το Enter το ορίζει, το Escape το αφήνει όπως ήταν, και ένα κλικ έξω το ορίζει
 settings_filter_hint	4aa0	Πληκτρολογήστε για φιλτράρισμα
+settings_forget	5220	ξέχνα το %s
+settings_help_more	93ec	το moonwater help λέει περισσότερα από όσα δείχνει το «Όλες οι εντολές»: η πρώτη γραμμή εκτελεί οποιαδήποτε εντολή
+settings_identify_screens	8be8	Αναγνώριση οθονών
+settings_item_add	fbef	το Enter κρατά το όνομα μιας συσκευής· η ασύρματη λειτουργία ενεργοποιείται για ό,τι ζευγαρώνει
+settings_item_ask	6aad	το Enter ζητά τον κωδικό και συνδέεται
+settings_item_cannot	e643	το moonwater δεν μπορεί να συνδεθεί σε ό,τι ζητά αυτό το δίκτυο
+settings_item_joined	0fb8	συνδεδεμένο: το Delete το ξεχνά
+settings_item_kept	33d9	κρατημένο με το όνομά του: το Delete το ξεχνά
+settings_item_open	4429	το Enter συνδέεται και το αποθηκεύει
+settings_item_saved	3ffd	αποθηκευμένο: το Enter ζητά ξανά τον κωδικό, το Delete το ξεχνά
+settings_joined	1050	συνδεδεμένο
+settings_kept	4759	κρατημένο
+settings_menu_keys	5546	Πάνω και Κάτω επιλέγουν, το Enter ορίζει, το Escape αφήνει
+settings_name_chars	58a2	ένα όνομα αποτελείται από γράμματα, ψηφία και παύλες
+settings_name_long	f2c0	ένα όνομα έχει λιγότερους από 32 χαρακτήρες
+settings_not_here	4e20	δεν υπάρχει σε αυτό το μηχάνημα
+settings_nothing_kept	85a2	δεν πληκτρολογήθηκε τίποτα: η τιμή διατηρείται
+settings_nothing_matches	14e9	Τίποτα δεν ταιριάζει με το κείμενο
+settings_nothing_typed	edce	δεν πληκτρολογήθηκε τίποτα
+settings_refused	454b	το moonwater αρνήθηκε
 settings_run_any	3ffd	Εκτέλεση οποιασδήποτε εντολής moonwater
+settings_running	d0e2	εκτελείται το %s (το Escape το σταματά)
+settings_saved	9f44	αποθηκευμένο
+settings_stopped	f34e	διακόπηκε
+settings_too_long	fed7	το moonwater άργησε πολύ και σταμάτησε
+settings_too_many	db0e	είναι περισσότερες λέξεις από όσες δέχεται μια εντολή
+settings_type_command	75f8	πληκτρολογήστε μια εντολή: το ρήμα και ό,τι ακολουθεί
+settings_type_device	63e0	πληκτρολογήστε το όνομα μιας συσκευής: το Enter το κρατά, το Escape το αφήνει
+settings_type_passphrase	ca95	πληκτρολογήστε τον κωδικό: το Enter συνδέεται, το Escape το αφήνει
+settings_unknown	9fb9	άγνωστο
+settings_verb_hint	05aa	ΡΗΜΑ [ΟΡΙΣΜΑΤΑ]
 terminal_exited_press_to_close	a8cf	τερματίστηκε με κατάσταση %d, πατήστε ένα πλήκτρο για κλείσιμο
 terminal_press_to_close	080d	πατήστε ένα πλήκτρο για κλείσιμο
 tray_am	0d13	πμ
@@ -112,6 +152,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Identify	033d	Αναγνώριση
 =In range and saved	7941	Σε εμβέλεια και αποθηκευμένα
 =Input	e11b	Είσοδος
+=Keep a device by its name	9c51	Κράτηση συσκευής με το όνομά της
 =Keep the lowest-delay sample	d8b9	Διατήρηση του δείγματος με τη μικρότερη καθυστέρηση
 =Kernel log	e57a	Αρχείο καταγραφής πυρήνα
 =Key repeat delay (ms, or default)	4eb7	Καθυστέρηση επανάληψης πλήκτρων (ms ή default)

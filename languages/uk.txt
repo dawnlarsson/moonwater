@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Закоментувати/розкоментувати
 menu_undo	b9d3	Скасувати
 menu_zoom_in	5bcf	Збільшити
 menu_zoom_out	9234	Зменшити
+settings_already_joined	71fb	уже підключено до %s
+settings_any_text	89dc	будь-яка команда, як слова після moonwater: її дієслово, потім аргументи
+settings_asks_first	e9bd	спершу запитає
+settings_busy	34e0	moonwater зайнятий: попередні зміни ще не виконано
+settings_cannot_join	dfa4	moonwater не може підключитися до того, що вимагає ця мережа
+settings_cannot_run	954f	команду moonwater не вдалося виконати
+settings_card_back	db52	Escape або клацання — назад
+settings_card_stopped	e24d	зупинено: Escape або клацання — назад
 settings_device_name	5f12	Назва пристрою
+settings_done	8071	готово
+settings_edit_keys	d161	Enter задає, Escape залишає як було, клацання поза полем теж задає
 settings_filter_hint	4aa0	Введіть для фільтрації
+settings_forget	5220	забути %s
+settings_help_more	93ec	moonwater help каже більше, ніж перелічено в «Усі команди»: перший рядок виконує будь-яку команду
+settings_identify_screens	8be8	Визначити екрани
+settings_item_add	fbef	Enter запам'ятовує назву пристрою; радіо вмикається для того, що з'єднується
+settings_item_ask	6aad	Enter запитає пароль і підключиться
+settings_item_cannot	e643	moonwater не може підключитися до того, що вимагає ця мережа
+settings_item_joined	0fb8	підключено: Delete забуває
+settings_item_kept	33d9	запам'ятовано за назвою: Delete забуває
+settings_item_open	4429	Enter підключить і збереже
+settings_item_saved	3ffd	збережено: Enter знову запитає пароль, Delete забуває
+settings_joined	1050	підключено
+settings_kept	4759	запам'ятовано
+settings_menu_keys	5546	Вгору й Вниз вибирають, Enter задає, Escape залишає
+settings_name_chars	58a2	ім'я складається з літер, цифр і дефісів
+settings_name_long	f2c0	ім'я коротше за 32 символи
+settings_not_here	4e20	немає на цьому комп'ютері
+settings_nothing_kept	85a2	нічого не введено: значення зберігається
+settings_nothing_matches	14e9	Нічого не знайдено за запитом
+settings_nothing_typed	edce	нічого не введено
+settings_refused	454b	moonwater відмовив
 settings_run_any	3ffd	Виконати будь-яку команду moonwater
+settings_running	d0e2	виконується %s (Escape зупиняє)
+settings_saved	9f44	збережено
+settings_stopped	f34e	зупинено
+settings_too_long	fed7	moonwater працював надто довго й був зупинений
+settings_too_many	db0e	це більше слів, ніж приймає команда
+settings_type_command	75f8	введіть команду: її дієслово і те, що за ним
+settings_type_device	63e0	введіть назву пристрою: Enter запам'ятає, Escape залишить
+settings_type_passphrase	ca95	введіть пароль: Enter підключить, Escape залишить
+settings_unknown	9fb9	невідомо
+settings_verb_hint	05aa	ДІЄСЛОВО [АРГУМЕНТИ]
 terminal_exited_press_to_close	a8cf	завершено зі статусом %d, натисніть будь-яку клавішу, щоб закрити
 terminal_press_to_close	080d	натисніть будь-яку клавішу, щоб закрити
 tray_am	0d13	дп
@@ -112,6 +152,7 @@ ui_field_full	fe02	більше не вміщається
 =Identify	033d	Визначити
 =In range and saved	7941	У зоні дії та збережені
 =Input	e11b	Введення
+=Keep a device by its name	9c51	Запам'ятати пристрій за назвою
 =Keep the lowest-delay sample	d8b9	Залишати вимір із найменшою затримкою
 =Kernel log	e57a	Журнал ядра
 =Key repeat delay (ms, or default)	4eb7	Затримка повтору клавіш (мс або default)

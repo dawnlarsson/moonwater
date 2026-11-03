@@ -143902,6 +143902,53 @@ static fn settings_words_check(void)
 }
 #endif
 
+#if MOONWATER_UI_SETTINGS
+/*
+        What the Settings window says of a row of a list (a network, a device, the row that keeps one) and what a name may hold:
+        English is the words it said before the table, written out here, and a language taken says them in its own. A change of
+        language puts away the status line, which holds the words of the language it was said in.
+*/
+static fn settings_status_check(void)
+{
+        static const struct
+        {
+                unsigned int kind, flags;
+                const char address_to english;
+        } items[] = {
+            {SETTINGS_NETWORK, SETTINGS_ITEM_JOINED, "joined: Delete forgets it"},
+            {SETTINGS_NETWORK, SETTINGS_ITEM_CANNOT, "moonwater cannot join what this network asks for"},
+            {SETTINGS_NETWORK, SETTINGS_ITEM_OPEN, "Enter joins it, and saves it"},
+            {SETTINGS_NETWORK, SETTINGS_ITEM_SAVED, "saved: Enter types its passphrase again, Delete forgets it"},
+            {SETTINGS_NETWORK, 0, "Enter asks for its passphrase and joins it"},
+            {SETTINGS_DEVICE, 0, "kept by its name: Delete forgets it"},
+            {SETTINGS_ADD, 0, "Enter keeps the name of a device; the radio goes on for what pairs"},
+        };
+        struct settings_item item;
+        positive wrong = 0;
+
+        language_take(0);
+        for (positive at = 0; at < sizeof(items) / sizeof(items[0]); at++)
+        {
+                memory_zero(&item, sizeof(item));
+                item.kind = (unsigned char)items[at].kind, item.flags = (unsigned char)items[at].flags;
+                wrong += !!string_compare_max((string_address)settings_item_text(&item), (string_address)items[at].english, 128);
+        }
+        wrong += !!string_compare_max((string_address)settings_name_accepts('!'), (string_address) "a name is letters, digits and hyphens", 64) ||
+                 settings_name_accepts('a') != null;
+        check("settings status: what a row of a list says when it is pressed, and what a name may hold, are the English they were", !wrong);
+        language_take('d' | 'e' << 8);
+        memory_zero(&item, sizeof(item));
+        item.kind = SETTINGS_DEVICE;
+        check("settings status: in German a row of a list and a name's rule say German",
+              !string_compare_max((string_address)settings_item_text(&item), (string_address) "nach Namen gemerkt: Delete vergisst es", 64) &&
+                  !string_compare_max((string_address)settings_name_accepts('!'), (string_address) "ein Name besteht aus Buchstaben, Ziffern und Bindestrichen", 64));
+        settings_say((string_address) "said in German");
+        settings_language();
+        check("settings status: a change of language puts away a status line made in the language before", !settings.status[0]);
+        language_take(0);
+}
+#endif
+
 static fn language_check(void)
 {
         font_face regular, bold;
@@ -143936,6 +143983,7 @@ static fn language_check(void)
         terminal_words_check();
 #if MOONWATER_UI_SETTINGS
         settings_words_check();
+        settings_status_check();
 #endif
 }
 #endif

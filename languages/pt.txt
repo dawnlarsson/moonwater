@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
 menu_zoom_in	5bcf	&Aumentar zoom
 menu_zoom_out	9234	&Diminuir zoom
+settings_already_joined	71fb	já conectado a %s
+settings_any_text	89dc	qualquer comando, como as palavras depois de moonwater: o verbo e os argumentos
+settings_asks_first	e9bd	pergunta antes
+settings_busy	34e0	moonwater está ocupado: as alterações anteriores não terminaram
+settings_cannot_join	dfa4	moonwater não pode entrar no que essa rede pede
+settings_cannot_run	954f	não foi possível executar o comando moonwater
+settings_card_back	db52	Escape ou um clique volta
+settings_card_stopped	e24d	interrompido: Escape ou um clique volta
 settings_device_name	5f12	Nome do dispositivo
+settings_done	8071	concluído
+settings_edit_keys	d161	Enter aplica, Escape mantém como estava, um clique fora também aplica
 settings_filter_hint	4aa0	Digite para filtrar
+settings_forget	5220	esquecer %s
+settings_help_more	93ec	moonwater help diz mais do que Todos os comandos lista: a primeira linha executa qualquer comando
+settings_identify_screens	8be8	Identificar telas
+settings_item_add	fbef	Enter guarda o nome de um dispositivo; o rádio liga para o que for emparelhado
+settings_item_ask	6aad	Enter pede a senha e conecta
+settings_item_cannot	e643	moonwater não pode entrar no que esta rede pede
+settings_item_joined	0fb8	conectado: Delete esquece
+settings_item_kept	33d9	guardado pelo nome: Delete esquece
+settings_item_open	4429	Enter conecta e salva
+settings_item_saved	3ffd	salva: Enter pede a senha de novo, Delete esquece
+settings_joined	1050	conectado
+settings_kept	4759	guardado
+settings_menu_keys	5546	Cima e Baixo escolhem, Enter aplica, Escape deixa
+settings_name_chars	58a2	um nome é feito de letras, dígitos e hifens
+settings_name_long	f2c0	um nome tem menos de 32 caracteres
+settings_not_here	4e20	não existe nesta máquina
+settings_nothing_kept	85a2	nada digitado: o valor é mantido
+settings_nothing_matches	14e9	Nada corresponde ao digitado
+settings_nothing_typed	edce	nada digitado
+settings_refused	454b	moonwater recusou
 settings_run_any	3ffd	Executar qualquer comando do moonwater
+settings_running	d0e2	executando %s (Escape interrompe)
+settings_saved	9f44	salva
+settings_stopped	f34e	interrompido
+settings_too_long	fed7	moonwater demorou demais e foi interrompido
+settings_too_many	db0e	são mais palavras do que um comando aceita
+settings_type_command	75f8	digite um comando: o verbo e o que vem depois
+settings_type_device	63e0	digite o nome de um dispositivo: Enter guarda, Escape deixa
+settings_type_passphrase	ca95	digite a senha: Enter conecta, Escape deixa
+settings_unknown	9fb9	desconhecido
+settings_verb_hint	05aa	VERBO [ARGUMENTOS]
 terminal_exited_press_to_close	a8cf	terminou com status %d, pressione uma tecla para fechar
 terminal_press_to_close	080d	pressione uma tecla para fechar
 tray_am	0d13	AM
@@ -112,6 +152,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Identify	033d	Identificar
 =In range and saved	7941	No alcance e salvas
 =Input	e11b	Entrada
+=Keep a device by its name	9c51	Guardar um dispositivo pelo nome
 =Keep the lowest-delay sample	d8b9	Manter a amostra de menor atraso
 =Kernel log	e57a	Registro do kernel
 =Key repeat delay (ms, or default)	4eb7	Atraso da repetição de teclas (ms ou default)

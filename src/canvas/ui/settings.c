@@ -866,6 +866,8 @@ static const char address_to settings_label_shown(int row)
 {
         if (row < SETTINGS_ANY)
                 return language_of(settings_rows[row].label);
+        if (settings_item(row) && settings_item(row)->kind == SETTINGS_ADD)
+                return language_of(settings_item(row)->label);
         return !settings_item(row) && !settings_generic_of(row) ? WORDS(settings_run_any) : settings_label(row);
 }
 
@@ -873,13 +875,13 @@ static const char address_to settings_label_shown(int row)
 static const char address_to settings_item_text(const struct settings_item address_to item)
 {
         if (item->kind == SETTINGS_NETWORK)
-                return item->flags & SETTINGS_ITEM_JOINED   ? "joined: Delete forgets it"
-                       : item->flags & SETTINGS_ITEM_CANNOT ? "moonwater cannot join what this network asks for"
-                       : item->flags & SETTINGS_ITEM_OPEN   ? "Enter joins it, and saves it"
-                       : item->flags & SETTINGS_ITEM_SAVED  ? "saved: Enter types its passphrase again, Delete forgets it"
-                                                            : "Enter asks for its passphrase and joins it";
-        return item->kind == SETTINGS_DEVICE ? "kept by its name: Delete forgets it"
-               : item->kind == SETTINGS_ADD  ? "Enter keeps the name of a device; the radio goes on for what pairs" : "";
+                return item->flags & SETTINGS_ITEM_JOINED   ? WORDS(settings_item_joined)
+                       : item->flags & SETTINGS_ITEM_CANNOT ? WORDS(settings_item_cannot)
+                       : item->flags & SETTINGS_ITEM_OPEN   ? WORDS(settings_item_open)
+                       : item->flags & SETTINGS_ITEM_SAVED  ? WORDS(settings_item_saved)
+                                                            : WORDS(settings_item_ask);
+        return item->kind == SETTINGS_DEVICE ? WORDS(settings_item_kept)
+               : item->kind == SETTINGS_ADD  ? WORDS(settings_item_add) : "";
 }
 
 // What a command of All commands does, as help says; the any row's own words.
@@ -890,7 +892,7 @@ static const char address_to settings_text(int row)
 
         if (item)
                 return settings_item_text(item);
-        return generic ? settings_large->pool + generic->text : "any command, as the words after moonwater: its verb, then its arguments";
+        return generic ? settings_large->pool + generic->text : WORDS(settings_any_text);
 }
 
 // Whether a row's command takes words after its verb (the any row all of them).
@@ -1309,7 +1311,7 @@ static void settings_map_place(void)
         settings.map.w = settings.page.right - settings.page.left, settings.map.h = ui_px(ui, SETTINGS_MAP_PANEL);
         settings.map.field_x = settings.map.x + pad, settings.map.field_y = settings.map.y + strip;
         settings.map.field_w = settings.map.w - 2 * pad, settings.map.field_h = settings.map.h - strip - pad;
-        c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address) "Identify screens";
+        c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address)WORDS(settings_identify_screens);
         c->w = button_w * 100 / ui->scale, c->h = button_h * 100 / ui->scale;
         c->x = (settings.map.x + settings.map.w - pad - button_w) * 100 / ui->scale;
         c->y = (settings.map.y + (strip - button_h) / 2) * 100 / ui->scale;
@@ -1542,7 +1544,6 @@ static fn settings_layout(void)
                 settings.list.ids = (int)SETTINGS_ALL;
                 settings.list.describe = settings_describe;
                 settings.list.damaged = settings_changed;
-                settings.list.empty = "Nothing matches what is typed";
                 settings.list.hover = settings.list.down = -1;
                 settings.map.display = settings.map.drag = -1;
                 for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
@@ -2267,9 +2268,7 @@ static fn settings_next_job(void)
                                 char line[SETTINGS_STATUS];
 
                                 settings_join(words, count, text, sizeof(text));
-                                string_copy_bounded((string_address)line, (string_address) "running ", sizeof(line));
-                                string_append_bounded((string_address)line, (string_address)text, sizeof(line));
-                                string_append_bounded((string_address)line, (string_address) " (Escape stops it)", sizeof(line));
+                                language_format(line, sizeof(line), WORDS(settings_running), text);
                                 settings_say((string_address)line);
                         }
                         return;
@@ -2277,8 +2276,8 @@ static fn settings_next_job(void)
 
                 if (settings.job_sets)
                         settings_say((string_address)(count || settings.job < SETTINGS_ANY
-                                                          ? "the moonwater command could not be run"
-                                                          : "that is more words than one command takes"));
+                                                          ? WORDS(settings_cannot_run)
+                                                          : WORDS(settings_too_many)));
                 else if (settings.job >= 0)
                         settings.state[settings.job] = SETTINGS_FAILED;
                 settings_dirty();
@@ -2335,7 +2334,7 @@ static fn settings_change(int row, const char address_to value)
         {
                 if (settings.queued == SETTINGS_QUEUE)
                 {
-                        settings_say((string_address) "moonwater is busy: the changes before this one are not done");
+                        settings_say((string_address)WORDS(settings_busy));
                         return;
                 }
                 settings.queue[at].row = row;
@@ -2356,7 +2355,7 @@ static fn settings_report(b32 killed, positive status)
         while (at < settings.said_length)
                 lines += settings_line(settings_large->said, settings.said_length, &at, lines ? other : first, SETTINGS_STATUS) != 0;
         if (!lines)
-                settings_say((string_address)(killed ? "stopped" : wait_status_code(status) ? "moonwater refused" : "done"));
+                settings_say((string_address)(killed ? WORDS(settings_stopped) : wait_status_code(status) ? WORDS(settings_refused) : WORDS(settings_done)));
         else if (lines == 1)
                 settings_say((string_address)first);
         else
@@ -2364,7 +2363,7 @@ static fn settings_report(b32 killed, positive status)
                 count = settings_generic_words(settings.job, settings.job_value, words, SETTINGS_WORDS);
                 settings_join(words, count, title, sizeof(title));
                 settings_card_open(title);
-                settings_say((string_address)(killed ? "stopped: Escape or a press goes back" : "Escape or a press goes back"));
+                settings_say((string_address)(killed ? WORDS(settings_card_stopped) : WORDS(settings_card_back)));
         }
 }
 
@@ -2730,11 +2729,11 @@ static fn settings_finished(b32 killed)
                         while (at < settings.said_length && !size)
                                 size = settings_line(settings_large->said, settings.said_length, &at, line, sizeof(line));
                         if (killed)
-                                settings_say((string_address) "moonwater took too long, and was stopped");
+                                settings_say((string_address)WORDS(settings_too_long));
                         else if (size)
                                 settings_say((string_address)line);
                         else
-                                settings_say((string_address)(wait_status_code(status) ? "moonwater refused" : "done"));
+                                settings_say((string_address)(wait_status_code(status) ? WORDS(settings_refused) : WORDS(settings_done)));
                 }
                 // What was done to a row of a list is seen at once in the list; any other change may move another row.
                 if (row == SETTINGS_JOB_ACT)
@@ -2750,7 +2749,7 @@ static fn settings_finished(b32 killed)
                         settings_help(settings_large->said, settings.said_length);
                 settings_refilter();
                 if (settings.truncated)
-                        settings_say((string_address) "moonwater help says more than All commands lists: the first row runs any command");
+                        settings_say((string_address)WORDS(settings_help_more));
         }
         else
         {
@@ -2853,12 +2852,12 @@ static b32 settings_run(int row, const char address_to args)
 
         if (!count)
         {
-                settings_say((string_address) "that is more words than one command takes");
+                settings_say((string_address)WORDS(settings_too_many));
                 return false;
         }
         if (count == 1)
         {
-                settings_say((string_address) "type a command: its verb, then what follows it");
+                settings_say((string_address)WORDS(settings_type_command));
                 return false;
         }
         if (settings_asks_for(words + 1, count - 1) && !ui_confirm_ask(&settings.confirm, row + 1, args))
@@ -3237,7 +3236,7 @@ static fn settings_menu_open(int row)
         settings.popup.menu.hot = current >= 0 ? current : 0;
         if (settings.popup.open)
                 ui_popup_present(&settings.popup);
-        settings_say((string_address) "Up and Down choose, Enter sets it, Escape leaves it");
+        settings_say((string_address)WORDS(settings_menu_keys));
         settings_dirty();
 }
 
@@ -3295,7 +3294,7 @@ static fn settings_act(char what, const char address_to name, const char address
 static const char address_to settings_name_accepts(p32 code)
 {
         return (code >= '0' && code <= '9') || ((code | 32) >= 'a' && (code | 32) <= 'z') || code == '-' ? null
-                                                                                                     : "a name is letters, digits and hyphens";
+                                                                                                     : WORDS(settings_name_chars);
 }
 
 /*
@@ -3320,7 +3319,7 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
                   : row >= SETTINGS_ANY || (settings_rows[row].flags & SETTINGS_SPLIT) ? SETTINGS_TYPED - 1
                                                                                         : SETTINGS_VALUE - 1;
         if (row == SETTINGS_NAME_ROW)
-                t->accept = settings_name_accepts, t->most = SETTINGS_NAME_MOST, t->most_said = "a name is under 32 characters";
+                t->accept = settings_name_accepts, t->most = SETTINGS_NAME_MOST, t->most_said = WORDS(settings_name_long);
         settings.editing = row;
         settings_dirty();
 }
@@ -3351,25 +3350,24 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         {
                 if (item->flags & SETTINGS_ITEM_JOINED)
                 {
-                        string_copy_bounded((string_address)line, (string_address) "already joined to ", sizeof(line));
-                        string_append_bounded((string_address)line, (string_address)item->label, sizeof(line));
+                        language_format(line, sizeof(line), WORDS(settings_already_joined), item->label);
                         settings_say((string_address)line);
                 }
                 else if (item->flags & SETTINGS_ITEM_CANNOT)
-                        settings_say((string_address) "moonwater cannot join what that network asks for");
+                        settings_say((string_address)WORDS(settings_cannot_join));
                 else if (item->flags & SETTINGS_ITEM_OPEN)
                         settings_act('j', item->label, null);
                 else
                 {
                         settings_edit_begin(row, "", true);
                         string_copy_bounded((string_address)settings.joining, (string_address)item->label, sizeof(settings.joining));
-                        settings_say((string_address) "type its passphrase: Enter joins it, Escape leaves it");
+                        settings_say((string_address)WORDS(settings_type_passphrase));
                 }
         }
         else if (item->kind == SETTINGS_ADD)
         {
                 settings_edit_begin(row, "", false);
-                settings_say((string_address) "type the name of a device: Enter keeps it, Escape leaves it");
+                settings_say((string_address)WORDS(settings_type_device));
         }
         else
                 settings_say((string_address)settings_item_text(item));
@@ -3387,8 +3385,7 @@ static fn settings_forget(void)
         // A forget is armed by its kind (a number no row has, below zero) and the label it is for.
         if (!ui_confirm_ask(&settings.confirm, -1 - (int)item->kind, item->label))
         {
-                string_copy_bounded((string_address)text, (string_address)"forget ", sizeof(text));
-                string_append_bounded((string_address)text, (string_address)item->label, sizeof(text));
+                language_format(text, sizeof(text), WORDS(settings_forget), item->label);
                 ui_confirm_line(line, sizeof(line), text);
                 settings_say((string_address)line);
                 return;
@@ -3424,7 +3421,7 @@ static fn settings_activate(int row, int way)
         {
         case SETTINGS_FIELD:
                 settings_edit_begin(row, settings.value[row], false);
-                settings_say((string_address) "Enter sets it, Escape keeps it, a click outside sets it too");
+                settings_say((string_address)WORDS(settings_edit_keys));
                 return;
         case SETTINGS_INFO:
                 return;
@@ -3516,7 +3513,7 @@ static fn settings_edit_commit(void)
                 const struct settings_item address_to item = settings_item(settings.editing);
 
                 if (!length)
-                        settings_say((string_address) "nothing typed");
+                        settings_say((string_address)WORDS(settings_nothing_typed));
                 else if (item && item->kind == SETTINGS_NETWORK)
                         settings_act('j', item->label, typed + start);
                 else if (item && item->kind == SETTINGS_ADD)
@@ -3533,7 +3530,7 @@ static fn settings_edit_commit(void)
         }
         // What the field opened on is kept as it was: a value that changed under the field is not written back over with it.
         if (!length)
-                settings_say((string_address) "nothing typed: the value is kept");
+                settings_say((string_address)WORDS(settings_nothing_kept));
         else if (!string_equals((string_address)typed + start, (string_address)settings.edit_from) &&
                  !string_equals((string_address)typed + start, (string_address)settings.value[settings.editing]))
                 settings_change(settings.editing, typed + start);
@@ -3989,7 +3986,7 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 else if (!which)
                 {
                         // A command being typed: its verb, and the field for what follows it, which says what it takes.
-                        const char address_to hint = generic ? settings_large->pool + generic->command + generic->verb : "VERB [ARGUMENTS]";
+                        const char address_to hint = generic ? settings_large->pool + generic->command + generic->verb : WORDS(settings_verb_hint);
 
                         if (generic)
                         {
@@ -4009,19 +4006,19 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 if (item->kind == SETTINGS_NETWORK)
                 {
                         row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
-                        row->note = item->flags & SETTINGS_ITEM_JOINED ? "joined" : item->flags & SETTINGS_ITEM_SAVED ? "saved" : null;
+                        row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null;
                         row->value = item->security[0] ? item->security : null;
                         row->bars = item->flags & SETTINGS_ITEM_HEARD ? item->bars : -1;
                         row->dim = !(item->flags & SETTINGS_ITEM_HEARD);
                 }
                 else if (item->kind == SETTINGS_DEVICE)
-                        row->value = "kept";
+                        row->value = WORDS(settings_kept);
                 row->dim |= item->kind == SETTINGS_NOTE;
                 return;
         }
         if (!which)
         {
-                row->value = settings_row_asks(id) ? "asks first" : null;
+                row->value = settings_row_asks(id) ? WORDS(settings_asks_first) : null;
                 return;
         }
         if (which->output != SETTINGS_OUT_NONE)
@@ -4030,8 +4027,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 return;
         }
         row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT;
-        row->value = state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? "not on this machine"
-                     : state == SETTINGS_FAILED || !shown[0] ? "unknown" : settings_label_of(id, shown);
+        row->value = state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? WORDS(settings_not_here)
+                     : state == SETTINGS_FAILED || !shown[0] ? WORDS(settings_unknown) : settings_label_of(id, shown);
         if (state != SETTINGS_READ)
                 return;
         if (which->kind == SETTINGS_SWITCH)
@@ -4742,6 +4739,7 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         }
         settings.page.title = settings.view ? settings.card_title : language_of("Settings");
         settings.page.status = settings.status;
+        settings.list.empty = WORDS(settings_nothing_matches);
         // The search field is the filter: the kit's bare field, the text engine's field in it (typing, a selection, the
         // clipboard, its caret), with the keys while the window has them and no row is typed in.
         settings.page.search.items[0] = settings.view ? null : WORDS(settings_filter_hint);
@@ -4867,6 +4865,13 @@ static fn settings_size(unsigned int width, unsigned int height)
 }
 
 // The settings' start, once its window is taken: the lift, the layout and the first picture. -1 runs the loop.
+// The status line holds a message of the language it was said in, so a change of language ends it.
+static fn settings_language(void)
+{
+        settings_say((string_address) "");
+        settings_dirty();
+}
+
 static int settings_open(void)
 {
         struct windows address_to table = settings.own.table;
@@ -4895,6 +4900,7 @@ static int settings_open(void)
                 ui_centre(table, row, settings.width, settings.height, ui_px(&settings.ui, 12));
         }
         settings_say((string_address) "");
+        language_listen(settings_language);
 
         settings_ask_all();
         settings.help = 1;

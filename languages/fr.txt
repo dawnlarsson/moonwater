@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
 menu_zoom_in	5bcf	Zoom a&vant
 menu_zoom_out	9234	Zoom a&rrière
+settings_already_joined	71fb	déjà connecté à %s
+settings_any_text	89dc	n'importe quelle commande, comme les mots après moonwater : son verbe, puis ses arguments
+settings_asks_first	e9bd	demande d'abord
+settings_busy	34e0	moonwater est occupé : les changements précédents ne sont pas terminés
+settings_cannot_join	dfa4	moonwater ne peut pas rejoindre ce que ce réseau demande
+settings_cannot_run	954f	la commande moonwater n'a pas pu être lancée
+settings_card_back	db52	Escape ou un clic revient en arrière
+settings_card_stopped	e24d	arrêté : Escape ou un clic revient en arrière
 settings_device_name	5f12	Nom de l'appareil
+settings_done	8071	terminé
+settings_edit_keys	d161	Enter l'applique, Escape le laisse tel quel, un clic à côté l'applique aussi
 settings_filter_hint	4aa0	Saisir pour filtrer
+settings_forget	5220	oublier %s
+settings_help_more	93ec	moonwater help en dit plus que Toutes les commandes n'en liste : la première ligne lance n'importe quelle commande
+settings_identify_screens	8be8	Identifier les écrans
+settings_item_add	fbef	Enter garde le nom d'un appareil ; la radio s'active pour ce qui s'appaire
+settings_item_ask	6aad	Enter demande son mot de passe et rejoint
+settings_item_cannot	e643	moonwater ne peut pas rejoindre ce que ce réseau demande
+settings_item_joined	0fb8	connecté : Delete l'oublie
+settings_item_kept	33d9	gardé par son nom : Delete l'oublie
+settings_item_open	4429	Enter rejoint et l'enregistre
+settings_item_saved	3ffd	enregistré : Enter redemande son mot de passe, Delete l'oublie
+settings_joined	1050	connecté
+settings_kept	4759	gardé
+settings_menu_keys	5546	Haut et Bas choisissent, Enter applique, Escape laisse
+settings_name_chars	58a2	un nom, ce sont des lettres, des chiffres et des tirets
+settings_name_long	f2c0	un nom compte moins de 32 caractères
+settings_not_here	4e20	absent de cette machine
+settings_nothing_kept	85a2	rien de saisi : la valeur est gardée
+settings_nothing_matches	14e9	Rien ne correspond à la saisie
+settings_nothing_typed	edce	rien de saisi
+settings_refused	454b	moonwater a refusé
 settings_run_any	3ffd	Exécuter une commande moonwater
+settings_running	d0e2	exécution de %s (Escape l'arrête)
+settings_saved	9f44	enregistré
+settings_stopped	f34e	arrêté
+settings_too_long	fed7	moonwater a pris trop de temps et a été arrêté
+settings_too_many	db0e	c'est plus de mots que n'en prend une commande
+settings_type_command	75f8	saisissez une commande : son verbe, puis ce qui suit
+settings_type_device	63e0	saisissez le nom d'un appareil : Enter le garde, Escape laisse
+settings_type_passphrase	ca95	saisissez son mot de passe : Enter rejoint, Escape laisse
+settings_unknown	9fb9	inconnu
+settings_verb_hint	05aa	VERBE [ARGUMENTS]
 terminal_exited_press_to_close	a8cf	terminé avec le code %d, appuyez sur une touche pour fermer
 terminal_press_to_close	080d	appuyez sur une touche pour fermer
 tray_am	0d13	AM
@@ -112,6 +152,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Identify	033d	Identifier
 =In range and saved	7941	À portée et enregistrés
 =Input	e11b	Saisie
+=Keep a device by its name	9c51	Garder un appareil par son nom
 =Keep the lowest-delay sample	d8b9	Garder l'échantillon au plus faible délai
 =Kernel log	e57a	Journal du noyau
 =Key repeat delay (ms, or default)	4eb7	Délai de répétition des touches (ms ou default)

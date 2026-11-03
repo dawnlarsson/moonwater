@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
 menu_zoom_in	5bcf	&Zooma in
 menu_zoom_out	9234	Zooma &ut
+settings_already_joined	71fb	redan ansluten till %s
+settings_any_text	89dc	valfritt kommando, som orden efter moonwater: verbet och sedan argumenten
+settings_asks_first	e9bd	frågar först
+settings_busy	34e0	moonwater är upptaget: ändringarna före den här är inte klara
+settings_cannot_join	dfa4	moonwater kan inte ansluta till det som nätverket kräver
+settings_cannot_run	954f	moonwater-kommandot kunde inte köras
+settings_card_back	db52	Escape eller ett klick går tillbaka
+settings_card_stopped	e24d	stoppad: Escape eller ett klick går tillbaka
 settings_device_name	5f12	Enhetens namn
+settings_done	8071	klart
+settings_edit_keys	d161	Enter ställer in, Escape lämnar som det var, ett klick utanför ställer också in
 settings_filter_hint	4aa0	Skriv för att filtrera
+settings_forget	5220	glöm %s
+settings_help_more	93ec	moonwater help säger mer än Alla kommandon listar: den första raden kör vilket kommando som helst
+settings_identify_screens	8be8	Identifiera skärmar
+settings_item_add	fbef	Enter sparar namnet på en enhet; radion slås på för det som paras
+settings_item_ask	6aad	Enter frågar efter lösenordet och ansluter
+settings_item_cannot	e643	moonwater kan inte ansluta till det som det här nätverket kräver
+settings_item_joined	0fb8	ansluten: Delete glömmer det
+settings_item_kept	33d9	sparad med namn: Delete glömmer den
+settings_item_open	4429	Enter ansluter och sparar
+settings_item_saved	3ffd	sparad: Enter frågar efter lösenordet igen, Delete glömmer den
+settings_joined	1050	ansluten
+settings_kept	4759	sparad
+settings_menu_keys	5546	Upp och Ned väljer, Enter ställer in, Escape lämnar
+settings_name_chars	58a2	ett namn består av bokstäver, siffror och bindestreck
+settings_name_long	f2c0	ett namn är kortare än 32 tecken
+settings_not_here	4e20	finns inte på den här maskinen
+settings_nothing_kept	85a2	inget skrivet: värdet behålls
+settings_nothing_matches	14e9	Inget matchar det som skrivits
+settings_nothing_typed	edce	inget skrivet
+settings_refused	454b	moonwater avvisade
 settings_run_any	3ffd	Kör valfritt moonwater-kommando
+settings_running	d0e2	kör %s (Escape stoppar)
+settings_saved	9f44	sparad
+settings_stopped	f34e	stoppad
+settings_too_long	fed7	moonwater tog för lång tid och stoppades
+settings_too_many	db0e	det är fler ord än ett kommando tar
+settings_type_command	75f8	skriv ett kommando: verbet och det som följer
+settings_type_device	63e0	skriv namnet på en enhet: Enter sparar det, Escape lämnar
+settings_type_passphrase	ca95	skriv lösenordet: Enter ansluter, Escape lämnar
+settings_unknown	9fb9	okänt
+settings_verb_hint	05aa	VERB [ARGUMENT]
 terminal_exited_press_to_close	a8cf	avslutades med status %d, tryck på en tangent för att stänga
 terminal_press_to_close	080d	tryck på en tangent för att stänga
 tray_am	0d13	fm
@@ -112,6 +152,7 @@ ui_field_full	fe02	mer ryms inte
 =Identify	033d	Identifiera
 =In range and saved	7941	I närheten och sparade
 =Input	e11b	Inmatning
+=Keep a device by its name	9c51	Spara en enhet med namn
 =Keep the lowest-delay sample	d8b9	Behåll stickprovet med lägst fördröjning
 =Kernel log	e57a	Kärnlogg
 =Key repeat delay (ms, or default)	4eb7	Fördröjning för tangentupprepning (ms eller default)

@@ -48,9 +48,49 @@ menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
 menu_zoom_in	5bcf	&Yakınlaştır
 menu_zoom_out	9234	&Uzaklaştır
+settings_already_joined	71fb	%s ağına zaten bağlı
+settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri
+settings_asks_first	e9bd	önce sorar
+settings_busy	34e0	moonwater meşgul: bundan önceki değişiklikler bitmedi
+settings_cannot_join	dfa4	moonwater bu ağın istediğine katılamıyor
+settings_cannot_run	954f	moonwater komutu çalıştırılamadı
+settings_card_back	db52	Escape veya bir tıklama geri döner
+settings_card_stopped	e24d	durduruldu: Escape veya bir tıklama geri döner
 settings_device_name	5f12	Aygıtın adı
+settings_done	8071	tamam
+settings_edit_keys	d161	Enter ayarlar, Escape olduğu gibi bırakır, dışarıya tıklamak da ayarlar
 settings_filter_hint	4aa0	Süzmek için yazın
+settings_forget	5220	%s öğesini unut
+settings_help_more	93ec	moonwater help, Tüm komutlar'ın listelediğinden fazlasını söyler: ilk satır herhangi bir komutu çalıştırır
+settings_identify_screens	8be8	Ekranları tanımla
+settings_item_add	fbef	Enter bir aygıtın adını saklar; radyo eşleşenler için açılır
+settings_item_ask	6aad	Enter parolasını sorar ve bağlanır
+settings_item_cannot	e643	moonwater bu ağın istediğine katılamıyor
+settings_item_joined	0fb8	bağlı: Delete unutturur
+settings_item_kept	33d9	adıyla saklı: Delete unutturur
+settings_item_open	4429	Enter bağlanır ve kaydeder
+settings_item_saved	3ffd	kayıtlı: Enter parolayı yeniden sorar, Delete unutturur
+settings_joined	1050	bağlı
+settings_kept	4759	saklı
+settings_menu_keys	5546	Yukarı ve Aşağı seçer, Enter ayarlar, Escape bırakır
+settings_name_chars	58a2	bir ad harflerden, rakamlardan ve tirelerden oluşur
+settings_name_long	f2c0	bir ad 32 karakterden kısadır
+settings_not_here	4e20	bu makinede yok
+settings_nothing_kept	85a2	bir şey yazılmadı: değer korunur
+settings_nothing_matches	14e9	Yazılana uyan bir şey yok
+settings_nothing_typed	edce	bir şey yazılmadı
+settings_refused	454b	moonwater reddetti
 settings_run_any	3ffd	Herhangi bir moonwater komutunu çalıştır
+settings_running	d0e2	%s çalışıyor (Escape durdurur)
+settings_saved	9f44	kayıtlı
+settings_stopped	f34e	durduruldu
+settings_too_long	fed7	moonwater çok uzun sürdü ve durduruldu
+settings_too_many	db0e	bu, bir komutun alabileceğinden fazla sözcük
+settings_type_command	75f8	bir komut yazın: fiili, sonra devamı
+settings_type_device	63e0	bir aygıtın adını yazın: Enter saklar, Escape bırakır
+settings_type_passphrase	ca95	parolayı yazın: Enter bağlanır, Escape bırakır
+settings_unknown	9fb9	bilinmiyor
+settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
 terminal_exited_press_to_close	a8cf	%d durumuyla çıktı, kapatmak için bir tuşa basın
 terminal_press_to_close	080d	kapatmak için bir tuşa basın
 tray_am	0d13	ÖÖ
@@ -112,6 +152,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Identify	033d	Tanımla
 =In range and saved	7941	Menzilde ve kayıtlı
 =Input	e11b	Giriş
+=Keep a device by its name	9c51	Bir aygıtı adıyla sakla
 =Keep the lowest-delay sample	d8b9	En düşük gecikmeli örneği tut
 =Kernel log	e57a	Çekirdek günlüğü
 =Key repeat delay (ms, or default)	4eb7	Tuş tekrarı gecikmesi (ms veya default)
