@@ -126803,6 +126803,29 @@ static void check_compositor_touch(void)
               (flags & (WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD)) ==
                   (WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD));
 
+    /*
+        A window that asked for no motion of the pointer over it (a terminal that is in no mouse mode) is told a held finger's moves all
+        the same: the long press took the press back, so no button is down for the grab to keep the pointer with the window, and what
+        the finger selects after it has to follow it there as it does in a window that wants the hover.
+    */
+    table->hover_off[1] = 1;
+    touch_one(100, 80, false);
+    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    head2 = table->event_head[1];
+    touch_one(120, 80, false);
+    unchanged = touch_seen(1, head2, WINDOW_EVENT_MOTION, -1, null) > 0;
+    touch_one(120, 80, true);
+    table->hover_off[1] = 0;
+    check("touch: a finger held for a long press and moved on is told to a window that asked for no hover, as the press's window", unchanged);
+    table->hover_off[1] = 1;
+    head2 = table->event_head[1];
+    touch_one(100, 80, false);
+    touch_one(140, 80, false);
+    unchanged = touch_seen(1, head2, WINDOW_EVENT_MOTION, -1, null) > 0 && touch_buttons(1, head2) == 0x1101;
+    touch_one(140, 80, true);
+    table->hover_off[1] = 0;
+    check("touch: a finger that is pressed and moved is told to it as before, the press holding the pointer with the window", unchanged);
+
     /* Its mark, `moonwater canvas touch on`: a disc and a ring round the finger over the windows, gone a second after. */
     compositor.spots_on = 0;
     compositor_touch_settings_read();

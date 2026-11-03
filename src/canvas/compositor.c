@@ -12103,6 +12103,10 @@ static void compositor_motion(void)
         compositor.hover = under;
         if (compositor.grab >= 0)
                 compositor_pointer_to(compositor.grab);
+        // A finger that was held for a long press has no button down (its press was taken back), and what it selects follows it as
+        // a held button's drag does, to the window it landed on, whether or not that window asked for the pointer's motion.
+        else if (compositor.touch.mode == COMPOSITOR_TOUCH_HELD && compositor.touch.hold_row >= 0)
+                compositor_pointer_to(compositor.touch.hold_row);
         else if (under >= 0 && !__atomic_load_n(&compositor.table->hover_off[under], __ATOMIC_ACQUIRE))
                 compositor_pointer_to(under);
 }
