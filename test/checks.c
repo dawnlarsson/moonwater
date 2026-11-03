@@ -185130,19 +185130,20 @@ static const unsigned int *gpu_grain(unsigned int light, int x, int y)
         return gpu_grains[light ? 1 : 0][y & 3] + (x & 15);
 }
 
-static unsigned int gpu_want[1500 * 300];
+static unsigned int gpu_want[1500 * 700];
 
 b32 main(void)
 {
         enum { BW = 1220, BH = 1320, SW = 2560, SH = 1440, W = 1219, H = 211, OW = 1500, OH = 300, X = 301, Y = 7 };
         positive src_at = GPU_DATA, dst_at = GPU_DATA + (positive)BW * BH * 4, gnd_at = dst_at + (positive)SW * SH * 4;
+        positive scene_at = gnd_at + (positive)BW * BH * 4, ops_at = scene_at + (positive)7680 * 4320 * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to src, address_to dst, address_to gnd;
         struct gpu_args address_to a;
         static const char *const names[4] = {"copy", "fill", "tone over", "glass over (dark)"};
         unsigned int tones[5] = {0x80402010u, 0u, 0xff112233u, 0x01ffffffu, 0};
         positive began, cpu[4], gpu_time[4];
 
-        if (!gpu_start(((positive)BW * BH * 2 + (positive)SW * SH) * 4))
+        if (!gpu_start(((positive)BW * BH * 2 + (positive)SW * SH + (positive)7680 * 4320) * 4 + (33 << 20)))
         {
                 string_format(log, "gpu: no amdgpu render node, skipped\n");
                 return test_report(null);
@@ -185219,6 +185220,103 @@ b32 main(void)
                 }
                 string_format(log, "  gpu: %s of %p x %p into %p x %p: GPU %p us, CPU %p us\n", names[kind], (positive)BW, (positive)BH, (positive)SW, (positive)SH,
                               gpu_time[kind] / 1000, cpu[kind] / 1000);
+        }
+
+        // 3. A scene: random fills and tones in order over a random picture, ops that run off the edge and ops with no area among them,
+        // against the CPU's routines applied in the same order; the whole picture compared.
+        {
+                enum { SWD = 997, SHT = 701, SP = 1024, N = 300 };
+                unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to sd = (unsigned int address_to)((p8 address_to)gpu.at + scene_at);
+                positive bad = 0;
+
+                for (positive i = 0; i < (positive)SP * SHT; i++)
+                        sd[i] = gpu_want[i] = gpu_random();
+                for (int k = 0; k < N; k++)
+                {
+                        unsigned int address_to q = ops + 8 * k, x0 = gpu_random() % SWD, y0 = gpu_random() % SHT;
+
+                        q[0] = gpu_random() & 1, q[1] = x0, q[2] = y0, q[3] = x0 + gpu_random() % (k & 1 ? 1100 : 60), q[4] = y0 + gpu_random() % (k & 1 ? 800 : 40);
+                        q[5] = gpu_random(), q[6] = q[7] = 0;
+                        for (unsigned int y = q[2]; y < q[4] && y < SHT; y++)
+                                if (q[1] < SWD && q[3] > q[1])
+                                {
+                                        unsigned int width = (q[3] < SWD ? q[3] : SWD) - q[1];
+
+                                        if (q[0] == 0)
+                                                memory_fill_u32_rect(gpu_want + (positive)y * SP + q[1], SP, width, 1, q[5]);
+                                        else
+                                                memory_over_tone_u32(gpu_want + (positive)y * SP + q[1], width, q[5]);
+                                }
+                }
+                check("gpu: the scene finishes", gpu_scene(ops_at, N, bins_at, scene_at, SP, SWD, SHT));
+                for (int y = 0; y < SHT; y++)
+                        for (int x = 0; x < SWD; x++)
+                        {
+                                checks++;
+                                if (sd[(positive)y * SP + x] != gpu_want[(positive)y * SP + x] && (++failures, ++bad) < 4)
+                                        string_format(log, "  FAIL gpu scene: pixel %p,%p is %p, wanted %p\n", (positive)x, (positive)y, (positive)sd[(positive)y * SP + x],
+                                                      (positive)gpu_want[(positive)y * SP + x]);
+                        }
+        }
+
+        // 4. The same at 8K: a window's clear and 199 more fills and tones, GPU (bins and run, then the run alone) against the CPU applying them, best of 5.
+        {
+                enum { KW = 7680, KH = 4320, M = 200 };
+                unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to sd = (unsigned int address_to)((p8 address_to)gpu.at + scene_at);
+                unsigned int address_to ref = (unsigned int address_to)memory((positive)KW * KH * 4);
+                positive total = ~0ull, run = ~0ull, host = ~0ull, bad = 0;
+
+                if (!ref)
+                        return 1;
+                ops[0] = 0, ops[1] = ops[2] = 0, ops[3] = KW, ops[4] = KH, ops[5] = 0xff203040u;
+                for (int k = 1; k < M; k++)
+                {
+                        unsigned int address_to q = ops + 8 * k, w = 40 + gpu_random() % 1200, h = 40 + gpu_random() % 800;
+
+                        q[0] = k % 3 == 0, q[1] = gpu_random() % (KW - w), q[2] = gpu_random() % (KH - h), q[3] = q[1] + w, q[4] = q[2] + h;
+                        q[5] = k % 3 == 0 ? (gpu_random() | 0x40000000u) & 0x7fffffffu : gpu_random() | 0xff000000u, q[6] = q[7] = 0;
+                }
+                memory_zero(sd, (positive)KW * KH * 4);
+                for (int i = 0; i < 5; i++)
+                {
+                        if (i)
+                                memory_zero(ref, (positive)KW * KH * 4);
+                        began = clock_monotonic_nanoseconds();
+                        for (int k = 0; k < M; k++)
+                        {
+                                unsigned int address_to q = ops + 8 * k;
+
+                                for (unsigned int y = q[2]; y < q[4]; y++)
+                                        if (q[0] == 0)
+                                                memory_fill_u32_rect(ref + (positive)y * KW + q[1], KW, q[3] - q[1], 1, q[5]);
+                                        else
+                                                memory_over_tone_u32(ref + (positive)y * KW + q[1], q[3] - q[1], q[5]);
+                        }
+                        began = clock_monotonic_nanoseconds() - began;
+                        host = began < host ? began : host;
+                }
+                memory_zero(sd, (positive)KW * KH * 4);
+                check("gpu: the 8K scene finishes", gpu_scene(ops_at, M, bins_at, scene_at, KW, KW, KH));
+                for (positive i = 0; i < (positive)KW * KH; i++)
+                {
+                        checks++;
+                        if (sd[i] != ref[i] && (++failures, ++bad) < 4)
+                                string_format(log, "  FAIL gpu 8K scene: pixel %p,%p is %p, wanted %p\n", i % KW, i / KW, (positive)sd[i], (positive)ref[i]);
+                }
+                for (int i = 0; i < 5; i++)
+                {
+                        memory_zero(sd, (positive)KW * KH * 4);
+                        began = clock_monotonic_nanoseconds();
+                        gpu_scene(ops_at, M, bins_at, scene_at, KW, KW, KH);
+                        began = clock_monotonic_nanoseconds() - began;
+                        total = began < total ? began : total;
+                        memory_zero(sd, (positive)KW * KH * 4);
+                        began = clock_monotonic_nanoseconds();
+                        gpu_run();
+                        began = clock_monotonic_nanoseconds() - began;
+                        run = began < run ? began : run;
+                }
+                string_format(log, "  gpu: 8K scene of %p ops: GPU with the binning %p us, the run alone %p us, CPU %p us\n", (positive)M, total / 1000, run / 1000, host / 1000);
         }
         return test_report(null);
 }
