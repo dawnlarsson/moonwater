@@ -646,6 +646,9 @@ struct window_place
 #define WINDOW_NO_CLOSE 2u
 #define WINDOW_DISMISS 4u
 #define WINDOW_NO_TAB 8u
+// A window that draws its own frame, as a Wayland client does: the top of its picture is its own (a press there is not the
+// compositor's to take for moving it), which a client moves by asking (xdg_toplevel.move).
+#define WINDOW_NO_GRAB 16u
 
 // What the compositor did not do of a screen's displays line (struct windows' output_refused): a refresh rate the screen
 // does not offer at its size, which it keeps its mode for; a turn it cannot do, which it is left unturned for; and a place
@@ -859,6 +862,8 @@ struct windows
 // right for a submenu).
 #define WINDOW_POPUP_POINT 1u
 #define WINDOW_POPUP_RIGHT 2u
+// The popup is put with its top left at the anchor point, as asked, with no flipping: its program has worked out the place.
+#define WINDOW_POPUP_EXACT 4u
 
 // Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
 // constant here and not the header's pixels field, which any mapper of the table may write.

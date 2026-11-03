@@ -3240,7 +3240,7 @@ static struct
                 goes to, and the ground it told its program. The scratch the blur is made in is shared.
         */
         unsigned int glassy[WINDOWS];
-        unsigned int asks[WINDOWS]; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS, WINDOW_NO_TAB)
+        unsigned int asks[WINDOWS]; // what the program asked of its window besides glass (WINDOW_NO_CLOSE, WINDOW_DISMISS, WINDOW_NO_TAB, WINDOW_NO_GRAB)
         unsigned int *backdrop[WINDOWS], *tinted[WINDOWS], *composed[WINDOWS];
         unsigned int *boosted[WINDOWS]; // compositor_vivid of each backdrop cell, as the cell last was
         unsigned long glass_sum[WINDOWS][3]; // per channel, the sums of boosted over the blocks: the side's mean
@@ -10712,7 +10712,7 @@ static void compositor_take(int row)
                 compositor.lifted[row] = table->lift[row];
                 compositor.moved[row] = table->moved[row];
                 compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
-                compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB);
+                compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB);
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
@@ -11288,6 +11288,15 @@ static void compositor_popup_place(int ax, int ay, int aw, int ah, int width, in
 {
         int left = screen[0], top = screen[1], right = screen[0] + screen[2], bottom = screen[1] + screen[3];
 
+        // Its program worked out the place: its top left is the anchor, held on the screen and no more.
+        if (flags & WINDOW_POPUP_EXACT)
+        {
+                *x = ax + width > right ? right - width : ax;
+                *y = ay + height > bottom ? bottom - height : ay;
+                *x = *x < left ? left : *x;
+                *y = *y < top ? top : *y;
+                return;
+        }
         if (flags & WINDOW_POPUP_RIGHT)
         {
                 *x = ax + aw, *y = ay;
@@ -12219,6 +12228,39 @@ static void compositor_preview(int row)
 // hand let go, unless the release is not the hand's (the device went away).
 static void compositor_lit(int row, unsigned int edges, unsigned int held);
 
+/*
+        The window is taken hold of to be moved, wherever the pointer is on it now: its popups go, the hand's place on it
+        is kept, and what a drop on a target would restore. The press on its top does this, and so does a client's own
+        request to be moved while the person holds a button on it (the Wayland shim's xdg_toplevel.move).
+*/
+static void compositor_drag_begin(int under)
+{
+        compositor_popups_close(under, -1);
+        compositor.drag = under;
+        compositor.drag_moved = 0;
+        compositor.drag_x = compositor.pointer_x - compositor.x[under];
+        compositor.drag_y = compositor.pointer_y - compositor.y[under];
+        compositor.press_x = compositor.pointer_x;
+        compositor.press_y = compositor.pointer_y;
+        compositor_hold_take(0, under);
+        // What a drop on a target keeps for a restore: where it floats now, or where it floated before.
+        if (compositor.arranged[under] == COMPOSITOR_FLOATING)
+        {
+                int keep[4] = {compositor.x[under], compositor.y[under], (int)compositor.w[under], (int)compositor.h[under]};
+
+                memory_copy(compositor.drag_keep, keep, sizeof(keep));
+        }
+        else
+        {
+                int keep[4] = {compositor.saved_x[under], compositor.saved_y[under], (int)compositor.saved_w[under],
+                               (int)compositor.saved_h[under]};
+
+                memory_copy(compositor.drag_keep, keep, sizeof(keep));
+        }
+        // The window is in the hand: all of its line is lit until it is let go.
+        compositor_lit(under, COMPOSITOR_LIT_ALL, 1);
+}
+
 // A release with flags: WINDOW_KEY_CANCEL is one that is no click (a finger that became two, or was held).
 static void compositor_release_as(unsigned int code, int snap, unsigned int flags)
 {
@@ -12560,7 +12602,8 @@ static void compositor_button(unsigned int code, int down)
                         otherwise it takes hold of the window to move it.
                         With Alt, anywhere on the window is the same.
                 */
-                top = !alt && code == COMPOSITOR_BTN_LEFT && compositor.pointer_x >= compositor.x[under] &&
+                top = !alt && code == COMPOSITOR_BTN_LEFT && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
+                      compositor.pointer_x >= compositor.x[under] &&
                       compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
                       compositor.pointer_y >= compositor.y[under] &&
                       compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100;
@@ -12590,30 +12633,7 @@ static void compositor_button(unsigned int code, int down)
                                         compositor_arrange(under, COMPOSITOR_MAXIMIZED);
                                 return;
                         }
-                        compositor_popups_close(under, -1);
-                        compositor.drag = under;
-                        compositor.drag_moved = 0;
-                        compositor.drag_x = compositor.pointer_x - compositor.x[under];
-                        compositor.drag_y = compositor.pointer_y - compositor.y[under];
-                        compositor.press_x = compositor.pointer_x;
-                        compositor.press_y = compositor.pointer_y;
-                        compositor_hold_take(0, under);
-                        // What a drop on a target keeps for a restore: where it floats now, or where it floated before.
-                        if (compositor.arranged[under] == COMPOSITOR_FLOATING)
-                        {
-                                int keep[4] = {compositor.x[under], compositor.y[under], (int)compositor.w[under], (int)compositor.h[under]};
-
-                                memory_copy(compositor.drag_keep, keep, sizeof(keep));
-                        }
-                        else
-                        {
-                                int keep[4] = {compositor.saved_x[under], compositor.saved_y[under], (int)compositor.saved_w[under],
-                                               (int)compositor.saved_h[under]};
-
-                                memory_copy(compositor.drag_keep, keep, sizeof(keep));
-                        }
-                        // The window is in the hand: all of its line is lit until it is let go.
-                        compositor_lit(under, COMPOSITOR_LIT_ALL, 1);
+                        compositor_drag_begin(under);
                         return;
                 }
         }
