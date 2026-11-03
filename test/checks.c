@@ -118361,6 +118361,124 @@ static void check_compositor_screens(void)
 }
 
 /*
+        A scale changed in a displays line is taken by the screens as they are driven: the same screens at the same modes
+        are no new space, so compositor_space_take took nothing and the scale waited for the next start. A is 320 by 192
+        and B 256 by 240, the first lit at 100 percent and the second at 100; their lines then ask 150 and 75. Each screen's
+        scale, the desktop's (the primary's) and the table's follow at once, a window is drawn at its screen's scale and its
+        program knocked when the picture is next made, a window that fills the room fills the room the band leaves at the
+        new scale, every pixel is drawn again, and a line that asks what the screens have changes nothing.
+*/
+static void check_compositor_scales(void)
+{
+    static unsigned int scanout[SCREENS_W * SCREENS_H];
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)SCREENS_A_W * SCREENS_H * 4 + 4095) & ~4095ul;
+    long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+    struct windows address_to table;
+    char names[2][WINDOWS_OUTPUT_NAME] = {"A-1", "B-1"};
+    int first_whole = 0;
+
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(compositor_display, sizeof(compositor_display));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = SCREENS_W;
+    compositor.height = SCREENS_H;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = scanout;
+    compositor.scanout_pitch = SCREENS_W * 4;
+    compositor.outputs = 2;
+    compositor.screen[0][2] = SCREENS_A_W, compositor.screen[0][3] = SCREENS_A_H;
+    compositor.screen[1][0] = SCREENS_A_W, compositor.screen[1][2] = SCREENS_B_W, compositor.screen[1][3] = SCREENS_H;
+    memory_copy(compositor.output[0].name, names[0], sizeof(names[0]));
+    memory_copy(compositor.output[1].name, names[1], sizeof(names[1]));
+    compositor.output[0].scale = compositor.output[1].scale = 100;
+    for (unsigned int row = 0; row < WINDOWS; row++)
+        compositor.wake[row] = -1; // a knock goes nowhere: no program reads it here
+    compositor.stride = compositor.most_w = SCREENS_A_W;
+    compositor.room_h = compositor.most_h = SCREENS_H;
+    if (mapped < 0 && mapped > -4096)
+    {
+        check("scales: the table is mapped", false);
+        return;
+    }
+    table = compositor.table = (struct windows address_to)mapped;
+    table->motion = 1;
+    compositor.pixels = table->pixels = header;
+    compositor.buffer = table->buffer = buffer;
+    table->stride = SCREENS_A_W;
+    table->scale = 100;
+    table->pid[1] = table->pid[2] = 7;
+    compositor_table_outputs();
+    table->x[1] = 30, table->y[1] = 30;
+    screens_paint(1, 60, 40, 0x2060c0u);
+    table->x[2] = 10, table->y[2] = 4;
+    screens_paint(2, 40, 20, 0xc06020u);
+    compositor.x[2] = SCREENS_A_W + 20, compositor.y[2] = 20, table->x[2] = SCREENS_A_W + 20, table->y[2] = 20;
+    compositor_damage(0, 0, SCREENS_W, SCREENS_H);
+    compositor_present();
+    compositor_knock();
+    check("scales: before the lines ask anything every screen, the desktop and the table are at 100 percent and a window is too",
+          compositor.scale == 100 && table->scale == 100 && compositor_row_scale(1) == 100 && compositor_row_scale(2) == 100 &&
+              table->window_scale[1] == 100 && table->window_scale[2] == 100);
+    check("scales: and nothing waits to be drawn or to be told", !compositor.damages && !compositor.woken);
+
+    check("scales: no line asking another scale takes nothing, and damages nothing", compositor_scales_take() == 0 && !compositor.damages);
+
+    memory_copy(compositor_display[0].name, "A-1", 4);
+    compositor_display[0].scale = 150;
+    memory_copy(compositor_display[1].name, "B-1", 4);
+    compositor_display[1].scale = 75;
+    compositor_displays = 2;
+    check("scales: lines that ask another scale are taken as they are, with no new screens", compositor_scales_take() == 1);
+    check("scales: each screen is at the scale its line asks", compositor.output[0].scale == 150 && compositor.output[1].scale == 75);
+    check("scales: the desktop's scale is the primary's, and the table has it for the kit to read",
+          compositor.scale == 150 && table->scale == 150);
+    check("scales: a window is drawn at the scale of the screen it is on", compositor_row_scale(1) == 150 && compositor_row_scale(2) == 75);
+    for (unsigned int at = 0; at < compositor.damages; at++)
+        first_whole |= compositor.damage[at][0] == 0 && compositor.damage[at][1] == 0 && compositor.damage[at][2] == SCREENS_W &&
+                       compositor.damage[at][3] == SCREENS_H;
+    check("scales: every pixel is drawn again", first_whole);
+    compositor_present();
+    check("scales: the table says each window's scale once it is drawn, and each program is knocked for it",
+          table->window_scale[1] == 150 && table->window_scale[2] == 75 && (compositor.woken & 6u) == 6u);
+    compositor_knock();
+    check("scales: a line that asks what the screens have changes nothing and damages nothing",
+          compositor_scales_take() == 0 && !compositor.damages && compositor.scale == 150 && table->scale == 150);
+    compositor_display[0].scale = 100;
+    compositor_scales_take();
+    check("scales: and back to 100 percent it is again, the table with it", compositor.scale == 100 && table->scale == 100 &&
+                                                                                compositor_row_scale(1) == 100);
+
+#if MOONWATER_UI_TASKBAR
+    {
+        struct compositor_frame band;
+        int room[4];
+        unsigned int thin, was_h;
+
+        compositor_band_frame(&band);
+        thin = (unsigned int)band.height;
+        compositor_room(compositor.screen[0], room);
+        compositor_arrange_rect(1, COMPOSITOR_ROOM, room);
+        was_h = compositor.h[1];
+        compositor_display[0].scale = 200;
+        compositor_scales_take();
+        compositor_band_frame(&band);
+        compositor_room(compositor.screen[0], room);
+        check("scales: the band is drawn at the scale of its screen", (unsigned int)band.height > thin);
+        check("scales: a window that fills the room fills the room the band leaves at the new scale",
+              compositor.arranged[1] == COMPOSITOR_ROOM && (int)compositor.h[1] == room[3] && compositor.h[1] < was_h);
+    }
+#endif
+    compositor_displays = 0;
+    memory_zero(compositor_display, sizeof(compositor_display));
+    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+    memory_zero(&compositor, sizeof(compositor));
+}
+
+/*
         The snap preview is a tint on its target and on nothing else. Over the desktop, the target is the kit's selection
         at its own alpha; the window dragged is as it is over the tint, and a window above it is as it is too. Everything
         else is the desktop, untouched.
@@ -142678,6 +142796,7 @@ b32 main()
         check_compositor_partial();
         check_compositor_held();
         check_compositor_screens();
+        check_compositor_scales();
         check_compositor_preview();
         check_compositor_snap_tint();
         check_compositor_preview_held();

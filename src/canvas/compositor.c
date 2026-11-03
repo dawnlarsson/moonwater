@@ -4085,6 +4085,9 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                                            line ? UI_RADIUS * compositor_row_scale(row) / 100 : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
+        // A program is knocked when the scale its window is drawn at is not the one the table had: the kit lays its picture out again at it.
+        if (compositor.table->pid[row] && compositor.table->window_scale[row] != (unsigned int)frame->scale)
+                compositor.woken |= 1u << row;
         compositor.table->window_scale[row] = (unsigned int)frame->scale;
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))
@@ -7083,6 +7086,42 @@ static void compositor_scanout_own(void)
 }
 
 /*
+        The scale each screen's displays line asks, taken by the screens as they are driven. A scale is no mode and no
+        place, so when it is all that changed the screens are not taken again (compositor_space_take): no scanout and
+        no commit, and this follows it instead: each screen's scale, the desktop's (the primary's) and the table's, the
+        pointer's plane painted again at the scale, the windows laid again in the room the bands leave at it, the
+        bands' memory for the size they are drawn at, and every pixel drawn again. A window's own scale is its screen's,
+        counted into the table as it is next drawn (compositor_frame_of), which also knocks it. True when one changed.
+*/
+static int compositor_scales_take(void)
+{
+        int was[WINDOWS_OUTPUTS][4], changed = 0;
+        char names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+
+        for (unsigned int at = 0; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
+        {
+                int scale = compositor_display_scale(compositor.output[at].name);
+
+                changed |= scale != compositor.output[at].scale;
+                compositor.output[at].scale = scale;
+                memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
+                memory_copy(names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
+        }
+        if (!changed)
+                return 0;
+        compositor.scale = compositor.output[0].scale;
+        if (compositor.table)
+                compositor.table->scale = (unsigned int)compositor.scale;
+        compositor.cursor.plane_scale = 0;
+        compositor_cursor_move();
+        compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])names, compositor.outputs);
+        compositor_band_room();
+        compositor_tabs_changed();
+        compositor_damage(0, 0, compositor.width, compositor.height);
+        return 1;
+}
+
+/*
         The screens taken: what the card has connected, laid by the
         arrangement, one scanout as large as the space they make, and each
         crtc showing its screen's rectangle of it. A screen the card will not
@@ -7159,7 +7198,13 @@ static b32 compositor_space_take(int first)
                                compositor_mode_same(&compositor.output[at].mode, &found.mode[order[at]]) &&
                                compositor.output[at].degrees == compositor_display_degrees(found.name[order[at]]);
                 if (same)
+                {
+                        // The same screens at the same modes: only the scale a line asks can have changed, and it takes no commit.
+                        // The table says what the lines ask now, beside what was done of it (the settings show both).
+                        compositor_scales_take();
+                        compositor_table_outputs();
                         return 0;
+                }
 
                 // A space of another size is another scanout; the one before is given back once no crtc shows it.
                 if (first || box[2] != compositor.width || box[3] != compositor.height)
@@ -7223,6 +7268,8 @@ static b32 compositor_space_take(int first)
                 compositor.outputs = lit;
                 if (lit)
                         compositor.scale = compositor.output[0].scale;
+                if (lit && compositor.table)
+                        compositor.table->scale = (unsigned int)compositor.scale;
                 compositor.period = period;
                 compositor.crtc = compositor.output[0].crtc;
                 compositor.crtc_index = compositor.output[0].crtc_index;

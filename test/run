@@ -18750,7 +18750,7 @@ MOONWATER_CANVAS_COVERAGE=${coverage_serial#-serial file:}
 export MOONWATER_CANVAS_COVERAGE
 qmp_guest_module "$work"
 
-#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, u1, f1, c1, e1, i1) runs the userspace compositor's boot alone, for a
+#       CANVAS_ONLY=m1 (or m5, r1, r2, r4, s1, l1, w1, p1, k1, g1, t1, x1, d1, u1, f1, c1, e1, i1) runs the userspace compositor's boot alone, for a
 #       parent and a fix compared in one sitting; the lane runs all of it.
 if [ -z "${CANVAS_ONLY:-}" ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/answers" 2>"$work/why" <<'PY'
@@ -21632,6 +21632,100 @@ else
         while IFS='|' read -r name got want; do
                 same "$name" "$want" "$got"
         done < "$work/x1-answers"
+fi
+fi
+
+if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = d1 ]; then
+#       A screen's scale and rotation, set while the desktop runs, as the Display section's dropdowns set them: the verb
+#       canvas display NAME scale PERCENT writes the screen's line of /root/canvas.displays, which the compositor reads as
+#       it is written. The same screens at the same modes are no new space, and a scale was taken by none of the
+#       compositor's code but the start: the table kept saying 100 percent and nothing on the screen changed.
+PYTHONPATH=$work python3 - "$image" > "$work/d1-answers" 2>"$work/d1-why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+
+image = sys.argv[1]
+work = os.environ["MOONWATER_CANVAS_WORK"] + "/d1"
+os.makedirs(work, exist_ok=True)
+out = []
+ser = work + "/ser"
+SW, SH = 2560, 1080
+GROUND = (0x1e, 0x1e, 0x1e)
+
+guest = Guest(desktop(image) + [
+    "-chardev", "socket,id=s0,path=" + ser + ",server=on,wait=off", "-serial", "chardev:s0",
+    "-no-reboot", "-display", "none",
+    "-append", "console=ttyS0 printk.time=1 drm_client_lib.active= moonwater.desktop=none moonwater.cursor_plane=0"],
+    work + "/qmp", work + "/mon", work, sockets=(ser,))
+time.sleep(25)
+shell = Shell(ser)
+shell.ready()
+
+def start_compositor():
+    shell.run("rm -f /root/canvas.displays; /compositor -f /usr/share/fonts/inter/Inter-Regular.ttf > /tmp/c.log 2>&1 & "
+              "echo $! > /tmp/c.pid; echo started", 10)
+    until(lambda: "yes" in shell.run("[ -e /run/moonwater/windows ] && echo yes || echo no", 10)[0], 30)
+    time.sleep(1)
+    shell.run("/surface -x 300 -y 200 -w 600 -h 400 -c 336699 -T one -s 900 > /dev/null 2>&1 & echo one", 10)
+    time.sleep(2)
+
+def scale_said():
+    found = re.search(r"scale (\d+) percent", shell.run("moonwater debug", 15)[0])
+    return found.group(1) if found else "none"
+
+def scale_becomes(percent, seconds=6):
+    return until(lambda: scale_said() == percent, seconds)[0] and percent or scale_said()
+
+def picture(name):
+    shot(name, 1)
+    width, height, data = load(name)
+    return width, height, lambda x, y: tuple(data[(y * width + x) * 3:(y * width + x) * 3 + 3])
+
+def clock_pill(name):
+    # The tray's clock is a pill at the bottom right: its height is the band's, so it follows the scale.
+    width, height, at = picture(name)
+    end = max([x for x in range(width) for y in range(height - 80, height) if at(x, y) != GROUND] or [0])
+    x = end - 6
+    rows = [y for y in range(height - 80, height) if at(x, y) != GROUND]
+    return (rows[-1] - rows[0] + 1) if rows else 0
+
+start_compositor()
+out.append(("d1.1 a screen with no line is drawn at 100 percent", scale_said(), "100"))
+pill100 = clock_pill("d1-100")
+pid = shell.run("cat /tmp/c.pid", 10)[0]
+
+shell.run("moonwater canvas display Virtual-1 scale 150", 15)
+out.append(("d1.2 a scale set while the desktop runs is the desktop's in a moment", scale_becomes("150"), "150"))
+time.sleep(1)
+pill150 = clock_pill("d1-150")
+out.append(("d1.3 and the band is drawn at it: its clock is half as tall again",
+            "yes" if pill100 and pill150 * 100 >= pill100 * 140 else "%d px then %d px" % (pill100, pill150), "yes"))
+screens = len(re.findall(r"compositor: screen ", shell.run("cat /tmp/c.log", 10)[0]))
+out.append(("d1.4 and by the same compositor, which took the screens once and none again for it",
+            "yes" if shell.run("cat /tmp/c.pid", 10)[0] == pid and screens == 1 and
+                     shell.run("[ -d /proc/%s ] && echo alive" % pid, 10)[0] == "alive" else "no (%d screens)" % screens, "yes"))
+
+shell.run("moonwater canvas display Virtual-1 scale 100", 15)
+out.append(("d1.5 and set to 100 again it is 100 again", scale_becomes("100"), "100"))
+time.sleep(1)
+out.append(("d1.6 with the band as it was", "yes" if clock_pill("d1-back") == pill100 else "no", "yes"))
+
+try:
+    guest.quit()
+    guest.wait(10)
+except Exception:
+    guest.kill()
+
+for name, got, want in out:
+    print("%s|%s|%s" % (name, got, want))
+PY
+if [ ! -s "$work/d1-answers" ]; then
+        same "the display scale and rotation boot answered" "yes" "no"
+        sed 's/^/    /' "$work/d1-why" | tail -30
+else
+        while IFS='|' read -r name got want; do
+                same "$name" "$want" "$got"
+        done < "$work/d1-answers"
 fi
 fi
 
