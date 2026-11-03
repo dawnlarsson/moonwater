@@ -6380,14 +6380,17 @@ static int ui_popup_pump(struct ui_popup address_to p)
         }
         while (windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
         {
-                int hot = p->menu.hot;
+                // What the picture shows: the hot item, the top one (a wheel or the bar moves it) and the bar's own lit state.
+                int hot = p->menu.hot, top = p->menu.top, scroll = p->menu.scroll.scroll;
+                b32 lit = p->menu.scroll.hover, held = p->menu.scroll.held;
 
                 if (event.type == WINDOW_EVENT_MOTION)
                         p->x = event.a, p->y = event.b;
                 answer = ui_popmenu_event(&p->ui, &p->menu, &event, p->x, p->y);
                 if (answer == UI_MENU_OPEN)
                         answer = UI_MENU_NOTHING;
-                if (p->menu.hot != hot)
+                if (p->menu.hot != hot || p->menu.top != top || p->menu.scroll.scroll != scroll || p->menu.scroll.hover != lit ||
+                    p->menu.scroll.held != held)
                         ui_popup_present(p);
         }
         if (p->menu.moving && answer == UI_MENU_NOTHING)

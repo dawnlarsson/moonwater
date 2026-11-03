@@ -119891,6 +119891,109 @@ static void check_dropdown_labels(void)
           labels_missing == 0);
 }
 
+/*
+        A menu that the wheel turns is drawn again as it is turned: the wheel moves the top item and not the hot one, so the picture
+        the compositor shows is presented from the pump (ui_popup_pump), or the menu stays as it was until the pointer moves.
+*/
+static void check_popup_wheel(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static unsigned int expect[GLASS_SIDE * GLASS_SIDE];
+    static struct ui_popup popup;
+    static const char *const names[20] = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                                          "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+                                          "eighteen", "nineteen", "twenty"};
+    struct window_row parent_row;
+    struct ui parent_ui = terminal.ui;
+    struct ui picture_ui;
+    struct windows address_to table;
+    const unsigned int *front;
+    int differ = 0, drawn = 0;
+
+    for (int row = 0; row < WINDOWS; row++)
+        compositor_popup_parent[row] = -1;
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("popup wheel: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 50;
+    table->y[1] = 30;
+    table->width[1] = 120;
+    table->height[1] = 80;
+    table->glass[1] = WINDOW_GLASS;
+    glass_paint(1, 0, 0, 120, 80, 0, true);
+    compositor_present();
+    compositor_focus(1);
+
+    parent_ui.scale = 100;
+    parent_ui.regular = parent_ui.bold = terminal.plain[0];
+    parent_ui.scratch = null, parent_ui.scratch_width = 0, parent_ui.scratch_scale = 0;
+    memory_zero(&parent_row, sizeof(parent_row));
+    parent_row.table = table;
+    parent_row.row = 1;
+
+    windows_reset_row(table, 3);
+    __atomic_store_n(&table->pid[3], 1u, __ATOMIC_RELEASE);
+    memory_zero(&popup.menu, sizeof(popup.menu));
+    for (int at = 0; at < 20; at++)
+        ui_popmenu_add(&popup.menu, names[at], null, 0, at + 1);
+    popup.own.table = table;
+    popup.own.row = 3;
+    popup.own.door = -1;
+    popup.own.wake = -1;
+    popup.own.buffer = compositor.buffer;
+    popup.own.stride = GLASS_SIDE;
+    popup.own.output_width = popup.own.output_height = GLASS_SIDE;
+    if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
+    {
+        check("popup wheel: the menu opens", false);
+        return;
+    }
+    compositor_take(3);
+    compositor_present();
+    for (int round = 0; round < 3; round++)
+    {
+        compositor_take(3);
+        compositor_present();
+        ui_popup_pump(&popup);
+    }
+    compositor_take(3);
+    compositor_present();
+
+    // The wheel turns the menu a row with the pointer where it was: no item's hot changes, and the top item must still show.
+    popup.menu.hot = -1;
+    compositor_post(3, WINDOW_EVENT_WHEEL, 0, -120, 0);
+    ui_popup_pump(&popup);
+    compositor_take(3);
+    compositor_present();
+    picture_ui = popup.ui;
+    memory_zero(expect, sizeof(expect));
+    ui_begin(&picture_ui, expect, GLASS_SIDE, popup.menu.width, popup.menu.height);
+    ui_popmenu_draw(&picture_ui, &popup.menu);
+    front = windows_pixels(&popup.own, (unsigned int)popup.shown);
+    for (int y = 0; y < popup.menu.height; y++)
+        for (int x = 0; x < popup.menu.width; x++)
+        {
+            drawn += expect[y * GLASS_SIDE + x] != 0;
+            differ += front[y * GLASS_SIDE + x] != expect[y * GLASS_SIDE + x];
+        }
+    check("popup wheel: a wheel that turns the menu a row moves its top item, and the picture shows the menu as it was turned",
+          popup.menu.top == 1 && drawn > 0 && differ == 0);
+    popup.open = false;
+    compositor_popup_leave(3);
+    compositor_leave(3);
+}
+
 static void check_popup_reopen(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -141141,6 +141244,7 @@ b32 main()
         check_compositor_popup_press(0);
         check_compositor_popup_press(1);
         check_popup_reopen();
+        check_popup_wheel();
         check_popup_ground_steady();
         check_dropdown_labels();
         check_compositor_popup_grip(0);
