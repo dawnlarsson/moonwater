@@ -185582,7 +185582,8 @@ static unsigned int gpu_kit_want[700 * 420];
 
 b32 main(void)
 {
-        enum { PW = 697, PH = 419, PP = 700, N = 64, ROUNDS = 40 };
+        enum { PH = 419, PP = 700, N = 64, ROUNDS = 40 };
+        int PW = 696; // even rounds the kernel by hand (a width of a multiple of 4), odd rounds clang's (any width)
         positive pic_at = GPU_DATA, ops_at = pic_at + (positive)PP * PH * 4, bins_at = ops_at + (1 << 20);
         unsigned int address_to pic, address_to ops;
         struct ui ui;
@@ -185598,6 +185599,7 @@ b32 main(void)
         ui.pixels = gpu_kit_want, ui.pitch = PP, ui.width = PW, ui.height = PH, ui.top = 0, ui.bottom = PH, ui.scale = 100;
         for (int round = 0; round < ROUNDS; round++)
         {
+                PW = round & 1 ? 697 : 696, ui.width = PW;
                 for (positive i = 0; i < (positive)PP * PH; i++)
                         pic[i] = gpu_kit_want[i] = gpu_random();
                 for (int k = 0; k < N; k++)

@@ -210,9 +210,85 @@ glass:
 	s_and_b64	\mk, \mk, s[76:77]
 .endm
 
-; op 6: a scene of fills and tones (records of 8 words in the lists), a wave a patch of 64 pixels by 4 rows, a lane four pixels in a row
-; (v5 to v8), each written once; the width and the pitch a multiple of 4. The wave leaves if its 64-pixel square has no op, does not read
-; the picture when the first op is a fill that holds the patch, and skips an op that misses it.
+; a tone from a VGPR (per lane): the same as over, its parts taken from \t
+.macro overv out, pix, t
+	v_lshrrev_b32	v39, 24, \t
+	v_sub_nc_u32	v39, 0xff, v39
+	v_and_b32	v40, s75, \t
+	v_lshrrev_b32	v41, 8, \t
+	v_and_b32	v41, s75, v41
+	v_and_b32	v20, s75, \pix
+	v_lshrrev_b32	v21, 8, \pix
+	v_and_b32	v21, s75, v21
+	v_mad_u32_u24	v20, v20, v39, 0x007f007f
+	v_mad_u32_u24	v21, v21, v39, 0x007f007f
+	v_lshrrev_b32	v22, 8, v20
+	v_and_b32	v22, s75, v22
+	v_add3_u32	v20, v20, 0x00010001, v22
+	v_lshrrev_b32	v20, 8, v20
+	v_and_b32	v20, s75, v20
+	v_lshrrev_b32	v22, 8, v21
+	v_and_b32	v22, s75, v22
+	v_add3_u32	v21, v21, 0x00010001, v22
+	v_lshrrev_b32	v21, 8, v21
+	v_and_b32	v21, s75, v21
+	v_add_nc_u32	v20, v40, v20
+	v_add_nc_u32	v21, v41, v21
+	v_pk_min_u16	v20, v20, s75
+	v_pk_min_u16	v21, v21, s75
+	v_lshl_or_b32	\out, v21, 8, v20
+.endm
+
+; \out = ui_premultiplied(the op's colour, \cover): a = alpha * cover / 4096, each colour (c * (a + (a >> 7)) + 128) >> 8
+; (the colour's alpha in s52, blue in s64, green in s65, red in s66)
+.macro premulv out, cover
+	v_mul_u32_u24	v35, s52, \cover
+	v_lshrrev_b32	v35, 12, v35
+	v_lshrrev_b32	v36, 7, v35
+	v_add_nc_u32	v36, v35, v36
+	v_mad_u32_u24	v37, s64, v36, 128
+	v_lshrrev_b32	v37, 8, v37
+	v_mad_u32_u24	v38, s65, v36, 128
+	v_lshrrev_b32	v38, 8, v38
+	v_mad_u32_u24	v36, s66, v36, 128
+	v_lshrrev_b32	v36, 8, v36
+	v_lshl_or_b32	v37, v38, 8, v37
+	v_lshl_or_b32	v37, v36, 16, v37
+	v_lshl_or_b32	\out, v35, 24, v37
+.endm
+
+; the cover of a row in the straight middle over the pixel at \p0 (256ths): the overlap of [x0, x1) with [p0, p0 + 256), times 16
+.macro cover_straight ck, p0
+	v_max_i32	v9, s57, \p0
+	v_add_nc_u32	v11, 0x100, \p0
+	v_min_i32	v11, s59, v11
+	v_sub_nc_u32	v11, v11, v9
+	v_max_i32	v11, 0, v11
+	v_lshlrev_b32	\ck, 4, v11
+.endm
+
+; one line's span (v45 left, v46 right, from the lane that has it) added to the four covers
+.macro accumulate ck, p0, p1
+	v_max_i32	v47, v45, \p0
+	v_min_i32	v48, v46, \p1
+	v_sub_nc_u32	v48, v48, v47
+	v_max_i32	v48, 0, v48
+	v_add_nc_u32	\ck, \ck, v48
+.endm
+
+; the pixel \o of the lane with the box's cover \ck: the colour at that cover laid over it where it has any alpha
+.macro boxpixel o, ck
+	premulv		v34, \ck
+	overv		v23, \o, v34
+	v_cmp_lt_u32_e64 s[88:89], 0x00ffffff, v34
+	v_cndmask_b32_e64 \o, \o, v23, s[88:89]
+.endm
+
+; op 6: a scene (records of 8 words in the lists: 0 fill, 1 tone over, 2 box as ui_kit_fill takes it with its radii already scaled as CSS draws them),
+; a wave a patch of 64 pixels by 4 rows, a lane four pixels in a row (v5 to v8), each written once; the width and the pitch a multiple of 4.
+; The wave leaves if its 64-pixel square has no op, does not read the picture when the first op holds the patch, and skips an op that misses it.
+; The lanes of a row in a box's corner take a line each of its sixteen (the 64-bit quotient and the root by a float and a correction, exact)
+; and read each other's with ds_bpermute, so the lanes past the picture's edge stay until the store.
 .globl scene
 .p2align 8
 .type scene,@function
@@ -248,10 +324,9 @@ scene:
 	v_lshl_add_u32	v3, v1, 2, s28
 	v_add_nc_u32	v4, s29, v2
 	v_cmp_gt_u32	vcc, s14, v4
-	v_cmp_gt_u32_e64 s[30:31], s12, v3
-	s_and_b64	vcc, vcc, s[30:31]
 	s_and_saveexec_b64 s[0:1], vcc
 	s_cbranch_execz	.scene_done
+	v_cmp_gt_u32_e64 s[30:31], s12, v3
 	v_mad_u32_u24	v10, v4, s13, v3
 	v_lshlrev_b32	v10, 2, v10
 	v_add_nc_u32	v17, 1, v3
@@ -262,6 +337,8 @@ scene:
 	s_add_u32	s41, s29, 4
 	s_min_u32	s41, s41, s14
 	s_waitcnt	lgkmcnt(0)
+	s_cmp_eq_u32	s32, 2
+	s_cbranch_scc1	.scene_first_box
 	s_cmp_lg_u32	s32, 0
 	s_cbranch_scc1	.scene_read
 	s_cmp_gt_u32	s33, s28
@@ -273,9 +350,35 @@ scene:
 	s_cmp_lt_u32	s36, s41
 	s_cbranch_scc1	.scene_read
 	s_branch	.scene_ops
+.scene_first_box:
+	s_lshr_b32	s43, s37, 24
+	s_cmp_lg_u32	s43, 255
+	s_cbranch_scc1	.scene_read
+	s_lshl_b32	s78, s28, 8
+	s_lshl_b32	s79, s29, 8
+	s_lshl_b32	s80, s40, 8
+	s_lshl_b32	s81, s41, 8
+	s_cmp_gt_i32	s33, s78
+	s_cbranch_scc1	.scene_read
+	s_cmp_lt_i32	s35, s80
+	s_cbranch_scc1	.scene_read
+	s_cmp_gt_i32	s34, s79
+	s_cbranch_scc1	.scene_read
+	s_cmp_lt_i32	s36, s81
+	s_cbranch_scc1	.scene_read
+	s_add_i32	s43, s34, s39
+	s_cmp_gt_i32	s43, s79
+	s_cbranch_scc1	.scene_read
+	s_sub_i32	s43, s36, s39
+	s_cmp_lt_i32	s43, s81
+	s_cbranch_scc1	.scene_read
+	s_branch	.scene_ops
 .scene_read:
+	s_mov_b64	s[2:3], exec
+	s_and_b64	exec, exec, s[30:31]
 	global_load_dwordx4 v[5:8], v10, s[8:9]
 	s_waitcnt	vmcnt(0)
+	s_mov_b64	exec, s[2:3]
 .scene_ops:
 	s_mov_b32	s75, 0x00ff00ff
 	s_mov_b32	s44, 0
@@ -289,6 +392,8 @@ scene:
 	s_load_dwordx8	s[56:63], s[48:49], 0x0
 	s_add_u32	s44, s44, 1
 	s_waitcnt	lgkmcnt(0)
+	s_cmp_eq_u32	s56, 2
+	s_cbranch_scc1	.scene_box
 	s_cmp_le_u32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -336,9 +441,213 @@ scene:
 	over		v23, v8
 	v_cndmask_b32_e64 v8, v8, v23, s[70:71]
 	s_branch	.scene_loop
+
+; a box (256ths: x0 s57, y0 s58, x1 s59, y1 s60, the colour s61, rx s62, ry s63)
+.scene_box:
+	s_lshl_b32	s78, s28, 8
+	s_lshl_b32	s79, s29, 8
+	s_lshl_b32	s80, s40, 8
+	s_lshl_b32	s81, s41, 8
+	s_cmp_le_i32	s59, s57
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_i32	s60, s58
+	s_cbranch_scc1	.scene_loop
+	s_cmp_ge_i32	s78, s59
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_i32	s80, s57
+	s_cbranch_scc1	.scene_loop
+	s_cmp_ge_i32	s79, s60
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_i32	s81, s58
+	s_cbranch_scc1	.scene_loop
+	s_lshr_b32	s52, s61, 24
+	s_cmp_eq_u32	s52, 0
+	s_cbranch_scc1	.scene_loop
+	s_mov_b32	s45, 1
+	s_and_b32	s64, s61, 255
+	s_bfe_u32	s65, s61, 0x80008
+	s_bfe_u32	s66, s61, 0x80010
+	s_add_i32	s86, s58, s63
+	s_sub_i32	s87, s60, s63
+	s_cmp_lt_i32	s78, s57
+	s_cbranch_scc1	.box_edge
+	s_cmp_gt_i32	s80, s59
+	s_cbranch_scc1	.box_edge
+	s_cmp_lt_i32	s79, s58
+	s_cbranch_scc1	.box_edge
+	s_cmp_gt_i32	s81, s60
+	s_cbranch_scc1	.box_edge
+	s_cmp_lt_i32	s79, s86
+	s_cbranch_scc1	.box_edge
+	s_cmp_gt_i32	s81, s87
+	s_cbranch_scc1	.box_edge
+; the patch is whole inside the box's straight middle: the colour at a whole cover, one tone over all the lanes
+	s_lshr_b32	s67, s52, 7
+	s_add_u32	s67, s52, s67
+	s_mul_i32	s68, s64, s67
+	s_add_u32	s68, s68, 128
+	s_lshr_b32	s68, s68, 8
+	s_mul_i32	s69, s65, s67
+	s_add_u32	s69, s69, 128
+	s_lshr_b32	s69, s69, 8
+	s_mul_i32	s70, s66, s67
+	s_add_u32	s70, s70, 128
+	s_lshr_b32	s70, s70, 8
+	s_lshl_b32	s70, s70, 16
+	s_lshl_b32	s69, s69, 8
+	s_or_b32	s70, s70, s69
+	s_or_b32	s70, s70, s68
+	s_lshl_b32	s71, s52, 24
+	s_or_b32	s71, s71, s70
+	s_cmp_eq_u32	s52, 255
+	s_cbranch_scc0	.box_whole_over
+	v_mov_b32	v5, s71
+	v_mov_b32	v6, s71
+	v_mov_b32	v7, s71
+	v_mov_b32	v8, s71
+	s_branch	.scene_loop
+.box_whole_over:
+	s_sub_u32	s72, 255, s52
+	s_and_b32	s73, s71, s75
+	s_lshr_b32	s74, s71, 8
+	s_and_b32	s74, s74, s75
+	over		v5, v5
+	over		v6, v6
+	over		v7, v7
+	over		v8, v8
+	s_branch	.scene_loop
+
+; the patch holds an edge: the cover of each of the lane's four pixels, then the colour at it
+.box_edge:
+	v_lshlrev_b32	v32, 8, v4
+	v_add_nc_u32	v33, 0x100, v32
+	v_lshlrev_b32	v28, 8, v3
+	v_lshlrev_b32	v29, 8, v17
+	v_lshlrev_b32	v30, 8, v18
+	v_lshlrev_b32	v31, 8, v19
+	v_add_nc_u32	v65, 0x100, v28
+	v_add_nc_u32	v66, 0x100, v29
+	v_add_nc_u32	v67, 0x100, v30
+	v_add_nc_u32	v68, 0x100, v31
+	v_cmp_lt_i32_e64 s[82:83], s58, v33
+	v_cmp_gt_i32_e64 s[88:89], s60, v32
+	s_and_b64	s[82:83], s[82:83], s[88:89]
+	v_cmp_ge_i32_e64 s[84:85], v32, s86
+	v_cmp_le_i32_e64 s[88:89], v33, s87
+	s_and_b64	s[84:85], s[84:85], s[88:89]
+	v_cmp_ge_i32_e64 s[88:89], v32, s58
+	s_and_b64	s[84:85], s[84:85], s[88:89]
+	v_cmp_le_i32_e64 s[88:89], v33, s60
+	s_and_b64	s[84:85], s[84:85], s[88:89]
+	cover_straight	v24, v28
+	cover_straight	v25, v29
+	cover_straight	v26, v30
+	cover_straight	v27, v31
+	s_andn2_b64	s[90:91], s[82:83], s[84:85]
+	s_and_saveexec_b64 s[92:93], s[90:91]
+	s_cbranch_execz	.box_corner_done
+; this lane's line of sixteen: yy = top + (lane & 15) * 16 + 8, and its span
+	v_mov_b32	v24, 0
+	v_mov_b32	v25, 0
+	v_mov_b32	v26, 0
+	v_mov_b32	v27, 0
+	v_and_b32	v43, 15, v0
+	v_lshlrev_b32	v43, 4, v43
+	v_add3_u32	v44, v32, v43, 8
+	v_cmp_ge_i32_e64 s[94:95], v44, s58
+	v_cmp_lt_i32_e64 s[96:97], v44, s60
+	s_and_b64	s[94:95], s[94:95], s[96:97]
+	s_cmp_le_i32	s62, 0
+	s_cbranch_scc1	.box_flat
+	s_cmp_le_i32	s63, 0
+	s_cbranch_scc1	.box_flat
+	v_sub_nc_u32	v45, s86, v44
+	v_sub_nc_u32	v46, v44, s87
+	v_add_nc_u32	v46, 1, v46
+	v_cmp_le_i32_e64 s[96:97], s87, v44
+	v_mov_b32	v47, 0
+	v_cndmask_b32_e64 v47, v47, v46, s[96:97]
+	v_cmp_gt_i32_e64 s[96:97], s86, v44
+	v_cndmask_b32_e64 v47, v47, v45, s[96:97]
+	v_cmp_lt_i32_e64 s[96:97], 0, v47
+	v_cvt_f32_u32	v48, v47
+	v_cvt_f32_u32	v49, s63
+	v_rcp_f32	v49, v49
+	v_mul_f32	v48, v48, v49
+	v_mul_f32	v48, 0x47800000, v48
+	v_cvt_u32_f32	v48, v48
+	v_lshlrev_b32	v50, 16, v47
+	v_lshrrev_b32	v51, 16, v47
+	v_mad_u64_u32	v[52:53], null, v48, s63, 0
+	v_cmp_gt_u64_e64 s[98:99], v[52:53], v[50:51]
+	v_subrev_nc_u32	v54, 1, v48
+	v_cndmask_b32_e64 v48, v48, v54, s[98:99]
+	v_add_nc_u32	v54, 1, v48
+	v_mad_u64_u32	v[52:53], null, v54, s63, 0
+	v_cmp_le_u64_e64 s[98:99], v[52:53], v[50:51]
+	v_cndmask_b32_e64 v48, v48, v54, s[98:99]
+	v_mul_lo_u32	v49, v48, v48
+	v_sub_nc_u32	v49, 0, v49
+	v_cvt_f32_u32	v54, v49
+	v_sqrt_f32	v54, v54
+	v_cvt_u32_f32	v54, v54
+	v_mov_b32	v56, v49
+	v_mov_b32	v57, 0
+	v_mad_u64_u32	v[58:59], null, v54, v54, 0
+	v_cmp_gt_u64_e64 s[98:99], v[58:59], v[56:57]
+	v_subrev_nc_u32	v60, 1, v54
+	v_cndmask_b32_e64 v54, v54, v60, s[98:99]
+	v_add_nc_u32	v60, 1, v54
+	v_mad_u64_u32	v[58:59], null, v60, v60, 0
+	v_cmp_le_u64_e64 s[98:99], v[58:59], v[56:57]
+	v_cndmask_b32_e64 v54, v54, v60, s[98:99]
+	v_mad_u64_u32	v[58:59], null, v54, s62, 0
+	v_alignbit_b32	v60, v59, v58, 16
+	v_cmp_gt_u32_e64 s[98:99], 0x10000, v48
+	v_cndmask_b32_e64 v60, 0, v60, s[98:99]
+	s_add_i32	s100, s57, s62
+	s_sub_i32	s101, s59, s62
+	v_sub_nc_u32	v61, s100, v60
+	v_add_nc_u32	v62, s101, v60
+	v_cndmask_b32_e64 v61, s57, v61, s[96:97]
+	v_cndmask_b32_e64 v62, s59, v62, s[96:97]
+	v_cmp_gt_i32_e64 s[98:99], v62, v61
+	s_and_b64	s[94:95], s[94:95], s[98:99]
+	s_branch	.box_lines
+.box_flat:
+	v_mov_b32	v61, s57
+	v_mov_b32	v62, s59
+.box_lines:
+	v_cndmask_b32_e64 v61, 0, v61, s[94:95]
+	v_cndmask_b32_e64 v62, 0, v62, s[94:95]
+	v_and_b32	v43, 48, v0
+	v_lshlrev_b32	v43, 2, v43
+	.irp		j, 0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60
+	v_add_nc_u32	v44, \j, v43
+	ds_bpermute_b32	v45, v44, v61
+	ds_bpermute_b32	v46, v44, v62
+	s_waitcnt	lgkmcnt(0)
+	accumulate	v24, v28, v65
+	accumulate	v25, v29, v66
+	accumulate	v26, v30, v67
+	accumulate	v27, v31, v68
+	.endr
+.box_corner_done:
+	s_mov_b64	exec, s[92:93]
+	v_cndmask_b32_e64 v24, 0, v24, s[82:83]
+	v_cndmask_b32_e64 v25, 0, v25, s[82:83]
+	v_cndmask_b32_e64 v26, 0, v26, s[82:83]
+	v_cndmask_b32_e64 v27, 0, v27, s[82:83]
+	boxpixel	v5, v24
+	boxpixel	v6, v25
+	boxpixel	v7, v26
+	boxpixel	v8, v27
+	s_branch	.scene_loop
+
 .scene_store:
 	s_cmp_eq_u32	s45, 0
 	s_cbranch_scc1	.scene_done
+	s_and_b64	exec, exec, s[30:31]
 	global_store_dwordx4 v10, v[5:8], s[8:9]
 .scene_done:
 	s_endpgm
@@ -364,4 +673,4 @@ kernel copy, 8, 24
 kernel fill, 8, 24
 kernel tone, 10, 28
 kernel glass, 16, 32
-kernel scene, 32, 80
+kernel scene, 72, 104
