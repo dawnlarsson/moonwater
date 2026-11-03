@@ -154423,6 +154423,7 @@ static struct fake_host_state
         long fds_open, fds_closed, maps, unmaps, allocs, releases;
         long refuse_open;
         long now;
+        long locks, caps, keymap_fd, rate, delay;
         struct wayland_screen screen;
 } fake;
 
@@ -154597,9 +154598,49 @@ static long fake_now(void *context)
         return fake.now += 16;
 }
 
+/* The keymap is a file the compositor owns and keeps: the shim hands out its descriptor and never closes it. */
+static long fake_keymap(void *context, long *size)
+{
+        static const char text[] = "xkb_keymap { };\n";
+
+        (void)context;
+        if (fake.keymap_fd <= 0)
+        {
+                char name[] = "/tmp/wlkeymapXXXXXX";
+                int fd = mkstemp(name);
+
+                unlink(name);
+                if (fd < 0 || write(fd, text, sizeof text - 1) != (ssize_t)(sizeof text - 1))
+                        abort();
+                fake.keymap_fd = fd;
+        }
+        *size = (long)sizeof text - 1;
+        return fake.keymap_fd;
+}
+
+static void fake_repeat(void *context, long *rate, long *delay)
+{
+        (void)context;
+        *rate = fake.rate ? fake.rate : 25;
+        *delay = fake.delay ? fake.delay : 600;
+}
+
+static long fake_seat(void *context)
+{
+        (void)context;
+        return fake.caps;
+}
+
+static long fake_locks(void *context)
+{
+        (void)context;
+        return fake.locks;
+}
+
 static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
-    fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now};
+    fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
+    fake_locks};
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -154623,6 +154664,7 @@ struct wlc
         unsigned char version[8192];
         struct wl_event_seen ev[EVENTS];
         long events, taken;
+        long fds_seen;
         long malformed;
         long errors;
         unsigned long error_object, error_code;
@@ -154857,9 +154899,9 @@ static int wlc_pump(struct wlc *c)
                         c->iface[e->u[0]] = 0;
                 at += size;
         }
+        c->fds_seen += fd_count;
         wayland_sent(c->slot, length);
         (void)fds;
-        (void)fd_count;
         return (int)length;
 }
 
@@ -154984,7 +155026,10 @@ static void session_window(struct session *s, unsigned colour)
 
 static void wl_reset(void)
 {
+        if (fake.keymap_fd > 0)
+                close((int)fake.keymap_fd);
         memset(&fake, 0, sizeof fake);
+        fake.caps = WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
         fake.screen = (struct wayland_screen){0, 0, 1280, 720, 100, 60000, 340, 190, "Virtual-1"};
 }
 
@@ -156135,6 +156180,11 @@ static void test_fuzz(long rounds)
                         c = s.c;
                         if (wl_random() & 1)
                                 session_window(&s, 0xff112233);
+                        if (wl_random() & 1)
+                        {
+                                wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, wlc_id(c, WLI_wl_pointer, 9));
+                                wlc_send(c, s.seat, WLQ_wl_seat_get_keyboard, wlc_id(c, WLI_wl_keyboard, 9));
+                        }
                         made = 0;
                 }
                 {
@@ -156230,6 +156280,23 @@ static void test_fuzz(long rounds)
                                         wayland_row_wake(row);
                                 }
                         wayland_frame();
+                        /* and the seat's: a pointer, keys and wheels sent to rows that are there, are gone, or are no row */
+                        for (int input = 0; input < 6; input++)
+                        {
+                                long row = (long)(wl_random() % 36) - 2;
+
+                                switch (wl_random() % 8)
+                                {
+                                case 0: wayland_pointer_to(row, (long)(wl_random() % 200) - 50, (long)(wl_random() % 200) - 50); break;
+                                case 1: wayland_pointer_motion(row, (long)(wl_random() % 300), (long)(wl_random() % 300)); break;
+                                case 2: wayland_pointer_button(row, (long)(wl_random() % 0x400) - 8, (long)(wl_random() & 1)); break;
+                                case 3: wayland_pointer_axis(row, (long)(wl_random() & 1), (long)(wl_random() % 2000) - 1000, (long)(wl_random() & 1)); break;
+                                case 4: wayland_keyboard_to(row); break;
+                                case 5: wayland_key(row, (long)(wl_random() % 0x500) - 16, (long)(wl_random() & 1)); break;
+                                case 6: fake.locks = (long)(wl_random() & 18); wayland_key(row, 58, (long)(wl_random() & 1)); break;
+                                default: wayland_keymap_changed(); break;
+                                }
+                        }
                         wlc_pump(c);
                 }
         }
@@ -156286,6 +156353,244 @@ static void test_raw(long rounds)
         wayland_stop();
 }
 
+
+/* A client with a pointer and a keyboard on a window of its own. */
+struct seated
+{
+        struct session s;
+        unsigned long pointer, keyboard;
+};
+
+static void seated_open(struct seated *t, long pointer_version, long keyboard_version)
+{
+        unsigned long pointer_seat, keyboard_seat;
+
+        session_open(&t->s);
+        pointer_seat = wl_global(t->s.c, t->s.registry, WLI_wl_seat, pointer_version);
+        keyboard_seat = wl_global(t->s.c, t->s.registry, WLI_wl_seat, keyboard_version);
+        t->pointer = wlc_id(t->s.c, WLI_wl_pointer, pointer_version);
+        wlc_send(t->s.c, pointer_seat, WLQ_wl_seat_get_pointer, t->pointer);
+        t->keyboard = wlc_id(t->s.c, WLI_wl_keyboard, keyboard_version);
+        wlc_send(t->s.c, keyboard_seat, WLQ_wl_seat_get_keyboard, t->keyboard);
+        session_window(&t->s, 0xff445566);
+        wlc_forget(t->s.c);
+}
+
+static void test_seat(void)
+{
+        struct seated t;
+        struct wlc *c;
+        struct wl_event_seen *e;
+
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* the keymap and the repeat come with the keyboard, the keymap as a descriptor beside its bytes */
+        session_open(&t.s);
+        c = t.s.c;
+        t.keyboard = wlc_id(c, WLI_wl_keyboard, 9);
+        wlc_send(c, t.s.seat, WLQ_wl_seat_get_keyboard, t.keyboard);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_keymap);
+        WLCHECK(e && e->u[0] == WLN_wl_keyboard_keymap_format_xkb_v1 && e->u[1] == 16 && c->fds_seen == 1, "a keyboard is sent its keymap with a descriptor");
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_repeat_info);
+        WLCHECK(e && e->u[0] == 25 && e->u[1] == 600, "and how fast a held key repeats");
+        wlc_end(c);
+
+        /* version 3 knows no repeat_info, and the shim does not send what the version has not got */
+        session_open(&t.s);
+        c = t.s.c;
+        t.keyboard = wlc_id(c, WLI_wl_keyboard, 3);
+        wlc_send(c, wl_global(c, t.s.registry, WLI_wl_seat, 3), WLQ_wl_seat_get_keyboard, t.keyboard);
+        WLCHECK(wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_repeat_info) == 0 && c->malformed == 0, "a version 3 keyboard has no repeat_info");
+        wlc_end(c);
+
+        seated_open(&t, 9, 9);
+        c = t.s.c;
+        /* the pointer enters the window, moves, presses, wheels and leaves */
+        wayland_pointer_to(0, 10, 20);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+        WLCHECK(e && e->u[1] == t.s.surface && e->u[2] == 10 * 256 && e->u[3] == 20 * 256, "the pointer enters at its place in the picture");
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_frame) == 1, "an enter ends with a frame");
+        wlc_forget(c);
+        wayland_pointer_to(0, 10, 20);
+        WLCHECK(wlc_pump(c) == 0, "the same window is no event");
+        wayland_pointer_motion(0, 11, 22);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_motion);
+        WLCHECK(e && e->u[1] == 11 * 256 && e->u[2] == 22 * 256, "a motion is sent in fixed point");
+        wlc_forget(c);
+        wayland_pointer_button(0, 0x110, 1);
+        wayland_pointer_button(0, 0x110, 0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_button);
+        WLCHECK(e && e->u[2] == 0x110 && e->u[3] == WLN_wl_pointer_button_state_pressed, "a press");
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_button);
+        WLCHECK(e && e->u[3] == WLN_wl_pointer_button_state_released, "and its release");
+        wlc_forget(c);
+        wayland_pointer_axis(0, 0, 120, 0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_source) == 1 && wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_value120) == 1 &&
+                    wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis) == 1 && wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_discrete) == 0,
+                "a notch to version 9 is a source, a value120 and an axis");
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_axis);
+        WLCHECK(e && (long)(int)e->u[2] == 15 * 256, "a notch is 15 units");
+        wlc_forget(c);
+        wayland_pointer_axis(0, 1, -60, 1);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_axis_source);
+        WLCHECK(e && e->u[0] == WLN_wl_pointer_axis_source_finger && wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_value120) == 0, "two fingers are a finger's smooth value");
+        wlc_forget(c);
+        wayland_pointer_to(-1, 0, 0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_leave) == 1, "the pointer leaves");
+        wlc_forget(c);
+        wayland_pointer_motion(0, 5, 5);
+        wayland_pointer_button(0, 0x110, 1);
+        WLCHECK(wlc_pump(c) == 0, "no event for a pointer that is not on the window");
+
+        /* the keyboard: an enter with no key held, keys, and the modifiers after the key that changed them */
+        wayland_keyboard_to(0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_enter);
+        WLCHECK(e && e->u[1] == t.s.surface, "the keys enter the window");
+        WLCHECK(wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_modifiers) == 1, "with the modifiers");
+        wlc_forget(c);
+        wayland_key(0, 30, 1);
+        wayland_key(0, 30, 0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_key) == 2 && wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_modifiers) == 0, "a letter's press and release change no modifier");
+        wlc_forget(c);
+        wayland_key(0, 42, 1);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_modifiers);
+        WLCHECK(e && e->u[1] == 1 && wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_key) == 1, "Shift pressed: its key, then the modifiers with Shift down");
+        wlc_forget(c);
+        wayland_key(0, 100, 1);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_modifiers);
+        WLCHECK(e && e->u[1] == (1 | 128), "AltGr is Mod5");
+        wlc_forget(c);
+        wayland_key(0, 42, 0);
+        wayland_key(0, 100, 0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_modifiers);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_modifiers);
+        WLCHECK(e && e->u[1] == 0, "and let go again");
+        wlc_forget(c);
+        fake.locks = 2;
+        wayland_key(0, 58, 1);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_modifiers);
+        WLCHECK(e && e->u[3] == 2, "Caps Lock is a locked modifier the compositor says");
+        wlc_forget(c);
+        wayland_key(0, 0, 1);
+        wayland_key(0, 0x3000, 1);
+        wayland_key(0, -5, 1);
+        WLCHECK(wlc_pump(c) == 0, "a key code that is not one is no event");
+        wayland_keyboard_to(-1);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_leave) == 1, "the keys leave");
+        wlc_forget(c);
+        wayland_key(0, 30, 1);
+        WLCHECK(wlc_pump(c) == 0, "no key to a window that has not the keys");
+        wlc_end(c);
+
+        /* a pointer or keyboard made when the window already has the pointer or the keys is told so at once */
+        session_open(&t.s);
+        session_window(&t.s, 0xff112233);
+        c = t.s.c;
+        wayland_pointer_to(0, 3, 4);
+        wayland_keyboard_to(0);
+        wlc_forget(c);
+        t.pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, t.s.seat, WLQ_wl_seat_get_pointer, t.pointer);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_enter) == 1, "a pointer made over the window enters it at once");
+        t.keyboard = wlc_id(c, WLI_wl_keyboard, 9);
+        wlc_send(c, t.s.seat, WLQ_wl_seat_get_keyboard, t.keyboard);
+        WLCHECK(wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_enter) == 1, "a keyboard made when the keys are the window's enters it at once");
+        /* released, it is told no more */
+        wlc_send(c, t.pointer, WLQ_wl_pointer_release);
+        wlc_forget(c);
+        wayland_pointer_motion(0, 4, 4);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_motion) == 0 && c->errors == 0, "a released pointer is sent nothing");
+        wlc_end(c);
+
+        /* a pointer of version 1 has no frame; of version 5 a notch is discrete steps, the remainder kept */
+        seated_open(&t, 1, 9);
+        c = t.s.c;
+        wayland_pointer_to(0, 1, 1);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_enter) == 1 && wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_frame) == 0 && c->malformed == 0,
+                "a version 1 pointer has no frame");
+        wlc_end(c);
+        seated_open(&t, 5, 9);
+        c = t.s.c;
+        wayland_pointer_to(0, 1, 1);
+        wlc_forget(c);
+        wayland_pointer_axis(0, 0, 60, 0);
+        wayland_pointer_axis(0, 0, 60, 0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_discrete) == 1, "half a notch twice is one discrete step to a version 5 pointer (%ld)",
+                wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_discrete));
+        wlc_end(c);
+
+        /* a client holds at most WAYLAND_SEATS pointers */
+        session_open(&t.s);
+        c = t.s.c;
+        for (int at = 0; at < WAYLAND_SEATS + 1 && !c->errors; at++)
+                wlc_send(c, t.s.seat, WLQ_wl_seat_get_pointer, wlc_id(c, WLI_wl_pointer, 9));
+        WLCHECK(refused_with(c, WLN_wl_display_error_no_memory), "more pointers than the room is refused");
+        wlc_end(c);
+        /* touch, which the seat does not have */
+        session_open(&t.s);
+        c = t.s.c;
+        wlc_send(c, t.s.seat, WLQ_wl_seat_get_touch, wlc_id(c, WLI_wl_touch, 9));
+        WLCHECK(refused_with(c, WLN_wl_seat_error_missing_capability), "a touch from a seat with none");
+        wlc_end(c);
+
+        /* the window destroyed while it has the pointer and the keys: nothing is sent, nothing is kept */
+        seated_open(&t, 9, 9);
+        c = t.s.c;
+        wayland_pointer_to(0, 1, 1);
+        wayland_keyboard_to(0);
+        wlc_send(c, t.s.surface, WLQ_wl_surface_destroy);
+        wlc_forget(c);
+        wayland_pointer_motion(0, 2, 2);
+        wayland_key(0, 30, 1);
+        WLCHECK(wlc_pump(c) == 0 && c->errors == 0, "a destroyed window is sent no input");
+        wlc_end(c);
+
+        /* two clients: the pointer leaves one and enters the other */
+        {
+                struct seated a, b;
+
+                seated_open(&a, 9, 9);
+                seated_open(&b, 9, 9);
+                wayland_pointer_to(0, 1, 1);
+                wlc_forget(a.s.c);
+                wlc_forget(b.s.c);
+                wayland_pointer_to(1, 2, 2);
+                wlc_pump(a.s.c);
+                wlc_pump(b.s.c);
+                WLCHECK(wlc_count(a.s.c, WLI_wl_pointer, WLE_wl_pointer_leave) == 1 && wlc_count(b.s.c, WLI_wl_pointer, WLE_wl_pointer_enter) == 1,
+                        "the pointer leaves one client and enters the other");
+                wayland_keyboard_to(0);
+                wayland_keyboard_to(1);
+                wlc_pump(a.s.c);
+                wlc_pump(b.s.c);
+                WLCHECK(wlc_count(a.s.c, WLI_wl_keyboard, WLE_wl_keyboard_leave) == 1 && wlc_count(b.s.c, WLI_wl_keyboard, WLE_wl_keyboard_enter) == 1,
+                        "and so the keys");
+                /* a client gone while it has them */
+                wlc_end(b.s.c);
+                wayland_pointer_motion(1, 3, 3);
+                WLCHECK(wlc_pump(a.s.c) == 0, "a client that goes with the pointer leaves nobody told");
+                wlc_end(a.s.c);
+        }
+        leak_check("seat");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -156301,6 +156606,7 @@ int main(int argc, char **argv)
         test_surface_rules();
         test_wire();
         test_caps();
+        test_seat();
         test_fuzz(rounds);
         test_raw(rounds);
         printf("CHECK_wayland: %u checks, %u failures\n", wl_checks, wl_failures);

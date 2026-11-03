@@ -83,6 +83,8 @@
 #define WAYLAND_SERVER_BASE 0xff000000UL
 #define WAYLAND_SCREENS 8
 #define WAYLAND_GLOBALS_MAX 32
+#define WAYLAND_SEATS 8         // pointers, and keyboards, one client holds
+#define WAYLAND_KEYMAP_MAX (1L << 20)
 
 /*
         What a request answers: zero is done, negative is a client that is dead (the error is queued).
@@ -175,6 +177,12 @@ struct wayland_host
         int (*row_facts)(void *context, int row, struct wayland_facts *facts);
         long (*screens)(void *context, struct wayland_screen *screens, long room);
         long (*now)(void *context); // milliseconds on a clock that only goes forward
+        // The seat: the keymap as a descriptor of xkb's text and its size (-1 for none), how fast a held key repeats, what the
+        // machine has (WLN_wl_seat_capability_*), and which modifiers are locked, as the keymap's own masks.
+        long (*keymap)(void *context, long *size);
+        void (*repeat)(void *context, long *rate, long *delay);
+        long (*seat)(void *context);
+        long (*locks)(void *context);
 };
 
 /*
@@ -291,6 +299,10 @@ struct wayland_client
         unsigned long serial;
         long pool_bytes;
         long free_hint;
+        unsigned int pointer_id[WAYLAND_SEATS], keyboard_id[WAYLAND_SEATS];
+        unsigned char pointers, keyboards;
+        unsigned int press_serial;  // the last button press this client was sent, which a move or a resize must name
+        long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
         unsigned short index[WAYLAND_IDS];
         unsigned short server_index[WAYLAND_SERVER_IDS];
         struct wayland_object objects[WAYLAND_OBJECTS];
@@ -312,6 +324,9 @@ static struct
         struct wayland_screen screen[WAYLAND_SCREENS];
         long screens;
         long clients, objects, surfaces, pools, buffers, fds, rows;
+        long pointer_row, keyboard_row, pointer_x, pointer_y;
+        unsigned long mods[4];
+        unsigned char keys[16];
 } wayland;
 
 /* ---- the wire ---- */
@@ -841,6 +856,10 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         if (s->row < 0)
                 return;
         wayland.row_client[s->row] = wayland.row_surface[s->row] = -1;
+        if (wayland.pointer_row == s->row)
+                wayland.pointer_row = -1;
+        if (wayland.keyboard_row == s->row)
+                wayland.keyboard_row = -1;
         wayland.host->row_close(wayland.host->context, s->row);
         wayland.rows--;
         s->row = -1;
@@ -976,7 +995,7 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         {
                 struct wayland_event e = wayland_begin(c, id, WLE_wl_seat_capabilities);
 
-                wayland_word(&e, WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard);
+                wayland_word(&e, (unsigned long)wayland.host->seat(wayland.host->context));
                 wayland_end(&e);
                 if (a[1].version >= 2)
                 {
@@ -2046,21 +2065,507 @@ static int wayland_decoration_request(struct wayland_client *c, struct wayland_o
         return WAYLAND_OK;
 }
 
-/* ---- seat ---- */
+/* ---- the seat: the pointer, the keyboard and what they are told ---- */
 
+/*
+        Where the pointer and the keyboard are, as the clients are told of them: a row each, or none. The compositor
+        decides both (the window under the pointer, the window with the keys) and says so; the shim sends the client
+        that owns the row its enter and, to the one it left, its leave, to every pointer and keyboard that client has.
+        A client's pointers, keyboards and touches are lists of ids kept as they are made and released, so an event
+        finds them without a walk of the whole object table.
+*/
+static unsigned long wayland_fixed(long pixels, long scale)
+{
+        return (unsigned long)(pixels * 256 / (scale > 0 ? scale : 1));
+}
+
+/* The surface and client of a row, or 0. */
+static struct wayland_surface *wayland_row_surface(long row, struct wayland_client **client)
+{
+        struct wayland_client *c;
+
+        if (row < 0 || row >= WAYLAND_ROWS || wayland.row_client[row] < 0)
+                return 0;
+        c = wayland.client[wayland.row_client[row]];
+        if (!c || !c->surfaces[wayland.row_surface[row]].live)
+                return 0;
+        *client = c;
+        return &c->surfaces[wayland.row_surface[row]];
+}
+
+/* Whether a popup's window asked to grab the keys (a menu does; a tooltip does not). */
+WAYLAND_API long wayland_row_grabs(long row)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
+
+        return s && s->grab;
+}
+
+/* The slots of a client's objects of a seat kind that are still there. */
+static long wayland_seats(struct wayland_client *c, long iface, long *slots)
+{
+        const unsigned int *ids = iface == WLI_wl_pointer ? c->pointer_id : c->keyboard_id;
+        long count = iface == WLI_wl_pointer ? c->pointers : c->keyboards, found = 0;
+
+        for (long at = 0; at < count; at++)
+        {
+                long slot = wayland_slot_of(c, ids[at]);
+
+                if (slot >= 0 && c->objects[slot].iface == iface)
+                        slots[found++] = slot;
+        }
+        return found;
+}
+
+/* A seat object made: its id is kept, up to the room; false for no room. */
+static int wayland_seat_add(struct wayland_client *c, long iface, unsigned int id)
+{
+        unsigned int *ids = iface == WLI_wl_pointer ? c->pointer_id : c->keyboard_id;
+        unsigned char *count = iface == WLI_wl_pointer ? &c->pointers : &c->keyboards;
+
+        if (*count >= WAYLAND_SEATS)
+                return 0;
+        ids[(*count)++] = id;
+        return 1;
+}
+
+static void wayland_seat_remove(struct wayland_client *c, long iface, unsigned int id)
+{
+        unsigned int *ids = iface == WLI_wl_pointer ? c->pointer_id : c->keyboard_id;
+        unsigned char *count = iface == WLI_wl_pointer ? &c->pointers : &c->keyboards;
+
+        for (long at = 0; at < *count; at++)
+                if (ids[at] == id)
+                {
+                        ids[at] = ids[--(*count)];
+                        return;
+                }
+}
+
+static void wayland_pointer_frame(struct wayland_client *c, long slot)
+{
+        if (c->objects[slot].version >= 5)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_pointer_frame);
+
+                wayland_end(&e);
+        }
+}
+
+/* The pointer entered a window at (x, y) of its picture, for one of its client's pointers, or left it. */
+static void wayland_pointer_enter_one(struct wayland_client *c, long slot, struct wayland_surface *s, unsigned long serial)
+{
+        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_pointer_enter);
+
+        wayland_word(&e, serial);
+        wayland_word(&e, s->id);
+        wayland_word(&e, wayland_fixed(wayland.pointer_x, s->scale));
+        wayland_word(&e, wayland_fixed(wayland.pointer_y, s->scale));
+        wayland_end(&e);
+        wayland_pointer_frame(c, slot);
+}
+
+static void wayland_pointer_leave_all(struct wayland_client *c, struct wayland_surface *s)
+{
+        unsigned long serial = wayland_serial(c);
+        long slots[WAYLAND_SEATS], count = wayland_seats(c, WLI_wl_pointer, slots);
+
+        for (long at = 0; at < count; at++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_leave);
+
+                wayland_word(&e, serial);
+                wayland_word(&e, s->id);
+                wayland_end(&e);
+                wayland_pointer_frame(c, slots[at]);
+        }
+}
+
+/*
+        The pointer is over row (or none, -1), at (x, y) of its picture: the client it leaves is sent its leave and the
+        one it enters its enter. The same row is no event.
+*/
+WAYLAND_API void wayland_pointer_to(long row, long x, long y)
+{
+        struct wayland_client *old = 0, *now = 0;
+        struct wayland_surface *was, *is;
+
+        if (!wayland.host || row == wayland.pointer_row)
+                return;
+        was = wayland_row_surface(wayland.pointer_row, &old);
+        is = wayland_row_surface(row, &now);
+        if (was)
+                wayland_pointer_leave_all(old, was);
+        wayland.pointer_row = is ? row : -1;
+        wayland.pointer_x = x;
+        wayland.pointer_y = y;
+        if (is)
+        {
+                unsigned long serial = wayland_serial(now);
+                long slots[WAYLAND_SEATS], count = wayland_seats(now, WLI_wl_pointer, slots);
+
+                for (long at = 0; at < count; at++)
+                        wayland_pointer_enter_one(now, slots[at], is, serial);
+        }
+}
+
+WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s;
+        long time, slots[WAYLAND_SEATS], count;
+
+        if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)))
+                return;
+        wayland.pointer_x = x;
+        wayland.pointer_y = y;
+        time = wayland.host->now(wayland.host->context);
+        count = wayland_seats(c, WLI_wl_pointer, slots);
+        for (long at = 0; at < count; at++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_motion);
+
+                wayland_word(&e, (unsigned long)time);
+                wayland_word(&e, wayland_fixed(x, s->scale));
+                wayland_word(&e, wayland_fixed(y, s->scale));
+                wayland_end(&e);
+                wayland_pointer_frame(c, slots[at]);
+        }
+}
+
+/* A button of the pointer, by its Linux code, pressed or let go. A press is the serial a client may name to ask for a move. */
+WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s;
+        unsigned long serial;
+        long time, slots[WAYLAND_SEATS], count;
+
+        if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || code < 0 || code > 0x2ff)
+                return;
+        time = wayland.host->now(wayland.host->context);
+        serial = wayland_serial(c);
+        if (pressed)
+                c->press_serial = (unsigned int)serial;
+        count = wayland_seats(c, WLI_wl_pointer, slots);
+        for (long at = 0; at < count; at++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_button);
+
+                wayland_word(&e, serial);
+                wayland_word(&e, (unsigned long)time);
+                wayland_word(&e, (unsigned long)code);
+                wayland_word(&e, pressed ? WLN_wl_pointer_button_state_pressed : WLN_wl_pointer_button_state_released);
+                wayland_end(&e);
+                wayland_pointer_frame(c, slots[at]);
+        }
+        (void)s;
+}
+
+/*
+        The wheel or two fingers: v120 is in hundred-and-twentieths of a notch, a notch being 15 of the surface's units
+        as every toolkit takes it, and horizontal says which axis. A wheel reports what version eight has for it
+        (value120), what earlier ones had (discrete steps, the remainder kept for the next), and a finger's motion is a
+        smooth value of the same size from a finger.
+*/
+WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long precise)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s;
+        long time, slots[WAYLAND_SEATS], count, axis = horizontal ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll;
+
+        if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || !v120)
+                return;
+        time = wayland.host->now(wayland.host->context);
+        count = wayland_seats(c, WLI_wl_pointer, slots);
+        for (long at = 0; at < count; at++)
+        {
+                struct wayland_object *o = &c->objects[slots[at]];
+                struct wayland_event e;
+
+                if (o->version >= 5)
+                {
+                        e = wayland_begin(c, o->id, WLE_wl_pointer_axis_source);
+                        wayland_word(&e, precise ? WLN_wl_pointer_axis_source_finger : WLN_wl_pointer_axis_source_wheel);
+                        wayland_end(&e);
+                }
+                if (!precise && o->version >= 8)
+                {
+                        e = wayland_begin(c, o->id, WLE_wl_pointer_axis_value120);
+                        wayland_word(&e, (unsigned long)axis);
+                        wayland_word(&e, (unsigned long)v120);
+                        wayland_end(&e);
+                }
+                else if (!precise && o->version >= 5)
+                {
+                        long notches;
+
+                        c->axis_left[horizontal ? 1 : 0] += v120;
+                        notches = c->axis_left[horizontal ? 1 : 0] / 120;
+                        c->axis_left[horizontal ? 1 : 0] -= notches * 120;
+                        if (notches)
+                        {
+                                e = wayland_begin(c, o->id, WLE_wl_pointer_axis_discrete);
+                                wayland_word(&e, (unsigned long)axis);
+                                wayland_word(&e, (unsigned long)notches);
+                                wayland_end(&e);
+                        }
+                }
+                e = wayland_begin(c, o->id, WLE_wl_pointer_axis);
+                wayland_word(&e, (unsigned long)time);
+                wayland_word(&e, (unsigned long)axis);
+                wayland_word(&e, (unsigned long)(v120 * 15 * 256 / 120));
+                wayland_end(&e);
+                wayland_pointer_frame(c, slots[at]);
+        }
+        (void)s;
+}
+
+/* The keymap to one keyboard: a descriptor beside the event, and how fast a held key repeats. */
+static void wayland_keyboard_keymap(struct wayland_client *c, long slot)
+{
+        struct wayland_event e;
+        long size = 0, fd = wayland.host->keymap(wayland.host->context, &size);
+
+        e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_keymap);
+        if (fd >= 0 && size > 0 && size <= WAYLAND_KEYMAP_MAX && c->out_fd_count < WAYLAND_OUT_FDS)
+        {
+                wayland_word(&e, WLN_wl_keyboard_keymap_format_xkb_v1);
+                wayland_word(&e, (unsigned long)size);
+                c->out_fds[c->out_fd_count] = fd;
+                c->out_fd_at[c->out_fd_count++] = e.start;
+        }
+        else
+        {
+                wayland_word(&e, WLN_wl_keyboard_keymap_format_no_keymap);
+                wayland_word(&e, 0);
+        }
+        wayland_end(&e);
+        if (c->objects[slot].version >= 4)
+        {
+                long rate = 25, delay = 600;
+
+                wayland.host->repeat(wayland.host->context, &rate, &delay);
+                e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_repeat_info);
+                wayland_word(&e, (unsigned long)rate);
+                wayland_word(&e, (unsigned long)delay);
+                wayland_end(&e);
+        }
+}
+
+/*
+        The modifiers a keymap built by the compositor reads, from the keys held: Shift, Control, Alt on Mod1, the logo keys
+        on Mod4 and AltGr on Mod5, the keymap's own masks (Shift 1, Lock 2, Control 4, Mod1 8, Mod2 16, Mod4 64, Mod5 128).
+        The locked ones, Caps Lock and Num Lock, are the compositor's to say.
+*/
+static unsigned long wayland_depressed(void)
+{
+        unsigned long mods = 0;
+
+#define WAYLAND_DOWN(code) ((wayland.keys[(code) >> 3] >> ((code) & 7)) & 1)
+        if (WAYLAND_DOWN(42) || WAYLAND_DOWN(54))
+                mods |= 1;
+        if (WAYLAND_DOWN(29) || WAYLAND_DOWN(97))
+                mods |= 4;
+        if (WAYLAND_DOWN(56))
+                mods |= 8;
+        if (WAYLAND_DOWN(125) || WAYLAND_DOWN(126))
+                mods |= 64;
+        if (WAYLAND_DOWN(100))
+                mods |= 128;
+#undef WAYLAND_DOWN
+        return mods;
+}
+
+static void wayland_modifiers_to(struct wayland_client *c, long slot)
+{
+        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_modifiers);
+
+        wayland_word(&e, wayland_serial(c));
+        wayland_word(&e, (unsigned long)wayland.mods[0]);
+        wayland_word(&e, (unsigned long)wayland.mods[1]);
+        wayland_word(&e, (unsigned long)wayland.mods[2]);
+        wayland_word(&e, (unsigned long)wayland.mods[3]);
+        wayland_end(&e);
+}
+
+static void wayland_keyboard_enter_one(struct wayland_client *c, long slot, struct wayland_surface *s, unsigned long serial)
+{
+        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_enter);
+        long count = 0;
+
+        wayland_word(&e, serial);
+        wayland_word(&e, s->id);
+        for (long key = 0; key < 128; key++)
+                count += (wayland.keys[key >> 3] >> (key & 7)) & 1;
+        wayland_word(&e, (unsigned long)count * 4);
+        for (long key = 0; key < 128; key++)
+                if ((wayland.keys[key >> 3] >> (key & 7)) & 1)
+                        wayland_word(&e, (unsigned long)key);
+        wayland_end(&e);
+        wayland_modifiers_to(c, slot);
+}
+
+/* The keys go to row (or to none, -1): the client it leaves is sent its leave, the one it enters its enter with the keys held. */
+WAYLAND_API void wayland_keyboard_to(long row)
+{
+        struct wayland_client *old = 0, *now = 0;
+        struct wayland_surface *was, *is;
+
+        if (!wayland.host || row == wayland.keyboard_row)
+                return;
+        was = wayland_row_surface(wayland.keyboard_row, &old);
+        is = wayland_row_surface(row, &now);
+        if (was)
+        {
+                unsigned long serial = wayland_serial(old);
+                long slots[WAYLAND_SEATS], count = wayland_seats(old, WLI_wl_keyboard, slots);
+
+                for (long at = 0; at < count; at++)
+                {
+                        struct wayland_event e = wayland_begin(old, old->objects[slots[at]].id, WLE_wl_keyboard_leave);
+
+                        wayland_word(&e, serial);
+                        wayland_word(&e, was->id);
+                        wayland_end(&e);
+                }
+        }
+        wayland.keyboard_row = is ? row : -1;
+        if (is)
+        {
+                unsigned long serial = wayland_serial(now);
+                long slots[WAYLAND_SEATS], count = wayland_seats(now, WLI_wl_keyboard, slots);
+
+                // A window is entered with no key held and the locks the compositor says: whatever was held went with the window
+                // that had the keys, whose release the compositor sent there.
+                for (long key = 0; key < 16; key++)
+                        wayland.keys[key] = 0;
+                wayland.mods[0] = wayland.mods[1] = wayland.mods[3] = 0;
+                wayland.mods[2] = (unsigned long)wayland.host->locks(wayland.host->context);
+                for (long at = 0; at < count; at++)
+                        wayland_keyboard_enter_one(now, slots[at], is, serial);
+        }
+}
+
+/*
+        A key of the keyboard, by its Linux code, pressed or let go, to the window that has the keys. A repeat is not sent:
+        the client repeats the key itself at the rate it was told, so a held key costs this nothing.
+*/
+WAYLAND_API void wayland_key(long row, long code, long pressed)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s;
+        unsigned long serial;
+        long time, slots[WAYLAND_SEATS], count;
+
+        if (!wayland.host || code < 1 || code > 0x2ff)
+                return;
+        if (code < 128)
+        {
+                if (pressed)
+                        wayland.keys[code >> 3] |= (unsigned char)(1u << (code & 7));
+                else
+                        wayland.keys[code >> 3] &= (unsigned char)~(1u << (code & 7));
+        }
+        if (row != wayland.keyboard_row || !(s = wayland_row_surface(row, &c)))
+                return;
+        time = wayland.host->now(wayland.host->context);
+        serial = wayland_serial(c);
+        count = wayland_seats(c, WLI_wl_keyboard, slots);
+        for (long at = 0; at < count; at++)
+        {
+                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_keyboard_key);
+
+                wayland_word(&e, serial);
+                wayland_word(&e, (unsigned long)time);
+                wayland_word(&e, (unsigned long)code);
+                wayland_word(&e, pressed ? WLN_wl_keyboard_key_state_pressed : WLN_wl_keyboard_key_state_released);
+                wayland_end(&e);
+        }
+        // The modifiers after the key that changed them, to each keyboard, when they did.
+        {
+                unsigned long depressed = wayland_depressed(), locked = (unsigned long)wayland.host->locks(wayland.host->context);
+
+                if (depressed != wayland.mods[0] || locked != wayland.mods[2])
+                {
+                        wayland.mods[0] = depressed;
+                        wayland.mods[2] = locked;
+                        for (long at = 0; at < count; at++)
+                                wayland_modifiers_to(c, slots[at]);
+                }
+        }
+        (void)s;
+}
+
+/* The keymap changed (a layout was set): each keyboard is sent the new one, and the modifiers. */
+WAYLAND_API void wayland_keymap_changed(void)
+{
+        if (!wayland.host)
+                return;
+        for (long client = 0; client < WAYLAND_CLIENTS; client++)
+        {
+                struct wayland_client *c = wayland.client[client];
+                long slots[WAYLAND_SEATS], count = c ? wayland_seats(c, WLI_wl_keyboard, slots) : 0;
+
+                for (long at = 0; at < count; at++)
+                {
+                        wayland_keyboard_keymap(c, slots[at]);
+                        wayland_modifiers_to(c, slots[at]);
+                }
+        }
+}
+
+/*
+        wl_seat: a pointer or a keyboard is made, kept in the client's list, and told where things are now (the keyboard
+        its keymap, and its enter if the keys are this client's already). Touch is not offered until the seat has it.
+*/
 static int wayland_seat_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
+        long slot = a ? a[0].slot : -1;
+
         switch (op)
         {
         case WLQ_wl_seat_get_pointer:
+                if (!wayland_seat_add(c, WLI_wl_pointer, c->objects[slot].id))
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many pointers");
+                if (wayland.pointer_row >= 0 && wayland.row_client[wayland.pointer_row] == c->slot)
+                {
+                        struct wayland_client *owner;
+                        struct wayland_surface *s = wayland_row_surface(wayland.pointer_row, &owner);
+
+                        if (s)
+                                wayland_pointer_enter_one(c, slot, s, wayland_serial(c));
+                }
+                return WAYLAND_OK;
         case WLQ_wl_seat_get_keyboard:
-                (void)a;
+                if (!wayland_seat_add(c, WLI_wl_keyboard, c->objects[slot].id))
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many keyboards");
+                wayland_keyboard_keymap(c, slot);
+                if (wayland.keyboard_row >= 0 && wayland.row_client[wayland.keyboard_row] == c->slot)
+                {
+                        struct wayland_client *owner;
+                        struct wayland_surface *s = wayland_row_surface(wayland.keyboard_row, &owner);
+
+                        if (s)
+                                wayland_keyboard_enter_one(c, slot, s, wayland_serial(c));
+                }
                 return WAYLAND_OK;
         case WLQ_wl_seat_get_touch:
                 return wayland_fail(c, self->id, WLN_wl_seat_error_missing_capability, "the seat has no touch");
         default:
                 return WAYLAND_OK;
         }
+}
+
+/* A pointer or a keyboard let go: out of its client's list. A pointer's set_cursor is taken and its image not yet shown. */
+static int wayland_seat_object_request(struct wayland_client *c, struct wayland_object *self, long op)
+{
+        if (op == WLQ_wl_pointer_release && self->iface == WLI_wl_pointer)
+                wayland_seat_remove(c, WLI_wl_pointer, self->id);
+        else if (op == WLQ_wl_keyboard_release && self->iface == WLI_wl_keyboard)
+                wayland_seat_remove(c, WLI_wl_keyboard, self->id);
+        return WAYLAND_OK;
 }
 
 /* ---- one request ---- */
@@ -2226,6 +2731,10 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wl_seat:
                         status = wayland_seat_request(c, o, op, a);
                         break;
+                case WLI_wl_pointer:
+                case WLI_wl_keyboard:
+                        status = wayland_seat_object_request(c, o, op);
+                        break;
                 case WLI_xdg_wm_base:
                         status = wayland_wm_base_request(c, o, op, a);
                         break;
@@ -2291,12 +2800,13 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
 
         if (wayland.host || !host || !host->alloc || !host->release || !host->map || !host->remap || !host->unmap ||
             !host->close || !host->row_open || !host->row_close || !host->row_picture || !host->row_title || !host->row_do ||
-            !host->row_facts || !host->screens || !host->now)
+            !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks)
                 return -1;
         for (unsigned long at = 0; at < sizeof wayland; at++)
                 clear[at] = 0;
         for (long row = 0; row < WAYLAND_ROWS; row++)
                 wayland.row_client[row] = wayland.row_surface[row] = -1;
+        wayland.pointer_row = wayland.keyboard_row = -1;
         wayland.host = host;
         wayland.screens = host->screens(host->context, wayland.screen, WAYLAND_SCREENS);
         if (wayland.screens < 0)
