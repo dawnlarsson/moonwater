@@ -963,6 +963,160 @@ static void compositor_draw(const struct compositor_target *t, const struct comp
         compositor_draw_with(t, frame, compositor_radius(frame));
 }
 
+#ifdef MOONWATER_GPU_C
+/*
+        The GPU's compose (src/canvas/gpu.c): frames as the records of its scene, which draws them in order as compositor_draw does -- a frame's
+        pictures copied, its line filled, and in each round corner's square the line's colour and then the picture mixed by a table of covers
+        (compositor_corner_rows' own arithmetic, made once and kept in the GPU's buffer). A frame it cannot draw as the processor does
+        (the panel, a picture scaled, a line lit, a close button, a preview) makes the whole answer none, and the frames are drawn by the processor.
+*/
+#define COMPOSITOR_GPU_TABLES 128
+struct compositor_gscene
+{
+        unsigned int *ops;                  // the records, in the GPU's buffer
+        unsigned int count, room, width, height; // and the picture they are for
+        unsigned char *tables;              // the cover tables' pool, in the GPU's buffer, its size and its place from the buffer's start
+        unsigned int tables_size, tables_at, tables_used, kept;
+        struct
+        {
+                int r, b, corner, content;
+                unsigned int at;
+        } table[COMPOSITOR_GPU_TABLES];
+};
+static struct compositor_gscene compositor_gscene;
+
+// The cover table of a corner's square (r by r bytes, rows from the square's top): the line's outside (content 0), or the picture's inside it (content 1), as
+// compositor_corner_rows reads the masks, flipped and mirrored so that the square is read from its own top left. Its place from the buffer's start, 0 for none.
+static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        int ri = r > b ? r - b : 0, right = corner & 1, down = (corner & 2) != 0;
+        const unsigned char *outer = right ? compositor_corner_mirror(r) : compositor_corner_mask(r);
+        const unsigned char *inner = ri ? (right ? compositor_corner_mirror(ri) : compositor_corner_mask(ri)) : 0;
+        unsigned char *table;
+
+        for (unsigned int k = 0; k < g->kept; k++)
+                if (g->table[k].r == r && g->table[k].b == b && g->table[k].corner == corner && g->table[k].content == content)
+                        return g->table[k].at;
+        if (g->kept == COMPOSITOR_GPU_TABLES || g->tables_used + (unsigned int)(r * r) > g->tables_size)
+                return 0;
+        table = g->tables + g->tables_used;
+        for (int row = 0; row < r; row++)
+                for (int col = 0; col < r; col++)
+                {
+                        int my = down ? r - 1 - row : row;
+                        unsigned char cover = outer[my * r + col];
+
+                        if (content && b)
+                        {
+                                int iy = my - b, ix = right ? col : col - b;
+
+                                cover = inner && iy >= 0 && iy < ri && ix >= 0 && ix < ri ? inner[iy * ri + ix] : 0;
+                        }
+                        table[row * r + col] = cover;
+                }
+        g->table[g->kept].r = r, g->table[g->kept].b = b, g->table[g->kept].corner = corner, g->table[g->kept].content = content;
+        g->table[g->kept++].at = g->tables_at + g->tables_used;
+        g->tables_used += (unsigned int)(r * r + 15) & ~15u;
+        return g->table[g->kept - 1].at;
+}
+
+// One record: the rectangle cut to the picture, none when nothing is left. A fill writes the colour; a copy takes the picture's pixels from the frame, at the
+// rectangle's own corner; a mix is memory_mix_u32_row by the cover table at cover (pitch r), the ink the colour or, with a frame, the picture.
+static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y1, unsigned int colour, const struct compositor_frame *frame, unsigned int cover, int r)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        int cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0, cx1 = x1 > (int)g->width ? (int)g->width : x1, cy1 = y1 > (int)g->height ? (int)g->height : y1;
+        unsigned int *op = g->ops + 8 * g->count;
+
+        if (cx1 <= cx0 || cy1 <= cy0)
+                return;
+        op[0] = kind, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
+        op[5] = colour, op[6] = op[7] = 0;
+        if (frame)
+        {
+                positive at = gpu_va(frame->pixels) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
+
+                if (kind == 4)
+                        op[5] = (unsigned int)at, op[6] = (unsigned int)(at >> 32), op[7] = (unsigned int)frame->pitch;
+                else
+                        op[0] |= (unsigned int)frame->pitch << 16, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32);
+        }
+        if (kind == 5)
+                op[0] |= (unsigned int)r << 8, op[5] = cover + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), op[6] = frame ? op[6] : colour;
+        g->count++;
+}
+
+// A frame as compositor_draw_with draws it (a window with a picture at its own size and nothing over it): false if it is not one, or the pools are full.
+static b32 compositor_gpu_frame(const struct compositor_frame *f)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        int x = f->x, y = f->y, w = f->width, h = f->height, ox, oy, ow, oh, r = compositor_radius(f), b, ri;
+
+        if (f->builtin || !f->pixels || compositor_scaled(f) || f->lit || f->close || f->preview[0] || f->preview[1] || f->preview[2] || f->preview[3] ||
+            f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || !gpu_va(f->pixels) || g->count + 40 > g->room)
+                return false;
+        compositor_outline(f, &ox, &oy, &ow, &oh);
+        b = x - ox, ri = r > b ? r - b : 0;
+        if (b)
+        {
+                compositor_gpu_rect(0, ox + r, oy, ox + ow - r, oy + b, f->edge, 0, 0, 0);
+                compositor_gpu_rect(0, ox + r, y + h, ox + ow - r, y + h + b, f->edge, 0, 0, 0);
+                compositor_gpu_rect(0, ox, oy + r, ox + b, oy + oh - r, f->edge, 0, 0, 0);
+                compositor_gpu_rect(0, x + w, oy + r, x + w + b, oy + oh - r, f->edge, 0, 0, 0);
+        }
+        if (!r)
+        {
+                compositor_gpu_rect(4, x, y, x + w, y + h, 0, f, 0, 0);
+                return true;
+        }
+        compositor_gpu_rect(4, x + ri, y, x + w - ri, y + h, 0, f, 0, 0);
+        compositor_gpu_rect(4, x, y + ri, x + ri, y + h - ri, 0, f, 0, 0);
+        compositor_gpu_rect(4, x + w - ri, y + ri, x + w, y + h - ri, 0, f, 0, 0);
+        for (int corner = 0; corner < 4; corner++)
+        {
+                int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
+                int sx1 = cx > x ? cx : x, sx2 = cx + r < x + w ? cx + r : x + w, sy1 = cy > y ? cy : y, sy2 = cy + r < y + h ? cy + r : y + h;
+                unsigned int edge_table, content_table;
+
+                if (f->square & (1 << corner))
+                {
+                        if (b)
+                                compositor_gpu_rect(0, cx, cy, cx + r, cy + r, f->edge, 0, 0, 0);
+                        compositor_gpu_rect(4, sx1, sy1, sx2, sy2, 0, f, 0, 0);
+                        continue;
+                }
+                edge_table = b ? compositor_gpu_table(r, b, corner, 0) : 0;
+                content_table = ri ? compositor_gpu_table(r, b, corner, 1) : 0;
+                if ((b && !edge_table) || (ri && !content_table))
+                        return false;
+                if (b)
+                        compositor_gpu_rect(5, cx, cy, cx + r, cy + r, f->edge & 0xffffffu, 0, edge_table, r);
+                if (ri && sx2 > sx1 && sy2 > sy1)
+                        compositor_gpu_rect(5, sx1, sy1, sx2, sy2, 0, f, content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
+        }
+        return true;
+}
+
+// The frames, in order, over a ground: the scene's records; false (and none) if any is not one the GPU draws.
+static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned int count, unsigned int ground)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+
+        g->count = 0;
+        if (g->kept > COMPOSITOR_GPU_TABLES / 2) // the tables of the last scenes let go when the pool is half full: a scene is under that
+                g->kept = 0, g->tables_used = 0;
+        compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
+        for (unsigned int k = 0; k < count; k++)
+                if (!compositor_gpu_frame(&frames[k]))
+                {
+                        g->count = 0;
+                        return false;
+                }
+        return true;
+}
+#endif
+
 /*
         The tabs of a panel as frames of their own, each its tab's rectangle
         and nothing of the band between them: shapes the scene draws when

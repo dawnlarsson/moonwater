@@ -118394,6 +118394,9 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #include "../src/canvas/screen.c"
 #include "../src/canvas/font.c"
 #define SHELL_NO_WAYLAND 1 // the shim is on in a build, and these lanes are without the shell's signals it needs; CHECK_wayland holds it
+#ifdef CHECK_gpu_kit
+#include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
+#endif
 #include "../src/canvas/compositor.c"
 #include "../src/canvas/ui/features.h"
 #if MOONWATER_UI_ANY
@@ -186952,22 +186955,16 @@ b32 main(void)
         // anywhere in the source; against memory_copy_rect_u32 on the processor over a random picture.
         {
                 enum { SW = 400, SH = 300, SP = 416, IMAGES = 40, IROUNDS = 12 };
-                positive img_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20), up_va = 0x2000000000ull;
+                positive img_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20), up_va = 0;
                 unsigned int address_to gpu_img = (unsigned int address_to)((p8 address_to)gpu.at + img_at), address_to shared;
-                p64 up[3] = {0, 1 << 20, 0xc}, va[8] = {0, 1 | 14ull << 32, 0x2000000000ull, 0, 1 << 20};
                 long fd = system_call_2(syscall(memfd_create), (positive) "mw-window", 1), mapped = -1;
                 positive image_bad = 0;
 
                 if (fd >= 0 && system_call_2(syscall(ftruncate), (positive)fd, 1 << 20) == 0)
                         mapped = system_call_6(syscall(mmap), 0, 1 << 20, 3, 1, (positive)fd, 0);
                 shared = (unsigned int address_to)mapped;
-                up[0] = (p64)shared;
-                if (mapped < 0 && mapped > -4096)
-                        up_va = 0;
-                else if (!gpu_io(3u, 0x11, 24, up))
-                        up_va = 0;
-                else
-                        va[0] = up[2] >> 32, up_va = gpu_io(1u, 8, 64, va) ? up_va : 0;
+                if (!(mapped < 0 && mapped > -4096) && gpu_map(shared, 1 << 20))
+                        up_va = gpu_va(shared);
                 check("gpu images: the memfd's pages are a userptr buffer", up_va != 0);
                 for (positive i = 0; i < (positive)SP * SH; i++)
                         gpu_img[i] = gpu_random();
@@ -187085,6 +187082,89 @@ b32 main(void)
                                                 if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++failures, ++mix_bad) < 6)
                                                         string_format(log, "  FAIL gpu mixes round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
                                                                       (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                        }
+                        }
+                }
+        }
+
+        // Frames: the compositor's own windows (a picture in a memfd's pages, a radius, a line, corners kept square, any place, overlapping) composed by the GPU
+        // from compositor_gpu_frames against compositor_draw on the processor over a ground: the whole picture, and a damage rectangle drawn alone.
+        {
+                enum { FRAMES = 6, FROUNDS = 40 };
+                positive tables_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20) + (6 << 20);
+                struct compositor_frame frames[FRAMES];
+                long fd = system_call_2(syscall(memfd_create), (positive) "mw-window", 1), mapped = -1;
+                unsigned int address_to region;
+                struct compositor_target reference;
+                positive frame_bad = 0;
+
+                if (fd >= 0 && system_call_2(syscall(ftruncate), (positive)fd, 4 << 20) == 0)
+                        mapped = system_call_6(syscall(mmap), 0, 4 << 20, 3, 1, (positive)fd, 0);
+                region = (unsigned int address_to)mapped;
+                check("gpu frames: the pictures are userptr buffers", !(mapped < 0 && mapped > -4096) && gpu_map(region, 4 << 20));
+                memory_zero(&compositor_gscene, sizeof(compositor_gscene));
+                compositor_gscene.ops = ops, compositor_gscene.room = 512, compositor_gscene.width = 696, compositor_gscene.height = PH;
+                compositor_gscene.tables = (unsigned char address_to)((p8 address_to)gpu.at + tables_at), compositor_gscene.tables_at = (unsigned int)tables_at;
+                compositor_gscene.tables_size = 1 << 20;
+                reference = (struct compositor_target){gpu_kit_want, PP, 696, PH, 0, 0, 696, PH, 0, 0, 0};
+                for (int round = 0; round < FROUNDS; round++)
+                {
+                        unsigned int ground = gpu_random() | 0xff000000u, used = 0;
+                        int count = 2 + (int)(gpu_random() % (FRAMES - 1));
+
+                        for (int k = 0; k < count; k++)
+                        {
+                                struct compositor_frame *f = &frames[k];
+                                unsigned int pitch;
+
+                                memory_zero(f, sizeof(*f));
+                                f->width = 30 + (int)(gpu_random() % 260), f->height = 24 + (int)(gpu_random() % 200);
+                                f->x = (int)(gpu_random() % (696 + 60)) - 50, f->y = (int)(gpu_random() % (PH + 60)) - 50;
+                                f->scale = 100, f->radius = gpu_random() % 4 ? (int)(gpu_random() % 26) : 0, f->line = gpu_random() % 3 ? (int)(gpu_random() % 4) : 0;
+                                f->edge = gpu_random() % 5 ? (gpu_random() | 0xff000000u) : gpu_random(), f->square = gpu_random() % 3 ? 0 : (int)(gpu_random() % 16);
+                                pitch = (unsigned int)f->width + gpu_random() % 8;
+                                f->pitch = pitch, f->pixels = region + used;
+                                for (positive i = 0; i < (positive)pitch * (unsigned int)f->height; i++)
+                                        region[used + i] = gpu_random();
+                                used += (pitch * (unsigned int)f->height + 15) & ~15u;
+                        }
+                        memory_fill_u32_rect(gpu_kit_want, PP, 696, PH, ground);
+                        for (int k = 0; k < count; k++)
+                                compositor_draw(&reference, &frames[k]);
+                        for (positive i = 0; i < (positive)PP * PH; i++)
+                                pic[i] = 0;
+                        check("gpu frames: the frames are drawn by the GPU", compositor_gpu_frames(frames, (unsigned int)count, ground));
+                        if (!gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH))
+                        {
+                                check("gpu frames: the scene finishes", false);
+                                return test_report(null);
+                        }
+                        for (int y = 0; y < PH; y++)
+                                for (int x = 0; x < 696; x++)
+                                {
+                                        checks++;
+                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++failures, ++frame_bad) < 6)
+                                                string_format(log, "  FAIL gpu frames round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                }
+                        // a part: the rounded-out rectangle is the whole's, the rest untouched
+                        {
+                                unsigned int x0 = gpu_random() % 600, y0 = gpu_random() % (PH - 10), x1 = x0 + 1 + gpu_random() % 90, y1 = y0 + 1 + gpu_random() % 60;
+                                unsigned int rx0 = (x0 >> 6) << 6, rx1 = ((x1 + 63) >> 6) << 6, ry0 = (y0 >> 2) << 2, ry1 = ((y1 + 3) >> 2) << 2;
+
+                                x1 = x1 > 696 ? 696 : x1, y1 = y1 > (unsigned int)PH ? (unsigned int)PH : y1;
+                                rx1 = rx1 > 696 ? 696 : rx1, ry1 = ry1 > (unsigned int)PH ? (unsigned int)PH : ry1;
+                                for (positive i = 0; i < (positive)PP * PH; i++)
+                                        pic[i] = 0;
+                                gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, x0, y0, x1, y1);
+                                for (unsigned int y = 0; y < (unsigned int)PH; y++)
+                                        for (unsigned int x = 0; x < 696; x++)
+                                        {
+                                                int inside = x >= rx0 && x < rx1 && y >= ry0 && y < ry1;
+
+                                                checks++;
+                                                if (pic[(positive)y * PP + x] != (inside ? gpu_kit_want[(positive)y * PP + x] : 0) && (++failures, ++frame_bad) < 6)
+                                                        string_format(log, "  FAIL gpu frames part %p: pixel %p,%p is %p\n", (positive)round, (positive)x, (positive)y, (positive)pic[(positive)y * PP + x]);
                                         }
                         }
                 }

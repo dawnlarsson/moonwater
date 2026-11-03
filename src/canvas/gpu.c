@@ -1,3 +1,5 @@
+#ifndef MOONWATER_GPU_C
+#define MOONWATER_GPU_C
 // Canvas on the GPU: AMD compute, raw. One buffer holds the packets, the arguments, the kernel and the pixels.
 
 #define GPU_IO(dir, n, size) ((dir) << 30 | (size) << 16 | 0x6400u | (0x40 + (n)))
@@ -716,6 +718,35 @@ static b32 gpu_start(positive bytes)
         return true;
 }
 
+// Pages of the processor's (a window's picture: a memfd's, mapped shared) the GPU can reach, as userptr buffers at addresses of their own: gpu_map widens
+// [addr, addr + size) to pages and maps them; gpu_va answers the GPU's address of a pointer into them, 0 for one that is not.
+static struct { positive from, to, va; } gpu_maps[64];
+static unsigned int gpu_map_count;
+static positive gpu_map_next = 0x2000000000ull;
+
+static b32 gpu_map(const void *addr, positive size)
+{
+        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull;
+        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | 14ull << 32, gpu_map_next, 0, to - from};
+
+        if (gpu_map_count == 64 || !gpu_io(3u, 0x11, 24, up))
+                return false;
+        va[0] = up[2] >> 32;
+        if (!gpu_io(1u, 8, 64, va))
+                return false;
+        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count++].va = gpu_map_next;
+        gpu_map_next += to - from;
+        return true;
+}
+
+static positive gpu_va(const void *pointer)
+{
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if ((positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to)
+                        return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
+        return 0;
+}
+
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
 // s to d, 1 fill d with v, 2 tone v over d, 3 glass: s over g into d (v the light side, x0 y0 where the rect is, for the grain), 4 a scene, 5 with boxes (both by clang, any width), 6 by hand with or without boxes for a width and a pitch of a multiple of 4 (gpu_scene picks).
 struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows; };
@@ -792,3 +823,4 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
                 a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
         return (a->op == 6 || !hand) && gpu_run(); // text and a box with changes of cover are the kernel by hand's alone
 }
+#endif
