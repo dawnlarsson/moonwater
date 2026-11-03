@@ -3746,7 +3746,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 
         if (!seg)
         {
-                struct ui_box hair = {ui_q8(ui, c->x), ui_q8(ui, c->y + height), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + height + 1), 0, 0};
+                struct ui_box hair = {ui_q8(ui, c->x), ui_q8(ui, c->y + height), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + height) + ui_stroke(ui), 0, 0};
 
                 ui_kit_fill(ui, &hair, ui_role(UI_OUTLINE_VARIANT), null);
         }
@@ -4467,7 +4467,7 @@ static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to 
                 if (c->label)
                 {
                         ui_control_label(ui, c, 24, 24, UI_TITLE_LARGE, ui_role(UI_ON_SURFACE));
-                        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y + 68), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + 69), 0, 0},
+                        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y + 68), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + 68) + ui_stroke(ui), 0, 0},
                                     ui_role(UI_OUTLINE_VARIANT), null);
                 }
         }
@@ -4727,7 +4727,7 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
                                  ui_role(c->role), 0, c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
                 break;
         case UI_RULE:
-                ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + 1), 0, 0},
+                ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y) + ui_stroke(ui), 0, 0},
                             ui_role(UI_OUTLINE_VARIANT), null);
                 break;
         }

@@ -138590,6 +138590,26 @@ static fn field_check(struct ui address_to wui)
                 check("chevron: a choice row's chevron is drawn at 50, 75, 100 and 200 percent", drawn == 4);
                 wui->scale = scale_was;
         }
+        // A rule is a hairline: one device pixel at 50 and 75 percent too, at the top of the row it is in (its first row is 0).
+        {
+                static const int scales[3] = {50, 75, 100};
+                static struct ui_control rule;
+                int scale_was = wui->scale, painted = 0;
+
+                memory_zero(&rule, sizeof(rule));
+                rule.kind = UI_RULE, rule.x = 0, rule.y = 0, rule.w = 100, rule.h = 1;
+                for (int s = 0; s < 3; s++)
+                {
+                        unsigned int *shown = (unsigned int address_to)pixels;
+
+                        wui->scale = scales[s];
+                        memory_fill_u32(shown, 400 * 100, 0x111113);
+                        ui_control_draw(wui, &rule);
+                        painted += shown[5] != 0x111113u;
+                }
+                check("rule: a hairline is drawn at its row's top at 50, 75 and 100 percent", painted == 3);
+                wui->scale = scale_was;
+        }
         ui_text_close(&t);
         compositor_call(syscall(munmap), (positive)pixels, 400 * 100 * 4, 0, 0, 0, 0);
 }
