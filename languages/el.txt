@@ -42,9 +42,14 @@ menu_find	1fa6	Εύρεση
 menu_go_to_line	bc96	Μετάβαση στη γραμμή
 menu_paste	6854	Επικόλληση
 menu_redo	ac45	Επανάληψη
+menu_reset_zoom	1b0f	Επαναφορά ζουμ
 menu_select_all	f6f6	Επιλογή όλων
 menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
+menu_zoom_in	5bcf	Μεγέθυνση
+menu_zoom_out	9234	Σμίκρυνση
+terminal_exited_press_to_close	a8cf	τερματίστηκε με κατάσταση %d, πατήστε ένα πλήκτρο για κλείσιμο
+terminal_press_to_close	080d	πατήστε ένα πλήκτρο για κλείσιμο
 tray_am	0d13	πμ
 tray_charging	60c2	φορτίζει
 tray_day_fri	fbe8	Παρ

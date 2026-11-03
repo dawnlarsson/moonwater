@@ -42,9 +42,14 @@ menu_find	1fa6	&Zoeken
 menu_go_to_line	bc96	&Ga naar regel
 menu_paste	6854	P&lakken
 menu_redo	ac45	Op&nieuw
+menu_reset_zoom	1b0f	Zoom &herstellen
 menu_select_all	f6f6	&Alles selecteren
 menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
+menu_zoom_in	5bcf	&Inzoomen
+menu_zoom_out	9234	&Uitzoomen
+terminal_exited_press_to_close	a8cf	beëindigd met status %d, druk op een toets om te sluiten
+terminal_press_to_close	080d	druk op een toets om te sluiten
 tray_am	0d13	a.m.
 tray_charging	60c2	laadt op
 tray_day_fri	fbe8	vr

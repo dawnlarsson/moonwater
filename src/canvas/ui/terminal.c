@@ -2474,13 +2474,13 @@ static fn terminal_menu_open(int x, int y, b32 touch)
         struct ui_popmenu address_to m = &terminal_menu.menu;
 
         m->count = 0;
-        ui_popmenu_add(m, "&Copy", "Ctrl+Shift+C", terminal.selecting ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_COPY);
-        ui_popmenu_add(m, "&Paste", "Ctrl+Shift+V", 0, TERMINAL_MENU_PASTE);
-        ui_popmenu_add(m, "Select &All", null, 0, TERMINAL_MENU_ALL);
+        ui_popmenu_add(m, WORDS(menu_copy), "Ctrl+Shift+C", terminal.selecting ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_COPY);
+        ui_popmenu_add(m, WORDS(menu_paste), "Ctrl+Shift+V", 0, TERMINAL_MENU_PASTE);
+        ui_popmenu_add(m, WORDS(menu_select_all), null, 0, TERMINAL_MENU_ALL);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, "Zoom &In", "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
-        ui_popmenu_add(m, "Zoom &Out", "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
-        ui_popmenu_add(m, "&Reset Zoom", "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET);
+        ui_popmenu_add(m, WORDS(menu_zoom_in), "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
+        ui_popmenu_add(m, WORDS(menu_zoom_out), "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
+        ui_popmenu_add(m, WORDS(menu_reset_zoom), "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET);
         ui_popup_open(&terminal_menu, &terminal.own, &terminal.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
@@ -2987,22 +2987,27 @@ static void terminal_said(b32 reading, string_address what)
         compositor_kmsg(line, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), what);
 }
 
-// What is said after a program this terminal was asked to run has ended: how it did, and what closes the window.
+// What is said after a program this terminal was asked to run has ended: how it did, and what closes the window. The line is
+// the table's words in [ ] after a break from what was on the screen; here and not in terminal_exit_said so a check can ask it.
+static positive terminal_exit_line(p8 address_to line, positive room)
+{
+        positive at;
+
+        string_copy(line, (string_address) "\x1b[0m\r\n[");
+        at = string_length(line);
+        at += language_format((char address_to)line + at, room - at,
+                              (term_exit_status & 0x7f) ? WORDS(terminal_press_to_close) : WORDS(terminal_exited_press_to_close),
+                              (long)((term_exit_status >> 8) & 0xff));
+        line[at++] = ']';
+        line[at] = 0;
+        return at;
+}
+
 static fn terminal_exit_said(void)
 {
-        p8 line[96] = "\x1b[0m\r\n[";
-        positive at = string_length(line);
+        p8 line[256];
+        positive at = terminal_exit_line(line, sizeof(line) - 1);
 
-        if (!(term_exit_status & 0x7f))
-        {
-                string_copy(line + at, (string_address) "exited with status ");
-                at += string_length(line + at);
-                at += positive_into_string(line + at, (term_exit_status >> 8) & 0xff);
-                string_copy(line + at, (string_address) ", ");
-                at += 2;
-        }
-        string_copy(line + at, (string_address) "press a key to close]");
-        at += string_length(line + at);
         cursor_hide();
         term_bytes(line, at);
 }
@@ -3644,6 +3649,8 @@ static b32 terminal_run(b32 reading)
 
         terminal.reading = reading;
         terminal_app.title = reading ? (string_address) "kernel log" : (string_address)terminal_label;
+        // The log's tab is the kit's to name (and to say again in a new language); a terminal's is its program's, as it runs.
+        terminal_app.own_title = !reading;
         terminal_app.name = reading ? (string_address) "klog" : (string_address) "terminal";
         terminal_app.missing = reading ? (string_address) "klog: no window: no compositor, or no row free in its table\n"
                                        : (string_address) "terminal: no window: no compositor, or no row free in its table\n";

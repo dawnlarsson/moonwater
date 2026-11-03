@@ -42,9 +42,14 @@ menu_find	1fa6	&Procurar
 menu_go_to_line	bc96	&Ir para a linha
 menu_paste	6854	Co&lar
 menu_redo	ac45	&Refazer
+menu_reset_zoom	1b0f	&Redefinir zoom
 menu_select_all	f6f6	Selecionar t&udo
 menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
+menu_zoom_in	5bcf	&Aumentar zoom
+menu_zoom_out	9234	&Diminuir zoom
+terminal_exited_press_to_close	a8cf	terminou com status %d, pressione uma tecla para fechar
+terminal_press_to_close	080d	pressione uma tecla para fechar
 tray_am	0d13	AM
 tray_charging	60c2	carregando
 tray_day_fri	fbe8	sex

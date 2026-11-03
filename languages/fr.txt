@@ -42,9 +42,14 @@ menu_find	1fa6	Rec&hercher
 menu_go_to_line	bc96	Aller à la l&igne
 menu_paste	6854	Co&ller
 menu_redo	ac45	&Rétablir
+menu_reset_zoom	1b0f	Réinitialiser le &zoom
 menu_select_all	f6f6	&Tout sélectionner
 menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
+menu_zoom_in	5bcf	Zoom a&vant
+menu_zoom_out	9234	Zoom a&rrière
+terminal_exited_press_to_close	a8cf	terminé avec le code %d, appuyez sur une touche pour fermer
+terminal_press_to_close	080d	appuyez sur une touche pour fermer
 tray_am	0d13	AM
 tray_charging	60c2	en charge
 tray_day_fri	fbe8	ven

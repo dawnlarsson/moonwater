@@ -1,3 +1,17 @@
-# English literals of a converted source file that stay, because they are text no person reads in a window and the check cannot tell
+# English literals of a converted source file that stay, because they are text no person reads in a window (pieces of a line for
+# the machine's log, the table's own English that a lookup shows) and the check cannot tell
 # from text by what stands round them. One a line: the file, a tab, the literal as it is written between its quotes. Keys,
 # verbs, options, paths, log lines, assembly and static asserts need no line here: the check knows them by their place and shape.
+src/canvas/ui/launcher.c	Settings
+src/canvas/ui/launcher.c	settings preferences options
+src/canvas/ui/launcher.c	Terminal
+src/canvas/ui/launcher.c	terminal shell console
+src/canvas/ui/launcher.c	Kernel log
+src/canvas/ui/launcher.c	kernel log klog dmesg messages
+src/canvas/ui/terminal.c	cannot use the font
+src/canvas/ui/terminal.c	text size
+src/canvas/ui/terminal.c	px, cell
+src/canvas/ui/terminal.c	by
+src/canvas/ui/terminal.c	px
+src/canvas/ui/terminal.c	klog pid
+src/canvas/ui/terminal.c	terminal pid

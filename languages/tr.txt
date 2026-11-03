@@ -42,9 +42,14 @@ menu_find	1fa6	&Bul
 menu_go_to_line	bc96	S&atıra Git
 menu_paste	6854	Ya&pıştır
 menu_redo	ac45	&Yinele
+menu_reset_zoom	1b0f	Yakınlaştırmayı Sıfır&la
 menu_select_all	f6f6	&Tümünü Seç
 menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
+menu_zoom_in	5bcf	&Yakınlaştır
+menu_zoom_out	9234	&Uzaklaştır
+terminal_exited_press_to_close	a8cf	%d durumuyla çıktı, kapatmak için bir tuşa basın
+terminal_press_to_close	080d	kapatmak için bir tuşa basın
 tray_am	0d13	ÖÖ
 tray_charging	60c2	şarj oluyor
 tray_day_fri	fbe8	Cum

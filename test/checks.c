@@ -143058,6 +143058,9 @@ static const int lcheck_menus[][12] = {
     // The editor's: the kit's seven, then find, go to a line and the comment.
     {LANGUAGE_menu_cut, LANGUAGE_menu_copy, LANGUAGE_menu_paste, LANGUAGE_menu_delete, LANGUAGE_menu_undo, LANGUAGE_menu_redo,
      LANGUAGE_menu_select_all, LANGUAGE_menu_find, LANGUAGE_menu_go_to_line, LANGUAGE_menu_toggle_comment, -1},
+    // The terminal's: copy, paste, select all, and the zoom.
+    {LANGUAGE_menu_copy, LANGUAGE_menu_paste, LANGUAGE_menu_select_all, LANGUAGE_menu_zoom_in, LANGUAGE_menu_zoom_out,
+     LANGUAGE_menu_reset_zoom, -1},
 };
 
 // Whether a word of a row's choices is one the window shows as words (not a number, a layout code, a language or a display mode).
@@ -143220,8 +143223,8 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c"};
-static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c", "src/canvas/ui/editor.c", "src/canvas/ui/launcher.c",
-                                                         "src/canvas/ui/taskbar.c"};
+static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
+                                                         "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -143258,7 +143261,8 @@ static b32 lcheck_context(const char address_to stmt, positive length)
         static const char address_to const names[] = {
             "asm", "ASM_", "_Static_assert", "string_equals(", "memory_compare(", "string_has_prefix(", "string_compare", "memory_search(",
             "setting_by_path(", "compositor_word(", "ui_argument(", "program_argument(", "string_table_find(", "word_is(", "string_starts(",
-            "compositor_kmsg(", "string_format(log", "log_direct(", "log_error", "host_say(", ".missing =", ".nofont =", ".title ="};
+            "compositor_kmsg(", "string_format(log", "log_direct(", "log_error", "host_say(", ".missing =", ".nofont =", ".title =",
+            "terminal_said("};
 
         for (positive k = 0; k < sizeof(names) / sizeof(names[0]); k++)
                 if (lcheck_has(stmt, length, names[k]))
@@ -143290,6 +143294,9 @@ static b32 lcheck_not_text(const char address_to lit, positive length)
                 return true;
         if (blank)
                 return false;
+        // A key of a file the program reads (MemTotal:, PATH=) ends in a colon or an equal sign.
+        if (lit[length - 1] == ':' || lit[length - 1] == '=')
+                return true;
         // A word with no blank: a lower case one is a key or a verb, a capitalised one with lower case after it is a word a person reads.
         return !(lit[0] >= 'A' && lit[0] <= 'Z' && length > 2 && lit[1] >= 'a' && lit[1] <= 'z');
 }
@@ -143299,16 +143306,27 @@ static b32 lcheck_kept(const char address_to keep, positive keep_size, const cha
 {
         positive file_length = string_length((string_address)file);
 
+        // Blanks at either end of a literal or of a line do not count: a piece of a log line starts or ends with one.
+        while (length && lit[0] == ' ')
+                lit++, length--;
+        while (length && lit[length - 1] == ' ')
+                length--;
         for (positive at = 0; at < keep_size;)
         {
-                positive stop = at;
+                positive stop = at, from = at + file_length + 1;
 
                 while (stop < keep_size && keep[stop] != '\n')
                         stop++;
-                if (stop - at == file_length + 1 + length && !memory_compare(keep + at, file, file_length) && keep[at + file_length] == '\t' &&
-                    !memory_compare(keep + at + file_length + 1, lit, length))
+                while (stop > at && keep[stop - 1] == ' ')
+                        stop--;
+                while (from < stop && keep[from] == ' ')
+                        from++;
+                if (stop > from && stop - from == length && !memory_compare(keep + at, file, file_length) && keep[at + file_length] == '\t' &&
+                    !memory_compare(keep + from, lit, length))
                         return true;
-                at = stop + 1;
+                while (at < keep_size && keep[at] != '\n')
+                        at++;
+                at++;
         }
         return false;
 }
@@ -143737,6 +143755,55 @@ static fn taskbar_words_check(void)
 }
 #endif
 
+/*
+        The terminal's words: the line printed in its window when a program it was asked to run has ended (how it did, if it
+        exited, and what closes the window). English is the line it printed before the table, written out here as the reference
+        over every exit status; a language taken says it in that language.
+*/
+static positive terminal_exit_reference(p8 address_to line)
+{
+        positive at;
+
+        string_copy((string_address)line, (string_address) "\x1b[0m\r\n[");
+        at = string_length(line);
+        if (!(term_exit_status & 0x7f))
+        {
+                string_copy((string_address)line + at, (string_address) "exited with status ");
+                at += string_length(line + at);
+                at += positive_into_string((string_address)line + at, (term_exit_status >> 8) & 0xff);
+                string_copy((string_address)line + at, (string_address) ", ");
+                at += 2;
+        }
+        string_copy((string_address)line + at, (string_address) "press a key to close]");
+        return at + string_length(line + at);
+}
+
+static fn terminal_words_check(void)
+{
+        p8 now[256], before[256];
+        positive wrong = 0, made = 0;
+        int saved = (int)term_exit_status;
+
+        language_take(0);
+        for (unsigned int status = 0; status < 0x10000; status += 0x1d)
+        {
+                term_exit_status = (int)status;
+                wrong += terminal_exit_line(now, sizeof(now) - 1) != terminal_exit_reference(before) ||
+                         string_compare_max((string_address)now, (string_address)before, sizeof(now));
+                made++;
+        }
+        check("terminal words: the line printed when its program ended is what it was, for every exit status and signal", made > 2000 && !wrong);
+        language_take('d' | 'e' << 8);
+        term_exit_status = 3 << 8;
+        terminal_exit_line(now, sizeof(now) - 1);
+        check("terminal words: in German it says so, with the status", !string_compare_max((string_address)now, (string_address) "\x1b[0m\r\n[beendet mit Status 3, zum Schlie\xc3\x9f" "en eine Taste dr\xc3\xbc" "cken]", sizeof(now)));
+        term_exit_status = 9;
+        terminal_exit_line(now, sizeof(now) - 1);
+        check("terminal words: and a program a signal ended gets the line without a status", !string_compare_max((string_address)now, (string_address) "\x1b[0m\r\n[zum Schlie\xc3\x9f" "en eine Taste dr\xc3\xbc" "cken]", sizeof(now)));
+        language_take(0);
+        term_exit_status = saved;
+}
+
 static fn language_check(void)
 {
         font_face regular, bold;
@@ -143768,6 +143835,7 @@ static fn language_check(void)
 #if MOONWATER_UI_TASKBAR
         taskbar_words_check();
 #endif
+        terminal_words_check();
 }
 #endif
 

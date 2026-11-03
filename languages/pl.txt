@@ -42,9 +42,14 @@ menu_find	1fa6	Zna&jdź
 menu_go_to_line	bc96	Prz&ejdź do wiersza
 menu_paste	6854	Wk&lej
 menu_redo	ac45	&Ponów
+menu_reset_zoom	1b0f	&Resetuj powiększenie
 menu_select_all	f6f6	&Zaznacz wszystko
 menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
+menu_zoom_in	5bcf	&Powiększ
+menu_zoom_out	9234	Pom&niejsz
+terminal_exited_press_to_close	a8cf	zakończono ze statusem %d, naciśnij klawisz, aby zamknąć
+terminal_press_to_close	080d	naciśnij klawisz, aby zamknąć
 tray_am	0d13	AM
 tray_charging	60c2	ładowanie
 tray_day_fri	fbe8	pt

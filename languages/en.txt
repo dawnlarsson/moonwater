@@ -42,9 +42,14 @@ menu_find	1fa6	&Find
 menu_go_to_line	bc96	&Go to Line
 menu_paste	6854	&Paste
 menu_redo	ac45	&Redo
+menu_reset_zoom	1b0f	&Reset Zoom
 menu_select_all	f6f6	Select &All
 menu_toggle_comment	92ac	Toggle Co&mment
 menu_undo	b9d3	&Undo
+menu_zoom_in	5bcf	Zoom &In
+menu_zoom_out	9234	Zoom &Out
+terminal_exited_press_to_close	a8cf	exited with status %d, press a key to close
+terminal_press_to_close	080d	press a key to close
 tray_am	0d13	AM
 tray_charging	60c2	charging
 tray_day_fri	fbe8	Fri

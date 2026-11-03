@@ -42,9 +42,14 @@ menu_find	1fa6	&Sök
 menu_go_to_line	bc96	Gå till &rad
 menu_paste	6854	Kl&istra in
 menu_redo	ac45	&Gör om
+menu_reset_zoom	1b0f	Å&terställ zoom
 menu_select_all	f6f6	&Markera allt
 menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
+menu_zoom_in	5bcf	&Zooma in
+menu_zoom_out	9234	Zooma &ut
+terminal_exited_press_to_close	a8cf	avslutades med status %d, tryck på en tangent för att stänga
+terminal_press_to_close	080d	tryck på en tangent för att stänga
 tray_am	0d13	fm
 tray_charging	60c2	laddar
 tray_day_fri	fbe8	fre

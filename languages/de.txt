@@ -42,9 +42,14 @@ menu_find	1fa6	&Suchen
 menu_go_to_line	bc96	&Gehe zu Zeile
 menu_paste	6854	&Einfügen
 menu_redo	ac45	&Wiederholen
+menu_reset_zoom	1b0f	&Zoom zurücksetzen
 menu_select_all	f6f6	Alles &auswählen
 menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
+menu_zoom_in	5bcf	&Vergrößern
+menu_zoom_out	9234	Verk&leinern
+terminal_exited_press_to_close	a8cf	beendet mit Status %d, zum Schließen eine Taste drücken
+terminal_press_to_close	080d	zum Schließen eine Taste drücken
 tray_am	0d13	AM
 tray_charging	60c2	lädt
 tray_day_fri	fbe8	Fr

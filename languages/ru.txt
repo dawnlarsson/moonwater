@@ -42,9 +42,14 @@ menu_find	1fa6	Найти
 menu_go_to_line	bc96	Перейти к строке
 menu_paste	6854	Вставить
 menu_redo	ac45	Повторить
+menu_reset_zoom	1b0f	Сбросить масштаб
 menu_select_all	f6f6	Выделить всё
 menu_toggle_comment	92ac	Закомментировать/раскомментировать
 menu_undo	b9d3	Отменить
+menu_zoom_in	5bcf	Увеличить
+menu_zoom_out	9234	Уменьшить
+terminal_exited_press_to_close	a8cf	завершено со статусом %d, нажмите любую клавишу, чтобы закрыть
+terminal_press_to_close	080d	нажмите любую клавишу, чтобы закрыть
 tray_am	0d13	ДП
 tray_charging	60c2	заряжается
 tray_day_fri	fbe8	пт
