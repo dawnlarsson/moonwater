@@ -48,6 +48,9 @@ menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
 menu_zoom_in	5bcf	&Zooma in
 menu_zoom_out	9234	Zooma &ut
+settings_device_name	5f12	Enhetens namn
+settings_filter_hint	4aa0	Skriv för att filtrera
+settings_run_any	3ffd	Kör valfritt moonwater-kommando
 terminal_exited_press_to_close	a8cf	avslutades med status %d, tryck på en tangent för att stänga
 terminal_press_to_close	080d	tryck på en tangent för att stänga
 tray_am	0d13	fm
@@ -107,6 +110,7 @@ ui_field_full	fe02	mer ryms inte
 =Gallery	4cdd	Galleri
 =Hubs	456d	Hubbar
 =Identify	033d	Identifiera
+=In range and saved	7941	I närheten och sparade
 =Input	e11b	Inmatning
 =Keep the lowest-delay sample	d8b9	Behåll stickprovet med lägst fördröjning
 =Kernel log	e57a	Kärnlogg
@@ -136,6 +140,7 @@ ui_field_full	fe02	mer ryms inte
 =Power profile	8def	Strömprofil
 =Predict touch and pen	e2b7	Förutse touch och penna
 =Refresh rate	bf6e	Uppdateringsfrekvens
+=Remembered devices	abbc	Ihågkomna enheter
 =Rotation	777f	Rotation
 =Scale of this screen	e4ca	Den här skärmens skala
 =Screen	c631	Skärm

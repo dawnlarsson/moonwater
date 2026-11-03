@@ -48,6 +48,9 @@ menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
 menu_zoom_in	5bcf	&Inzoomen
 menu_zoom_out	9234	&Uitzoomen
+settings_device_name	5f12	Naam van het apparaat
+settings_filter_hint	4aa0	Typ om te filteren
+settings_run_any	3ffd	Een willekeurige moonwater-opdracht uitvoeren
 terminal_exited_press_to_close	a8cf	beëindigd met status %d, druk op een toets om te sluiten
 terminal_press_to_close	080d	druk op een toets om te sluiten
 tray_am	0d13	a.m.
@@ -107,6 +110,7 @@ ui_field_full	fe02	meer past er niet in
 =Gallery	4cdd	Galerij
 =Hubs	456d	Hubs
 =Identify	033d	Identificeren
+=In range and saved	7941	In bereik en opgeslagen
 =Input	e11b	Invoer
 =Keep the lowest-delay sample	d8b9	Monster met laagste vertraging bewaren
 =Kernel log	e57a	Kernellogboek
@@ -136,6 +140,7 @@ ui_field_full	fe02	meer past er niet in
 =Power profile	8def	Energieprofiel
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen
 =Refresh rate	bf6e	Vernieuwingsfrequentie
+=Remembered devices	abbc	Onthouden apparaten
 =Rotation	777f	Rotatie
 =Scale of this screen	e4ca	Schaal van dit scherm
 =Screen	c631	Scherm

@@ -48,6 +48,9 @@ menu_toggle_comment	92ac	Toggle Co&mment
 menu_undo	b9d3	&Undo
 menu_zoom_in	5bcf	Zoom &In
 menu_zoom_out	9234	Zoom &Out
+settings_device_name	5f12	Name of the device
+settings_filter_hint	4aa0	Type to filter
+settings_run_any	3ffd	Run any moonwater command
 terminal_exited_press_to_close	a8cf	exited with status %d, press a key to close
 terminal_press_to_close	080d	press a key to close
 tray_am	0d13	AM
@@ -107,6 +110,7 @@ ui_field_full	fe02	that is as much as it holds
 =Gallery	4cdd	Gallery
 =Hubs	456d	Hubs
 =Identify	033d	Identify
+=In range and saved	7941	In range and saved
 =Input	e11b	Input
 =Keep the lowest-delay sample	d8b9	Keep the lowest-delay sample
 =Kernel log	e57a	Kernel log
@@ -136,6 +140,7 @@ ui_field_full	fe02	that is as much as it holds
 =Power profile	8def	Power profile
 =Predict touch and pen	e2b7	Predict touch and pen
 =Refresh rate	bf6e	Refresh rate
+=Remembered devices	abbc	Remembered devices
 =Rotation	777f	Rotation
 =Scale of this screen	e4ca	Scale of this screen
 =Screen	c631	Screen

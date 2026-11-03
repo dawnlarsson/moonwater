@@ -48,6 +48,9 @@ menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
 menu_zoom_in	5bcf	&Powiększ
 menu_zoom_out	9234	Pom&niejsz
+settings_device_name	5f12	Nazwa urządzenia
+settings_filter_hint	4aa0	Wpisz, aby filtrować
+settings_run_any	3ffd	Uruchom dowolne polecenie moonwater
 terminal_exited_press_to_close	a8cf	zakończono ze statusem %d, naciśnij klawisz, aby zamknąć
 terminal_press_to_close	080d	naciśnij klawisz, aby zamknąć
 tray_am	0d13	AM
@@ -107,6 +110,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Gallery	4cdd	Galeria
 =Hubs	456d	Huby
 =Identify	033d	Identyfikuj
+=In range and saved	7941	W zasięgu i zapisane
 =Input	e11b	Wprowadzanie
 =Keep the lowest-delay sample	d8b9	Zachowuj próbkę o najmniejszym opóźnieniu
 =Kernel log	e57a	Dziennik jądra
@@ -136,6 +140,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Power profile	8def	Profil zasilania
 =Predict touch and pen	e2b7	Przewiduj dotyk i rysik
 =Refresh rate	bf6e	Częstotliwość odświeżania
+=Remembered devices	abbc	Zapamiętane urządzenia
 =Rotation	777f	Obrót
 =Scale of this screen	e4ca	Skala tego ekranu
 =Screen	c631	Ekran

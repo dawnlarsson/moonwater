@@ -48,6 +48,9 @@ menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
 menu_zoom_in	5bcf	Zoom a&vant
 menu_zoom_out	9234	Zoom a&rrière
+settings_device_name	5f12	Nom de l'appareil
+settings_filter_hint	4aa0	Saisir pour filtrer
+settings_run_any	3ffd	Exécuter une commande moonwater
 terminal_exited_press_to_close	a8cf	terminé avec le code %d, appuyez sur une touche pour fermer
 terminal_press_to_close	080d	appuyez sur une touche pour fermer
 tray_am	0d13	AM
@@ -107,6 +110,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Gallery	4cdd	Galerie
 =Hubs	456d	Concentrateurs
 =Identify	033d	Identifier
+=In range and saved	7941	À portée et enregistrés
 =Input	e11b	Saisie
 =Keep the lowest-delay sample	d8b9	Garder l'échantillon au plus faible délai
 =Kernel log	e57a	Journal du noyau
@@ -136,6 +140,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Power profile	8def	Profil d'alimentation
 =Predict touch and pen	e2b7	Prédire le toucher et le stylet
 =Refresh rate	bf6e	Fréquence de rafraîchissement
+=Remembered devices	abbc	Appareils mémorisés
 =Rotation	777f	Rotation
 =Scale of this screen	e4ca	Échelle de cet écran
 =Screen	c631	Écran

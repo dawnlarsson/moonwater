@@ -143097,7 +143097,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
         static const char address_to const codes[] = {"es", "fr", "de", "pt", "it", "nl", "pl", "tr", "sv", "ru", "uk", "el"};
         const char address_to wanted = SETTINGS_LANGUAGE_CODES;
         positive missing_keys = 0, order = 0, absent = 0, bad_header = 0, bad_text = 0, bad_stamp = 0, bad_ids = 0, bad_keys = 0;
-        positive bad_specs = 0, bad_menus = 0, bad_glyphs = 0;
+        positive bad_specs = 0, bad_menus = 0, bad_glyphs = 0, tab_words = 0;
 
         // The registry's own texts are the keyed lines of English.
         for (positive at = 0; at < SETTINGS_ROWS; at++)
@@ -143181,6 +143181,12 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         bad_text += (said->text_length && said->text[0] == ' ') != (mine->text_length && mine->text[0] == ' ');
                         bad_glyphs += !lcheck_drawn(regular, mine->text, mine->text_length) ||
                                       !lcheck_drawn(bold, mine->text, mine->text_length);
+                        // A word a row of tabs shows has no blank in it: the tabs are the words of a list a blank apart.
+                        if (said->key_length > 1 && said->key[0] == '=' &&
+                            (lcheck_same(said->key, said->key_length, "=light", 6) || lcheck_same(said->key, said->key_length, "=dark", 5) ||
+                             lcheck_same(said->key, said->key_length, "=auto", 5) || lcheck_same(said->key, said->key_length, "=full", 5) ||
+                             lcheck_same(said->key, said->key_length, "=reduced", 8)))
+                                tab_words += memory_search((address_any)mine->text, mine->text_length, (address_any) " ", 1) != null;
                 }
                 // No two items of a menu share a mnemonic.
                 for (positive m = 0; m < sizeof(lcheck_menus) / sizeof(lcheck_menus[0]); m++)
@@ -143209,6 +143215,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                 string_format(log, "  languages: keys %p, order %p, absent %p, header %p, text %p, stamp %p, ids %p, lines %p, placeholders %p, mnemonics %p, glyphs %p\n",
                               missing_keys, order, absent, bad_header, bad_text, bad_stamp, bad_ids, bad_keys, bad_specs, bad_menus, bad_glyphs);
         check("languages: every group, label and choice word of the registry has its keyed line in English", !missing_keys);
+        check("languages: the words the tabs of the theme and the motion show are single words in every language", !tab_words);
         check("languages: the Language row offers the table of names' codes in its order, and each is a file", !order && !absent);
         check("languages: each file's header says its code, its own name and what made it, machine or reviewed", !bad_header);
         check("languages: each file has the ids and keyed lines English has, once each, stamped with the English it was made from",
@@ -143441,9 +143448,11 @@ static fn language_sources_check(void)
 
                         while (stop < size && text[stop] != '\n')
                                 stop++;
+                        // A line that says "// shown" compares two texts as they are shown, which a menu's label is held to.
                         if ((lcheck_has(text + start, stop - start, "WORDS(") || lcheck_has(text + start, stop - start, "language_of(") ||
                              lcheck_has(text + start, stop - start, "language_text(")) &&
-                            (lcheck_has(text + start, stop - start, "string_equals(") || lcheck_has(text + start, stop - start, "memory_compare(")))
+                            (lcheck_has(text + start, stop - start, "string_equals(") || lcheck_has(text + start, stop - start, "memory_compare(")) &&
+                            !lcheck_has(text + start, stop - start, "// shown"))
                         {
                                 compared++;
                                 string_format(log, "  a language lookup is compared as a key in %s\n", (string_address)lcheck_sources[f]);
@@ -143804,6 +143813,95 @@ static fn terminal_words_check(void)
         term_exit_status = saved;
 }
 
+#if MOONWATER_UI_SETTINGS
+// The row whose label is label, or -1.
+static int lcheck_row(const char address_to label)
+{
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+                if (string_equals((string_address)settings_rows[at].label, (string_address)label))
+                        return (int)at;
+        return -1;
+}
+
+/*
+        The Settings window's words that are the registry's: the groups, the labels, the words of the choices and the tabs.
+        In English each is the registry's own text (the same pointer, so nothing is looked up); in every language a choice's
+        word that the menu shows comes back, through settings_word_of, as the English word the verb takes (so the labels of
+        one row are all different), the tabs of the theme and the motion have one word each, and the filter finds a row by
+        its words in the language and in English.
+*/
+static fn settings_words_check(void)
+{
+        static const char address_to const codes[] = {"es", "fr", "de", "pt", "it", "nl", "pl", "tr", "sv", "ru", "uk", "el"};
+        char word[SETTINGS_VALUE], back[SETTINGS_VALUE];
+        positive english_wrong = 0, round = 0, tabs = 0, blank = 0, checked = 0;
+        int theme = lcheck_row("Theme"), motion = lcheck_row("Motion"), name = lcheck_row("Name"), language_row = lcheck_row("Language");
+
+        language_take(0);
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                english_wrong += settings_label_shown((int)at) != settings_rows[at].label;
+                // (The screen modes row says Biggest picture and Recommended for its words, in English too.)
+                if (settings_rows[at].kind == SETTINGS_CHOICE && settings_rows[at].choices && !(settings_rows[at].flags & SETTINGS_LANGUAGE) &&
+                    !settings_is_modes((int)at))
+                        for (positive k = 0; settings_word(settings_rows[at].choices, k, word, sizeof(word)); k++)
+                                english_wrong += !!string_compare_max((string_address)settings_label_of((int)at, word), (string_address)word, sizeof(word));
+        }
+        for (int group = 0; group < settings_groups(); group++)
+                english_wrong += settings_group_text(group) != settings_group_name(group);
+        english_wrong += theme < 0 || motion < 0 || settings_tab_words(&settings_rows[theme], 0) != settings_rows[theme].choices;
+        check("settings words: in English a row's label, a group's name, a choice's word and the tabs' words are the registry's own",
+              !english_wrong && theme >= 0 && motion >= 0 && name >= 0 && language_row >= 0);
+        for (positive l = 0; l < sizeof(codes) / sizeof(codes[0]); l++)
+        {
+                const char address_to tabs_said;
+
+                language_take((unsigned int)codes[l][0] | (unsigned int)codes[l][1] << 8);
+                for (positive at = 0; at < SETTINGS_ROWS; at++)
+                {
+                        blank += !settings_label_shown((int)at)[0];
+                        if (settings_rows[at].kind != SETTINGS_CHOICE || !settings_rows[at].choices || (settings_rows[at].flags & SETTINGS_LANGUAGE))
+                                continue;
+                        for (positive k = 0; settings_word(settings_rows[at].choices, k, word, sizeof(word)); k++)
+                        {
+                                if (word[0] >= '0' && word[0] <= '9')
+                                        continue;
+                                settings_word_of((int)at, settings_label_of((int)at, word), back, sizeof(back));
+                                round += !!string_compare_max((string_address)back, (string_address)word, sizeof(back));
+                                checked++;
+                        }
+                }
+                {
+                        positive blanks = 0;
+
+                        tabs_said = settings_tab_words(&settings_rows[theme], 0);
+                        for (positive each = 0; tabs_said[each]; each++)
+                                blanks += tabs_said[each] == ' ';
+                        tabs += blanks != 2 || tabs_said[0] == ' ';
+                        blanks = 0, tabs_said = settings_tab_words(&settings_rows[motion], 1);
+                        for (positive each = 0; tabs_said[each]; each++)
+                                blanks += tabs_said[each] == ' ';
+                        tabs += blanks != 1 || tabs_said[0] == ' ';
+                }
+        }
+        check("settings words: in every language a label is never empty, and each word a choice's menu shows comes back as the word the verb takes",
+              !blank && !round && checked > 500);
+        check("settings words: the tabs of the theme and of the motion are three and two words, one each", !tabs);
+        language_take('d' | 'e' << 8);
+        settings_word_of(theme, settings_label_of(theme, "dark"), back, sizeof(back));
+        check("settings words: in German the groups, labels and choices are German, and the theme's dark is shown as Dunkel and taken as dark",
+              !string_compare_max((string_address)settings_group_text(0), (string_address) "Ger\xc3\xa4t", 8) &&
+                  !string_compare_max((string_address)settings_label_shown(language_row), (string_address) "Sprache", 8) &&
+                  !string_compare_max((string_address)settings_label_of(theme, "dark"), (string_address) "Dunkel", 7) && !string_compare_max((string_address)back, (string_address) "dark", 5) &&
+                  !string_compare_max((string_address)settings_tab_words(&settings_rows[theme], 0), (string_address) "Hell Dunkel Automatisch", 24));
+        check("settings words: the filter finds the Name row by its group's word in German and by the English one",
+              settings_matches_word(name, "ger\xc3\xa4t", 5) && settings_matches_word(name, "machine", 7) && !settings_matches_word(name, "xyzzy", 5));
+        language_take(0);
+        check("settings words: back in English the German is gone from the filter and the labels", !settings_matches_word(name, "ger\xc3\xa4t", 5) &&
+                                                                                                      settings_label_shown(language_row) == settings_rows[language_row].label);
+}
+#endif
+
 static fn language_check(void)
 {
         font_face regular, bold;
@@ -143836,6 +143934,9 @@ static fn language_check(void)
         taskbar_words_check();
 #endif
         terminal_words_check();
+#if MOONWATER_UI_SETTINGS
+        settings_words_check();
+#endif
 }
 #endif
 

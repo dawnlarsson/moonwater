@@ -858,6 +858,17 @@ static const char address_to settings_label(int row)
         return generic ? settings_large->pool + generic->command : "Run any moonwater command";
 }
 
+/*
+        A row's label as the window shows it. A setting's label is English the language says (registry.c keeps it, and code
+        that compares it compares the English); the name of a network or a device, and a command's verb, are what they are.
+*/
+static const char address_to settings_label_shown(int row)
+{
+        if (row < SETTINGS_ANY)
+                return language_of(settings_rows[row].label);
+        return !settings_item(row) && !settings_generic_of(row) ? WORDS(settings_run_any) : settings_label(row);
+}
+
 // What a row of a list does when it is pressed, said where the status is.
 static const char address_to settings_item_text(const struct settings_item address_to item)
 {
@@ -933,6 +944,12 @@ static const char address_to settings_group_name(int group)
         return SETTINGS_ALL_HEADER;
 }
 
+// A group's name as the column shows it; settings_group_name is the English that code compares.
+static const char address_to settings_group_text(int group)
+{
+        return language_of(settings_group_name(group));
+}
+
 // The group a row is in; a list is in the group its feed keeps up with.
 static int settings_group_of(int row)
 {
@@ -967,10 +984,17 @@ static b32 settings_has(const char address_to text, const char address_to wanted
         return length >= size && (memory_search_ascii_case)((address_any)text, length, (address_any)wanted, size) != null;
 }
 
+// Whether the label or the group of a row has the word, in English or in the language taken.
+static b32 settings_matches_name(const char address_to label, const char address_to section, const char address_to word, positive size)
+{
+        return settings_has(label, word, size) || settings_has(section, word, size) ||
+               (language.loaded && (settings_has(language_of(label), word, size) || settings_has(language_of(section), word, size)));
+}
+
 static b32 settings_matches_word(int row, const char address_to word, positive size)
 {
         if (row >= (int)SETTINGS_LIST)
-                return settings_has(settings_label(row), word, size) || settings_has(settings_section(row), word, size);
+                return settings_matches_name(settings_label(row), settings_section(row), word, size);
         if (row < SETTINGS_ANY)
         {
                 const struct settings_row address_to which = &settings_rows[row];
@@ -978,7 +1002,7 @@ static b32 settings_matches_word(int row, const char address_to word, positive s
                 for (positive at = 0; at < SETTING_WORDS; at++)
                         if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
                                 return true;
-                return settings_has(which->label, word, size) || settings_has(settings_section(row), word, size);
+                return settings_matches_name(which->label, settings_section(row), word, size);
         }
         return settings_has(settings_label(row), word, size) || settings_has(settings_text(row), word, size) ||
                (row == SETTINGS_ANY && settings_has("anything", word, size));
@@ -2938,7 +2962,11 @@ static const char address_to settings_label_of(int row, const char address_to wo
         if (settings_rows[row].flags & SETTINGS_LANGUAGE)
                 return language_name_of(word);
         if (!settings_is_modes(row))
-                return word;
+                // A choice's own word is English the language says; anything else a row holds is what it is.
+                return language.loaded && settings_rows[row].kind == SETTINGS_CHOICE && settings_rows[row].choices &&
+                               setting_place(settings_rows[row].choices, (string_address)word) >= 0
+                           ? language_of(word)
+                           : word;
         return string_equals((string_address)word, (string_address) "largest") ? "Biggest picture"
                : string_equals((string_address)word, (string_address) "preferred") ? "Recommended" : word;
 }
@@ -2950,6 +2978,18 @@ static void settings_word_of(int row, const char address_to label, char address_
 
         if (settings_rows[row].flags & SETTINGS_LANGUAGE)
                 word = language_code_of(label);
+        else if (language.loaded && !settings_is_modes(row) && settings_rows[row].kind == SETTINGS_CHOICE && settings_rows[row].choices)
+        {
+                // The word of the row's choices that the language says as label does: its menu lists the language's words.
+                char each[SETTINGS_VALUE];
+
+                for (positive k = 0; settings_word(settings_rows[row].choices, k, each, sizeof(each)); k++)
+                        if (string_equals((string_address)language_of(each), (string_address)label)) // shown against shown
+                        {
+                                string_copy_bounded((string_address)into, (string_address)each, room);
+                                return;
+                        }
+        }
         else if (settings_is_modes(row))
                 word = string_equals((string_address)label, (string_address) "Biggest picture") ? "largest"
                        : string_equals((string_address)label, (string_address) "Recommended") ? "preferred" : label;
@@ -3902,6 +3942,33 @@ static b32 settings_row_is(int at, const char address_to path)
         another, the line the verb said that is no row; a command, and whether it asks first. A value not read yet,
         not on this machine or not understood says so, quietly.
 */
+// The words of a row of tabs (the theme's, the motion's) as the language says them, one word each with a blank between, which
+// a check holds the translations to; English is the row's own list.
+static const char address_to settings_tab_words(const struct settings_row address_to which, int slot)
+{
+        static char shown[2][SETTINGS_VALUE];
+        positive at = 0;
+
+        if (!language.loaded)
+                return which->choices;
+        for (positive k = 0; k < 8; k++)
+        {
+                char each[SETTINGS_VALUE];
+                const char address_to said;
+
+                if (!settings_word(which->choices, k, each, sizeof(each)))
+                        break;
+                said = language_of(each);
+                if (at + string_length((string_address)said) + 2 >= sizeof(shown[slot]))
+                        break;
+                if (at)
+                        shown[slot][at++] = ' ';
+                string_copy_bounded((string_address)shown[slot] + at, (string_address)said, sizeof(shown[slot]) - at);
+                at += string_length((string_address)said);
+        }
+        return shown[slot];
+}
+
 static fn settings_describe(int id, struct ui_row address_to row)
 {
         const struct settings_row address_to which = id < SETTINGS_ANY ? &settings_rows[id] : null;
@@ -3910,15 +3977,15 @@ static fn settings_describe(int id, struct ui_row address_to row)
         const char address_to shown = which ? settings.value[id] : "";
 
         row->section = settings_section_start(id);
-        row->header = settings_section(id);
-        row->label = settings_label(id);
+        row->header = language_of(settings_section(id));
+        row->label = settings_label_shown(id);
         if (id == settings.editing)
         {
                 const struct settings_generic address_to generic = settings_generic_of(id);
 
                 row->kind = UI_ROW_FIELD, row->edit = &settings.edit;
                 if (item)
-                        row->label = item->kind == SETTINGS_ADD ? "Name of the device" : settings.joining;
+                        row->label = item->kind == SETTINGS_ADD ? WORDS(settings_device_name) : settings.joining;
                 else if (!which)
                 {
                         // A command being typed: its verb, and the field for what follows it, which says what it takes.
@@ -3970,7 +4037,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
         if (which->kind == SETTINGS_SWITCH)
                 row->kind = UI_ROW_SWITCH, row->on = string_equals((string_address)shown, (string_address) "on");
         else if (settings_row_is(id, SETTING_THEME_PATH) || settings_row_is(id, SETTING_MOTION_PATH))
-                row->kind = UI_ROW_TABS, row->words = which->choices, row->at = (int)setting_place(which->choices, (string_address)shown);
+                row->kind = UI_ROW_TABS, row->words = settings_tab_words(which, settings_row_is(id, SETTING_THEME_PATH) ? 0 : 1),
+                row->at = (int)setting_place(which->choices, (string_address)shown);
         else if (settings_row_is(id, SETTING_ACCENT_PATH) && which->kind == SETTINGS_CHOICE)
         {
                 row->kind = UI_ROW_SWATCHES, row->words = settings.accents;
@@ -4672,18 +4740,18 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 settings_gallery_draw(ui);
                 return;
         }
-        settings.page.title = settings.view ? settings.card_title : "Settings";
+        settings.page.title = settings.view ? settings.card_title : language_of("Settings");
         settings.page.status = settings.status;
         // The search field is the filter: the kit's bare field, the text engine's field in it (typing, a selection, the
         // clipboard, its caret), with the keys while the window has them and no row is typed in.
-        settings.page.search.items[0] = settings.view ? null : "Type to filter";
+        settings.page.search.items[0] = settings.view ? null : WORDS(settings_filter_hint);
         settings.page.search.edit = settings.view ? null : settings_filter_field();
         ui_page_draw(ui, &settings.page, settings.editing < 0 && settings.focused);
         if (settings.view)
                 ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
         else
         {
-                ui_page_groups(ui, &settings.page, settings_group_name, settings_groups());
+                ui_page_groups(ui, &settings.page, settings_group_text, settings_groups());
                 ui_page_column(ui, &settings.page, settings.group, settings.focused && !settings.pane, settings.filter_length != 0);
                 if (settings_map_on())
                         settings_map_draw(ui);

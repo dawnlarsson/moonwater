@@ -48,6 +48,9 @@ menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
 menu_zoom_in	5bcf	&Vergrößern
 menu_zoom_out	9234	Verk&leinern
+settings_device_name	5f12	Name des Geräts
+settings_filter_hint	4aa0	Zum Filtern tippen
+settings_run_any	3ffd	Beliebigen moonwater-Befehl ausführen
 terminal_exited_press_to_close	a8cf	beendet mit Status %d, zum Schließen eine Taste drücken
 terminal_press_to_close	080d	zum Schließen eine Taste drücken
 tray_am	0d13	AM
@@ -107,6 +110,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Gallery	4cdd	Galerie
 =Hubs	456d	Hubs
 =Identify	033d	Identifizieren
+=In range and saved	7941	In Reichweite und gespeichert
 =Input	e11b	Eingabe
 =Keep the lowest-delay sample	d8b9	Die Probe mit der geringsten Verzögerung behalten
 =Kernel log	e57a	Kernel-Protokoll
@@ -136,6 +140,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Power profile	8def	Energieprofil
 =Predict touch and pen	e2b7	Berührung und Stift vorhersagen
 =Refresh rate	bf6e	Bildwiederholrate
+=Remembered devices	abbc	Gemerkte Geräte
 =Rotation	777f	Drehung
 =Scale of this screen	e4ca	Skalierung dieses Bildschirms
 =Screen	c631	Bildschirm
