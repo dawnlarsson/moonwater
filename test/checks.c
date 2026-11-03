@@ -184989,6 +184989,62 @@ int main(int argc, char **argv)
 }
 #endif /* CHECK_firewall_probe */
 
+#ifdef CHECK_gpu
+#include "../src/lib.util.c"
+#include "../src/canvas/gpu.c"
+/*
+        The GPU's copy against the CPU's, on a window of a screen's size: the rows land where they were put and nothing
+        around them moves. Needs an amdgpu render node; without one it says so and passes.
+*/
+#define SHARED_counted
+#include "checks.c"
+#undef SHARED_counted
+
+b32 main(void)
+{
+        enum { W = 1220, H = 1320, OW = 2560, OH = 1440, X = 300, Y = 60 };
+        unsigned int address_to src, address_to dst;
+        positive from = GPU_DATA, to = GPU_DATA + (positive)W * H * 4, began, spent[16];
+        b32 done;
+
+        if (!gpu_start((positive)(W * H + OW * OH) * 4))
+        {
+                string_format(log, "gpu: no amdgpu render node, skipped\n");
+                return test_report(null);
+        }
+        src = (unsigned int address_to)((p8 address_to)gpu.at + from), dst = (unsigned int address_to)((p8 address_to)gpu.at + to);
+        for (positive i = 0; i < (positive)W * H; i++)
+                src[i] = 0xff000000u | (unsigned int)(i * 2654435761u >> 8);
+        for (positive i = 0; i < (positive)OW * OH; i++)
+                dst[i] = 0x55555555u;
+        done = gpu_copy(from, W * 4, to + ((positive)Y * OW + X) * 4, OW * 4, W * 4, H);
+        check("gpu: the copy finishes", done);
+        for (int y = 0; y < OH; y++)
+                for (int x = 0; x < OW; x++)
+                {
+                        b32 inside = x >= X && x < X + W && y >= Y && y < Y + H;
+                        unsigned int want = inside ? src[(y - Y) * W + (x - X)] : 0x55555555u;
+
+                        checks++;
+                        if (dst[(positive)y * OW + x] != want && ++failures < 5)
+                                string_format(log, "  FAIL gpu: pixel %p,%p is %p, wanted %p\n", (positive)x, (positive)y,
+                                              (positive)dst[(positive)y * OW + x], (positive)want);
+                }
+        for (int i = 0; i < 16; i++)
+        {
+                began = clock_monotonic_nanoseconds();
+                gpu_copy(from, W * 4, to + ((positive)Y * OW + X) * 4, OW * 4, W * 4, H);
+                spent[i] = clock_monotonic_nanoseconds() - began;
+        }
+        for (int i = 1; i < 16; i++)
+                if (spent[i] < spent[0])
+                        spent[0] = spent[i];
+        string_format(log, "  gpu: copy %p x %p into %p x %p, best of 16: %p us\n", (positive)W, (positive)H, (positive)OW, (positive)OH,
+                      spent[0] / 1000);
+        return test_report(null);
+}
+#endif /* CHECK_gpu */
+
 #ifdef COVERAGE_hook
 /*
         The other half of `sh test/run coverage`: built on its own, without
