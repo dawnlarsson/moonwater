@@ -1,0 +1,148 @@
+@language en
+@name English
+@translated source
+action_copy	3664	Copy
+action_cut	5863	Cut
+action_paste	0288	Paste
+action_select_all	3b12	Select All
+menu_copy	43e0	&Copy
+menu_cut	5c17	Cu&t
+menu_delete	1e3e	&Delete
+menu_paste	6854	&Paste
+menu_redo	ac45	&Redo
+menu_select_all	f6f6	Select &All
+menu_undo	b9d3	&Undo
+ui_confirm_again	b3ff	press again to confirm: 
+ui_field_digits	f52b	a number is digits
+ui_field_full	fe02	that is as much as it holds
+=Accent	ccd7	Accent
+=Accent colour (rrggbb or reset)	53aa	Accent colour (rrggbb or reset)
+=Airplane mode	3b8a	Airplane mode
+=All commands	4a42	All commands
+=Audio	1439	Audio
+=Authenticated time (NTS)	e533	Authenticated time (NTS)
+=Background	0abd	Background
+=Background colour (rrggbb or default)	e2b2	Background colour (rrggbb or default)
+=Battery	e12e	Battery
+=Battery shown	2a23	Battery shown
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Bluetooth adapters
+=Boost	a6cc	Boost
+=Boot	38f5	Boot
+=Brightness	324a	Brightness
+=Cameras	cea7	Cameras
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Caret blink speed
+=Caret thickness	1e9a	Caret thickness
+=Charge limit (20 to 100, or off)	c92d	Charge limit (20 to 100, or off)
+=Clipboard	99b1	Clipboard
+=Clipboard history (copies kept)	7423	Clipboard history (copies kept)
+=Clipboard limit (MiB)	a505	Clipboard limit (MiB)
+=Clock (Enter sets it now)	575e	Clock (Enter sets it now)
+=Cursor look	34ce	Cursor look
+=Cursor size	65d4	Cursor size
+=Display	d9b5	Display
+=Editor	bf98	Editor
+=Gallery	4cdd	Gallery
+=Hubs	456d	Hubs
+=Identify	033d	Identify
+=Input	e11b	Input
+=Keep the lowest-delay sample	d8b9	Keep the lowest-delay sample
+=Key repeat delay (ms, or default)	4eb7	Key repeat delay (ms, or default)
+=Key repeat rate (per second, off or default)	1e94	Key repeat rate (per second, off or default)
+=Keyboard	a714	Keyboard
+=Keyboards and mice	c352	Keyboards and mice
+=Language	db9b	Language
+=Large pointer stays (ms, or default)	5626	Large pointer stays (ms, or default)
+=Launcher	44b1	Launcher
+=Machine	be0e	Machine
+=Motion	7647	Motion
+=Mount kept disks	f0c8	Mount kept disks
+=Mouse acceleration	c400	Mouse acceleration
+=Mouse sensitivity (percent, or default)	8a23	Mouse sensitivity (percent, or default)
+=NTS servers (or default)	9fd7	NTS servers (or default)
+=Name	7306	Name
+=Name servers (auto for the network)	695a	Name servers (auto for the network)
+=Names over TLS	075a	Names over TLS
+=Network	ad65	Network
+=Network adapters	88ef	Network adapters
+=New USB devices	c15c	New USB devices
+=Open windows where they were last put	8711	Open windows where they were last put
+=Other devices	8362	Other devices
+=Power	a5e6	Power
+=Power profile	8def	Power profile
+=Predict touch and pen	e2b7	Predict touch and pen
+=Refresh rate	bf6e	Refresh rate
+=Rotation	777f	Rotation
+=Scale of this screen	e4ca	Scale of this screen
+=Screen	c631	Screen
+=Screen modes	85ad	Screen modes
+=Set the clock from the network	b2a3	Set the clock from the network
+=Settings	8728	Settings
+=Shake the pointer to find it	f508	Shake the pointer to find it
+=Show touch area	9ca8	Show touch area
+=Side taskbar text faces	d115	Side taskbar text faces
+=Simultaneous threads (SMT)	e836	Simultaneous threads (SMT)
+=Smooth mouse wheel	0dab	Smooth mouse wheel
+=Start the desktop	be4c	Start the desktop
+=Storage	df06	Storage
+=Taskbar	d759	Taskbar
+=Taskbar display	042b	Taskbar display
+=Taskbar launcher button	dd4d	Taskbar launcher button
+=Taskbar position	81b8	Taskbar position
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	The internet prefers
+=Theme	7c92	Theme
+=Time	e404	Time
+=Time server (auto for the pool)	67e5	Time server (auto for the pool)
+=Time zone	741a	Time zone
+=Turned by the screen	ea45	Turned by the screen
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Wired
+=all	4bc4	all
+=allow	a832	allow
+=amber	bec0	amber
+=auto	a396	auto
+=balanced	b71d	balanced
+=black	4ba4	black
+=blue	f5cd	blue
+=bottom	6b2a	bottom
+=center	4484	center
+=dark	6945	dark
+=dark-grey	bcb3	dark-grey
+=default	5bde	default
+=deny	6367	deny
+=edge	d83c	edge
+=fast	02af	fast
+=forest	2a60	forest
+=full	b33c	full
+=graphite	dc8d	graphite
+=green	ecbc	green
+=kernel log	415a	kernel log
+=left	ec70	left
+=light	1e2f	light
+=light-grey	ed41	light-grey
+=lock	7842	lock
+=midnight-blue	4008	midnight-blue
+=normal	9c52	normal
+=off	8a0a	off
+=on	2fd0	on
+=only	89f7	only
+=performance	8ca5	performance
+=plum	b06b	plum
+=powersave	2283	powersave
+=primary	5fd9	primary
+=reduced	5839	reduced
+=right	2de5	right
+=rose	1806	rose
+=slate	deee	slate
+=slow	42b8	slow
+=thick	964e	thick
+=thin	b172	thin
+=top	dc3c	top
+=unlock	1f55	unlock
+=violet	57f2	violet
+=white	0766	white
+=wifi	6448	wifi
+=wired	bfb4	wired

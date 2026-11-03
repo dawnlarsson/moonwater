@@ -21008,12 +21008,16 @@ static string_address host_setting_value(const struct settings_row address_to ro
         return setting_shown(row, (string_address)word, shown, 48);
 }
 
+static fn host_language_list(void);
+
 static b32 host_setting_status(const struct settings_row address_to row)
 {
         p8 word[32], shown[48], says[48];
 
         host_setting_says(row, says, sizeof(says));
         host_say(log, host_label "%s %s\n", (string_address)says, host_setting_value(row, word, shown));
+        if (row->flags & SETTINGS_LANGUAGE)
+                host_language_list();
         return 0;
 }
 
@@ -24225,6 +24229,7 @@ static const host_row host_rows[] = {
     {null, "@mouse", null, 'r'},
     {null, "@taskbar", null, 'r'},
     {null, "@name", null, 'r'},
+    {null, "@language", null, 'r'},
     {null, "@dns", null, 'r'},
     {null, "security [trust|block|SWITCH ...]", "keys TLS trusts and refuses besides the built-in ones, and the switches of TLS and bowls", 'm'},
     {null, "security", "the built-in trust, and what was added to it or taken from it", 'f'},
@@ -24596,6 +24601,7 @@ static b32 host_answer(bool update, string_address disk)
 }
 
 #include "../waterlink/command.c"
+#include "languages.c"
 
 /*
         Forget userspace, keep the machine.
@@ -25533,6 +25539,7 @@ static b32 host_main()
             {"ntp", host_ntp, false, true},
             {"keyboard", host_keyboard, false, true},
             {"mouse", host_setting_verb, false, true},
+            {"language", host_setting_verb, false, true},
             {"taskbar", host_taskbar, false, true},
             {"time", host_time, false, true},
             {"name", host_name, true},

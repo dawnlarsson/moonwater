@@ -38,6 +38,9 @@
 // What text is below the look: documents, history, selections, segmentation (text.c, which says why it is its own file).
 #include "text.c"
 
+// What the windows say, in the language chosen: the table of words and the file of each other language (language.c).
+#include "language.c"
+
 #define UI_ROW 40      // a row of a list or a column
 #define UI_PAD 16      // the window's margin
 #define UI_INSET 14    // a row's text in from its edges
@@ -971,7 +974,7 @@ static void ui_confirm_drop(struct ui_confirm address_to c)
 // The line an armed confirm shows: the hint, then what the next press does.
 static void ui_confirm_line(char address_to into, positive room, const char address_to what)
 {
-        string_copy_bounded((string_address)into, (string_address) "press again to confirm: ", room);
+        string_copy_bounded((string_address)into, (string_address)WORDS(ui_confirm_again), room);
         string_append_bounded((string_address)into, (string_address)what, room);
 }
 
@@ -1914,6 +1917,12 @@ static fn ui_kit_caret_take(const struct windows address_to table)
 {
         ui_kit.caret_speed = table->caret_speed ? table->caret_speed - 1 : UI_CARET_NORMAL;
         ui_kit.caret_thick = table->caret_thick ? table->caret_thick - 1 : UI_CARET_MID;
+}
+
+// The language the table says, taken wherever the theme is: the one place a window of this program learns it.
+static fn ui_kit_language_take(const struct windows address_to table)
+{
+        language_take(table->language);
 }
 
 // Rows top to bottom (logical pixels) of the control being drawn move this frame.
@@ -6586,7 +6595,7 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
         {
-                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table);
+                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table);
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
@@ -8185,9 +8194,9 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
-        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table);
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table);
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
-        string_copy_bounded((string_address)table->title[row], app->title, WINDOWS_TITLE);
+        string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
         table->glass[row] = app->glass;
         *app->ground = table->ground[row];
@@ -8261,7 +8270,9 @@ static int ui_app_run(struct ui_app address_to app)
                 if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
                 {
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
-                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table);
+                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table);
+                        // The title is a text the kit copied for the app, so the kit sets it again in the language now taken.
+                        string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
                         ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_kit_inks(app->ui);
                         ui_app_changed(app);
@@ -8617,7 +8628,7 @@ static b32 ui_field_open(struct ui_text address_to t, const struct window_row ad
 // A field's rule for a number: digits, and nothing else (a field's accept, for an app that asks a count or a line).
 static const char address_to ui_field_digits(p32 code)
 {
-        return code >= '0' && code <= '9' ? null : "a number is digits";
+        return code >= '0' && code <= '9' ? null : WORDS(ui_field_digits);
 }
 
 // The widget let go; a masked field's text (every byte ever typed into it is in the added buffer) and composition are
@@ -8678,7 +8689,7 @@ static positive ui_text_admit(struct ui_text address_to t, const p8 address_to t
         room = doc_length(&t->doc) - selected < t->most ? (t->most - (doc_length(&t->doc) - selected)) / carets : 0;
         if (length <= room)
                 return length;
-        t->refused = t->most_said ? t->most_said : "that is as much as it holds";
+        t->refused = t->most_said ? t->most_said : WORDS(ui_field_full);
         if (!cut)
                 return 0;
         while (room && (text[room] & 0xc0) == 0x80)
@@ -9882,26 +9893,26 @@ static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_tex
 
         if (actions)
         {
-                ui_popmenu_add(m, "Cu&t", ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
-                ui_popmenu_add(m, "&Copy", ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
-                ui_popmenu_add(m, "&Paste", ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
+                ui_popmenu_add(m, WORDS(menu_cut), ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
+                ui_popmenu_add(m, WORDS(menu_copy), ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
+                ui_popmenu_add(m, WORDS(menu_paste), ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
                                fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
-                ui_popmenu_add(m, "Select &All", ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
+                ui_popmenu_add(m, WORDS(menu_select_all), ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
                                doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
                 return;
         }
-        ui_popmenu_add(m, "&Undo", ui_text_menu_key(t, UI_TEXT_MENU_UNDO, DOC_CMD_UNDO),
+        ui_popmenu_add(m, WORDS(menu_undo), ui_text_menu_key(t, UI_TEXT_MENU_UNDO, DOC_CMD_UNDO),
                        t->doc.done && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_UNDO);
-        ui_popmenu_add(m, "&Redo", ui_text_menu_key(t, UI_TEXT_MENU_REDO, DOC_CMD_REDO),
+        ui_popmenu_add(m, WORDS(menu_redo), ui_text_menu_key(t, UI_TEXT_MENU_REDO, DOC_CMD_REDO),
                        t->doc.done < t->doc.group_count && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_REDO);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, "Cu&t", ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
-        ui_popmenu_add(m, "&Copy", ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
-        ui_popmenu_add(m, "&Paste", ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
+        ui_popmenu_add(m, WORDS(menu_cut), ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
+        ui_popmenu_add(m, WORDS(menu_copy), ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
+        ui_popmenu_add(m, WORDS(menu_paste), ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
                        fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
-        ui_popmenu_add(m, "&Delete", ui_text_menu_key(t, UI_TEXT_MENU_DELETE, DOC_CMD_DELETE), none | fixed, UI_TEXT_MENU_DELETE);
+        ui_popmenu_add(m, WORDS(menu_delete), ui_text_menu_key(t, UI_TEXT_MENU_DELETE, DOC_CMD_DELETE), none | fixed, UI_TEXT_MENU_DELETE);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, "Select &All", ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
+        ui_popmenu_add(m, WORDS(menu_select_all), ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
                        doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
 }
 
@@ -9957,7 +9968,10 @@ static b32 ui_text_inside(const struct ui_text address_to t, int x, int y)
 // The label of an item of the actions bar.
 static const char address_to ui_text_action_label(int id)
 {
-        return id == UI_TEXT_MENU_CUT ? "Cut" : id == UI_TEXT_MENU_COPY ? "Copy" : id == UI_TEXT_MENU_PASTE ? "Paste" : "Select All";
+        return id == UI_TEXT_MENU_CUT     ? WORDS(action_cut)
+               : id == UI_TEXT_MENU_COPY  ? WORDS(action_copy)
+               : id == UI_TEXT_MENU_PASTE ? WORDS(action_paste)
+                                          : WORDS(action_select_all);
 }
 
 // The bar's items now, in bar_id: the menu's four (ui_text_menu_items) the widget can do, Select All left off when everything

@@ -1,0 +1,148 @@
+@language uk
+@name Українська
+@translated machine
+action_copy	3664	Копіювати
+action_cut	5863	Вирізати
+action_paste	0288	Вставити
+action_select_all	3b12	Вибрати все
+menu_copy	43e0	Копіювати
+menu_cut	5c17	Вирізати
+menu_delete	1e3e	Видалити
+menu_paste	6854	Вставити
+menu_redo	ac45	Повторити
+menu_select_all	f6f6	Вибрати все
+menu_undo	b9d3	Скасувати
+ui_confirm_again	b3ff	натисніть ще раз для підтвердження: 
+ui_field_digits	f52b	число складається з цифр
+ui_field_full	fe02	більше не вміщається
+=Accent	ccd7	Акцент
+=Accent colour (rrggbb or reset)	53aa	Колір акценту (rrggbb або reset)
+=Airplane mode	3b8a	Режим польоту
+=All commands	4a42	Усі команди
+=Audio	1439	Звук
+=Authenticated time (NTS)	e533	Автентифікований час (NTS)
+=Background	0abd	Тло
+=Background colour (rrggbb or default)	e2b2	Колір тла (rrggbb або default)
+=Battery	e12e	Батарея
+=Battery shown	2a23	Показувана батарея
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Адаптери Bluetooth
+=Boost	a6cc	Boost
+=Boot	38f5	Завантаження
+=Brightness	324a	Яскравість
+=Cameras	cea7	Камери
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Швидкість блимання текстового курсора
+=Caret thickness	1e9a	Товщина текстового курсора
+=Charge limit (20 to 100, or off)	c92d	Межа заряджання (від 20 до 100 або off)
+=Clipboard	99b1	Буфер обміну
+=Clipboard history (copies kept)	7423	Історія буфера обміну (збережених копій)
+=Clipboard limit (MiB)	a505	Ліміт буфера обміну (MiB)
+=Clock (Enter sets it now)	575e	Годинник (Enter встановлює зараз)
+=Cursor look	34ce	Вигляд вказівника
+=Cursor size	65d4	Розмір вказівника
+=Display	d9b5	Екран
+=Editor	bf98	Редактор
+=Gallery	4cdd	Галерея
+=Hubs	456d	Хаби
+=Identify	033d	Визначити
+=Input	e11b	Введення
+=Keep the lowest-delay sample	d8b9	Залишати вимір із найменшою затримкою
+=Key repeat delay (ms, or default)	4eb7	Затримка повтору клавіш (мс або default)
+=Key repeat rate (per second, off or default)	1e94	Швидкість повтору клавіш (за секунду, off або default)
+=Keyboard	a714	Клавіатура
+=Keyboards and mice	c352	Клавіатури та миші
+=Language	db9b	Мова
+=Large pointer stays (ms, or default)	5626	Великий вказівник залишається (мс або default)
+=Launcher	44b1	Запуск
+=Machine	be0e	Комп'ютер
+=Motion	7647	Рух
+=Mount kept disks	f0c8	Монтувати збережені диски
+=Mouse acceleration	c400	Прискорення миші
+=Mouse sensitivity (percent, or default)	8a23	Чутливість миші (відсотки або default)
+=NTS servers (or default)	9fd7	Сервери NTS (або default)
+=Name	7306	Ім'я
+=Name servers (auto for the network)	695a	Сервери імен (auto для мережі)
+=Names over TLS	075a	Імена через TLS
+=Network	ad65	Мережа
+=Network adapters	88ef	Мережеві адаптери
+=New USB devices	c15c	Нові USB-пристрої
+=Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
+=Other devices	8362	Інші пристрої
+=Power	a5e6	Живлення
+=Power profile	8def	Профіль живлення
+=Predict touch and pen	e2b7	Передбачати дотик і перо
+=Refresh rate	bf6e	Частота оновлення
+=Rotation	777f	Поворот
+=Scale of this screen	e4ca	Масштаб цього екрана
+=Screen	c631	Екран
+=Screen modes	85ad	Режими екрана
+=Set the clock from the network	b2a3	Встановлювати годинник за мережею
+=Settings	8728	Налаштування
+=Shake the pointer to find it	f508	Потрусити вказівником, щоб знайти його
+=Show touch area	9ca8	Показувати область дотику
+=Side taskbar text faces	d115	Напрямок тексту бічної панелі
+=Simultaneous threads (SMT)	e836	Одночасні потоки (SMT)
+=Smooth mouse wheel	0dab	Плавне колесо миші
+=Start the desktop	be4c	Запускати робочий стіл
+=Storage	df06	Накопичувачі
+=Taskbar	d759	Панель завдань
+=Taskbar display	042b	Екран панелі завдань
+=Taskbar launcher button	dd4d	Кнопка запуску на панелі завдань
+=Taskbar position	81b8	Розташування панелі завдань
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область сповіщень панелі завдань (текст із {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	Інтернет надає перевагу
+=Theme	7c92	Тема
+=Time	e404	Час
+=Time server (auto for the pool)	67e5	Сервер часу (auto для пулу)
+=Time zone	741a	Часовий пояс
+=Turned by the screen	ea45	Повертає екран
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Дротова мережа
+=all	4bc4	усі
+=allow	a832	дозволити
+=amber	bec0	бурштиновий
+=auto	a396	авто
+=balanced	b71d	збалансований
+=black	4ba4	чорний
+=blue	f5cd	синій
+=bottom	6b2a	внизу
+=center	4484	центр
+=dark	6945	темна
+=dark-grey	bcb3	темно-сірий
+=default	5bde	типовий
+=deny	6367	заборонити
+=edge	d83c	край
+=fast	02af	швидко
+=forest	2a60	лісовий
+=full	b33c	повний
+=graphite	dc8d	графітовий
+=green	ecbc	зелений
+=kernel log	415a	журнал ядра
+=left	ec70	ліворуч
+=light	1e2f	світла
+=light-grey	ed41	світло-сірий
+=lock	7842	заблокувати
+=midnight-blue	4008	опівнічно-синій
+=normal	9c52	нормально
+=off	8a0a	вимкнено
+=on	2fd0	увімкнено
+=only	89f7	лише
+=performance	8ca5	продуктивність
+=plum	b06b	сливовий
+=powersave	2283	енергозбереження
+=primary	5fd9	основний
+=reduced	5839	зменшений
+=right	2de5	праворуч
+=rose	1806	рожевий
+=slate	deee	сланцевий
+=slow	42b8	повільно
+=thick	964e	товстий
+=thin	b172	тонкий
+=top	dc3c	угорі
+=unlock	1f55	розблокувати
+=violet	57f2	фіолетовий
+=white	0766	білий
+=wifi	6448	Wi-Fi
+=wired	bfb4	дротова

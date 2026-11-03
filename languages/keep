@@ -1,0 +1,3 @@
+# English literals of a converted source file that stay, because they are text no person reads in a window and the check cannot tell
+# from text by what stands round them. One a line: the file, a tab, the literal as it is written between its quotes. Keys,
+# verbs, options, paths, log lines, assembly and static asserts need no line here: the check knows them by their place and shape.

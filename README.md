@@ -61,6 +61,7 @@ moonwater clipboard watch [primary]    a line each time something is copied, the
 moonwater latency [reset]              what the input handlers cost a report, and who has the display
 moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows, the pointer, the input devices and the wheel
 moonwater name [NEW|random]            what this machine is called, like space-wizard
+moonwater language [CODE|default]      the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]
 moonwater keyboard [LAYOUT|list|xkb]   us uk gb de se sv no nb dk fi fr es it [us]
 moonwater keyboard repeat delay [MS|default]  how long a key is held before it repeats, 100 to 2000 ms [250]
 moonwater keyboard repeat rate [PER-SECOND|off|default]  repeats a second of a held key, 1 to 100, or none [30]
@@ -255,6 +256,14 @@ dark or auto (light from 7 to 19), `canvas theme accent` the colour its controls
 with, and `canvas motion reduced` turns the motion off; every open window turns to a
 change at once. `moonwater settings gallery` opens the settings window on the kit's
 gallery: every control, as the kit's own demo page has them, to see and press.
+
+The words those windows say are one table of ids (src/canvas/ui/language.inc), English being the table itself, and
+every other language is a file of `languages/` (the image carries them as /usr/share/moonwater/language/CODE.txt)
+with the same ids. `moonwater language CODE` picks one, and every open window says its words in it at once; bare, it
+lists the languages and marks the ones a machine translated and no person has reviewed. Es, fr, de, pt, it, nl, pl,
+tr, sv, ru, uk and el are the ones the shipped faces (Inter, IBM Plex Mono) draw; Hebrew, Arabic, the Indic scripts,
+Thai and the Chinese, Japanese and Korean ones need a face, shaping and a right-to-left layout that are not there.
+`languages/glossary` fixes the terms, and `languages/keep` the few English literals a converted file keeps.
 
 On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. With `moonwater taskbar launcher on` the taskbar has a button at its start (its left end, or the top of a side taskbar) that opens it beside the button, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the button while it is open puts it away. Under its list are two buttons, Power off and Restart: each asks for a second press before it powers the machine off or restarts it (a key held down is one press, and its repeats confirm nothing), and Shift-Tab puts the keys on them.
 

@@ -1,0 +1,148 @@
+@language nl
+@name Nederlands
+@translated machine
+action_copy	3664	Kopiëren
+action_cut	5863	Knippen
+action_paste	0288	Plakken
+action_select_all	3b12	Alles selecteren
+menu_copy	43e0	Ko&piëren
+menu_cut	5c17	&Knippen
+menu_delete	1e3e	&Verwijderen
+menu_paste	6854	P&lakken
+menu_redo	ac45	Op&nieuw
+menu_select_all	f6f6	&Alles selecteren
+menu_undo	b9d3	&Ongedaan maken
+ui_confirm_again	b3ff	druk nogmaals om te bevestigen: 
+ui_field_digits	f52b	een getal bestaat uit cijfers
+ui_field_full	fe02	meer past er niet in
+=Accent	ccd7	Accent
+=Accent colour (rrggbb or reset)	53aa	Accentkleur (rrggbb of reset)
+=Airplane mode	3b8a	Vliegtuigmodus
+=All commands	4a42	Alle opdrachten
+=Audio	1439	Audio
+=Authenticated time (NTS)	e533	Geauthenticeerde tijd (NTS)
+=Background	0abd	Achtergrond
+=Background colour (rrggbb or default)	e2b2	Achtergrondkleur (rrggbb of default)
+=Battery	e12e	Batterij
+=Battery shown	2a23	Getoonde batterij
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Bluetooth-adapters
+=Boost	a6cc	Boost
+=Boot	38f5	Opstarten
+=Brightness	324a	Helderheid
+=Cameras	cea7	Camera's
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Knippersnelheid van de tekstcursor
+=Caret thickness	1e9a	Dikte van de tekstcursor
+=Charge limit (20 to 100, or off)	c92d	Laadlimiet (20 tot 100, of off)
+=Clipboard	99b1	Klembord
+=Clipboard history (copies kept)	7423	Klembordgeschiedenis (bewaarde kopieën)
+=Clipboard limit (MiB)	a505	Klembordlimiet (MiB)
+=Clock (Enter sets it now)	575e	Klok (Enter stelt hem nu in)
+=Cursor look	34ce	Uiterlijk van de aanwijzer
+=Cursor size	65d4	Grootte van de aanwijzer
+=Display	d9b5	Scherm
+=Editor	bf98	Editor
+=Gallery	4cdd	Galerij
+=Hubs	456d	Hubs
+=Identify	033d	Identificeren
+=Input	e11b	Invoer
+=Keep the lowest-delay sample	d8b9	Monster met laagste vertraging bewaren
+=Key repeat delay (ms, or default)	4eb7	Vertraging toetsherhaling (ms of default)
+=Key repeat rate (per second, off or default)	1e94	Herhaalsnelheid van toetsen (per seconde, off of default)
+=Keyboard	a714	Toetsenbord
+=Keyboards and mice	c352	Toetsenborden en muizen
+=Language	db9b	Taal
+=Large pointer stays (ms, or default)	5626	Grote aanwijzer blijft (ms of default)
+=Launcher	44b1	Starter
+=Machine	be0e	Machine
+=Motion	7647	Beweging
+=Mount kept disks	f0c8	Bewaarde schijven aankoppelen
+=Mouse acceleration	c400	Muisversnelling
+=Mouse sensitivity (percent, or default)	8a23	Muisgevoeligheid (procent of default)
+=NTS servers (or default)	9fd7	NTS-servers (of default)
+=Name	7306	Naam
+=Name servers (auto for the network)	695a	Naamservers (auto voor het netwerk)
+=Names over TLS	075a	Namen via TLS
+=Network	ad65	Netwerk
+=Network adapters	88ef	Netwerkadapters
+=New USB devices	c15c	Nieuwe USB-apparaten
+=Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
+=Other devices	8362	Andere apparaten
+=Power	a5e6	Energie
+=Power profile	8def	Energieprofiel
+=Predict touch and pen	e2b7	Aanraking en pen voorspellen
+=Refresh rate	bf6e	Vernieuwingsfrequentie
+=Rotation	777f	Rotatie
+=Scale of this screen	e4ca	Schaal van dit scherm
+=Screen	c631	Scherm
+=Screen modes	85ad	Schermmodi
+=Set the clock from the network	b2a3	Klok instellen via het netwerk
+=Settings	8728	Instellingen
+=Shake the pointer to find it	f508	Schud de aanwijzer om hem te vinden
+=Show touch area	9ca8	Aanraakgebied tonen
+=Side taskbar text faces	d115	Tekstrichting van de zijtaakbalk
+=Simultaneous threads (SMT)	e836	Gelijktijdige threads (SMT)
+=Smooth mouse wheel	0dab	Soepel muiswiel
+=Start the desktop	be4c	Bureaublad starten
+=Storage	df06	Opslag
+=Taskbar	d759	Taakbalk
+=Taskbar display	042b	Scherm van de taakbalk
+=Taskbar launcher button	dd4d	Starterknop op de taakbalk
+=Taskbar position	81b8	Positie van de taakbalk
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	Internet verkiest
+=Theme	7c92	Thema
+=Time	e404	Tijd
+=Time server (auto for the pool)	67e5	Tijdserver (auto voor de pool)
+=Time zone	741a	Tijdzone
+=Turned by the screen	ea45	Gedraaid door het scherm
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Bekabeld
+=all	4bc4	alle
+=allow	a832	toestaan
+=amber	bec0	amber
+=auto	a396	automatisch
+=balanced	b71d	gebalanceerd
+=black	4ba4	zwart
+=blue	f5cd	blauw
+=bottom	6b2a	onderaan
+=center	4484	midden
+=dark	6945	donker
+=dark-grey	bcb3	donkergrijs
+=default	5bde	standaard
+=deny	6367	weigeren
+=edge	d83c	rand
+=fast	02af	snel
+=forest	2a60	woud
+=full	b33c	volledig
+=graphite	dc8d	grafiet
+=green	ecbc	groen
+=kernel log	415a	kernellogboek
+=left	ec70	links
+=light	1e2f	licht
+=light-grey	ed41	lichtgrijs
+=lock	7842	vergrendelen
+=midnight-blue	4008	middernachtblauw
+=normal	9c52	normaal
+=off	8a0a	uit
+=on	2fd0	aan
+=only	89f7	alleen
+=performance	8ca5	prestaties
+=plum	b06b	pruim
+=powersave	2283	energiebesparing
+=primary	5fd9	primair
+=reduced	5839	beperkt
+=right	2de5	rechts
+=rose	1806	roze
+=slate	deee	leisteen
+=slow	42b8	langzaam
+=thick	964e	dik
+=thin	b172	dun
+=top	dc3c	bovenaan
+=unlock	1f55	ontgrendelen
+=violet	57f2	violet
+=white	0766	wit
+=wifi	6448	wifi
+=wired	bfb4	bekabeld

@@ -131788,7 +131788,7 @@ static fn check_settings_groups(void)
         check("settings groups: and none of them is listed under Machine", apart);
         check("settings groups: and the filter finds each by the first word of its label, from the group chosen", found);
 
-        // Machine holds only what the machine is called.
+        // Machine holds only what the machine is called, and the language it speaks.
         settings.group = 0;
         settings.filter_length = 0, settings.filter[0] = 0;
         settings_rebuild();
@@ -131797,9 +131797,10 @@ static fn check_settings_groups(void)
                 const struct settings_row address_to row = settings.list.id[at] < SETTINGS_ANY ? &settings_rows[settings.list.id[at]] : null;
 
                 bare &= row && row->read[0] && (string_equals((string_address)row->read[0], (string_address) "name") ||
+                                                string_equals((string_address)row->read[0], (string_address) "language") ||
                                                 string_equals((string_address)row->read[0], (string_address) "machine"));
         }
-        check("settings groups: the rows listed under Machine are the machine's name, and nothing of the desktop, the keyboard, the clock or the screens",
+        check("settings groups: the rows listed under Machine are the machine's name and its language, and nothing of the desktop, the keyboard, the clock or the screens",
               bare && settings.list.count > 0);
 
         // The filter lists the rows of every group: each row by the first word of its label, and each group's rows by its name.
@@ -142798,6 +142799,758 @@ static positive check_hits(const char address_to text, positive size, const char
         return hits;
 }
 
+#if MOONWATER_UI_ANY
+/*
+        The language table and its files (ui/language.inc, ui/language.c, languages/). Read from the tree the check runs in
+        (the repository's root), as the checks above are; not run where the sources are not.
+
+        English is the table, and languages/en.txt is the same words written out, which pins them: a word changed in the table
+        and not there is red, and so is one changed there (a row proves that one changed letter is seen). Every other language
+        is a file with the same ids and the same keyed texts as English, no more and no fewer, each line stamped with the
+        English it was made from (an English edit makes it old), its placeholders and braces the English's one for one, its
+        mnemonics before an ASCII letter and none twice in a menu, and every letter of it a glyph the faces have. The keyed
+        texts are the Settings window's: every group, label and choice word of registry.c, which stay English as the keys
+        code compares and are shown through language_of. Code is held to the table too: every id is used, no lookup is
+        compared as a key, and in a file that is converted no English literal is left that is not a key, a path, a log line
+        or assembly (languages/keep lists the few that are none of those, one `file TAB literal` a line).
+*/
+#define LCHECK_ENTRIES 1024
+struct lcheck_entry
+{
+        const char address_to key;
+        const char address_to stamp;
+        const char address_to text;
+        positive key_length, text_length;
+};
+
+struct lcheck_file
+{
+        positive bytes, size, count, bad;
+        const char address_to code;
+        const char address_to name;
+        const char address_to translated;
+        positive code_length, name_length, translated_length;
+        struct lcheck_entry entry[LCHECK_ENTRIES];
+};
+
+static struct lcheck_file lcheck_english, lcheck_other;
+
+static b32 lcheck_same(const char address_to a, positive a_length, const char address_to b, positive b_length)
+{
+        return a_length == b_length && !memory_compare(a, b, a_length);
+}
+
+// The file parsed in place into its entries and its header (@language, @name, @translated); false when it is not there.
+static b32 lcheck_load(string_address path, struct lcheck_file address_to file)
+{
+        const char address_to text;
+        positive at = 0;
+
+        memory_zero(file, sizeof(*file));
+        file->bytes = compositor_map_file(path, &file->size);
+        if (!file->bytes)
+                return false;
+        text = (const char address_to)file->bytes;
+        while (at < file->size)
+        {
+                positive start = at, stop, tab, second;
+
+                while (at < file->size && text[at] != '\n')
+                        at++;
+                stop = at++;
+                if (stop == start || text[start] == '#')
+                        continue;
+                if (text[start] == '@')
+                {
+                        if (stop - start > 10 && !memory_compare(text + start, "@language ", 10))
+                                file->code = text + start + 10, file->code_length = stop - start - 10;
+                        else if (stop - start > 6 && !memory_compare(text + start, "@name ", 6))
+                                file->name = text + start + 6, file->name_length = stop - start - 6;
+                        else if (stop - start > 12 && !memory_compare(text + start, "@translated ", 12))
+                                file->translated = text + start + 12, file->translated_length = stop - start - 12;
+                        continue;
+                }
+                for (tab = start; tab < stop && text[tab] != '\t'; tab++)
+                        ;
+                second = tab + 5;
+                if (second >= stop || text[second] != '\t' || file->count >= LCHECK_ENTRIES)
+                {
+                        file->bad++;
+                        continue;
+                }
+                file->entry[file->count++] = (struct lcheck_entry){text + start, text + tab + 1, text + second + 1, tab - start,
+                                                                   stop - second - 1};
+        }
+        return true;
+}
+
+static fn lcheck_close(struct lcheck_file address_to file)
+{
+        if (file->bytes)
+                compositor_call(syscall(munmap), file->bytes, file->size, 0, 0, 0, 0);
+        file->bytes = 0;
+}
+
+static long lcheck_find(const struct lcheck_file address_to file, const char address_to key, positive length)
+{
+        for (positive at = 0; at < file->count; at++)
+                if (lcheck_same(file->entry[at].key, file->entry[at].key_length, key, length))
+                        return (long)at;
+        return -1;
+}
+
+// The stamp of an English text: the low 16 bits of its FNV-1a hash, four hex digits.
+static fn lcheck_stamp(const char address_to text, positive length, char address_to into)
+{
+        unsigned int hash = 2166136261u;
+
+        for (positive at = 0; at < length; at++)
+                hash = (hash ^ (p8)text[at]) * 16777619u;
+        for (int digit = 0; digit < 4; digit++)
+                into[digit] = "0123456789abcdef"[hash >> (12 - 4 * digit) & 15];
+}
+
+/*
+        How many ids of the table the file does not say the way the table does (its text, its stamp). With a flip, that one
+        id is compared with its English changed by a letter, which is what a changed word is to the pin.
+*/
+static positive lcheck_identity(const struct lcheck_file address_to file, long flip)
+{
+        positive wrong = 0;
+
+        for (positive id = 0; id < LANGUAGE_COUNT; id++)
+        {
+                char english[256], stamp[4];
+                positive length = string_length((string_address)language_table[id].english);
+                long at = lcheck_find(file, language_table[id].name, string_length((string_address)language_table[id].name));
+
+                if (at < 0 || length >= sizeof(english))
+                {
+                        wrong++;
+                        continue;
+                }
+                memory_copy(english, language_table[id].english, length);
+                if ((long)id == flip)
+                        english[0] = (char)(english[0] ^ 1);
+                lcheck_stamp(english, length, stamp);
+                wrong += !lcheck_same(file->entry[at].text, file->entry[at].text_length, english, length) ||
+                         memory_compare(file->entry[at].stamp, stamp, 4) != 0;
+        }
+        return wrong;
+}
+
+// The placeholders of a text, one byte each (its index times two, and one more for a string), sorted; false when one is ill made.
+static b32 lcheck_specs(const char address_to text, positive length, p8 address_to into, positive address_to count)
+{
+        unsigned int implicit = 0;
+
+        *count = 0;
+        for (positive at = 0; at < length; at++)
+        {
+                unsigned int index;
+
+                if (text[at] != '%')
+                        continue;
+                if (++at >= length)
+                        return false;
+                if (text[at] == '%')
+                        continue;
+                if (text[at] >= '1' && text[at] <= '9' && at + 1 < length && text[at + 1] == '$')
+                        index = (unsigned int)(text[at] - '0'), at += 2;
+                else
+                        index = ++implicit;
+                if (at >= length || (text[at] != 's' && text[at] != 'd') || index > 9 || *count >= 16)
+                        return false;
+                into[(*count)++] = (p8)(index * 2 + (text[at] == 's'));
+        }
+        for (positive a = 1; a < *count; a++)
+                for (positive b = a; b > 0 && into[b - 1] > into[b]; b--)
+                {
+                        p8 swap = into[b];
+
+                        into[b] = into[b - 1], into[b - 1] = swap;
+                }
+        return true;
+}
+
+// The {braces} of a text, each from { to }: a sum over all of them and their count, which two texts with the same braces share.
+static fn lcheck_braces(const char address_to text, positive length, unsigned long address_to sum, positive address_to count)
+{
+        *sum = 0, *count = 0;
+        for (positive at = 0; at < length; at++)
+                if (text[at] == '{')
+                {
+                        unsigned long each = 5381;
+
+                        for (; at < length && text[at] != '}'; at++)
+                                each = each * 33 + (p8)text[at];
+                        *sum += each, ++*count;
+                }
+}
+
+// The mnemonic of a text: the letter after its & in lower case, 0 for none, 1 when the & is not before an ASCII letter; marks counts the &.
+static unsigned int lcheck_mnemonic(const char address_to text, positive length, positive address_to marks)
+{
+        unsigned int letter = 0;
+
+        *marks = 0;
+        for (positive at = 0; at < length; at++)
+                if (text[at] == '&')
+                {
+                        ++*marks;
+                        letter = at + 1 < length && (text[at + 1] | 32) >= 'a' && (text[at + 1] | 32) <= 'z' ? (unsigned int)(text[at + 1] | 32) : 1;
+                }
+        return letter;
+}
+
+// Whether every character of a text is well formed UTF-8 that the face draws (a glyph, not the notdef) and none is a control.
+static b32 lcheck_drawn(const font_face address_to face, const char address_to text, positive length)
+{
+        for (positive at = 0; at < length;)
+        {
+                p8 first = (p8)text[at];
+                unsigned int more = first < 0x80 ? 0 : (first & 0xe0) == 0xc0 ? 1 : (first & 0xf0) == 0xe0 ? 2 : (first & 0xf8) == 0xf0 ? 3 : 9;
+                unsigned int code = more ? first & (0x3f >> more) : first;
+
+                if (more == 9 || at + more >= length)
+                        return false;
+                for (unsigned int k = 1; k <= more; k++)
+                {
+                        if (((p8)text[at + k] & 0xc0) != 0x80)
+                                return false;
+                        code = code << 6 | ((p8)text[at + k] & 0x3f);
+                }
+                if (code < 0x20 || code == 0x7f || !font_glyph(face, code))
+                        return false;
+                at += more + 1;
+        }
+        return true;
+}
+
+// The menus whose mnemonics must differ: each is its ids, ended by -1.
+static const int lcheck_menus[][10] = {
+    {LANGUAGE_menu_cut, LANGUAGE_menu_copy, LANGUAGE_menu_paste, LANGUAGE_menu_delete, LANGUAGE_menu_undo, LANGUAGE_menu_redo,
+     LANGUAGE_menu_select_all, -1},
+};
+
+// Whether a word of a row's choices is one the window shows as words (not a number, a layout code, a language or a display mode).
+static b32 lcheck_choice_word(const struct settings_row address_to row, const char address_to word, positive length)
+{
+        if (row->kind != SETTINGS_CHOICE || !row->choices || (row->flags & SETTINGS_LANGUAGE) ||
+            !string_compare_max((string_address)row->label, (string_address) "Keyboard", 9) ||
+            (row->set[1] && string_equals((string_address)row->set[1], (string_address) "modes")))
+                return false;
+        for (positive at = 0; at < length; at++)
+                if (word[at] >= '0' && word[at] <= '9')
+                        return false;
+        return true;
+}
+
+// Whether English has the keyed line for a text: the registry's group, label or choice word.
+static positive lcheck_keyed_missing(const char address_to text, positive length)
+{
+        char key[200];
+
+        if (!text || !length || length + 2 > sizeof(key))
+                return 0;
+        key[0] = '=';
+        memory_copy(key + 1, text, length);
+        key[length + 1] = 0;
+        if (lcheck_find(&lcheck_english, key, length + 1) >= 0)
+                return 0;
+        string_format(log, "  languages: no keyed line in English for \"%s\"\n", (string_address)(key + 1));
+        return 1;
+}
+
+static fn language_files_check(const font_face address_to regular, const font_face address_to bold)
+{
+        static const char address_to const codes[] = {"es", "fr", "de", "pt", "it", "nl", "pl", "tr", "sv", "ru", "uk", "el"};
+        const char address_to wanted = SETTINGS_LANGUAGE_CODES;
+        positive missing_keys = 0, order = 0, absent = 0, bad_header = 0, bad_text = 0, bad_stamp = 0, bad_ids = 0, bad_keys = 0;
+        positive bad_specs = 0, bad_menus = 0, bad_glyphs = 0;
+
+        // The registry's own texts are the keyed lines of English.
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
+        {
+                const struct settings_row address_to row = &settings_rows[at];
+                const char address_to words = row->choices;
+
+                missing_keys += lcheck_keyed_missing(row->section, row->section ? string_length((string_address)row->section) : 0);
+                missing_keys += lcheck_keyed_missing(row->label, row->label ? string_length((string_address)row->label) : 0);
+                while (words && *words)
+                {
+                        positive length = (positive)(string_first_of_or_end((string_address)words, ' ') - (string_address)words);
+
+                        if (lcheck_choice_word(row, words, length))
+                                missing_keys += lcheck_keyed_missing(words, length);
+                        words += length + (words[length] == ' ');
+                }
+        }
+        // The codes the Language row offers are the table of names', in its order, and each is a file.
+        for (positive at = 0; at < sizeof(language_names) / sizeof(language_names[0]); at++)
+        {
+                positive length = string_length((string_address)language_names[at].code);
+
+                order += !(!memory_compare(wanted, language_names[at].code, length) && (wanted[length] == ' ' || !wanted[length]));
+                wanted += length + (wanted[length] == ' ');
+        }
+        order += *wanted != 0;
+        for (positive l = 0; l < sizeof(codes) / sizeof(codes[0]); l++)
+        {
+                char path[24] = "languages/";
+                const char address_to name = null;
+
+                path[10] = codes[l][0], path[11] = codes[l][1], memory_copy(path + 12, ".txt", 5);
+                if (!lcheck_load((string_address)path, &lcheck_other))
+                {
+                        absent++;
+                        continue;
+                }
+                for (positive at = 0; at < sizeof(language_names) / sizeof(language_names[0]); at++)
+                        if (!memory_compare(language_names[at].code, codes[l], 3))
+                                name = language_names[at].name;
+                bad_header += !lcheck_same(lcheck_other.code, lcheck_other.code_length, codes[l], 2) || !name ||
+                              !lcheck_same(lcheck_other.name, lcheck_other.name_length, name, string_length((string_address)name)) ||
+                              !(lcheck_same(lcheck_other.translated, lcheck_other.translated_length, "machine", 7) ||
+                                lcheck_same(lcheck_other.translated, lcheck_other.translated_length, "reviewed", 8)) ||
+                              lcheck_other.bad;
+                // The same lines as English, each once: none missing, none over, none twice.
+                bad_ids += lcheck_other.count != lcheck_english.count;
+                for (positive at = 0; at < lcheck_english.count; at++)
+                {
+                        const struct lcheck_entry address_to said = &lcheck_english.entry[at];
+                        const struct lcheck_entry address_to mine;
+                        long found = lcheck_find(&lcheck_other, said->key, said->key_length);
+                        p8 specs[16], theirs[16];
+                        positive specs_count = 0, theirs_count = 0, marks = 0, theirs_marks = 0, braces, theirs_braces;
+                        unsigned long sum, theirs_sum;
+                        char stamp[4];
+
+                        if (found < 0)
+                        {
+                                bad_keys++;
+                                continue;
+                        }
+                        mine = &lcheck_other.entry[found];
+                        lcheck_stamp(said->text, said->text_length, stamp);
+                        bad_stamp += memory_compare(mine->stamp, stamp, 4) != 0;
+                        bad_text += !mine->text_length || mine->text_length > 200;
+                        for (positive k = 0; k < mine->text_length; k++)
+                                bad_text += (p8)mine->text[k] < 0x20 || mine->text[k] == 0x7f;
+                        bad_specs += !lcheck_specs(said->text, said->text_length, specs, &specs_count) ||
+                                     !lcheck_specs(mine->text, mine->text_length, theirs, &theirs_count) || specs_count != theirs_count ||
+                                     memory_compare(specs, theirs, specs_count);
+                        lcheck_braces(said->text, said->text_length, &sum, &braces);
+                        lcheck_braces(mine->text, mine->text_length, &theirs_sum, &theirs_braces);
+                        bad_specs += sum != theirs_sum || braces != theirs_braces;
+                        // A mnemonic is kept or dropped, never moved off an ASCII letter, and a blank at the end is English's.
+                        lcheck_mnemonic(said->text, said->text_length, &marks);
+                        bad_menus += lcheck_mnemonic(mine->text, mine->text_length, &theirs_marks) == 1 || theirs_marks > marks;
+                        bad_text += (said->text_length && said->text[said->text_length - 1] == ' ') !=
+                                    (mine->text_length && mine->text[mine->text_length - 1] == ' ');
+                        bad_glyphs += !lcheck_drawn(regular, mine->text, mine->text_length) ||
+                                      !lcheck_drawn(bold, mine->text, mine->text_length);
+                }
+                // No two items of a menu share a mnemonic.
+                for (positive m = 0; m < sizeof(lcheck_menus) / sizeof(lcheck_menus[0]); m++)
+                {
+                        unsigned int seen[16], used = 0;
+
+                        for (int k = 0; lcheck_menus[m][k] >= 0; k++)
+                        {
+                                const char address_to id = language_table[lcheck_menus[m][k]].name;
+                                long at = lcheck_find(&lcheck_other, id, string_length((string_address)id));
+                                positive marks;
+                                unsigned int letter;
+
+                                if (at < 0)
+                                        continue;
+                                letter = lcheck_mnemonic(lcheck_other.entry[at].text, lcheck_other.entry[at].text_length, &marks);
+                                for (unsigned int s = 0; letter > 1 && s < used; s++)
+                                        bad_menus += seen[s] == letter;
+                                if (letter > 1 && used < 16)
+                                        seen[used++] = letter;
+                        }
+                }
+                lcheck_close(&lcheck_other);
+        }
+        if (missing_keys + order + absent + bad_header + bad_text + bad_stamp + bad_ids + bad_keys + bad_specs + bad_menus + bad_glyphs)
+                string_format(log, "  languages: keys %p, order %p, absent %p, header %p, text %p, stamp %p, ids %p, lines %p, placeholders %p, mnemonics %p, glyphs %p\n",
+                              missing_keys, order, absent, bad_header, bad_text, bad_stamp, bad_ids, bad_keys, bad_specs, bad_menus, bad_glyphs);
+        check("languages: every group, label and choice word of the registry has its keyed line in English", !missing_keys);
+        check("languages: the Language row offers the table of names' codes in its order, and each is a file", !order && !absent);
+        check("languages: each file's header says its code, its own name and what made it, machine or reviewed", !bad_header);
+        check("languages: each file has the ids and keyed lines English has, once each, stamped with the English it was made from",
+              !bad_ids && !bad_keys && !bad_stamp);
+        check("languages: placeholders and braces are English's one for one, mnemonics before ASCII letters and not twice in a menu",
+              !bad_specs && !bad_menus);
+        check("languages: every text is one line of well formed UTF-8, never empty, every letter a glyph of the shipped faces",
+              !bad_text && !bad_glyphs);
+}
+
+// The sources an id may be named in, and the ones converted: no English literal is left in them.
+static const char address_to const lcheck_sources[] = {
+    "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
+    "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c"};
+static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c"};
+
+static b32 lcheck_word_byte(char c)
+{
+        return c == '_' || (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z');
+}
+
+// How many times name stands whole in the text (not at the start or end of a longer identifier).
+static positive lcheck_tokens(const char address_to text, positive size, const char address_to name)
+{
+        positive length = string_length((string_address)name), hits = 0;
+
+        for (positive at = 0; at + length <= size;)
+        {
+                const char address_to hit = (const char address_to)memory_search((address_any)(text + at), size - at, (address_any)name, length);
+                positive place;
+
+                if (!hit)
+                        break;
+                place = (positive)(hit - text);
+                hits += (!place || !lcheck_word_byte(text[place - 1])) && (place + length >= size || !lcheck_word_byte(text[place + length]));
+                at = place + length;
+        }
+        return hits;
+}
+
+static b32 lcheck_has(const char address_to text, positive length, const char address_to what)
+{
+        return memory_search((address_any)text, length, (address_any)what, string_length((string_address)what)) != null;
+}
+
+// What the statement before a literal says it is for: a call whose text is a key, a log line, assembly or an assert.
+static b32 lcheck_context(const char address_to stmt, positive length)
+{
+        static const char address_to const names[] = {
+            "asm", "ASM_", "_Static_assert", "string_equals(", "memory_compare(", "string_has_prefix(", "string_compare", "memory_search(",
+            "setting_by_path(", "compositor_word(", "ui_argument(", "program_argument(", "string_table_find(", "word_is(", "string_starts(",
+            "compositor_kmsg(", "string_format(log", "log_direct(", "log_error", "host_say(", ".missing =", ".nofont =", ".title ="};
+
+        for (positive k = 0; k < sizeof(names) / sizeof(names[0]); k++)
+                if (lcheck_has(stmt, length, names[k]))
+                        return true;
+        return false;
+}
+
+// Whether a literal, as written between its quotes, is a key, a path, a terminal's escape or the like and so is no text a person reads.
+static b32 lcheck_not_text(const char address_to lit, positive length)
+{
+        b32 letters = false, blank = false;
+
+        for (positive at = 0; at < length; at++)
+        {
+                if (lit[at] == '\\')
+                {
+                        at++;
+                        if (at < length && lit[at] == 'x')
+                                while (at + 1 < length && ((lit[at + 1] | 32) >= 'a' && (lit[at + 1] | 32) <= 'f' || (lit[at + 1] >= '0' && lit[at + 1] <= '9')))
+                                        at++;
+                        continue;
+                }
+                letters |= (lit[at] | 32) >= 'a' && (lit[at] | 32) <= 'z';
+                blank |= lit[at] == ' ';
+        }
+        if (!letters || lit[0] == '/' || lit[0] == '.' || lit[0] == '-' || lcheck_has(lit, length, "/proc") || lcheck_has(lit, length, "/sys") ||
+            lcheck_has(lit, length, "/dev") || lcheck_has(lit, length, "\\033") || lcheck_has(lit, length, "\\x1b") ||
+            lcheck_has(lit, length, "\\n") || lcheck_has(lit, length, "\\t"))
+                return true;
+        if (blank)
+                return false;
+        // A word with no blank: a lower case one is a key or a verb, a capitalised one with lower case after it is a word a person reads.
+        return !(lit[0] >= 'A' && lit[0] <= 'Z' && length > 2 && lit[1] >= 'a' && lit[1] <= 'z');
+}
+
+// Whether languages/keep says a literal of a file may stay: a line is the file, a tab and the literal as written.
+static b32 lcheck_kept(const char address_to keep, positive keep_size, const char address_to file, const char address_to lit, positive length)
+{
+        positive file_length = string_length((string_address)file);
+
+        for (positive at = 0; at < keep_size;)
+        {
+                positive stop = at;
+
+                while (stop < keep_size && keep[stop] != '\n')
+                        stop++;
+                if (stop - at == file_length + 1 + length && !memory_compare(keep + at, file, file_length) && keep[at + file_length] == '\t' &&
+                    !memory_compare(keep + at + file_length + 1, lit, length))
+                        return true;
+                at = stop + 1;
+        }
+        return false;
+}
+
+// The literals of a file that are English text and are not kept, counted, and reported by line when it is converted (report).
+static positive lcheck_left(const char address_to file, const char address_to text, positive size, const char address_to keep, positive keep_size,
+                            b32 report)
+{
+        positive left = 0, line = 1, at = 0, line_start = 0;
+
+        while (at < size)
+        {
+                positive from, to, stmt;
+
+                if (text[at] == '\n')
+                {
+                        line++, line_start = ++at;
+                        continue;
+                }
+                if (text[at] == '/' && at + 1 < size && text[at + 1] == '/')
+                {
+                        while (at < size && text[at] != '\n')
+                                at++;
+                        continue;
+                }
+                if (text[at] == '/' && at + 1 < size && text[at + 1] == '*')
+                {
+                        for (at += 2; at + 1 < size && !(text[at] == '*' && text[at + 1] == '/'); at++)
+                                if (text[at] == '\n')
+                                        line++, line_start = at + 1;
+                        at += 2;
+                        continue;
+                }
+                if (text[at] == '\'')
+                {
+                        for (at++; at < size && text[at] != '\''; at++)
+                                at += text[at] == '\\';
+                        at++;
+                        continue;
+                }
+                if (text[at] != '"')
+                {
+                        at++;
+                        continue;
+                }
+                from = at + 1;
+                for (at++; at < size && text[at] != '"'; at++)
+                        at += text[at] == '\\';
+                to = at++;
+                // An #include names a file; any other preprocessor line is judged on its own, and a statement back to the last ; { or }.
+                {
+                        positive first = line_start;
+
+                        while (first < from && (text[first] == ' ' || text[first] == '\t'))
+                                first++;
+                        if (text[first] == '#')
+                        {
+                                if (first + 8 <= size && !memory_compare(text + first, "#include", 8))
+                                        continue;
+                                stmt = first;
+                        }
+                        else
+                        {
+                                stmt = from - 1;
+                                while (stmt > 0 && from - stmt < 1600 && text[stmt - 1] != ';' && text[stmt - 1] != '{' && text[stmt - 1] != '}')
+                                        stmt--;
+                        }
+                }
+                if (lcheck_context(text + stmt, from - 1 - stmt) || lcheck_not_text(text + from, to - from) ||
+                    (keep && lcheck_kept(keep, keep_size, file, text + from, to - from)))
+                        continue;
+                left++;
+                if (report)
+                        string_format(log, "  an English literal in a converted file: %s:%p\n", (string_address)file, line);
+        }
+        return left;
+}
+
+static fn language_sources_check(void)
+{
+        positive read = 0, unused = 0, compared = 0, left = 0, keep_size = 0, titles = 0;
+        positive keep_bytes = compositor_map_file((string_address) "languages/keep", &keep_size);
+        const char address_to keep = (const char address_to)keep_bytes;
+
+        for (positive f = 0; f < sizeof(lcheck_sources) / sizeof(lcheck_sources[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)lcheck_sources[f], &size);
+                const char address_to text = (const char address_to)bytes;
+                b32 converted = false;
+
+                if (!bytes)
+                        continue;
+                read++;
+                for (positive c = 0; c < sizeof(lcheck_converted) / sizeof(lcheck_converted[0]); c++)
+                        converted |= !string_compare_max((string_address)lcheck_sources[f], (string_address)lcheck_converted[c], 64);
+                // A window's title is English the kit looks up (ui_app_run, language_of), so each has its keyed line.
+                for (positive title = 0; title + 30 < size; title++)
+                {
+                        static const char address_to const head = ".title = (string_address) \"";
+                        positive head_length = string_length((string_address)head), end_at;
+
+                        if (memory_compare(text + title, head, head_length))
+                                continue;
+                        for (end_at = title + head_length; end_at < size && text[end_at] != '"'; end_at++)
+                                ;
+                        titles += lcheck_keyed_missing(text + title + head_length, end_at - title - head_length);
+                }
+                // A lookup is never compared: no line that asks for a word also tests a text.
+                for (positive start = 0; start < size;)
+                {
+                        positive stop = start;
+
+                        while (stop < size && text[stop] != '\n')
+                                stop++;
+                        if ((lcheck_has(text + start, stop - start, "WORDS(") || lcheck_has(text + start, stop - start, "language_of(") ||
+                             lcheck_has(text + start, stop - start, "language_text(")) &&
+                            (lcheck_has(text + start, stop - start, "string_equals(") || lcheck_has(text + start, stop - start, "memory_compare(")))
+                        {
+                                compared++;
+                                string_format(log, "  a language lookup is compared as a key in %s\n", (string_address)lcheck_sources[f]);
+                        }
+                        start = stop + 1;
+                }
+                // The files not converted yet are counted, for whoever sweeps them next; a converted one has none.
+                {
+                        positive owned = lcheck_left(lcheck_sources[f], text, size, keep, keep_bytes ? keep_size : 0, converted);
+
+                        left += converted ? owned : 0;
+                        string_format(log, "  language inventory: %s %s, %p owned literals %s\n", (string_address)lcheck_sources[f],
+                                      (string_address)(converted ? "converted" : "not converted"), owned,
+                                      (string_address)(converted ? "left" : "to convert"));
+                }
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        // Every id is named by code, as WORDS(id) or as LANGUAGE_id.
+        for (positive id = 0; id < LANGUAGE_COUNT; id++)
+        {
+                char said[96] = "WORDS(", named[96] = "LANGUAGE_";
+                positive found = 0;
+
+                string_append_bounded((string_address)said, (string_address)language_table[id].name, sizeof(said) - 2);
+                string_append_bounded((string_address)said, (string_address) ")", sizeof(said));
+                string_append_bounded((string_address)named, (string_address)language_table[id].name, sizeof(named));
+                for (positive f = 0; f < sizeof(lcheck_sources) / sizeof(lcheck_sources[0]); f++)
+                {
+                        positive size = 0, bytes = compositor_map_file((string_address)lcheck_sources[f], &size);
+
+                        if (!bytes)
+                                continue;
+                        found += lcheck_tokens((const char address_to)bytes, size, named) + check_hits((const char address_to)bytes, size, said);
+                        compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+                }
+                if (!found)
+                {
+                        unused++;
+                        string_format(log, "  a language id is never used: %s\n", (string_address)language_table[id].name);
+                }
+        }
+        if (keep_bytes)
+                compositor_call(syscall(munmap), keep_bytes, keep_size, 0, 0, 0, 0);
+        if (!read)
+        {
+                string_format(log, "  NOT RUN: the language sources, the sources are not here\n");
+                return;
+        }
+        check("language: every id of the table is named by code", !unused && read == sizeof(lcheck_sources) / sizeof(lcheck_sources[0]));
+        check("language: every window's title is a text the kit looks up, and English has its keyed line", !titles);
+        check("language: no lookup is compared as a key, so a translated text is never what code tests", !compared);
+        check("language: a converted file has no English literal left that is no key, path, log line or assembly", !left);
+}
+
+static unsigned int lcheck_heard;
+
+static fn lcheck_listener(void)
+{
+        lcheck_heard++;
+}
+
+static fn language_runtime_check(void)
+{
+        static struct windows table;
+        const char address_to held;
+        const char address_to data = "Settings";
+        char text[64];
+
+        // English is the table: the same pointers, nothing read, and a data text comes back as it went in.
+        language_take(0);
+        check("language: English asks the table itself, and a data text passes through as it came",
+              WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english && language_of(data) == data);
+        // The pin: English as the table has it is languages/en.txt, and one changed letter of one text is seen by the comparison.
+        if (lcheck_load((string_address) "languages/en.txt", &lcheck_english))
+        {
+                check("language: languages/en.txt is the table's English, every id and every stamp", !lcheck_identity(&lcheck_english, -1) && !lcheck_english.bad);
+                check("language: a changed letter of one English text is seen, once, and of each text in turn",
+                      lcheck_identity(&lcheck_english, 0) == 1 && lcheck_identity(&lcheck_english, LANGUAGE_COUNT - 1) == 1);
+                lcheck_close(&lcheck_english);
+        }
+        // Taking a language reads its file; every word changes at once, a text the file lacks stays English, and the listeners hear.
+        language_listen(lcheck_listener);
+        table.language = 'd' | 'e' << 8;
+        ui_kit_language_take(&table);
+        check("language: a window takes the table's language, and its ids come out of the file",
+              !string_compare_max((string_address)WORDS(menu_copy), (string_address) "&Kopieren", 10) && lcheck_heard == 1);
+        check("language: a data text comes out of the file by its English, and one the file lacks stays English",
+              !string_compare_max((string_address)language_of(data), (string_address) "Einstellungen", 14) &&
+                  language_of("no such text") != null && !string_compare_max((string_address)language_of("no such text"), (string_address) "no such text", 13));
+        ui_kit_language_take(&table);
+        check("language: the same code again changes nothing and tells nobody", lcheck_heard == 1);
+        held = WORDS(menu_cut);
+        table.language = 'f' | 'r' << 8;
+        ui_kit_language_take(&table);
+        check("language: a change is taken at once, and the words a window still holds from the language it left are whole",
+              !string_compare_max((string_address)WORDS(menu_copy), (string_address) "&Copier", 10) && lcheck_heard == 2 &&
+                  !string_compare_max((string_address)held, (string_address) "A&usschneiden", 14));
+        language_format(text, sizeof(text), "%2$s: %1$d (%%)", (long)-42, (string_address) "x");
+        check("language: placeholders are filled in the order the text names them, numbers signed, a percent sign escaped",
+              !string_compare_max((string_address)text, (string_address) "x: -42 (%)", 11));
+        table.language = 'e' | 'n' << 8;
+        ui_kit_language_take(&table);
+        check("language: back to English the table answers again, with nothing left of the language before",
+              WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english && language_of(data) == data && lcheck_heard == 3);
+        table.language = 'x' | 'x' << 8;
+        ui_kit_language_take(&table);
+        check("language: a code with no file is English, and no word of it is blank",
+              WORDS(menu_copy) == language_table[LANGUAGE_menu_copy].english && language_of(data) == data);
+        table.language = 0;
+        ui_kit_language_take(&table);
+        // The compositor's side: a change of the code counts the table's theme up once, the same code not at all.
+        {
+                struct windows address_to saved = compositor.table;
+                unsigned int before;
+
+                compositor.table = &table;
+                before = table.themed;
+                compositor_language_publish(windows_language_code("de", 2));
+                compositor_language_publish(windows_language_code("de", 2));
+                check("language: the compositor publishes the code into the table and knocks the windows once for a change",
+                      table.language == ('d' | 'e' << 8) && table.themed == before + 1);
+                compositor_language_publish(windows_language_code("default", 7));
+                check("language: a word that is not a code is English, and only two or three lower case letters are a code",
+                      table.language == 0 && table.themed == before + 2 && !windows_language_code("EN", 2) && !windows_language_code("e", 1) &&
+                          !windows_language_code("de1", 3) && windows_language_code("en", 2) == LANGUAGE_ENGLISH);
+                compositor.table = saved;
+        }
+}
+
+static fn language_check(void)
+{
+        font_face regular, bold;
+        positive size = 0, bytes;
+
+        if (!lcheck_load((string_address) "languages/en.txt", &lcheck_english))
+        {
+                string_format(log, "  NOT RUN: the languages, the sources are not here\n");
+                return;
+        }
+        if (program_argument_count() < 5)
+                return;
+        bytes = compositor_map_file(program_argument(3), &size);
+        check("languages: the regular face loads", bytes && font_load(&regular, (const p8 address_to)bytes, size, 0) == 0);
+        bytes = compositor_map_file(program_argument(4), &size);
+        check("languages: the bold face loads", bytes && font_load(&bold, (const p8 address_to)bytes, size, 0) == 0);
+        if (failures)
+                return;
+        language_files_check(&regular, &bold);
+        language_sources_check();
+        lcheck_close(&lcheck_english);
+        language_runtime_check();
+}
+#endif
+
 /*
         One blink for every field: ui.c's ui_text_timeout is the only place a field's caret deadline is folded into a loop's
         timeout, and the three windows with a field each ask it (none reads the engine's tick, or folds the deadline by
@@ -146366,6 +147119,10 @@ b32 main()
 #endif
         check_no_hand_typing();
         check_one_blink();
+#if MOONWATER_UI_ANY
+        language_directory = "languages/";
+        language_check();
+#endif
         check_one_cut();
         check_one_digits();
 #if MOONWATER_UI_ANY

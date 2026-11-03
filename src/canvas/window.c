@@ -744,6 +744,9 @@ struct windows
         unsigned int theme, accent, motion, themed;
         unsigned int wheel_off;
         unsigned int caret_speed, caret_thick;
+        // The compositor's: the language the windows Canvas draws itself speak, `moonwater language` as /root/language keeps it,
+        // packed by windows_language_code (0 for English, which "en" is too). A change counts themed up, as a theme's does.
+        unsigned int language;
 
         unsigned int pid[WINDOWS];
         unsigned int state[WINDOWS]; // WINDOW_MINIMIZED, WINDOW_CLOSING
@@ -853,6 +856,26 @@ struct windows
 // Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
 // constant here and not the header's pixels field, which any mapper of the table may write.
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
+
+/*
+        A language's code as the table carries it: its two or three lower case letters (an ISO 639 code), the first in
+        the low byte, or 0 when the word is none of that. Here because the command, the compositor and every window
+        read the same word.
+*/
+static unsigned int windows_language_code(const char *word, unsigned int length)
+{
+        unsigned int code = 0;
+
+        if (length < 2 || length > 3)
+                return 0;
+        for (unsigned int at = 0; at < length; at++)
+        {
+                if (word[at] < 'a' || word[at] > 'z')
+                        return 0;
+                code |= (unsigned int)word[at] << 8 * at;
+        }
+        return code;
+}
 
 /*
         The arrangement of the screens, which the compositor lays them by and

@@ -1,0 +1,148 @@
+@language el
+@name Ελληνικά
+@translated machine
+action_copy	3664	Αντιγραφή
+action_cut	5863	Αποκοπή
+action_paste	0288	Επικόλληση
+action_select_all	3b12	Επιλογή όλων
+menu_copy	43e0	Αντιγραφή
+menu_cut	5c17	Αποκοπή
+menu_delete	1e3e	Διαγραφή
+menu_paste	6854	Επικόλληση
+menu_redo	ac45	Επανάληψη
+menu_select_all	f6f6	Επιλογή όλων
+menu_undo	b9d3	Αναίρεση
+ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
+ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
+ui_field_full	fe02	δεν χωράει περισσότερο
+=Accent	ccd7	Έμφαση
+=Accent colour (rrggbb or reset)	53aa	Χρώμα έμφασης (rrggbb ή reset)
+=Airplane mode	3b8a	Λειτουργία πτήσης
+=All commands	4a42	Όλες οι εντολές
+=Audio	1439	Ήχος
+=Authenticated time (NTS)	e533	Πιστοποιημένη ώρα (NTS)
+=Background	0abd	Φόντο
+=Background colour (rrggbb or default)	e2b2	Χρώμα φόντου (rrggbb ή default)
+=Battery	e12e	Μπαταρία
+=Battery shown	2a23	Μπαταρία που εμφανίζεται
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Προσαρμογείς Bluetooth
+=Boost	a6cc	Boost
+=Boot	38f5	Εκκίνηση
+=Brightness	324a	Φωτεινότητα
+=Cameras	cea7	Κάμερες
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Ταχύτητα αναβοσβήματος του δρομέα κειμένου
+=Caret thickness	1e9a	Πάχος του δρομέα κειμένου
+=Charge limit (20 to 100, or off)	c92d	Όριο φόρτισης (20 έως 100 ή off)
+=Clipboard	99b1	Πρόχειρο
+=Clipboard history (copies kept)	7423	Ιστορικό προχείρου (αντίγραφα που κρατούνται)
+=Clipboard limit (MiB)	a505	Όριο προχείρου (MiB)
+=Clock (Enter sets it now)	575e	Ρολόι (το Enter το ρυθμίζει τώρα)
+=Cursor look	34ce	Εμφάνιση δείκτη
+=Cursor size	65d4	Μέγεθος δείκτη
+=Display	d9b5	Οθόνη
+=Editor	bf98	Επεξεργαστής
+=Gallery	4cdd	Συλλογή
+=Hubs	456d	Διανομείς
+=Identify	033d	Αναγνώριση
+=Input	e11b	Είσοδος
+=Keep the lowest-delay sample	d8b9	Διατήρηση του δείγματος με τη μικρότερη καθυστέρηση
+=Key repeat delay (ms, or default)	4eb7	Καθυστέρηση επανάληψης πλήκτρων (ms ή default)
+=Key repeat rate (per second, off or default)	1e94	Ρυθμός επανάληψης πλήκτρων (ανά δευτερόλεπτο, off ή default)
+=Keyboard	a714	Πληκτρολόγιο
+=Keyboards and mice	c352	Πληκτρολόγια και ποντίκια
+=Language	db9b	Γλώσσα
+=Large pointer stays (ms, or default)	5626	Ο μεγάλος δείκτης μένει (ms ή default)
+=Launcher	44b1	Εκκινητής
+=Machine	be0e	Μηχάνημα
+=Motion	7647	Κίνηση
+=Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
+=Mouse acceleration	c400	Επιτάχυνση ποντικιού
+=Mouse sensitivity (percent, or default)	8a23	Ευαισθησία ποντικιού (ποσοστό ή default)
+=NTS servers (or default)	9fd7	Διακομιστές NTS (ή default)
+=Name	7306	Όνομα
+=Name servers (auto for the network)	695a	Διακομιστές ονομάτων (auto για το δίκτυο)
+=Names over TLS	075a	Ονόματα μέσω TLS
+=Network	ad65	Δίκτυο
+=Network adapters	88ef	Προσαρμογείς δικτύου
+=New USB devices	c15c	Νέες συσκευές USB
+=Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
+=Other devices	8362	Άλλες συσκευές
+=Power	a5e6	Ενέργεια
+=Power profile	8def	Προφίλ ενέργειας
+=Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας
+=Refresh rate	bf6e	Ρυθμός ανανέωσης
+=Rotation	777f	Περιστροφή
+=Scale of this screen	e4ca	Κλίμακα αυτής της οθόνης
+=Screen	c631	Οθόνη
+=Screen modes	85ad	Λειτουργίες οθόνης
+=Set the clock from the network	b2a3	Ρύθμιση ρολογιού από το δίκτυο
+=Settings	8728	Ρυθμίσεις
+=Shake the pointer to find it	f508	Κούνημα του δείκτη για να βρεθεί
+=Show touch area	9ca8	Εμφάνιση περιοχής αφής
+=Side taskbar text faces	d115	Προσανατολισμός κειμένου πλευρικής γραμμής
+=Simultaneous threads (SMT)	e836	Ταυτόχρονα νήματα (SMT)
+=Smooth mouse wheel	0dab	Ομαλός τροχός ποντικιού
+=Start the desktop	be4c	Έναρξη της επιφάνειας εργασίας
+=Storage	df06	Αποθήκευση
+=Taskbar	d759	Γραμμή εργασιών
+=Taskbar display	042b	Οθόνη της γραμμής εργασιών
+=Taskbar launcher button	dd4d	Κουμπί εκκινητή στη γραμμή εργασιών
+=Taskbar position	81b8	Θέση της γραμμής εργασιών
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	Το διαδίκτυο προτιμά
+=Theme	7c92	Θέμα
+=Time	e404	Ώρα
+=Time server (auto for the pool)	67e5	Διακομιστής ώρας (auto για το pool)
+=Time zone	741a	Ζώνη ώρας
+=Turned by the screen	ea45	Περιστρέφεται από την οθόνη
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Ενσύρματο
+=all	4bc4	όλα
+=allow	a832	επιτρέπεται
+=amber	bec0	κεχριμπαρί
+=auto	a396	αυτόματο
+=balanced	b71d	ισορροπημένο
+=black	4ba4	μαύρο
+=blue	f5cd	μπλε
+=bottom	6b2a	κάτω
+=center	4484	κέντρο
+=dark	6945	σκούρο
+=dark-grey	bcb3	σκούρο γκρι
+=default	5bde	προεπιλογή
+=deny	6367	άρνηση
+=edge	d83c	άκρη
+=fast	02af	γρήγορα
+=forest	2a60	δάσος
+=full	b33c	πλήρες
+=graphite	dc8d	γραφίτης
+=green	ecbc	πράσινο
+=kernel log	415a	αρχείο καταγραφής πυρήνα
+=left	ec70	αριστερά
+=light	1e2f	φωτεινό
+=light-grey	ed41	ανοιχτό γκρι
+=lock	7842	κλείδωμα
+=midnight-blue	4008	μεσονύχτιο μπλε
+=normal	9c52	κανονικά
+=off	8a0a	ανενεργό
+=on	2fd0	ενεργό
+=only	89f7	μόνο
+=performance	8ca5	απόδοση
+=plum	b06b	δαμάσκηνο
+=powersave	2283	εξοικονόμηση ενέργειας
+=primary	5fd9	κύριο
+=reduced	5839	μειωμένο
+=right	2de5	δεξιά
+=rose	1806	ροζ
+=slate	deee	σχιστόλιθος
+=slow	42b8	αργά
+=thick	964e	χοντρό
+=thin	b172	λεπτό
+=top	dc3c	πάνω
+=unlock	1f55	ξεκλείδωμα
+=violet	57f2	βιολετί
+=white	0766	λευκό
+=wifi	6448	Wi-Fi
+=wired	bfb4	ενσύρματη

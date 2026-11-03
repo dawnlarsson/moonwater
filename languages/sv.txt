@@ -1,0 +1,148 @@
+@language sv
+@name Svenska
+@translated machine
+action_copy	3664	Kopiera
+action_cut	5863	Klipp ut
+action_paste	0288	Klistra in
+action_select_all	3b12	Markera allt
+menu_copy	43e0	Ko&piera
+menu_cut	5c17	&Klipp ut
+menu_delete	1e3e	&Ta bort
+menu_paste	6854	Kl&istra in
+menu_redo	ac45	&Gör om
+menu_select_all	f6f6	&Markera allt
+menu_undo	b9d3	Å&ngra
+ui_confirm_again	b3ff	tryck igen för att bekräfta: 
+ui_field_digits	f52b	ett tal består av siffror
+ui_field_full	fe02	mer ryms inte
+=Accent	ccd7	Accent
+=Accent colour (rrggbb or reset)	53aa	Accentfärg (rrggbb eller reset)
+=Airplane mode	3b8a	Flygplansläge
+=All commands	4a42	Alla kommandon
+=Audio	1439	Ljud
+=Authenticated time (NTS)	e533	Autentiserad tid (NTS)
+=Background	0abd	Bakgrund
+=Background colour (rrggbb or default)	e2b2	Bakgrundsfärg (rrggbb eller default)
+=Battery	e12e	Batteri
+=Battery shown	2a23	Visat batteri
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Bluetooth-adaptrar
+=Boost	a6cc	Boost
+=Boot	38f5	Start
+=Brightness	324a	Ljusstyrka
+=Cameras	cea7	Kameror
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Textmarkörens blinkhastighet
+=Caret thickness	1e9a	Textmarkörens tjocklek
+=Charge limit (20 to 100, or off)	c92d	Laddningsgräns (20 till 100, eller off)
+=Clipboard	99b1	Urklipp
+=Clipboard history (copies kept)	7423	Urklippshistorik (sparade kopior)
+=Clipboard limit (MiB)	a505	Urklippsgräns (MiB)
+=Clock (Enter sets it now)	575e	Klocka (Enter ställer den nu)
+=Cursor look	34ce	Pekarens utseende
+=Cursor size	65d4	Pekarens storlek
+=Display	d9b5	Skärm
+=Editor	bf98	Redigerare
+=Gallery	4cdd	Galleri
+=Hubs	456d	Hubbar
+=Identify	033d	Identifiera
+=Input	e11b	Inmatning
+=Keep the lowest-delay sample	d8b9	Behåll stickprovet med lägst fördröjning
+=Key repeat delay (ms, or default)	4eb7	Fördröjning för tangentupprepning (ms eller default)
+=Key repeat rate (per second, off or default)	1e94	Tangentupprepning (per sekund, off eller default)
+=Keyboard	a714	Tangentbord
+=Keyboards and mice	c352	Tangentbord och möss
+=Language	db9b	Språk
+=Large pointer stays (ms, or default)	5626	Stor pekare kvarstår (ms eller default)
+=Launcher	44b1	Startare
+=Machine	be0e	Maskin
+=Motion	7647	Rörelse
+=Mount kept disks	f0c8	Montera sparade diskar
+=Mouse acceleration	c400	Musacceleration
+=Mouse sensitivity (percent, or default)	8a23	Musens känslighet (procent eller default)
+=NTS servers (or default)	9fd7	NTS-servrar (eller default)
+=Name	7306	Namn
+=Name servers (auto for the network)	695a	Namnservrar (auto för nätverket)
+=Names over TLS	075a	Namn över TLS
+=Network	ad65	Nätverk
+=Network adapters	88ef	Nätverksadaptrar
+=New USB devices	c15c	Nya USB-enheter
+=Open windows where they were last put	8711	Öppna fönster där de senast lades
+=Other devices	8362	Andra enheter
+=Power	a5e6	Ström
+=Power profile	8def	Strömprofil
+=Predict touch and pen	e2b7	Förutse touch och penna
+=Refresh rate	bf6e	Uppdateringsfrekvens
+=Rotation	777f	Rotation
+=Scale of this screen	e4ca	Den här skärmens skala
+=Screen	c631	Skärm
+=Screen modes	85ad	Skärmlägen
+=Set the clock from the network	b2a3	Ställ klockan från nätverket
+=Settings	8728	Inställningar
+=Shake the pointer to find it	f508	Skaka pekaren för att hitta den
+=Show touch area	9ca8	Visa tryckytan
+=Side taskbar text faces	d115	Sidofältets textriktning
+=Simultaneous threads (SMT)	e836	Samtidiga trådar (SMT)
+=Smooth mouse wheel	0dab	Mjukt mushjul
+=Start the desktop	be4c	Starta skrivbordet
+=Storage	df06	Lagring
+=Taskbar	d759	Aktivitetsfält
+=Taskbar display	042b	Aktivitetsfältets skärm
+=Taskbar launcher button	dd4d	Startarknapp i aktivitetsfältet
+=Taskbar position	81b8	Aktivitetsfältets plats
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Aktivitetsfältets systemfält (text med {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	Internet föredrar
+=Theme	7c92	Tema
+=Time	e404	Tid
+=Time server (auto for the pool)	67e5	Tidsserver (auto för poolen)
+=Time zone	741a	Tidszon
+=Turned by the screen	ea45	Vänds av skärmen
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Trådbundet
+=all	4bc4	alla
+=allow	a832	tillåt
+=amber	bec0	bärnsten
+=auto	a396	automatiskt
+=balanced	b71d	balanserad
+=black	4ba4	svart
+=blue	f5cd	blå
+=bottom	6b2a	nederst
+=center	4484	mitten
+=dark	6945	mörkt
+=dark-grey	bcb3	mörkgrå
+=default	5bde	standard
+=deny	6367	neka
+=edge	d83c	kant
+=fast	02af	snabb
+=forest	2a60	skog
+=full	b33c	full
+=graphite	dc8d	grafit
+=green	ecbc	grön
+=kernel log	415a	kärnlogg
+=left	ec70	till vänster
+=light	1e2f	ljust
+=light-grey	ed41	ljusgrå
+=lock	7842	lås
+=midnight-blue	4008	midnattsblå
+=normal	9c52	normal
+=off	8a0a	av
+=on	2fd0	på
+=only	89f7	endast
+=performance	8ca5	prestanda
+=plum	b06b	plommon
+=powersave	2283	strömsparläge
+=primary	5fd9	primär
+=reduced	5839	minskad
+=right	2de5	till höger
+=rose	1806	rosa
+=slate	deee	skiffer
+=slow	42b8	långsam
+=thick	964e	tjock
+=thin	b172	tunn
+=top	dc3c	överst
+=unlock	1f55	lås upp
+=violet	57f2	violett
+=white	0766	vit
+=wifi	6448	Wi-Fi
+=wired	bfb4	trådbundet

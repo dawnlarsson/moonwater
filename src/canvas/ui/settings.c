@@ -2934,6 +2934,9 @@ static b32 settings_is_modes(int row)
 // The plain word a row's verb word is read as: Screen modes says Biggest picture and Recommended, others say their word.
 static const char address_to settings_label_of(int row, const char address_to word)
 {
+        // The Language row says each language by its own name, whichever language is taken (language_names).
+        if (settings_rows[row].flags & SETTINGS_LANGUAGE)
+                return language_name_of(word);
         if (!settings_is_modes(row))
                 return word;
         return string_equals((string_address)word, (string_address) "largest") ? "Biggest picture"
@@ -2945,7 +2948,9 @@ static void settings_word_of(int row, const char address_to label, char address_
 {
         const char address_to word = label;
 
-        if (settings_is_modes(row))
+        if (settings_rows[row].flags & SETTINGS_LANGUAGE)
+                word = language_code_of(label);
+        else if (settings_is_modes(row))
                 word = string_equals((string_address)label, (string_address) "Biggest picture") ? "largest"
                        : string_equals((string_address)label, (string_address) "Recommended") ? "preferred" : label;
         string_copy_bounded((string_address)into, (string_address)word, room);

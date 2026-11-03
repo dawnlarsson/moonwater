@@ -1,0 +1,148 @@
+@language ru
+@name Русский
+@translated machine
+action_copy	3664	Копировать
+action_cut	5863	Вырезать
+action_paste	0288	Вставить
+action_select_all	3b12	Выделить всё
+menu_copy	43e0	Копировать
+menu_cut	5c17	Вырезать
+menu_delete	1e3e	Удалить
+menu_paste	6854	Вставить
+menu_redo	ac45	Повторить
+menu_select_all	f6f6	Выделить всё
+menu_undo	b9d3	Отменить
+ui_confirm_again	b3ff	нажмите ещё раз для подтверждения: 
+ui_field_digits	f52b	число состоит из цифр
+ui_field_full	fe02	больше не помещается
+=Accent	ccd7	Акцент
+=Accent colour (rrggbb or reset)	53aa	Цвет акцента (rrggbb или reset)
+=Airplane mode	3b8a	Режим полёта
+=All commands	4a42	Все команды
+=Audio	1439	Звук
+=Authenticated time (NTS)	e533	Аутентифицированное время (NTS)
+=Background	0abd	Фон
+=Background colour (rrggbb or default)	e2b2	Цвет фона (rrggbb или default)
+=Battery	e12e	Батарея
+=Battery shown	2a23	Показываемая батарея
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Адаптеры Bluetooth
+=Boost	a6cc	Boost
+=Boot	38f5	Загрузка
+=Brightness	324a	Яркость
+=Cameras	cea7	Камеры
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Скорость мигания текстового курсора
+=Caret thickness	1e9a	Толщина текстового курсора
+=Charge limit (20 to 100, or off)	c92d	Предел зарядки (от 20 до 100 или off)
+=Clipboard	99b1	Буфер обмена
+=Clipboard history (copies kept)	7423	История буфера обмена (хранимых копий)
+=Clipboard limit (MiB)	a505	Предел буфера обмена (MiB)
+=Clock (Enter sets it now)	575e	Часы (Enter устанавливает сейчас)
+=Cursor look	34ce	Вид указателя
+=Cursor size	65d4	Размер указателя
+=Display	d9b5	Экран
+=Editor	bf98	Редактор
+=Gallery	4cdd	Галерея
+=Hubs	456d	Хабы
+=Identify	033d	Определить
+=Input	e11b	Ввод
+=Keep the lowest-delay sample	d8b9	Оставлять замер с наименьшей задержкой
+=Key repeat delay (ms, or default)	4eb7	Задержка повтора клавиш (мс или default)
+=Key repeat rate (per second, off or default)	1e94	Скорость повтора клавиш (в секунду, off или default)
+=Keyboard	a714	Клавиатура
+=Keyboards and mice	c352	Клавиатуры и мыши
+=Language	db9b	Язык
+=Large pointer stays (ms, or default)	5626	Крупный указатель остаётся (мс или default)
+=Launcher	44b1	Запуск
+=Machine	be0e	Компьютер
+=Motion	7647	Движение
+=Mount kept disks	f0c8	Монтировать сохранённые диски
+=Mouse acceleration	c400	Ускорение мыши
+=Mouse sensitivity (percent, or default)	8a23	Чувствительность мыши (проценты или default)
+=NTS servers (or default)	9fd7	Серверы NTS (или default)
+=Name	7306	Имя
+=Name servers (auto for the network)	695a	Серверы имён (auto для сети)
+=Names over TLS	075a	Имена через TLS
+=Network	ad65	Сеть
+=Network adapters	88ef	Сетевые адаптеры
+=New USB devices	c15c	Новые USB-устройства
+=Open windows where they were last put	8711	Открывать окна там, где их оставили
+=Other devices	8362	Другие устройства
+=Power	a5e6	Питание
+=Power profile	8def	Профиль питания
+=Predict touch and pen	e2b7	Предсказывать касание и перо
+=Refresh rate	bf6e	Частота обновления
+=Rotation	777f	Поворот
+=Scale of this screen	e4ca	Масштаб этого экрана
+=Screen	c631	Экран
+=Screen modes	85ad	Режимы экрана
+=Set the clock from the network	b2a3	Устанавливать часы по сети
+=Settings	8728	Настройки
+=Shake the pointer to find it	f508	Потрясти указатель, чтобы найти его
+=Show touch area	9ca8	Показывать область касания
+=Side taskbar text faces	d115	Направление текста боковой панели
+=Simultaneous threads (SMT)	e836	Одновременные потоки (SMT)
+=Smooth mouse wheel	0dab	Плавное колесо мыши
+=Start the desktop	be4c	Запускать рабочий стол
+=Storage	df06	Накопители
+=Taskbar	d759	Панель задач
+=Taskbar display	042b	Экран панели задач
+=Taskbar launcher button	dd4d	Кнопка запуска на панели задач
+=Taskbar position	81b8	Положение панели задач
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	Интернет предпочитает
+=Theme	7c92	Тема
+=Time	e404	Время
+=Time server (auto for the pool)	67e5	Сервер времени (auto для пула)
+=Time zone	741a	Часовой пояс
+=Turned by the screen	ea45	Поворачивает экран
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Проводная сеть
+=all	4bc4	все
+=allow	a832	разрешить
+=amber	bec0	янтарный
+=auto	a396	авто
+=balanced	b71d	сбалансированный
+=black	4ba4	чёрный
+=blue	f5cd	синий
+=bottom	6b2a	внизу
+=center	4484	центр
+=dark	6945	тёмная
+=dark-grey	bcb3	тёмно-серый
+=default	5bde	по умолчанию
+=deny	6367	запретить
+=edge	d83c	край
+=fast	02af	быстро
+=forest	2a60	лесной
+=full	b33c	полное
+=graphite	dc8d	графитовый
+=green	ecbc	зелёный
+=kernel log	415a	журнал ядра
+=left	ec70	слева
+=light	1e2f	светлая
+=light-grey	ed41	светло-серый
+=lock	7842	заблокировать
+=midnight-blue	4008	полуночно-синий
+=normal	9c52	нормально
+=off	8a0a	выключено
+=on	2fd0	включено
+=only	89f7	только
+=performance	8ca5	производительность
+=plum	b06b	сливовый
+=powersave	2283	экономия энергии
+=primary	5fd9	основной
+=reduced	5839	уменьшенное
+=right	2de5	справа
+=rose	1806	розовый
+=slate	deee	сланцевый
+=slow	42b8	медленно
+=thick	964e	толстый
+=thin	b172	тонкий
+=top	dc3c	вверху
+=unlock	1f55	разблокировать
+=violet	57f2	фиолетовый
+=white	0766	белый
+=wifi	6448	Wi-Fi
+=wired	bfb4	проводная

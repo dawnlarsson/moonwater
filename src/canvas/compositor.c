@@ -8218,6 +8218,17 @@ static void compositor_caret_publish(unsigned int speed, unsigned int thick)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
+// The language the windows speak (ui/language.c), as the table keeps it: a change knocks every window, as a theme change does.
+static void compositor_language_publish(unsigned int code)
+{
+        struct windows *table = compositor.table;
+
+        if (!table || table->language == code)
+                return;
+        table->language = code;
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+}
+
 static void compositor_theme_read(void)
 {
         char word[16];
@@ -8241,6 +8252,9 @@ static void compositor_theme_read(void)
         compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_THICKNESS_PATH, word, &thick);
         compositor_caret_publish((unsigned int)blink + 1, (unsigned int)thick + 1);
+        // English when nothing is kept, and when what is kept is not a code (default).
+        compositor_word(SETTING_LANGUAGE_PATH, word, sizeof(word));
+        compositor_language_publish(windows_language_code(word, string_length((string_address)word)));
         // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
                              accent < 0 ? 0xffffffu : (unsigned int)accent, motion);

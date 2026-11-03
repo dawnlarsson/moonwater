@@ -52,6 +52,7 @@
 #define SETTINGS_TICK 4u  // the value changes by itself: it is asked again while its group is shown
 #define SETTINGS_INK 8u   // a choice of named colours: the verb says rrggbb, and a name is what is shown and chosen
 #define SETTINGS_BATTERIES 16u // a choice of the batteries the machine has: auto, each name from the kernel, and none
+#define SETTINGS_LANGUAGE 32u  // a choice of the languages: the verb says the code and the menu shows the language's own name (ui/language.c)
 
 // The Display rows of a screen (settings.c draws the map above them): the screen chosen, its rotation and refresh (the
 // window table says what each is, and the verb sets it), and a note of who turns it.
@@ -117,6 +118,11 @@
 #define SETTING_WHEEL_SMOOTH_PATH "/root/canvas.wheel.smooth"
 #define SETTING_CARET_BLINK_PATH "/root/canvas.caret.blink"
 #define SETTING_CARET_THICKNESS_PATH "/root/canvas.caret.thickness"
+// The language the windows Canvas draws itself speak: the code of a file in /usr/share/moonwater/language (ui/language.c reads it).
+// These are the codes the Language row offers, in the order of its menu; a check keeps them the languages/ directory's.
+#define SETTING_LANGUAGE_PATH "/root/language"
+#define SETTING_LANGUAGE_DIRECTORY "/usr/share/moonwater/language/"
+#define SETTINGS_LANGUAGE_CODES "en es fr de pt it nl pl tr sv ru uk el"
 
 struct settings_row
 {
@@ -174,6 +180,13 @@ struct settings_row
 static const struct settings_row settings_rows[] = {
     {"Machine", "Name", SETTINGS_FIELD, 0, SETTINGS_LINE, {"name"}, "", null, {"name"}, null, 0, null,
      .usage = "name [NEW|random]", .help = "what this machine is called, like space-wizard"},
+    //  What the system's own windows say, in which language: one file of languages/ read by every window of the kit, taken
+    //  from the window table so a change reaches them at once. Bare, the verb adds what is installed and which are machine-made.
+    SETTING_PLAIN_ROW(null, "Language", SETTINGS_CHOICE, SETTINGS_LANGUAGE, ("language"), "language ", SETTINGS_LANGUAGE_CODES,
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_LANGUAGE_PATH, .standard = "en", .say = "language", .need = "the language",
+                      .refusal = "language is one of " SETTINGS_LANGUAGE_CODES ", not %s\n",
+                      .usage = "language [CODE|default]",
+                      .help = "the language the windows Canvas draws itself speak; bare lists them, machine-translated ones marked [en]"),
     SETTING_PLAIN_ROW("Canvas", "Background", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "background"), "background ",
                       "default black dark-grey slate midnight-blue forest plum light-grey white",
                       .type = SETTING_COLOUR, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_BACKGROUND_PATH, .standard = "#1e1e1e", .reset = "default",

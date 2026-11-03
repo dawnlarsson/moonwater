@@ -1,0 +1,148 @@
+@language pt
+@name Português
+@translated machine
+action_copy	3664	Copiar
+action_cut	5863	Recortar
+action_paste	0288	Colar
+action_select_all	3b12	Selecionar tudo
+menu_copy	43e0	&Copiar
+menu_cut	5c17	Recor&tar
+menu_delete	1e3e	&Excluir
+menu_paste	6854	Co&lar
+menu_redo	ac45	&Refazer
+menu_select_all	f6f6	Selecionar t&udo
+menu_undo	b9d3	&Desfazer
+ui_confirm_again	b3ff	pressione novamente para confirmar: 
+ui_field_digits	f52b	um número é feito de dígitos
+ui_field_full	fe02	não cabe mais que isso
+=Accent	ccd7	Destaque
+=Accent colour (rrggbb or reset)	53aa	Cor de destaque (rrggbb ou reset)
+=Airplane mode	3b8a	Modo avião
+=All commands	4a42	Todos os comandos
+=Audio	1439	Áudio
+=Authenticated time (NTS)	e533	Hora autenticada (NTS)
+=Background	0abd	Plano de fundo
+=Background colour (rrggbb or default)	e2b2	Cor do plano de fundo (rrggbb ou default)
+=Battery	e12e	Bateria
+=Battery shown	2a23	Bateria mostrada
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Adaptadores Bluetooth
+=Boost	a6cc	Boost
+=Boot	38f5	Inicialização
+=Brightness	324a	Brilho
+=Cameras	cea7	Câmeras
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Velocidade de piscar do cursor de texto
+=Caret thickness	1e9a	Espessura do cursor de texto
+=Charge limit (20 to 100, or off)	c92d	Limite de carga (20 a 100, ou off)
+=Clipboard	99b1	Área de transferência
+=Clipboard history (copies kept)	7423	Histórico da área de transferência (cópias mantidas)
+=Clipboard limit (MiB)	a505	Limite da área de transferência (MiB)
+=Clock (Enter sets it now)	575e	Relógio (Enter ajusta agora)
+=Cursor look	34ce	Aparência do ponteiro
+=Cursor size	65d4	Tamanho do ponteiro
+=Display	d9b5	Tela
+=Editor	bf98	Editor
+=Gallery	4cdd	Galeria
+=Hubs	456d	Hubs
+=Identify	033d	Identificar
+=Input	e11b	Entrada
+=Keep the lowest-delay sample	d8b9	Manter a amostra de menor atraso
+=Key repeat delay (ms, or default)	4eb7	Atraso da repetição de teclas (ms ou default)
+=Key repeat rate (per second, off or default)	1e94	Taxa de repetição de teclas (por segundo, off ou default)
+=Keyboard	a714	Teclado
+=Keyboards and mice	c352	Teclados e mouses
+=Language	db9b	Idioma
+=Large pointer stays (ms, or default)	5626	O ponteiro grande permanece (ms ou default)
+=Launcher	44b1	Lançador
+=Machine	be0e	Máquina
+=Motion	7647	Movimento
+=Mount kept disks	f0c8	Montar os discos mantidos
+=Mouse acceleration	c400	Aceleração do mouse
+=Mouse sensitivity (percent, or default)	8a23	Sensibilidade do mouse (porcentagem ou default)
+=NTS servers (or default)	9fd7	Servidores NTS (ou default)
+=Name	7306	Nome
+=Name servers (auto for the network)	695a	Servidores de nomes (auto para a rede)
+=Names over TLS	075a	Nomes por TLS
+=Network	ad65	Rede
+=Network adapters	88ef	Adaptadores de rede
+=New USB devices	c15c	Novos dispositivos USB
+=Open windows where they were last put	8711	Abrir janelas onde foram deixadas
+=Other devices	8362	Outros dispositivos
+=Power	a5e6	Energia
+=Power profile	8def	Perfil de energia
+=Predict touch and pen	e2b7	Prever toque e caneta
+=Refresh rate	bf6e	Taxa de atualização
+=Rotation	777f	Rotação
+=Scale of this screen	e4ca	Escala desta tela
+=Screen	c631	Tela
+=Screen modes	85ad	Modos de tela
+=Set the clock from the network	b2a3	Acertar o relógio pela rede
+=Settings	8728	Configurações
+=Shake the pointer to find it	f508	Sacudir o ponteiro para encontrá-lo
+=Show touch area	9ca8	Mostrar a área de toque
+=Side taskbar text faces	d115	Orientação do texto da barra lateral
+=Simultaneous threads (SMT)	e836	Threads simultâneos (SMT)
+=Smooth mouse wheel	0dab	Roda do mouse suave
+=Start the desktop	be4c	Iniciar a área de trabalho
+=Storage	df06	Armazenamento
+=Taskbar	d759	Barra de tarefas
+=Taskbar display	042b	Tela da barra de tarefas
+=Taskbar launcher button	dd4d	Botão do lançador na barra de tarefas
+=Taskbar position	81b8	Posição da barra de tarefas
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Bandeja da barra de tarefas (texto com {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	A internet prefere
+=Theme	7c92	Tema
+=Time	e404	Hora
+=Time server (auto for the pool)	67e5	Servidor de hora (auto para o pool)
+=Time zone	741a	Fuso horário
+=Turned by the screen	ea45	Girado pela tela
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Com fio
+=all	4bc4	todas
+=allow	a832	permitir
+=amber	bec0	âmbar
+=auto	a396	automático
+=balanced	b71d	equilibrado
+=black	4ba4	preto
+=blue	f5cd	azul
+=bottom	6b2a	embaixo
+=center	4484	centro
+=dark	6945	escuro
+=dark-grey	bcb3	cinza-escuro
+=default	5bde	padrão
+=deny	6367	negar
+=edge	d83c	borda
+=fast	02af	rápido
+=forest	2a60	floresta
+=full	b33c	completo
+=graphite	dc8d	grafite
+=green	ecbc	verde
+=kernel log	415a	registro do kernel
+=left	ec70	à esquerda
+=light	1e2f	claro
+=light-grey	ed41	cinza-claro
+=lock	7842	bloquear
+=midnight-blue	4008	azul-meia-noite
+=normal	9c52	normal
+=off	8a0a	desativado
+=on	2fd0	ativado
+=only	89f7	somente
+=performance	8ca5	desempenho
+=plum	b06b	ameixa
+=powersave	2283	economia de energia
+=primary	5fd9	principal
+=reduced	5839	reduzido
+=right	2de5	à direita
+=rose	1806	rosa
+=slate	deee	ardósia
+=slow	42b8	lento
+=thick	964e	grosso
+=thin	b172	fino
+=top	dc3c	em cima
+=unlock	1f55	desbloquear
+=violet	57f2	violeta
+=white	0766	branco
+=wifi	6448	Wi-Fi
+=wired	bfb4	com fio

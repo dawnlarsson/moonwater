@@ -1,0 +1,45 @@
+# The fixed terms of the translations: one concept, one word, in every language, so a later pass says the same thing the same way.
+# A line is the English concept, then the word in es, fr, de, pt, it, nl, pl, tr, sv, ru, uk, el, separated by " | ".
+# Add a line before using a new term twice; change a line only with every text that uses it.
+#
+# Rules that hold for every text:
+#   - Never translated: Moonwater, Canvas, Wi-Fi, Bluetooth, USB, NTS, TLS, SMT, MiB, ms, Ctrl, Alt, Shift, Enter and Escape
+#     where they name a key, rrggbb, and every {name} of a format. A word a person types (default, auto, off, reset, on)
+#     stays English inside a label that tells them to type it, and is translated where the window only shows it.
+#   - Placeholders (%s, %d, %1$s) and {names} are kept whole; a translation may put them in another order, naming them (%2$s).
+#   - A mnemonic is & before one ASCII letter; Cyrillic and Greek texts have none, and no menu has two the same.
+#   - One line of UTF-8, short: the windows cut with "..." where it does not fit. German and Russian run 30 to 40 percent over English.
+#   - Brazilian Portuguese and Latin American neutral Spanish where the two regions differ. Formal "you" where a text addresses one.
+#   - Machine translations: marked @translated machine in the file, until a person who speaks the language has reviewed it.
+#
+# English | es | fr | de | pt | it | nl | pl | tr | sv | ru | uk | el
+machine | equipo | machine | Gerät | máquina | macchina | machine | maszyna | makine | maskin | компьютер | комп'ютер | μηχάνημα
+screen (a display) | pantalla | écran | Bildschirm | tela | schermo | scherm | ekran | ekran | skärm | экран | екран | οθόνη
+pointer (the mouse's) | puntero | pointeur | Mauszeiger | ponteiro | puntatore | aanwijzer | wskaźnik | işaretçi | pekare | указатель | вказівник | δείκτης
+caret (the text's) | cursor de texto | curseur de texte | Textcursor | cursor de texto | cursore di testo | tekstcursor | kursor tekstowy | metin imleci | textmarkör | текстовый курсор | текстовий курсор | δρομέας κειμένου
+taskbar | barra de tareas | barre des tâches | Taskleiste | barra de tarefas | barra delle applicazioni | taakbalk | pasek zadań | görev çubuğu | aktivitetsfält | панель задач | панель завдань | γραμμή εργασιών
+tray | bandeja | zone d'état | Infobereich | bandeja | area di notifica | systeemvak | obszar powiadomień | bildirim alanı | systemfält | область уведомлений | область сповіщень | περιοχή ειδοποιήσεων
+clipboard | portapapeles | presse-papiers | Zwischenablage | área de transferência | appunti | klembord | schowek | pano | urklipp | буфер обмена | буфер обміну | πρόχειρο
+theme | tema | thème | Design | tema | tema | thema | motyw | tema | tema | тема | тема | θέμα
+accent | acento | accent | Akzent | destaque | accento | accent | akcent | vurgu | accent | акцент | акцент | έμφαση
+refresh rate | frecuencia de actualización | fréquence de rafraîchissement | Bildwiederholrate | taxa de atualização | frequenza di aggiornamento | vernieuwingsfrequentie | częstotliwość odświeżania | yenileme hızı | uppdateringsfrekvens | частота обновления | частота оновлення | ρυθμός ανανέωσης
+scale | escala | échelle | Skalierung | escala | scala | schaal | skala | ölçek | skala | масштаб | масштаб | κλίμακα
+brightness | brillo | luminosité | Helligkeit | brilho | luminosità | helderheid | jasność | parlaklık | ljusstyrka | яркость | яскравість | φωτεινότητα
+battery | batería | batterie | Akku | bateria | batteria | batterij | bateria | pil | batteri | батарея | батарея | μπαταρία
+power (energy) | energía | alimentation | Energie | energia | alimentazione | energie | zasilanie | güç | ström | питание | живлення | ενέργεια
+setting (a preference) | ajuste | paramètre | Einstellung | configuração | impostazione | instelling | ustawienie | ayar | inställning | настройка | налаштування | ρύθμιση
+network | red | réseau | Netzwerk | rede | rete | netwerk | sieć | ağ | nätverk | сеть | мережа | δίκτυο
+wired | cableada | filaire | kabelgebunden | com fio | cablata | bekabeld | przewodowa | kablolu | trådbundet | проводная | дротова | ενσύρματη
+airplane mode | modo avión | mode avion | Flugmodus | modo avião | modalità aereo | vliegtuigmodus | tryb samolotowy | uçak modu | flygplansläge | режим полёта | режим польоту | λειτουργία πτήσης
+time zone | zona horaria | fuseau horaire | Zeitzone | fuso horário | fuso orario | tijdzone | strefa czasowa | saat dilimi | tidszon | часовой пояс | часовий пояс | ζώνη ώρας
+keyboard | teclado | clavier | Tastatur | teclado | tastiera | toetsenbord | klawiatura | klavye | tangentbord | клавиатура | клавіатура | πληκτρολόγιο
+mouse | ratón | souris | Maus | mouse | mouse | muis | mysz | fare | mus | мышь | миша | ποντίκι
+default (the standard value) | predeterminado | par défaut | Standard | padrão | predefinito | standaard | domyślny | varsayılan | standard | по умолчанию | типовий | προεπιλογή
+on / off (a state) | activado / desactivado | activé / désactivé | An / Aus | ativado / desativado | attivato / disattivato | aan / uit | włączone / wyłączone | açık / kapalı | på / av | включено / выключено | увімкнено / вимкнено | ενεργό / ανενεργό
+Copy | Copiar | Copier | Kopieren | Copiar | Copia | Kopiëren | Kopiuj | Kopyala | Kopiera | Копировать | Копіювати | Αντιγραφή
+Cut | Cortar | Couper | Ausschneiden | Recortar | Taglia | Knippen | Wytnij | Kes | Klipp ut | Вырезать | Вирізати | Αποκοπή
+Paste | Pegar | Coller | Einfügen | Colar | Incolla | Plakken | Wklej | Yapıştır | Klistra in | Вставить | Вставити | Επικόλληση
+Delete | Eliminar | Supprimer | Löschen | Excluir | Elimina | Verwijderen | Usuń | Sil | Ta bort | Удалить | Видалити | Διαγραφή
+Select All | Seleccionar todo | Tout sélectionner | Alles auswählen | Selecionar tudo | Seleziona tutto | Alles selecteren | Zaznacz wszystko | Tümünü Seç | Markera allt | Выделить всё | Вибрати все | Επιλογή όλων
+Undo | Deshacer | Annuler | Rückgängig | Desfazer | Annulla | Ongedaan maken | Cofnij | Geri Al | Ångra | Отменить | Скасувати | Αναίρεση
+Redo | Rehacer | Rétablir | Wiederholen | Refazer | Ripeti | Opnieuw | Ponów | Yinele | Gör om | Повторить | Повторити | Επανάληψη

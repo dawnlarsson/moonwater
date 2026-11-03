@@ -160,6 +160,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
         {"utilities_source", "programs/utilities"},
         {"monitor_source", "programs/monitor.sh"},
         {"font_source", "fonts"},
+        {"language_source", "languages"},
         {"patch_script", "kernel/patch/apply"},
         {"replace_script", "kernel/replace/apply"},
         {"firmware_script", "kernel/firmware/apply"},
@@ -5256,6 +5257,38 @@ static b32 build_fonts(string_address image)
         return 0;
 }
 
+/*
+        The languages the desktop's windows speak besides English.
+
+        languages/ holds one file for each, CODE.txt (ui/language.c says what is in it), and they go into the image as
+        /usr/share/moonwater/language/CODE.txt, beside the fonts, which is where the windows look. English is not
+        among them: its words are the table in the programs themselves, and en.txt is only that table written out,
+        for the checks. They are only words for something that draws a window: a build without the compositor or the
+        terminal ships none, and one that dropped them clears what the last build put there, as the fonts are.
+*/
+static b32 build_languages(string_address image)
+{
+        string_address source = build_setting_get("language_source");
+        string_address where = build_join(image, "/usr/share/moonwater/language", null);
+
+        //      An empty image_root would make this the host's own /usr.
+        return_if(!*image, build_die("languages: image_root is empty"));
+
+        if (build_tool("rm", "-rf", where, null))
+                return build_die("clearing the languages");
+
+        if (!build_tool_named_on("compositor") && !build_tool_named_on("terminal"))
+                return 0;
+
+        if (build_tool("mkdir", "-p", where, null))
+                return build_die("making the languages directory");
+
+        if (build_tool("find", source, "-maxdepth", "1", "-name", "*.txt", "!", "-name", "en.txt", "-exec", "cp", "{}", where, ";", null))
+                return build_die(build_join("installing the languages of ", source, null));
+
+        return 0;
+}
+
 static b32 build_userspace()
 {
         string_address image = build_setting_get("image_root");
@@ -5451,7 +5484,7 @@ static b32 build_userspace()
         if (applet && build_tool_links(image, applet, false))
                 return 1;
 
-        return build_fonts(image);
+        return build_fonts(image) || build_languages(image);
 }
 
 static b32 build_local(string_address address_to profiles, positive count,

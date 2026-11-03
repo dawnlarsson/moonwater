@@ -1,0 +1,148 @@
+@language tr
+@name Türkçe
+@translated machine
+action_copy	3664	Kopyala
+action_cut	5863	Kes
+action_paste	0288	Yapıştır
+action_select_all	3b12	Tümünü Seç
+menu_copy	43e0	&Kopyala
+menu_cut	5c17	K&es
+menu_delete	1e3e	&Sil
+menu_paste	6854	Ya&pıştır
+menu_redo	ac45	&Yinele
+menu_select_all	f6f6	&Tümünü Seç
+menu_undo	b9d3	&Geri Al
+ui_confirm_again	b3ff	onaylamak için tekrar basın: 
+ui_field_digits	f52b	bir sayı rakamlardan oluşur
+ui_field_full	fe02	daha fazlası sığmaz
+=Accent	ccd7	Vurgu
+=Accent colour (rrggbb or reset)	53aa	Vurgu rengi (rrggbb veya reset)
+=Airplane mode	3b8a	Uçak modu
+=All commands	4a42	Tüm komutlar
+=Audio	1439	Ses
+=Authenticated time (NTS)	e533	Doğrulanmış zaman (NTS)
+=Background	0abd	Arka plan
+=Background colour (rrggbb or default)	e2b2	Arka plan rengi (rrggbb veya default)
+=Battery	e12e	Pil
+=Battery shown	2a23	Gösterilen pil
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Bluetooth bağdaştırıcıları
+=Boost	a6cc	Boost
+=Boot	38f5	Açılış
+=Brightness	324a	Parlaklık
+=Cameras	cea7	Kameralar
+=Canvas	5091	Canvas
+=Caret blink speed	4085	Metin imlecinin yanıp sönme hızı
+=Caret thickness	1e9a	Metin imlecinin kalınlığı
+=Charge limit (20 to 100, or off)	c92d	Şarj sınırı (20 ile 100 arası veya off)
+=Clipboard	99b1	Pano
+=Clipboard history (copies kept)	7423	Pano geçmişi (saklanan kopyalar)
+=Clipboard limit (MiB)	a505	Pano sınırı (MiB)
+=Clock (Enter sets it now)	575e	Saat (Enter şimdi ayarlar)
+=Cursor look	34ce	İşaretçi görünümü
+=Cursor size	65d4	İşaretçi boyutu
+=Display	d9b5	Ekran
+=Editor	bf98	Düzenleyici
+=Gallery	4cdd	Galeri
+=Hubs	456d	Hub'lar
+=Identify	033d	Tanımla
+=Input	e11b	Giriş
+=Keep the lowest-delay sample	d8b9	En düşük gecikmeli örneği tut
+=Key repeat delay (ms, or default)	4eb7	Tuş tekrarı gecikmesi (ms veya default)
+=Key repeat rate (per second, off or default)	1e94	Tuş tekrar hızı (saniyede, off veya default)
+=Keyboard	a714	Klavye
+=Keyboards and mice	c352	Klavyeler ve fareler
+=Language	db9b	Dil
+=Large pointer stays (ms, or default)	5626	Büyük işaretçi kalır (ms veya default)
+=Launcher	44b1	Başlatıcı
+=Machine	be0e	Makine
+=Motion	7647	Hareket
+=Mount kept disks	f0c8	Saklanan diskleri bağla
+=Mouse acceleration	c400	Fare ivmesi
+=Mouse sensitivity (percent, or default)	8a23	Fare duyarlılığı (yüzde veya default)
+=NTS servers (or default)	9fd7	NTS sunucuları (veya default)
+=Name	7306	Ad
+=Name servers (auto for the network)	695a	Ad sunucuları (ağ için auto)
+=Names over TLS	075a	TLS üzerinden adlar
+=Network	ad65	Ağ
+=Network adapters	88ef	Ağ bağdaştırıcıları
+=New USB devices	c15c	Yeni USB aygıtları
+=Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
+=Other devices	8362	Diğer aygıtlar
+=Power	a5e6	Güç
+=Power profile	8def	Güç profili
+=Predict touch and pen	e2b7	Dokunma ve kalemi tahmin et
+=Refresh rate	bf6e	Yenileme hızı
+=Rotation	777f	Döndürme
+=Scale of this screen	e4ca	Bu ekranın ölçeği
+=Screen	c631	Ekran
+=Screen modes	85ad	Ekran kipleri
+=Set the clock from the network	b2a3	Saati ağdan ayarla
+=Settings	8728	Ayarlar
+=Shake the pointer to find it	f508	İşaretçiyi bulmak için salla
+=Show touch area	9ca8	Dokunma alanını göster
+=Side taskbar text faces	d115	Yan çubuğun metin yönü
+=Simultaneous threads (SMT)	e836	Eşzamanlı iş parçacıkları (SMT)
+=Smooth mouse wheel	0dab	Düzgün fare tekerleği
+=Start the desktop	be4c	Masaüstünü başlat
+=Storage	df06	Depolama
+=Taskbar	d759	Görev çubuğu
+=Taskbar display	042b	Görev çubuğu ekranı
+=Taskbar launcher button	dd4d	Görev çubuğunda başlatıcı düğmesi
+=Taskbar position	81b8	Görev çubuğu konumu
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Görev çubuğu bildirim alanı ({names} içeren metin: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=The internet prefers	3dbe	İnternet şunu tercih eder
+=Theme	7c92	Tema
+=Time	e404	Saat
+=Time server (auto for the pool)	67e5	Zaman sunucusu (havuz için auto)
+=Time zone	741a	Saat dilimi
+=Turned by the screen	ea45	Ekran tarafından döndürülür
+=USB	da81	USB
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	Kablolu
+=all	4bc4	tümü
+=allow	a832	izin ver
+=amber	bec0	kehribar
+=auto	a396	otomatik
+=balanced	b71d	dengeli
+=black	4ba4	siyah
+=blue	f5cd	mavi
+=bottom	6b2a	altta
+=center	4484	orta
+=dark	6945	koyu
+=dark-grey	bcb3	koyu gri
+=default	5bde	varsayılan
+=deny	6367	reddet
+=edge	d83c	kenar
+=fast	02af	hızlı
+=forest	2a60	orman
+=full	b33c	tam
+=graphite	dc8d	grafit
+=green	ecbc	yeşil
+=kernel log	415a	çekirdek günlüğü
+=left	ec70	solda
+=light	1e2f	açık
+=light-grey	ed41	açık gri
+=lock	7842	kilitle
+=midnight-blue	4008	gece mavisi
+=normal	9c52	normal
+=off	8a0a	kapalı
+=on	2fd0	açık
+=only	89f7	yalnızca
+=performance	8ca5	performans
+=plum	b06b	erik
+=powersave	2283	güç tasarrufu
+=primary	5fd9	birincil
+=reduced	5839	azaltılmış
+=right	2de5	sağda
+=rose	1806	pembe
+=slate	deee	arduvaz
+=slow	42b8	yavaş
+=thick	964e	kalın
+=thin	b172	ince
+=top	dc3c	üstte
+=unlock	1f55	kilidi aç
+=violet	57f2	mor
+=white	0766	beyaz
+=wifi	6448	Wi-Fi
+=wired	bfb4	kablolu
