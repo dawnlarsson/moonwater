@@ -91,9 +91,10 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 /*
         The snap's look, in one place. A snap preview is the selection's colour at COMPOSITOR_SNAP_PERCENT (more on a light
         wallpaper, up to COMPOSITOR_SNAP_PERCENT_MOST), its colour deepened till its edge reads COMPOSITOR_SNAP_READ
-        (compositor_snap_ink; ui_contrast's hundredths, so 300 is 3 to 1). A tile, a thumbnail and a grid tile have the
-        window's line and corners, and their fades run COMPOSITOR_SNAP_FADE_NS, the same time both ways. A tile's preview
-        has the window's corners and a line of the tint at COMPOSITOR_SNAP_LINE percent of the tint's own strength.
+        (compositor_snap_ink; ui_contrast's hundredths, so 300 is 3 to 1). A thumbnail and a grid tile have the window's
+        line and corners, and their fades run COMPOSITOR_SNAP_FADE_NS, the same time both ways. A window arranged, a tile or
+        filling its screen, is square, as the preview of it is: a tile has the window's line and a preview of one a line of
+        the tint at COMPOSITOR_SNAP_LINE percent of the tint's own strength, a window filling its screen has none.
 */
 #define COMPOSITOR_SNAP_PERCENT 40
 #define COMPOSITOR_SNAP_PERCENT_MOST 60
@@ -3720,15 +3721,16 @@ static int compositor_filling(int row)
         return compositor.arranged[row] == COMPOSITOR_MAXIMIZED || compositor.arranged[row] == COMPOSITOR_ROOM;
 }
 
-// Whether a window's corners are round: a floating one's, and a tile's (a half or a quarter reads as a window, the same
-// line and corners); a window filling the output, or its room, is square.
+// Whether a window's corners are round: only a floating window's. A window arranged, filling the output or its room or
+// a half or a quarter of its screen, is square (it meets the screen's edges and its neighbours', as a maximized one does).
 static int compositor_rounded(int row)
 {
-        return !compositor_filling(row);
+        return compositor.arranged[row] == COMPOSITOR_FLOATING;
 }
 
-// The line a window is drawn with, at the scale of its screen: a floating window's, and a tile's. A window filling the output,
-// or its room, has none. The geometry keeps compositor_line, which a placement clamps to.
+// The line a window is drawn with, at the scale of its screen: a floating window's, and a tile's (it reads as a window, and
+// where it meets another tile the line is what tells them apart). A window filling the output, or its room, has none. The
+// geometry keeps compositor_line, which a placement clamps to.
 static int compositor_frame_line(int row)
 {
         return compositor_filling(row) ? 0 : compositor_line_px(compositor_row_scale(row));
@@ -4126,7 +4128,7 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                 frame->lit_ink = compositor.lit_held ? COMPOSITOR_INK_LINE_HELD : COMPOSITOR_INK_LINE_HOVER;
         }
         // The snap preview is the dragged window's: drawn under it, where it is drawn now (compositor_preview_shown), shaped as
-        // the window will be there -- a tile with the window's corners and a line, filling the screen square -- at the scale of
+        // the window will be there -- square, a tile with the window's line, filling the screen with none -- at the scale of
         // the screen it is on, its line the tint's colour at COMPOSITOR_SNAP_LINE percent of its strength (compositor_scene).
         if (row == compositor.preview_draw - 1)
         {
@@ -4139,15 +4141,15 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                         const int (*screens)[4] = compositor_screens(&count);
                         int on = compositor_screen_owner(screens, count, rect[0], rect[1], rect[2], rect[3]);
                         int scale = compositor_output_scale(on) > 0 ? compositor_output_scale(on) : compositor.scale;
-                        int square = compositor.preview_how == COMPOSITOR_MAXIMIZED || compositor.preview_how == COMPOSITOR_ROOM;
+                        int fills = compositor.preview_how == COMPOSITOR_MAXIMIZED || compositor.preview_how == COMPOSITOR_ROOM;
 
                         a = (ink >> 24) * alpha / 100;
                         edge = (ink >> 24) * COMPOSITOR_SNAP_LINE / 100 > 255 ? 255 : (ink >> 24) * COMPOSITOR_SNAP_LINE / 100;
                         memory_copy(frame->preview, rect, sizeof(rect));
                         frame->preview_ink = (ink & 0xffffffu) | a << 24;
-                        frame->preview_radius = square ? 0 : UI_RADIUS * scale / 100;
-                        frame->preview_line = square ? 0 : compositor_px1(scale);
-                        frame->preview_edge = square ? 0 : (ink & 0xffffffu) | (edge * alpha / 100) << 24;
+                        frame->preview_radius = 0;
+                        frame->preview_line = fills ? 0 : compositor_line_px(scale);
+                        frame->preview_edge = fills ? 0 : (ink & 0xffffffu) | (edge * alpha / 100) << 24;
                 }
         }
         if (row == compositor.mark_row && compositor.mark[2] > 0)
@@ -5350,7 +5352,7 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
         if (compositor.table->glass[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
             compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
             compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
-            compositor.asking[row] || compositor_radius(&frames[windows - 1]) || compositor_line(row))
+            compositor.asking[row] || compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
                 return -1;
         return compositor_window_fb(row, compositor.front[row]) ? row : -1;
 }

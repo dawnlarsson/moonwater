@@ -123120,9 +123120,10 @@ static void layout_paint(int row, unsigned int colour)
 }
 
 /*
-        A tile is drawn as a window is: the line round it is the window's 1 px line, outside its picture on the inner sides
-        (the screen's own sides are off the output), and its corners are the window's 8 px round. The left half of a 256 px
-        screen: its right line is the column past its picture, its top left corner is ground, and a point 12 px in is its picture.
+        A tile is drawn as a window is in its line and as a maximized one is in its corners: the line round it is the window's
+        1 px line, outside its picture on the inner sides (the screen's own sides are off the output), and its corners are
+        square. The left half of a 256 px screen: its right line is the column past its picture and runs the whole height
+        (the line's own corners are square too), its top left corner is its picture, and a point 12 px in is its picture.
 */
 static void check_compositor_tile_line(void)
 {
@@ -123143,8 +123144,12 @@ static void check_compositor_tile_line(void)
     check("tile line: a half is drawn with the window's 1 px line on its inner side, and nothing past it",
           compositor.arranged[1] == COMPOSITOR_LEFT && compositor.w[1] == 128 &&
               line_at == (compositor_ink_shadow() & 0xffffffu) && beyond_at == (ground & 0xffffffu));
-    check("tile corners: a half's corners are the window's 8 px round, the corner ground and the picture inside it",
-          corner_at == (ground & 0xffffffu) && inside_at == picture);
+    check("tile corners: a half's corners are square: the corner pixel is its picture, the same as 12 px in",
+          corner_at == picture && inside_at == picture);
+    check("tile corners: and so are the corners of its line, which runs the whole height of its inner side",
+          (layout_pixels[0 * 256 + 128] & 0xffffffu) == (compositor_ink_shadow() & 0xffffffu) &&
+              (layout_pixels[255 * 256 + 128] & 0xffffffu) == (compositor_ink_shadow() & 0xffffffu) &&
+              (layout_pixels[255 * 256 + 127] & 0xffffffu) == picture && (layout_pixels[0 * 256 + 127] & 0xffffffu) == picture);
     compositor_float(1);
 }
 
@@ -123718,8 +123723,8 @@ static void check_compositor_screen_chord(void)
         The preview's motion and shape. Entering a target it is drawn there at full strength at once; a new target (the left
         half's corner) is reached from where it is drawn, between the two half way and on the quarter exactly at the end;
         dragged off, its target is gone at once and what is drawn fades out where it was; let go on a target, it fades out
-        under the window gliding into it, over the same time. A tile's preview has the window's round corners and a line
-        stronger than its fill; a filled screen's is square with none. Reduced motion cuts. A glide that starts while another
+        under the window gliding into it, over the same time. A tile's preview is square with the window's line, stronger than
+        its fill; a filled screen's is square with none. Reduced motion cuts. A glide that starts while another
         runs starts from where the window is drawn.
 */
 static void check_compositor_preview_motion(void)
@@ -123766,7 +123771,7 @@ static void check_compositor_preview_motion(void)
     compositor_preview_keep();
     check("preview motion: and then it is gone", !compositor.preview_draw && !compositor_preview_shown(rect));
 
-    /* The shape, presented above the window (it is at 60 down): a tile is round with a line, filling the screen is square. */
+    /* The shape, presented above the window (it is at 60 down): a tile is square with a line, filling the screen is square with none. */
     snap_fresh();
     snap_hand(1, 0, 60, 50, 40);
     compositor_damage(0, 0, 256, 256);
@@ -123774,9 +123779,10 @@ static void check_compositor_preview_motion(void)
     ink = compositor_snap_ink();
     fill = compositor_mix(compositor_ground, ink & 0xffffffu, ink >> 24) & 0xffffffu;
     corner_at = layout_pixels[0] & 0xffffffu, fill_at = layout_pixels[30 * 256 + 64] & 0xffffffu, line_at = layout_pixels[30 * 256 + 127] & 0xffffffu;
-    check("preview shape: a half's preview has the window's round corner (its corner pixel is the wallpaper), its fill inside, "
-          "and a line stronger than the fill along its edge",
-          corner_at == (compositor_ground & 0xffffffu) && fill_at == fill && line_at != fill && line_at != (compositor_ground & 0xffffffu));
+    check("preview shape: a half's preview is square as the window will be (its corner pixel is its line, not the wallpaper), its fill "
+          "inside, and a line stronger than the fill along its edge",
+          corner_at == line_at && corner_at != (compositor_ground & 0xffffffu) && fill_at == fill && line_at != fill &&
+              line_at != (compositor_ground & 0xffffffu));
     snap_hand(1, 60, 0, 50, 40);
     compositor.preview_at = clock_monotonic_nanoseconds() - UI_WINDOW_NS - 1;
     compositor_preview_keep();
@@ -123795,7 +123801,8 @@ static void check_compositor_preview_motion(void)
           compositor.arranged[1] == COMPOSITOR_LEFT && compositor.glide[1] && compositor.preview_fading && alpha == 100 &&
               !memory_compare(rect, half, sizeof(rect)) && compositor.preview_draw == 2);
     compositor_frame_of(1, &frame);
-    check("preview motion: the window's frame carries the fading preview under it", frame.preview[2] == 128 && frame.preview_radius > 0);
+    check("preview motion: the window's frame carries the fading preview, square with the window's line as the window is",
+          frame.preview[2] == 128 && frame.preview_radius == 0 && frame.preview_line == frame.line && frame.line > 0 && frame.radius == 0);
 
     /* Reduced motion cuts: off a target, nothing is drawn at once. */
     snap_fresh();
@@ -123819,6 +123826,240 @@ static void check_compositor_preview_motion(void)
     check("glide: a glide begun half way through another starts from where the window is drawn, not from the left half",
           compositor.glide[1] && compositor.glide_from[1][0] - was[0] <= 1 && was[0] - compositor.glide_from[1][0] <= 1 &&
               compositor.glide_from[1][2] - was[2] <= 1 && was[2] - compositor.glide_from[1][2] <= 1 && compositor.glide_from[1][2] != 128);
+}
+
+/*
+        A window arranged is square, as a maximized one is: a half, a quarter, the bottom half, the whole screen and the room a
+        placement fills, at every scale; a floating window is round, and the line is what it was (a tile has the window's, a
+        window filling its screen has none). The tile is square where it is drawn too, at its four corners and at the corners of
+        its line; its preview is square before the drop, with the line the window will have; a window torn off a tile floats
+        and is round again; a tile resized by an inner edge stays a tile and stays square; the Super chords walk the states and
+        the shape follows each; a window moved to another screen is square or round at that screen's scale; and a tile that
+        glides or lands is square from its first frame.
+*/
+static int square_line(int scale)
+{
+    return scale / 100 > 1 ? scale / 100 : 1;
+}
+
+static void check_compositor_tile_square(void)
+{
+    static const unsigned int tiles[] = {COMPOSITOR_LEFT, COMPOSITOR_RIGHT, COMPOSITOR_BOTTOM, COMPOSITOR_TOP_LEFT,
+                                         COMPOSITOR_TOP_RIGHT, COMPOSITOR_BOTTOM_LEFT, COMPOSITOR_BOTTOM_RIGHT};
+    static const char *const names[] = {"left half", "right half", "bottom half", "top left", "top right", "bottom left", "bottom right"};
+    const unsigned int picture = 0xc06020u;
+    struct compositor_frame frame;
+    unsigned int shapes = ~0u, previews = ~0u, drawn = ~0u;
+    int room[4] = {0, 0, 256, 200};
+
+    if (!layout_table_map(256))
+    {
+        check("tile square: the table is mapped", false);
+        return;
+    }
+
+    // Every arrangement at every scale: the frame's radius and line.
+    for (unsigned int at = 0; at < array_count(corner_scales); at++)
+    {
+        int scale = corner_scales[at], round = UI_RADIUS * scale / 100, line = square_line(scale), bad = 0;
+
+        layout_setup(256, 1);
+        compositor.table->motion = 1;
+        compositor.scale = scale;
+        layout_show(1, 60, 60, 100, 80);
+        compositor.stack[0] = 1, compositor.stacked = 1;
+        compositor_frame_of(1, &frame);
+        bad |= !(frame.radius == round && frame.line == line);
+        for (unsigned int tile = 0; tile < array_count(tiles); tile++)
+        {
+            compositor_arrange(1, tiles[tile]);
+            compositor_frame_of(1, &frame);
+            if (frame.radius != 0 || compositor_radius(&frame) != 0 || frame.line != line)
+            {
+                bad |= 2;
+                string_format(log, "  tile square: %p percent, %s: radius %p, line %p\n", (positive)scale, names[tile],
+                              (positive)frame.radius, (positive)frame.line);
+            }
+        }
+        compositor_arrange(1, COMPOSITOR_MAXIMIZED);
+        compositor_frame_of(1, &frame);
+        bad |= (frame.radius != 0 || frame.line != 0) << 2;
+        compositor_float(1);
+        compositor_arrange_rect(1, COMPOSITOR_ROOM, room);
+        compositor_frame_of(1, &frame);
+        bad |= (frame.radius != 0 || frame.line != 0) << 3;
+        compositor_float(1);
+        compositor_frame_of(1, &frame);
+        bad |= (frame.radius != round || frame.line != line) << 4;
+        shapes &= bad ? ~(1u << at) : ~0u;
+    }
+    check("tile square: at 50, 75, 100, 125, 150 and 200 percent every tile (a half, a quarter, the bottom half) is square with the "
+          "window's line, the whole screen and the room are square with none, and a floating window is round again after each",
+          shapes == ~0u);
+
+    // The tiles drawn: the four corners of the picture are the picture, at scale 100, for every tile.
+    for (unsigned int tile = 0; tile < array_count(tiles); tile++)
+    {
+        int x, y, w, h;
+        unsigned int ok;
+
+        layout_setup(256, 1);
+        compositor.table->motion = 1;
+        layout_show(1, 60, 60, 100, 80);
+        compositor.stack[0] = 1, compositor.stacked = 1;
+        compositor_arrange(1, tiles[tile]);
+        layout_paint(1, picture);
+        compositor_damage(0, 0, 256, 256);
+        compositor_present();
+        x = compositor.x[1], y = compositor.y[1], w = (int)compositor.w[1], h = (int)compositor.h[1];
+        ok = (layout_pixels[y * 256 + x] & 0xffffffu) == picture && (layout_pixels[y * 256 + x + w - 1] & 0xffffffu) == picture &&
+             (layout_pixels[(y + h - 1) * 256 + x] & 0xffffffu) == picture &&
+             (layout_pixels[(y + h - 1) * 256 + x + w - 1] & 0xffffffu) == picture;
+        drawn &= ok ? ~0u : ~(1u << tile);
+        if (!ok)
+            string_format(log, "  tile square: %s drawn with a cut corner\n", names[tile]);
+    }
+    check("tile square: drawn, the four corners of every tile's picture are the picture", drawn == ~0u);
+
+    // The preview of a tile and of the whole screen, at every scale: square, with the window's line for a tile and none to fill.
+    for (unsigned int at = 0; at < array_count(corner_scales); at++)
+    {
+        int scale = corner_scales[at], bad = 0;
+
+        snap_fresh();
+        compositor.scale = scale;
+        snap_hand(1, 0, 60, 50, 40);
+        compositor_frame_of(1, &frame);
+        bad |= !(frame.preview[2] > 0 && frame.preview_radius == 0 && frame.preview_line == square_line(scale) &&
+                 frame.preview_line == frame.line && (frame.preview_edge >> 24) > 0);
+        snap_hand(1, 60, 0, 50, 40);
+        compositor_frame_of(1, &frame);
+        bad |= (!(frame.preview[2] > 0 && frame.preview_radius == 0 && frame.preview_line == 0 && frame.preview_edge == 0)) << 1;
+        snap_let_go(60, 0, 50, 40);
+        previews &= bad ? ~(1u << at) : ~0u;
+    }
+    check("tile square: at every scale the preview of a tile is square with the window's line, and of the whole screen square with none",
+          previews == ~0u);
+
+    // Torn off: a tile is square, and pulled off by its top past the slop the window floats and is round again.
+    {
+        int before, after, round_again;
+
+        restore_fresh();
+        compositor_arrange(1, COMPOSITOR_LEFT);
+        compositor_frame_of(1, &frame);
+        before = frame.radius;
+        screens_hand(64, 10, 1);
+        screens_hand(64, 12, 0);
+        compositor_frame_of(1, &frame);
+        after = compositor.arranged[1] == COMPOSITOR_LEFT && frame.radius == 0;
+        screens_hand(64, 40, 0);
+        compositor_frame_of(1, &frame);
+        round_again = compositor.arranged[1] == COMPOSITOR_FLOATING && frame.radius == UI_RADIUS && frame.line == 1;
+        screens_hand(64, 40, -1);
+        compositor.press = COMPOSITOR_NONE;
+        check("tile square: a tile is square, a press on it moves nothing within the slop and it stays square, torn off past the slop "
+              "it floats and is round again",
+              before == 0 && after && round_again);
+    }
+
+    // Resized by an inner edge: still a tile, still square.
+    {
+        int moved;
+
+        restore_fresh();
+        compositor_arrange(1, COMPOSITOR_LEFT);
+        screens_hand(130, 100, 1);
+        screens_hand(150, 100, 0);
+        compositor_frame_of(1, &frame);
+        moved = compositor.arranged[1] == COMPOSITOR_LEFT && compositor.w[1] == 148 && frame.radius == 0 && frame.line == 1;
+        screens_hand(150, 100, -1);
+        compositor.press = COMPOSITOR_NONE;
+        compositor_frame_of(1, &frame);
+        check("tile square: a tile resized by its inner edge stays a tile and stays square, held and let go",
+              moved && compositor.arranged[1] == COMPOSITOR_LEFT && frame.radius == 0);
+    }
+
+    // The Super chords walk the states, and the shape follows each step.
+    {
+        static const unsigned int walk[] = {CK_KEY_RIGHT, CK_KEY_UP, CK_KEY_LEFT, CK_KEY_DOWN, CK_KEY_DOWN, CK_KEY_UP, CK_KEY_UP,
+                                            CK_KEY_UP, CK_KEY_DOWN, CK_KEY_DOWN};
+        unsigned int steps = 0, wrong = 0;
+
+        layout_setup(256, 1);
+        compositor.table->motion = 1;
+        layout_show(1, 50, 30, 120, 80);
+        compositor.stack[0] = 1, compositor.stacked = 1;
+        for (unsigned int at = 0; at < array_count(walk); at++)
+        {
+            layout_chord(1, walk[at]);
+            compositor_frame_of(1, &frame);
+            steps += compositor.arranged[1] != COMPOSITOR_FLOATING;
+            wrong += frame.radius != (compositor.arranged[1] == COMPOSITOR_FLOATING ? UI_RADIUS : 0);
+        }
+        check("tile square: walking Super with the arrows (half, quarter, quarter, half, bottom quarter, half, quarter, whole screen, "
+              "back to floating) the window is square in every arranged state and round when it floats",
+              steps >= 7 && wrong == 0 && compositor.arranged[1] == COMPOSITOR_FLOATING);
+    }
+
+    // Moved to another screen with Super and Shift: square or round, at that screen's scale.
+    {
+        unsigned int ok;
+
+        if (!layout_table_map(512))
+        {
+            check("tile square: the table is mapped for two screens", false);
+            return;
+        }
+        layout_setup(512, 1);
+        compositor.table->motion = 1;
+        compositor.outputs = 2;
+        compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 256, compositor.screen[0][3] = 256;
+        compositor.screen[1][0] = 256, compositor.screen[1][1] = 0, compositor.screen[1][2] = 256, compositor.screen[1][3] = 256;
+        compositor.output[0].scale = 100, compositor.output[1].scale = 200;
+        for (unsigned int row = 0; row < WINDOWS; row++)
+            compositor.wake[row] = -1;
+        layout_show(1, 10, 20, 100, 40);
+        compositor.stack[0] = 1, compositor.stacked = 1;
+        compositor_focus(1);
+        compositor.held[0] = CK_HELD_LSUPER | CK_HELD_LSHIFT;
+        compositor_key(0, CK_KEY_RIGHT, 1, 0);
+        compositor_frame_of(1, &frame);
+        ok = compositor.arranged[1] == COMPOSITOR_FLOATING && frame.radius == 2 * UI_RADIUS && frame.line == 2;
+        compositor.held[0] = CK_HELD_LSUPER;
+        compositor_key(0, CK_KEY_LEFT, 1, 0);
+        compositor_frame_of(1, &frame);
+        ok &= compositor.arranged[1] == COMPOSITOR_LEFT && compositor_screen_of(1) == 1 && frame.radius == 0 && frame.line == 2;
+        compositor.held[0] = CK_HELD_LSUPER | CK_HELD_LSHIFT;
+        compositor_key(0, CK_KEY_LEFT, 1, 0);
+        compositor_frame_of(1, &frame);
+        ok &= compositor.arranged[1] == COMPOSITOR_LEFT && compositor_screen_of(1) == 0 && frame.radius == 0 && frame.line == 1;
+        compositor.held[0] = CK_HELD_LSUPER;
+        compositor_key(0, CK_KEY_RIGHT, 1, 0);
+        compositor_frame_of(1, &frame);
+        ok &= compositor.arranged[1] == COMPOSITOR_FLOATING && frame.radius == UI_RADIUS && frame.line == 1;
+        check("tile square: moved with Super and Shift between a screen at 100 and one at 200 percent a window is round floating "
+              "(8, then 16 px), square as a tile on either (line 1, then 2), and round again where it floats",
+              ok);
+    }
+
+    // A tile that glides into its place and one that lands there are square from their first frame.
+    {
+        int glides, lands;
+
+        layout_setup(256, 1);
+        compositor.table->motion = 0;
+        layout_show(1, 60, 60, 100, 80);
+        compositor.stack[0] = 1, compositor.stacked = 1;
+        compositor_arrange(1, COMPOSITOR_TOP_LEFT);
+        compositor_frame_of(1, &frame);
+        glides = compositor.glide[1] && frame.radius == 0 && frame.line == 1;
+        compositor.glide[1] = 0;
+        compositor.landing[1] = 1, compositor.land_at[1] = clock_monotonic_nanoseconds();
+        compositor_frame_of(1, &frame);
+        lands = frame.source_w > 0 && frame.width < (int)compositor.w[1] && frame.radius == 0 && frame.line == 1;
+        check("tile square: a tile gliding into its place and one landing there are square from the first frame", glides && lands);
+    }
 }
 
 /*
@@ -143420,6 +143661,7 @@ b32 main()
         check_compositor_cancel();
         check_compositor_screen_chord();
         check_compositor_preview_motion();
+        check_compositor_tile_square();
         check_compositor_restore_glide();
         check_compositor_tile_resize();
         check_compositor_divider();
