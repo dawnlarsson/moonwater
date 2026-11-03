@@ -123030,6 +123030,63 @@ static void check_compositor_restore(void)
 }
 
 /*
+        Escape, or a right press, during a drag or a resize takes it back: the window is put back as it was at the press -- a
+        floating window where it was, a torn off tile as that tile, a resized window at its size -- the preview and the lit
+        line go, the remembered rectangle is untouched, and Escape is no key of the window's.
+*/
+static void check_compositor_cancel(void)
+{
+    unsigned int head;
+
+    if (!layout_table_map(256))
+    {
+        check("cancel: the table is mapped", false);
+        return;
+    }
+    restore_fresh();
+    compositor_focus(1);
+    screens_hand(80, 64, 1);
+    screens_hand(0, 100, 0);
+    head = compositor.table->event_head[1];
+    compositor_key(0, CK_KEY_ESC, 1, 0);
+    compositor_key(0, CK_KEY_ESC, 0, 0);
+    check("cancel: Escape during a drag over the left edge puts the window back where the press took it, with no preview",
+          compositor.drag == COMPOSITOR_NONE && compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 60 &&
+              compositor.y[1] == 60 && compositor.preview[2] == 0 && compositor.lit_row == COMPOSITOR_NONE);
+    check("cancel: and Escape is no key of the window's", compositor.table->event_head[1] == head);
+    screens_hand(0, 100, 0);
+    screens_hand(0, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("cancel: the hand moved on and let go after it, nothing is arranged",
+          compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.x[1] == 60);
+
+    /* A tile torn off and taken back by a right press is that tile again, and still remembers its rectangle. */
+    compositor_arrange(1, COMPOSITOR_LEFT);
+    screens_hand(64, 10, 1);
+    screens_hand(180, 120, 0);
+    check("cancel: (the tile is torn off)", compositor.arranged[1] == COMPOSITOR_FLOATING && compositor.w[1] == 100);
+    compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+    check("cancel: a right press during the drag puts the torn off tile back as the left half, remembering its rectangle",
+          layout_is(1, COMPOSITOR_LEFT, 0, 0, 128, 256) && restore_kept_is(1, 60, 60, 100, 80) && compositor.drag == COMPOSITOR_NONE);
+    compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    screens_hand(180, 120, -1);
+    compositor.press = COMPOSITOR_NONE;
+    check("cancel: and the left let go after it arranges nothing more", layout_is(1, COMPOSITOR_LEFT, 0, 0, 128, 256));
+
+    /* A resize taken back is the size it was. */
+    compositor_float(1);
+    screens_hand(60 + 100 + 2, 100, 1);
+    screens_hand(60 + 100 + 2 + 40, 100, 0);
+    check("cancel: (the right edge is resized)", compositor.resize == 1 && compositor.table->want_width[1] == 140);
+    compositor_key(0, CK_KEY_ESC, 1, 0);
+    compositor_key(0, CK_KEY_ESC, 0, 0);
+    check("cancel: Escape during a resize puts the window back at the size it was, and the hand holds nothing",
+          compositor.resize == COMPOSITOR_NONE && compositor.table->want_width[1] == 100 && compositor.x[1] == 60);
+    screens_hand(60 + 100 + 2 + 40, 100, -1);
+    compositor.press = COMPOSITOR_NONE;
+}
+
+/*
         A window dragged under the grid is over it: the grid's tints are the wallpaper's, and the window being moved is not
         tinted where the grid's row lies across it.
 */
@@ -141760,6 +141817,7 @@ b32 main()
         check_compositor_snap_trigger();
         check_compositor_snap_edges();
         check_compositor_restore();
+        check_compositor_cancel();
         check_compositor_touch_hold();
         check_compositor_snap_frames();
         check_compositor_overlay_fade();

@@ -3123,6 +3123,10 @@ static struct
         // one it had before it was first arranged. A drop on a target keeps it, so a restore puts back where the window was
         // before the drag, not where it was let go against the edge, and snaps in a row keep the first one.
         int drag_keep[4];
+        // What a drag or a resize took hold of, for Escape or a right press to put back (compositor_hold_cancel): each row
+        // plus one (0 for none; a shared edge holds two), its rectangle and what it filled at the press.
+        int hold_row[2], hold_rect[2][4];
+        unsigned int hold_how[2];
         // The snap assist (compositor_assist_refresh): up over a drag's target, or armed after its drop until a click or Escape;
         // the row snapped, the region it took and its screen; the thumbnails, each its row, its tile and its rectangle.
         int assist_on, assist_armed, assist_row, assist_screen, assist_count;
@@ -8511,6 +8515,7 @@ static void compositor_want(int row, int width, int height)
 */
 
 static void compositor_resize_begin(int row, unsigned int edges);
+static void compositor_hold_take(int at, int row);
 
 // The window on the far side of row's edge (one edge: a corner is the window's own) that meets it edge to edge with the
 // same extent along it, or COMPOSITOR_NONE.
@@ -8652,6 +8657,7 @@ static int compositor_shared_begin(int row, unsigned int edge)
                 compositor_resize_begin(row, edge);
                 compositor.arranged[row] = was_row;
                 compositor.arranged[other] = was_other;
+                compositor_hold_take(1, other);
         }
         compositor.shared_row = other;
         compositor.shared_lo = lo;
@@ -8699,6 +8705,7 @@ static void compositor_shared_move(void)
 
 static void compositor_resize_begin(int row, unsigned int edges)
 {
+        compositor_hold_take(0, row);
         compositor.resize = row;
         compositor.shared_row = COMPOSITOR_NONE;
         compositor_mark_clear();
@@ -8750,10 +8757,34 @@ static void compositor_resize_move(void)
         is the screen's stays where it is whatever size comes back: the right
         half is held by its right.
 */
-static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
+// The edges a window filling how holds whatever size its program comes back at: those that are not the screen's, so the
+// screen's stay where they are (a window on the right is held by its right, one at the bottom by its bottom).
+static unsigned int compositor_tile_edges(unsigned int how)
+{
+        return (how == COMPOSITOR_RIGHT || how == COMPOSITOR_TOP_RIGHT || how == COMPOSITOR_BOTTOM_RIGHT ? COMPOSITOR_EDGE_LEFT : 0) |
+               (how == COMPOSITOR_BOTTOM || how == COMPOSITOR_BOTTOM_LEFT || how == COMPOSITOR_BOTTOM_RIGHT ? COMPOSITOR_EDGE_TOP : 0);
+}
+
+// A window set to rect, filling how, gliding there from where it was: what an arrangement and a put back share.
+static void compositor_set_rect(int row, unsigned int how, const int *rect)
 {
         int was[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
 
+        // Its line goes with it: the outline it had is damaged before it is a filling one.
+        compositor_damage_row(row);
+        compositor.arranged[row] = how;
+        compositor.edges[row] = compositor_tile_edges(how);
+        compositor.far_x[row] = rect[0] + rect[2];
+        compositor.far_y[row] = rect[1] + rect[3];
+        compositor_put(row, rect[0], rect[1]);
+        compositor_damage_row(row);
+        compositor_want(row, rect[2], rect[3]);
+        if (memory_compare(was, rect, sizeof(was)))
+                compositor_glide_start(row, was);
+}
+
+static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
+{
         if (!compositor.showing[row])
                 return;
 
@@ -8764,18 +8795,43 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
                 compositor.saved_w[row] = compositor.w[row];
                 compositor.saved_h[row] = compositor.h[row];
         }
-        // Its line goes with it: the outline it had is damaged before it is a filling one.
-        compositor_damage_row(row);
-        compositor.arranged[row] = how;
-        // The edges that are the screen's stay where they are whatever size comes back: a window on the right is held by its right, one at the bottom by its bottom.
-        compositor.edges[row] = (how == COMPOSITOR_RIGHT || how == COMPOSITOR_TOP_RIGHT || how == COMPOSITOR_BOTTOM_RIGHT ? COMPOSITOR_EDGE_LEFT : 0) |
-                                (how == COMPOSITOR_BOTTOM || how == COMPOSITOR_BOTTOM_LEFT || how == COMPOSITOR_BOTTOM_RIGHT ? COMPOSITOR_EDGE_TOP : 0);
-        compositor.far_x[row] = rect[0] + rect[2];
-        compositor.far_y[row] = rect[1] + rect[3];
-        compositor_put(row, rect[0], rect[1]);
-        compositor_damage_row(row);
-        compositor_want(row, rect[2], rect[3]);
-        compositor_glide_start(row, was);
+        compositor_set_rect(row, how, rect);
+}
+
+/*
+        Escape, or a right press, during a drag or a resize: what the hand took is put back as it was at the press -- its
+        rectangle and what it filled, the remembered rectangle untouched -- gliding there from where it is, and the hand
+        holds nothing. Its preview, the grid and its lit line go with it; the press is no half of a double click.
+*/
+static void compositor_hold_take(int at, int row)
+{
+        int rect[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+
+        compositor.hold_row[at] = row + 1;
+        memory_copy(compositor.hold_rect[at], rect, sizeof(rect));
+        compositor.hold_how[at] = compositor.arranged[row];
+        if (!at)
+                compositor.hold_row[1] = 0;
+}
+
+static int compositor_hold_cancel(void)
+{
+        if (compositor.drag < 0 && compositor.resize < 0)
+                return 0;
+        compositor_preview(COMPOSITOR_NONE);
+        compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
+        compositor.press = COMPOSITOR_NONE;
+        compositor_mark_clear();
+        compositor_lit(COMPOSITOR_NONE, 0, 0);
+        for (int at = 0; at < 2; at++)
+        {
+                int row = compositor.hold_row[at] - 1;
+
+                if (row >= 0 && compositor.showing[row])
+                        compositor_set_rect(row, compositor.hold_how[at], compositor.hold_rect[at]);
+                compositor.hold_row[at] = 0;
+        }
+        return 1;
 }
 
 static void compositor_float(int row);
@@ -10940,6 +10996,14 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
         int count, target;
 
+        // Escape while the hand moves or resizes a window puts it back as it was at the press, and is no window's key.
+        if (code == CK_KEY_ESC && value && (compositor.drag >= 0 || compositor.resize >= 0))
+        {
+                if (value == 1)
+                        compositor_hold_cancel();
+                return;
+        }
+
         // The snap assist offered after a drop goes at any key that is not a modifier: Escape is only that, and any other key
         // goes on to the window that has the keys, as it would have.
         if (compositor.assist_armed && value == 1 && !bit)
@@ -11509,6 +11573,11 @@ static void compositor_button(unsigned int code, int down)
                 return;
         }
 
+        // A right press while the hand moves or resizes a window takes the move back, as Escape does (compositor_hold_cancel);
+        // the press is nothing else. A resize the right button holds (Alt) has no second right press.
+        if (code == COMPOSITOR_BTN_RIGHT && compositor_hold_cancel())
+                return;
+
         if (under >= 0 && compositor_popup_parent[under] >= 0)
         {
                 compositor_popups_close(-1, under);
@@ -11660,6 +11729,7 @@ static void compositor_button(unsigned int code, int down)
                         compositor.drag_y = compositor.pointer_y - compositor.y[under];
                         compositor.press_x = compositor.pointer_x;
                         compositor.press_y = compositor.pointer_y;
+                        compositor_hold_take(0, under);
                         // What a drop on a target keeps for a restore: where it floats now, or where it floated before.
                         if (compositor.arranged[under] == COMPOSITOR_FLOATING)
                         {
