@@ -158103,6 +158103,187 @@ static void test_clip_fuzz(long rounds)
         wayland_stop();
 }
 
+/* A buffer whose pixel at (x, y) says so: 0xff000000 | y << 8 | x. */
+static unsigned long wl_buffer_pattern(struct session *t, long width, long height)
+{
+        struct wlc *c = t->c;
+        long bytes = width * height * 4, fd = wl_file(bytes, 0);
+        unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1), buffer = wlc_id(c, WLI_wl_buffer, 1);
+        unsigned *pixels = malloc((size_t)bytes);
+
+        for (long y = 0; y < height; y++)
+                for (long x = 0; x < width; x++)
+                        pixels[y * width + x] = 0xff000000u | (unsigned)(y << 8) | (unsigned)x;
+        wl_file_put(fd, 0, pixels, bytes);
+        free(pixels);
+        wlc_send(c, t->shm, WLQ_wl_shm_create_pool, pool, fd, bytes);
+        close((int)fd);
+        wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, buffer, 0L, width, height, width * 4, (long)WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, pool, WLQ_wl_shm_pool_destroy);
+        return buffer;
+}
+
+#define PATTERN(x, y) (0xff000000u | (unsigned)((y) << 8) | (unsigned)(x))
+
+/* The window is its geometry: the margin a toolkit draws round it is not shown, and what is pointed at and placed by is the geometry's. */
+static void test_geometry(void)
+{
+        struct session s;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long buffer, pointer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, s.seat, WLQ_wl_seat_get_pointer, pointer);
+
+        /* a geometry of 20 by 10 at (4, 5) in a picture of 32 by 24: the row is that part of it */
+        wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 4L, 5L, 20L, 10L);
+        buffer = wl_buffer_pattern(&s, 32, 24);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].picture_w == 20 && fake.row[0].picture_h == 10,
+                "the window is the size of its geometry (%ldx%ld, %s)", fake.row[0].picture_w, fake.row[0].picture_h, c->error_text);
+        WLCHECK(fake.row[0].pixels[0] == PATTERN(4, 5) && fake.row[0].pixels[9 * FAKE_W + 19] == PATTERN(23, 14),
+                "and begins at the geometry's corner and ends at its other (%08x, %08x)", fake.row[0].pixels[0],
+                fake.row[0].pixels[9 * FAKE_W + 19]);
+
+        /* the pointer is told places of the surface, which are the row's and the geometry's corner */
+        wlc_forget(c);
+        wayland_pointer_to(0, 0, 0);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+        WLCHECK(e && e->u[2] == 4 * 256 && e->u[3] == 5 * 256, "a pointer at the window's corner is at the geometry's corner of the surface (%ld %ld)",
+                e ? (long)e->u[2] : -1, e ? (long)e->u[3] : -1);
+        wlc_forget(c);
+        wayland_pointer_motion(0, 3, 2);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_motion);
+        WLCHECK(e && e->u[1] == 7 * 256 && e->u[2] == 7 * 256, "and motion is told in the surface's places too");
+
+        /* a geometry that changes with only a small part of the picture damaged is the whole window drawn again */
+        wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 0L, 0L, 16L, 12L);
+        buffer = wl_buffer_pattern(&s, 32, 24);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 1L, 1L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].picture_w == 16 && fake.row[0].picture_h == 12 && fake.row[0].pixels[11 * FAKE_W + 15] == PATTERN(15, 11) &&
+                    fake.row[0].pixels[0] == PATTERN(0, 0),
+                "a new geometry is drawn whole, whatever was damaged (%ldx%ld, %08x)", fake.row[0].picture_w, fake.row[0].picture_h,
+                fake.row[0].pixels[11 * FAKE_W + 15]);
+
+        /* a geometry that is past the picture, or has none of it, is the picture */
+        wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 0L, 0L, 100L, 100L);
+        buffer = wl_buffer_pattern(&s, 32, 24);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].picture_w == 32 && fake.row[0].picture_h == 24, "a geometry past the picture is cut to the picture (%ldx%ld)",
+                fake.row[0].picture_w, fake.row[0].picture_h);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 40L, 40L, 10L, 10L);
+        buffer = wl_buffer_pattern(&s, 32, 24);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].picture_w == 32 && fake.row[0].picture_h == 24,
+                "a geometry with none of the picture in it is the picture (%ldx%ld)", fake.row[0].picture_w, fake.row[0].picture_h);
+        wlc_end(c);
+
+        /* a subsurface is placed by the surface's places, so it lands that much nearer the corner */
+        {
+                struct tree t;
+
+                tree_open(&t, 1);
+                c = t.s.c;
+                wlc_send(c, t.s.xdg, WLQ_xdg_surface_set_window_geometry, 2L, 2L, 16L, 12L);
+                buffer = wl_buffer_of(&t.s, 32, 24, 0xff202020, WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.row[0].picture_w == 16 && fake.row[0].pixels[2 * FAKE_W + 2] == 0xff00ff00 &&
+                            fake.row[0].pixels[1 * FAKE_W + 1] == 0xff202020 && fake.row[0].pixels[10 * FAKE_W + 10] == 0xff202020,
+                        "a subsurface at (4, 4) of the surface is at (2, 2) of a window whose geometry begins at (2, 2) (%s)", c->error_text);
+                wlc_end(c);
+        }
+
+        /* a subsurface that hangs past the root's edge (a title bar, a border) is part of the window, which begins at it */
+        {
+                struct tree t;
+                struct wl_event_seen *e2;
+
+                tree_open(&t, 1);
+                c = t.s.c;
+                wlc_send(c, t.sub, WLQ_wl_subsurface_set_position, -3L, -5L);
+                buffer = wl_buffer_of(&t.s, 32, 24, 0xff202020, WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
+                wlc_send(c, t.s.surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.row[0].picture_w == 35 && fake.row[0].picture_h == 29 && fake.row[0].pixels[0] == 0xff00ff00 &&
+                            fake.row[0].pixels[10 * FAKE_W + 10] == 0xff202020 && fake.row[0].pixels[12 * FAKE_W + 12] == 0xff202020,
+                        "a subsurface past the root's corner makes the window begin there, and the root is drawn in it (%ldx%ld, %s)",
+                        fake.row[0].picture_w, fake.row[0].picture_h, c->error_text);
+                pointer = wlc_id(c, WLI_wl_pointer, 9);
+                wlc_send(c, t.s.seat, WLQ_wl_seat_get_pointer, pointer);
+                wlc_forget(c);
+                wayland_pointer_to(0, 0, 0);
+                wlc_pump(c);
+                e2 = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+                WLCHECK(e2 && e2->u[1] == t.child && e2->u[2] == 0 && e2->u[3] == 0,
+                        "the pointer at the window's corner is on that subsurface, at its own corner");
+                wlc_forget(c);
+                wayland_pointer_to(0, 10, 10);
+                wlc_pump(c);
+                e2 = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+                WLCHECK(e2 && e2->u[1] == t.s.surface && e2->u[2] == 7 * 256 && e2->u[3] == 5 * 256,
+                        "and further in it is on the root, at the place in the root's own pixels (%ld %ld)", e2 ? (long)e2->u[2] : -1,
+                        e2 ? (long)e2->u[3] : -1);
+                /* the subsurface let go: the window is the root's again, whole */
+                wlc_send(c, t.sub, WLQ_wl_subsurface_destroy);
+                WLCHECK(c->errors == 0 && fake.row[0].picture_w == 32 && fake.row[0].picture_h == 24 && fake.row[0].pixels[0] == 0xff202020,
+                        "a window whose subsurface went is the root's again (%ldx%ld)", fake.row[0].picture_w, fake.row[0].picture_h);
+                wlc_end(c);
+        }
+
+        /* a popup is placed against the geometry, which is where the parent's window begins */
+        {
+                unsigned long positioner, popup_surface, popup_xdg, popup;
+
+                session_open(&s);
+                session_window(&s, 0xff000000);
+                c = s.c;
+                wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 4L, 5L, 20L, 10L);
+                positioner = wlc_id(c, WLI_xdg_positioner, 6);
+                wlc_send(c, s.wm_base, WLQ_xdg_wm_base_create_positioner, positioner);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_size, 8L, 6L);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_anchor_rect, 3L, 2L, 1L, 1L);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_anchor, (long)WLN_xdg_positioner_anchor_top_left);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_gravity, (long)WLN_xdg_positioner_gravity_bottom_right);
+                popup_surface = wlc_id(c, WLI_wl_surface, 6);
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, popup_surface);
+                popup_xdg = wlc_id(c, WLI_xdg_surface, 6);
+                wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, popup_xdg, popup_surface);
+                popup = wlc_id(c, WLI_xdg_popup, 6);
+                wlc_forget(c);
+                wlc_send(c, popup_xdg, WLQ_xdg_surface_get_popup, popup, s.xdg, positioner);
+                e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+                wlc_send(c, popup_xdg, WLQ_xdg_surface_ack_configure, e ? (long)e->u[0] : 0L);
+                wlc_send(c, popup_surface, WLQ_wl_surface_attach, wl_buffer_of(&s, 8, 6, 0xff123456, WLN_wl_shm_format_xrgb8888), 0L, 0L);
+                wlc_send(c, popup_surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.row[1].used && fake.row[1].x == 3 && fake.row[1].y == 2,
+                        "a popup is put where the positioner says against the parent's geometry, which is its row's corner (%ld %ld, %s)",
+                        fake.row[1].x, fake.row[1].y, c->error_text);
+                wlc_end(c);
+        }
+        leak_check("geometry");
+        WLCHECK(fds_balanced(), "descriptors balance (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -158120,6 +158301,7 @@ int main(int argc, char **argv)
         test_caps();
         test_seat();
         test_subsurfaces();
+        test_geometry();
         test_tree_fuzz(rounds);
         test_clipboard();
         test_clip_fuzz(rounds);

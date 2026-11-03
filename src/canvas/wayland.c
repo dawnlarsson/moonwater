@@ -262,6 +262,7 @@ struct wayland_surface
         unsigned int last_serial;
         long geometry_x, geometry_y, geometry_width, geometry_height;
         unsigned char geometry_set;
+        long window_x, window_y, window_w, window_h; // the part of the picture last shown as the window, in pixels
         // A toplevel.
         char title[WAYLAND_TEXT];
         char app_id[WAYLAND_TEXT];
@@ -1066,13 +1067,63 @@ static long wayland_next_child(struct wayland_client *c, long parent, long above
         return best;
 }
 
+/*
+        The part of a window's surfaces that is the window, in the root's pixels (which may be above and to the left of it, where
+        a subsurface hangs past its edge): the geometry the toolkit set (in surface units, so times the scale), which is how it
+        leaves out the shadow and the margins it draws round itself, taken from the bounding box of the root's picture
+        (width by height pixels) and the subsurfaces; or all of the box when no geometry was set or none of it lies in the box.
+        The row is this: what the person sees and points at begins at its corner, and what is outside it is not shown. A
+        subsurface that is a window's title bar or border, outside the root, is in it when the geometry says so.
+*/
+static void wayland_window_rect(struct wayland_client *c, const struct wayland_surface *root, long width, long height, long scale,
+                                long *x, long *y, long *w, long *h)
+{
+        long x1 = 0, y1 = 0, x2 = width, y2 = height;
+
+        for (long at = 0; at < WAYLAND_SURFACES; at++)
+        {
+                struct wayland_surface *child = &c->surfaces[at];
+                long ox, oy;
+
+                if (!child->live || child->role != WAYLAND_ROLE_SUBSURFACE || !child->held || wayland_root_of(c, child) != root)
+                        continue;
+                wayland_sub_offset(c, child, &ox, &oy);
+                ox = wayland_max(-WAYLAND_DIMENSION, wayland_min(ox, WAYLAND_DIMENSION));
+                oy = wayland_max(-WAYLAND_DIMENSION, wayland_min(oy, WAYLAND_DIMENSION));
+                x1 = wayland_min(x1, ox);
+                y1 = wayland_min(y1, oy);
+                x2 = wayland_max(x2, ox + child->width);
+                y2 = wayland_max(y2, oy + child->height);
+        }
+        if (root->geometry_set && scale >= 1)
+        {
+                long gx1 = wayland_max(root->geometry_x * scale, x1), gy1 = wayland_max(root->geometry_y * scale, y1);
+                long gx2 = wayland_min((root->geometry_x + root->geometry_width) * scale, x2);
+                long gy2 = wayland_min((root->geometry_y + root->geometry_height) * scale, y2);
+
+                if (gx2 > gx1 && gy2 > gy1)
+                {
+                        x1 = gx1;
+                        y1 = gy1;
+                        x2 = gx2;
+                        y2 = gy2;
+                }
+        }
+        *x = x1;
+        *y = y1;
+        *w = wayland_min(x2 - x1, WAYLAND_DIMENSION);
+        *h = wayland_min(y2 - y1, WAYLAND_DIMENSION);
+}
+
 /* The row's picture taken: after the copies of a commit, the compositor is told the window has a new one. */
-static void wayland_row_take(struct wayland_surface *root)
+static void wayland_row_take(struct wayland_client *c, struct wayland_surface *root)
 {
         struct wayland_picture none;
+        long wx, wy, ww, wh;
 
         if (root->row < 0)
                 return;
+        wayland_window_rect(c, root, root->width, root->height, root->scale, &wx, &wy, &ww, &wh);
         none.pixels = 0;
         none.stride = 0;
         none.width = none.height = 0;
@@ -1080,8 +1131,8 @@ static void wayland_row_take(struct wayland_surface *root)
         none.damages = 0;
         none.full = 0;
         none.dest_x = none.dest_y = 0;
-        none.row_width = root->width;
-        none.row_height = root->height;
+        none.row_width = ww;
+        none.row_height = wh;
         none.blend = 0;
         none.last = 1;
         wayland.host->row_picture(wayland.host->context, root->row, &none);
@@ -1093,21 +1144,22 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         struct wayland_surface *root = wayland_root_of(c, child);
         struct wayland_picture picture;
         struct wayland_buffer *b;
-        long ox, oy;
+        long ox, oy, wx, wy, ww, wh;
 
         if (root->row < 0 || !child->held || (child != root && !child->sub_parent))
                 return;
         b = &c->buffers[child->held - 1];
         wayland_sub_offset(c, child, &ox, &oy);
+        wayland_window_rect(c, root, root->width, root->height, root->scale, &wx, &wy, &ww, &wh);
         picture.pixels = (const unsigned char *)c->pools[b->pool].at + b->offset;
         picture.stride = b->stride;
         picture.width = b->width;
         picture.height = b->height;
         picture.format = b->format;
-        picture.dest_x = ox;
-        picture.dest_y = oy;
-        picture.row_width = root->width;
-        picture.row_height = root->height;
+        picture.dest_x = ox - wx;
+        picture.dest_y = oy - wy;
+        picture.row_width = ww;
+        picture.row_height = wh;
         picture.blend = child != root && b->format == WLN_wl_shm_format_argb8888;
         picture.last = 0;
         picture.damages = 0;
@@ -1155,11 +1207,13 @@ static void wayland_relay(struct wayland_client *c, struct wayland_surface *root
                 return;
         if (!(root->flags & WAYLAND_SURFACE_MAPPED))
                 return;
+        // What is laid now is the window as it is now: the next picture of the root is drawn whole only if that changes.
+        wayland_window_rect(c, root, root->width, root->height, root->scale, &root->window_x, &root->window_y, &root->window_w, &root->window_h);
         root->need_full = 0;
         if (root->held)
                 wayland_child_copy(c, root, 0);
         wayland_flatten(c, wayland_surface_index(c, root), 0);
-        wayland_row_take(root);
+        wayland_row_take(c, root);
 }
 
 /*
@@ -1357,7 +1411,7 @@ static int wayland_sub_commit(struct wayland_client *c, struct wayland_object *s
         }
         wayland_sub_apply(c, s);
         wayland_sub_apply_children(c, wayland_surface_index(c, s));
-        wayland_row_take(wayland_root_of(c, s));
+        wayland_row_take(c, wayland_root_of(c, s));
         return WAYLAND_OK;
 }
 
@@ -1654,6 +1708,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         struct wayland_pool *p = &c->pools[b->pool];
         struct wayland_picture picture;
         int first = s->row < 0;
+        long wx, wy, ww, wh;
 
         if (first)
         {
@@ -1692,13 +1747,19 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         picture.height = b->height;
         picture.format = b->format;
         picture.damages = 0;
-        picture.dest_x = picture.dest_y = 0;
-        picture.row_width = b->width;
-        picture.row_height = b->height;
+        wayland_window_rect(c, s, b->width, b->height, scale, &wx, &wy, &ww, &wh);
+        picture.dest_x = -wx;
+        picture.dest_y = -wy;
+        picture.row_width = ww;
+        picture.row_height = wh;
         picture.blend = 0;
         picture.last = !wayland_has_children(c, wayland_surface_index(c, s));
         picture.full = first || s->width != b->width || s->height != b->height || s->damage_full || scale != s->scale || !s->damages ||
-                       s->need_full;
+                       s->need_full || wx != s->window_x || wy != s->window_y || ww != s->window_w || wh != s->window_h;
+        s->window_x = wx;
+        s->window_y = wy;
+        s->window_w = ww;
+        s->window_h = wh;
         s->need_full = 0;
         for (long at = 0; at < s->damages && !picture.full; at++)
         {
@@ -1818,7 +1879,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         s->held = (unsigned short)(c->objects[buffer].link + 1);
                         wayland_flatten(c, wayland_surface_index(c, s), s->shown_full ? 0 : &s->shown_rect);
                         wayland_sub_apply_children(c, wayland_surface_index(c, s));
-                        wayland_row_take(s);
+                        wayland_row_take(c, s);
                 }
                 else
                 {
@@ -1847,7 +1908,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 if (s->need_full)
                         wayland_relay(c, s);
                 wayland_sub_apply_children(c, wayland_surface_index(c, s));
-                wayland_row_take(s);
+                wayland_row_take(c, s);
         }
         s->attach_made = 0;
         s->attached = 0;
@@ -2128,7 +2189,7 @@ static int wayland_subsurface_request(struct wayland_client *c, struct wayland_o
                 {
                         wayland_sub_apply(c, s);
                         wayland_sub_apply_children(c, wayland_surface_index(c, s));
-                        wayland_row_take(wayland_root_of(c, s));
+                        wayland_row_take(c, wayland_root_of(c, s));
                 }
                 return WAYLAND_OK;
         }
@@ -2290,8 +2351,8 @@ static void wayland_popup_configure(struct wayland_client *c, struct wayland_sur
 
         if (parent && parent->row >= 0 && wayland.host->row_facts(wayland.host->context, parent->row, &facts) >= 0)
         {
-                origin_x = facts.x + parent->geometry_x;
-                origin_y = facts.y + parent->geometry_y;
+                origin_x = facts.x;
+                origin_y = facts.y;
         }
         for (long at = 0; at < wayland.screens; at++)
                 if (origin_x + p->anchor_x >= screens[at].x && origin_x + p->anchor_x < screens[at].x + screens[at].width &&
@@ -2303,8 +2364,8 @@ static void wayland_popup_configure(struct wayland_client *c, struct wayland_sur
                         screen.height = screens[at].height;
                 }
         wayland_popup_place(p, origin_x, origin_y, &screen, &x, &y, &w, &h);
-        s->popup_x = x + (parent ? parent->geometry_x : 0);
-        s->popup_y = y + (parent ? parent->geometry_y : 0);
+        s->popup_x = x;
+        s->popup_y = y;
         s->popup_width = w;
         s->popup_height = h;
         slot = wayland_find(c, s->role_id, WLI_xdg_popup);
@@ -2819,7 +2880,11 @@ static void wayland_pointer_frame(struct wayland_client *c, long slot)
 static struct wayland_surface *wayland_pick(struct wayland_client *c, struct wayland_surface *root, long x, long y, long *sx, long *sy)
 {
         struct wayland_surface *best = root;
-        long best_rank = -1, bx = 0, by = 0;
+        long best_rank = -1, bx = 0, by = 0, wx, wy, ww, wh;
+
+        wayland_window_rect(c, root, root->width, root->height, root->scale, &wx, &wy, &ww, &wh);
+        x += wx;
+        y += wy;
 
         for (long at = 0; at < WAYLAND_SURFACES; at++)
         {
