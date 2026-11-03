@@ -22928,6 +22928,41 @@ time.sleep(0.5)
 out.append(("S1.5d the group shown is kept up with: the clock in Time changes in the picture with nothing pressed",
             "live" if live > 15 else "%d pixels changed" % live, "live"))
 said("S1.5d")
+#   The keyboard's layout is the first row of Input, the fourth group (Machine, Canvas, Display, Input): the column's
+#   keys choose the group, Enter goes to its rows and opens the layout's list, a way down it and Enter sets another
+#   layout, which the command says, and back. Listed under Machine, as it was, it was a row of the first group and
+#   the fourth was the panel's, so the same keys set nothing.
+layouts = ["us", "uk", "de", "se", "no", "dk", "fi", "fr", "es", "it"]
+
+def layout_now():
+    found = re.search(r"keyboard (\w+)", shell.run("moonwater keyboard", 10)[0])
+    return found.group(1) if found else "?"
+
+had_layout = layout_now()
+had_layout = had_layout if had_layout in layouts else "us"
+want_layout = "de" if had_layout != "de" else "se"
+key("tab")
+key("home")
+for _ in range(3):
+    key("down")
+key("ret")
+key("ret")
+key("home")
+for _ in range(layouts.index(want_layout)):
+    key("down")
+key("ret")
+layout_set, _ = until(lambda: layout_now() == want_layout, 15)
+key("ret")
+key("home")
+for _ in range(layouts.index(had_layout)):
+    key("down")
+key("ret")
+layout_back, _ = until(lambda: layout_now() == had_layout, 15)
+time.sleep(1)
+out.append(("S1.5g the keyboard's layout is the first row of the fourth group, Input: set from its list there, and back",
+            "%s %s %d" % ("set" if layout_set else "not set to " + layout_now(), "back" if layout_back else "not back", len(pids("settings"))),
+            "set back 1"))
+said("S1.5g")
 shell.run("moonwater settings", 15)
 time.sleep(2)
 out.append(("S1.6 a second moonwater settings lifts the window that is up and makes no other",
