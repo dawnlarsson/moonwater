@@ -553,6 +553,7 @@ typedef struct
         p16 mask_of[8];
         p16 lookup[2][FONT_STEPS], mask[2][FONT_STEPS];
         p8 manual[2][FONT_STEPS], stage_of[2][FONT_STEPS];
+        p64 digest[2][FONT_STEPS][2];
 } font_plan;
 
 typedef struct
@@ -3474,8 +3475,101 @@ static bool font_apply_nested(font_shaper address_to s, p32 index)
         return done;
 }
 
+/*
+        Which glyphs a lookup can start at, as two words of bits: a glyph sets
+        one bit of the first for its low six bits and one of the second for
+        the next six, and a glyph the lookup covers has both set. The lookup
+        passes over a string without reading a table for a glyph that does
+        not: of a line's glyphs and a face's forty lookups that is nearly
+        all of them. Built once for a plan from the first coverage of every
+        subtable (the mark's, for a mark attachment), with the number of
+        entries read capped so that a table claiming sixty thousand glyphs in
+        every one of two hundred subtables costs what a line costs.
+*/
+static inline fn font_digest_add(p64 address_to digest, p32 first, p32 last)
+{
+        if (last < first)
+                return;
+        if (last - first >= 63)
+                digest[0] = ~(p64)0;
+        else
+                for (p32 g = first; g <= last; g++)
+                        digest[0] |= (p64)1 << (g & 63);
+        if ((last >> 6) - (first >> 6) >= 63)
+                digest[1] = ~(p64)0;
+        else
+                for (p32 g = first >> 6; g <= last >> 6; g++)
+                        digest[1] |= (p64)1 << (g & 63);
+}
+
+static fn font_digest_coverage(const font_face address_to face, positive coverage, p64 address_to digest, p32 address_to budget)
+{
+        p32 format = font_u16(face, coverage), count = font_u16(face, coverage + 2);
+
+        if ((format != 1 && format != 2) || count > *budget)
+        {
+                digest[0] = digest[1] = ~(p64)0;
+                return;
+        }
+        *budget -= count;
+        for (p32 i = 0; i < count; i++)
+                if (format == 1)
+                        font_digest_add(digest, font_u16(face, coverage + 4 + 2 * (positive)i), font_u16(face, coverage + 4 + 2 * (positive)i));
+                else
+                        font_digest_add(digest, font_u16(face, coverage + 4 + 6 * (positive)i), font_u16(face, coverage + 6 + 6 * (positive)i));
+}
+
+static fn font_lookup_digest(const font_face address_to face, positive list, p32 index, p32 table, p64 address_to digest)
+{
+        p32 budget = 100000;
+        positive lookup = list && index < font_u16(face, list) ? list + font_u16(face, list + 2 + 2 * (positive)index) : 0;
+        p32 type = lookup ? font_u16(face, lookup) : 0, count = lookup ? font_u16(face, lookup + 4) : 0;
+
+        digest[0] = digest[1] = 0;
+        if (!lookup || !font_u16(face, list + 2 + 2 * (positive)index))
+                return;
+        for (p32 k = 0; k < count && k < FONT_SUBTABLES; k++)
+        {
+                positive t = lookup + font_u16(face, lookup + 6 + 2 * (positive)k), at = t + 2;
+                p32 kind = type;
+
+                if (type == (table ? 9 : 7))
+                {
+                        if (font_u16(face, t) != 1)
+                                continue;
+                        kind = font_u16(face, t + 2);
+                        t += font_u32(face, t + 4);
+                        at = t + 2;
+                }
+                if (table ? kind == 7 : kind == 5)
+                {
+                        if (font_u16(face, t) == 3)
+                                at = t + 6;
+                }
+                else if (table ? kind == 8 : kind == 6)
+                {
+                        if (font_u16(face, t) == 3)
+                                at = t + 6 + 2 * (positive)font_u16(face, t + 2);
+                }
+                if ((table ? kind == 7 || kind == 8 : kind == 5 || kind == 6) && font_u16(face, t) == 3)
+                {
+                        positive first = font_u16(face, at);
+
+                        if (first)
+                                font_digest_coverage(face, t + first, digest, &budget);
+                        continue;
+                }
+                font_digest_coverage(face, t + font_u16(face, at), digest, &budget);
+        }
+}
+
+static inline bool font_digest_has(const p64 address_to digest, p32 glyph)
+{
+        return (digest[0] >> (glyph & 63) & digest[1] >> (glyph >> 6 & 63)) & 1;
+}
+
 //      A lookup over the whole string, for the glyphs whose mask has a bit of mask.
-static void font_apply_string(font_shaper address_to s, p32 index, p32 mask, p32 manual)
+static void font_apply_string(font_shaper address_to s, p32 index, p32 mask, p32 manual, const p64 address_to digest)
 {
         positive lookup;
         p32 type, count, props;
@@ -3487,6 +3581,16 @@ static void font_apply_string(font_shaper address_to s, p32 index, p32 mask, p32
         s->lookup_props = props;
         s->auto_zwj = !(manual & 1);
         s->auto_zwnj = !(manual & 2);
+
+        //      Nothing in the string it can start at: nothing to copy to an output and back.
+        {
+                p32 at = 0;
+
+                while (at < s->len && !((s->info[at].mask & mask) && font_digest_has(digest, s->info[at].glyph)))
+                        at++;
+                if (at == s->len)
+                        return;
+        }
         reverse = !s->table && (type == 8 || (type == 7 && count && font_u16(s->face, lookup + 6) &&
                                               font_u16(s->face, lookup + font_u16(s->face, lookup + 6) + 2) == 8));
         if (reverse)
@@ -3494,7 +3598,8 @@ static void font_apply_string(font_shaper address_to s, p32 index, p32 mask, p32
                 for (b32 i = (b32)s->len - 1; i >= 0 && s->ops-- > 0 && !s->failed; i--)
                 {
                         s->idx = (p32)i;
-                        if ((s->info[i].mask & mask) && font_let_through(s, &s->info[i], props))
+                        if ((s->info[i].mask & mask) && font_digest_has(digest, s->info[i].glyph) &&
+                            font_let_through(s, &s->info[i], props))
                                 font_try_subtables(s, lookup, type, count);
                 }
                 return;
@@ -3511,7 +3616,8 @@ static void font_apply_string(font_shaper address_to s, p32 index, p32 mask, p32
         {
                 font_item address_to cur = &s->info[s->idx];
 
-                if (!((cur->mask & mask) && font_let_through(s, cur, props) && font_try_subtables(s, lookup, type, count)))
+                if (!((cur->mask & mask) && font_digest_has(digest, cur->glyph) && font_let_through(s, cur, props) &&
+                      font_try_subtables(s, lookup, type, count)))
                         font_next_glyph(s);
         }
         if (!s->table)
@@ -3696,6 +3802,14 @@ static font_plan address_to font_plan_for(font_engine address_to e, const font_f
                 plan->mask_of[action] = (p16)FONT_MASK_FORM(action);
         font_plan_table(face, plan, 0, kind, rtl);
         font_plan_table(face, plan, 1, kind, rtl);
+        for (p32 table = 0; table < 2; table++)
+        {
+                positive base = table ? face->gpos : face->gsub;
+                positive list = base && font_u16(face, base) == 1 ? base + font_u16(face, base + 8) : 0;
+
+                for (p32 step = 0; step < plan->steps[table]; step++)
+                        font_lookup_digest(face, list, plan->lookup[table][step], table, plan->digest[table][step]);
+        }
 
         //      Without any of the joining forms in the face, the letters take their presentation forms instead.
         if (kind == 2)
@@ -3992,7 +4106,8 @@ static void font_run_plan(font_shaper address_to s, const font_plan address_to p
         s->table = table;
         s->lookups = base && font_u16(face, base) == 1 ? base + font_u16(face, base + 8) : 0;
         for (p32 step = 0; step < plan->steps[table] && !s->failed; step++)
-                font_apply_string(s, plan->lookup[table][step], plan->mask[table][step], plan->manual[table][step]);
+                font_apply_string(s, plan->lookup[table][step], plan->mask[table][step], plan->manual[table][step],
+                                  plan->digest[table][step]);
 }
 
 /*
