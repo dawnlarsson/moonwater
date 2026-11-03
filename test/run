@@ -6878,6 +6878,14 @@ gate_inventory()
         python3 test/assembly/inventory.py --check --target all src/lib.c > /dev/null
 }
 
+# The GPU's kernels in src/canvas/gpu.c are what src/canvas/gpu.asm assembles to (a machine with no llvm-mc cannot say, and does not).
+gate_gpu_kernels()
+{
+        command -v llvm-mc > /dev/null 2>&1 && command -v ld.lld > /dev/null 2>&1 ||
+                { note "gate gpu-kernels: no llvm-mc or ld.lld here, not checked"; return 0; }
+        python3 test/gpu_kernels.py --check
+}
+
 lane_gate()
 {
         gate_began=$(date +%s)
@@ -6888,6 +6896,7 @@ lane_gate()
         job maybe gate_row shell-clang gate_clang
         job hard gate_row terminal gate_terminal
         job hard gate_row seal python3 test/function_audit.py --check
+        job hard gate_row gpu-kernels gate_gpu_kernels
         job hard gate_row inventory gate_inventory
         job hard gate_row engine lane_differential_oracle
         job hard gate_row host-writes python3 test/differential.py --harness host_writes

@@ -3,7 +3,7 @@
 #define GPU_IO(dir, n, size) ((dir) << 30 | (size) << 16 | 0x6400u | (0x40 + (n)))
 #define GPU_PKT(op, n) (0xc0000002u | (op) << 8 | (n) << 16) // type 3, for the compute shader type
 #define GPU_VA 0x1000000000ull
-#define GPU_DATA 24576 // the pixels start here; before them: packets at 0, arguments at 512, the kernel at 1024, the one with boxes at 8192
+#define GPU_DATA 24576 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024
 
 static struct { int fd; unsigned int ctx; unsigned int address_to at; } gpu;
 
@@ -418,7 +418,24 @@ static const unsigned int gpu_bx[] = {
     0xbe96047e, 0x7da40a80, 0xbf88f5b3, 0xdc30800c, 0x047d000d, 0x385a5a88, 0xbf82f5af, 0xbea204c1, 0x87a27e22, 0x850b8081,
     0xbf07810b, 0xbf84faf4, 0xbf82fb09};
 
-typedef char gpu_kernel_fits[sizeof(gpu_cp) - 8 <= 8192 - 1024 && sizeof(gpu_bx) - 8 <= GPU_DATA - 8192 ? 1 : -1]; // each kernel ends before the next thing begins
+// gpu.asm begin: test/gpu_kernels.py --write
+static const unsigned int gpu_k_copy[] = {
+    0xe0ac0001, 0x0000018c, 0xf4080202, 0xfa000000, 0xf4040382, 0xfa000018, 0xf4000402, 0xfa000024, 0xd76f0001, 0x04010c06,
+    0xbf8cc07f, 0x7d880210, 0xbe80246a, 0xbf88000b, 0x93120e07, 0x93130f07, 0x4a040212, 0x4a060213, 0x34040482, 0x34060682,
+    0xdc308000, 0x04080002, 0xbf8c3f70, 0xdc708000, 0x000a0403, 0xbf810000};
+static const unsigned int gpu_k_fill[] = {
+    0xe0ac0001, 0x0000018c, 0xf4040282, 0xfa000008, 0xf40003c2, 0xfa00001c, 0xf4040402, 0xfa000024, 0xf4000502, 0xfa00002c,
+    0xd76f0001, 0x04010c06, 0xbf8cc07f, 0x7d880210, 0xbe80246a, 0xbf880006, 0x93130f07, 0x4a060213, 0x34060682, 0x7e080214,
+    0xdc708000, 0x000a0403, 0xbf810000};
+// gpu.asm end
+
+// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024; GPU_KERNEL_OF says which one an op runs.
+static const struct { const unsigned int *words; unsigned int size; } gpu_kernels[] = {
+    {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}};
+#define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
+#define GPU_KERNEL_OF(op) ((op) == 0 ? 0 : (op) == 1 ? 1 : (op) == 5 ? 3 : 2)
+static unsigned int gpu_kernel_at[GPU_KERNELS];
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_cp) + sizeof(gpu_bx) + 256 * 4 <= GPU_DATA - 1024 ? 1 : -1]; // they end before the pixels begin
 
 #define gpu_io(dir, n, size, a) (system_control(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 
@@ -440,8 +457,12 @@ static b32 gpu_start(positive bytes)
         if (at < 0 && at > -4096)
                 return false;
         gpu.at = (unsigned int address_to)at, gpu.ctx = ctx[0];
-        memory_copy(gpu.at + 256, gpu_cp + 2, sizeof(gpu_cp) - 8);
-        memory_copy(gpu.at + 2048, gpu_bx + 2, sizeof(gpu_bx) - 8);
+        for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
+        {
+                gpu_kernel_at[i] = here;
+                memory_copy((p8 address_to)gpu.at + here, gpu_kernels[i].words + 2, gpu_kernels[i].size - 8);
+                here = (here + gpu_kernels[i].size - 8 + 255) & ~255u;
+        }
         return true;
 }
 
@@ -453,8 +474,8 @@ struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, r
 // Run the kernel over the arguments' w by rows pixels; false if it did not finish.
 static b32 gpu_run(void)
 {
-        const unsigned int address_to k = GPU_ARGS->op == 5 ? gpu_bx : gpu_cp;
-        positive code = GPU_VA + (GPU_ARGS->op == 5 ? 8192 : 1024), args = GPU_VA + 512;
+        const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), address_to k = gpu_kernels[which].words;
+        positive code = GPU_VA + gpu_kernel_at[which], args = GPU_VA + 512;
         unsigned int ib[] = {
             GPU_PKT(0x76, 2), 0x20c, (unsigned int)(code >> 8), (unsigned int)(code >> 40),
             GPU_PKT(0x76, 2), 0x212, k[0], k[1], GPU_PKT(0x76, 1), 0x218, 0x100,
