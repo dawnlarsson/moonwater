@@ -1319,43 +1319,76 @@ static void windows_rotate_at(unsigned int lw, unsigned int lh, unsigned int deg
                 *px = lx, *py = ly;
 }
 
+/*
+        The panel is the card's memory, mapped to be written: a store to it that does not fill a whole line goes over the bus
+        as a partial write, and a quarter turn stored a pixel at a time steps a panel row between stores, so every store of
+        it is one. A quarter turn is therefore done in tiles WINDOWS_TURN_TILE pixels square, 64 bytes a row, each panel
+        row of a tile stored whole and in order from the tile's 16 picture rows, which the tile's rows read again and
+        again from the cache; a half turn and no turn store each panel row in order as they read.
+*/
+#define WINDOWS_TURN_TILE 16u
+
 static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
                                unsigned int lw, unsigned int lh, unsigned int degrees, unsigned int x0, unsigned int y0,
                                unsigned int x1, unsigned int y1)
 {
-        // The turn is chosen once a row, and each row's stores step through the panel by a constant: a row of the
-        // picture is a column of the panel for a quarter turn, so its stores step by a panel row.
+        if (degrees == 90 || degrees == 270)
+        {
+                // The panel columns and rows the rectangle turns into.
+                unsigned int pa = degrees == 90 ? lh - y1 : y0, pb = degrees == 90 ? lh - y0 : y1;
+                unsigned int qa = degrees == 90 ? x0 : lw - x1, qb = degrees == 90 ? x1 : lw - x0;
+
+                for (unsigned int p = pa, pe; p < pb; p = pe)
+                {
+                        // Tiles start at multiples of the tile, so a tile's panel row is a line of the card's memory.
+                        pe = (p / WINDOWS_TURN_TILE + 1) * WINDOWS_TURN_TILE;
+                        pe = pe < pb ? pe : pb;
+                        for (unsigned int q = qa; q < qb; q += WINDOWS_TURN_TILE)
+                        {
+                                unsigned int qe = q + WINDOWS_TURN_TILE < qb ? q + WINDOWS_TURN_TILE : qb;
+
+                                for (unsigned int row = q; row < qe; row++)
+                                {
+                                        unsigned int *to = into + (unsigned long)row * into_pitch;
+
+                                        if (degrees == 90)
+                                        {
+                                                // Panel column px of this row is the picture's column row, from the row lh - 1 - px.
+                                                const unsigned int *source = from + (unsigned long)(lh - 1 - p) * from_pitch + row;
+
+                                                for (unsigned int px = p; px < pe; px++, source -= from_pitch)
+                                                        to[px] = *source;
+                                        }
+                                        else
+                                        {
+                                                // Panel column px of this row is the picture's row px, from the column lw - 1 - row.
+                                                const unsigned int *source = from + (unsigned long)p * from_pitch + (lw - 1 - row);
+
+                                                for (unsigned int px = p; px < pe; px++, source += from_pitch)
+                                                        to[px] = *source;
+                                        }
+                                }
+                        }
+                }
+                return;
+        }
         for (unsigned int ly = y0; ly < y1; ly++)
         {
-                const unsigned int *row = from + (unsigned long)ly * from_pitch;
-
-                if (degrees == 90)
+                if (degrees == 180)
                 {
-                        unsigned long at = (unsigned long)x0 * into_pitch + (lh - 1 - ly);
+                        unsigned int *to = into + (unsigned long)(lh - 1 - ly) * into_pitch + (lw - x1);
+                        const unsigned int *row = from + (unsigned long)ly * from_pitch + (x1 - 1);
 
-                        for (unsigned int lx = x0; lx < x1; lx++, at += into_pitch)
-                                into[at] = row[lx];
-                }
-                else if (degrees == 270)
-                {
-                        unsigned long at = (unsigned long)(lw - 1 - x0) * into_pitch + ly;
-
-                        for (unsigned int lx = x0; lx < x1; lx++, at -= into_pitch)
-                                into[at] = row[lx];
-                }
-                else if (degrees == 180)
-                {
-                        unsigned long at = (unsigned long)(lh - 1 - ly) * into_pitch + (lw - 1 - x0);
-
-                        for (unsigned int lx = x0; lx < x1; lx++, at--)
-                                into[at] = row[lx];
+                        for (unsigned int each = x1 - x0; each; each--)
+                                *to++ = *row--;
                 }
                 else
                 {
-                        unsigned long at = (unsigned long)ly * into_pitch + x0;
+                        unsigned int *to = into + (unsigned long)ly * into_pitch + x0;
+                        const unsigned int *row = from + (unsigned long)ly * from_pitch + x0;
 
-                        for (unsigned int lx = x0; lx < x1; lx++, at++)
-                                into[at] = row[lx];
+                        for (unsigned int each = x1 - x0; each; each--)
+                                *to++ = *row++;
                 }
         }
 }

@@ -118670,6 +118670,201 @@ static void check_compositor_corner_scales(void)
 }
 
 /*
+        A screen Canvas turns in software, a frame at a time. The turn is every pixel of the rectangle where the turn puts it,
+        in tiles of 16 pixels square whatever the rectangle's edges (a rectangle of the damage is no multiple of anything),
+        and nothing outside the rectangle's panel rectangle is stored; each rectangle of a frame's damage is turned alone, so
+        two far apart (the pointer's old place and its new one) are not the box that holds them both, which was most of the
+        screen; and the picture is turned from the machine's memory, the mirror of what the card holds, and never read from
+        the card's own (about ten megabytes a second on a real card: a frame of 2560 by 1080 turned from it took a second).
+*/
+#define TURN_SIDE 96
+#define TURN_W 70
+#define TURN_H 45
+
+static unsigned int turn_scene[TURN_SIDE * TURN_SIDE], turn_mirror[TURN_SIDE * TURN_SIDE], turn_panel[TURN_SIDE * TURN_SIDE];
+
+// The panel's pixel a picture pixel turns into, by the one rule every turn has (windows_rotate_at).
+static unsigned int turn_expected(unsigned int degrees, unsigned int lw, unsigned int lh, unsigned int x, unsigned int y)
+{
+    unsigned int px, py;
+
+    windows_rotate_at(lw, lh, degrees, x, y, &px, &py);
+    return py * TURN_SIDE + px;
+}
+
+static void check_compositor_turn(void)
+{
+    static const unsigned int degrees_listed[3] = {90, 180, 270};
+    static const unsigned int rects[5][4] = {{0, 0, TURN_W, TURN_H}, {3, 5, 34, 47 - 4}, {16, 16, 32, 32}, {17, 1, 69, 44}, {0, 44, 70, 45}};
+    unsigned int wrong = 0, outside = 0, stored = 0;
+
+    // Every rectangle, every turn: each pixel is where the rule puts it, and nothing outside the rectangle is stored.
+    for (unsigned int turn = 0; turn < 3; turn++)
+        for (unsigned int which = 0; which < 5; which++)
+        {
+            unsigned int degrees = degrees_listed[turn], x0 = rects[which][0], y0 = rects[which][1], x1 = rects[which][2],
+                         y1 = rects[which][3];
+
+            for (unsigned int at = 0; at < TURN_SIDE * TURN_SIDE; at++)
+                turn_scene[at] = 0x01000000u + at, turn_panel[at] = 0xdead0000u;
+            windows_rotate_u32(turn_panel, TURN_SIDE, turn_scene, TURN_SIDE, TURN_W, TURN_H, degrees, x0, y0, x1, y1);
+            for (unsigned int y = y0; y < y1; y++)
+                for (unsigned int x = x0; x < x1; x++)
+                    wrong += turn_panel[turn_expected(degrees, TURN_W, TURN_H, x, y)] != turn_scene[y * TURN_SIDE + x];
+            for (unsigned int at = 0; at < TURN_SIDE * TURN_SIDE; at++)
+                stored += turn_panel[at] != 0xdead0000u;
+            outside += stored != (x1 - x0) * (y1 - y0);
+            stored = 0;
+        }
+    check("turn: every pixel of a rectangle, whatever its edges are, is where the turn puts it, in every turn", wrong == 0);
+    check("turn: and no pixel but those of the rectangle is stored", outside == 0);
+
+    // A frame: one screen turned by Canvas, its scene a pattern, its panel a sentinel.
+    for (unsigned int turn = 0; turn < 3; turn++)
+    {
+        unsigned int degrees = degrees_listed[turn], between = 0, near_a = 0, near_b = 0, from_card = 0;
+        unsigned short clips[2][4] = {{2, 2, 14, 10}, {TURN_W - 12, TURN_H - 9, TURN_W - 2, TURN_H - 2}};
+
+        memory_zero(&compositor, sizeof(compositor));
+        memory_zero(compositor_turns, sizeof(compositor_turns));
+        compositor.card = -1;
+        compositor.outputs = 1;
+        compositor.screen[0][2] = TURN_W, compositor.screen[0][3] = TURN_H;
+        compositor.output[0].turned = 2, compositor.output[0].degrees = degrees;
+        compositor.width = TURN_W, compositor.height = TURN_H;
+        compositor_turns[0].pixels = turn_panel;
+        compositor_turns[0].pitch = TURN_SIDE * 4;
+        compositor_turns[0].width = TURN_SIDE, compositor_turns[0].height = TURN_SIDE;
+        for (unsigned int at = 0; at < TURN_SIDE * TURN_SIDE; at++)
+            turn_scene[at] = 0x02000000u + at, turn_mirror[at] = 0x03000000u + at, turn_panel[at] = 0xdead0000u;
+
+        // The card's own memory (the scanout) holds what a read of it must never be taken for.
+        compositor.scanout = turn_scene;
+        compositor.scanout_pitch = TURN_SIDE * 4;
+        compositor.changed = 1;
+        compositor.mirror = turn_mirror;
+        compositor.mirror_pitch = TURN_SIDE;
+        compositor_turn_frame((const unsigned short (*)[4])clips, 2);
+        for (unsigned int y = 0; y < TURN_H; y++)
+            for (unsigned int x = 0; x < TURN_W; x++)
+            {
+                unsigned int got = turn_panel[turn_expected(degrees, TURN_W, TURN_H, x, y)];
+                int in_a = x >= clips[0][0] && x < clips[0][2] && y >= clips[0][1] && y < clips[0][3];
+                int in_b = x >= clips[1][0] && x < clips[1][2] && y >= clips[1][1] && y < clips[1][3];
+
+                if (in_a || in_b)
+                {
+                    near_a += in_a && got != turn_mirror[y * TURN_SIDE + x];
+                    near_b += in_b && got != turn_mirror[y * TURN_SIDE + x];
+                    from_card += got == turn_scene[y * TURN_SIDE + x];
+                }
+                else
+                    between += got != 0xdead0000u;
+            }
+        check("turn: the damage's two rectangles far apart are turned, each from the mirror", near_a + near_b == 0);
+        check("turn: and nothing between them is turned, as the box that holds them both would", between == 0);
+        check("turn: and the card's own memory is not read for it", from_card == 0);
+    }
+
+    // A frame turned with no mirror, the scanout the machine's memory, is turned from the scanout.
+    {
+        unsigned short clip[1][4] = {{0, 0, TURN_W, TURN_H}};
+        unsigned int wrong_scanout = 0;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.card = -1;
+        compositor.outputs = 1;
+        compositor.screen[0][2] = TURN_W, compositor.screen[0][3] = TURN_H;
+        compositor.output[0].turned = 2, compositor.output[0].degrees = 90;
+        compositor_turns[0].pixels = turn_panel;
+        compositor_turns[0].pitch = TURN_SIDE * 4;
+        for (unsigned int at = 0; at < TURN_SIDE * TURN_SIDE; at++)
+            turn_scene[at] = 0x02000000u + at, turn_panel[at] = 0xdead0000u;
+        compositor.scanout = turn_scene;
+        compositor.scanout_pitch = TURN_SIDE * 4;
+        compositor_turn_frame((const unsigned short (*)[4])clip, 1);
+        for (unsigned int y = 0; y < TURN_H; y++)
+            for (unsigned int x = 0; x < TURN_W; x++)
+                wrong_scanout += turn_panel[turn_expected(90, TURN_W, TURN_H, x, y)] != turn_scene[y * TURN_SIDE + x];
+        check("turn: with no mirror (the scanout is the machine's memory) a frame is turned from the scanout", wrong_scanout == 0);
+    }
+
+    // A card whose driver no list names keeps the scene in the machine's memory while a screen is turned, and not otherwise.
+    {
+        unsigned int *kept;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.card = 3; // never used: the decision asks the driver's name
+        memory_copy(compositor.driver, "i915", 5);
+        compositor.width = 128, compositor.height = 64;
+        compositor.scanout = turn_scene, compositor.scanout_pitch = 128 * 4;
+        compositor.outputs = 1;
+        check("turn: a card no list names, nothing turned, composes straight to its memory", compositor_changed_ready() == 0 && !compositor.mirror);
+        compositor.output[0].turned = 2;
+        check("turn: and with a screen turned in software it keeps the scene and a mirror of what the card holds",
+              compositor_changed_ready() == 1 && compositor.composing && compositor.mirror && compositor.mirror != compositor.scanout &&
+                  compositor.mirror_stale);
+        kept = compositor.mirror;
+        check("turn: and asks nothing again while that is so", compositor_changed_ready() == 1 && compositor.mirror == kept);
+        compositor.output[0].turned = 0;
+        check("turn: and gives it back when none is, composing straight again",
+              compositor_changed_ready() == 0 && !compositor.mirror && !compositor.composing);
+        compositor.output[0].turned = 1;
+        check("turn: a screen the card turns reads nothing and keeps nothing", compositor_changed_ready() == 0 && !compositor.mirror);
+        memory_copy(compositor.driver, "amdgpu", 7);
+        compositor.output[0].turned = 0;
+        compositor.changed = 0;
+        check("turn: a card of the apart list keeps its mirror as it did", compositor_changed_ready() == 1 && compositor.mirror != compositor.scanout);
+        compositor_apart_drop();
+    }
+
+    // The space taken again at another shape: what waited to be drawn in the space before is gone, the whole new one is to be drawn.
+    {
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.width = 256, compositor.height = 64;
+        compositor_damage(0, 40, 256, 24);
+        compositor_damage(10, 10, 20, 20);
+        compositor.width = 64, compositor.height = 256;
+        compositor_damage_space();
+        check("turn: the space taken at another shape leaves only the whole of it to be drawn",
+              compositor.damages == 1 && compositor.damage[0][0] == 0 && compositor.damage[0][1] == 0 &&
+                  compositor.damage[0][2] == 64 && compositor.damage[0][3] == 256);
+    }
+
+    // And what is composed then is the new space and nothing past it: a band's rectangle along the bottom of a tall space
+    // (rows 232 to 256 of 64 by 256) waiting when the space becomes 256 by 64 is rows past the scanout's end, which the
+    // present stored into whatever the memory after it was (red with the rectangle kept: the sentinels after the space).
+    {
+        static unsigned int arena[256 * 256];
+        unsigned int smashed = 0, ground = 0;
+
+        for (unsigned int at = 0; at < 256 * 256; at++)
+            arena[at] = at < 256 * 64 ? 0u : 0xfeedfeedu;
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+        compositor.card = -1;
+        compositor.scale = 100;
+        compositor.width = 64, compositor.height = 256;
+        compositor_damage(0, 232, 64, 24);
+        compositor.width = 256, compositor.height = 64;
+        compositor.scanout = arena;
+        compositor.scanout_pitch = 256 * 4;
+        compositor_damage_space();
+        compositor_present();
+        for (unsigned int at = 256 * 64; at < 256 * 256; at++)
+            smashed += arena[at] != 0xfeedfeedu;
+        for (unsigned int at = 0; at < 256 * 64; at++)
+            ground += arena[at] != 0;
+        check("turn: the space taken at another shape composes the new space and stores nothing past its end",
+              smashed == 0 && ground * 10 >= 256 * 64 * 9);
+    }
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(compositor_turns, sizeof(compositor_turns));
+}
+
+/*
         The snap preview is a tint on its target and on nothing else. Over the desktop, the target is the kit's selection
         at its own alpha; the window dragged is as it is over the tint, and a window above it is as it is too. Everything
         else is the desktop, untouched.
@@ -143190,6 +143385,7 @@ b32 main()
         check_compositor_screens();
         check_compositor_scales();
         check_compositor_corner_scales();
+        check_compositor_turn();
         check_compositor_preview();
         check_compositor_snap_tint();
         check_compositor_preview_held();

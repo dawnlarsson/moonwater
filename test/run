@@ -21710,6 +21710,62 @@ out.append(("d1.5 and set to 100 again it is 100 again", scale_becomes("100"), "
 time.sleep(1)
 out.append(("d1.6 with the band as it was", "yes" if clock_pill("d1-back") == pill100 else "no", "yes"))
 
+#       A screen turned while the desktop runs. A turn Canvas does itself (a card with no rotation on its plane: this one)
+#       makes 1080 by 2560 of the 2560 by 1080 panel; the compositor must live through every turn after every turn, a
+#       window must be where the turn puts it, and a pointer hopping between the corners (two small rectangles of damage,
+#       far apart) must not cost a frame of the whole screen: it was one turned box, 20 ms of processor a frame here and a
+#       second a frame on a card's own memory.
+def alive():
+    return shell.run("[ -d /proc/%s ] && echo alive || echo DEAD" % pid, 10)[0].splitlines()[-1] == "alive"
+
+def ticks():
+    fields = shell.run("cat /proc/%s/stat" % pid, 10)[0].split(") ")[-1].split()
+    return int(fields[11]) + int(fields[12])
+
+def hop(count, gap):
+    for n in range(count):
+        fraction = 5 if n % 2 == 0 else 95
+        send([{"type": "abs", "data": {"axis": "x", "value": fraction * 32767 // 100}},
+              {"type": "abs", "data": {"axis": "y", "value": fraction * 32767 // 100}}])
+        time.sleep(gap)
+
+shell.run("moonwater canvas display Virtual-1 rotation 90", 15)
+time.sleep(3)
+text = shell.run("moonwater debug", 15)[0]
+found = re.search(r"screen 0 +Virtual-1, (\d+)x(\d+)", text)
+out.append(("d1.7 turned 90 degrees while the desktop runs, the screen is 1080 by 2560",
+            "%sx%s" % found.groups() if found else "none", "1080x2560"))
+window = re.search(r"window \d+ +one at (-?\d+),(-?\d+), (\d+)x(\d+)", text)
+if window and found:
+    x, y, w, h = [int(v) for v in window.groups()]
+    lw, lh = int(found.group(1)), int(found.group(2))
+    cx, cy = x + w // 4, y + h // 4
+    width, height, at = picture("d1-turned")
+    where = (lh - 1 - cy, cx)
+    out.append(("d1.8 and a window is where the turn puts it: its colour at the panel pixel a point inside it turns into",
+                "%02x%02x%02x" % at(*where), "336699"))
+else:
+    out.append(("d1.8 and a window is where the turn puts it: its colour at the panel pixel a point inside it turns into", "no window", "336699"))
+
+if alive():
+    before, started = ticks(), time.time()
+    hop(100, 0.06)
+    spent = (ticks() - before) * 10.0 / 100
+    out.append(("d1.9 a pointer hopping between the corners of a screen turned by Canvas costs under 5 ms of processor a frame",
+                "yes" if spent < 5 else "%.1f ms a frame" % spent, "yes"))
+else:
+    out.append(("d1.9 a pointer hopping between the corners of a screen turned by Canvas costs under 5 ms of processor a frame",
+                "no compositor", "yes"))
+
+died = "none"
+for degrees in (270, 180, 90, 0, 180, 270, 0, 270, 90, 180, 0):
+    shell.run("moonwater canvas display Virtual-1 rotation %d" % degrees, 15)
+    time.sleep(2)
+    if not alive():
+        died = "died turning to %d" % degrees
+        break
+out.append(("d1.10 and turned on through every quarter and back, the compositor lives", "yes" if died == "none" else died, "yes"))
+
 try:
     guest.quit()
     guest.wait(10)

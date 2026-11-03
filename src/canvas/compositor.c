@@ -3058,10 +3058,12 @@ static struct
         unsigned int fb, crtc;
         // Where a store to the card is dear: slices of the scene composed apart, and what the card holds (mirror, words a row
         // mirror_pitch; the scanout itself where the card's memory is the machine's). changed: 0 not yet asked, 1 on,
-        // -1 off. mirror_stale: the card may hold anything, so the next present stores all it composes.
+        // -1 off. mirror_stale: the card may hold anything, so the next present stores all it composes. changed_turned:
+        // whether a screen was turned in software when changed was decided (a turn reads the scene whole, from memory that is
+        // the machine's, so it is decided again when that changes).
         unsigned int *composing, *mirror;
         unsigned long mirror_pitch;
-        int changed, mirror_stale;
+        int changed, mirror_stale, changed_turned;
         int width, height;   // the space every screen is a rectangle of, and the scanout that is as large
         /*
                 The screens, how many there are (none listed is one screen, the whole space: a headless
@@ -5458,6 +5460,20 @@ static int compositor_driver_in(const char *const *names, unsigned int count)
         is a slice of rows a band (COMPOSITOR_SLICE), and the mirror's memory
         where it is apart.
 */
+static int compositor_turning_software(void);
+
+// What compositor_changed_ready mapped, given back; it is decided again at the next present.
+static void compositor_apart_drop(void)
+{
+        if (compositor.composing)
+                compositor_call(syscall(munmap), (positive)compositor.composing, compositor.composing_bytes, 0, 0, 0, 0);
+        if (compositor.mirror && compositor.mirror_bytes)
+                compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
+        compositor.composing = compositor.mirror = 0;
+        compositor.composing_bytes = compositor.mirror_bytes = 0;
+        compositor.changed = 0;
+}
+
 static int compositor_changed_ready(void)
 {
         static const char *const apart[] = {"amdgpu", "radeon", "nouveau", "bochs-drm", "qxl", "vmwgfx"};
@@ -5465,16 +5481,24 @@ static int compositor_changed_ready(void)
                                              "mgag200", "udl", "gud"};
         unsigned long bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
         unsigned long slices = (unsigned long)compositor.width * COMPOSITOR_SLICE * COMPOSITOR_BANDS * 4;
-        int own;
+        int own, listed, turned = compositor_turning_software();
 
-        if (compositor.changed)
+        if (compositor.changed && compositor.changed_turned == turned)
                 return compositor.changed > 0;
+        compositor_apart_drop();
         compositor.changed = -1;
+        compositor.changed_turned = turned;
         if (compositor.card < 0)
                 return 0;
         own = compositor_driver_in(apart, sizeof(apart) / sizeof(apart[0]));
-        if (!own && !compositor_driver_in(shared, sizeof(shared) / sizeof(shared[0])))
+        listed = own || compositor_driver_in(shared, sizeof(shared) / sizeof(shared[0]));
+        // A screen Canvas turns reads the scene whole, a frame at a time, and a read of the card's memory is more than a
+        // frame can pay (a dumb buffer is mapped write-combined on most cards, and word loads from one came to about ten
+        // megabytes a second on a real card): with a screen turned, the scene is kept in the machine's memory whatever the
+        // card, as the apart cards' is.
+        if (!listed && !turned)
                 return 0;
+        own = own || !listed;
 
         long composing = compositor_call(syscall(mmap), 0, slices, 3, 0x22, (positive)-1, 0);
 
@@ -6179,49 +6203,64 @@ static int compositor_turning(void)
         return 0;
 }
 
+// Whether any screen is turned by Canvas itself: its picture is made from the scene, a frame at a time.
+static int compositor_turning_software(void)
+{
+        for (unsigned int at = 0; at < compositor.outputs; at++)
+                if (compositor.output[at].turned == 2)
+                        return 1;
+        return 0;
+}
+
 /*
-        The part of the scene a turned screen shows, turned into its own buffer and told to its framebuffer: the bounding
-        box of the damage, cut to the screen, is turned for the panel (windows_rotate_u32), and the panel's rectangle of
-        it is given to the card in one DIRTYFB. The scene is composed on the scanout first, so the pointer and the tabs
-        are in it.
+        The part of the scene a turned screen shows, turned into its own buffer and told to its framebuffer: each rectangle
+        of the damage (clip), cut to the screen, is turned for the panel (windows_rotate_u32) and the panel's rectangle of it
+        is given to the card, all of a screen's in one DIRTYFB. A rectangle is turned alone: two far apart (the pointer's old
+        place and its new, the clock) are two small ones and not the one box that holds them both, which was most of the
+        screen. The scene is composed on the scanout first, so the pointer and the tabs are in it, and it is turned from the
+        machine's memory: the mirror of what the card holds where Canvas keeps one (compositor_changed_ready, which it does
+        for every card while a screen is turned), the scanout itself where that is the machine's memory. The card's own
+        memory is only ever written: a read of it came to about ten megabytes a second on a real card, and a frame of
+        2560 by 1080 a second.
 */
 static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int clips)
 {
-        unsigned int box[4] = {~0u, ~0u, 0, 0}, pitch = compositor.scanout_pitch / 4;
+        const unsigned int *scene = compositor.changed > 0 && compositor.mirror ? compositor.mirror : compositor.scanout;
+        unsigned long pitch = compositor.changed > 0 && compositor.mirror ? compositor.mirror_pitch : compositor.scanout_pitch / 4;
 
-        for (unsigned int at = 0; at < clips; at++)
-        {
-                box[0] = clip[at][0] < box[0] ? clip[at][0] : box[0];
-                box[1] = clip[at][1] < box[1] ? clip[at][1] : box[1];
-                box[2] = clip[at][2] > box[2] ? clip[at][2] : box[2];
-                box[3] = clip[at][3] > box[3] ? clip[at][3] : box[3];
-        }
         for (unsigned int at = 0; at < compositor.outputs && clips; at++)
         {
                 const int *screen = compositor.screen[at];
-                unsigned int x0, y0, x1, y1, panel[4], degrees = compositor.output[at].degrees;
-                unsigned int *into, *from;
-                unsigned short rect[1][4];
+                unsigned int degrees = compositor.output[at].degrees, told = 0;
+                unsigned short rect[COMPOSITOR_DAMAGE][4];
 
                 if (compositor.output[at].turned != 2)
                         continue;
-                x0 = box[0] > (unsigned int)screen[0] ? box[0] : (unsigned int)screen[0];
-                y0 = box[1] > (unsigned int)screen[1] ? box[1] : (unsigned int)screen[1];
-                x1 = box[2] < (unsigned int)(screen[0] + screen[2]) ? box[2] : (unsigned int)(screen[0] + screen[2]);
-                y1 = box[3] < (unsigned int)(screen[1] + screen[3]) ? box[3] : (unsigned int)(screen[1] + screen[3]);
-                if (x0 >= x1 || y0 >= y1)
-                        continue;
-                from = compositor.scanout + (unsigned long)screen[1] * pitch + (unsigned long)screen[0];
-                into = compositor_turns[at].pixels;
-                windows_rotate_u32(into, compositor_turns[at].pitch / 4, from, pitch, (unsigned int)screen[2],
-                                   (unsigned int)screen[3], degrees, x0 - screen[0], y0 - screen[1], x1 - screen[0],
-                                   y1 - screen[1]);
-                windows_rotate_panel((unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0], y0 - screen[1],
-                                     x1 - screen[0], y1 - screen[1], panel);
-                rect[0][0] = (unsigned short)panel[0], rect[0][1] = (unsigned short)panel[1];
-                rect[0][2] = (unsigned short)panel[2], rect[0][3] = (unsigned short)panel[3];
+                for (unsigned int each = 0; each < clips && told < COMPOSITOR_DAMAGE; each++)
                 {
-                        struct compositor_dirty dirty = {compositor_turns[at].fb, 0, 0, 1, (unsigned long)rect};
+                        unsigned int x0 = clip[each][0] > (unsigned int)screen[0] ? clip[each][0] : (unsigned int)screen[0];
+                        unsigned int y0 = clip[each][1] > (unsigned int)screen[1] ? clip[each][1] : (unsigned int)screen[1];
+                        unsigned int x1 = clip[each][2] < (unsigned int)(screen[0] + screen[2]) ? clip[each][2]
+                                                                                              : (unsigned int)(screen[0] + screen[2]);
+                        unsigned int y1 = clip[each][3] < (unsigned int)(screen[1] + screen[3]) ? clip[each][3]
+                                                                                              : (unsigned int)(screen[1] + screen[3]);
+                        unsigned int panel[4];
+
+                        if (x0 >= x1 || y0 >= y1)
+                                continue;
+                        windows_rotate_u32(compositor_turns[at].pixels, compositor_turns[at].pitch / 4,
+                                           scene + (unsigned long)screen[1] * pitch + (unsigned long)screen[0], pitch,
+                                           (unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0],
+                                           y0 - screen[1], x1 - screen[0], y1 - screen[1]);
+                        windows_rotate_panel((unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0],
+                                             y0 - screen[1], x1 - screen[0], y1 - screen[1], panel);
+                        for (unsigned int side = 0; side < 4; side++)
+                                rect[told][side] = (unsigned short)panel[side];
+                        told++;
+                }
+                if (told)
+                {
+                        struct compositor_dirty dirty = {compositor_turns[at].fb, 0, 0, told, (unsigned long)rect};
 
                         system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
                 }
@@ -7111,6 +7150,19 @@ static void compositor_scanout_own(void)
 }
 
 /*
+        The whole space to be drawn again, and what waited to be drawn before it forgotten: those are rectangles of the space
+        before, and a space that is another shape holds none of them. A turn makes 2560 by 1080 of 1080 by 2560, the band's
+        rectangle along the old bottom (rows past the new space's end) is made just before the screens are taken again, and
+        composed it was stored into memory past the scanout's end: a write the compositor died of on a booted guest at the
+        third or fourth turn, when the memory there was not mapped.
+*/
+static void compositor_damage_space(void)
+{
+        compositor.damages = 0;
+        compositor_damage(0, 0, compositor.width, compositor.height);
+}
+
+/*
         The scale each screen's displays line asks, taken by the screens as they are driven. A scale is no mode and no
         place, so when it is all that changed the screens are not taken again (compositor_space_take): no scanout and
         no commit, and this follows it instead: each screen's scale, the desktop's (the primary's) and the table's, the
@@ -7317,13 +7369,7 @@ static b32 compositor_space_take(int first)
                 // The scanout the space is composed into; what was composed apart for the one before is let go.
                 if (fb != compositor.fb)
                 {
-                        if (compositor.composing)
-                                compositor_call(syscall(munmap), (positive)compositor.composing, compositor.composing_bytes, 0, 0, 0, 0);
-                        if (compositor.mirror && compositor.mirror_bytes)
-                                compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
-                        compositor.composing = compositor.mirror = 0;
-                        compositor.composing_bytes = compositor.mirror_bytes = 0;
-                        compositor.changed = 0;
+                        compositor_apart_drop();
                         compositor.scanout = pixels;
                         compositor.scanout_bytes = bytes;
                         compositor.scanout_pitch = pitch;
@@ -7345,7 +7391,7 @@ static b32 compositor_space_take(int first)
                         compositor_tabs_changed();
                 }
                 compositor.mirror_stale = 1;
-                compositor_damage(0, 0, compositor.width, compositor.height);
+                compositor_damage_space();
                 compositor_present();
 
                 for (unsigned int at = 0; at < lit; at++)
