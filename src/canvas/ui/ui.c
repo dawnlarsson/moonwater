@@ -9739,7 +9739,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         continue;
                 colour = ui_role(range->kind == DOC_RANGE_ERROR ? UI_ERROR : range->kind == DOC_RANGE_WARNING ? UI_WARNING : UI_INFO);
                 for (int x = origin + ui_text_x_of(l, range->start), stop = origin + ui_text_x_of(l, range->finish); x < stop; x++)
-                        ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100 + ((x / (2 * ui->scale / 100)) & 1) * ui->scale / 100, 1, ui->scale, ui_tone(colour & 0xffffffu, 255));
+                        ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100 + ((x / (2 * ui->scale / 100)) & 1) * ui->scale / 100, 1, ui_px(ui, 1), ui_tone(colour & 0xffffffu, 255));
         }
         // The carets on this line, in the accent, at the blink's cover (solid, faded or gone: ui_text_wake); a composition's
         // text after the primary, underlined. A bar caret stands on the edge between two characters, half in each one's
@@ -9771,7 +9771,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                         wide = ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, x, baseline, shown,
                                          t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0);
 
-                        ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100, wide, ui->scale, ui_tone(text & 0xffffffu, 255));
+                        ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100, wide, ui_px(ui, 1), ui_tone(text & 0xffffffu, 255));
                 }
         }
 }

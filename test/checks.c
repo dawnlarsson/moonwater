@@ -137429,6 +137429,30 @@ static fn field_check(struct ui address_to wui);
 static fn popmenu_bar_check(struct ui address_to wui);
 
 /*
+        An error's underline in a code view is a wave one pixel tall at 100 percent, a row under the text. The line was the scale's
+        height in pixels (100 at 100 percent), so the wave covered the lines under it.
+*/
+static fn squiggle_check(struct ui address_to wui)
+{
+        static struct ui_text view;
+        long pixels = ui_map(400 * 300 * 4);
+        unsigned int *shown = (unsigned int address_to)pixels, error = ui_role(UI_ERROR) & 0xffffffu;
+        int rows = 0;
+
+        ui_begin(wui, shown, 400, 400, 300);
+        wui->scale = 100;
+        memory_fill_u32(shown, 400 * 300, 0x111113);
+        ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to) "alpha beta\ngamma\n", 17, ui_text_keymap());
+        doc_range_add(&view.doc, 0, 5, DOC_RANGE_ERROR, 0);
+        ui_text_draw(wui, &view, 10, 10, 300, 200, 0x111113);
+        for (int y = view.top; y < view.top + 3 * view.line_height && y < 300; y++)
+            rows += (shown[(positive)y * 400 + (positive)(view.left + 1)] & 0xffffffu) == error;
+        check("squiggle: an error's underline is one pixel tall at 100 percent, not the scale's 100", rows >= 1 && rows <= 2);
+        ui_text_close(&view);
+        compositor_call(syscall(munmap), pixels, 400 * 300 * 4, 0, 0, 0, 0);
+}
+
+/*
         A dropdown's bar: a thumb pressed and dragged down 100 pixels moves the menu's top with it. The bar's answer is the
         scroll it asks for, and that is what the menu takes; a menu that kept the old scroll drew the bar moving and the items not.
 */
@@ -137920,6 +137944,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_readonly_check(&wui);
         field_check(&wui);
         popmenu_bar_check(&wui);
+        squiggle_check(&wui);
         ui_over_check();
         ui_edge_row_check();
 }
