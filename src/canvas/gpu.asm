@@ -377,8 +377,11 @@ scene:
 	s_waitcnt	lgkmcnt(0)
 	s_cmp_eq_u32	s32, 2
 	s_cbranch_scc1	.scene_first_box
+	s_cmp_eq_u32	s32, 4
+	s_cbranch_scc1	.scene_first_rect
 	s_cmp_lg_u32	s32, 0
 	s_cbranch_scc1	.scene_read
+.scene_first_rect:
 	s_cmp_gt_u32	s33, s28
 	s_cbranch_scc1	.scene_read
 	s_cmp_lt_u32	s35, s40
@@ -435,6 +438,8 @@ scene:
 	s_cbranch_scc1	.scene_box
 	s_cmp_eq_u32	s47, 3
 	s_cbranch_scc1	.scene_text
+	s_cmp_eq_u32	s47, 4
+	s_cbranch_scc1	.scene_image
 	s_cmp_le_u32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -481,6 +486,54 @@ scene:
 	v_cndmask_b32_e64 v7, v7, v23, s[68:69]
 	over		v23, v8
 	v_cndmask_b32_e64 v8, v8, v23, s[70:71]
+	s_branch	.scene_loop
+
+; an image (4, x0, y0, x1, y1 in pixels, the address of the picture's pixel at x0, y0 in two words, its pitch in pixels): the pixels copied, each lane's four loaded by the
+; address and no further than the rectangle and the rows (a lane outside them loads nothing)
+.scene_image:
+	s_cmp_le_u32	s59, s28
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s50, s28, 64
+	s_cmp_ge_u32	s57, s50
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_u32	s60, s29
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s51, s29, 4
+	s_cmp_ge_u32	s58, s51
+	s_cbranch_scc1	.scene_loop
+	s_mov_b32	s45, 1
+	s_min_u32	s53, s59, s12
+	v_cmp_le_u32_e64 s[76:77], s58, v4
+	v_cmp_gt_u32	vcc, s60, v4
+	s_and_b64	s[76:77], s[76:77], vcc
+	inside		s[82:83], v3
+	inside		s[84:85], v17
+	inside		s[86:87], v18
+	inside		s[88:89], v19
+	v_subrev_nc_u32	v30, s58, v4
+	v_mul_lo_u32	v30, v30, s63
+	v_subrev_nc_u32	v31, s57, v3
+	v_add_nc_u32	v30, v30, v31
+	v_lshlrev_b32	v30, 2, v30
+	v_ashrrev_i32	v31, 31, v30
+	v_add_co_u32	v32, vcc, s61, v30
+	v_mov_b32	v33, s62
+	v_add_co_ci_u32	v33, vcc, v33, v31, vcc
+	s_mov_b64	s[92:93], exec
+	s_and_b64	exec, s[92:93], s[82:83]
+	global_load_dword v34, v[32:33], off
+	s_and_b64	exec, s[92:93], s[84:85]
+	global_load_dword v35, v[32:33], off offset:4
+	s_and_b64	exec, s[92:93], s[86:87]
+	global_load_dword v36, v[32:33], off offset:8
+	s_and_b64	exec, s[92:93], s[88:89]
+	global_load_dword v37, v[32:33], off offset:12
+	s_mov_b64	exec, s[92:93]
+	s_waitcnt	vmcnt(0)
+	v_cndmask_b32_e64 v5, v5, v34, s[82:83]
+	v_cndmask_b32_e64 v6, v6, v35, s[84:85]
+	v_cndmask_b32_e64 v7, v7, v36, s[86:87]
+	v_cndmask_b32_e64 v8, v8, v37, s[88:89]
 	s_branch	.scene_loop
 
 ; a text run (3 | the pitch << 8, x0, y0, x1, y1, the ink, alpha | stroke << 8, the bitmap's place from the buffer's start): the cover of each pixel is

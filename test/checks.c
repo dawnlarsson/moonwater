@@ -186097,6 +186097,77 @@ b32 main(void)
                 ui.top = 0, ui.bottom = PH, ui.width = PW, ui.band_top = ui.band_bottom = 0, ui.opaque = 0;
         }
 
+        // Images: pictures copied into the picture by the GPU, from two places: a buffer of the GPU's own, and the pages of a memfd mapped shared (what a
+        // window's pixels are), read by the GPU as a userptr buffer at an address of their own. The rectangles are cut at the picture's edges, the copies start
+        // anywhere in the source; against memory_copy_rect_u32 on the processor over a random picture.
+        {
+                enum { SW = 400, SH = 300, SP = 416, IMAGES = 40, IROUNDS = 12 };
+                positive img_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20), up_va = 0x2000000000ull;
+                unsigned int address_to gpu_img = (unsigned int address_to)((p8 address_to)gpu.at + img_at), address_to shared;
+                p64 up[3] = {0, 1 << 20, 0xc}, va[8] = {0, 1 | 14ull << 32, 0x2000000000ull, 0, 1 << 20};
+                long fd = system_call_2(syscall(memfd_create), (positive) "mw-window", 1), mapped = -1;
+                positive image_bad = 0;
+
+                if (fd >= 0 && system_call_2(syscall(ftruncate), (positive)fd, 1 << 20) == 0)
+                        mapped = system_call_6(syscall(mmap), 0, 1 << 20, 3, 1, (positive)fd, 0);
+                shared = (unsigned int address_to)mapped;
+                up[0] = (p64)shared;
+                if (mapped < 0 && mapped > -4096)
+                        up_va = 0;
+                else if (!gpu_io(3u, 0x11, 24, up))
+                        up_va = 0;
+                else
+                        va[0] = up[2] >> 32, up_va = gpu_io(1u, 8, 64, va) ? up_va : 0;
+                check("gpu images: the memfd's pages are a userptr buffer", up_va != 0);
+                for (positive i = 0; i < (positive)SP * SH; i++)
+                        gpu_img[i] = gpu_random();
+                for (positive i = 0; up_va && i < (positive)SW * SH; i++)
+                        shared[i] = gpu_random();
+                PW = 696;
+                ui.width = PW;
+                for (int round = 0; round < IROUNDS; round++)
+                {
+                        positive count = 0;
+
+                        for (positive i = 0; i < (positive)PP * PH; i++)
+                                pic[i] = gpu_kit_want[i] = gpu_random();
+                        for (int k = 0; k < IMAGES; k++)
+                        {
+                                unsigned int address_to q = ops + 8 * count;
+                                int from_shared = up_va && gpu_random() % 2, pitch = from_shared ? SW : SP;
+                                int sx = (int)(gpu_random() % 300), sy = (int)(gpu_random() % 200), w = 1 + (int)(gpu_random() % (unsigned int)(SW - sx)), h = 1 + (int)(gpu_random() % (unsigned int)(SH - sy));
+                                int x0 = (int)(gpu_random() % (PW + 100)) - 50, y0 = (int)(gpu_random() % (PH + 100)) - 50;
+                                int cx0, cy0, cx1, cy1;
+                                positive from, at;
+
+                                if (gpu_random() % 6 == 0)
+                                        x0 = y0 = 0; // the picture's top left corner
+                                cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0, cx1 = x0 + w > PW ? PW : x0 + w, cy1 = y0 + h > PH ? PH : y0 + h;
+                                if (cx1 <= cx0 || cy1 <= cy0)
+                                        continue;
+                                from = (positive)(sy + cy0 - y0) * (positive)pitch + (positive)(sx + cx0 - x0); // the source's pixel at the cut rectangle's corner
+                                at = (from_shared ? up_va : GPU_VA + img_at) + 4ull * from;
+                                q[0] = 4, q[1] = (unsigned int)cx0, q[2] = (unsigned int)cy0, q[3] = (unsigned int)cx1, q[4] = (unsigned int)cy1, q[5] = (unsigned int)at, q[6] = (unsigned int)(at >> 32), q[7] = (unsigned int)pitch;
+                                memory_copy_rect_u32(gpu_kit_want + (positive)cy0 * PP + (positive)cx0, PP, (from_shared ? shared : gpu_img) + from, (positive)pitch,
+                                                     (positive)(cx1 - cx0), (positive)(cy1 - cy0));
+                                count++;
+                        }
+                        if (!gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
+                        {
+                                check("gpu images: the scene finishes", false);
+                                return test_report(null);
+                        }
+                        for (int y = 0; y < PH; y++)
+                                for (int x = 0; x < PW; x++)
+                                {
+                                        checks++;
+                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++failures, ++image_bad) < 6)
+                                                string_format(log, "  FAIL gpu images round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                }
+                }
+        }
+
         // 8K: a window's clear and 159 boxes of the sizes cards and buttons have, the radii a card has, a third of them translucent;
         // the scene on the GPU against ui_kit_fill laid the same way, the whole picture compared once, then each timed, best of 5.
         {
