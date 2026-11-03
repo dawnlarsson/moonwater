@@ -2987,6 +2987,8 @@ static inline fn ui_control_forget(struct ui_control address_to c)
 // The pieces a control needs in device pixels.
 static inline b32 ui_dev(const struct ui address_to ui, int logical) { return logical * ui->scale / 100; }
 static inline b32 ui_q8(const struct ui address_to ui, int logical) { return logical * ui->scale / 100 * 256; }
+// A stroke of one logical pixel in Q8, never less than a device pixel: at 75 percent it is 0.75 of one, which the whole-pixel rule takes to 0.
+static inline b32 ui_stroke(const struct ui address_to ui) { return ui_q8(ui, 1) > 256 ? ui_q8(ui, 1) : 256; }
 
 // A determinate progress's fill as a whole: at most the track's end, UI_ONE (a value past its whole fills the track, no more).
 static inline b64 ui_progress_whole(b64 value) { return value > UI_ONE ? UI_ONE : value; }
@@ -6695,14 +6697,14 @@ static fn ui_signal(struct ui address_to ui, int right, int middle, int bars)
 */
 static fn ui_chevron(struct ui address_to ui, int cx, int cy, int size, unsigned int argb)
 {
-        b32 thick = ui_q8(ui, 1) + 128;
+        b32 thick = ui_stroke(ui) + 128;
 
         for (int step = 0; step <= size; step++)
         {
                 b32 y = (cy - size / 2 + step) * 256;
 
-                ui_kit_fill(ui, &(struct ui_box){(cx - size + step) * 256, y, (cx - size + step) * 256 + thick, y + ui_q8(ui, 1), 0, 0}, argb, null);
-                ui_kit_fill(ui, &(struct ui_box){(cx + size - step + 1) * 256 - thick, y, (cx + size - step + 1) * 256, y + ui_q8(ui, 1), 0, 0}, argb, null);
+                ui_kit_fill(ui, &(struct ui_box){(cx - size + step) * 256, y, (cx - size + step) * 256 + thick, y + ui_stroke(ui), 0, 0}, argb, null);
+                ui_kit_fill(ui, &(struct ui_box){(cx + size - step + 1) * 256 - thick, y, (cx + size - step + 1) * 256, y + ui_stroke(ui), 0, 0}, argb, null);
         }
 }
 

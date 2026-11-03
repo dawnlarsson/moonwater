@@ -138414,6 +138414,26 @@ static fn field_check(struct ui address_to wui)
                 ui_kit.caret_thick = saved_thick;
                 ui_kit.caret_speed = saved_speed;
         }
+        // A dropdown's chevron is two strokes of one logical pixel: at 50 and 75 percent they are still drawn, not zero pixels thick.
+        {
+                static const int scales[4] = {50, 75, 100, 200};
+                int scale_was = wui->scale, drawn = 0;
+
+                for (int s = 0; s < 4; s++)
+                {
+                        unsigned int *shown = (unsigned int address_to)pixels;
+                        int inked = 0;
+
+                        wui->scale = scales[s];
+                        memory_fill_u32(shown, 400 * 100, 0x111113);
+                        ui_chevron(wui, 50, 50, 8, 0xffffffffu);
+                        for (positive i = 0; i < 400 * 100; i++)
+                                inked |= shown[i] != 0x111113u;
+                        drawn += inked;
+                }
+                check("chevron: a choice row's chevron is drawn at 50, 75, 100 and 200 percent", drawn == 4);
+                wui->scale = scale_was;
+        }
         ui_text_close(&t);
         compositor_call(syscall(munmap), (positive)pixels, 400 * 100 * 4, 0, 0, 0, 0);
 }
