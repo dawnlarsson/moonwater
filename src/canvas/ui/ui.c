@@ -8157,6 +8157,7 @@ struct ui_app
         struct ui_popup address_to popup;
         void (*chose)(int id);
         b32 mono;                       // the kit's mono face is loaded too (a tag, a code well, a key)
+        b32 own_title;                  // the app names its window itself as it runs (the terminal): the kit sets the title once, at the start
 };
 
 // Every row is due: the picture, and the app's changed hook when it has one.
@@ -8276,9 +8277,13 @@ static int ui_app_run(struct ui_app address_to app)
                 if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
                 {
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
+                        unsigned int was = language.code;
+
                         ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_language_take(table);
-                        // The title is a text the kit copied for the app, so the kit sets it again in the language now taken.
-                        string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
+                        // The title is a text the kit copied for the app, so the kit sets it again when the language changed (a theme's
+                        // knock leaves it, and so does an app that names its window itself).
+                        if (language.code != was && !app->own_title)
+                                string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
                         ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_kit_inks(app->ui);
                         ui_app_changed(app);
