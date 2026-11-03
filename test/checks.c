@@ -143220,7 +143220,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c"};
-static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c", "src/canvas/ui/editor.c"};
+static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c", "src/canvas/ui/editor.c", "src/canvas/ui/launcher.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -143628,6 +143628,41 @@ static fn editor_words_check(void)
 }
 #endif
 
+#if MOONWATER_UI_LAUNCHER
+/*
+        The launcher's words: a desktop program listed by its name and where it is from, the command row, and what a typed
+        text names. English is what it said before the table (these are the old literals); a language taken names the programs
+        in its words and keeps the English names working too.
+*/
+static fn launcher_words_check(void)
+{
+        struct launcher_entry window = {LAUNCHER_WINDOW, 0}, command = {LAUNCHER_COMMAND, 0};
+        char label[64];
+        const char address_to note;
+
+        language_take(0);
+        launcher_label(&window, label, sizeof(label), &note);
+        check("launcher words: a desktop program is its English name, from the desktop",
+              !string_compare_max((string_address)label, (string_address) "Settings", 9) && !string_compare_max((string_address)note, (string_address) "desktop", 8));
+        string_copy_bounded((string_address)launcher.text, (string_address) "ls -l", sizeof(launcher.text));
+        launcher_label(&command, label, sizeof(label), &note);
+        check("launcher words: the command row is Run, two blanks and the text, from the shell",
+              !string_compare_max((string_address)label, (string_address) "Run  ls -l", 11) && !string_compare_max((string_address)note, (string_address) "shell", 6));
+        check("launcher words: sett names Settings and zzz names nothing",
+              launcher_program_rank("sett", 4, &launcher_programs[0]) == 2 && !launcher_program_rank("zzz", 3, &launcher_programs[0]));
+        language_take('d' | 'e' << 8);
+        launcher_label(&window, label, sizeof(label), &note);
+        check("launcher words: in German the program and where it is from say so",
+              !string_compare_max((string_address)label, (string_address) "Einstellungen", 14) && !string_compare_max((string_address)note, (string_address) "Desktop", 8));
+        launcher_label(&command, label, sizeof(label), &note);
+        check("launcher words: and the command row says Ausf\xc3\xbchren", !string_compare_max((string_address)label, (string_address) "Ausf\xc3\xbchren  ls -l", 20));
+        check("launcher words: einst names Settings in German, and the English settings still does",
+              launcher_program_rank("einst", 5, &launcher_programs[0]) == 2 && launcher_program_rank("settings", 8, &launcher_programs[0]) == 3 &&
+                  launcher_program_rank("ajustes", 7, &launcher_programs[0]) == 0);
+        language_take(0);
+}
+#endif
+
 static fn language_check(void)
 {
         font_face regular, bold;
@@ -143652,6 +143687,9 @@ static fn language_check(void)
         language_runtime_check();
 #if MOONWATER_UI_EDITOR
         editor_words_check();
+#endif
+#if MOONWATER_UI_LAUNCHER
+        launcher_words_check();
 #endif
 }
 #endif

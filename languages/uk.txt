@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Вимкнути
 launcher_power_off_armed	a48f	вимкнути
 launcher_restart	ed8c	Перезавантажити
 launcher_restart_armed	11ec	перезавантажити
+launcher_run	e05a	Виконати  %s
+launcher_search_hint	334b	Пошук програм або введення команди
 menu_copy	43e0	Копіювати
 menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити
@@ -79,6 +81,7 @@ ui_field_full	fe02	більше не вміщається
 =Identify	033d	Визначити
 =Input	e11b	Введення
 =Keep the lowest-delay sample	d8b9	Залишати вимір із найменшою затримкою
+=Kernel log	e57a	Журнал ядра
 =Key repeat delay (ms, or default)	4eb7	Затримка повтору клавіш (мс або default)
 =Key repeat rate (per second, off or default)	1e94	Швидкість повтору клавіш (за секунду, off або default)
 =Keyboard	a714	Клавіатура
@@ -123,6 +126,7 @@ ui_field_full	fe02	більше не вміщається
 =Taskbar launcher button	dd4d	Кнопка запуску на панелі завдань
 =Taskbar position	81b8	Розташування панелі завдань
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область сповіщень панелі завдань (текст із {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Термінал
 =The internet prefers	3dbe	Інтернет надає перевагу
 =Theme	7c92	Тема
 =Time	e404	Час
@@ -145,6 +149,7 @@ ui_field_full	fe02	більше не вміщається
 =dark-grey	bcb3	темно-сірий
 =default	5bde	типовий
 =deny	6367	заборонити
+=desktop	87b3	робочий стіл
 =edge	d83c	край
 =fast	02af	швидко
 =forest	2a60	лісовий
@@ -152,6 +157,7 @@ ui_field_full	fe02	більше не вміщається
 =graphite	dc8d	графітовий
 =green	ecbc	зелений
 =kernel log	415a	журнал ядра
+=kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg повідомлення
 =left	ec70	ліворуч
 =light	1e2f	світла
 =light-grey	ed41	світло-сірий
@@ -168,8 +174,10 @@ ui_field_full	fe02	більше не вміщається
 =reduced	5839	зменшений
 =right	2de5	праворуч
 =rose	1806	рожевий
+=settings preferences options	8c78	налаштування параметри опції
 =slate	deee	сланцевий
 =slow	42b8	повільно
+=terminal shell console	eaba	термінал консоль оболонка
 =thick	964e	товстий
 =thin	b172	тонкий
 =top	dc3c	угорі

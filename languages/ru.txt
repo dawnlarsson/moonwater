@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Выключить
 launcher_power_off_armed	a48f	выключить
 launcher_restart	ed8c	Перезагрузить
 launcher_restart_armed	11ec	перезагрузить
+launcher_run	e05a	Выполнить  %s
+launcher_search_hint	334b	Поиск программ или ввод команды
 menu_copy	43e0	Копировать
 menu_cut	5c17	Вырезать
 menu_delete	1e3e	Удалить
@@ -79,6 +81,7 @@ ui_field_full	fe02	больше не помещается
 =Identify	033d	Определить
 =Input	e11b	Ввод
 =Keep the lowest-delay sample	d8b9	Оставлять замер с наименьшей задержкой
+=Kernel log	e57a	Журнал ядра
 =Key repeat delay (ms, or default)	4eb7	Задержка повтора клавиш (мс или default)
 =Key repeat rate (per second, off or default)	1e94	Скорость повтора клавиш (в секунду, off или default)
 =Keyboard	a714	Клавиатура
@@ -123,6 +126,7 @@ ui_field_full	fe02	больше не помещается
 =Taskbar launcher button	dd4d	Кнопка запуска на панели задач
 =Taskbar position	81b8	Положение панели задач
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Терминал
 =The internet prefers	3dbe	Интернет предпочитает
 =Theme	7c92	Тема
 =Time	e404	Время
@@ -145,6 +149,7 @@ ui_field_full	fe02	больше не помещается
 =dark-grey	bcb3	тёмно-серый
 =default	5bde	по умолчанию
 =deny	6367	запретить
+=desktop	87b3	рабочий стол
 =edge	d83c	край
 =fast	02af	быстро
 =forest	2a60	лесной
@@ -152,6 +157,7 @@ ui_field_full	fe02	больше не помещается
 =graphite	dc8d	графитовый
 =green	ecbc	зелёный
 =kernel log	415a	журнал ядра
+=kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg сообщения
 =left	ec70	слева
 =light	1e2f	светлая
 =light-grey	ed41	светло-серый
@@ -168,8 +174,10 @@ ui_field_full	fe02	больше не помещается
 =reduced	5839	уменьшенное
 =right	2de5	справа
 =rose	1806	розовый
+=settings preferences options	8c78	настройки параметры опции
 =slate	deee	сланцевый
 =slow	42b8	медленно
+=terminal shell console	eaba	терминал консоль оболочка
 =thick	964e	толстый
 =thin	b172	тонкий
 =top	dc3c	вверху

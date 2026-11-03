@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Wyłącz
 launcher_power_off_armed	a48f	wyłącz
 launcher_restart	ed8c	Uruchom ponownie
 launcher_restart_armed	11ec	uruchom ponownie
+launcher_run	e05a	Uruchom  %s
+launcher_search_hint	334b	Szukaj programów lub wpisz polecenie
 menu_copy	43e0	&Kopiuj
 menu_cut	5c17	&Wytnij
 menu_delete	1e3e	&Usuń
@@ -79,6 +81,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Identify	033d	Identyfikuj
 =Input	e11b	Wprowadzanie
 =Keep the lowest-delay sample	d8b9	Zachowuj próbkę o najmniejszym opóźnieniu
+=Kernel log	e57a	Dziennik jądra
 =Key repeat delay (ms, or default)	4eb7	Opóźnienie powtarzania klawiszy (ms lub default)
 =Key repeat rate (per second, off or default)	1e94	Szybkość powtarzania klawiszy (na sekundę, off lub default)
 =Keyboard	a714	Klawiatura
@@ -123,6 +126,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Taskbar launcher button	dd4d	Przycisk uruchamiania na pasku zadań
 =Taskbar position	81b8	Położenie paska zadań
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Obszar powiadomień paska zadań (tekst z {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Terminal
 =The internet prefers	3dbe	Internet preferuje
 =Theme	7c92	Motyw
 =Time	e404	Czas
@@ -145,6 +149,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =dark-grey	bcb3	ciemnoszary
 =default	5bde	domyślny
 =deny	6367	odmów
+=desktop	87b3	pulpit
 =edge	d83c	krawędź
 =fast	02af	szybko
 =forest	2a60	leśny
@@ -152,6 +157,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =graphite	dc8d	grafitowy
 =green	ecbc	zielony
 =kernel log	415a	dziennik jądra
+=kernel log klog dmesg messages	1a8d	dziennik jądro klog dmesg komunikaty
 =left	ec70	po lewej
 =light	1e2f	jasny
 =light-grey	ed41	jasnoszary
@@ -168,8 +174,10 @@ ui_field_full	fe02	więcej się nie zmieści
 =reduced	5839	ograniczony
 =right	2de5	po prawej
 =rose	1806	różowy
+=settings preferences options	8c78	ustawienia preferencje opcje
 =slate	deee	łupkowy
 =slow	42b8	wolno
+=terminal shell console	eaba	terminal konsola powłoka
 =thick	964e	gruby
 =thin	b172	cienki
 =top	dc3c	na górze

@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Éteindre
 launcher_power_off_armed	a48f	éteindre
 launcher_restart	ed8c	Redémarrer
 launcher_restart_armed	11ec	redémarrer
+launcher_run	e05a	Exécuter  %s
+launcher_search_hint	334b	Chercher un programme, ou saisir une commande
 menu_copy	43e0	&Copier
 menu_cut	5c17	Co&uper
 menu_delete	1e3e	&Supprimer
@@ -79,6 +81,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Identify	033d	Identifier
 =Input	e11b	Saisie
 =Keep the lowest-delay sample	d8b9	Garder l'échantillon au plus faible délai
+=Kernel log	e57a	Journal du noyau
 =Key repeat delay (ms, or default)	4eb7	Délai de répétition des touches (ms ou default)
 =Key repeat rate (per second, off or default)	1e94	Cadence de répétition des touches (par seconde, off ou default)
 =Keyboard	a714	Clavier
@@ -123,6 +126,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Taskbar launcher button	dd4d	Bouton du lanceur dans la barre des tâches
 =Taskbar position	81b8	Position de la barre des tâches
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Zone d'état de la barre des tâches (texte avec {names} : {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Terminal
 =The internet prefers	3dbe	Internet préfère
 =Theme	7c92	Thème
 =Time	e404	Heure
@@ -145,6 +149,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =dark-grey	bcb3	gris foncé
 =default	5bde	par défaut
 =deny	6367	refuser
+=desktop	87b3	bureau
 =edge	d83c	bord
 =fast	02af	rapide
 =forest	2a60	forêt
@@ -152,6 +157,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =graphite	dc8d	graphite
 =green	ecbc	vert
 =kernel log	415a	journal du noyau
+=kernel log klog dmesg messages	1a8d	journal noyau klog dmesg messages
 =left	ec70	à gauche
 =light	1e2f	clair
 =light-grey	ed41	gris clair
@@ -168,8 +174,10 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =reduced	5839	réduite
 =right	2de5	à droite
 =rose	1806	rose
+=settings preferences options	8c78	paramètres réglages préférences options
 =slate	deee	ardoise
 =slow	42b8	lent
+=terminal shell console	eaba	terminal console shell
 =thick	964e	épais
 =thin	b172	fin
 =top	dc3c	en haut

@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Τερματισμός
 launcher_power_off_armed	a48f	τερματισμός
 launcher_restart	ed8c	Επανεκκίνηση
 launcher_restart_armed	11ec	επανεκκίνηση
+launcher_run	e05a	Εκτέλεση  %s
+launcher_search_hint	334b	Αναζήτηση προγραμμάτων ή πληκτρολόγηση εντολής
 menu_copy	43e0	Αντιγραφή
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή
@@ -79,6 +81,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Identify	033d	Αναγνώριση
 =Input	e11b	Είσοδος
 =Keep the lowest-delay sample	d8b9	Διατήρηση του δείγματος με τη μικρότερη καθυστέρηση
+=Kernel log	e57a	Αρχείο καταγραφής πυρήνα
 =Key repeat delay (ms, or default)	4eb7	Καθυστέρηση επανάληψης πλήκτρων (ms ή default)
 =Key repeat rate (per second, off or default)	1e94	Ρυθμός επανάληψης πλήκτρων (ανά δευτερόλεπτο, off ή default)
 =Keyboard	a714	Πληκτρολόγιο
@@ -123,6 +126,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar launcher button	dd4d	Κουμπί εκκινητή στη γραμμή εργασιών
 =Taskbar position	81b8	Θέση της γραμμής εργασιών
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Τερματικό
 =The internet prefers	3dbe	Το διαδίκτυο προτιμά
 =Theme	7c92	Θέμα
 =Time	e404	Ώρα
@@ -145,6 +149,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =dark-grey	bcb3	σκούρο γκρι
 =default	5bde	προεπιλογή
 =deny	6367	άρνηση
+=desktop	87b3	επιφάνεια εργασίας
 =edge	d83c	άκρη
 =fast	02af	γρήγορα
 =forest	2a60	δάσος
@@ -152,6 +157,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =graphite	dc8d	γραφίτης
 =green	ecbc	πράσινο
 =kernel log	415a	αρχείο καταγραφής πυρήνα
+=kernel log klog dmesg messages	1a8d	πυρήνας καταγραφή klog dmesg μηνύματα
 =left	ec70	αριστερά
 =light	1e2f	φωτεινό
 =light-grey	ed41	ανοιχτό γκρι
@@ -168,8 +174,10 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =reduced	5839	μειωμένο
 =right	2de5	δεξιά
 =rose	1806	ροζ
+=settings preferences options	8c78	ρυθμίσεις προτιμήσεις επιλογές
 =slate	deee	σχιστόλιθος
 =slow	42b8	αργά
+=terminal shell console	eaba	τερματικό κονσόλα κέλυφος
 =thick	964e	χοντρό
 =thin	b172	λεπτό
 =top	dc3c	πάνω

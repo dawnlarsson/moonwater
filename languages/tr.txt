@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Kapat
 launcher_power_off_armed	a48f	kapat
 launcher_restart	ed8c	Yeniden başlat
 launcher_restart_armed	11ec	yeniden başlat
+launcher_run	e05a	Çalıştır  %s
+launcher_search_hint	334b	Program ara veya bir komut yaz
 menu_copy	43e0	&Kopyala
 menu_cut	5c17	K&es
 menu_delete	1e3e	&Sil
@@ -79,6 +81,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Identify	033d	Tanımla
 =Input	e11b	Giriş
 =Keep the lowest-delay sample	d8b9	En düşük gecikmeli örneği tut
+=Kernel log	e57a	Çekirdek günlüğü
 =Key repeat delay (ms, or default)	4eb7	Tuş tekrarı gecikmesi (ms veya default)
 =Key repeat rate (per second, off or default)	1e94	Tuş tekrar hızı (saniyede, off veya default)
 =Keyboard	a714	Klavye
@@ -123,6 +126,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Taskbar launcher button	dd4d	Görev çubuğunda başlatıcı düğmesi
 =Taskbar position	81b8	Görev çubuğu konumu
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Görev çubuğu bildirim alanı ({names} içeren metin: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Terminal
 =The internet prefers	3dbe	İnternet şunu tercih eder
 =Theme	7c92	Tema
 =Time	e404	Saat
@@ -145,6 +149,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =dark-grey	bcb3	koyu gri
 =default	5bde	varsayılan
 =deny	6367	reddet
+=desktop	87b3	masaüstü
 =edge	d83c	kenar
 =fast	02af	hızlı
 =forest	2a60	orman
@@ -152,6 +157,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =graphite	dc8d	grafit
 =green	ecbc	yeşil
 =kernel log	415a	çekirdek günlüğü
+=kernel log klog dmesg messages	1a8d	çekirdek günlüğü klog dmesg iletiler
 =left	ec70	solda
 =light	1e2f	açık
 =light-grey	ed41	açık gri
@@ -168,8 +174,10 @@ ui_field_full	fe02	daha fazlası sığmaz
 =reduced	5839	azaltılmış
 =right	2de5	sağda
 =rose	1806	pembe
+=settings preferences options	8c78	ayarlar tercihler seçenekler
 =slate	deee	arduvaz
 =slow	42b8	yavaş
+=terminal shell console	eaba	terminal konsol kabuk
 =thick	964e	kalın
 =thin	b172	ince
 =top	dc3c	üstte

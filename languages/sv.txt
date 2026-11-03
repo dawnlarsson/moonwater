@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Stäng av
 launcher_power_off_armed	a48f	stäng av
 launcher_restart	ed8c	Starta om
 launcher_restart_armed	11ec	starta om
+launcher_run	e05a	Kör  %s
+launcher_search_hint	334b	Sök program, eller skriv ett kommando
 menu_copy	43e0	Ko&piera
 menu_cut	5c17	&Klipp ut
 menu_delete	1e3e	&Ta bort
@@ -79,6 +81,7 @@ ui_field_full	fe02	mer ryms inte
 =Identify	033d	Identifiera
 =Input	e11b	Inmatning
 =Keep the lowest-delay sample	d8b9	Behåll stickprovet med lägst fördröjning
+=Kernel log	e57a	Kärnlogg
 =Key repeat delay (ms, or default)	4eb7	Fördröjning för tangentupprepning (ms eller default)
 =Key repeat rate (per second, off or default)	1e94	Tangentupprepning (per sekund, off eller default)
 =Keyboard	a714	Tangentbord
@@ -123,6 +126,7 @@ ui_field_full	fe02	mer ryms inte
 =Taskbar launcher button	dd4d	Startarknapp i aktivitetsfältet
 =Taskbar position	81b8	Aktivitetsfältets plats
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Aktivitetsfältets systemfält (text med {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Terminal
 =The internet prefers	3dbe	Internet föredrar
 =Theme	7c92	Tema
 =Time	e404	Tid
@@ -145,6 +149,7 @@ ui_field_full	fe02	mer ryms inte
 =dark-grey	bcb3	mörkgrå
 =default	5bde	standard
 =deny	6367	neka
+=desktop	87b3	skrivbord
 =edge	d83c	kant
 =fast	02af	snabb
 =forest	2a60	skog
@@ -152,6 +157,7 @@ ui_field_full	fe02	mer ryms inte
 =graphite	dc8d	grafit
 =green	ecbc	grön
 =kernel log	415a	kärnlogg
+=kernel log klog dmesg messages	1a8d	kärnlogg klog dmesg meddelanden
 =left	ec70	till vänster
 =light	1e2f	ljust
 =light-grey	ed41	ljusgrå
@@ -168,8 +174,10 @@ ui_field_full	fe02	mer ryms inte
 =reduced	5839	minskad
 =right	2de5	till höger
 =rose	1806	rosa
+=settings preferences options	8c78	inställningar preferenser alternativ
 =slate	deee	skiffer
 =slow	42b8	långsam
+=terminal shell console	eaba	terminal konsol skal
 =thick	964e	tjock
 =thin	b172	tunn
 =top	dc3c	överst

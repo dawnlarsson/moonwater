@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Spegni
 launcher_power_off_armed	a48f	spegni
 launcher_restart	ed8c	Riavvia
 launcher_restart_armed	11ec	riavvia
+launcher_run	e05a	Esegui  %s
+launcher_search_hint	334b	Cerca programmi, oppure scrivi un comando
 menu_copy	43e0	&Copia
 menu_cut	5c17	&Taglia
 menu_delete	1e3e	&Elimina
@@ -79,6 +81,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Identify	033d	Identifica
 =Input	e11b	Ingresso
 =Keep the lowest-delay sample	d8b9	Mantieni il campione con il ritardo minore
+=Kernel log	e57a	Registro del kernel
 =Key repeat delay (ms, or default)	4eb7	Ritardo di ripetizione dei tasti (ms o default)
 =Key repeat rate (per second, off or default)	1e94	Frequenza di ripetizione dei tasti (al secondo, off o default)
 =Keyboard	a714	Tastiera
@@ -123,6 +126,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Taskbar launcher button	dd4d	Pulsante dell'avviatore nella barra delle applicazioni
 =Taskbar position	81b8	Posizione della barra delle applicazioni
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Area di notifica della barra (testo con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Terminale
 =The internet prefers	3dbe	Internet preferisce
 =Theme	7c92	Tema
 =Time	e404	Ora
@@ -145,6 +149,7 @@ ui_field_full	fe02	non ce ne sta di più
 =dark-grey	bcb3	grigio scuro
 =default	5bde	predefinito
 =deny	6367	nega
+=desktop	87b3	desktop
 =edge	d83c	bordo
 =fast	02af	veloce
 =forest	2a60	foresta
@@ -152,6 +157,7 @@ ui_field_full	fe02	non ce ne sta di più
 =graphite	dc8d	grafite
 =green	ecbc	verde
 =kernel log	415a	registro del kernel
+=kernel log klog dmesg messages	1a8d	registro kernel klog dmesg messaggi
 =left	ec70	a sinistra
 =light	1e2f	chiaro
 =light-grey	ed41	grigio chiaro
@@ -168,8 +174,10 @@ ui_field_full	fe02	non ce ne sta di più
 =reduced	5839	ridotto
 =right	2de5	a destra
 =rose	1806	rosa
+=settings preferences options	8c78	impostazioni preferenze opzioni
 =slate	deee	ardesia
 =slow	42b8	lento
+=terminal shell console	eaba	terminale console shell
 =thick	964e	spesso
 =thin	b172	sottile
 =top	dc3c	in alto

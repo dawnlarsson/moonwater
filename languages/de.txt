@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Ausschalten
 launcher_power_off_armed	a48f	ausschalten
 launcher_restart	ed8c	Neu starten
 launcher_restart_armed	11ec	neu starten
+launcher_run	e05a	Ausführen  %s
+launcher_search_hint	334b	Programme suchen oder einen Befehl eingeben
 menu_copy	43e0	&Kopieren
 menu_cut	5c17	A&usschneiden
 menu_delete	1e3e	&Löschen
@@ -79,6 +81,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Identify	033d	Identifizieren
 =Input	e11b	Eingabe
 =Keep the lowest-delay sample	d8b9	Die Probe mit der geringsten Verzögerung behalten
+=Kernel log	e57a	Kernel-Protokoll
 =Key repeat delay (ms, or default)	4eb7	Verzögerung der Tastenwiederholung (ms oder default)
 =Key repeat rate (per second, off or default)	1e94	Wiederholrate der Tasten (pro Sekunde, off oder default)
 =Keyboard	a714	Tastatur
@@ -123,6 +126,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Taskbar launcher button	dd4d	Starter-Schaltfläche in der Taskleiste
 =Taskbar position	81b8	Position der Taskleiste
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskleisten-Infobereich (Text mit {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Terminal
 =The internet prefers	3dbe	Internet bevorzugt
 =Theme	7c92	Design
 =Time	e404	Zeit
@@ -145,6 +149,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =dark-grey	bcb3	Dunkelgrau
 =default	5bde	Standard
 =deny	6367	Verweigern
+=desktop	87b3	Desktop
 =edge	d83c	Rand
 =fast	02af	Schnell
 =forest	2a60	Wald
@@ -152,6 +157,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =graphite	dc8d	Graphit
 =green	ecbc	Grün
 =kernel log	415a	Kernel-Protokoll
+=kernel log klog dmesg messages	1a8d	kernel protokoll klog dmesg meldungen
 =left	ec70	Links
 =light	1e2f	Hell
 =light-grey	ed41	Hellgrau
@@ -168,8 +174,10 @@ ui_field_full	fe02	mehr passt nicht hinein
 =reduced	5839	Reduziert
 =right	2de5	Rechts
 =rose	1806	Rosé
+=settings preferences options	8c78	einstellungen optionen präferenzen
 =slate	deee	Schiefer
 =slow	42b8	Langsam
+=terminal shell console	eaba	terminal konsole shell
 =thick	964e	Dick
 =thin	b172	Dünn
 =top	dc3c	Oben

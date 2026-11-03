@@ -201,12 +201,11 @@ static unsigned int launcher_rank(const char address_to text, positive length, c
         return memory_search_ascii_case((address_any)name, size, (address_any)text, length) ? 1 : 0;
 }
 
-// How well a text names a desktop program: its label, or any of the words that also name it.
-static unsigned int launcher_program_rank(const char address_to text, positive length,
-                                          const struct launcher_program address_to program)
+// How well a text names what is called label and also named by words (a blank apart): the label, or any of the words.
+static unsigned int launcher_names_rank(const char address_to text, positive length, const char address_to label,
+                                        const char address_to words)
 {
-        const char address_to words = program->words;
-        unsigned int best = launcher_rank(text, length, program->label, string_length((string_address)program->label));
+        unsigned int best = launcher_rank(text, length, label, string_length((string_address)label));
 
         while (*words)
         {
@@ -217,6 +216,18 @@ static unsigned int launcher_program_rank(const char address_to text, positive l
                 words += size + (words[size] == ' ');
         }
         return best;
+}
+
+// How well a text names a desktop program: by its English names, which work in every language, or by the names the language has.
+static unsigned int launcher_program_rank(const char address_to text, positive length,
+                                          const struct launcher_program address_to program)
+{
+        unsigned int best = launcher_names_rank(text, length, program->label, program->words), said;
+
+        if (!language.loaded)
+                return best;
+        said = launcher_names_rank(text, length, language_of(program->label), language_of(program->words));
+        return said > best ? said : best;
 }
 
 // The better rank first, then the shorter name, then the earlier in the alphabet.
@@ -760,7 +771,7 @@ static b32 launcher_key(const struct window_event address_to event)
                 // The highlighted name into the field, where it is a name.
                 const struct launcher_entry address_to entry = &launcher.entry[launcher.list.focus];
                 const char address_to name = entry->kind == LAUNCHER_PROGRAM ? launcher_name(entry->index)
-                                             : entry->kind == LAUNCHER_WINDOW ? launcher_programs[entry->index].label
+                                             : entry->kind == LAUNCHER_WINDOW ? language_of(launcher_programs[entry->index].label)
                                                                               : null;
 
                 if (name)
@@ -913,8 +924,8 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
         into[0] = 0;
         if (entry->kind == LAUNCHER_WINDOW)
         {
-                string_copy_bounded((string_address)into, (string_address)launcher_programs[entry->index].label, room);
-                *note = "desktop";
+                string_copy_bounded((string_address)into, (string_address)language_of(launcher_programs[entry->index].label), room);
+                *note = language_of("desktop");
         }
         else if (entry->kind == LAUNCHER_PROGRAM)
         {
@@ -923,8 +934,7 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
         }
         else
         {
-                string_copy_bounded((string_address)into, (string_address) "Run  ", room);
-                string_append_bounded((string_address)into, (string_address)launcher.text, room);
+                language_format(into, room, WORDS(launcher_run), launcher.text);
                 *note = "shell";
         }
 }
@@ -955,7 +965,7 @@ static fn launcher_draw(unsigned int address_to pixels)
                 if (!search->kind)
                 {
                         search->kind = UI_INPUT, search->variant = UI_FIELD_BARE;
-                        search->items[0] = "Search programs, or type a command";
+                        search->items[0] = WORDS(launcher_search_hint);
                         search->edit = launcher_field();
                 }
                 search->focused = (launcher.focused || !launcher.had_focus) && !launcher.power.keys;
@@ -1046,6 +1056,12 @@ static fn launcher_anchor_take(void)
 }
 
 // The launcher's start, once its window is taken: the lift, the fonts and the first picture. -1 runs the loop.
+// The search field keeps the hint it was set up with: a change of language sets it up again.
+static fn launcher_language(void)
+{
+        launcher.search.kind = 0;
+}
+
 static int launcher_open(void)
 {
         struct windows address_to table = launcher.own.table;
@@ -1082,6 +1098,7 @@ static int launcher_open(void)
 
         // The first frame is up before PATH is read. The empty field names no program of PATH, so the picture does not
         // change with the scan and needs no second frame; a key read after this sees every name.
+        language_listen(launcher_language);
         launcher_scan(launcher_path_variable());
         return -1;
 }

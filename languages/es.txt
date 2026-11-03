@@ -33,6 +33,8 @@ launcher_power_off	ae2f	Apagar
 launcher_power_off_armed	a48f	apagar
 launcher_restart	ed8c	Reiniciar
 launcher_restart_armed	11ec	reiniciar
+launcher_run	e05a	Ejecutar  %s
+launcher_search_hint	334b	Buscar programas, o escribir un comando
 menu_copy	43e0	&Copiar
 menu_cut	5c17	Cor&tar
 menu_delete	1e3e	&Eliminar
@@ -79,6 +81,7 @@ ui_field_full	fe02	no cabe más
 =Identify	033d	Identificar
 =Input	e11b	Entrada
 =Keep the lowest-delay sample	d8b9	Conservar la muestra de menor retardo
+=Kernel log	e57a	Registro del kernel
 =Key repeat delay (ms, or default)	4eb7	Retardo de repetición de teclas (ms o default)
 =Key repeat rate (per second, off or default)	1e94	Frecuencia de repetición de teclas (por segundo, off o default)
 =Keyboard	a714	Teclado
@@ -123,6 +126,7 @@ ui_field_full	fe02	no cabe más
 =Taskbar launcher button	dd4d	Botón del lanzador en la barra de tareas
 =Taskbar position	81b8	Posición de la barra de tareas
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Bandeja de la barra de tareas (texto con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	Terminal
 =The internet prefers	3dbe	Internet prefiere
 =Theme	7c92	Tema
 =Time	e404	Hora
@@ -145,6 +149,7 @@ ui_field_full	fe02	no cabe más
 =dark-grey	bcb3	gris oscuro
 =default	5bde	predeterminado
 =deny	6367	denegar
+=desktop	87b3	escritorio
 =edge	d83c	borde
 =fast	02af	rápido
 =forest	2a60	bosque
@@ -152,6 +157,7 @@ ui_field_full	fe02	no cabe más
 =graphite	dc8d	grafito
 =green	ecbc	verde
 =kernel log	415a	registro del kernel
+=kernel log klog dmesg messages	1a8d	registro kernel klog dmesg mensajes
 =left	ec70	izquierda
 =light	1e2f	claro
 =light-grey	ed41	gris claro
@@ -168,8 +174,10 @@ ui_field_full	fe02	no cabe más
 =reduced	5839	reducido
 =right	2de5	derecha
 =rose	1806	rosa
+=settings preferences options	8c78	ajustes configuración preferencias opciones
 =slate	deee	pizarra
 =slow	42b8	lento
+=terminal shell console	eaba	terminal consola intérprete
 =thick	964e	grueso
 =thin	b172	fino
 =top	dc3c	arriba
