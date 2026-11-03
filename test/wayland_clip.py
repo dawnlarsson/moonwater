@@ -33,9 +33,11 @@ def key(code):
     os.write(fifo, record(EV_KEY, code, 0) + record(EV_SYN, 0, 0))
 
 
-def start(name, *args):
+def start(name, *args, asked=True):
     log = open(os.path.join(work, name + ".log"), "w")
-    env = dict(os.environ, MOONWATER_ASKED="1")
+    env = dict(os.environ)
+    if asked:
+        env["MOONWATER_ASKED"] = "1"
     children.append(subprocess.Popen([client, "-n", "1000000", "-s", "-w", "200", "-h", "150", "-q"] + list(args),
                                      stdout=log, stderr=subprocess.STDOUT, env=env))
     return os.path.join(work, name + ".log")
@@ -62,6 +64,17 @@ def row(ok, name, detail=""):
     print(("ok " if ok else "FAIL ") + name + ("" if ok else " " + detail), flush=True)
     failures += 0 if ok else 1
 
+
+# A window nobody asked for has the keys from the first key of all, and is not left without it: the focus that key makes is
+# told to the client before the key is.
+lone = start("lone", "-v", asked=False)
+time.sleep(1.5)
+key(30)
+row(wait_for(lone, "key 30 1"), "the first key of all reaches a window nobody asked for", read(lone)[-300:])
+children[0].kill()
+children[0].wait()
+children.pop(0)
+time.sleep(0.3)
 
 first = start("copier", "-C", "copied by a client")
 row(wait_for(first, "selection none"), "a client that has the keys is told there is no selection, to begin with", read(first)[-300:])

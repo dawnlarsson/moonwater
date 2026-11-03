@@ -1569,6 +1569,9 @@ static int compositor_wl_key(unsigned int code, int value)
         row = compositor_wl_key_row();
         if (row < 0)
                 return 0;
+        // The window is told it has the keys before it is given one: the focus may have changed in this very pass (the first
+        // key after a window was shown, or the first of all), and the shim is told of focus only once a pass otherwise.
+        wayland_keyboard_to(row);
         if (code == CK_CAPSLOCK && value == 1)
                 compositor.keymap.caps ^= 1;
         // The keys down, and the window they went to, as the compositor keeps them for its own windows.
