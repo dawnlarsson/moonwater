@@ -75,25 +75,42 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "$(uname)" = "Linux" ]; then
         tool=$here/build
+        depfile=$tool.d
         source=$here/src/build/build.c
         compiler=${CC:-cc}
 
         # CC is useful to an ordinary build, but root must not be pointed at an
-        # arbitrary pathname by inherited environment. The native bootstrap
-        # needs no special compiler; anyone needing one can build ./build
-        # explicitly before elevating.
+        # arbitrary pathname by inherited environment. Root takes clang when the
+        # reset PATH has it: the tool is one program that includes the shell,
+        # and clang builds it in about a third of the time gcc takes. Anyone
+        # needing another compiler can build ./build explicitly before elevating.
         if [ "$bootstrap_uid" = 0 ]; then
                 compiler=cc
+                command -v clang >/dev/null 2>&1 && compiler=clang
         fi
 
-        # The freestanding tool includes the shared runtime and utilities.
-        # All of its project dependencies live under src; a conservative tree
-        # check avoids another generated manifest and makefile parser here.
-        #
-        # Root always rebuilds. Otherwise an old user-writable ./build with a
-        # future timestamp could be exec'd unchanged by an elevated invocation.
-        if [ "$bootstrap_uid" = 0 ] || [ ! -x "$tool" ] ||
-                [ -n "$(find "$here/src" "$here/build.sh" -newer "$tool" -print -quit)" ]; then
+        # The tool is built again when it is missing, when the compiler's own
+        # list of the files it was built from names one that is newer than the
+        # tool or gone, or when build.sh is newer. The list is the compiler's
+        # (-MMD), so an edit to a file the tool does not include costs nothing.
+        tool_stale() {
+                for dep in $(sed -e 's/\\$//' -e 's/^[^:]*://' "$depfile"); do
+                        [ -e "$dep" ] || return 0
+                        [ -n "$(find "$dep" -newer "$tool" -print -quit)" ] && return 0
+                done
+                [ -n "$(find "$here/build.sh" -newer "$tool" -print -quit)" ]
+        }
+
+        # Root does not exec a tool anyone else can write, whatever its
+        # timestamp says: an old user-writable ./build with a future timestamp
+        # would otherwise run unchanged under sudo. Only a file root owns, and
+        # that no group or other can write, is taken as built.
+        tool_untrusted() {
+                [ -n "$(find "$tool" \( ! -user 0 -o -perm -020 -o -perm -002 \) -print -quit)" ]
+        }
+
+        if [ ! -x "$tool" ] || [ ! -f "$depfile" ] || tool_stale ||
+                { [ "$bootstrap_uid" = 0 ] && tool_untrusted; }; then
                 # Built beside it and renamed over, so a second build.sh
                 # started meanwhile runs the old tool or the new one and
                 # never a half-written file. clang has no nested functions,
@@ -105,10 +122,12 @@ if [ "$(uname)" = "Linux" ]; then
                 esac
                 "$compiler" -O2 -static -nostdlib -nostartfiles \
                         -fno-stack-protector -fno-builtin -w $defer \
+                        -MMD -MT "$tool" -MF "$depfile.$$" \
                         -o "$tool.$$" "$source" &&
+                        mv -f "$depfile.$$" "$depfile" &&
                         mv -f "$tool.$$" "$tool" ||
                         {
-                                rm -f "$tool.$$"
+                                rm -f "$tool.$$" "$depfile.$$"
                                 echo "build.sh: could not build the build tool" >&2
                                 exit 1
                         }
