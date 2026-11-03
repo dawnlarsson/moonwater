@@ -154,6 +154,36 @@ static int compositor_line_px(int percent)
 }
 
 /*
+        The solid runs of a window's picture, row by row: a stretch of 32 pixels or more that is one colour is a fill when the
+        picture is composed, which writes what it writes and reads nothing, where a copy reads it all. memory_runs_u32 reads a
+        picture for them, in chunks of 16 pixels (its comment says what a run is). A row keeps up to COMPOSITOR_RUN_ROW of them in
+        the order they lie, x0 to x1 (not including it) of the row, and the colour; a stretch past the room is copied like any
+        other. A row is 128 bytes, two lines.
+*/
+#define COMPOSITOR_RUN_ROW 15
+
+// The shortest stretch of a run that is filled when the run is cut to a rectangle; less is copied with what is round it. A call
+// for a fill and one for the copy after it cost as much as the 64 pixels they would save writing.
+#define COMPOSITOR_RUNS_FILL 64
+// The least rectangle composed from runs: its width in pixels and its area; a smaller one is the copy.
+#define COMPOSITOR_RUNS_LEAST_WIDTH 64
+#define COMPOSITOR_RUNS_LEAST_AREA 16384
+
+struct compositor_run
+{
+        unsigned short x0, x1;
+        unsigned int colour;
+};
+
+struct compositor_run_row
+{
+        unsigned int count, spare;
+        struct compositor_run run[COMPOSITOR_RUN_ROW];
+};
+
+_Static_assert(sizeof(struct compositor_run_row) == 128, "a run row is two cache lines");
+
+/*
         One thing to draw. A window is its buffer and nothing around it; the
         panel is a band with a mark a window, one byte each:
         COMPOSITOR_TAB_LIT and COMPOSITOR_TAB_AWAY, and its pixels are the
@@ -197,6 +227,9 @@ struct compositor_frame
         // The shared edge's indicator over this window (compositor_mark_set): the rectangle and the kit's selection.
         int mark[4];
         unsigned int mark_ink;
+        // A window's picture composed from its runs (compositor_runs_note): each row of it, the stretches that are one colour
+        // filled and the rest copied; none for a frame whose runs are not known, which is copied whole.
+        const struct compositor_run_row *runs;
 };
 
 /*
@@ -247,6 +280,73 @@ static void compositor_blit(const struct compositor_target *t, int x, int y, int
         memory_copy_rect_u32(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
                              source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
                              (unsigned long)(x2 - x1), (unsigned long)(y2 - y1));
+}
+
+// Whether two run rows hold the same runs.
+static int compositor_runs_same(const struct compositor_run_row *one, const struct compositor_run_row *two)
+{
+        return one->count == two->count &&
+               !memory_compare(one->run, two->run,
+                               (one->count < COMPOSITOR_RUN_ROW ? one->count : COMPOSITOR_RUN_ROW) * sizeof(one->run[0]));
+}
+
+/*
+        A rectangle composed from its rows' runs: each run filled, what lies between them copied, a run cut to the rectangle
+        (skip is the picture's column its left edge is) and one cut to less than COMPOSITOR_RUNS_FILL pixels left to the copy.
+        Rows that hold the same runs, as the rows of a band of one colour or of a line's blank end do, are one block: a call to
+        fill each run of it and one to copy each gap, for as many rows as the block has.
+*/
+static void compositor_runs_copy(unsigned int *into, unsigned long into_pitch, const unsigned int *from, unsigned long from_pitch,
+                                 unsigned long width, unsigned long height, const struct compositor_run_row *rows, unsigned long skip)
+{
+        while (height)
+        {
+                unsigned long block = 1, at = 0, count = rows->count < COMPOSITOR_RUN_ROW ? rows->count : COMPOSITOR_RUN_ROW;
+
+                while (block < height && compositor_runs_same(&rows[block], rows))
+                        block++;
+                for (unsigned long k = 0; k < count; k++)
+                {
+                        long a = (long)rows->run[k].x0 - (long)skip, b = (long)rows->run[k].x1 - (long)skip;
+
+                        a = a < (long)at ? (long)at : a;
+                        b = b > (long)width ? (long)width : b;
+                        if (b - a < COMPOSITOR_RUNS_FILL)
+                                continue;
+                        if ((unsigned long)a > at)
+                                memory_copy_rect_u32(into + at, into_pitch, from + at, from_pitch, (unsigned long)a - at, block);
+                        memory_fill_u32_rect(into + a, into_pitch, (unsigned long)(b - a), block, rows->run[k].colour);
+                        at = (unsigned long)b;
+                }
+                if (at < width)
+                        memory_copy_rect_u32(into + at, into_pitch, from + at, from_pitch, width - at, block);
+                into += block * into_pitch;
+                from += block * from_pitch;
+                rows += block;
+                height -= block;
+        }
+}
+
+// compositor_blit for a window whose runs are known: rows is the run row of the window's picture row 0.
+static void compositor_blit_runs(const struct compositor_target *t, int x, int y, int width, int height,
+                                 const unsigned int *source, unsigned long pitch, const struct compositor_run_row *rows)
+{
+        int x1 = x > t->x1 ? x : t->x1;
+        int y1 = y > t->y1 ? y : t->y1;
+        int x2 = x + width < t->x2 ? x + width : t->x2;
+        int y2 = y + height < t->y2 ? y + height : t->y2;
+
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        // A caret's damage, a hover, a letter: what is copied in a few lines is not worth a row's runs.
+        if (x2 - x1 < COMPOSITOR_RUNS_LEAST_WIDTH || (long)(x2 - x1) * (long)(y2 - y1) < COMPOSITOR_RUNS_LEAST_AREA)
+        {
+                compositor_blit(t, x, y, width, height, source, pitch);
+                return;
+        }
+        compositor_runs_copy(t->pixels + (unsigned long)(y1 - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), t->pitch,
+                             source + (unsigned long)(y1 - y) * pitch + (unsigned long)(x1 - x), pitch,
+                             (unsigned long)(x2 - x1), (unsigned long)(y2 - y1), rows + (y1 - y), (unsigned long)(x1 - x));
 }
 
 /*
@@ -614,6 +714,8 @@ static void compositor_contents(const struct compositor_target *t, const struct 
         else if (compositor_scaled(frame))
                 compositor_blit_scaled(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch,
                                        frame->source_w, frame->source_h);
+        else if (frame->runs)
+                compositor_blit_runs(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch, frame->runs);
         else
                 compositor_blit(t, frame->x, frame->y, frame->width, frame->height, frame->pixels, frame->pitch);
 }
@@ -3185,6 +3287,13 @@ static struct
         int door[WINDOWS], wake[WINDOWS];
         unsigned int woken;  // the rows to knock on at the end of the pass, a bit each
         unsigned int seen[WINDOWS];     // the frame last taken
+        // A window's solid runs (compositor_runs_note): its picture's, mapped when first read, the picture they are of (the tag of
+        // its frame and buffer), how many presents composed that picture, and what became of the read: 0 not read, 1 read and used
+        // by the compose, 2 read and not worth using.
+        struct compositor_run_row *runs[WINDOWS];
+        unsigned long runs_bytes[WINDOWS];
+        unsigned int runs_tag[WINDOWS], runs_composed[WINDOWS];
+        unsigned char runs_state[WINDOWS];
         unsigned int showing[WINDOWS];  // it has shown a picture: it is on the screen and has a tab
         unsigned char landing[WINDOWS]; // its first show is landing: drawn smaller, growing to its size (compositor_land)
         positive land_at[WINDOWS];      // when its landing began, at the first present that drew it; 0 until then
@@ -4114,6 +4223,148 @@ static unsigned int *compositor_pixels(int row)
 }
 
 /*
+        A window composed again and again is composed from its runs. What a window shows is a picture that holds until its program
+        gives another (a frame), and a drag, a glide or an uncovering composes the same picture each present: the whole of it, at a
+        new place. The third present that composes a picture reads its runs off it (after the compose, on the pool), and from the
+        next the stretches of one colour are filled where they were copied. A picture composed once or twice, which is every
+        picture of a window that scrolls, is only counted. A run row is the compositor's own: it is made from the pixels, not
+        taken from the table, so it is never wrong about them, and it is dropped when the picture changes (the tag is the
+        frame and the buffer), when the compositor writes into the buffer (compositor_stretch, the tabs of a direct window),
+        and with the window.
+*/
+#define COMPOSITOR_RUNS_AFTER 3
+#define COMPOSITOR_RUNS_WIDTH 4096
+#define COMPOSITOR_RUNS_WORTH 30 // the percent of a picture its runs must cover for the compose to use them
+
+static void compositor_runs_drop(int row)
+{
+        if (compositor.runs[row])
+                compositor_call(syscall(munmap), (positive)compositor.runs[row], compositor.runs_bytes[row], 0, 0, 0, 0);
+        compositor.runs[row] = 0;
+        compositor.runs_bytes[row] = 0;
+        compositor.runs_tag[row] = compositor.runs_composed[row] = compositor.runs_state[row] = 0;
+}
+
+// The picture is not what its runs were read from.
+static void compositor_runs_forget(int row)
+{
+        if (row >= 0)
+                compositor.runs_tag[row] = compositor.runs_composed[row] = compositor.runs_state[row] = 0;
+}
+
+// A window's run rows, mapped for the most rows a window's buffer holds; none when the map is refused.
+static struct compositor_run_row *compositor_runs_of(int row)
+{
+        unsigned long rows = compositor_buffer_room() / ((unsigned long)compositor_stride() * 4);
+        unsigned long bytes = (rows * sizeof(struct compositor_run_row) + 4095) & ~4095ul;
+        long got;
+
+        if (compositor.runs[row] && compositor.runs_bytes[row] >= bytes)
+                return compositor.runs[row];
+        compositor_runs_drop(row);
+        got = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+        if (got < 0 && got > -4096)
+                return 0;
+        compositor.runs[row] = (struct compositor_run_row *)got;
+        compositor.runs_bytes[row] = bytes;
+        return compositor.runs[row];
+}
+
+struct compositor_learning
+{
+        struct compositor_run_row *rows;
+        const unsigned int *from;
+        unsigned long pitch, width;
+        unsigned int height, bands;
+};
+
+static void compositor_learn_band(address_any context, positive index)
+{
+        struct compositor_learning *learning = (struct compositor_learning *)context;
+        unsigned long from = (unsigned long)learning->height * index / learning->bands;
+        unsigned long to = (unsigned long)learning->height * (index + 1) / learning->bands;
+
+        memory_runs_u32((unsigned char *)(learning->rows + from), learning->from + from * learning->pitch, learning->pitch, learning->width,
+                        to - from);
+}
+
+// Whether a frame is a window's own picture at its own size, composed as it is in the table's buffer, and large enough to count.
+static int compositor_runs_eligible(int row, const struct compositor_frame *frame)
+{
+        return !frame->builtin && frame->pixels && frame->pixels == compositor_pixels(row) && !compositor_scaled(frame) &&
+               frame->width >= 64 && frame->width <= COMPOSITOR_RUNS_WIDTH && frame->height >= 16 &&
+               (unsigned long)frame->width * (unsigned long)frame->height * 4 >= PARALLEL_MINIMUM_BYTES;
+}
+
+// Whether some of the damage is on the frame's rectangle: the present composes it.
+static int compositor_runs_damaged(const struct compositor_frame *frame)
+{
+        for (unsigned int at = 0; at < compositor.damages; at++)
+                if (compositor.damage[at][0] < frame->x + frame->width && compositor.damage[at][2] > frame->x &&
+                    compositor.damage[at][1] < frame->y + frame->height && compositor.damage[at][3] > frame->y)
+                        return 1;
+        return 0;
+}
+
+// Before the compose: each window's frame takes its runs when it has them, and the presents that compose its picture are counted.
+static void compositor_runs_note(struct compositor_frame *frames, const unsigned char *rows, unsigned int windows)
+{
+        for (unsigned int at = 0; at < windows; at++)
+        {
+                int row = rows[at];
+                unsigned int tag;
+
+                frames[at].runs = 0;
+                if (!compositor_runs_eligible(row, &frames[at]))
+                        continue;
+                tag = compositor.seen[row] * 2 + (compositor.front[row] & 1u) + 1;
+                if (compositor.runs_tag[row] != tag)
+                {
+                        compositor.runs_tag[row] = tag;
+                        compositor.runs_composed[row] = compositor.runs_state[row] = 0;
+                }
+                if (compositor.runs_composed[row] < COMPOSITOR_RUNS_AFTER && compositor_runs_damaged(&frames[at]))
+                        compositor.runs_composed[row]++;
+                if (compositor.runs_state[row] == 1)
+                        frames[at].runs = compositor.runs[row];
+        }
+}
+
+// After the compose: the picture composed enough times is read for its runs, once, over its whole height.
+static void compositor_runs_learn(const struct compositor_frame *frames, const unsigned char *rows, unsigned int windows)
+{
+        for (unsigned int at = 0; at < windows; at++)
+        {
+                int row = rows[at];
+                struct compositor_run_row *runs;
+                struct compositor_learning learning;
+                positive bands = parallel_width();
+                unsigned long covered = 0, height = (unsigned long)frames[at].height;
+
+                if (compositor.runs_state[row] || compositor.runs_composed[row] < COMPOSITOR_RUNS_AFTER ||
+                    !compositor_runs_eligible(row, &frames[at]) || !(runs = compositor_runs_of(row)))
+                        continue;
+                learning = (struct compositor_learning){runs, frames[at].pixels, frames[at].pitch, (unsigned long)frames[at].width,
+                                                        (unsigned int)height, 1};
+                bands = bands < COMPOSITOR_BANDS ? bands : COMPOSITOR_BANDS;
+                bands = bands < (positive)height / 16 ? bands : (positive)height / 16;
+                if (bands >= 2)
+                {
+                        learning.bands = (unsigned int)bands;
+                        parallel_for(compositor_learn_band, &learning, bands, (positive)frames[at].width * (positive)height * 4);
+                }
+                else
+                        compositor_learn_band(&learning, 0);
+                // A picture of few runs (a photograph, a gradient) is composed as it always was: its runs there are the copy in
+                // more calls.
+                for (unsigned long y = 0; y < height; y++)
+                        for (unsigned int k = 0; k < runs[y].count && k < COMPOSITOR_RUN_ROW; k++)
+                                covered += runs[y].run[k].x1 - runs[y].run[k].x0;
+                compositor.runs_state[row] = covered * 100 >= (unsigned long)frames[at].width * height * COMPOSITOR_RUNS_WORTH ? 1 : 2;
+        }
+}
+
+/*
         A picture shown at a size it was not drawn at: past what its program
         drew, its last column again to the right and its last row again
         below, and short of it, cut. A size the compositor asked for is shown
@@ -4134,6 +4385,7 @@ static void compositor_stretch(int row)
 
         if (!drawn_w || !drawn_h)
                 return;
+        compositor_runs_forget(row);
 
         if (width > drawn_w)
                 for (unsigned int line = 0; line < drawn_h && line < height; line++)
@@ -5337,6 +5589,7 @@ static void compositor_direct_unpatch(void)
 
         if (row < 0 || !compositor.patched[row][which] || !compositor.under[which])
                 return;
+        compositor_runs_forget(row);
         pixels = compositor_buffer(row, which);
         for (int y = rect[1]; y < rect[3]; y++)
                 memory_copy(pixels + (unsigned long)y * (unsigned long)compositor_stride() + (unsigned long)rect[0],
@@ -5352,6 +5605,7 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         unsigned int *pixels = compositor_buffer(row, which);
         struct windows *table = compositor.table;
 
+        compositor_runs_forget(row);
         for (unsigned int at = 0; at < count; at++)
         {
                 int x, y, width, height;
@@ -6376,6 +6630,8 @@ static void compositor_present(void)
         // A window the card shows straight has what the tabs covered put back, so the glass is made from the window.
         compositor_direct_unpatch();
         compositor_glass_pass(frames, rows, windows);
+        // After the glass, which puts a glass window's own composed picture in its frame: that one has no runs.
+        compositor_runs_note(frames, rows, windows);
 
         // What is under the tabs changed, or what they say: the glass is made again over it, and shown. The glass
         // is made from the scene over the tabs' span and the blur's reach round it, so only a change there is one.
@@ -6568,6 +6824,7 @@ static void compositor_present(void)
                 clips++;
         }
         compositor.mirror_stale = 0;
+        compositor_runs_learn(frames, rows, windows);
 
         // No clips at all would tell the card everything changed.
         dirty.clip_count = clips;
@@ -10872,6 +11129,7 @@ static void compositor_leave(int row)
         compositor.title[row][0] = 0;
         compositor.name[row][0] = 0;
         compositor_glass_drop(row);
+        compositor_runs_drop(row);
         compositor.glass_side[row] = compositor.glass_told[row] = 0;
         // Shown straight: the screen is the compositor's again at the next frame, and the window's framebuffers
         // go when the card is off them (now, if it is).

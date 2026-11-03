@@ -115997,6 +115997,152 @@ static fn check_copy_rect()
 }
 
 /*
+        memory_runs_u32 is the contract in its comment, written out: a row is chunks of 16 words, the last short one and any
+        past the 4095th left out, a chunk is flat when its words are its first, a run is two or more flat chunks in a row of one
+        colour, and a row keeps the first 15. The reference is that, a chunk at a time with the loops in plain sight; the
+        routine's rows must equal it in the count, the spare word and every run a row has, and the bytes after a row's last
+        run, the rows after the last and the picture must be as they were. The pictures are made of stretches of one
+        colour (from a palette of three, so neighbours join) and of noise, of random lengths, the source at each word offset
+        to 15 and ending at a guard page; every width to 300 words, zero to three rows, and one past the 4095th chunk; with
+        AVX-512 and without on x86_64.
+*/
+static void runs_reference(p8 address_to rows, const p32 address_to from, positive from_stride, positive width, positive height)
+{
+        positive chunks = width / 16 > 4095 ? 4095 : width / 16;
+
+        for (positive y = 0; y < height; y++)
+        {
+                p8 address_to row = rows + y * 128;
+                const p32 address_to line = from + y * from_stride;
+                positive count = 0, start = 0;
+                bool open = false;
+                p32 colour = 0;
+
+                for (positive c = 0; c <= chunks; c++)
+                {
+                        bool flat = false;
+
+                        if (c < chunks)
+                        {
+                                flat = true;
+                                for (positive k = 1; k < 16; k++)
+                                        flat = flat && line[c * 16 + k] == line[c * 16];
+                        }
+                        if (flat && open && line[c * 16] == colour)
+                                continue;
+                        if (open && c - start >= 2 && count < 15)
+                        {
+                                p16 address_to run = (p16 address_to)(row + 8 + count * 8);
+
+                                run[0] = (p16)(start * 16);
+                                run[1] = (p16)(c * 16);
+                                *(p32 address_to)(row + 8 + count * 8 + 4) = colour;
+                                count++;
+                        }
+                        open = flat;
+                        if (flat)
+                        {
+                                start = c;
+                                colour = line[c * 16];
+                        }
+                }
+                *(p32 address_to)row = (p32)count;
+                *(p32 address_to)(row + 4) = 0;
+        }
+}
+
+static fn check_runs()
+{
+        static const p32 palette[3] = {0x00203040u, 0x00ffffffu, 0x80000000u};
+        p32 address_to from_pool = memory(80 * 4096);
+        p8 address_to out_pool = memory(4096);
+        p8 address_to want_pool = memory(4096);
+        bool guarded = from_pool && out_pool && want_pool &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)from_pool + 79 * 4096), 4096, 0) == 0;
+        p64 seed = 0x9e3779b97f4a7c15ull;
+
+        check("runs: a guard page at the end of the picture", guarded);
+        if (!guarded)
+                return;
+#if X64
+        p8 wide_on = cpu_has_avx512;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx512 = tier ? 0 : wide_on;
+#endif
+                bool fine = true, kept = true;
+                p32 address_to stop = from_pool + 79 * 4096 / 4;
+
+                // Widths to 300 words, and three that hold more runs than a row keeps and one past the 4095th chunk.
+                for (positive shape = 0; shape < 305 + 3; shape++)
+                        for (positive height = 0; height <= 3; height++)
+                                for (positive sa = 0; sa < 16; sa++)
+                                {
+                                        positive w = shape <= 300 ? shape : shape == 301 ? 400 : shape == 302 ? 770 : 800;
+                                        positive stride = w + sa % 3 * 7;
+                                        positive span = height ? (height - 1) * stride + w : 0;
+                                        p32 address_to picture = stop - span - sa;
+                                        p64 before = 0, after = 0;
+
+                                        for (positive y = 0; y < height; y++)
+                                        {
+                                                positive x = 0;
+
+                                                while (x < w)
+                                                {
+                                                        positive length;
+                                                        bool solid;
+                                                        p32 colour;
+
+                                                        XORSHIFT64(seed);
+                                                        solid = shape > 300 ? (x / 16) % 3 != 2 : (seed >> 33) % 3 != 0;
+                                                        length = shape > 300 ? (solid ? 32 : 16) : 1 + (seed >> 20) % ((seed >> 10) % 4 ? 40 : 90);
+                                                        length = x + length > w ? w - x : length;
+                                                        colour = palette[shape > 300 ? 0 : (seed >> 50) % 3];
+                                                        for (positive k = 0; k < length; k++)
+                                                        {
+                                                                XORSHIFT64(seed);
+                                                                picture[y * stride + x + k] = solid ? colour : (p32)(seed >> 8);
+                                                        }
+                                                        x += length;
+                                                }
+                                        }
+                                        for (positive i = 0; i < span; i++)
+                                                before = before * 31 + picture[i];
+                                        memory_fill(out_pool, 0xa5, 4096);
+                                        memory_fill(want_pool, 0xa5, 4096);
+                                        runs_reference(want_pool + 64, picture, stride, w, height);
+                                        memory_runs_u32(out_pool + 64, picture, stride, w, height);
+                                        fine = fine && !memory_compare(out_pool, want_pool, 4096);
+                                        for (positive i = 0; i < span; i++)
+                                                after = after * 31 + picture[i];
+                                        kept = kept && before == after;
+                                }
+                check("runs: every row the reference makes, and nothing past a row's last run or the last row", fine);
+                check("runs: the picture is what it was", kept);
+
+                // One past the 4095th chunk: the row ends at 65520 words, with the 16 + 5 beyond it unread.
+                {
+                        positive w = 4096 * 16 + 5;
+                        p32 address_to picture = stop - w;
+
+                        for (positive i = 0; i < w; i++)
+                                picture[i] = 0x00123456u;
+                        memory_fill(out_pool, 0xa5, 4096);
+                        memory_fill(want_pool, 0xa5, 4096);
+                        runs_reference(want_pool + 64, picture, w, w, 1);
+                        memory_runs_u32(out_pool + 64, picture, w, w, 1);
+                        check("runs: no chunk past the 4095th is read", !memory_compare(out_pool, want_pool, 4096) &&
+                                                                          *(p32 address_to)(out_pool + 64) == 1 &&
+                                                                          *(p16 address_to)(out_pool + 64 + 10) == 4095 * 16);
+                }
+#if X64
+        }
+        cpu_has_avx512 = wide_on;
+#endif
+}
+
+/*
         The walk compositor_blit_scaled made before it moved to lib.c, with the rectangle as arguments: the visible part of
         a width by height rectangle, its top left at left, top, of a picture from_width by from_height, a source position
         per target pixel's centre stepping in 24-bit fixed point and rounded down. memory_resample_u32_rect is checked
@@ -116950,6 +117096,7 @@ b32 main()
         check_fill_rect();
         check_over_tone();
         check_copy_rect();
+        check_runs();
         check_resample_rect();
         check_copy_changed();
         check_first_differs();
@@ -118110,6 +118257,187 @@ static void check_compositor_held(void)
     check("held: and one that changed no pixel still asks for that present", compositor.damages > 0);
     compositor.direct_row = -1;
     compositor.held_rows = 0;
+}
+
+/*
+        Runs are the same screen. A window composed again and again has its picture read for runs, which are then filled where
+        they were copied (compositor_runs_learn): the screen must be the one the copy makes, byte for byte, whatever is done
+        with the windows. The same steps (windows of flat bands, rectangles and noise that move, are raised, are repainted
+        in part and are presented in part and whole, over a screen with corners, overlaps and windows cut by it) are run
+        twice from the same start, once as the compositor is and once with every window's runs forgotten before each present,
+        so that every compose is the copy; the screens must agree after every step, and some picture must have been composed
+        from its runs.
+*/
+#define RUNS_W 640
+#define RUNS_H 480
+
+static fn runs_paint(int row, unsigned int seed, int x, int y, int width, int height, b32 whole)
+{
+        struct windows address_to table = compositor.table;
+        unsigned int address_to pixels = windows_buffer(table, row, 0);
+
+        for (int line = y; line < y + height; line++)
+                for (int column = x; column < x + width; column++)
+                {
+                        unsigned int mix = (unsigned int)(line / 24) * 2654435761u + seed;
+                        unsigned int colour = 0x00101010u + (mix >> 9 & 0x3f3f3f);
+
+                        // Bands of one colour broken by a rectangle, a text-like patch of noise and a thin stripe.
+                        if (column > 40 + (int)(mix >> 5 & 63) && column < 200 + (int)(mix >> 11 & 127) && (line / 24) % 3 == 1)
+                                colour ^= 0x00ff00ffu;
+                        if ((line / 24) % 4 == 2 && column > 60 && column < 60 + (int)(mix >> 3 & 255))
+                                colour = (unsigned int)(column * 40503u + line * 9973u + seed) >> 3 & 0xffffffu;
+                        if ((column + (int)seed) % 97 == 0)
+                                colour = 0x00ffffffu;
+                        pixels[line * RUNS_W + column] = colour;
+                }
+        table->buffer_index[row] = 0;
+        table->damage_x[row] = x;
+        table->damage_y[row] = y;
+        table->damage_width[row] = whole ? 0 : width;
+        table->damage_height[row] = height;
+        table->frame[row]++;
+        compositor_take(row);
+}
+
+// One run of the steps; with forgetting, every window's runs are dropped before each present. The screen's hash after each step is
+// kept, and the answer is how many presents ended with a window whose runs were learned.
+static positive runs_steps(unsigned int address_to out, b32 forgetting, p64 address_to hashes)
+{
+        unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+        unsigned long buffer = ((unsigned long)RUNS_W * RUNS_H * 4 + 4095) & ~4095ul;
+        long mapped = compositor_call(syscall(mmap), 0, header + buffer * 2 * WINDOWS, 3, 0x22, (positive)-1, 0);
+        unsigned int seed = 11;
+        positive used = 0;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = RUNS_W;
+        compositor.height = RUNS_H;
+        compositor.scale = 100;
+        compositor.card = -1;
+        compositor.scanout = out;
+        compositor.scanout_pitch = RUNS_W * 4;
+        if (mapped < 0 && mapped > -4096)
+                return 0;
+        compositor.table = (struct windows address_to)mapped;
+        compositor.table->motion = 1;
+        compositor.pixels = compositor.table->pixels = header;
+        compositor.buffer = compositor.table->buffer = buffer;
+        compositor.table->stride = compositor.table->output_width = RUNS_W;
+        compositor.table->output_height = RUNS_H;
+        for (int row = 1; row <= 3; row++)
+        {
+                compositor.table->x[row] = 20 + 70 * row;
+                compositor.table->y[row] = 10 + 40 * row;
+                compositor.table->width[row] = row == 1 ? 400 : row == 2 ? 330 : 390;
+                compositor.table->height[row] = row == 1 ? 300 : row == 2 ? 290 : 270;
+                runs_paint(row, (unsigned int)row * 977u, 0, 0, (int)compositor.table->width[row], (int)compositor.table->height[row], true);
+        }
+        compositor_damage(0, 0, RUNS_W, RUNS_H);
+        compositor_present();
+
+        for (int step = 0; step < 240; step++)
+        {
+                int row;
+                unsigned int op;
+
+                seed = seed * 1664525u + 1013904223u;
+                row = 1 + (int)((seed >> 16) % 3);
+                op = (seed >> 8) % 8;
+                if (op == 0)
+                {
+                        compositor_damage_row(row);
+                        compositor_place(row, (int)((seed >> 4) % 300), (int)((seed >> 12) % 200) - 20);
+                        compositor_damage_row(row);
+                }
+                else if (op == 1)
+                        compositor_raise(row);
+                else if (op == 2)
+                        runs_paint(row, seed, (int)((seed >> 4) % 200), (int)((seed >> 12) % 200), 20 + (int)((seed >> 20) % 100),
+                                   10 + (int)((seed >> 24) % 60), false);
+                else if (op == 3)
+                        runs_paint(row, seed >> 3, 0, 0, (int)compositor.table->width[row], (int)compositor.table->height[row], true);
+                else if (op == 4)
+                        compositor_damage((int)((seed >> 4) % 400), (int)((seed >> 12) % 300), 30 + (int)((seed >> 20) % 200),
+                                          20 + (int)((seed >> 24) % 150));
+                else
+                        compositor_damage(0, 0, RUNS_W, RUNS_H);
+                if (forgetting)
+                        for (int each = 1; each <= 3; each++)
+                                compositor_runs_forget(each);
+                compositor_present();
+                for (int each = 1; each <= 3; each++)
+                        used += compositor.runs_state[each] == 1;
+                hashes[step] = 1469598103934665603ull;
+                for (positive at = 0; at < (positive)RUNS_W * RUNS_H; at++)
+                        hashes[step] = (hashes[step] ^ out[at]) * 1099511628211ull;
+        }
+        // Four presents of everything, so each window's picture is composed enough times to have its runs (unless forgetting).
+        for (int settle = 0; settle < 4; settle++)
+        {
+                compositor_damage(0, 0, RUNS_W, RUNS_H);
+                compositor_present();
+        }
+        return used;
+}
+
+// A slice of a scene composed apart, kept in the flat screen the check compares.
+static unsigned int address_to runs_flat;
+
+static void runs_flush(const struct compositor_target *slice, int *first, int *last)
+{
+        *first = slice->y1;
+        *last = slice->y2 - 1;
+        for (int y = slice->y1; y < slice->y2; y++)
+                memory_copy(runs_flat + (positive)y * RUNS_W + slice->x1,
+                            slice->pixels + (positive)(y - slice->oy) * slice->pitch + (positive)(slice->x1 - slice->ox),
+                            (positive)(slice->x2 - slice->x1) * 4);
+}
+
+static void check_compositor_runs(void)
+{
+        static unsigned int screen[RUNS_H * RUNS_W], flat[4][RUNS_H * RUNS_W], slices[RUNS_W * COMPOSITOR_SLICE * COMPOSITOR_BANDS];
+        static p64 made[240], copied[240];
+        struct compositor_frame frames[COMPOSITOR_FRAMES];
+        struct compositor_apart apart = {runs_flush, slices, RUNS_W};
+        unsigned char rows[WINDOWS];
+        unsigned int count = 0, with = 0;
+        positive used = runs_steps(screen, false, made);
+        int spare[2];
+
+        runs_steps(screen, true, copied);
+        check("runs: some window was composed from its runs", used > 20);
+        check("runs: the screen composed from runs is the screen the copy makes, after every step",
+              !memory_compare(made, copied, sizeof(made)));
+
+        // The same windows composed straight and apart (in slices of a band, handed to a flush), from their runs and from their
+        // copies: the screen is the same each way. The steps ran last with their runs, and left the windows' runs learned.
+        runs_steps(screen, false, made);
+        for (unsigned int at = 0; at < compositor.stacked; at++)
+                if (compositor_visible(compositor.stack[at]))
+                {
+                        rows[count] = compositor.stack[at];
+                        compositor_frame_of(compositor.stack[at], &frames[count++]);
+                }
+        compositor_damage(0, 0, RUNS_W, RUNS_H);
+        compositor_runs_note(frames, rows, count);
+        for (unsigned int at = 0; at < count; at++)
+                with += frames[at].runs != 0;
+        for (int pass = 0; pass < 4; pass++)
+        {
+                struct compositor_target target = {flat[pass], RUNS_W, RUNS_W, RUNS_H, 0, 0, RUNS_W, RUNS_H, 0, 0, 0};
+
+                // Passes 0 and 1 compose with the runs, straight and apart; 2 and 3 with every frame's runs taken away.
+                if (pass == 2)
+                        for (unsigned int at = 0; at < count; at++)
+                                frames[at].runs = 0;
+                runs_flat = flat[pass];
+                compositor_scene_banded(&target, frames, count, pass & 1 ? &apart : 0, spare);
+        }
+        check("runs: composed from the runs and from the copies, straight and apart, the screen is one",
+              with > 0 && !memory_compare(flat[0], flat[2], sizeof(flat[0])) && !memory_compare(flat[1], flat[3], sizeof(flat[1])));
 }
 
 /*
@@ -147705,6 +148033,7 @@ b32 main()
         check_identify_events();
         check_identify_timing();
         check_compositor_partial();
+        check_compositor_runs();
         check_compositor_held();
         check_compositor_screens();
         check_compositor_scales();
@@ -165346,6 +165675,140 @@ b32 main(void)
         return 0;
 }
 #endif /* BENCH_copy_rect */
+
+#ifdef BENCH_runs
+/* memory_runs_u32 against the C loop it is written out as (runs_reference in the CHECK_font section): a picture read for its
+   stretches of one colour, a chunk of 16 words at a time. The shapes are what the compositor reads once a picture has
+   been composed three times: a window's rows 1160 words wide with rows 2560 apart, all one colour, as a blank terminal
+   is; lines of text, each chunk of 16 a noise chunk or a flat one at a third; and noise, where no chunk is flat and
+   every row ends at the first word that differs. On x86_64 with AVX-512 and without, riscv64 and arm64 (one body each). */
+#include "../src/lib.util.c"
+#define SHARED_bench_measure
+#include "checks.c"
+#undef SHARED_bench_measure
+
+#define TRIES 9
+#define STRIDE 2560
+#define ROWS 64
+
+static unsigned int plane[STRIDE * ROWS];
+static unsigned char rows_out[ROWS * 128 + 64];
+static volatile positive sink;
+
+__attribute__((noinline, noclone)) static void runs_c(unsigned char address_to rows, const unsigned int address_to from,
+                                                      positive from_stride, positive width, positive height)
+{
+        positive chunks = width / 16 > 4095 ? 4095 : width / 16;
+
+        for (positive y = 0; y < height; y++)
+        {
+                unsigned char address_to row = rows + y * 128;
+                const unsigned int address_to line = from + y * from_stride;
+                positive count = 0, start = 0;
+                bool open = false;
+                unsigned int colour = 0;
+
+                for (positive c = 0; c <= chunks; c++)
+                {
+                        bool flat = false;
+
+                        if (c < chunks)
+                        {
+                                flat = true;
+                                for (positive k = 1; k < 16; k++)
+                                        flat = flat && line[c * 16 + k] == line[c * 16];
+                        }
+                        if (flat && open && line[c * 16] == colour)
+                                continue;
+                        if (open && c - start >= 2 && count < 15)
+                        {
+                                unsigned short address_to run = (unsigned short address_to)(row + 8 + count * 8);
+
+                                run[0] = (unsigned short)(start * 16);
+                                run[1] = (unsigned short)(c * 16);
+                                *(unsigned int address_to)(row + 8 + count * 8 + 4) = colour;
+                                count++;
+                        }
+                        open = flat;
+                        if (flat)
+                        {
+                                start = c;
+                                colour = line[c * 16];
+                        }
+                }
+                *(unsigned int address_to)row = (unsigned int)count;
+                *(unsigned int address_to)(row + 4) = 0;
+        }
+}
+
+__attribute__((noinline, noclone)) static p64 run(bool assembly, positive width, positive height, positive rounds)
+{
+        positive answers = 0;
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                if (assembly)
+                        memory_runs_u32(rows_out, plane + round % 8, STRIDE, width, height);
+                else
+                        runs_c(rows_out, plane + round % 8, STRIDE, width, height);
+                answers += rows_out[0] + round;
+        }
+        sink = answers;
+        return get_cpu_time() - start;
+}
+
+b32 main(void)
+{
+        static const string_address names[] = {"a flat window of 1160 words", "lines of text 1160 words wide", "noise 1160 words wide"};
+        p64 seed = 0x2545f4914f6cdd1dull;
+
+        for (positive shape = 0; shape < 3; shape++)
+        {
+                for (positive y = 0; y < ROWS; y++)
+                        for (positive x = 0; x < STRIDE; x++)
+                        {
+                                XORSHIFT64(seed);
+                                plane[y * STRIDE + x] = shape == 0 ? 0x00203040u : shape == 1 && (x / 16 + y / 19) % 3 == 0 ? 0x00203040u : (unsigned int)(seed >> 8);
+                        }
+                {
+#if X64
+                p8 wide512 = cpu_has_avx512;
+                for (positive tier = 0; tier < 2; tier++)
+                {
+                        cpu_has_avx512 = tier == 0 ? wide512 : 0;
+                        if (tier == 0 && !wide512)
+                                continue;
+#else
+                for (positive tier = 0; tier < 1; tier++)
+                {
+#endif
+                        positive ratios[TRIES];
+                        positive rounds = 2000000 / (1160 * ROWS / 16 + 64) + 1;
+
+                        BENCH_PAIRED_RUNS(ratios, former, assembly, 1160, ROWS, rounds);
+                        string_format(log, "memory_runs_u32 %s, %s: paired median ASM/C %p.", names[shape],
+#if X64
+                                      cpu_has_avx512 ? (string_address) "avx512" : (string_address) "scalar",
+#elif RISCV64
+                                      (string_address) "scalar",
+#else
+                                      (string_address) "neon",
+#endif
+                                      ratios[TRIES / 2] / 100);
+                        positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                        log("%\n", 2);
+                }
+#if X64
+                cpu_has_avx512 = wide512;
+#endif
+                }
+        }
+        log_flush();
+        return 0;
+}
+#endif /* BENCH_runs */
 
 #ifdef BENCH_resample
 /* memory_resample_u32_rect against resample_reference, the walk compositor_blit_scaled made: a landing window's picture,

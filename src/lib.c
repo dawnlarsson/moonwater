@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        434 routines (410 public, 24 local), 424 of them on all three and 10 local to one.
+        435 routines (411 public, 24 local), 425 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -288,6 +288,7 @@
           memory_reserve                 public  yes     yes     yes
           memory_reverse                 public  yes     yes     yes
           memory_reverse_lines__room_64  public  yes     yes     yes
+          memory_runs_u32                public  yes     yes     yes
           memory_saturate_u32            public  yes     yes     yes
           memory_search                  public  yes     yes     yes
           memory_search_ascii_case       public  yes     yes     yes
@@ -15493,6 +15494,65 @@ __asm__(
     ASM_END(memory_copy_rect_u32)
 
     //
+    //       memory_runs_u32 -- rdi rows, rsi from, rdx from_stride in words, rcx width in words, r8 height. Reads a
+    //       picture for the stretches of one colour a compose can fill, where it would copy, and writes them as one
+    //       row of 128 bytes a picture row: a count and a spare word (written as 0), then up to 15 runs of x0 and x1
+    //       (16 bits each, x1 not part of the run) and the colour. A picture row is seen as chunks of 16 words, the
+    //       last short one left out and none past the 4095th; a chunk is flat when its 16 words are the first one,
+    //       and a run is two or more flat chunks in a row of one colour, so x0 and x1 are multiples of 16 and every word
+    //       from x0 to x1 is the colour, which is all a caller may rely on. A row of more runs than 15 keeps its first
+    //       15. Only the count, the spare word and the runs a row has are written: the bytes after them are not
+    //       touched, and nothing of the picture is.
+    //       AVX-512 asks a chunk one broadcast and one compare of the chunk's words with it, and a flat one is a carry
+    //       from kortestw; without it (and always in the kernel) the same walk compares eight words of 64 bits against
+    //       the first twice over, leaving at the first that differs. rbx is the chunk a run began at (-1 for none), r12
+    //       its colour, r10 the chunk, r11 the runs written, r13 the stride in bytes.
+    //
+#define RUNS_CLOSE_X64                                                                                                \
+    "mov %r10, %rdx\n   sub %rbx, %rdx\n   cmp $2, %rdx\n   jb 19f\n   cmp $15, %r11d\n   jae 19f\n"                \
+    "lea (%rdi,%r11,8), %rax\n   shl $4, %ebx\n   mov %bx, 8(%rax)\n   mov %r10d, %edx\n   shl $4, %edx\n"             \
+    "mov %dx, 10(%rax)\n   mov %r12d, 12(%rax)\n   inc %r11d\n19: mov $-1, %rbx\n"
+    ASM_FUNC(memory_runs_u32)
+    "test %r8, %r8\n   jz 9f\n   push %rbx\n   push %r12\n   push %r13\n"
+    "shr $4, %rcx\n   cmp $4095, %rcx\n   jbe 1f\n   mov $4095, %ecx\n"
+    "1:  shl $2, %rdx\n   mov %rdx, %r13\n"
+    ASM_NARROW("cpu_has_avx512", "30f")
+    ASM_USERSPACE_WIDE(
+    "21: xor %r10d, %r10d\n   xor %r11d, %r11d\n   mov $-1, %rbx\n   mov %rsi, %r9\n"
+    "22: cmp %rcx, %r10\n   jae 26f\n"
+    "vpbroadcastd (%r9), %zmm1\n   vpcmpeqd (%r9), %zmm1, %k1\n   kortestw %k1, %k1\n   jnc 24f\n"
+    "mov (%r9), %eax\n   cmp $-1, %rbx\n   je 25f\n   cmp %eax, %r12d\n   je 23f\n"
+    RUNS_CLOSE_X64
+    "25: mov %r10, %rbx\n   mov (%r9), %r12d\n"
+    "23: inc %r10\n   add $64, %r9\n   jmp 22b\n"
+    "24: cmp $-1, %rbx\n   je 23b\n"
+    RUNS_CLOSE_X64
+    "   jmp 23b\n"
+    "26: cmp $-1, %rbx\n   je 27f\n"
+    RUNS_CLOSE_X64
+    "27: mov %r11d, (%rdi)\n   movl $0, 4(%rdi)\n   add $128, %rdi\n   add %r13, %rsi\n   dec %r8\n   jnz 21b\n"
+    "vzeroupper\n   jmp 99f\n"
+    )
+    "30: xor %r10d, %r10d\n   xor %r11d, %r11d\n   mov $-1, %rbx\n   mov %rsi, %r9\n"
+    "31: cmp %rcx, %r10\n   jae 36f\n"
+    "mov (%r9), %eax\n   mov %rax, %rdx\n   shl $32, %rdx\n   or %rdx, %rax\n"
+    "cmp %rax, (%r9)\n   jne 34f\n   cmp %rax, 8(%r9)\n   jne 34f\n   cmp %rax, 16(%r9)\n   jne 34f\n   cmp %rax, 24(%r9)\n   jne 34f\n"
+    "cmp %rax, 32(%r9)\n   jne 34f\n   cmp %rax, 40(%r9)\n   jne 34f\n   cmp %rax, 48(%r9)\n   jne 34f\n   cmp %rax, 56(%r9)\n   jne 34f\n"
+    "mov (%r9), %eax\n   cmp $-1, %rbx\n   je 35f\n   cmp %eax, %r12d\n   je 33f\n"
+    RUNS_CLOSE_X64
+    "35: mov %r10, %rbx\n   mov (%r9), %r12d\n"
+    "33: inc %r10\n   add $64, %r9\n   jmp 31b\n"
+    "34: cmp $-1, %rbx\n   je 33b\n"
+    RUNS_CLOSE_X64
+    "   jmp 33b\n"
+    "36: cmp $-1, %rbx\n   je 37f\n"
+    RUNS_CLOSE_X64
+    "37: mov %r11d, (%rdi)\n   movl $0, 4(%rdi)\n   add $128, %rdi\n   add %r13, %rsi\n   dec %r8\n   jnz 30b\n"
+    "99: pop %r13\n   pop %r12\n   pop %rbx\n"
+    "9:  " ASM_RET
+    ASM_END(memory_runs_u32)
+
+    //
     //       memory_resample_u32_rect -- rdi into (the visible rectangle's top left word), rsi into_stride in words,
     //       rdx visible width, rcx visible height, r8 from, r9 from_stride in words, and on the stack from_width,
     //       from_height, width, height, left, top. Nearest neighbour, the C in test/checks.c (resample_reference).
@@ -25347,6 +25407,37 @@ __asm__(
     ASM_END(memory_copy_rect_u32)
 
     //
+    //       memory_runs_u32 -- x0 rows, x1 from, x2 from_stride in words, x3 width in words, x4 height. The x86_64
+    //       block carries the contract. A chunk of 16 words is four q registers compared with its first word
+    //       (ld1r), the four results anded and reduced to a byte by uminv: 255 is flat. x9 is the chunk a run
+    //       began at (-1 for none), w10 its colour, x7 the chunk, w8 the runs written, x6 the chunk's address.
+    //
+#define RUNS_CLOSE_ARM64                                                                                        \
+    "sub x12, x7, x9\n   cmp x12, #2\n   b.lo 12f\n   cmp w8, #15\n   b.hs 12f\n"                             \
+    "add x12, x0, x8, lsl #3\n   lsl x13, x9, #4\n   strh w13, [x12, #8]\n   lsl x13, x7, #4\n   strh w13, [x12, #10]\n" \
+    "str w10, [x12, #12]\n   add w8, w8, #1\n12: mov x9, #-1\n"
+    ASM_FUNC(memory_runs_u32)
+    "cbz x4, 9f\n   lsr x3, x3, #4\n   mov x5, #4095\n   cmp x3, x5\n   csel x3, x3, x5, ls\n   lsl x2, x2, #2\n"
+    "1:  mov x6, x1\n   mov x7, #0\n   mov w8, #0\n   mov x9, #-1\n   mov w10, #0\n   cbz x3, 7f\n"
+    "2:  cmp x7, x3\n   b.hs 6f\n"
+    "ldp q0, q1, [x6]\n   ldp q2, q3, [x6, #32]\n   ld1r {v4.4s}, [x6]\n"
+    "cmeq v0.4s, v0.4s, v4.4s\n   cmeq v1.4s, v1.4s, v4.4s\n   cmeq v2.4s, v2.4s, v4.4s\n   cmeq v3.4s, v3.4s, v4.4s\n"
+    "and v0.16b, v0.16b, v1.16b\n   and v2.16b, v2.16b, v3.16b\n   and v0.16b, v0.16b, v2.16b\n   uminv b0, v0.16b\n   umov w11, v0.b[0]\n"
+    "cmp w11, #255\n   b.ne 4f\n"
+    "ldr w11, [x6]\n   cmn x9, #1\n   b.eq 5f\n   cmp w11, w10\n   b.eq 3f\n"
+    RUNS_CLOSE_ARM64
+    "5:  mov x9, x7\n   mov w10, w11\n"
+    "3:  add x7, x7, #1\n   add x6, x6, #64\n   b 2b\n"
+    "4:  cmn x9, #1\n   b.eq 3b\n"
+    RUNS_CLOSE_ARM64
+    "b 3b\n"
+    "6:  cmn x9, #1\n   b.eq 7f\n"
+    RUNS_CLOSE_ARM64
+    "7:  str w8, [x0]\n   str wzr, [x0, #4]\n   add x0, x0, #128\n   add x1, x1, x2\n   subs x4, x4, #1\n   b.ne 1b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_runs_u32)
+
+    //
     //       memory_resample_u32_rect -- x0 into, x1 into_stride in words, x2 visible width, x3 visible height, x4 from,
     //       x5 from_stride in words, x6 from_width, x7 from_height, and on the stack width, height, left, top. The
     //       x86_64 block carries the contract. The walk is four target pixels a turn, each source position the block's
@@ -35171,6 +35262,38 @@ __asm__(
     "addi sp, sp, 64\n"
     "8:  " ASM_RET
     ASM_END(memory_copy_rect_u32)
+
+    //
+    //       memory_runs_u32 -- a0 rows, a1 from, a2 from_stride in words, a3 width in words, a4 height. The x86_64
+    //       block carries the contract. A chunk of 16 words is fifteen word loads each compared with the first, leaving
+    //       at the first that differs: words and not doublewords, since a picture's rows are word aligned and a
+    //       doubleword load that is not aligned traps on a core with no support for it. t4 is the chunk a run began at
+    //       (-1 for none), t5 its colour, t2 the chunk, t3 the runs written, t1 the chunk's address.
+    //
+#define RUNS_CLOSE_RISCV64                                                                                      \
+    "sub a6, t2, t4\n   li a7, 2\n   bltu a6, a7, 19f\n   li a7, 15\n   bgeu t3, a7, 19f\n"                      \
+    "slli a6, t3, 3\n   add a6, a0, a6\n   slli a7, t4, 4\n   sh a7, 8(a6)\n   slli a7, t2, 4\n   sh a7, 10(a6)\n"  \
+    "sw t5, 12(a6)\n   addi t3, t3, 1\n19: li t4, -1\n"
+    ASM_FUNC(memory_runs_u32)
+    "beqz a4, 9f\n   srli a3, a3, 4\n   li t0, 4095\n   bleu a3, t0, 1f\n   mv a3, t0\n1:  slli a2, a2, 2\n"
+    "10: mv t1, a1\n   li t2, 0\n   li t3, 0\n   li t4, -1\n   li t5, 0\n   beqz a3, 17f\n"
+    "12: lw t6, 0(t1)\n"
+    "lw a6, 4(t1)\n   bne a6, t6, 14f\n   lw a6, 8(t1)\n   bne a6, t6, 14f\n   lw a6, 12(t1)\n   bne a6, t6, 14f\n   lw a6, 16(t1)\n   bne a6, t6, 14f\n"
+    "lw a6, 20(t1)\n   bne a6, t6, 14f\n   lw a6, 24(t1)\n   bne a6, t6, 14f\n   lw a6, 28(t1)\n   bne a6, t6, 14f\n   lw a6, 32(t1)\n   bne a6, t6, 14f\n"
+    "lw a6, 36(t1)\n   bne a6, t6, 14f\n   lw a6, 40(t1)\n   bne a6, t6, 14f\n   lw a6, 44(t1)\n   bne a6, t6, 14f\n   lw a6, 48(t1)\n   bne a6, t6, 14f\n"
+    "lw a6, 52(t1)\n   bne a6, t6, 14f\n   lw a6, 56(t1)\n   bne a6, t6, 14f\n   lw a6, 60(t1)\n   bne a6, t6, 14f\n"
+    "li a7, -1\n   beq t4, a7, 15f\n   beq t6, t5, 13f\n"
+    RUNS_CLOSE_RISCV64
+    "15: mv t4, t2\n   mv t5, t6\n"
+    "13: addi t2, t2, 1\n   addi t1, t1, 64\n   bne t2, a3, 12b\n   j 16f\n"
+    "14: li a7, -1\n   beq t4, a7, 13b\n"
+    RUNS_CLOSE_RISCV64
+    "j 13b\n"
+    "16: li a7, -1\n   beq t4, a7, 17f\n"
+    RUNS_CLOSE_RISCV64
+    "17: sw t3, 0(a0)\n   sw zero, 4(a0)\n   addi a0, a0, 128\n   add a1, a1, a2\n   addi a4, a4, -1\n   bnez a4, 10b\n"
+    "9:  " ASM_RET
+    ASM_END(memory_runs_u32)
 
     //
     //       memory_resample_u32_rect -- a0 into, a1 into_stride in words, a2 visible width, a3 visible height, a4 from,
@@ -46593,6 +46716,14 @@ fn memory_mix_u32_rect(p32 address_to into, positive into_stride, const p8 addre
 // rectangles are copied row by row in order, as memory_copy copies them.
 fn memory_copy_rect_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
+// height rows of a picture (width words, from_stride words a row) read for the stretches of one colour that a compose
+// could fill where it would copy, written as height rows of 128 bytes at rows: a 32-bit count, a spare word of 0, and up to
+// 15 runs of a 16-bit x0, a 16-bit x1 (not part of the run) and a 32-bit colour. A row is seen as chunks of 16 words, the
+// last short one and any past the 4095th left out; a chunk is flat when its 16 words are its first, and a run is two or
+// more flat chunks in a row of one colour, so x0 and x1 are multiples of 16 and every word of the row from x0 to x1 is
+// the colour. A row of more than 15 keeps its first 15. Nothing of the picture is written and nothing of a row's 128
+// bytes past its last run, and a zero width or height touches nothing but zero-width rows' counts (a zero count).
+fn memory_runs_u32(p8 address_to rows, const p32 address_to from, positive from_stride, positive width, positive height);
 // A picture from_width by from_height (from_stride words a row) drawn nearest neighbour into a width by height
 // rectangle, of which the visible_width by visible_height part at left, top is written: into points at its top left
 // word, into_stride words a row. A pixel is the picture's at the source position of its centre, which steps in 24-bit

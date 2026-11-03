@@ -26602,7 +26602,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect average-ahead glass fill-rect over-tone copy-changed copy-rect sweep-coverage first-differs saturate tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged"
+benchmarks="floor baseline numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect average-ahead glass fill-rect over-tone copy-changed copy-rect runs sweep-coverage first-differs saturate tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -26653,6 +26653,8 @@ bench_about()
                  bench_line="the text engine's coverage rows summed into bytes, against the C loop it replaced" ;;
         copy-rect) bench_section=BENCH_copy_rect
                  bench_line="a rectangle of words copied by memory_copy_rect_u32 against the row loop compositor_blit had, over a window, a sliver, a band and a row" ;;
+        runs)    bench_section=BENCH_runs
+                 bench_line="a picture read for its stretches of one colour by memory_runs_u32, over a blank window, lines of text and noise, against the C loop of the same walk" ;;
         resample) bench_section=BENCH_resample
                  bench_line="a landing window's picture drawn by memory_resample_u32_rect at 96, 98 and 100 percent against the walk compositor_blit_scaled made" ;;
         first-differs) bench_section=BENCH_first_differs
