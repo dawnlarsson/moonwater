@@ -22780,6 +22780,19 @@ def rename(old, new):
     type_text(new)
     key("ret")
 
+#   A window a shell opens does not take the keys by itself (the shell's tab stays the lit one in the panel), so a click
+#   on the settings window's title gives it them before the rows that type; the pointer then goes off the window again.
+listed = shell.run("moonwater window", 10)[0]
+found = re.search(r"settings, pid \d+, at (-?\d+),(-?\d+), (\d+) by (\d+)", listed)
+if found:
+    fx, fy, fw, fh = [int(v) for v in found.groups()]
+    moveto(fx + 120 * fw / 700.0, fy + 30 * fw / 700.0)
+    send([{"type": "btn", "data": {"down": True, "button": "left"}}])
+    time.sleep(0.1)
+    send([{"type": "btn", "data": {"down": False, "button": "left"}}])
+    time.sleep(1.0)
+    moveto(fx + fw + 60, fy + fh + 60)
+    time.sleep(0.5)
 rename(had_name, "lane-glass")
 renamed, _ = until(lambda: shell.run("moonwater name", 10)[0].strip() == "lane-glass", 15)
 rename("lane-glass", had_name)
