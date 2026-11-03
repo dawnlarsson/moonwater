@@ -2689,6 +2689,8 @@ struct compositor_card_res
         unsigned int min_width, max_width, min_height, max_height;
 };
 
+#define COMPOSITOR_MODE_USERDEF 32u // DRM_MODE_TYPE_USERDEF
+
 struct compositor_mode
 {
         unsigned int clock;
@@ -6635,30 +6637,39 @@ static unsigned int compositor_said(char *line, unsigned int at, const char *tex
 /*
         The mode a screen is driven at for the rate its displays line asks for: the first mode it lists at the size it
         has now and that rate (windows_mode_at), in mode. A rate no mode of the screen has keeps the mode it has, and
-        the kernel log says so. A screen with no line keeps its mode. A preferred rate is the first mode it lists at
-        that size, which a screen at another rate than it goes back to: the mode it has is the one it was switched to,
-        so keeping that was no switch back (the settings' first rate, the recommended one, never took after another).
+        the kernel log says so. A preferred rate, which a screen with no line has too, is the first mode it lists at that
+        size (or the one the kernel's command line forced there, video=), which a screen at another rate than it goes
+        back to: the mode it has is the one it was switched to, so keeping that was no switch back, and the settings'
+        first rate, the recommended one, never took after another. The settings write that rate as no line at all once
+        nothing else of the screen is asked (a line of the defaults is not kept), so a screen with none is not a screen
+        whose mode is its own to keep.
 */
 static void compositor_refresh_pick(const char *name, unsigned int count, const struct compositor_mode *modes,
                                     struct compositor_mode *mode)
 {
         const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
                                                                    windows_name_length(name));
-        unsigned int rates[128][3], at;
+        unsigned int rates[128][3], at, asked = display ? display->refresh : 0;
         char line[160];
         unsigned int length;
 
-        if (!display)
-                return;
         for (at = 0; at < count && at < 128; at++)
                 rates[at][0] = modes[at].hdisplay, rates[at][1] = modes[at].vdisplay, rates[at][2] = modes[at].vrefresh;
-        at = windows_mode_at(rates, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay, display->refresh);
+        at = windows_mode_at(rates, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay, asked);
+        // No rate asked: the mode the command line forced at this size, if one was, is the screen's own.
+        for (unsigned int forced = 0; !asked && forced < count && forced < 128; forced++)
+                if ((modes[forced].type & COMPOSITOR_MODE_USERDEF) && rates[forced][0] == mode->hdisplay &&
+                    rates[forced][1] == mode->vdisplay)
+                {
+                        at = forced;
+                        break;
+                }
         if (at < count && at < 128)
         {
                 *mode = modes[at];
                 return;
         }
-        if (!display->refresh)
+        if (!asked)
                 return;
         length = compositor_said(line, 0, "compositor: canvas.displays: no mode of ");
         length = compositor_said(line, length, name);
@@ -6726,7 +6737,6 @@ static unsigned int compositor_display_degrees(const char *name)
         is to be answered by.
 */
 #define COMPOSITOR_CONNECTORS 16
-#define COMPOSITOR_MODE_USERDEF 32u // DRM_MODE_TYPE_USERDEF
 
 struct compositor_connected
 {

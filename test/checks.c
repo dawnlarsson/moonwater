@@ -118921,10 +118921,27 @@ static void check_compositor_refresh(void)
     compositor_refresh_pick("A-1", 4, modes, &mode);
     check("refresh: and a rate asked by number after another is as it was", mode.vrefresh == 60 && mode.clock == modes[0].clock);
 
-    compositor_display[0].refresh = 0;
+    // The settings write the recommended rate as no line at all once nothing else of the screen is asked, so a screen
+    // with none is asked the preferred rate too.
+    compositor_display[0].refresh = 50;
     mode = modes[1];
     compositor_refresh_pick("B-1", 4, modes, &mode);
-    check("refresh: a screen with no line keeps the mode it has", mode.clock == modes[1].clock);
+    check("refresh: a screen with no line is at the first mode it lists at its size, as a line of the preferred rate says",
+          mode.vrefresh == 60 && mode.clock == modes[0].clock);
+    mode = modes[0];
+    compositor_refresh_pick("B-1", 4, modes, &mode);
+    check("refresh: and a screen with none that is there already stays", mode.clock == modes[0].clock);
+    // A mode the kernel's command line forced at a size is the screen's own there, whatever the order the card lists.
+    modes[1].type = COMPOSITOR_MODE_USERDEF;
+    mode = modes[1];
+    compositor_refresh_pick("B-1", 4, modes, &mode);
+    check("refresh: and a mode forced on the command line at its size is kept, line or none",
+          mode.clock == modes[1].clock && mode.type == COMPOSITOR_MODE_USERDEF);
+    compositor_display[0].refresh = 0;
+    mode = modes[0];
+    compositor_refresh_pick("A-1", 4, modes, &mode);
+    check("refresh: also for a line of the preferred rate", mode.clock == modes[1].clock);
+    modes[1].type = 0;
 
     // The rates a screen lists are those at the size of its panel, whether it is laid out turned or not.
     {
