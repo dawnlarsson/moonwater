@@ -4169,6 +4169,9 @@ static fn settings_gallery_draw(struct ui address_to ui)
         }
         settings_gallery_place();
         ui_scroll_draw(ui, &settings_gallery.scroll);
+        // A finger's selection in either field: its handles and actions bar, over the page.
+        ui_text_overlay(ui, &settings_gallery.field[0]);
+        ui_text_overlay(ui, &settings_gallery.field[1]);
 }
 
 // The page's region: the window, over the whole page's height.
@@ -4685,6 +4688,11 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 settings.list.keys = settings.focused && settings.pane && !settings.map.keys;
                 ui_list_draw(ui, &settings.list);
         }
+        // A finger's selection in the field a row is typed in, or in the filter: its handles and actions bar, over the rows.
+        if (settings.editing >= 0 && settings_edit_shown())
+                ui_text_overlay(ui, &settings.edit);
+        if (settings.filter_open && !settings.view)
+                ui_text_overlay(ui, &settings.filter_edit);
 }
 
 /*
@@ -4868,7 +4876,10 @@ static long settings_tick(long timeout, long address_to other)
                         t->focused = settings.focused;
                 if (t->doc.selections)
                         timeout = ui_text_timeout(&settings.ui, t, timeout, now, &redraw);
-                if (redraw)
+                // The rows the field's handles and bar cover are drawn again with it, those they covered as well.
+                if (redraw && (t->bar || t->bar_up || t->over_bottom > t->over_top))
+                        settings_dirty();
+                else if (redraw)
                         settings_changed(t->well_top, t->well_bottom);
         }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))

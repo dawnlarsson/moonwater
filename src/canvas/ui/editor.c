@@ -459,7 +459,7 @@ static fn editor_menu_open(int x, int y)
         struct ui_text address_to view = &editor_now()->view;
 
         m->count = 0;
-        ui_text_menu_items(m, view);
+        ui_text_menu_items(m, view, false);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(m, "&Find", "Ctrl+F", 0, EDITOR_MENU_FIND);
         ui_popmenu_add(m, "&Go to Line", "Ctrl+G", 0, EDITOR_MENU_LINE);
@@ -614,6 +614,10 @@ static fn editor_draw(unsigned int address_to pixels)
                                     ui_role(tab->changed_on_disk ? UI_WARNING : UI_ON_SURFACE_VARIANT), 0);
                 }
         }
+        // A finger's selection: its handles and actions bar, over everything, the find bar's and then the code view's.
+        if (find)
+                ui_text_overlay(ui, &editor.find);
+        ui_text_overlay(ui, &tab->view);
 }
 
 static b32 editor_frame(void)
@@ -726,9 +730,7 @@ static b32 editor_event(const struct window_event address_to event)
         asks = ui_text_event(&editor.ui, &tab->view, event, editor.pointer_x, editor.pointer_y);
         if (asks & UI_TEXT_COMMAND)
                 editor_command(tab->view.command);
-        if ((asks & UI_TEXT_MENU) && tab->view.choices)
-                ui_text_menu_open(&editor.menu, &tab->view, &editor.ui, 0, 0, true);
-        else if (asks & UI_TEXT_MENU)
+        if (asks & UI_TEXT_MENU)
                 editor_menu_open(tab->view.menu_x, tab->view.menu_y);
         if (asks)
                 editor.dirty = true;

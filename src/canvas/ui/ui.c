@@ -8442,7 +8442,8 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
         drag after it whole words, a triple click a line and whole lines, Alt with a click adds a caret, Alt and Shift
         with a drag selects a box of columns, the middle button pastes PRIMARY, the right button asks the app for a
         context menu (ui_text_asks), a finger's tap is a caret and a finger's drag scrolls (thrown, it slows as the
-        kit's lists do), and the wheel scrolls (Ctrl and the wheel zoom the code view). The keys are the keymap's
+        kit's lists do), a finger's long press or double tap selects a word and shows handles and an actions bar (the
+        finger's selection, below), and the wheel scrolls (Ctrl and the wheel zoom the code view). The keys are the keymap's
         (text.c, overridden by /root/canvas.text.keys); a key that is no binding types its character, and AltGr always
         types. The caret blinks only while the widget has the keys, never while it moves, and ui_text_tick says when
         it next needs a frame, so an idle widget wakes nothing. Colours are the kit's roles: the selection, the caret
@@ -8470,6 +8471,18 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_BLINK_FOR_NS 10000000000ull // the caret blinks this long after the last key or move, then stays
 #define UI_TEXT_COMMIT 256u   // a press outside a field that has the keys: the field's plain value is kept (the app commits it)
 
+/*
+        What a finger on a text widget holds, from its press to its lift: the text (a tap, or a drag that scrolls it), an
+        end of the selection by its handle (the drag moves that end), an item of the actions bar (the lift does it), or a
+        selection it is making by words (a long press, or a double tap, and the finger going on). UI_TEXT_BAR_ITEMS is the
+        most the bar has: Cut, Copy, Paste and Select All.
+*/
+#define UI_TEXT_FINGER_TEXT 1
+#define UI_TEXT_FINGER_HANDLE 2
+#define UI_TEXT_FINGER_BAR 3
+#define UI_TEXT_FINGER_SELECT 4
+#define UI_TEXT_BAR_ITEMS 4
+
 struct ui_text
 {
         struct doc doc;
@@ -8488,11 +8501,21 @@ struct ui_text
         b64 scroll_x;
         int clicks;
         struct ui_click click;                  // the kit's click count (ui_click_count): a double click and a triple
-        b32 dragging, drag_box, touch;
+        b32 dragging, drag_box;
         b32 holding;                            // a finger's long press holds the selection (ui_text_hold) until its lift
-        struct ui_press tap;                    // a finger's press on the selection: its lift with no drag asks for the menu
-        b32 choices;                            // the menu asked for is a touch selection's (Cut, Copy, Paste, Select All)
-        b32 handles;                            // a touch selection: its two ends show handles a finger drags (ui_text_draw_handles)
+        struct ui_press tap;                    // a finger's press: a lift with no drag is a tap (target 0 the text, 1 the selection, 2 a handle)
+        p64 tap_at;                             // the offset a tap went down on
+        int finger;                             // what a finger on it holds (UI_TEXT_FINGER_*), 0 none
+        b32 handles;                            // a touch selection: its two ends show handles a finger drags (ui_text_overlay)
+        int grab_dx, grab_dy;                   // a handle's finger holds it where it took it: the end is at the finger plus this
+        b32 bar;                                // the actions bar is wanted: a touch selection's Cut, Copy, Paste and Select All
+        b32 bar_want, bar_up;                   // whether the last overlay meant to show it, and whether it drew it
+        positive bar_since, quiet_at;           // when it was first drawn (its fade); and when the view last moved, which it waits out
+        int bar_x, bar_y, bar_w, bar_h;         // where it was drawn, device pixels: what a finger's press can hit
+        int bar_count, bar_down;                // its items, and the one a finger is on (item + 1, 0 none)
+        int bar_at[UI_TEXT_BAR_ITEMS + 1];      // each item's left edge from bar_x, then the bar's right
+        int bar_id[UI_TEXT_BAR_ITEMS];          // each item's UI_TEXT_MENU_* id
+        int over_top, over_bottom;              // the rows its handles and bar covered: an app that draws in bands draws them again
         int drag_x, drag_y, scroll_past;        // a selection drag's last point, and how far past the box's top (-) or bottom it is (0 inside)
         positive scroll_at;                     // when the last autoscroll step was (ui_text_autoscroll), 0 before the first
         long scroll_owed;                       // the scroll that step owes and has not made, in thousandths of a device pixel
@@ -8850,8 +8873,178 @@ static int ui_text_rows(const struct ui_text address_to t)
 }
 
 /*
+        A wrapped line's rows. The line is cut where it would pass the box's width, at a blank when one is near, and each
+        row after the first is indented as the line is (by its leading blanks, when they are under half the width). The draw,
+        the hand (ui_text_hit) and the handles (ui_text_where) all cut it here, so they agree on where a row starts.
+*/
+static int ui_text_wrap_indent(const struct ui_text_layout address_to l, int room)
+{
+        int indent = 0;
+
+        while (indent < (int)l->count && l->shown[l->shown_at[indent]] == ' ')
+                indent++;
+        return l->x[indent] < room / 2 ? l->x[indent] : 0;
+}
+
+// The cluster after the last of the row that starts at from: at most room wide, cut after the last blank in it when it is cut.
+static p32 ui_text_wrap_to(const struct ui_text_layout address_to l, p32 from, int room, int indent)
+{
+        p32 to = from, blank = 0;
+        int offset_x = l->x[from] - (from ? indent : 0);
+
+        while (to < l->count && l->x[to + 1] - offset_x <= room)
+        {
+                if (l->shown[l->shown_at[to]] == ' ')
+                        blank = to + 1;
+                to++;
+        }
+        if (to < l->count && blank > from)
+                to = blank;
+        to = to > from ? to : from + 1;
+        return to > l->count ? l->count : to;
+}
+
+// Whether the widget has a fold closed: the rows are then not the lines from the top one on, a closed fold's lines being none.
+static b32 ui_text_folds(const struct ui_text address_to t)
+{
+        for (positive r = 0; r < t->doc.range_count; r++)
+                if (t->doc.ranges[r].kind == DOC_RANGE_FOLD)
+                        return true;
+        return false;
+}
+
+// How many rows a line takes: none hidden in a fold, one unless the widget wraps.
+static int ui_text_line_rows(struct ui address_to ui, struct ui_text address_to t, p64 line)
+{
+        static struct ui_text_layout l;
+        int rows = 0, room = t->right - t->left, indent;
+        p32 from = 0, to;
+
+        if (t->mode != UI_TEXT_FIELD && doc_hidden(&t->doc, line))
+                return 0;
+        if (!t->wrap || t->mode == UI_TEXT_FIELD)
+                return 1;
+        ui_text_layout_line(ui, t, line, &l);
+        indent = ui_text_wrap_indent(&l, room);
+        for (;;)
+        {
+                to = ui_text_wrap_to(&l, from, room, indent);
+                rows++;
+                if (to >= l.count)
+                        return rows;
+                from = to;
+        }
+}
+
+/*
+        One row of the view, a line as it is drawn: the document line, the clusters of its layout the row holds (from up to to),
+        how far left of its place on the laid line the row is drawn (a wrapped line's later rows start at the line's indent),
+        and whether it is the line's last row.
+*/
+struct ui_text_row
+{
+        p64 line;
+        p32 from, to;
+        int shift;
+        b32 last;
+};
+
+/*
+        The row at index (0 the top one, a row a line high) of the view, with its line laid out in l: the lines from the top
+        one on, a line a closed fold hides left out and a wrapped line as many rows as it is cut in. False when the view has
+        no row at index, and then row is the last it has.
+*/
+static b32 ui_text_nth_row(struct ui address_to ui, struct ui_text address_to t, int index, struct ui_text_layout address_to l,
+                           struct ui_text_row address_to row)
+{
+        b32 field = t->mode == UI_TEXT_FIELD, wrapped = t->wrap && !field;
+        p64 lines = doc_line_count(&t->doc), line = field ? 0 : t->top_line, use;
+        int at = 0, room = t->right - t->left, indent;
+        p32 from, to;
+
+        line = line < lines ? line : lines - 1;
+        use = line;
+        for (; line < lines; line++)
+        {
+                if (!field && doc_hidden(&t->doc, line))
+                        continue;
+                use = line;
+                if (!wrapped)
+                {
+                        if (at == index)
+                                break;
+                        at++;
+                        continue;
+                }
+                ui_text_layout_line(ui, t, line, l);
+                indent = ui_text_wrap_indent(l, room);
+                for (from = 0;;)
+                {
+                        to = ui_text_wrap_to(l, from, room, indent);
+                        row->line = line, row->from = from, row->to = to, row->last = to >= l->count;
+                        row->shift = l->x[from] - (from ? indent : 0);
+                        if (at == index)
+                                return true;
+                        at++;
+                        if (to >= l->count)
+                                break;
+                        from = to;
+                }
+        }
+        if (wrapped)
+                return false;
+        ui_text_layout_line(ui, t, use, l);
+        row->line = use, row->from = 0, row->to = l->count, row->shift = 0, row->last = true;
+        return line < lines;
+}
+
+/*
+        Where an offset is drawn: the x of its place and the top of its row, device pixels. 0 when it is in the box, -1 when it
+        is before it (its row above the top, hidden in a fold, or a field's place left of the box) and 1 past it (its row
+        below, or a field's place right of it). A row only partly in the box is past it.
+*/
+static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p64 offset, int address_to x, int address_to top)
+{
+        static struct ui_text_layout l;
+        b32 field = t->mode == UI_TEXT_FIELD, wrapped = t->wrap && !field;
+        p64 target = doc_line_of(&t->doc, offset), line = field ? 0 : t->top_line;
+        int at = 0, rows = field ? 1 : ui_text_rows(t), room = t->right - t->left, indent, place;
+        p32 k, from = 0, to;
+
+        if (!field && (target < line || doc_hidden(&t->doc, target)))
+                return -1;
+        for (; line < target && at < rows; line++)
+                at += ui_text_line_rows(ui, t, line);
+        if (at >= rows)
+                return 1;
+        ui_text_layout_line(ui, t, target, &l);
+        for (k = 0; k < l.count && l.offset[k] < offset; k++)
+                ;
+        place = l.x[k];
+        if (wrapped)
+        {
+                indent = ui_text_wrap_indent(&l, room);
+                for (;;)
+                {
+                        to = ui_text_wrap_to(&l, from, room, indent);
+                        if (k < to || to >= l.count)
+                                break;
+                        from = to;
+                        at++;
+                }
+                place -= l.x[from] - (from ? indent : 0);
+                if (at >= rows)
+                        return 1;
+        }
+        *top = t->top + at * t->line_height;
+        *x = t->left - (int)t->scroll_x + place;
+        return *x < t->left ? -1 : *x > t->right ? 1 : 0;
+}
+
+/*
         The view keeps the primary caret in sight: lines scroll so it is between the top and the bottom row, columns so
-        it is inside the text box (a field scrolls sideways only).
+        it is inside the text box (a field scrolls sideways only). Where rows are not lines (a fold hides some, a wrapped
+        line is many) the rows from the top line to the caret's are counted, and the top moves down until they fit.
 */
 static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
 {
@@ -8863,8 +9056,20 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
         {
                 if (line < t->top_line)
                         t->top_line = line;
-                else if (rows > 0 && line >= t->top_line + (p64)rows)
-                        t->top_line = line - (p64)rows + 1;
+                else if (!t->wrap && !ui_text_folds(t))
+                {
+                        if (rows > 0 && line >= t->top_line + (p64)rows)
+                                t->top_line = line - (p64)rows + 1;
+                }
+                else if (rows > 0)
+                {
+                        int used = 0;
+
+                        for (p64 each = t->top_line; each <= line; each++)
+                                used += ui_text_line_rows(ui, t, each);
+                        while (used > rows && t->top_line < line)
+                                used -= ui_text_line_rows(ui, t, t->top_line++);
+                }
         }
         if (t->wrap && t->mode != UI_TEXT_FIELD)
         {
@@ -8886,15 +9091,23 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
         }
 }
 
-// The document offset under device pixels x, y of the widget's text box (clamped to it).
+/*
+        The document offset under device pixels x, y of the widget's text box (clamped to it): the row at y is the view's
+        row (ui_text_nth_row), a wrapped line's or a fold's included, and in it the boundary nearest x. Past the end of a wrapped
+        row that ends at a blank it is the place before the blank, which is where the row's text ends.
+*/
 static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int x, int y)
 {
         static struct ui_text_layout l;
-        p64 line = t->mode == UI_TEXT_FIELD ? 0 : t->top_line + (p64)((y > t->top ? y - t->top : 0) / (t->line_height ? t->line_height : 1));
+        struct ui_text_row row;
+        int index = y > t->top && t->line_height ? (y - t->top) / t->line_height : 0, px;
 
-        line = line >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : line;
-        ui_text_layout_line(ui, t, line, &l);
-        return ui_text_at_x(&l, x - t->left + (int)t->scroll_x);
+        ui_text_nth_row(ui, t, index < 4096 ? index : 4096, &l, &row);
+        px = x - t->left + (int)t->scroll_x + row.shift;
+        for (p32 k = row.from; k < row.to; k++)
+                if (px < (l.x[k] + l.x[k + 1]) / 2)
+                        return l.offset[k];
+        return !row.last && row.to > row.from && l.shown[l.shown_at[row.to - 1]] == ' ' ? l.offset[row.to - 1] : l.offset[row.to];
 }
 
 /*
@@ -9034,20 +9247,24 @@ static positive ui_text_tick(struct ui_text address_to t, positive now, b32 addr
 }
 
 static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, positive now, b32 address_to redraw);
+static positive ui_text_bar_tick(struct ui_text address_to t, positive now, b32 address_to redraw);
 
 /*
-        The widget's next frame as a loop's timeout: its blink and its selection's scroll (ui_text_autoscroll, a drag held past an
-        edge), each folded into the timeout the loop sleeps (-1 for none, as the tick answers it), with the redraw they asked for.
+        The widget's next frame as a loop's timeout: its blink, its selection's scroll (ui_text_autoscroll, a drag held past an
+        edge) and the actions bar's coming and going (ui_text_bar_tick), each folded into the timeout the loop sleeps (-1 for
+        none, as the tick answers it), with the redraw they asked for.
         Every app's tick asks this for its field, and none of them keeps its own deadline.
 */
 static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t, long timeout, positive now, b32 address_to redraw)
 {
-        positive due = ui_text_tick(t, now, redraw), scroll = ui_text_autoscroll(ui, t, now, redraw);
+        positive due = ui_text_tick(t, now, redraw), scroll = ui_text_autoscroll(ui, t, now, redraw), bar = ui_text_bar_tick(t, now, redraw);
 
         if (due && (timeout < 0 || (long)(due - now) < timeout))
                 timeout = (long)(due - now);
         if (scroll && (timeout < 0 || (long)(scroll - now) < timeout))
                 timeout = (long)(scroll - now);
+        if (bar && (timeout < 0 || (long)(bar - now) < timeout))
+                timeout = (long)(bar - now);
         return timeout;
 }
 
@@ -9329,127 +9546,17 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
 
 /*
         The pointer and the wheel. x and y are the window's device pixels; the widget's box is where it was last drawn.
-        Answers what changed, and UI_TEXT_MENU for the right button (menu_x and menu_y say where).
+        Answers what changed, and UI_TEXT_MENU for the right button (menu_x and menu_y say where). A mouse's presses and
+        drags are here; a finger's are ui_text_finger's, further on.
 */
 static b32 ui_text_selected(const struct ui_text address_to t, p64 offset);
+static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y,
+                          positive now);
+static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, int x, int y);
 
-// The first line of the primary selection as it is drawn now, in device pixels: its ends (the line's own where the selection
-// goes on past it) and the top and bottom of its row. False with no selection, or when that line is scrolled off the top.
-static b32 ui_text_span(struct ui address_to ui, struct ui_text address_to t, int *left, int *top, int *right, int *bottom)
-{
-        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
-        static struct ui_text_layout l;
-        p64 start = doc_sel_start(s), finish = doc_sel_end(s), first = t->mode == UI_TEXT_FIELD ? 0 : t->top_line, line;
-        int origin = t->left - (int)t->scroll_x;
-
-        if (start >= finish)
-                return false;
-        line = doc_line_of(&t->doc, start);
-        if (line < first)
-                return false;
-        ui_text_layout_line(ui, t, line, &l);
-        *left = origin + ui_text_x_of(&l, start);
-        *right = origin + ui_text_x_of(&l, doc_line_of(&t->doc, finish) == line ? finish : doc_line_end(&t->doc, line));
-        *top = t->top + (int)(line - first) * t->line_height;
-        *bottom = *top + t->line_height;
-        return true;
-}
-
-#define UI_TEXT_HANDLE 6 // a handle's knob, its radius in logical pixels; the stem under the line is two wide
-
-// Where a selection end's handle is drawn, in device pixels: x, the top of its row (the stem's top) and the row's bottom (the
-// knob hangs below it). False when that row is not wholly in the box, or its line's x is not (a wrapped widget has none: a
-// wrapped row's place is not the layout's).
-static b32 ui_text_handle_at(struct ui address_to ui, struct ui_text address_to t, p64 offset, int *x, int *top, int *bottom)
-{
-        static struct ui_text_layout l;
-        p64 line = doc_line_of(&t->doc, offset), first = t->mode == UI_TEXT_FIELD ? 0 : t->top_line;
-        int row;
-
-        if (t->wrap || line < first)
-                return false;
-        row = t->top + (int)(line - first) * t->line_height;
-        if (row < t->top || row + t->line_height > t->bottom)
-                return false;
-        ui_text_layout_line(ui, t, line, &l);
-        *x = t->left - (int)t->scroll_x + ui_text_x_of(&l, offset);
-        if (*x < t->left || *x > t->right)
-                return false;
-        *top = row;
-        *bottom = row + t->line_height;
-        return true;
-}
-
-// The handles of a touch selection, drawn over its two ends in the accent: a flat stem under each end's line, and a knob hung
-// below it. Only the one selection of a widget has them, and only while the widget says so (handles).
-static fn ui_text_draw_handles(struct ui address_to ui, struct ui_text address_to t)
-{
-        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
-        unsigned int tone = ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, 255);
-        int radius = UI_TEXT_HANDLE * ui->scale / 100, width = 2 * ui->scale / 100;
-
-        if (!t->handles || t->doc.selection_count != 1 || doc_sel_start(s) >= doc_sel_end(s))
-                return;
-        for (int side = 0; side < 2; side++)
-        {
-                int x, top, bottom;
-
-                if (!ui_text_handle_at(ui, t, side ? doc_sel_end(s) : doc_sel_start(s), &x, &top, &bottom))
-                        continue;
-                ui_fill(ui, x - width / 2, top, width, bottom - top, tone);
-                ui_round(ui, x - radius, bottom, 2 * radius, 2 * radius, radius, tone);
-        }
-}
-
-// A finger's press on a handle moves that end: the other end stays where it is, and the drag after it is by characters. The
-// press is on a handle when it is within a finger's reach across the knob (UI_TARGET), from the lower quarter of the end's row
-// down past the knob: the text of the row is still the selection's, so a tap there is its menu. False when it is on neither.
-static b32 ui_text_handle_grab(struct ui address_to ui, struct ui_text address_to t, int x, int y)
-{
-        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
-        int radius = UI_TEXT_HANDLE * ui->scale / 100, reach = UI_TARGET * ui->scale / 100 / 2;
-
-        if (!t->handles || t->doc.selection_count != 1 || doc_sel_start(s) >= doc_sel_end(s))
-                return false;
-        for (int side = 0; side < 2; side++)
-        {
-                p64 at = side ? doc_sel_end(s) : doc_sel_start(s), fixed = side ? doc_sel_start(s) : doc_sel_end(s);
-                int hx, top, bottom;
-
-                if (!ui_text_handle_at(ui, t, at, &hx, &top, &bottom))
-                        continue;
-                if (x < hx - reach || x >= hx + reach || y < bottom - t->line_height / 4 || y >= bottom + 3 * radius)
-                        continue;
-                ui_drag_stop(&t->kinetic);
-                t->touch = t->holding = t->tap.down = false;
-                t->dragging = true, t->drag_box = false;
-                t->drag_kind = 1, t->drag_start = t->drag_end = fixed;
-                ui_text_wake(t);
-                return true;
-        }
-        return false;
-}
-
-// A finger's long press (the compositor's right button, WINDOW_KEY_HOLD): the word under it is selected, and the drag after it
-// is by words from there (drag_kind 2) until the lift. A masked field has no words, so its whole text is taken, as a double
-// click takes it.
-static p32 ui_text_hold(struct ui address_to ui, struct ui_text address_to t, int x, int y)
-{
-        p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
-
-        if (t->masked)
-                start = 0, finish = doc_length(&t->doc);
-        else
-                doc_word_at(&t->doc, at, &start, &finish);
-        ui_drag_stop(&t->kinetic);
-        doc_select_set(&t->doc, start, finish);
-        t->touch = false, t->holding = true, t->dragging = true, t->drag_box = false;
-        t->tap.down = false, t->handles = true;
-        t->drag_kind = 2, t->drag_start = start, t->drag_end = finish;
-        ui_text_reveal(ui, t);
-        ui_text_wake(t);
-        return UI_TEXT_MOVED;
-}
+// How long the view stays still after it moved before the actions bar comes back, and how long the bar takes to fade in.
+#define UI_TEXT_BAR_AFTER_NS 200000000ull
+#define UI_TEXT_BAR_FADE_NS 120000000ull
 
 // A drag's selection, taken at the point at: it grows by the drag's kind from where the drag began (drag_kind, drag_start and
 // drag_end). A word or a line is taken whole, back to the start of one before the drag's start and on to the end of one after.
@@ -9490,16 +9597,17 @@ static long ui_text_lines_moved(struct ui_text address_to t, int up)
 
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
-        b32 inside = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
+        b32 well = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0 && t->mode != UI_TEXT_FIELD;
         positive now = clock_monotonic_nanoseconds();
 
         if (event->type == WINDOW_EVENT_WHEEL)
         {
-                if (!inside)
+                if (!well)
                         return 0;
                 if ((event->flags & WINDOW_KEY_CONTROL) && t->mode == UI_TEXT_CODE)
                         return ui_text_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
+                t->quiet_at = now + UI_TEXT_BAR_AFTER_NS;
                 if (event->b)
                         t->scroll_x = t->scroll_x - (b64)event->a * t->cell * 3 / 120 > 0 ? t->scroll_x - (b64)event->a * t->cell * 3 / 120 : 0;
                 else
@@ -9510,45 +9618,29 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 }
                 return UI_TEXT_MOVED;
         }
+        // A finger's: its left button (the press, the lift, the compositor taking it back), the right button of its long press
+        // (WINDOW_KEY_HOLD), and its moves while it holds something. A two fingers' right button is a mouse's, and asks the menu.
+        if (event->type == WINDOW_EVENT_BUTTON && ((event->a == 0x110 && (event->flags & WINDOW_KEY_TOUCH)) ||
+                                                   (event->a == 0x111 && (event->flags & WINDOW_KEY_HOLD))))
+                return ui_text_finger(ui, t, event, x, y, now);
+        if (event->type == WINDOW_EVENT_MOTION && t->finger)
+                return event->flags & WINDOW_KEY_TOUCH ? ui_text_finger(ui, t, event, x, y, now) : 0;
         if (event->type == WINDOW_EVENT_BUTTON)
         {
                 b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
 
-                // A finger held still (the compositor's long press): its right button selects the word under it, and the moves
-                // after it extend the selection by words. The press's own cancel comes before that button and is no lift; the
-                // left release after it is the lift, which ends the drag and keeps the selection.
-                if (event->a == 0x111 && (event->flags & WINDOW_KEY_HOLD))
-                        return down && inside ? ui_text_hold(ui, t, x, y) : 0;
-                if (event->a == 0x110 && (event->flags & WINDOW_KEY_HOLD) && !down)
-                {
-                        b32 lifted = t->dragging && t->holding;
-
-                        t->dragging = t->holding = false;
-                        if (!lifted)
-                                return 0;
-                        if (doc_any_selected(&t->doc))
-                                ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
-                        return UI_TEXT_MOVED;
-                }
                 if (!down)
                 {
-                        b32 was = t->dragging, tapped = event->a == 0x110 && ui_press_end(&t->tap, (event->flags & WINDOW_KEY_CANCEL) != 0) == 0;
+                        b32 was = t->dragging;
 
                         t->dragging = false, t->scroll_past = 0;
-                        if (tapped)
-                        {
-                                // A tap on the selection: its copy and paste menu, and the selection kept (ui_text_menu_open places it).
-                                t->choices = true;
-                                return UI_TEXT_MENU | UI_TEXT_MOVED;
-                        }
-                        if (t->touch && ui_drag_let_go(&t->kinetic, now))
-                                return UI_TEXT_MOVED;
                         if (was && doc_any_selected(&t->doc))
                                 ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
                         return 0;
                 }
-                if (!inside)
+                if (!well)
                         return 0;
+                t->handles = t->bar = false;
                 if (event->a == 0x111)
                 {
                         p64 at = ui_text_hit(ui, t, x, y);
@@ -9575,30 +9667,9 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 }
                 if (event->a != 0x110)
                         return 0;
-                t->touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
-                if (t->touch)
-                {
-                        // A finger: a caret where it lands, and a drag scrolls rather than selects. On the selection it keeps the
-                        // selection, and a tap there (a lift with no drag) asks for the copy and paste menu.
-                        p64 at = ui_text_hit(ui, t, x, y);
-                        b32 on = doc_any_selected(&t->doc) && ui_text_selected(t, at);
-
-                        if (ui_text_handle_grab(ui, t, x, y))
-                                return UI_TEXT_MOVED;
-                        ui_drag_start(&t->kinetic, y, now);
-                        t->finger_left = 0;
-                        if (on)
-                                ui_press_begin(&t->tap, x, y, 0, true);
-                        else
-                                doc_select_set(&t->doc, at, at), t->tap.down = false, t->handles = false;
-                        t->dragging = true;
-                        ui_text_wake(t);
-                        return UI_TEXT_MOVED;
-                }
                 {
                         p64 at = ui_text_hit(ui, t, x, y), start = at, finish = at;
 
-                        t->handles = false;
                         t->clicks = ui_click_count(ui, &t->click, now, x, y);
                         t->drag_box = false;
                         // A masked field has no words: a double click takes it all, as a triple does.
@@ -9641,37 +9712,23 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         }
         if (event->type == WINDOW_EVENT_MOTION && t->dragging)
         {
-                if (t->touch)
+                // A drag past the top or bottom edge scrolls the box (ui_text_autoscroll), and the selection is taken at the
+                // edge's row meanwhile: the drag's last point is kept for that.
+                int edge = y < t->top ? t->top : y >= t->bottom ? t->bottom - 1 : y;
+                p64 at = ui_text_hit(ui, t, x, edge);
+
+                // A field's edge is its left and right: past them the field scrolls sideways, as a code view does up and down.
+                t->drag_x = x, t->drag_y = y;
+                t->scroll_past = t->mode == UI_TEXT_FIELD ? (x < t->left ? x - t->left : x >= t->right ? x - t->right + 1 : 0)
+                                 : y < t->top ? y - t->top : y >= t->bottom ? y - t->bottom + 1 : 0;
+                if (t->drag_box)
                 {
-                        int moved = ui_drag_follow(&t->kinetic, y, now);
-                        long lines = ui_text_lines_moved(t, -moved);
-                        b64 to = (b64)t->top_line + lines;
-
-                        ui_press_move(ui, &t->tap, x, y);
-
-                        if (lines)
-                                t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
-                        return lines ? UI_TEXT_MOVED : 0;
-                }
-                {
-                        // A drag past the top or bottom edge scrolls the box (ui_text_autoscroll), and the selection is taken at the
-                        // edge's row meanwhile: the drag's last point is kept for that.
-                        int edge = y < t->top ? t->top : y >= t->bottom ? t->bottom - 1 : y;
-                        p64 at = ui_text_hit(ui, t, x, edge);
-
-                        // A field's edge is its left and right: past them the field scrolls sideways, as a code view does up and down.
-                        t->drag_x = x, t->drag_y = y;
-                        t->scroll_past = t->mode == UI_TEXT_FIELD ? (x < t->left ? x - t->left : x >= t->right ? x - t->right + 1 : 0)
-                                         : y < t->top ? y - t->top : y >= t->bottom ? y - t->bottom + 1 : 0;
-                        if (t->drag_box)
-                        {
-                                doc_select_box(&t->doc, t->box_line, t->box_column, doc_line_of(&t->doc, at), doc_column(&t->doc, at));
-                                return UI_TEXT_MOVED;
-                        }
-                        // Past the edge the view is the tick's to move, a step at a time: the reveal waits for the drag to come back.
-                        ui_text_extend(ui, t, at, t->scroll_past == 0);
+                        doc_select_box(&t->doc, t->box_line, t->box_column, doc_line_of(&t->doc, at), doc_column(&t->doc, at));
                         return UI_TEXT_MOVED;
                 }
+                // Past the edge the view is the tick's to move, a step at a time: the reveal waits for the drag to come back.
+                ui_text_extend(ui, t, at, t->scroll_past == 0);
+                return UI_TEXT_MOVED;
         }
         return 0;
 }
@@ -9772,16 +9829,23 @@ static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text addre
         return now + UI_DRAG_FRAME_NS;
 }
 
-// Any event of the window the widget may take: keys only while it has the keys; the pointer within its box.
+// Any event of the window the widget may take: keys only while it has the keys; the pointer within its box. A key is
+// no finger's selection (its handles and bar go), and neither is a text that changed.
 static p32 ui_text_event(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
         t->asks = 0;
-        t->choices = false;
         if (event->type == WINDOW_EVENT_KEY)
-                return t->focused ? t->asks = ui_text_key(ui, t, event) : 0;
-        if (event->type == WINDOW_EVENT_CLIP)
-                return t->asks = ui_text_clip(t, event);
-        return t->asks = ui_text_pointer(ui, t, event, x, y);
+        {
+                if (!t->focused)
+                        return 0;
+                if (event->flags & WINDOW_KEY_DOWN)
+                        t->handles = t->bar = false;
+                return t->asks = ui_text_key(ui, t, event);
+        }
+        t->asks = event->type == WINDOW_EVENT_CLIP ? ui_text_clip(t, event) : ui_text_pointer(ui, t, event, x, y);
+        if (t->asks & UI_TEXT_CHANGED)
+                t->handles = t->bar = false;
+        return t->asks;
 }
 
 /*
@@ -9809,13 +9873,14 @@ static const char address_to ui_text_menu_key(const struct ui_text address_to t,
         return ui_text_menu_keys[id];
 }
 
-static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_text address_to t)
+// The items of the menu, or with actions only the four a finger's selection offers (the actions bar's): Cut, Copy, Paste and
+// Select All, each greyed when the widget can not do it (the bar leaves those out).
+static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_text address_to t, b32 actions)
 {
         p32 none = doc_any_selected(&t->doc) ? 0 : UI_MENU_DISABLED, fixed = t->read_only ? UI_MENU_DISABLED : 0;
         p32 hidden = t->masked ? UI_MENU_DISABLED : 0;
 
-        // A tap on a touch selection: the copy and paste menu, Cut, Copy, Paste and Select All, and nothing else.
-        if (t->choices)
+        if (actions)
         {
                 ui_popmenu_add(m, "Cu&t", ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
                 ui_popmenu_add(m, "&Copy", ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
@@ -9842,23 +9907,11 @@ static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_tex
 
 static b32 ui_text_menu_open(struct ui_popup address_to p, struct ui_text address_to t, const struct ui address_to ui, int x, int y, b32 touch)
 {
-        struct ui measure = *ui;
-        int left, top, right, bottom, screen_x, screen_y, screen_w, screen_h;
-
         if (!p || !t->own)
                 return false;
         p->menu.count = 0;
-        ui_text_menu_items(&p->menu, t);
+        ui_text_menu_items(&p->menu, t, false);
         p->field = t;
-        // A touch selection's menu goes above its first line, centred on it, and below the line when the window has no room
-        // above on the screen. The anchor is a point (the menu's top-left), so the menu's own height is measured here first.
-        if (t->choices && ui_text_span(&measure, t, &left, &top, &right, &bottom))
-        {
-                windows_output(t->own->table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
-                ui_popmenu_size(&measure, &p->menu, screen_h);
-                x = (left + right) / 2 - p->menu.width / 2;
-                y = t->own->table->y[t->own->row] + top - p->menu.height >= screen_y ? top - p->menu.height : bottom;
-        }
         return ui_popup_open(p, t->own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
@@ -9879,6 +9932,445 @@ static p32 ui_text_menu_do(struct ui address_to ui, struct ui_text address_to t,
 static b32 ui_text_inside(const struct ui_text address_to t, int x, int y)
 {
         return x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
+}
+
+/*
+        A finger's selection. A long press on text selects the word under it (the compositor sends it as the right button
+        flagged WINDOW_KEY_HOLD), a double tap selects a word and a triple tap a line, and the finger going on after either
+        extends the selection by words until it lifts. The selection then shows a handle at each end, and an actions bar (Cut,
+        Copy, Paste and Select All, the ones the widget can do: ui_text_menu_items) over it. A finger on a handle moves that end,
+        anywhere in the text, past the edge of the view too (the view scrolls while the finger is held in the band at the edge,
+        at the speed of a mouse's selection drag); the two ends may cross. A finger that lands on the text and moves still
+        scrolls it, as before; a tap on the selection or on a handle shows the bar or takes it away, and a tap anywhere else puts
+        the caret there. The bar is not shown while a handle or the text moves under a finger, and comes back when it is still.
+
+        The handles and the bar are the widget's overlay (ui_text_overlay), which the app draws last in its picture so nothing
+        is drawn over them, and they are inside the window: a press on them is the widget's (ui_text_reach). What a finger can
+        hit is at least UI_TARGET logical pixels each way (ui_hit), the drawn shapes small in the middle of it.
+*/
+#define UI_TEXT_HANDLE 6    // a handle's knob, its radius in logical pixels; the stem over it is two wide
+#define UI_TEXT_TITLEBAR 24 // the top of a window the compositor takes for the window (COMPOSITOR_GRAB): the bar keeps below it
+#define UI_TEXT_BAR_PAD 16  // the bar's item, its label's room each side
+#define UI_TEXT_BAR_GAP 8   // the bar's room from the selection
+#define UI_TEXT_BAR_EDGE 12 // and from the window's edge, which a finger's grip (the compositor's) takes the press of
+
+// The label of an item of the actions bar.
+static const char address_to ui_text_action_label(int id)
+{
+        return id == UI_TEXT_MENU_CUT ? "Cut" : id == UI_TEXT_MENU_COPY ? "Copy" : id == UI_TEXT_MENU_PASTE ? "Paste" : "Select All";
+}
+
+// The bar's items now, in bar_id: the menu's four (ui_text_menu_items) the widget can do, Select All left off when everything
+// is selected already. How many.
+static int ui_text_actions(struct ui_text address_to t)
+{
+        static struct ui_popmenu m;
+        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+        b32 all = doc_length(&t->doc) && doc_sel_start(s) == 0 && doc_sel_end(s) == doc_length(&t->doc);
+        int count = 0;
+
+        m.count = 0;
+        ui_text_menu_items(&m, t, true);
+        for (int at = 0; at < m.count && count < UI_TEXT_BAR_ITEMS; at++)
+                if (!(m.items[at].flags & UI_MENU_DISABLED) && !(m.items[at].id == UI_TEXT_MENU_ALL && all))
+                        t->bar_id[count++] = m.items[at].id;
+        return count;
+}
+
+// The item of the bar under x, y as it was drawn, or -1: none when the bar is not up.
+static int ui_text_bar_item(const struct ui_text address_to t, int x, int y)
+{
+        if (!t->bar_up || x < t->bar_x || x >= t->bar_x + t->bar_w || y < t->bar_y || y >= t->bar_y + t->bar_h)
+                return -1;
+        for (int k = 0; k < t->bar_count; k++)
+                if (x - t->bar_x < t->bar_at[k + 1])
+                        return k;
+        return -1;
+}
+
+// Which end's handle a finger at x, y is on (1 the start, 2 the end), or 0: the shape is the knob, its reach the finger's (ui_hit);
+// where the two reaches meet it is the nearer knob's. A handle whose row is out of the box is not there to be taken.
+static int ui_text_handle_hit(struct ui address_to ui, struct ui_text address_to t, int x, int y)
+{
+        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+        int radius = ui_dev(ui, UI_TEXT_HANDLE), best = 0;
+        long near = 0;
+
+        if (!t->handles || t->doc.selection_count != 1 || doc_sel_start(s) >= doc_sel_end(s))
+                return 0;
+        for (int side = 1; side <= 2; side++)
+        {
+                int hx, top;
+                long dx, dy, far;
+
+                if (ui_text_where(ui, t, side == 2 ? doc_sel_end(s) : doc_sel_start(s), &hx, &top) ||
+                    !ui_hit(ui, true, x, y, hx - radius, top + t->line_height, 2 * radius, 2 * radius))
+                        continue;
+                dx = x - hx, dy = y - (top + t->line_height + radius);
+                far = dx * dx + dy * dy;
+                if (!best || far < near)
+                        best = side, near = far;
+        }
+        return best;
+}
+
+// Whether a press at x, y is the widget's: its well, its actions bar over whatever is under it, or a handle.
+static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, int x, int y)
+{
+        return ui_text_inside(t, x, y) || (t->bar_up && x >= t->bar_x && x < t->bar_x + t->bar_w && y >= t->bar_y && y < t->bar_y + t->bar_h) ||
+               ui_text_handle_hit(ui, t, x, y);
+}
+
+/*
+        Whether the bar may be seen now: no finger is moving a handle, a selection or the text (a press that has not moved is
+        none), nothing is thrown, and the view has been still for UI_TEXT_BAR_AFTER_NS.
+*/
+static b32 ui_text_bar_still(const struct ui_text address_to t, positive now)
+{
+        return t->finger != UI_TEXT_FINGER_HANDLE && t->finger != UI_TEXT_FINGER_SELECT &&
+               !(t->finger == UI_TEXT_FINGER_TEXT && t->tap.dragged) && !t->kinetic.flying && now >= t->quiet_at;
+}
+
+/*
+        Where the bar goes: its items' widths, and over the selection (centred on the first row's part of it, above its first
+        visible row) or below it when there is no room above, clear of the handles hung under it. It stays inside the window,
+        in from its edges and below its top, which the compositor takes for the window's own. False when there is nothing
+        to offer or none of the selection is in the view.
+*/
+static b32 ui_text_bar_place(struct ui address_to ui, struct ui_text address_to t)
+{
+        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+        int sx = t->left, st = t->top, ex = t->right, et = t->top, count = ui_text_actions(t);
+        int a = ui_text_where(ui, t, doc_sel_start(s), &sx, &st), b = ui_text_where(ui, t, doc_sel_end(s), &ex, &et);
+        int pad = ui_dev(ui, UI_TEXT_BAR_PAD), edge = ui_dev(ui, UI_TEXT_BAR_EDGE), room = ui->width - 2 * edge, titlebar = ui_dev(ui, UI_TEXT_TITLEBAR);
+        int top, bottom, mid, text = 0, wide = 0, x, y;
+
+        if (!count || (a < 0 && b < 0) || (a > 0 && b > 0))
+                return false;
+        top = a == 0 ? st : t->top;
+        bottom = b == 0 ? et + t->line_height : t->bottom;
+        mid = a == 0 && b == 0 && st == et ? (sx + ex) / 2 : a == 0 ? (sx + t->right) / 2 : (t->left + t->right) / 2;
+        for (int k = 0; k < count; k++)
+                text += ui_kit_measure(ui, (string_address)ui_text_action_label(t->bar_id[k]), UI_BODY_MEDIUM);
+        // A window too narrow for the bar gives its items less room, down to a little.
+        wide = text + 2 * pad * count;
+        if (wide > room && room > 0)
+                pad = (room - text) / (2 * count) > ui_dev(ui, 2) ? (room - text) / (2 * count) : ui_dev(ui, 2), wide = text + 2 * pad * count;
+        t->bar_w = wide, t->bar_h = ui_dev(ui, UI_TARGET);
+        t->bar_count = count;
+        t->bar_at[0] = 0;
+        for (int k = 0; k < count; k++)
+                t->bar_at[k + 1] = t->bar_at[k] + ui_kit_measure(ui, (string_address)ui_text_action_label(t->bar_id[k]), UI_BODY_MEDIUM) + 2 * pad;
+        x = mid - wide / 2;
+        x = x > ui->width - wide - edge ? ui->width - wide - edge : x;
+        x = x < edge ? edge : x;
+        y = top - t->bar_h - ui_dev(ui, UI_TEXT_BAR_GAP);
+        if (y < titlebar)
+                y = bottom + 2 * ui_dev(ui, UI_TEXT_HANDLE) + ui_dev(ui, UI_TEXT_BAR_GAP);
+        y = y > ui->height - t->bar_h - edge ? ui->height - t->bar_h - edge : y;
+        y = y < titlebar ? titlebar : y;
+        t->bar_x = x, t->bar_y = y;
+        return true;
+}
+
+/*
+        The handles and the bar, over everything the app drew: a flat stem down the end's row in the accent with a knob hung
+        under it, at each end of a finger's selection that is in the box; then the bar, in the surface's highest layer with a line
+        round it and a rule between its items, the one a finger is on lit, faded in over UI_TEXT_BAR_FADE_NS the frame it first comes
+        (at once with reduced motion). Nothing is drawn for a widget that has neither, and what it covered is kept (over_top,
+        over_bottom) for an app that draws in bands. An app calls it last, for each widget it draws, in the same frame.
+*/
+static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t)
+{
+        const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+        positive now = clock_monotonic_nanoseconds();
+        b32 was = t->bar_up;
+        int radius = ui_dev(ui, UI_TEXT_HANDLE), stem = ui_dev(ui, 2) ? ui_dev(ui, 2) : 1;
+
+        t->over_top = t->over_bottom = 0;
+        t->bar_up = false;
+        if (t->handles && t->doc.selection_count == 1 && doc_sel_start(s) < doc_sel_end(s))
+        {
+                unsigned int tone = ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, 255);
+
+                for (int side = 0; side < 2; side++)
+                {
+                        int x, top;
+
+                        if (ui_text_where(ui, t, side ? doc_sel_end(s) : doc_sel_start(s), &x, &top))
+                                continue;
+                        ui_fill(ui, x - stem / 2, top, stem, t->line_height, tone);
+                        ui_round(ui, x - radius, top + t->line_height, 2 * radius, 2 * radius, radius, tone);
+                        t->over_top = !t->over_bottom || top < t->over_top ? top : t->over_top;
+                        t->over_bottom = top + t->line_height + 2 * radius > t->over_bottom ? top + t->line_height + 2 * radius : t->over_bottom;
+                }
+        }
+        t->bar_want = t->bar && ui_text_bar_still(t, now);
+        if (t->bar_want && ui_text_bar_place(ui, t))
+        {
+                int line = ui_px(ui, 1), corner = ui_dev(ui, UI_MENU_RADIUS), baseline, alpha = 255;
+                b64 age = now - (was ? t->bar_since : now);
+
+                if (!was)
+                        t->bar_since = now;
+                if (!ui_kit.motion && age < (b64)UI_TEXT_BAR_FADE_NS)
+                        alpha = (int)(age * 255 / (b64)UI_TEXT_BAR_FADE_NS), ui_kit.busy = 1;
+                ui_round(ui, t->bar_x, t->bar_y, t->bar_w, t->bar_h, corner, ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, (unsigned int)alpha));
+                ui_round(ui, t->bar_x + line, t->bar_y + line, t->bar_w - 2 * line, t->bar_h - 2 * line, corner > line ? corner - line : 0,
+                         ui_tone(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu, (unsigned int)alpha));
+                baseline = t->bar_y + (t->bar_h - ui_capital(ui, 14)) / 2 + ui_capital(ui, 14);
+                for (int k = 0; k < t->bar_count; k++)
+                {
+                        const char address_to label = ui_text_action_label(t->bar_id[k]);
+                        int left = t->bar_x + t->bar_at[k], right = t->bar_x + t->bar_at[k + 1], wide = ui_kit_measure(ui, (string_address)label, UI_BODY_MEDIUM);
+
+                        if (t->bar_down == k + 1)
+                                ui_fill(ui, left + (k ? 0 : line), t->bar_y + line, right - left - (k + 1 == t->bar_count ? line : 0), t->bar_h - 2 * line,
+                                        ui_tone(ui_role(UI_SELECTION) & 0xffffffu, (unsigned int)alpha * (ui_role(UI_SELECTION) >> 24) / 255));
+                        if (k)
+                                ui_fill(ui, left, t->bar_y + t->bar_h / 4, line, t->bar_h / 2, ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, (unsigned int)alpha));
+                        ui_kit_text(ui, (left + right - wide) / 2, baseline, (string_address)label, UI_BODY_MEDIUM,
+                                    ((unsigned int)alpha << 24) | (ui_role(UI_ON_SURFACE) & 0xffffffu), 0);
+                }
+                t->bar_up = true;
+                t->over_top = !t->over_bottom || t->bar_y < t->over_top ? t->bar_y : t->over_top;
+                t->over_bottom = t->bar_y + t->bar_h > t->over_bottom ? t->bar_y + t->bar_h : t->over_bottom;
+        }
+}
+
+/*
+        The text under a finger that is held still, or the word under a double tap (clicks 2) and the line under a triple (3):
+        selected, with its handles, and the finger going on extends it by words (lines for a triple) until it lifts. A masked
+        field has no words, so a word of it is all of it, as a double click takes it all.
+*/
+static p32 ui_text_pick(struct ui address_to ui, struct ui_text address_to t, p64 at, int clicks, b32 holding)
+{
+        p64 start = at, finish = at;
+
+        if (clicks == 3)
+        {
+                p64 line = doc_line_of(&t->doc, at);
+
+                start = doc_line_start(&t->doc, line), finish = doc_line_start(&t->doc, line + 1);
+        }
+        else if (t->masked)
+                start = 0, finish = doc_length(&t->doc);
+        else
+                doc_word_at(&t->doc, at, &start, &finish);
+        ui_drag_stop(&t->kinetic);
+        doc_select_set(&t->doc, start, finish);
+        t->finger = UI_TEXT_FINGER_SELECT, t->holding = holding, t->dragging = true, t->drag_box = false;
+        t->handles = true, t->bar = false, t->tap.down = false;
+        t->drag_kind = clicks == 3 ? 3 : 2, t->drag_start = start, t->drag_end = finish;
+        ui_text_reveal(ui, t);
+        ui_text_wake(t);
+        return UI_TEXT_MOVED;
+}
+
+// A finger lands: on the bar's item it shows pressed; on a handle it takes that end; on the text it is a press (a tap, or the start of
+// a scroll), a second tap a word and a third a line, and a caret where it landed when nothing is selected.
+static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_to t, int x, int y, positive now)
+{
+        int item = ui_text_bar_item(t, x, y), grab = item < 0 ? ui_text_handle_hit(ui, t, x, y) : 0, clicks;
+        p64 at;
+        b32 on;
+
+        t->holding = false;
+        if (item >= 0)
+        {
+                t->finger = UI_TEXT_FINGER_BAR, t->dragging = true, t->bar_down = item + 1;
+                ui_press_begin(&t->tap, x, y, item, true);
+                return UI_TEXT_MOVED;
+        }
+        if (grab)
+        {
+                const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
+                int hx = 0, top = 0;
+
+                ui_text_where(ui, t, grab == 2 ? doc_sel_end(s) : doc_sel_start(s), &hx, &top);
+                // The other end stays; the finger holds this one where it took it, so the end does not jump to the finger.
+                t->drag_kind = 1, t->drag_start = t->drag_end = grab == 2 ? doc_sel_start(s) : doc_sel_end(s);
+                t->grab_dx = hx - x, t->grab_dy = top + t->line_height / 2 - y;
+                ui_drag_stop(&t->kinetic);
+                t->finger = UI_TEXT_FINGER_HANDLE, t->dragging = true, t->drag_box = false;
+                ui_press_begin(&t->tap, x, y, 2, true);
+                ui_text_wake(t);
+                return UI_TEXT_MOVED;
+        }
+        if (!ui_text_inside(t, x, y))
+                return 0;
+        at = ui_text_hit(ui, t, x, y);
+        clicks = ui_click_count(ui, &t->click, now, x, y);
+        if (clicks >= 2)
+                return ui_text_pick(ui, t, at, clicks, false);
+        // On the selection, or on the caret of none, a tap shows the bar; anywhere else it puts the caret there, which a tap with
+        // a selection waits for the lift to do (the finger may be about to scroll).
+        on = doc_any_selected(&t->doc) ? ui_text_selected(t, at) : at == t->doc.selections[t->doc.primary].active;
+        t->finger = UI_TEXT_FINGER_TEXT, t->dragging = true, t->tap_at = at;
+        ui_drag_start(&t->kinetic, y, now);
+        t->finger_left = 0;
+        ui_press_begin(&t->tap, x, y, on, true);
+        if (!doc_any_selected(&t->doc) && !on)
+        {
+                doc_select_set(&t->doc, at, at);
+                t->handles = t->bar = false;
+        }
+        ui_text_wake(t);
+        return UI_TEXT_MOVED;
+}
+
+// A finger that holds something moves.
+static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_to t, int x, int y, positive now)
+{
+        if (t->finger == UI_TEXT_FINGER_BAR)
+        {
+                int was = t->bar_down;
+
+                ui_press_move(ui, &t->tap, x, y);
+                t->bar_down = !t->tap.dragged && ui_text_bar_item(t, x, y) == t->tap.target ? t->tap.target + 1 : 0;
+                return was != t->bar_down ? UI_TEXT_MOVED : 0;
+        }
+        if (t->finger == UI_TEXT_FINGER_TEXT)
+        {
+                // The text follows the finger, a line at a time as its pixels make lines; the bar goes as the press turns to a drag.
+                b32 was = t->tap.dragged;
+                int moved = ui_drag_follow(&t->kinetic, y, now);
+                long lines = ui_text_lines_moved(t, -moved);
+                b64 to = (b64)t->top_line + lines;
+
+                ui_press_move(ui, &t->tap, x, y);
+                if (lines)
+                        t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
+                return lines || was != t->tap.dragged ? UI_TEXT_MOVED : 0;
+        }
+        {
+                // A handle's end, or a selection by words, follows the finger: the end is where the finger plus what it took the handle
+                // by is, taken at the box's edge when it is past it. The view scrolls (ui_text_autoscroll) while the finger is in the
+                // band at the box's edge, a finger's width in from it, the faster the further in.
+                int handle = t->finger == UI_TEXT_FINGER_HANDLE, ex = x + (handle ? t->grab_dx : 0), ey = y + (handle ? t->grab_dy : 0);
+                int band = ui_dev(ui, UI_TARGET) / 2, edge_x = ex < t->left ? t->left : ex >= t->right ? t->right - 1 : ex;
+                int edge_y = ey < t->top ? t->top : ey >= t->bottom ? t->bottom - 1 : ey;
+
+                if (handle)
+                        ui_press_move(ui, &t->tap, x, y);
+                t->drag_x = ex, t->drag_y = ey;
+                t->scroll_past = t->mode == UI_TEXT_FIELD ? (x < t->left + band ? x - (t->left + band) : x >= t->right - band ? x - (t->right - band) + 1 : 0)
+                                 : y < t->top + band ? y - (t->top + band) : y >= t->bottom - band ? y - (t->bottom - band) + 1 : 0;
+                ui_text_extend(ui, t, ui_text_hit(ui, t, edge_x, edge_y), t->scroll_past == 0);
+                return UI_TEXT_MOVED;
+        }
+}
+
+// A finger lifts, or the compositor takes its press back (cancelled), or the lift is a long press's (hold).
+static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to t, int x, int y, b32 cancelled, b32 hold, positive now)
+{
+        int finger = t->finger, tapped;
+        p32 asks = UI_TEXT_MOVED;
+
+        // A long press's left release that comes before its right button is the press taken back, and no lift: a press on the text
+        // ends, one on a handle or the bar goes on to the lift that comes after it.
+        if (hold && !t->holding)
+        {
+                if (finger == UI_TEXT_FINGER_TEXT)
+                {
+                        ui_press_end(&t->tap, true);
+                        t->finger = 0, t->dragging = false;
+                }
+                return 0;
+        }
+        t->finger = 0, t->dragging = false, t->holding = false, t->scroll_past = 0;
+        if (finger == UI_TEXT_FINGER_TEXT)
+        {
+                tapped = ui_press_end(&t->tap, cancelled);
+                if (tapped >= 0)
+                {
+                        // A tap on the selection is the bar's, to show or take away; anywhere else it puts the caret.
+                        if (tapped)
+                                t->bar = !t->bar;
+                        else
+                        {
+                                if (doc_any_selected(&t->doc))
+                                        doc_select_set(&t->doc, t->tap_at, t->tap_at);
+                                t->handles = t->bar = false;
+                        }
+                        return asks;
+                }
+                return ui_drag_let_go(&t->kinetic, now) ? asks : 0;
+        }
+        if (finger == UI_TEXT_FINGER_HANDLE)
+        {
+                tapped = ui_press_end(&t->tap, cancelled);
+                t->bar = tapped >= 0 ? !t->bar : true;
+                if (tapped < 0 && doc_any_selected(&t->doc))
+                        ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
+                return asks;
+        }
+        if (finger == UI_TEXT_FINGER_BAR)
+        {
+                tapped = ui_press_end(&t->tap, cancelled);
+                t->bar_down = 0;
+                if (tapped >= 0 && tapped < t->bar_count && tapped == ui_text_bar_item(t, x, y))
+                {
+                        int id = t->bar_id[tapped];
+
+                        asks |= ui_text_menu_do(ui, t, id);
+                        // Cut, Copy and Paste are done with the selection and the bar; Select All shows it over all of the text.
+                        if (id != UI_TEXT_MENU_ALL || (asks & UI_TEXT_CHANGED))
+                                t->bar = false;
+                        if (asks & UI_TEXT_CHANGED)
+                                t->handles = false;
+                }
+                return asks;
+        }
+        if (finger == UI_TEXT_FINGER_SELECT)
+        {
+                if (doc_any_selected(&t->doc))
+                        ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
+                t->bar = true;
+                return asks;
+        }
+        return 0;
+}
+
+// What a finger does on the widget: its left button's press, lift and cancel, the right button of its long press, and its moves.
+static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y,
+                          positive now)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+
+        if (event->type == WINDOW_EVENT_MOTION)
+                return ui_text_finger_move(ui, t, x, y, now);
+        if (event->a == 0x111)
+        {
+                // The long press's right button: on the text it selects the word; a finger on a handle or the bar only says it was
+                // held, and that press's lift is what it was.
+                if (!down)
+                        return 0;
+                if (t->finger == UI_TEXT_FINGER_HANDLE || t->finger == UI_TEXT_FINGER_BAR)
+                {
+                        t->holding = true;
+                        return 0;
+                }
+                return ui_text_inside(t, x, y) ? ui_text_pick(ui, t, ui_text_hit(ui, t, x, y), 2, true) : 0;
+        }
+        if (down)
+                return ui_text_finger_down(ui, t, x, y, now);
+        return ui_text_finger_up(ui, t, x, y, (event->flags & WINDOW_KEY_CANCEL) != 0, (event->flags & WINDOW_KEY_HOLD) != 0, now);
+}
+
+/*
+        The bar's coming and going as a tick sees it: it is wanted and the view is still and it was not shown (or the other way
+        round), so the frame is drawn; and when it waits for the view to be still, when that is. 0 for no wait.
+*/
+static positive ui_text_bar_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
+{
+        b32 want = t->bar && ui_text_bar_still(t, now);
+
+        if (want != t->bar_want)
+                *redraw = true;
+        if (t->bar && now < t->quiet_at && t->finger != UI_TEXT_FINGER_HANDLE && t->finger != UI_TEXT_FINGER_SELECT && !t->kinetic.flying)
+                return t->quiet_at;
+        return 0;
 }
 
 /*
@@ -9903,7 +10395,7 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
                 // A press outside a field that has the keys ends the typing, by the one rule for every field: a plain value is
                 // kept (UI_TEXT_COMMIT), and a command or a secret is cancelled (UI_TEXT_CANCEL). The press is not the field's:
                 // the app goes on with it, to the row or the button it is on.
-                if ((event->flags & WINDOW_KEY_DOWN) && !ui_text_inside(t, x, y))
+                if ((event->flags & WINDOW_KEY_DOWN) && !ui_text_reach(ui, t, x, y))
                         return t->focused ? (t->masked || t->cancels ? UI_TEXT_CANCEL : UI_TEXT_COMMIT) : 0;
                 if (!(event->flags & WINDOW_KEY_DOWN) && !t->dragging)
                         return 0;
@@ -10310,30 +10802,17 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                         continue;
                 }
                 // Wrapped: the line cut where it would pass the box's width, at a blank when one is near, each row
-                // after the first indented as the line is.
+                // after the first indented as the line is (ui_text_wrap_to, which the hand and the handles cut it by too).
                 {
                         static struct ui_text_layout part;
-                        p32 from = 0, room = (p32)(t->right - t->left);
-                        int indent = 0;
+                        p32 from = 0;
+                        int room = t->right - t->left, indent = ui_text_wrap_indent(&l, room);
 
-                        while (indent < (int)l.count && (l.shown[l.shown_at[indent]] == ' '))
-                                indent++;
-                        indent = l.x[indent] < (int)room / 2 ? l.x[indent] : 0;
                         do
                         {
-                                p32 to = from, blank = 0;
+                                p32 to = ui_text_wrap_to(&l, from, room, indent);
                                 int offset_x = l.x[from] - (from ? indent : 0);
 
-                                while (to < l.count && l.x[to + 1] - offset_x <= (int)room)
-                                {
-                                        if (l.shown[l.shown_at[to]] == ' ')
-                                                blank = to + 1;
-                                        to++;
-                                }
-                                if (to < l.count && blank > from)
-                                        to = blank;
-                                to = to > from ? to : from + 1;
-                                to = to > l.count ? l.count : to;
                                 part.count = to - from;
                                 for (p32 k = 0; k <= part.count; k++)
                                 {
@@ -10351,7 +10830,6 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                         } while (from < l.count && row_y + t->line_height <= t->bottom);
                 }
         }
-        ui_text_draw_handles(ui, t);
 }
 
 /*

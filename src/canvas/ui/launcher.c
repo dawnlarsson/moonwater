@@ -967,6 +967,8 @@ static fn launcher_draw(unsigned int address_to pixels)
         launcher.list.lit = true;
         ui_list_draw(ui, &launcher.list);
         ui_buttons_draw(ui, &launcher.power, launcher.focused || !launcher.had_focus);
+        // A finger's selection in the field: its handles and actions bar, over the rows and the buttons.
+        ui_text_overlay(ui, launcher_field());
 }
 
 // One picture, into the buffer the compositor is not reading; false when there is none yet.

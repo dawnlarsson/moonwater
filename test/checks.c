@@ -125967,6 +125967,8 @@ static void check_touch_path(struct ui address_to wui)
        characters, the start staying where it is. */
     ui_begin(wui, wui->pixels, wui->pitch, wui->width, wui->height);
     ui_text_draw(wui, &t, 20, 60, 190, 44, 0);
+    t.bar = false; // the actions bar the lift showed lies over the field in a window this small: it is another row's
+    ui_text_overlay(wui, &t);
     ex = touch_path_x(wui, &t, 16);
     knob = t.top + t.line_height + 6 * compositor.scale / 100;
     check("touch path: the end of the selection has a handle, a knob in the accent under its line",
@@ -140986,7 +140988,7 @@ static fn text_menu_keys_check(void)
         doc_keymap_defaults(&map);
         ui_text_open(&t, UI_TEXT_FIELD, (const p8 address_to) "hello", 5, &map);
         m.count = 0;
-        ui_text_menu_items(&m, &t);
+        ui_text_menu_items(&m, &t, false);
         check("text menu keys: the defaults are the keymap's first keys (Ctrl+Z, Ctrl+Y, Ctrl+X, Ctrl+C, Ctrl+V, Delete, Ctrl+A)",
               text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_UNDO), "Ctrl+Z") &&
                   text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_REDO), "Ctrl+Y") &&
@@ -140999,13 +141001,13 @@ static fn text_menu_keys_check(void)
         doc_keymap_line(&map, "ctrl+x none", 11);
         doc_keymap_line(&map, "shift+delete none", 17);
         m.count = 0;
-        ui_text_menu_items(&m, &t);
+        ui_text_menu_items(&m, &t, false);
         check("text menu keys: a command with no key left shows none (Cut, with its two keys taken away)",
               text_menu_key(&m, UI_TEXT_MENU_CUT) == null);
 
         doc_keymap_line(&map, "ctrl+k cut", 10);
         m.count = 0;
-        ui_text_menu_items(&m, &t);
+        ui_text_menu_items(&m, &t, false);
         check("text menu keys: the key the keymap binds shows, rebound or not (Cut is Ctrl+K)",
               text_menu_keys_are(text_menu_key(&m, UI_TEXT_MENU_CUT), "Ctrl+K"));
 }
@@ -141399,16 +141401,18 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
         asks = field_button(wui, t, 0x110, false, gamma + 1, y, cancel);
         check("touch: the lift ends the drag and keeps the selection", (asks & UI_TEXT_MOVED) && field_selected(t, 6, 16) && !t->dragging);
 
-        // A tap on the selection keeps it and asks for its menu, which is Cut, Copy, Paste and Select All (not the full menu).
+        // A tap on the selection keeps it and shows the actions bar (no popup menu), which is Cut, Copy, Paste and Select All.
+        t->bar = false;
         field_button(wui, t, 0x110, true, beta + 1, y, touch);
         asks = field_button(wui, t, 0x110, false, beta + 1, y, touch);
-        check("touch: a tap on the selection keeps it and asks for its menu", (asks & UI_TEXT_MENU) && field_selected(t, 6, 16));
+        check("touch: a tap on the selection keeps it, shows the actions bar and asks for no popup menu",
+              !(asks & UI_TEXT_MENU) && t->bar && field_selected(t, 6, 16));
         {
                 static struct ui_popmenu m;
 
                 m.count = 0;
-                ui_text_menu_items(&m, t);
-                check("touch: the menu of a selection is Cut, Copy, Paste and Select All",
+                ui_text_menu_items(&m, t, true);
+                check("touch: the actions of a selection are Cut, Copy, Paste and Select All",
                       m.count == 4 && m.items[0].id == UI_TEXT_MENU_CUT && m.items[1].id == UI_TEXT_MENU_COPY &&
                               m.items[2].id == UI_TEXT_MENU_PASTE && m.items[3].id == UI_TEXT_MENU_ALL);
         }
@@ -141430,6 +141434,7 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
         // Each end of a touch selection has a handle: a stem under its line and a knob hung below it, in the accent. A finger on
         // a knob moves that end by characters, and the other end stays where it was.
         ui_text_draw(wui, t, 20, 20, 300, 60, 0);
+        ui_text_overlay(wui, t);
         y = t->top + t->line_height / 2;
         {
                 int bottom = t->top + t->line_height, radius = 6 * wui->scale / 100, knob = field_x(wui, t, 10);
@@ -141437,7 +141442,7 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
                 check("touch: a selection's end has a handle, a knob in the accent under its line",
                       (wui->pixels[(positive)(bottom + radius) * wui->pitch + (positive)knob] & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu));
                 field_button(wui, t, 0x110, true, knob, bottom + radius, touch);
-                field_motion(wui, t, field_x(wui, t, 13) + 1, y);
+                ui_field_event(wui, t, null, &(struct window_event){WINDOW_EVENT_MOTION, touch, field_x(wui, t, 13) + 1, y}, field_x(wui, t, 13) + 1, y);
                 asks = field_button(wui, t, 0x110, false, field_x(wui, t, 13) + 1, y, touch);
                 check("touch: a finger on a handle moves that end by characters, and the other end stays",
                       (asks & UI_TEXT_MOVED) && field_selected(t, 6, 13));
@@ -141513,6 +141518,621 @@ static fn touch_scroll_check(struct ui address_to wui)
         field_button(wui, &view, 0x110, false, x, row, 0);
         check("scroll: the lift stops it", !ui_text_autoscroll(wui, &view, now + 600000000ull, &redraw) && view.top_line == 10);
         ui_text_close(&view);
+}
+
+/*
+        A finger's selection (ui_text_finger, ui_text_overlay), one rule for every surface that takes it, tested here once: a code
+        view, a field, a masked field and a read only view, at each scale the kit draws at. A long press selects the word under
+        the finger; the selection shows a handle at each end, a finger's width to take it by; a finger on a handle moves that
+        end across words and lines (and past the box's edge, the view scrolling by the kit's speed for the scale) to the ends
+        of the text, the two ends able to cross; the actions bar shows what the surface allows, inside the window, over the
+        selection or under it, and not while something moves; a tap on the selection or a handle shows or takes it away, a tap
+        elsewhere clears the selection; a finger that drags the text still scrolls it; a mouse is as it was. Each answer is a
+        bit; it is kept only if it held at every scale, and one row says it.
+*/
+#define TS_WIDTH 1280
+#define TS_HEIGHT 960
+#define TS_LEFT 20
+#define TS_LINES 40
+
+enum
+{
+        TS_LONG_PRESS, TS_HANDLES, TS_GRAB_IN, TS_GRAB_OUT, TS_ACROSS_LINES, TS_KEEPS_START, TS_CROSS, TS_TO_END, TS_TO_START, TS_SPEED,
+        TS_BAR_ITEMS, TS_BAR_ABOVE, TS_BAR_BELOW, TS_BAR_INSIDE, TS_BAR_SELECT_ALL, TS_BAR_CUT, TS_BAR_COPY, TS_TOGGLE_SELECTION,
+        TS_TOGGLE_HANDLE, TS_HANDLE_BAR, TS_TAP_CLEARS, TS_SCROLLS, TS_BAR_HIDES, TS_BAR_RETURNS, TS_DOUBLE_TAP, TS_TRIPLE_TAP, TS_MOUSE,
+        TS_FADE, TS_REDUCED, TS_IDLE, TS_FIELD_ITEMS, TS_FIELD_ACROSS, TS_FIELD_TO_END, TS_FIELD_TO_START, TS_MASKED, TS_READ_ONLY,
+        TS_CARET_BAR, TS_EMPTY_BAR, TS_WRAP_HIT, TS_WRAP_HANDLE, TS_FOLD_HIT
+};
+
+static struct ui_text ts_view;
+static struct windows ts_table;
+static struct window_row ts_own;
+static unsigned int address_to ts_pixels;
+static int ts_top = 40;
+
+// The widget drawn as the app draws it: its picture cleared, the widget, then its overlay.
+static void ts_draw(struct ui address_to wui, struct ui_text address_to t)
+{
+        ui_begin(wui, ts_pixels, TS_WIDTH, TS_WIDTH, TS_HEIGHT);
+        if (t->mode == UI_TEXT_FIELD)
+                ui_text_draw(wui, t, TS_LEFT, ts_top, 400 * wui->scale / 100, 44 * wui->scale / 100, 0);
+        else
+                ui_text_draw(wui, t, TS_LEFT, ts_top, 400 * wui->scale / 100, 300 * wui->scale / 100, 0);
+        ui_text_overlay(wui, t);
+}
+
+static p32 ts_event(struct ui address_to wui, struct ui_text address_to t, unsigned int type, unsigned int flags, int a, int x, int y)
+{
+        struct window_event event = {type, flags, a, 0};
+
+        return ui_field_event(wui, t, null, &event, x, y);
+}
+
+static void ts_reset(struct ui_text address_to t)
+{
+        t->click.at = 0, t->click.count = 0;
+}
+
+static p32 ts_down(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        return ts_event(wui, t, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, x, y);
+}
+
+static p32 ts_move(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        return ts_event(wui, t, WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, x, y);
+}
+
+static p32 ts_up(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        return ts_event(wui, t, WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, x, y);
+}
+
+// A tap: a press and a lift, the click count not carried from the last one.
+static p32 ts_tap(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        ts_reset(t);
+        ts_down(wui, t, x, y);
+        return ts_up(wui, t, x, y);
+}
+
+// A long press the way the compositor sends it, then its lift: the press taken back (cancelled and held), the right button flagged
+// held, and the left release flagged held that is the finger leaving.
+static void ts_hold(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        const unsigned int held = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD;
+
+        ts_reset(t);
+        ts_down(wui, t, x, y);
+        ts_event(wui, t, WINDOW_EVENT_BUTTON, held | WINDOW_KEY_CANCEL, 0x110, x, y);
+        ts_event(wui, t, WINDOW_EVENT_BUTTON, held | WINDOW_KEY_DOWN, 0x111, x, y);
+        ts_event(wui, t, WINDOW_EVENT_BUTTON, held, 0x111, x, y);
+}
+
+static void ts_lift(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        ts_event(wui, t, WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD | WINDOW_KEY_CANCEL, 0x110, x, y);
+}
+
+// A long press and its lift where it is, and the widget drawn with its handles and bar.
+static void ts_select(struct ui address_to wui, struct ui_text address_to t, int x, int y)
+{
+        ts_hold(wui, t, x, y);
+        ts_lift(wui, t, x, y);
+        ts_draw(wui, t);
+}
+
+static b32 ts_is(const struct ui_text address_to t, p64 start, p64 finish)
+{
+        return doc_sel_start(&t->doc.selections[t->doc.primary]) == start && doc_sel_end(&t->doc.selections[t->doc.primary]) == finish;
+}
+
+// The centre of the knob of an offset's handle, where a finger takes it. False when the offset is not in the box.
+static b32 ts_knob(struct ui address_to wui, struct ui_text address_to t, p64 offset, int address_to x, int address_to y)
+{
+        int top;
+
+        if (ui_text_where(wui, t, offset, x, &top))
+                return false;
+        *y = top + t->line_height + ui_dev(wui, UI_TEXT_HANDLE);
+        return true;
+}
+
+// The middle of a line's row of the code view, and an x a little inside a column of it.
+static int ts_row(struct ui_text address_to t, p64 line)
+{
+        return t->top + (int)(line - t->top_line) * t->line_height + t->line_height / 2;
+}
+
+static int ts_col(struct ui address_to wui, struct ui_text address_to t, int col)
+{
+        return t->left + col * t->cell + ui_dev(wui, 2);
+}
+
+// The accent's pixel at x, y of the picture.
+static b32 ts_accent(struct ui address_to wui, int x, int y)
+{
+        return (wui->pixels[(positive)y * TS_WIDTH + (positive)x] & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu);
+}
+
+// The view's autoscroll, 16 ms a step for steps steps from now.
+static void ts_ticks(struct ui address_to wui, struct ui_text address_to t, positive now, int steps)
+{
+        b32 redraw = false;
+
+        for (int step = 0; step <= steps; step++)
+                ui_text_autoscroll(wui, t, now + (positive)step * 16000000ull, &redraw);
+}
+
+// Whether the bar's items are these ids, in this order (0 for none).
+static b32 ts_ids(const struct ui_text address_to t, int a, int b, int c, int d)
+{
+        int want[4] = {a, b, c, d};
+
+        for (int k = 0; k < 4; k++)
+                if ((want[k] != 0) != (k < t->bar_count) || (want[k] && t->bar_id[k] != want[k]))
+                        return false;
+        return true;
+}
+
+static p64 ts_line_start[TS_LINES + 1];
+
+// The code view of forty lines "line NN" opened, at the top, drawn.
+static void ts_code_open(struct ui address_to wui, positive address_to length)
+{
+        static char text[TS_LINES * 8];
+
+        if (ts_view.doc.selections)
+                ui_text_close(&ts_view);
+        *length = 0;
+        for (int n = 0; n < TS_LINES; n++)
+        {
+                ts_line_start[n] = (p64)*length;
+                text[(*length)++] = 'l', text[(*length)++] = 'i', text[(*length)++] = 'n', text[(*length)++] = 'e', text[(*length)++] = ' ';
+                text[(*length)++] = (char)('0' + n / 10), text[(*length)++] = (char)('0' + n % 10), text[(*length)++] = '\n';
+        }
+        ts_line_start[TS_LINES] = (p64)*length;
+        ui_text_open(&ts_view, UI_TEXT_CODE, (const p8 address_to)text, *length, ui_text_keymap());
+        ts_view.own = &ts_own, ts_view.focused = true;
+        ts_draw(wui, &ts_view);
+}
+
+// A code view of one word of 26 letters and two short lines, at the top, drawn: a word wide enough that a finger in its middle is
+// far from both its handles.
+static void ts_long_open(struct ui address_to wui)
+{
+        if (ts_view.doc.selections)
+                ui_text_close(&ts_view);
+        ui_text_open(&ts_view, UI_TEXT_CODE, (const p8 address_to) "abcdefghijklmnopqrstuvwxyz\nsecond line\nthird\n", 45, ui_text_keymap());
+        ts_view.own = &ts_own, ts_view.focused = true;
+        ts_draw(wui, &ts_view);
+}
+
+// The view's fourth line's word selected by a long press, its end's knob in kx, ky and its start's in sx, sy.
+static void ts_word(struct ui address_to wui, int address_to sx, int address_to sy, int address_to kx, int address_to ky)
+{
+        ts_select(wui, &ts_view, ts_col(wui, &ts_view, 2), ts_row(&ts_view, ts_view.top_line + 3));
+        ts_knob(wui, &ts_view, ts_line_start[ts_view.top_line + 3], sx, sy);
+        ts_knob(wui, &ts_view, ts_line_start[ts_view.top_line + 3] + 4, kx, ky);
+}
+
+// The code view at a scale. The bits of TS_* it answers true for are set in the return.
+static p64 ts_code(struct ui address_to wui, int scale)
+{
+        positive length = 0, now = 5000000000ull;
+        p64 got = 0, start, finish;
+        int kx, ky, sx, sy, row, x, lh, half;
+
+        wui->scale = scale;
+        ui_kit.motion = 1;
+        ts_top = 40;
+        half = ui_dev(wui, UI_TARGET) / 2;
+
+        /* A long press on the fourth line selects its word, and shows a handle at each end. */
+        ts_code_open(wui, &length);
+        lh = ts_view.line_height;
+        row = ts_row(&ts_view, 3), x = ts_col(wui, &ts_view, 2);
+        ts_hold(wui, &ts_view, x, row);
+        got |= (p64)ts_is(&ts_view, ts_line_start[3], ts_line_start[3] + 4) << TS_LONG_PRESS;
+        ts_lift(wui, &ts_view, x, row);
+        ts_draw(wui, &ts_view);
+        if (ts_knob(wui, &ts_view, ts_line_start[3], &sx, &sy) && ts_knob(wui, &ts_view, ts_line_start[3] + 4, &kx, &ky))
+                got |= (p64)(ts_accent(wui, sx, sy) && ts_accent(wui, kx, ky) && ts_view.handles) << TS_HANDLES;
+
+        /* A finger a little less than half a target from a knob takes it, to the right, below and above; a little more does not. */
+        {
+                static const int dx[5] = {1, 0, 1, 1, 0}, dy[5] = {0, 1, 1, -1, -1};
+                int in = 0, out = 0;
+
+                for (int k = 0; k < 5; k++)
+                {
+                        ts_code_open(wui, &length);
+                        ts_word(wui, &sx, &sy, &kx, &ky);
+                        ts_down(wui, &ts_view, kx + dx[k] * (half - 2), ky + dy[k] * (half - 2));
+                        in += ts_view.finger == UI_TEXT_FINGER_HANDLE;
+                        ts_up(wui, &ts_view, kx, ky);
+                        ts_code_open(wui, &length);
+                        ts_word(wui, &sx, &sy, &kx, &ky);
+                        ts_down(wui, &ts_view, kx + dx[k] * (half + 3), ky + dy[k] * (half + 3));
+                        out += ts_view.finger == UI_TEXT_FINGER_HANDLE;
+                        ts_up(wui, &ts_view, kx, ky);
+                }
+                got |= (p64)(in == 5) << TS_GRAB_IN;
+                got |= (p64)(out == 0) << TS_GRAB_OUT;
+        }
+
+        /* The end's handle, taken on its knob and moved to the ninth line's fourth column: the end is there, and the start has not moved. The
+              finger holds the knob, under the line, and the end is on the line the handle was on and not the line under the knob. */
+        ts_code_open(wui, &length);
+        ts_word(wui, &sx, &sy, &kx, &ky);
+        ts_down(wui, &ts_view, kx, ky);
+        ts_move(wui, &ts_view, kx + (ts_col(wui, &ts_view, 3) - ts_col(wui, &ts_view, 4)), ky + 5 * lh);
+        ts_up(wui, &ts_view, kx, ky + 5 * lh);
+        got |= (p64)ts_is(&ts_view, ts_line_start[3], ts_line_start[8] + 3) << TS_ACROSS_LINES;
+        got |= (p64)(doc_sel_start(&ts_view.doc.selections[ts_view.doc.primary]) == ts_line_start[3]) << TS_KEEPS_START;
+        got |= (p64)ts_view.bar << TS_HANDLE_BAR; // the lift of a dragged handle brings the bar back
+
+        /* The start's handle taken and moved past the end: the ends cross. */
+        ts_code_open(wui, &length);
+        ts_word(wui, &sx, &sy, &kx, &ky);
+        ts_down(wui, &ts_view, sx, sy);
+        ts_move(wui, &ts_view, sx + (ts_col(wui, &ts_view, 2) - ts_col(wui, &ts_view, 0)), sy + 9 * lh);
+        ts_up(wui, &ts_view, sx, sy + 9 * lh);
+        got |= (p64)ts_is(&ts_view, ts_line_start[3] + 4, ts_line_start[12] + 2) << TS_CROSS;
+
+        /* The end's handle held in the band at the box's bottom: the view scrolls, by the kit's speed for the scale, and the end follows to
+              the end of the text. */
+        ts_code_open(wui, &length);
+        ts_word(wui, &sx, &sy, &kx, &ky);
+        ts_down(wui, &ts_view, kx, ky);
+        ts_move(wui, &ts_view, kx, ts_view.bottom - 2);
+        {
+                long moved, past = (ts_view.bottom - 2) - (ts_view.bottom - ui_dev(wui, UI_TARGET) / 2) + 1, want = ui_edge_speed(past, scale) * 496 / 1000 / lh;
+
+                ts_ticks(wui, &ts_view, now, 31); // 496 ms
+                moved = (long)ts_view.top_line;
+                got |= (p64)(moved > 0 && moved >= want - 2 && moved <= want + 2) << TS_SPEED;
+                ts_ticks(wui, &ts_view, now + 600000000ull, 400);
+                finish = doc_sel_end(&ts_view.doc.selections[ts_view.doc.primary]);
+                got |= (p64)(finish == (p64)length && ts_view.top_line > 0) << TS_TO_END;
+        }
+        ts_up(wui, &ts_view, kx, ts_view.bottom - 2);
+
+        /* The start's handle, on a word far down, held in the band at the top: the view scrolls up and the start follows to the start. */
+        ts_code_open(wui, &length);
+        ts_view.top_line = 15;
+        ts_draw(wui, &ts_view);
+        ts_word(wui, &sx, &sy, &kx, &ky);
+        ts_down(wui, &ts_view, sx, sy);
+        ts_move(wui, &ts_view, sx, ts_view.top + 2);
+        ts_ticks(wui, &ts_view, now + 20000000000ull, 400);
+        got |= (p64)(doc_sel_start(&ts_view.doc.selections[ts_view.doc.primary]) == 0 && ts_view.top_line == 0) << TS_TO_START;
+        ts_up(wui, &ts_view, sx, ts_view.top + 2);
+
+        /* The bar. After a long press and its lift it is wanted and, drawn, it is over the selection, inside the window, and has the editable
+              view's four items. */
+        ts_code_open(wui, &length);
+        row = ts_row(&ts_view, 6), x = ts_col(wui, &ts_view, 2);
+        ts_select(wui, &ts_view, x, row);
+        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_CUT, UI_TEXT_MENU_COPY, UI_TEXT_MENU_PASTE, UI_TEXT_MENU_ALL)) << TS_BAR_ITEMS;
+        got |= (p64)(ts_view.bar_up && ts_view.bar_y + ts_view.bar_h <= row - lh / 2) << TS_BAR_ABOVE;
+        got |= (p64)(ts_view.bar_up && ts_view.bar_x >= 0 && ts_view.bar_y >= ui_dev(wui, UI_TEXT_TITLEBAR) &&
+                                  ts_view.bar_x + ts_view.bar_w <= TS_WIDTH && ts_view.bar_y + ts_view.bar_h <= TS_HEIGHT) << TS_BAR_INSIDE;
+        /* A tap on an item of the bar does it: Select All selects the text and leaves the bar up. */
+        ts_tap(wui, &ts_view, ts_view.bar_x + (ts_view.bar_at[3] + ts_view.bar_at[4]) / 2, ts_view.bar_y + ts_view.bar_h / 2);
+        ts_draw(wui, &ts_view);
+        got |= (p64)(ts_is(&ts_view, 0, (p64)length) && ts_view.bar && ts_view.bar_up) << TS_BAR_SELECT_ALL;
+        /* Copy takes the bar away and leaves the selection; Cut takes the text out, and the handles and the bar with it. */
+        ts_code_open(wui, &length);
+        ts_select(wui, &ts_view, x, row);
+        ts_tap(wui, &ts_view, ts_view.bar_x + (ts_view.bar_at[1] + ts_view.bar_at[2]) / 2, ts_view.bar_y + ts_view.bar_h / 2);
+        got |= (p64)(ts_is(&ts_view, ts_line_start[6], ts_line_start[6] + 4) && !ts_view.bar && ts_view.handles) << TS_BAR_COPY;
+        ts_code_open(wui, &length);
+        ts_select(wui, &ts_view, x, row);
+        ts_tap(wui, &ts_view, ts_view.bar_x + (ts_view.bar_at[0] + ts_view.bar_at[1]) / 2, ts_view.bar_y + ts_view.bar_h / 2);
+        got |= (p64)(doc_length(&ts_view.doc) == length - 4 && !ts_view.bar && !ts_view.handles) << TS_BAR_CUT;
+
+        /* A selection on the first row, with the box at the window's top, has no room above for the bar: it is below the handles. */
+        ts_top = 0;
+        ts_code_open(wui, &length);
+        ts_select(wui, &ts_view, ts_col(wui, &ts_view, 2), ts_row(&ts_view, 0));
+        got |= (p64)(ts_view.bar_up && ts_view.bar_y >= ts_view.top + lh + 2 * ui_dev(wui, UI_TEXT_HANDLE)) << TS_BAR_BELOW;
+        ts_top = 40;
+
+        /* A tap on the selection takes the bar away and a second brings it back; a tap on a handle does the same, and a tap elsewhere
+              clears the selection and its handles and bar. The word is one of 26 letters, so that a finger in its middle is on no handle. */
+        ts_long_open(wui);
+        row = ts_row(&ts_view, 0);
+        ts_select(wui, &ts_view, ts_col(wui, &ts_view, 13), row);
+        ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 13), row);
+        ts_draw(wui, &ts_view);
+        {
+                b32 gone = !ts_view.bar && !ts_view.bar_up && ts_is(&ts_view, 0, 26);
+
+                ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 13), row);
+                ts_draw(wui, &ts_view);
+                got |= (p64)(gone && ts_view.bar && ts_view.bar_up) << TS_TOGGLE_SELECTION;
+        }
+        ts_view.bar = false;
+        ts_draw(wui, &ts_view);
+        ts_knob(wui, &ts_view, 26, &kx, &ky);
+        ts_tap(wui, &ts_view, kx, ky);
+        ts_draw(wui, &ts_view);
+        got |= (p64)(ts_view.bar && ts_view.bar_up && ts_is(&ts_view, 0, 26)) << TS_TOGGLE_HANDLE;
+        ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 1));
+        ts_draw(wui, &ts_view);
+        got |= (p64)(ts_is(&ts_view, 27 + 5, 27 + 5) && !ts_view.handles && !ts_view.bar && !ts_view.bar_up) << TS_TAP_CLEARS;
+
+        /* A finger that drags the text still scrolls it, with the selection and its handles where they were, and the bar not shown while
+              it moves; thrown and settled, the bar comes back, and the loop is told to draw it. */
+        ts_code_open(wui, &length);
+        ts_view.top_line = 20;
+        ts_draw(wui, &ts_view);
+        ts_select(wui, &ts_view, ts_col(wui, &ts_view, 2), ts_row(&ts_view, 23));
+        {
+                int fx = ts_col(wui, &ts_view, 6), fy = ts_view.top + 10 * lh + lh / 2;
+                b32 redraw = false;
+
+                ts_reset(&ts_view);
+                ts_down(wui, &ts_view, fx, fy);
+                // Five lines: the selection is still in the view, so the bar's absence is the finger's and not the selection's leaving it.
+                for (int step = 1; step <= 10; step++)
+                        ts_move(wui, &ts_view, fx, fy + step * lh / 2);
+                ts_draw(wui, &ts_view);
+                got |= (p64)(ts_view.top_line < 20 && ts_is(&ts_view, ts_line_start[23], ts_line_start[23] + 4) && ts_view.handles) << TS_SCROLLS;
+                got |= (p64)(ts_view.bar && !ts_view.bar_up) << TS_BAR_HIDES;
+                ts_up(wui, &ts_view, fx, fy + 5 * lh);
+                for (int step = 1; step < 600 && ts_view.kinetic.flying; step++)
+                        ui_text_fling(&ts_view, clock_monotonic_nanoseconds() + (positive)step * 16000000ull);
+                ui_text_bar_tick(&ts_view, clock_monotonic_nanoseconds() + 1000000000ull, &redraw);
+                ts_view.top_line = 20;
+                ts_draw(wui, &ts_view);
+                got |= (p64)(redraw && ts_view.bar_up) << TS_BAR_RETURNS;
+        }
+
+        /* A second tap on the same place is a double tap, a word; a third, the line. */
+        ts_long_open(wui);
+        ts_reset(&ts_view);
+        x = ts_col(wui, &ts_view, 13), row = ts_row(&ts_view, 0);
+        ts_down(wui, &ts_view, x, row);
+        ts_up(wui, &ts_view, x, row);
+        ts_down(wui, &ts_view, x, row);
+        ts_up(wui, &ts_view, x, row);
+        got |= (p64)(ts_is(&ts_view, 0, 26) && ts_view.handles && ts_view.bar) << TS_DOUBLE_TAP;
+        ts_down(wui, &ts_view, x, row);
+        ts_up(wui, &ts_view, x, row);
+        got |= (p64)ts_is(&ts_view, 0, 27) << TS_TRIPLE_TAP;
+
+        /* A mouse is as it was: a click and a drag select, with no handles, no bar and no overlay drawn. */
+        ts_code_open(wui, &length);
+        ts_event(wui, &ts_view, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, ts_col(wui, &ts_view, 1), ts_row(&ts_view, 4));
+        ts_event(wui, &ts_view, WINDOW_EVENT_MOTION, 0, 0, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 6));
+        ts_event(wui, &ts_view, WINDOW_EVENT_BUTTON, 0, 0x110, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 6));
+        ts_draw(wui, &ts_view);
+        got |= (p64)(ts_is(&ts_view, ts_line_start[4] + 1, ts_line_start[6] + 5) && !ts_view.handles && !ts_view.bar && !ts_view.bar_up &&
+                                  !ts_view.over_bottom) << TS_MOUSE;
+
+        /* The bar fades in with full motion (not whole at its first frame, and the loop is asked for the next); with reduced motion it is
+              whole at once and asks for no frame; and a settled bar asks the loop for nothing, a widget without the keys neither blinks. */
+        ts_code_open(wui, &length);
+        ts_view.focused = false;
+        ts_select(wui, &ts_view, ts_col(wui, &ts_view, 2), ts_row(&ts_view, 6));
+        ui_kit.motion = 0;
+        ts_view.quiet_at = 0;
+        ts_view.bar_up = false;
+        ui_kit.busy = 0;
+        ts_draw(wui, &ts_view);
+        {
+                int px = ts_view.bar_x + 6, py = ts_view.bar_y + ts_view.bar_h / 2;
+                unsigned int first = wui->pixels[(positive)py * TS_WIDTH + (positive)px];
+                b32 busy = ui_kit.busy, redraw = false;
+
+                ts_view.bar_since = clock_monotonic_nanoseconds() - 2 * UI_TEXT_BAR_FADE_NS;
+                ui_kit.busy = 0;
+                ts_draw(wui, &ts_view);
+                got |= (p64)(busy && ts_view.bar_up && !ui_kit.busy && first != wui->pixels[(positive)py * TS_WIDTH + (positive)px]) << TS_FADE;
+                got |= (p64)(ui_text_timeout(wui, &ts_view, -1, clock_monotonic_nanoseconds() + 1000000000ull, &redraw) == -1 && !redraw) << TS_IDLE;
+                ui_kit.motion = 1;
+                ts_view.bar_up = false;
+                ui_kit.busy = 0;
+                ts_draw(wui, &ts_view);
+                got |= (p64)(ts_view.bar_up && !ui_kit.busy) << TS_REDUCED;
+        }
+        ui_text_close(&ts_view);
+        return got;
+}
+
+// A field, a masked field and a read only view: what the bar offers each, and a handle moved across words and to the ends of a field.
+static p64 ts_fields(struct ui address_to wui, int scale)
+{
+        const char address_to words = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega";
+        p64 got = 0, length = (p64)string_length((string_address)words);
+        positive now = 5000000000ull;
+        int kx, ky, y, hx, top;
+
+        wui->scale = scale;
+        ui_kit.motion = 1;
+        ts_top = 40;
+        ui_field_open(&ts_view, &ts_own, words);
+        doc_select_set(&ts_view.doc, 0, 0);
+        ts_draw(wui, &ts_view);
+        y = ts_view.top + ts_view.line_height / 2;
+
+        /* A long press on "beta" selects it and shows the field's bar; its end's handle taken and moved on to the end of "delta" extends it
+              across words. */
+        ts_select(wui, &ts_view, field_x(wui, &ts_view, 7), y);
+        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_CUT, UI_TEXT_MENU_COPY, UI_TEXT_MENU_PASTE, UI_TEXT_MENU_ALL)) << TS_FIELD_ITEMS;
+        ts_knob(wui, &ts_view, 10, &kx, &ky);
+        ts_reset(&ts_view);
+        ts_down(wui, &ts_view, kx, ky);
+        ui_text_where(wui, &ts_view, 22, &hx, &top);
+        ts_move(wui, &ts_view, hx, ky);
+        ts_up(wui, &ts_view, hx, ky);
+        got |= (p64)ts_is(&ts_view, 6, 22) << TS_FIELD_ACROSS;
+
+        /* Held in the band at the right edge, the field scrolls and the end follows to the text's end. */
+        ts_draw(wui, &ts_view);
+        ts_knob(wui, &ts_view, 22, &kx, &ky);
+        ts_reset(&ts_view);
+        ts_down(wui, &ts_view, kx, ky);
+        ts_move(wui, &ts_view, ts_view.right - 2, ky);
+        ts_ticks(wui, &ts_view, now, 500);
+        got |= (p64)(ts_is(&ts_view, 6, length) && ts_view.scroll_x > 0) << TS_FIELD_TO_END;
+        ts_up(wui, &ts_view, ts_view.right - 2, ky);
+        ui_text_close(&ts_view);
+
+        /* And the start's handle of a selection far along, held in the band at the left, takes the start back to the text's start. */
+        ui_field_open(&ts_view, &ts_own, words);
+        doc_select_set(&ts_view.doc, 90, 100);
+        ts_view.handles = true;
+        ts_draw(wui, &ts_view);
+        if (ts_knob(wui, &ts_view, 90, &kx, &ky))
+        {
+                ts_reset(&ts_view);
+                ts_down(wui, &ts_view, kx, ky);
+                ts_move(wui, &ts_view, ts_view.left, ky);
+                ts_ticks(wui, &ts_view, now + 20000000000ull, 600);
+                got |= (p64)(doc_sel_start(&ts_view.doc.selections[ts_view.doc.primary]) == 0) << TS_FIELD_TO_START;
+                ts_up(wui, &ts_view, ts_view.left, ky);
+        }
+        ui_text_close(&ts_view);
+
+        /* A masked field: a long press takes all of it, and the bar has Paste and nothing that would copy it out. */
+        ui_field_open(&ts_view, &ts_own, "hunter2");
+        ts_view.masked = true;
+        ts_draw(wui, &ts_view);
+        ts_select(wui, &ts_view, ts_view.left + ts_view.cell * 2, ts_view.top + ts_view.line_height / 2);
+        got |= (p64)(ts_is(&ts_view, 0, 7) && ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_PASTE, 0, 0, 0)) << TS_MASKED;
+        ui_text_close(&ts_view);
+
+        /* A read only view has Copy and Select All, and no Cut or Paste. */
+        ui_text_open(&ts_view, UI_TEXT_CODE, (const p8 address_to) "one two three\nfour five six\n", 28, ui_text_keymap());
+        ts_view.own = &ts_own, ts_view.focused = true, ts_view.read_only = true;
+        ts_draw(wui, &ts_view);
+        ts_select(wui, &ts_view, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 0));
+        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_COPY, UI_TEXT_MENU_ALL, 0, 0)) << TS_READ_ONLY;
+        ui_text_close(&ts_view);
+
+        /* A caret has Paste and Select All, and an empty field Paste alone. */
+        ui_text_open(&ts_view, UI_TEXT_CODE, (const p8 address_to) "ab\n", 3, ui_text_keymap());
+        ts_view.own = &ts_own, ts_view.focused = true;
+        ts_draw(wui, &ts_view);
+        ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 1), ts_row(&ts_view, 0));
+        ts_view.bar = true;
+        ts_draw(wui, &ts_view);
+        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_PASTE, UI_TEXT_MENU_ALL, 0, 0)) << TS_CARET_BAR;
+        ui_text_close(&ts_view);
+        ui_field_open(&ts_view, &ts_own, "");
+        ts_draw(wui, &ts_view);
+        ts_select(wui, &ts_view, ts_view.left + 2, ts_view.top + ts_view.line_height / 2);
+        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_PASTE, 0, 0, 0)) << TS_EMPTY_BAR;
+        ui_text_close(&ts_view);
+        return got;
+}
+
+// A code view that wraps and one with a closed fold: the row under a finger is the row it is drawn at, and the handle is at it.
+static p64 ts_rows(struct ui address_to wui, int scale)
+{
+        static char text[60 * 4 + 16];
+        positive length = 0;
+        p64 got = 0;
+        int lh;
+
+        wui->scale = scale;
+        ui_kit.motion = 1;
+        ts_top = 40;
+        for (int n = 0; n < 60; n++)
+                text[length++] = 'w', text[length++] = (char)('0' + n / 10), text[length++] = (char)('0' + n % 10), text[length++] = ' ';
+        text[length++] = '\n', text[length++] = 'o', text[length++] = 'n', text[length++] = 'e', text[length++] = '\n';
+        ui_text_open(&ts_view, UI_TEXT_CODE, (const p8 address_to)text, length, ui_text_keymap());
+        ts_view.own = &ts_own, ts_view.focused = true, ts_view.wrap = true;
+        ts_draw(wui, &ts_view);
+        lh = ts_view.line_height;
+        /* The first line wraps into rows, and "one", the second line, is under the last of them. A long press on the second row's first word
+              selects a word of the first line (a w and two digits) and its handle is drawn on that row. */
+        ts_select(wui, &ts_view, ts_view.left + ui_dev(wui, 2), ts_view.top + lh + lh / 2);
+        {
+                int x, top, y;
+                p64 start = doc_sel_start(&ts_view.doc.selections[ts_view.doc.primary]);
+
+
+                got |= (p64)(start > 4 * 8 && start < 60 * 4 && ts_view.handles && !ui_text_where(wui, &ts_view, start, &x, &top) &&
+                                          top == ts_view.top + lh) << TS_WRAP_HIT;
+                y = top + lh + ui_dev(wui, UI_TEXT_HANDLE);
+                got |= (p64)ts_accent(wui, x, y) << TS_WRAP_HANDLE;
+        }
+        ui_text_close(&ts_view);
+
+        /* A fold hides the lines under its first: the view's rows are "a" (the fold closed), "d" and "e", and its second row is "d". */
+        ui_text_open(&ts_view, UI_TEXT_CODE, (const p8 address_to) "a\n  b\n  c\nd\ne\n", 14, ui_text_keymap());
+        ts_view.own = &ts_own, ts_view.focused = true;
+        doc_fold(&ts_view.doc, 0, true);
+        ts_draw(wui, &ts_view);
+        lh = ts_view.line_height;
+        got |= (p64)(ui_text_hit(wui, &ts_view, ts_view.left + ui_dev(wui, 2), ts_view.top + lh + lh / 2) == 10) << TS_FOLD_HIT;
+        ui_text_close(&ts_view);
+        return got;
+}
+
+static fn touch_select_check(struct ui address_to wui)
+{
+        static const int scales[6] = {50, 75, 100, 125, 150, 200};
+        struct ui saved = *wui;
+        b32 motion = ui_kit.motion;
+        p64 all = ~0ull;
+        long pixels = ui_map(TS_WIDTH * TS_HEIGHT * 4);
+
+        ts_own.table = &ts_table, ts_own.row = 0, ts_own.door = -1;
+        ts_pixels = (unsigned int address_to)pixels;
+        for (int k = 0; k < 6; k++)
+                        all &= ts_code(wui, scales[k]) | ts_fields(wui, scales[k]) | ts_rows(wui, scales[k]);
+#define TS(bit, name) check(name, (all >> (bit)) & 1)
+        TS(TS_LONG_PRESS, "touch select: a long press selects the word under the finger");
+        TS(TS_HANDLES, "touch select: its selection has a handle at each end, a knob in the accent under the line");
+        TS(TS_GRAB_IN, "touch select: a finger within half a finger's target of a knob takes the handle (44 logical pixels each way)");
+        TS(TS_GRAB_OUT, "touch select: a finger beyond that takes no handle");
+        TS(TS_ACROSS_LINES, "touch select: a handle held by its knob goes across lines to where it is moved, on the line the handle was on and not the line under the knob");
+        TS(TS_KEEPS_START, "touch select: the other end stays where it was");
+        TS(TS_CROSS, "touch select: the start's handle moved past the end crosses it");
+        TS(TS_TO_END, "touch select: the end's handle held in the band at the bottom scrolls the view and takes the end to the end of the text");
+        TS(TS_TO_START, "touch select: the start's handle held in the band at the top takes the start to the start of the text");
+        TS(TS_SPEED, "touch select: the view scrolls at the kit's speed for the scale (ui_edge_speed)");
+        TS(TS_BAR_ITEMS, "touch select: after a long press and its lift the bar has Cut, Copy, Paste and Select All");
+        TS(TS_BAR_ABOVE, "touch select: the bar is over the selection");
+        TS(TS_BAR_BELOW, "touch select: and under it, past the handles, where there is no room above");
+        TS(TS_BAR_INSIDE, "touch select: and inside the window, below its top and in from its edges");
+        TS(TS_BAR_SELECT_ALL, "touch select: a tap on the bar's Select All selects the text and leaves the bar up");
+        TS(TS_BAR_CUT, "touch select: a tap on Cut takes the selection out, and the handles and the bar away");
+        TS(TS_BAR_COPY, "touch select: a tap on Copy takes the bar away and leaves the selection and its handles");
+        TS(TS_TOGGLE_SELECTION, "touch select: a tap on the selection takes the bar away, and a second brings it back");
+        TS(TS_TOGGLE_HANDLE, "touch select: a tap on a handle shows the bar");
+        TS(TS_HANDLE_BAR, "touch select: a handle dragged brings the bar back at its lift");
+        TS(TS_TAP_CLEARS, "touch select: a tap elsewhere puts the caret there and takes the handles and the bar away");
+        TS(TS_SCROLLS, "touch select: a finger that drags the text still scrolls it, the selection and its handles staying");
+        TS(TS_BAR_HIDES, "touch select: the bar is not shown while the text moves under a finger");
+        TS(TS_BAR_RETURNS, "touch select: and it comes back, the loop told to draw it, when the view is still");
+        TS(TS_DOUBLE_TAP, "touch select: a double tap selects the word under it, with handles and the bar");
+        TS(TS_TRIPLE_TAP, "touch select: a triple tap selects the line");
+        TS(TS_MOUSE, "touch select: a mouse's click and drag select as they did, with no handles, no bar and no overlay");
+        TS(TS_FADE, "touch select: the bar fades in with full motion, and asks for the next frame while it does");
+        TS(TS_REDUCED, "touch select: with reduced motion the bar is whole at once and asks for no frame");
+        TS(TS_IDLE, "touch select: a settled bar and handles ask the loop for nothing, an idle window wakes nothing");
+        TS(TS_FIELD_ITEMS, "touch select: a field's bar has Cut, Copy, Paste and Select All, shown after a long press");
+        TS(TS_FIELD_ACROSS, "touch select: a field's handle moved on goes across words");
+        TS(TS_FIELD_TO_END, "touch select: held in the band at a field's right edge, the field scrolls and the end goes to the text's end");
+        TS(TS_FIELD_TO_START, "touch select: held in the band at its left edge, the start goes to the text's start");
+        TS(TS_MASKED, "touch select: a masked field takes all of it, and its bar has Paste and no Cut or Copy");
+        TS(TS_READ_ONLY, "touch select: a read only view's bar has Copy and Select All, and no Cut or Paste");
+        TS(TS_CARET_BAR, "touch select: a caret's bar has Paste and Select All");
+        TS(TS_EMPTY_BAR, "touch select: an empty field's bar has Paste alone");
+        TS(TS_WRAP_HIT, "touch select: in a wrapped line the row under the finger is the row it is drawn at");
+        TS(TS_WRAP_HANDLE, "touch select: and its handle is drawn on that row");
+        TS(TS_FOLD_HIT, "touch select: with a fold closed, the row under the finger is the line it is drawn as");
+#undef TS
+        check("touch select: the bar keeps below the compositor's top of a window, where its press is the window's own", UI_TEXT_TITLEBAR == COMPOSITOR_GRAB);
+        *wui = saved;
+        ui_kit.motion = motion;
+        compositor_call(syscall(munmap), (positive)pixels, TS_WIDTH * TS_HEIGHT * 4, 0, 0, 0, 0);
 }
 
 static fn field_check(struct ui address_to wui)
@@ -141777,7 +142397,7 @@ static fn field_check(struct ui address_to wui)
                 field_key(wui, &t, 45, 24, WINDOW_KEY_CONTROL);
                 check("field: a masked field is never copied or cut out", field_is(&t, "pa ss") && table.clip_offer_serial[0] == offered);
                 m.count = 0;
-                ui_text_menu_items(&m, &t);
+                ui_text_menu_items(&m, &t, false);
                 check("field: and its menu has Cut and Copy greyed", m.items[3].id == UI_TEXT_MENU_CUT && (m.items[3].flags & UI_MENU_DISABLED) &&
                                                                      m.items[4].id == UI_TEXT_MENU_COPY && (m.items[4].flags & UI_MENU_DISABLED));
                 field_key(wui, &t, FIELD_KEY_END, 0, 0);
@@ -141797,7 +142417,7 @@ static fn field_check(struct ui address_to wui)
 
                 ui_field_open(&t, &own, "one two");
                 m.count = 0;
-                ui_text_menu_items(&m, &t);
+                ui_text_menu_items(&m, &t, false);
                 check("field: the menu is Undo, Redo, Cut, Copy, Paste, Delete and Select All, greyed with nothing done or selected",
                       m.count == 9 && (m.items[0].flags & UI_MENU_DISABLED) && (m.items[3].flags & UI_MENU_DISABLED) &&
                           (m.items[4].flags & UI_MENU_DISABLED) && !(m.items[5].flags & UI_MENU_DISABLED) &&
@@ -141866,6 +142486,7 @@ static fn field_check(struct ui address_to wui)
         check_code_finger(wui);
         switch_cancel_check(wui);
         fling_scale_check();
+        touch_select_check(wui);
 
         // The blink: a while after the last key the caret stays drawn, and the field asks for no frame.
         {
