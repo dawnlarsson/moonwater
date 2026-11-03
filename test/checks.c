@@ -116983,10 +116983,26 @@ static bipolar host_bind_request(unsigned int op, unsigned int event, string_add
         (void)op, (void)event, (void)command, (void)control;
         return -1;
 }
+// A start ends here in the fixture, and a check reads what was asked: the program's words, a line in /tmp/mw-launcher-started.
 static bipolar shell_exec_file(string_address path, string_address address_to arguments, positive count,
                                string_address address_to environment)
 {
-        (void)path, (void)arguments, (void)count, (void)environment;
+        char line[256] = "";
+        bipolar handle;
+
+        (void)path, (void)environment;
+        for (positive at = 0; at < count && at < 8; at++)
+        {
+                string_append_bounded((string_address)line, arguments[at], sizeof(line));
+                string_append_bounded((string_address)line, (string_address) " ", sizeof(line));
+        }
+        string_append_bounded((string_address)line, (string_address) "\n", sizeof(line));
+        handle = system_open_at_mode(AT_FDCWD, (string_address) "/tmp/mw-launcher-started", FILE_APPEND, 0644);
+        if (handle >= 0)
+        {
+                system_write_once(handle, line, string_length((string_address)line));
+                system_close(handle);
+        }
         return -1;
 }
 static fn kill_name(positive number, p8 address_to into) { positive_into_string(into, number); }
@@ -127841,6 +127857,50 @@ static b32 launcher_list_is(const char address_to want)
         return string_equals((string_address)got, (string_address)want);
 }
 
+// The text of a file, into into: its length, 0 for none.
+static positive file_text(const char address_to path, char address_to into, positive room)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ), got = 0;
+
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, into, room - 1);
+                system_close(handle);
+        }
+        got = got < 0 ? 0 : got;
+        into[got] = 0;
+        return (positive)got;
+}
+
+// Whether the file has this many lines, waited for up to two seconds: a start is a grandchild's, which the check does not wait on.
+static b32 launcher_waits(const char address_to path, int lines)
+{
+        positive begin = clock_monotonic_nanoseconds();
+        char text[512];
+
+        for (;;)
+        {
+                int seen = 0;
+
+                for (positive at = 0, length = file_text(path, text, sizeof(text)); at < length; at++)
+                        seen += text[at] == '\n';
+                if (seen >= lines)
+                        return true;
+                if (clock_monotonic_nanoseconds() - begin > 2000000000ull)
+                        return false;
+                system_call(syscall(sched_yield));
+        }
+}
+
+// Whether the file is exactly this text, after the lines it was waited for are all there.
+static b32 launcher_started_is(const char address_to path, const char address_to want)
+{
+        char text[512];
+
+        file_text(path, text, sizeof(text));
+        return string_equals((string_address)text, (string_address)want);
+}
+
 static fn launcher_check_path(char address_to path, const char address_to directory, const char address_to name)
 {
         string_copy((string_address)path, (string_address) "/tmp/mw-launcher-check/");
@@ -128052,7 +128112,7 @@ static fn check_launcher(void)
                   string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
         launcher.height = 0;
         launcher_changed();
-        check("launcher: the picture's height follows the list", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW);
+        check("launcher: the picture's height follows the list, and has the power row under it", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW + UI_GAP2 + UI_ROW);
 #ifdef UI_TARGET
         // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
         {
@@ -128074,6 +128134,98 @@ static fn check_launcher(void)
                 check("launcher: a row is a finger's least height", UI_ROW >= 40);
         }
 #endif
+
+        // The power buttons under the list are the kit's row: here the launcher hands it its events, starts what it fires and
+        // nothing else, and keeps the rest of its keys. What a start is, is a line in a file (the fixture's shell_exec_file).
+        {
+                static const char started_path[] = "/tmp/mw-launcher-started";
+                char said[512];
+                int ax, ay, bx, by;
+                struct window_event motion, land, lift;
+
+                system_remove_at(AT_FDCWD, started_path, 0);
+                launcher.width = LAUNCHER_WIDTH * launcher.ui.scale / 100;
+                launcher_type_text("ls");
+                launcher_layout();
+                check("launcher: the list leaves room for the power row, whose buttons are the kit's, Power off then Restart, right of the bar",
+                      launcher.power.count == 2 && string_equals((string_address)launcher.power.button[0].label, (string_address) "Power off") &&
+                          string_equals((string_address)launcher.power.button[1].label, (string_address) "Restart") &&
+                          launcher.power.button[1].x + launcher.power.button[1].w == LAUNCHER_WIDTH - UI_PAD &&
+                          launcher.power.button[0].y >= UI_PAD + UI_TARGET + UI_GAP2 + (int)launcher.entries * UI_ROW);
+                check("launcher: Shift-Tab gives the keys to the buttons, the first of them, and leaves the field as it is",
+                      launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT) && launcher.power.keys == 1 && launcher_holds("ls"));
+                launcher_typed('x');
+                check("launcher: a letter typed with the keys on the buttons is the field's, and takes the keys back", launcher_holds("lsx") && !launcher.power.keys);
+                launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT);
+                check("launcher: Escape with the keys on the buttons closes the bar, as it does anywhere", !launcher_pressed(UI_KEY_ESCAPE, 0));
+                launcher_type_text("ls");
+
+                // Power off from the keys: the first Enter arms, a held Enter's repeats confirm nothing, the next Enter starts it once.
+                launcher.power_runs = 0;
+                launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT);
+                launcher_pressed(UI_KEY_ENTER, 0);
+                for (int repeat = 0; repeat < 40; repeat++)
+                        launcher_pressed(UI_KEY_ENTER, WINDOW_KEY_REPEAT);
+                check("launcher: a first Enter on Power off arms it and a held Enter's repeats start nothing",
+                      launcher.power.confirm.armed && launcher.power.confirm.what == 1 && !launcher.power_runs && file_text(started_path, said, sizeof(said)) == 0);
+                launcher_pressed(UI_KEY_ESCAPE, 0);
+                launcher_type_text("ls");
+                check("launcher: a key that is not the press drops what was armed, and the keys are the field's again", !launcher.power.confirm.armed && !launcher.power.keys);
+                launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT);
+                launcher_pressed(UI_KEY_ENTER, 0);
+                check("launcher: the next Enter starts the shell's poweroff, once, and the bar goes",
+                      !launcher_pressed(UI_KEY_ENTER, 0) && launcher.power_runs == 1 && launcher_waits(started_path, 1) &&
+                          launcher_started_is(started_path, "/shell -c poweroff \n"));
+                // Restart, by Right, and Space.
+                launcher_type_text("ls");
+                launcher.power.keys = 0;
+                launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT);
+                launcher_pressed(UI_KEY_RIGHT, 0);
+                launcher_pressed(UI_KEY_SPACE, 0);
+                check("launcher: Right and Space on Restart arm it, and the second Space starts the shell's reboot, once and not poweroff",
+                      launcher.power.confirm.armed && launcher.power.confirm.what == 2 && !launcher_pressed(UI_KEY_SPACE, 0) &&
+                          launcher.power_runs == 2 && launcher_waits(started_path, 2) && launcher_started_is(started_path, "/shell -c poweroff \n/shell -c reboot \n"));
+
+                // The pointer: a click arms, a second click starts; a click elsewhere drops it; a finger does the same.
+                system_remove_at(AT_FDCWD, started_path, 0);
+                launcher.power_runs = 0;
+                launcher_type_text("ls");
+                launcher_layout();
+                ax = launcher.power.button[0].x + 10, ay = launcher.power.button[0].y + 10;
+                bx = launcher.power.button[1].x + 10, by = launcher.power.button[1].y + 10;
+                motion = (struct window_event){WINDOW_EVENT_MOTION, 0, ax, ay};
+                land = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                launcher_event(&motion);
+                launcher_event(&land);
+                check("launcher: a click on Power off arms it and starts nothing", launcher_event(&lift) && launcher.power.confirm.armed && !launcher.power_runs);
+                motion.b = 2, motion.a = 2;
+                launcher_event(&motion);
+                launcher_event(&land);
+                launcher_event(&lift);
+                check("launcher: a click elsewhere drops it", !launcher.power.confirm.armed);
+                motion.a = bx, motion.b = by;
+                launcher_event(&motion);
+                launcher_event(&land);
+                launcher_event(&lift);
+                check("launcher: a click on Restart arms Restart and not another", launcher.power.confirm.armed && launcher.power.confirm.what == 2);
+                launcher_event(&land);
+                check("launcher: the next click on it starts the shell's reboot once, and the bar goes",
+                      !launcher_event(&lift) && launcher.power_runs == 1 && launcher_waits(started_path, 1) && launcher_started_is(started_path, "/shell -c reboot \n"));
+                launcher_type_text("ls");
+                launcher_layout();
+                motion = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, ax, ay};
+                land = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+                lift = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+                launcher_event(&motion);
+                launcher_event(&land);
+                launcher_event(&lift);
+                launcher_event(&land);
+                check("launcher: two taps of a finger on Power off start the shell's poweroff once",
+                      !launcher_event(&lift) && launcher.power_runs == 2 && launcher_waits(started_path, 2) &&
+                          launcher_started_is(started_path, "/shell -c reboot \n/shell -c poweroff \n"));
+                system_remove_at(AT_FDCWD, started_path, 0);
+        }
 
         // PATH read from real directories: a program of any name length, once, and nothing that is not one.
         {
@@ -128279,7 +128431,7 @@ static fn check_launcher_anchor(void)
         launcher.height = 0;
         launcher.width = 560;
         launcher_changed();
-        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW;
+        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW + UI_GAP2 + UI_ROW;
         launcher.anchor[1] = 100;
         launcher.screen[1] = 0;
         kept &= launcher_most_height() == 100;
@@ -138788,6 +138940,238 @@ static fn check_kit_hand(void)
               step >= 340 && step <= 400);
 }
 
+/*
+        The kit's row of buttons (ui_buttons), which a window's foot is made of: the buttons at the right of a row, the first
+        leftmost; an action that says what it does takes the kit's press again to confirm, from the keys and from the pointer, and a
+        held key's repeats are no press; the keys are one focus along the row that Shift-Tab gives it and the ends and Up give back;
+        a press that is not a button's drops what was armed; an armed button is filled and the row says what it will do.
+*/
+#ifdef UI_BUTTONS_MOST
+static struct ui buttons_ui;
+
+static p32 buttons_key(struct ui_buttons address_to row, int key, unsigned int flags)
+{
+        struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, 0};
+
+        return ui_buttons_event(&buttons_ui, row, &event, 0, 0);
+}
+
+static p32 buttons_pointer(struct ui_buttons address_to row, unsigned int type, b32 down, int x, int y, unsigned int button)
+{
+        struct window_event event = {type, down ? WINDOW_KEY_DOWN : 0u, type == WINDOW_EVENT_BUTTON ? (int)button : x, type == WINDOW_EVENT_BUTTON ? 0 : y};
+
+        return ui_buttons_event(&buttons_ui, row, &event, x, y);
+}
+
+static fn check_kit_buttons(void)
+{
+        static unsigned int pixels[600 * 120], scratch[600 * UI_SCRATCH_ROWS];
+        static font_face face;
+        static struct ui_buttons row;
+        struct ui address_to ui = &buttons_ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        p32 got;
+        int ok;
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit buttons: the face loads", false);
+                return;
+        }
+        *ui = terminal.ui;
+        ui->pixels = pixels, ui->pitch = 600, ui->width = 600, ui->height = 120, ui->top = 0, ui->bottom = 120, ui->scale = 100;
+        ui->scratch = scratch, ui->scratch_width = 600, ui->band_top = ui->band_bottom = 0, ui->mono = null;
+        ui->regular = ui->bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = 9000000000ll;
+
+        memory_zero(&row, sizeof(row));
+        ui_buttons_set(&row, 0, "Power off", "power off");
+        ui_buttons_set(&row, 1, "Restart", "restart");
+        ui_buttons_set(&row, 2, "Close", null);
+        ui_buttons_place(ui, &row, 16, 40, 568);
+        ok = row.count == 3 && row.button[2].x + row.button[2].w == 584 && row.button[1].x + row.button[1].w + UI_GAP2 == row.button[2].x &&
+             row.button[0].x + row.button[0].w + UI_GAP2 == row.button[1].x && row.button[0].w == UI_BUTTONS_W && row.button[0].h == UI_BUTTONS_H &&
+             row.button[0].y == 40 + (UI_ROW - UI_BUTTONS_H) / 2 && row.line.x == 16 && row.line.w == row.button[0].x - UI_GAP2 - 16 &&
+             row.button[0].variant == UI_BUTTON_OUTLINED && row.button[0].kind == UI_BUTTON;
+        check("kit buttons: the buttons are the kit's outlined ones at the right of the row, the first leftmost, with the line before them", ok);
+
+        // The keys: not the row's until Shift-Tab gives them; a key that is no press of a button of it is the app's.
+        check("kit buttons: with the keys elsewhere Enter, Tab and a letter are the app's, and Shift-Tab is the row's, at its first button",
+              buttons_key(&row, UI_KEY_ENTER, 0) == 0 && buttons_key(&row, UI_KEY_TAB, 0) == 0 && buttons_key(&row, 45, 0) == 0 && !row.keys &&
+                  (buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT) & UI_BUTTONS_TAKEN) && row.keys == 1);
+        // The first press arms, the second acts.
+        got = buttons_key(&row, UI_KEY_ENTER, 0);
+        check("kit buttons: a first Enter arms the button and acts on nothing", (got & UI_BUTTONS_TAKEN) && !(got & UI_BUTTONS_FIRED) &&
+                                                                              row.confirm.armed && row.confirm.what == 1);
+        got = buttons_key(&row, UI_KEY_ENTER, 0);
+        check("kit buttons: the next Enter acts, once, and it is that button's", (got & UI_BUTTONS_FIRED) && row.fired == 0 && !row.confirm.armed);
+        // A held key is one press: its repeats never confirm, however many.
+        buttons_key(&row, UI_KEY_ENTER, 0);
+        ok = row.confirm.armed;
+        for (int repeat = 0; repeat < 40; repeat++)
+        {
+                got = buttons_key(&row, UI_KEY_ENTER, WINDOW_KEY_REPEAT);
+                ok &= !(got & UI_BUTTONS_FIRED) && (got & UI_BUTTONS_TAKEN) && row.confirm.armed;
+                got = buttons_key(&row, UI_KEY_SPACE, WINDOW_KEY_REPEAT);
+                ok &= !(got & UI_BUTTONS_FIRED) && row.confirm.armed;
+        }
+        check("kit buttons: a held key's repeats neither confirm nor drop what is armed", ok);
+        got = buttons_key(&row, UI_KEY_SPACE, 0);
+        check("kit buttons: a press of Space after them confirms", (got & UI_BUTTONS_FIRED) && row.fired == 0);
+        // A modifier alone is nobody's; Right moves on and drops, so the next press arms the other button and the one after acts.
+        buttons_key(&row, UI_KEY_ENTER, 0);
+        ok = buttons_key(&row, 42, WINDOW_KEY_SHIFT) == 0 && row.confirm.armed && row.keys == 1;
+        got = buttons_key(&row, UI_KEY_RIGHT, 0);
+        ok &= (got & UI_BUTTONS_TAKEN) && row.keys == 2 && !row.confirm.armed;
+        got = buttons_key(&row, UI_KEY_ENTER, 0);
+        ok &= !(got & UI_BUTTONS_FIRED) && row.confirm.armed && row.confirm.what == 2;
+        got = buttons_key(&row, UI_KEY_ENTER, 0);
+        ok &= (got & UI_BUTTONS_FIRED) && row.fired == 1;
+        check("kit buttons: a modifier is nobody's, Right drops what was armed, and each button asks its own confirm", ok);
+        // A button that says nothing acts at once.
+        buttons_key(&row, UI_KEY_RIGHT, 0);
+        got = buttons_key(&row, UI_KEY_ENTER, 0);
+        check("kit buttons: a button that says nothing of what it does acts on the first press", row.keys == 3 && (got & UI_BUTTONS_FIRED) && row.fired == 2);
+        // The ends: Left and Right stop, Tab and Shift-Tab and Up give the keys back, Down is the row's and stays.
+        ok = row.keys == 3;
+        buttons_key(&row, UI_KEY_RIGHT, 0);
+        ok &= row.keys == 3;
+        buttons_key(&row, UI_KEY_LEFT, 0);
+        buttons_key(&row, UI_KEY_LEFT, 0);
+        buttons_key(&row, UI_KEY_LEFT, 0);
+        ok &= row.keys == 1;
+        buttons_key(&row, UI_KEY_TAB, 0);
+        ok &= row.keys == 2;
+        buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT);
+        buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT);
+        ok &= row.keys == 0;
+        buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT);
+        buttons_key(&row, UI_KEY_TAB, 0);
+        buttons_key(&row, UI_KEY_TAB, 0);
+        buttons_key(&row, UI_KEY_TAB, 0);
+        ok &= row.keys == 0;
+        buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT);
+        got = buttons_key(&row, UI_KEY_DOWN, 0);
+        ok &= (got & UI_BUTTONS_TAKEN) && row.keys == 1;
+        got = buttons_key(&row, UI_KEY_UP, 0);
+        ok &= (got & UI_BUTTONS_TAKEN) && row.keys == 0;
+        check("kit buttons: Left and Right stop at the ends, Tab and Shift-Tab go past them and Up goes back to the app, Down stays", ok);
+        // Any other key, Escape too, is the app's and gives the keys back; a release is nothing.
+        buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT);
+        buttons_key(&row, UI_KEY_ENTER, 0);
+        got = buttons_key(&row, UI_KEY_ESCAPE, 0);
+        ok = !(got & UI_BUTTONS_TAKEN) && (got & UI_BUTTONS_DRAW) && !row.keys && !row.confirm.armed;
+        buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT);
+        got = buttons_key(&row, 45, 0);
+        ok &= !(got & UI_BUTTONS_TAKEN) && !row.keys;
+        {
+                struct window_event up = {WINDOW_EVENT_KEY, 0, UI_KEY_ENTER, 0};
+
+                buttons_key(&row, UI_KEY_TAB, WINDOW_KEY_SHIFT);
+                ok &= ui_buttons_event(ui, &row, &up, 0, 0) == 0 && row.keys == 1;
+        }
+        buttons_key(&row, UI_KEY_UP, 0);
+        check("kit buttons: any other key, Escape too, is the app's and takes the keys back and what was armed with them, and a release is nothing", ok);
+
+        // The pointer: hover, a press that focuses, a release that arms, the next that acts; a press elsewhere, or of another mouse
+        // button, drops what was armed; a release of a press that began off the buttons is nobody's.
+        memory_zero(&row, sizeof(row));
+        ui_buttons_set(&row, 0, "Power off", "power off");
+        ui_buttons_set(&row, 1, "Restart", "restart");
+        ui_buttons_place(ui, &row, 16, 40, 568);
+        {
+                int ax = row.button[0].x + 10, ay = row.button[0].y + 10, bx = row.button[1].x + 10, by = row.button[1].y + 10;
+
+                got = buttons_pointer(&row, WINDOW_EVENT_MOTION, false, ax, ay, 0);
+                ok = (got & UI_BUTTONS_DRAW) && !(got & UI_BUTTONS_TAKEN) && row.button[0].hover;
+                got = buttons_pointer(&row, WINDOW_EVENT_MOTION, false, ax, ay, 0);
+                ok &= !got;
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, ax, ay, UI_POINTER_LEFT);
+                ok &= (got & UI_BUTTONS_TAKEN) && row.keys == 1 && row.button[0].down;
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, ax, ay, UI_POINTER_LEFT);
+                ok &= (got & UI_BUTTONS_TAKEN) && !(got & UI_BUTTONS_FIRED) && row.confirm.armed && row.confirm.what == 1;
+                check("kit buttons: the pointer hovers a button, a press focuses it and its release arms it", ok);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, ax, ay, UI_POINTER_LEFT);
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, ax, ay, UI_POINTER_LEFT);
+                check("kit buttons: and the next press and release of it acts, once", (got & UI_BUTTONS_FIRED) && row.fired == 0 && !row.confirm.armed);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, bx, by, UI_POINTER_LEFT);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, bx, by, UI_POINTER_LEFT);
+                ok = row.confirm.armed && row.confirm.what == 2;
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, ax, ay, UI_POINTER_LEFT);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, ax, ay, UI_POINTER_LEFT);
+                ok &= row.confirm.armed && row.confirm.what == 1;
+                check("kit buttons: a press on the other button arms that one and not the first", ok);
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, 2, 2, UI_POINTER_LEFT);
+                ok = !(got & UI_BUTTONS_TAKEN) && !row.confirm.armed && !row.keys;
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, 2, 2, UI_POINTER_LEFT);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, ax, ay, UI_POINTER_LEFT);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, ax, ay, UI_POINTER_LEFT);
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, 2, 2, UI_POINTER_RIGHT);
+                ok &= !(got & UI_BUTTONS_TAKEN) && !row.confirm.armed;
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, ax, ay, UI_POINTER_LEFT);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, ax, ay, UI_POINTER_LEFT);
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, ax, ay, UI_POINTER_RIGHT);
+                ok &= !(got & UI_BUTTONS_TAKEN) && !row.confirm.armed;
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, ax, ay, UI_POINTER_LEFT);
+                ok &= !(got & UI_BUTTONS_TAKEN) && !(got & UI_BUTTONS_FIRED);
+                check("kit buttons: a press anywhere else, or of another mouse button, drops what was armed, and takes no event that is not a button's", ok);
+                // A press let go off its button acts on nothing.
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, ax, ay, UI_POINTER_LEFT);
+                buttons_pointer(&row, WINDOW_EVENT_MOTION, false, 400, 100, 0);
+                got = buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, 400, 100, UI_POINTER_LEFT);
+                check("kit buttons: a press let go off its button arms and acts on nothing, and its release is the row's and not the app's",
+                      !(got & UI_BUTTONS_FIRED) && !row.confirm.armed && (got & UI_BUTTONS_TAKEN));
+                // A click arms as a press of Enter does, and a key that is not that button's drops it.
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, true, bx, by, UI_POINTER_LEFT);
+                buttons_pointer(&row, WINDOW_EVENT_BUTTON, false, bx, by, UI_POINTER_LEFT);
+                ok = row.confirm.armed && row.confirm.what == 2 && row.keys == 2;
+                buttons_key(&row, 45, 0);
+                ok &= !row.confirm.armed;
+                check("kit buttons: a click arms a button as a press of Enter does, and a key that is not that button's drops it", ok);
+        }
+
+        // Drawn: the row says what an armed button will do at its left, the armed one is the accent's fill, and nothing is drawn
+        // outside the row.
+        {
+                unsigned int fill[2];
+                int touched[2];
+                b32 clean = true;
+
+                memory_zero(&row, sizeof(row));
+                ui_buttons_set(&row, 0, "Power off", "power off");
+                ui_buttons_set(&row, 1, "Restart", "restart");
+                for (int round = 0; round < 2; round++)
+                {
+                        if (round)
+                                ui_buttons_press(&row, 0);
+                        ui_buttons_place(ui, &row, 16, 40, 568);
+                        // Drawn the frames a person would see, each over a cleared picture, until the fill has settled.
+                        for (int settle = 0; settle < 40; settle++)
+                        {
+                                ui_kit.now += 16000000ll, ui_kit.busy = 0;
+                                ui_begin(ui, pixels, 600, 600, 120);
+                                ui_buttons_draw(ui, &row, true);
+                        }
+                        touched[round] = 0;
+                        for (int y = 40; y < 80; y++)
+                                for (int x = 16; x < 100; x++)
+                                        touched[round] += pixels[y * 600 + x] != 0;
+                        fill[round] = pixels[(row.button[0].y + UI_BUTTONS_H / 2) * 600 + row.button[0].x + 8];
+                        for (int x = 0; x < 600; x++)
+                                clean &= !pixels[x] && !pixels[119 * 600 + x] && !pixels[39 * 600 + x] && !pixels[80 * 600 + x];
+                }
+                check("kit buttons: an armed row says what it will do at its left, and a row at rest says nothing there", touched[0] == 0 && touched[1] > 40);
+                check("kit buttons: the armed button is filled and the other is not, and nothing is drawn outside the row", fill[0] != fill[1] && clean);
+        }
+}
+#else
+static fn check_kit_buttons(void)
+{
+        check("kit buttons: the kit has a row of buttons (ui_buttons: the pointer, the keys and the press again to confirm)", false);
+}
+#endif
+
 static fn check_kit_states(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -145193,6 +145577,7 @@ b32 main()
         check_kit_place();
         check_kit_controls();
         check_kit_states();
+        check_kit_buttons();
         check_kit_scroll_ends();
         check_kit_scroll_robust();
         check_kit_ripple_pace();

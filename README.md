@@ -256,7 +256,7 @@ with, and `canvas motion reduced` turns the motion off; every open window turns 
 change at once. `moonwater settings gallery` opens the settings window on the kit's
 gallery: every control, as the kit's own demo page has them, to see and press.
 
-On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. With `moonwater taskbar launcher on` the taskbar has a button at its start (its left end, or the top of a side taskbar) that opens it beside the button, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the button while it is open puts it away.
+On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. With `moonwater taskbar launcher on` the taskbar has a button at its start (its left end, or the top of a side taskbar) that opens it beside the button, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the button while it is open puts it away. Under its list are two buttons, Power off and Restart: each asks for a second press before it powers the machine off or restarts it (a key held down is one press, and its repeats confirm nothing), and Shift-Tab puts the keys on them.
 
 Every screen the card has connected is one desktop. `moonwater canvas arrange` lays the
 screens by their connectors' names, left to right with their tops level, the first the

@@ -6694,6 +6694,201 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_POINTER_RIGHT 0x111
 #define UI_POINTER_MIDDLE 0x112
 
+// Whether a key is a modifier alone (Control, Shift, Alt, AltGr, Super, Caps Lock), which no widget takes as a key of its own.
+static b32 ui_key_modifier(int code)
+{
+        return code == 29 || code == 97 || code == 42 || code == 54 || code == 56 || code == 100 || code == 125 || code == 126 || code == 58;
+}
+
+/*
+        A row of buttons that are one thing: the actions at the foot of a window (a launcher's Power off and Restart), the kit's
+        outlined buttons at the right of a row of UI_ROW, the first leftmost. The kit does all of it, so an app says only what
+        each is, hands the row its events and acts on the one that fired:
+
+            ui_buttons_set     button n: its label, and what it says when armed (none: it acts at once)
+            ui_buttons_place   the row, in device pixels: its left, top and width
+            ui_buttons_event   a key or a pointer event: the UI_BUTTONS_ bits of what the row made of it
+            ui_buttons_draw    the buttons, and at the left of the row what an armed one will do
+
+        An action that is not undone says what it does and takes the kit's press again to confirm (ui_confirm): the first press
+        arms it (it fills with the accent, and the row says "press again to confirm: ..."), and the next, with no other press or
+        key between, acts. A key held down is one press: its repeats are the row's and confirm nothing. The keys are one focus
+        among the buttons: Shift-Tab gives them to the row, at its first button; Left and Right move along it and stop at its
+        ends; Tab and Shift-Tab move along it and past either end give them back, as Up does; Enter and Space press the focused
+        button. Any other key is the app's and gives the keys back (Escape too), and a modifier alone is nobody's. A press on a
+        button focuses it; a press anywhere else drops what was armed. The pointer is ui_kit_pointer's, with its hover, its press
+        and its ripple.
+*/
+#define UI_BUTTONS_MOST 4
+#define UI_BUTTONS_W 104 // logical pixels: a button, its label inside it
+#define UI_BUTTONS_H 32
+#define UI_BUTTONS_DRAW 1u  // the row's picture is due again
+#define UI_BUTTONS_TAKEN 2u // the event was the row's, and the app does not have it
+#define UI_BUTTONS_FIRED 4u // a button acted: fired is its number
+
+struct ui_buttons
+{
+        struct ui_control button[UI_BUTTONS_MOST];
+        struct ui_control line;                      // what an armed button says, at the row's left
+        const char address_to says[UI_BUTTONS_MOST]; // what each does, said when armed; none: it acts at once
+        int count, keys, fired;                      // the buttons, the one the keys are on and 1 (0: the app's), the one that acted
+        struct ui_confirm confirm;
+        char said[UI_CONFIRM_TEXT];                  // the line as it is drawn
+};
+
+static fn ui_buttons_set(struct ui_buttons address_to b, int n, const char address_to label, const char address_to says)
+{
+        b->button[n].kind = UI_BUTTON, b->button[n].label = label;
+        b->says[n] = says;
+        b->count = b->count > n ? b->count : n + 1;
+}
+
+static fn ui_buttons_place(struct ui address_to ui, struct ui_buttons address_to b, int left, int top, int width)
+{
+        int right = (left + width) * 100 / ui->scale, row = top * 100 / ui->scale;
+
+        for (int k = 0; k < b->count; k++)
+        {
+                struct ui_control address_to c = &b->button[k];
+
+                c->variant = b->confirm.armed && b->confirm.what == k + 1 ? UI_BUTTON_PRIMARY : UI_BUTTON_OUTLINED;
+                c->w = UI_BUTTONS_W, c->h = UI_BUTTONS_H;
+                c->x = right - (b->count - k) * UI_BUTTONS_W - (b->count - 1 - k) * UI_GAP2;
+                c->y = row + (UI_ROW - UI_BUTTONS_H) / 2;
+        }
+        b->line.kind = UI_HEADING, b->line.variant = UI_BODY_MEDIUM, b->line.role = UI_ON_SURFACE_VARIANT;
+        b->line.x = left * 100 / ui->scale, b->line.y = row + (UI_ROW - ui_types[UI_BODY_MEDIUM].line) / 2;
+        b->line.w = b->button[0].x - UI_GAP2 - b->line.x;
+}
+
+// keys: the window has the keys, so the focused button shows its ring.
+static fn ui_buttons_draw(struct ui address_to ui, struct ui_buttons address_to b, b32 keys)
+{
+        if (b->confirm.armed && b->confirm.what >= 1 && b->confirm.what <= b->count && b->says[b->confirm.what - 1])
+        {
+                ui_confirm_line(b->said, sizeof(b->said), b->says[b->confirm.what - 1]);
+                b->line.label = b->said;
+                ui_control_draw(ui, &b->line);
+        }
+        for (int k = 0; k < b->count; k++)
+        {
+                b->button[k].focused = keys && b->keys == k + 1;
+                ui_control_draw(ui, &b->button[k]);
+        }
+}
+
+// A press of button which: it is armed when it says what it does and was not armed, else it acts.
+static p32 ui_buttons_press(struct ui_buttons address_to b, int which)
+{
+        b->keys = which + 1;
+        if (b->says[which] && !ui_confirm_ask(&b->confirm, which + 1, b->says[which]))
+                return UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN;
+        b->fired = which;
+        return UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN | UI_BUTTONS_FIRED;
+}
+
+static p32 ui_buttons_key(struct ui_buttons address_to b, const struct window_event address_to event)
+{
+        b32 repeat = (event->flags & WINDOW_KEY_REPEAT) != 0, back = (event->flags & WINDOW_KEY_SHIFT) != 0;
+        int at = b->keys - 1, key = event->a;
+        p32 drawn = b->keys || b->confirm.armed ? UI_BUTTONS_DRAW : 0;
+
+        if (!(event->flags & WINDOW_KEY_DOWN) || ui_key_modifier(key) || !b->count)
+                return 0;
+        if (!b->keys)
+        {
+                // Shift-Tab gives the row the keys; any other press of a key drops what was armed, and a repeat is nothing.
+                if (key == UI_KEY_TAB && back && !repeat)
+                {
+                        ui_confirm_drop(&b->confirm);
+                        b->keys = 1;
+                        return UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN;
+                }
+                if (repeat)
+                        return 0;
+                ui_confirm_drop(&b->confirm);
+                return drawn;
+        }
+        if (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD || key == UI_KEY_SPACE)
+                return repeat ? UI_BUTTONS_TAKEN : ui_buttons_press(b, at);
+        ui_confirm_drop(&b->confirm);
+        if (key == UI_KEY_LEFT || key == UI_KEY_RIGHT)
+        {
+                at += key == UI_KEY_LEFT ? -1 : 1;
+                b->keys = (at < 0 ? 0 : at >= b->count ? b->count - 1 : at) + 1;
+        }
+        else if (key == UI_KEY_TAB)
+        {
+                at += back ? -1 : 1;
+                b->keys = at >= 0 && at < b->count ? at + 1 : 0;
+        }
+        else if (key == UI_KEY_UP)
+                b->keys = 0;
+        else if (key != UI_KEY_DOWN)
+        {
+                b->keys = 0; // another key is the app's, and the row lets go of the keys
+                return UI_BUTTONS_DRAW;
+        }
+        return UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN;
+}
+
+// x, y: where the pointer is, for a button's press, which carries no place of its own.
+static p32 ui_buttons_pointer(struct ui address_to ui, struct ui_buttons address_to b, const struct window_event address_to event, int x, int y)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, held = ui_kit_held >= b->button && ui_kit_held < b->button + b->count;
+        int was = 0, now = 0, hit = -1;
+        struct ui_control address_to clicked;
+        p32 asks = 0;
+
+        if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
+        {
+                // Another button of the mouse is a press that is not a button's: it drops what was armed.
+                if (!down)
+                        return 0;
+                asks = b->keys || b->confirm.armed ? UI_BUTTONS_DRAW : 0;
+                b->keys = 0;
+                ui_confirm_drop(&b->confirm);
+                return asks;
+        }
+        if (event->type == WINDOW_EVENT_MOTION)
+                x = event->a, y = event->b;
+        for (int k = 0; k < b->count; k++)
+                was |= (b->button[k].hover | b->button[k].down << 1) << (2 * k);
+        clicked = ui_kit_pointer(ui, b->button, b->count, (int)event->type, x, y, down, event->flags);
+        for (int k = 0; k < b->count; k++)
+        {
+                now |= (b->button[k].hover | b->button[k].down << 1) << (2 * k);
+                hit = b->button[k].down ? k : hit;
+        }
+        asks = was != now ? UI_BUTTONS_DRAW : 0;
+        if (event->type != WINDOW_EVENT_BUTTON)
+                return asks;
+        if (down)
+        {
+                if (hit >= 0)
+                {
+                        b->keys = hit + 1;
+                        return asks | UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN;
+                }
+                asks |= b->keys || b->confirm.armed ? UI_BUTTONS_DRAW : 0;
+                b->keys = 0;
+                ui_confirm_drop(&b->confirm);
+                return asks;
+        }
+        if (clicked)
+                return asks | ui_buttons_press(b, (int)(clicked - b->button));
+        return asks | (held ? UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN : 0);
+}
+
+static p32 ui_buttons_event(struct ui address_to ui, struct ui_buttons address_to b, const struct window_event address_to event, int x, int y)
+{
+        if (event->type == WINDOW_EVENT_KEY)
+                return ui_buttons_key(b, event);
+        if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
+                return ui_buttons_pointer(ui, b, event, x, y);
+        return 0;
+}
+
 /*
         A text cut to room at a role: the longest start, ending before a whole
         character, that fits with three dots after it, or the text itself when

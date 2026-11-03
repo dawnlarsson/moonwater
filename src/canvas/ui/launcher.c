@@ -30,6 +30,11 @@
         by is what the highlighted row starts as, the command row, so Enter on it
         is the shell's; a plain word that names programs highlights the nearest.
 
+        Under the list is a row of two buttons, Power off and Restart: the kit's row of buttons (ui_buttons), which does the
+        pointer, the keys and the press again to confirm, so a button asks for a second press (and a held key's repeats are
+        no press) before the machine's own poweroff or reboot is started, quietly, by the shell as a typed command is, and
+        the bar goes. Shift-Tab gives the buttons the keys; the kit says the rest.
+
         PATH is read once, when the bar opens (at most LAUNCHER_NAMES names, the
         first directory having a name keeping it), and every key only filters
         what was read: nothing is started for a key. Nothing here needs more than
@@ -90,6 +95,15 @@ struct launcher_program
         const char address_to command; // the program, which takes -f for its face
         unsigned char mono;            // it is drawn in the monospace face
 };
+
+// The power buttons, left to right: what each is called, says when it is armed, and starts (the machine's own stop).
+#define LAUNCHER_POWERS 2
+static const struct launcher_power
+{
+        const char address_to label;
+        const char address_to says;
+        const char address_to command;
+} launcher_powers[LAUNCHER_POWERS] = {{"Power off", "power off", "poweroff"}, {"Restart", "restart", "reboot"}};
 
 // The desktop's own programs, in the order they are listed.
 static const struct launcher_program launcher_programs[] = {
@@ -155,6 +169,10 @@ static struct
         b32 asked_beside, anchored, moved;
         int anchor[4], screen[4];
         unsigned int edge, number;
+
+        // The power row under the list: the kit's buttons, and how many starts they made (what a check counts).
+        struct ui_buttons power;
+        unsigned int power_runs;
 } launcher;
 
 /* ---- the model: what a text names, and what a row starts ---- */
@@ -619,7 +637,37 @@ static b32 launcher_run(int row)
         return launcher_start(words, count);
 }
 
+/*
+        What a power button starts: the machine's shell given the poweroff or the reboot, which is what typing it does (the exit
+        hooks, the sync and the quiet of the filesystems are the shell's). The words, a null after them; how many.
+*/
+static positive launcher_power_words(int which, string_address address_to words)
+{
+        words[0] = (string_address) "/shell";
+        words[1] = (string_address) "-c";
+        words[2] = (string_address)launcher_powers[which].command;
+        words[3] = null;
+        return 3;
+}
+
+// A power button that acted (it was pressed again to confirm): started, and the bar goes. False when nothing could be started.
+static b32 launcher_power_start(int which)
+{
+        string_address words[4];
+
+        if (which < 0 || which >= LAUNCHER_POWERS)
+                return false;
+        launcher.power_runs++;
+        return launcher_start(words, launcher_power_words(which, words));
+}
+
 /* ---- the field and the keys ---- */
+
+// What the power row takes under the list: the kit's gap and a row.
+static int launcher_power_block(void)
+{
+        return ui_px(&launcher.ui, UI_GAP2) + ui_px(&launcher.ui, UI_ROW);
+}
 
 // A new text: the list for it, from the top.
 static fn launcher_changed(void)
@@ -628,7 +676,8 @@ static fn launcher_changed(void)
 
         launcher_search();
         height = ui_px(&launcher.ui, UI_PAD) * 2 + ui_px(&launcher.ui, UI_TARGET) +
-                 (launcher.entries ? ui_px(&launcher.ui, UI_GAP2) + (int)launcher.entries * ui_px(&launcher.ui, UI_ROW) : 0);
+                 (launcher.entries ? ui_px(&launcher.ui, UI_GAP2) + (int)launcher.entries * ui_px(&launcher.ui, UI_ROW) : 0) +
+                 launcher_power_block();
         most = launcher_most_height();
         launcher.height = height > most ? most : height;
         // A bar above a bottom panel keeps its bottom where it is, so it is put again with the picture of its new height.
@@ -690,8 +739,15 @@ static b32 launcher_asked(p32 asks)
 // A key: the field's first, and what it leaves the bar's, which moves in the list. False when it closes the bar.
 static b32 launcher_key(const struct window_event address_to event)
 {
-        p32 asks;
+        p32 asks = ui_buttons_event(&launcher.ui, &launcher.power, event, 0, 0);
 
+        // The power buttons are the kit's row: what it takes of a key (Shift-Tab, and every key while it has the keys) is not the field's.
+        if (asks & UI_BUTTONS_DRAW)
+                launcher.dirty = true;
+        if (asks & UI_BUTTONS_FIRED)
+                return !launcher_power_start(launcher.power.fired);
+        if (asks & UI_BUTTONS_TAKEN)
+                return true;
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
         if ((asks = ui_field_event(&launcher.ui, launcher_field(), &launcher.menu, event, 0, 0)))
@@ -743,17 +799,22 @@ static fn launcher_layout(void)
                 launcher.list.damaged = launcher_damaged;
                 launcher.list.hover = launcher.list.down = -1;
         }
+        if (!launcher.power.count)
+                for (int at = 0; at < LAUNCHER_POWERS; at++)
+                        ui_buttons_set(&launcher.power, at, launcher_powers[at].label, launcher_powers[at].says);
         launcher.list.count = (int)launcher.entries;
         for (int at = 0; at < launcher.list.count; at++)
                 launcher.list.id[at] = (unsigned short)at;
         // The rows fill the window below the field; a list longer than the window scrolls (the wheel, and the keys reveal).
         {
-                int top = pad + ui_px(ui, UI_TARGET) + ui_px(ui, UI_GAP2), rows = (int)launcher.entries * ui_px(ui, UI_ROW), room = launcher.height - top - pad;
+                int top = pad + ui_px(ui, UI_TARGET) + ui_px(ui, UI_GAP2), rows = (int)launcher.entries * ui_px(ui, UI_ROW),
+                    room = launcher.height - top - pad - launcher_power_block();
 
                 ui_list_place(ui, &launcher.list, pad, top, launcher.width - 2 * pad,
                               launcher.height > 0 && rows > room ? (room > 0 ? room : 0) : rows);
         }
         ui_list_layout(ui, &launcher.list);
+        ui_buttons_place(ui, &launcher.power, pad, launcher.height - pad - ui_px(ui, UI_ROW), launcher.width - 2 * pad);
 }
 
 static b32 launcher_event(const struct window_event address_to event)
@@ -762,6 +823,18 @@ static b32 launcher_event(const struct window_event address_to event)
         p32 asks;
 
         launcher_layout();
+        // The power buttons are the kit's row: its hover, its presses and releases, and a press anywhere else that drops what was
+        // armed, before the field has the event; what the row takes of a pointer event is not the field's or the list's.
+        if (event->type != WINDOW_EVENT_KEY)
+        {
+                asks = ui_buttons_event(&launcher.ui, &launcher.power, event, launcher.pointer_x, launcher.pointer_y);
+                if (asks & UI_BUTTONS_DRAW)
+                        launcher.dirty = true;
+                if (asks & UI_BUTTONS_FIRED)
+                        return !launcher_power_start(launcher.power.fired);
+                if (asks & UI_BUTTONS_TAKEN)
+                        return true;
+        }
         // The field takes the pointer on its well (a caret, a drag, the middle button's paste, its menu) and the
         // clipboard's answers; the rest is the list's.
         // A press outside the field is the list's (the field's answer to it, commit or cancel, is the kit's and changes nothing here).
@@ -885,7 +958,7 @@ static fn launcher_draw(unsigned int address_to pixels)
                         search->items[0] = "Search programs, or type a command";
                         search->edit = launcher_field();
                 }
-                search->focused = launcher.focused || !launcher.had_focus;
+                search->focused = (launcher.focused || !launcher.had_focus) && !launcher.power.keys;
                 search->x = pad * 100 / ui->scale, search->y = pad * 100 / ui->scale, search->w = (launcher.width - 2 * pad) * 100 / ui->scale, search->h = UI_TARGET;
                 ui_control_draw(ui, search);
         }
@@ -893,6 +966,7 @@ static fn launcher_draw(unsigned int address_to pixels)
         launcher_layout();
         launcher.list.lit = true;
         ui_list_draw(ui, &launcher.list);
+        ui_buttons_draw(ui, &launcher.power, launcher.focused || !launcher.had_focus);
 }
 
 // One picture, into the buffer the compositor is not reading; false when there is none yet.
