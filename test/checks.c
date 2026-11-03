@@ -140165,6 +140165,10 @@ static void turn_run(struct ui address_to ui, int kind, unsigned int mode, int t
                 ui_control_draw(ui, &c);
                 values[k] = turn_sample(kind, &c);
         }
+        // A press held to the end (the fill's kind) is on a control that goes with this frame: let go, or the next press in
+        // any later check lets it go through a pointer into a frame that is gone, which writes into whatever lives there now.
+        if (ui_kit_held == &c)
+                ui_kit_held = null;
 }
 
 static fn check_kit_turn(void)
@@ -140266,6 +140270,7 @@ static fn check_kit_turn(void)
         }
         check("kit turn: every kind keeps its value across a theme turn mid-flight, within twice its own step", continuous);
         check("kit turn: every kind ends where a control fresh under the new theme ends, and does not overshoot", ends);
+        check("kit turn: no run leaves a press held on its control, which is gone with the run (the next press lets it go)", ui_kit_held == null);
 
         // A control placed for the first time under a turn starts at rest: its tweens are put at their state, and none moves.
         {
