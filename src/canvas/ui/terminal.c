@@ -1592,7 +1592,14 @@ static b32 terminal_frame(void)
                 // come back, and it is drawn on them.
                 if (bar || visible)
                 {
-                        a0 = a0 < from ? a0 : from;
+                        // A row that did not change has the span 0 to 0, which is not a first column of 0: the cells the bar
+                        // covers are drawn again, and not the whole row. They start where a span starts (terminal_span): never
+                        // on the second half of a wide character, which drawn alone is a blank.
+                        unsigned int start = from && ((line[from].flags & WINDOW_CELL_WIDE_RIGHT) || (line[from - 1].flags & WINDOW_CELL_WIDE))
+                                                 ? from - 1
+                                                 : from;
+
+                        a0 = a1 > a0 && a0 < start ? a0 : start;
                         a1 = COLUMNS;
                 }
 

@@ -140203,6 +140203,45 @@ static p32 address_to render_frame(void)
         return buffer;
 }
 
+/*
+        The kit's bar is there whenever the view has a scrollback, and the cells it covers are drawn again every frame, over fresh
+        cells: those, and not the whole grid. With history on the screen, a letter typed is the cells of that letter and the
+        bar's, so a frame that follows is a row or two of the grid wide, not every row of it; and nothing typed draws the bar's
+        cells again and no more. A row's drawn span is terminal_span_first to terminal_span_last.
+*/
+static fn check_bar_cells(void)
+{
+        unsigned int first, shown, total, from = terminal_bar_from(), wide = 0, rows = ROWS < TERMINAL_SPAN_ROWS ? ROWS : TERMINAL_SPAN_ROWS;
+
+        cursor_hide();
+        for (p32 line = 0; line < 3 * ROWS; line++)
+                term_bytes((const p8 address_to) "history line\r\n", 14);
+        term_bytes((const p8 address_to) "$ ", 2);
+        cursor_show();
+        to_shell_length = 0;
+        render_frame();
+        render_frame();
+        terminal_extent(&first, &shown, &total);
+        check("bar: a scrollback is behind the screen", total > shown);
+
+        // Nothing new: the bar's cells of each row, which start at or one before the bar's first column.
+        render_frame();
+        for (unsigned int row = 0; row < rows; row++)
+                wide += terminal_span_last[row] - terminal_span_first[row] > COLUMNS - from + 1;
+        check("bar: a frame with nothing new draws the bar's cells of each row, not the row", wide == 0);
+
+        // A letter: its row is as wide as from the letter to the bar, and no other row is wider than the bar's cells.
+        wide = 0;
+        cursor_hide();
+        term_bytes((const p8 address_to) "x", 1);
+        cursor_show();
+        to_shell_length = 0;
+        render_frame();
+        for (unsigned int row = 0; row < rows; row++)
+                wide += terminal_span_last[row] - terminal_span_first[row] > COLUMNS - from + 1;
+        check("bar: a letter typed draws its row to the bar and the other rows only the bar's cells", wide <= 1);
+}
+
 #ifdef CHECK_kit_frames
 /*
         The kit's frames, for the filmstrips: not a check, a renderer. The settings window's gallery (the kit's
@@ -147816,6 +147855,7 @@ b32 main()
 
         // What the terminal says its paper and ink are is what it paints them with: the theme's pair, and the palette's.
         terminal_theme_check();
+        check_bar_cells();
         check("frames: a buffer is refused only while the compositor may still be reading it", !refused);
         check("frames: some were drawn", compared > 1000);
         check("frames: the screen and the buffer are always the full draw", !wrong);
