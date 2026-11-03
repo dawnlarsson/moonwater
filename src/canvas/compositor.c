@@ -11840,6 +11840,11 @@ static void compositor_screen_chord(unsigned int code)
         compositor_arrange_on(row, how == COMPOSITOR_ROOM ? COMPOSITOR_MAXIMIZED : how, to);
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+// A key a client's window reads as it is, from the keymap it was sent (wayland_host.c): true when the key was the client's.
+static int compositor_wl_key(unsigned int code, int value);
+#endif
+
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
@@ -11881,6 +11886,10 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         {
                 if (!(modifiers & WINDOW_KEY_ALT) && compositor.cycle)
                         compositor_focus_commit();
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // A client's window reads Alt and AltGr itself: they are modifiers of its keymap.
+                compositor_wl_key(code, value);
+#endif
                 return;
         }
 
@@ -11938,6 +11947,11 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
             ((modifiers & WINDOW_KEY_ALT) && compositor.cycle))
                 return;
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // A client's window is given the key as it is, with no characters made of it here.
+        if (compositor_wl_key(code, value))
+                return;
+#endif
         count = compositor_keymap_event(&compositor.keymap, code, value, modifiers, characters);
         if (count < 0)
                 return;
