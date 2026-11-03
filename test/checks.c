@@ -119784,7 +119784,11 @@ static void check_popup_ground_steady(void)
     }
     compositor_take(3);
     compositor_present();
+    // The menu's pump takes the kit's clock: over a window that has not drawn since (idle), a press's ripple and its fade run on the
+    // time now, not on the parent's last frame, so the menu does not stay busy with a ripple that never ages.
+    ui_kit.now = 1000;
     ui_popup_pump(&popup);
+    check("popup: the menu's pump takes the kit's clock, not the parent's last frame's", ui_kit.now > 1000);
     for (int hot = 0; hot < 4; hot++)
     {
         if (hot == 2)

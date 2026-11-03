@@ -6421,6 +6421,9 @@ static int ui_popup_pump(struct ui_popup address_to p)
 
         if (!p->open)
                 return UI_MENU_NOTHING;
+        // The menu runs on the kit's clock as it is now: its ripples are timed from the press and drawn at the frame, and over an
+        // idle window the last frame's clock is old, so a ripple would not age and the menu would stay busy with it.
+        ui_kit.now = (b64)clock_monotonic_nanoseconds();
         // A picture the compositor was not ready for goes now, when it has taken the one before (its knock wakes the app).
         if (p->pending && windows_ready(&p->own))
                 ui_popup_present(p);
