@@ -10105,7 +10105,7 @@ static b32 ui_text_bar_place(struct ui address_to ui, struct ui_text address_to 
         (at once with reduced motion). Nothing is drawn for a widget that has neither, and what it covered is kept (over_top,
         over_bottom) for an app that draws in bands. An app calls it last, for each widget it draws, in the same frame.
 */
-static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t)
+static fn ui_text_overlay_draw(struct ui address_to ui, struct ui_text address_to t)
 {
         const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
         positive now = clock_monotonic_nanoseconds();
@@ -10161,6 +10161,18 @@ static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t)
                 t->over_top = !t->over_bottom || t->bar_y < t->over_top ? t->bar_y : t->over_top;
                 t->over_bottom = t->bar_y + t->bar_h > t->over_bottom ? t->bar_y + t->bar_h : t->over_bottom;
         }
+}
+
+// The overlay over the whole picture: a window draws a region at a time (the page's body under its own clip, a list's rows) and
+// leaves the clip of the last, which would cut a handle in the title band above it; the overlay is drawn with the picture's whole
+// height, in the band a repaint is drawing (a band is a repaint's, and kept), and the clip left as it was.
+static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t)
+{
+        int top = ui->top, bottom = ui->bottom;
+
+        ui->top = 0, ui->bottom = ui->height;
+        ui_text_overlay_draw(ui, t);
+        ui->top = top, ui->bottom = bottom;
 }
 
 /*

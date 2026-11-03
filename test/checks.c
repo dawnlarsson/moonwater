@@ -144745,6 +144745,16 @@ static fn check_field_hands(string_address regular)
                         launcher_draw((unsigned int address_to)pixels);
                         check("launcher: a finger's long press in the field selects its word, and the picture shows its handles and the actions bar",
                               launcher_holds("lsof") && launcher.field.handles && launcher.field.bar_up && launcher.field.bar_count == 3);
+                        // The handles are in the picture, in the accent under the line, though the list was drawn under its own clip after the field.
+                        {
+                                int hx, htop;
+                                const unsigned int address_to shown = (const unsigned int address_to)pixels;
+
+                                check("launcher: the handle's knob is drawn in the accent under the field's line, past the clip the list drew under",
+                                      !ui_text_where(&launcher.ui, &launcher.field, doc_sel_end(&launcher.field.doc.selections[0]), &hx, &htop) &&
+                                          (shown[(positive)(htop + launcher.field.line_height + ui_dev(&launcher.ui, UI_TEXT_HANDLE)) * launcher.ui.pitch + (positive)hx] & 0xffffffu) ==
+                                              (ui_role(UI_PRIMARY) & 0xffffffu));
+                        }
                 }
                 // A row runs on its release, where its press went down: a press shows the row pressed and runs nothing, a
                 // press slid off the row shows none and a release off it runs nothing, and a release on the row runs it.
@@ -144851,6 +144861,15 @@ static fn check_field_hands(string_address regular)
                                 settings_draw_rows((unsigned int address_to)pixels, 0, 0);
                                 check("settings: a finger's long press in the name's field selects a word, and the picture shows its handles and the actions bar",
                                       settings.editing == name && settings.edit.handles && settings.edit.bar_up && settings.edit.bar_count >= 3);
+                                {
+                                        int hx, htop;
+                                        const unsigned int address_to shown = (const unsigned int address_to)pixels;
+
+                                        check("settings: and the handle's knob is drawn in the accent under the field's line, past the clip the page drew under",
+                                              !ui_text_where(&settings.ui, &settings.edit, doc_sel_end(&settings.edit.doc.selections[0]), &hx, &htop) &&
+                                                  (shown[(positive)(htop + settings.edit.line_height + ui_dev(&settings.ui, UI_TEXT_HANDLE)) * settings.ui.pitch + (positive)hx] & 0xffffffu) ==
+                                                      (ui_role(UI_PRIMARY) & 0xffffffu));
+                                }
                         }
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter sets the name to what the field holds",
