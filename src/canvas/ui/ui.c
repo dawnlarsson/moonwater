@@ -9217,6 +9217,15 @@ static b32 ui_text_fling(struct ui_text address_to t, positive now)
 #define UI_TEXT_SCROLL_FAR 6
 #define UI_TEXT_SCROLL_MOST 2400
 
+// The speed a drag past an edge scrolls at, in device pixels a second, for past device pixels past it at scale (the terminal's too).
+static long ui_edge_speed(long past, int scale)
+{
+        long distance = (past < 0 ? -past : past) * 100 / scale, speed = UI_TEXT_SCROLL_SPEED + distance * UI_TEXT_SCROLL_FAR;
+
+        speed = speed > UI_TEXT_SCROLL_MOST ? UI_TEXT_SCROLL_MOST : speed;
+        return speed * scale / 100;
+}
+
 // The most a field's view scrolls: its line's end past the box, with a little room after it (ui_text_reveal's rule).
 static b64 ui_text_scroll_most(struct ui address_to ui, struct ui_text address_to t)
 {
@@ -9232,7 +9241,7 @@ static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text addre
 {
         b32 field = t->mode == UI_TEXT_FIELD;
         p64 lines = doc_line_count(&t->doc);
-        long distance, speed, steps;
+        long steps;
         int edge_x, edge_y;
 
         if (!t->dragging || !t->scroll_past || t->drag_box || (field ? t->right <= t->left : t->line_height <= 0))
@@ -9245,11 +9254,8 @@ static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text addre
                 t->scroll_at = now, t->scroll_owed = 0;
                 return now + UI_DRAG_FRAME_NS;
         }
-        distance = (t->scroll_past < 0 ? -(long)t->scroll_past : (long)t->scroll_past) * 100 / ui->scale;
-        speed = UI_TEXT_SCROLL_SPEED + distance * UI_TEXT_SCROLL_FAR;
-        speed = speed > UI_TEXT_SCROLL_MOST ? UI_TEXT_SCROLL_MOST : speed;
         // Device pixels a second over the time since the last step: thousandths of a device pixel owed.
-        t->scroll_owed += speed * ui->scale / 100 * (long)(now - t->scroll_at) / 1000000l;
+        t->scroll_owed += ui_edge_speed(t->scroll_past, ui->scale) * (long)(now - t->scroll_at) / 1000000l;
         t->scroll_at = now;
         if (field)
         {

@@ -117410,6 +117410,46 @@ static void check_terminal_select_scroll(void)
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
 }
 
+/*
+        The speed of the selection's edge scroll is the kit's, at the window's scale: 120 logical pixels a second at the edge and 6
+        more for each logical pixel past it. A mouse 25 pixels above the grid at 100% is 270 pixels a second, so 40 steps of 16 ms
+        (0.64 s) move 172.8 pixels: about 10 lines at a 17 pixel row. It moved about 450.
+*/
+static void check_terminal_select_speed(void)
+{
+    b32 dirty = false;
+    int x = (int)terminal.pad + 4 * (int)terminal.cell_w + (int)terminal.cell_w / 2, top = (int)terminal.pad_y;
+    int cell = (int)terminal.cell_h;
+    unsigned int first_before, first_after, shown, total;
+    long moved, want;
+    positive now = 1000000000ull;
+    struct window_event at = {WINDOW_EVENT_MOTION, 0, 0, 0};
+    struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+    struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+
+    for (int line = 0; line < 3 * (int)ROWS; line++)
+        term_bytes("scrollback\r\n", 12);
+    terminal_view_live();
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    at.a = x, at.b = top + 2 * cell + cell / 2;
+    terminal_receive(-1, &at, &dirty);
+    terminal_receive(-1, &press, &dirty);
+    at.b = top - 25;
+    terminal_receive(-1, &at, &dirty);
+    terminal_select_autoscroll(now, &dirty);
+    terminal_extent(&first_before, &shown, &total);
+    for (int step = 1; step <= 40; step++)
+        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+    terminal_extent(&first_after, &shown, &total);
+    moved = (long)first_before - (long)first_after;
+    want = 17280l / (100l * (long)cell);
+    check("terminal: a drag 25 pixels past the grid's top at scale 100 scrolls about 172.8 pixels in 0.64 s, not 100 times that",
+          moved >= want - 1 && moved <= want + 1);
+    terminal_receive(-1, &release, &dirty);
+    terminal_view_live();
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+}
+
 static fn check_keys(void)
 {
         static const struct
@@ -141958,6 +141998,7 @@ b32 main()
         check_keys();
         check_pointer();
         check_terminal_select_scroll();
+        check_terminal_select_speed();
         check_take();
         check_land();
         check_glass();

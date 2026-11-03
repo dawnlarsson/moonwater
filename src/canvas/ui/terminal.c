@@ -3131,13 +3131,9 @@ static void terminal_leave(b32 show)
         at the edge row each step, so it grows as the text scrolls. The alternate screen has no scrollback here, and a drag that
         is back on the grid, or lifted, stops it. Answers when the next step is due, 0 for none.
 */
-#define TERMINAL_SELECT_SPEED 120
-#define TERMINAL_SELECT_FAR 6
-#define TERMINAL_SELECT_MOST 2400
-
 static positive terminal_select_autoscroll(positive now, b32 address_to dirty)
 {
-        long distance, speed, rows;
+        long rows;
         int scale = terminal_scale(), row, column;
         unsigned int line, at;
 
@@ -3151,11 +3147,8 @@ static positive terminal_select_autoscroll(positive now, b32 address_to dirty)
                 terminal.select_scroll_at = now, terminal.select_owed = 0;
                 return now + UI_DRAG_FRAME_NS;
         }
-        distance = (terminal.select_past < 0 ? -(long)terminal.select_past : (long)terminal.select_past) / scale;
-        speed = TERMINAL_SELECT_SPEED + distance * TERMINAL_SELECT_FAR;
-        speed = speed > TERMINAL_SELECT_MOST ? TERMINAL_SELECT_MOST : speed;
         // Device pixels a second over the time since the last step: thousandths of a device pixel owed.
-        terminal.select_owed += speed * scale * (long)(now - terminal.select_scroll_at) / 1000000l;
+        terminal.select_owed += ui_edge_speed(terminal.select_past, scale) * (long)(now - terminal.select_scroll_at) / 1000000l;
         terminal.select_scroll_at = now;
         rows = terminal.select_owed / (1000l * terminal.cell_h);
         if (rows <= 0)
