@@ -703,7 +703,7 @@ static b32 editor_event(const struct window_event address_to event)
         if (editor.finding && (event->type == WINDOW_EVENT_KEY ? editor.find.focused : event->type != WINDOW_EVENT_WHEEL))
         {
                 if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
-                        editor.find.focused = ui_text_inside(&editor.find, editor.pointer_x, editor.pointer_y);
+                        editor.find.focused = ui_text_reach(&editor.ui, &editor.find, editor.pointer_x, editor.pointer_y);
                 asks = ui_field_event(&editor.ui, &editor.find, &editor.menu, event, editor.pointer_x, editor.pointer_y);
                 // A press outside the find bar is the view's: the bar's answer to it (commit or cancel) changes nothing here.
                 if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))

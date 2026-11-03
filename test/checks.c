@@ -144408,6 +144408,41 @@ static fn check_kit_defaults(struct ui address_to wui)
         check("editor tabs: a mouse press and release on a tab choose it, as the kit's tabs do", false);
 #endif
 
+        // A finger's long press in the code view, sent as the compositor sends it: the editor's own picture has the selection's handles
+        // and its actions bar over the text (editor_draw ends with the overlay).
+#ifdef UI_TEXT_BAR_ITEMS
+        {
+                unsigned int pixels[600 * 300];
+                const unsigned int held = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD;
+                struct editor_tab address_to tab;
+                int x, y;
+
+                editor.ui = ui;
+                editor.width = 600, editor.height = 300, editor.own.stride = 600;
+                editor.count = 0;
+                editor_open(null);
+                editor.tab = 0;
+                tab = editor_now();
+                doc_type(&tab->view.doc, (const p8 address_to) "hello world again\n", 18);
+                tab->view.focused = true;
+                editor_draw(pixels);
+                x = tab->view.left + 3 * tab->view.cell, y = tab->view.top + tab->view.line_height / 2;
+                editor_event(&(struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, x, y});
+                editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0});
+                editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, held | WINDOW_KEY_CANCEL, 0x110, 0});
+                editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, held | WINDOW_KEY_DOWN, 0x111, 0});
+                editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, held, 0x111, 0});
+                editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, held | WINDOW_KEY_CANCEL, 0x110, 0});
+                editor_draw(pixels);
+                check("editor: a finger's long press in the code view selects a word, and the editor's picture shows its handles and the actions bar",
+                      doc_sel_start(&tab->view.doc.selections[tab->view.doc.primary]) == 0 && doc_sel_end(&tab->view.doc.selections[tab->view.doc.primary]) == 5 &&
+                          tab->view.handles && tab->view.bar_up && tab->view.bar_count == 4);
+                editor.count = 0;
+        }
+#else
+        check("editor: a finger's long press in the code view selects a word, and the editor's picture shows its handles and the actions bar", false);
+#endif
+
         // No app keeps a copy of a default: the phrases of the copies it had are gone from its sources.
         for (positive k = 0; k < sizeof(copies) / sizeof(copies[0]); k++)
                 copied += kit_defaults_scan(copies[k][0], copies[k][1]) ? 1 : 0;
