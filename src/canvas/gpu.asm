@@ -440,6 +440,8 @@ scene:
 	s_cbranch_scc1	.scene_text
 	s_cmp_eq_u32	s47, 4
 	s_cbranch_scc1	.scene_image
+	s_cmp_eq_u32	s47, 5
+	s_cbranch_scc1	.scene_mix
 	s_cmp_le_u32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -486,6 +488,112 @@ scene:
 	v_cndmask_b32_e64 v7, v7, v23, s[68:69]
 	over		v23, v8
 	v_cndmask_b32_e64 v8, v8, v23, s[70:71]
+	s_branch	.scene_loop
+
+; one pixel of a mix (memory_mix_u32_row): the lane's pixel \o and the ink \ink at the cover \cv (0 to 255), where the mask \mk has it: none leaves the pixel, all takes the ink
+; whole, between the colours (alpha cleared) are g (255 - c) + i c + 127 in sixteen-bit lanes, then (x + (x >> 8) + 1) >> 8
+.macro mixpixel o, cv, ink, mk
+	v_sub_nc_u32	v39, 255, \cv
+	v_and_b32	v40, 0x00ffffff, \o
+	v_and_b32	v41, 0x00ffffff, \ink
+	v_and_b32	v42, s75, v40
+	v_lshrrev_b32	v43, 8, v40
+	v_and_b32	v43, s75, v43
+	v_and_b32	v44, s75, v41
+	v_lshrrev_b32	v45, 8, v41
+	v_and_b32	v45, s75, v45
+	v_mad_u32_u24	v42, v42, v39, 0x007f007f
+	v_mad_u32_u24	v42, v44, \cv, v42
+	v_mad_u32_u24	v43, v43, v39, 0x007f007f
+	v_mad_u32_u24	v43, v45, \cv, v43
+	v_lshrrev_b32	v46, 8, v42
+	v_and_b32	v46, s75, v46
+	v_add3_u32	v42, v42, 0x00010001, v46
+	v_lshrrev_b32	v42, 8, v42
+	v_and_b32	v42, s75, v42
+	v_lshrrev_b32	v47, 8, v43
+	v_and_b32	v47, s75, v47
+	v_add3_u32	v43, v43, 0x00010001, v47
+	v_lshrrev_b32	v43, 8, v43
+	v_and_b32	v43, s75, v43
+	v_lshl_or_b32	v42, v43, 8, v42
+	v_cmp_lt_u32_e64 s[96:97], 254, \cv
+	v_cndmask_b32_e64 v42, v42, \ink, s[96:97]
+	v_cmp_ne_u32_e64 s[96:97], 0, \cv
+	v_cndmask_b32_e64 v42, \o, v42, s[96:97]
+	v_cndmask_b32_e64 \o, \o, v42, \mk
+.endm
+
+; a mix (5 | the cover's pitch << 8 | the ink's pitch << 16, x0, y0, x1, y1 in pixels, the place of the cover byte at x0, y0 from the buffer's start, the ink's address in
+; two words, or the ink's colour in the first when the ink's pitch is 0): memory_mix_u32_row over the rectangle, the covers a table of bytes in the buffer
+.scene_mix:
+	s_cmp_le_u32	s59, s28
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s50, s28, 64
+	s_cmp_ge_u32	s57, s50
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_u32	s60, s29
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s51, s29, 4
+	s_cmp_ge_u32	s58, s51
+	s_cbranch_scc1	.scene_loop
+	s_mov_b32	s45, 1
+	s_min_u32	s53, s59, s12
+	v_cmp_le_u32_e64 s[76:77], s58, v4
+	v_cmp_gt_u32	vcc, s60, v4
+	s_and_b64	s[76:77], s[76:77], vcc
+	inside		s[82:83], v3
+	inside		s[84:85], v17
+	inside		s[86:87], v18
+	inside		s[88:89], v19
+	s_bfe_u32	s80, s56, 0x80008
+	s_lshr_b32	s81, s56, 16
+	v_subrev_nc_u32	v30, s58, v4
+	v_mad_u32_u24	v30, v30, s80, s61
+	v_subrev_nc_u32	v31, s57, v3
+	v_add_nc_u32	v30, v30, v31
+	s_mov_b64	s[92:93], exec
+	s_or_b64	s[90:91], s[82:83], s[84:85]
+	s_or_b64	s[90:91], s[90:91], s[86:87]
+	s_or_b64	s[90:91], s[90:91], s[88:89]
+	s_and_b64	exec, s[92:93], s[90:91]
+	global_load_dword v34, v30, s[102:103]
+	s_mov_b64	exec, s[92:93]
+	s_cmp_eq_u32	s81, 0
+	s_cbranch_scc1	.mix_constant
+	v_subrev_nc_u32	v35, s58, v4
+	v_mul_lo_u32	v35, v35, s81
+	v_add_nc_u32	v35, v35, v31
+	v_lshlrev_b32	v35, 2, v35
+	v_ashrrev_i32	v36, 31, v35
+	v_add_co_u32	v32, vcc, s62, v35
+	v_mov_b32	v33, s63
+	v_add_co_ci_u32	v33, vcc, v33, v36, vcc
+	s_and_b64	exec, s[92:93], s[82:83]
+	global_load_dword v64, v[32:33], off
+	s_and_b64	exec, s[92:93], s[84:85]
+	global_load_dword v65, v[32:33], off offset:4
+	s_and_b64	exec, s[92:93], s[86:87]
+	global_load_dword v66, v[32:33], off offset:8
+	s_and_b64	exec, s[92:93], s[88:89]
+	global_load_dword v67, v[32:33], off offset:12
+	s_mov_b64	exec, s[92:93]
+	s_branch	.mix_blend
+.mix_constant:
+	v_mov_b32	v64, s62
+	v_mov_b32	v65, s62
+	v_mov_b32	v66, s62
+	v_mov_b32	v67, s62
+.mix_blend:
+	s_waitcnt	vmcnt(0)
+	v_bfe_u32	v60, v34, 0, 8
+	v_bfe_u32	v61, v34, 8, 8
+	v_bfe_u32	v62, v34, 16, 8
+	v_bfe_u32	v63, v34, 24, 8
+	mixpixel	v5, v60, v64, s[82:83]
+	mixpixel	v6, v61, v65, s[84:85]
+	mixpixel	v7, v62, v66, s[86:87]
+	mixpixel	v8, v63, v67, s[88:89]
 	s_branch	.scene_loop
 
 ; an image (4, x0, y0, x1, y1 in pixels, the address of the picture's pixel at x0, y0 in two words, its pitch in pixels): the pixels copied, each lane's four loaded by the

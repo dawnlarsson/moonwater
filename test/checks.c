@@ -187016,6 +187016,78 @@ b32 main(void)
                                                               (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
                                 }
                 }
+                // Mixes: memory_mix_u32_row over rectangles (a corner's square or a line's end), the ink a colour or a picture, the covers a table of bytes in the
+                // buffer with a pitch of its own, a quarter of them none and a quarter whole.
+                {
+                        enum { CP = 96, CH = 80, MIXES = 48, MROUNDS = 12 };
+                        positive cov_at = img_at + (positive)SP * SH * 4 + 4096;
+                        unsigned char address_to table = (unsigned char address_to)((p8 address_to)gpu.at + cov_at);
+                        static unsigned int ink_row[CP];
+                        positive mix_bad = 0;
+
+                        for (int round = 0; round < MROUNDS; round++)
+                        {
+                                positive count = 0;
+                                int cp = CP - round % 5; // the table's rows are cp bytes apart in this round
+
+                                for (positive i = 0; i < (positive)cp * CH; i++)
+                                {
+                                        unsigned int r = gpu_random();
+
+                                        table[i] = (unsigned char)(r % 4 == 0 ? 0 : r % 4 == 1 ? 255 : r >> 8);
+                                }
+                                for (positive i = 0; i < (positive)PP * PH; i++)
+                                        pic[i] = gpu_kit_want[i] = gpu_random();
+                                for (int k = 0; k < MIXES; k++)
+                                {
+                                        unsigned int address_to q = ops + 8 * count;
+                                        int constant = gpu_random() % 3 == 0, from_shared = up_va && gpu_random() % 2, ink_pitch = from_shared ? SW : SP;
+                                        int w = 1 + (int)(gpu_random() % 80), h = 1 + (int)(gpu_random() % 70), tx = (int)(gpu_random() % (unsigned int)(cp - w - 4)), ty = (int)(gpu_random() % (unsigned int)(CH - h));
+                                        int sx = (int)(gpu_random() % 250), sy = (int)(gpu_random() % 200);
+                                        int x0 = (int)(gpu_random() % (PW + 60)) - 30, y0 = (int)(gpu_random() % (PH + 60)) - 30;
+                                        int cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0, cx1 = x0 + w > PW ? PW : x0 + w, cy1 = y0 + h > PH ? PH : y0 + h;
+                                        unsigned int colour = gpu_random();
+                                        positive cover_place, ink_place;
+
+                                        if (cx1 <= cx0 || cy1 <= cy0)
+                                                continue;
+                                        cover_place = (positive)(ty + cy0 - y0) * (positive)cp + (positive)(tx + cx0 - x0);
+                                        ink_place = (positive)(sy + cy0 - y0) * (positive)ink_pitch + (positive)(sx + cx0 - x0);
+                                        q[0] = 5u | (unsigned int)cp << 8 | (constant ? 0u : (unsigned int)ink_pitch << 16);
+                                        q[1] = (unsigned int)cx0, q[2] = (unsigned int)cy0, q[3] = (unsigned int)cx1, q[4] = (unsigned int)cy1, q[5] = (unsigned int)(cov_at + cover_place);
+                                        if (constant)
+                                                q[6] = colour, q[7] = 0;
+                                        else
+                                        {
+                                                positive at = (from_shared ? up_va : GPU_VA + img_at) + 4ull * ink_place;
+
+                                                q[6] = (unsigned int)at, q[7] = (unsigned int)(at >> 32);
+                                        }
+                                        for (int y = cy0; y < cy1; y++)
+                                        {
+                                                const unsigned int address_to ink = constant ? ink_row : (from_shared ? shared : gpu_img) + ink_place + (positive)(y - cy0) * (positive)ink_pitch;
+
+                                                if (constant)
+                                                        memory_fill_u32(ink_row, (positive)(cx1 - cx0), colour);
+                                                memory_mix_u32_row(gpu_kit_want + (positive)y * PP + (positive)cx0, ink, table + cover_place + (positive)(y - cy0) * (positive)cp, (positive)(cx1 - cx0));
+                                        }
+                                        count++;
+                                }
+                                if (!gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
+                                {
+                                        check("gpu mixes: the scene finishes", false);
+                                        return test_report(null);
+                                }
+                                for (int y = 0; y < PH; y++)
+                                        for (int x = 0; x < PW; x++)
+                                        {
+                                                checks++;
+                                                if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++failures, ++mix_bad) < 6)
+                                                        string_format(log, "  FAIL gpu mixes round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                                      (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                        }
+                        }
+                }
         }
 
         // 8K: a window's clear and 159 boxes of the sizes cards and buttons have, the radii a card has, a third of them translucent;
