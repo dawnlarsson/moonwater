@@ -117355,9 +117355,20 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
 */
 
 // An event to the terminal as the app's loop gives it (ui_app_run): the kit's context for the event first (a finger's, the time).
+static b64 deliver_clock;
+
+// What the loop gives every event (ui_event_context), with the time stepped on the test's own clock: a frame an event, from the later of
+// the kit's clock and the last event's, so a drag delivered move after move has the speed it was made with and not an instant's.
+static fn deliver_context(const struct window_event address_to event)
+{
+        deliver_clock = (ui_kit.now > deliver_clock ? ui_kit.now : deliver_clock) + 16666667ll;
+        ui_event_context(event);
+        ui_kit.now = deliver_clock;
+}
+
 static b32 terminal_deliver(b32 master, const struct window_event address_to event, b32 address_to dirty)
 {
-        ui_event_context(event);
+        deliver_context(event);
         return terminal_receive(master, event, dirty);
 }
 
@@ -117600,13 +117611,14 @@ static fn check_pointer(void)
                 terminal_deliver(-1, &finger, &dirty);
                 terminal_deliver(-1, &land, &dirty);
                 quiet = !to_shell_length;
-                for (int step = 1; step <= 4; step++)
+                // The drag follows from where the finger is when the slop is passed: the first cell it moves is the slop's.
+                for (int step = 1; step <= 5; step++)
                 {
                         finger.b = y + step * (int)terminal.cell_h;
                         terminal_deliver(-1, &finger, &dirty);
                 }
                 terminal_extent(&first, &shown, &total);
-                check("pointer: a finger dragged four cells down the paper takes the scrollback four lines back, and sends nothing",
+                check("pointer: a finger dragged five cells down the paper (the first is the slop's) takes the scrollback four lines back, and sends nothing",
                       quiet && !to_shell_length && first + 4 == before);
                 terminal_deliver(-1, &lift, &dirty);
                 check("pointer: let go moving, the view is thrown", ui_scroll_going(&terminal.bar));
@@ -128758,7 +128770,7 @@ static void settings_menu_gone(void)
 // real one, which is what a finger's speed is made of when events come one after another.
 static b32 settings_event_real(const struct window_event address_to event)
 {
-        ui_event_context(event);
+        deliver_context(event);
         return settings_event(event);
 }
 
@@ -130612,6 +130624,7 @@ static fn settings_frames_event(unsigned int type, unsigned int flags, int a, in
 {
         struct window_event event = {type, flags, a, b};
 
+        ui_kit_touch = (flags & WINDOW_KEY_TOUCH) != 0; // the loop's context for the event (the clock is the harness's own)
         settings_event(&event);
 }
 
@@ -131016,6 +131029,7 @@ static fn settings_end_check(void)
                 string_format(log, "  settings end (scale %p): rows %p, view %p, maximum %p, wheel and bar at %p\n", (positive)scale,
                               (positive)settings.list.content, (positive)settings.list.scroll.view, (positive)expected, (positive)settings.list.scroll.scroll);
         }
+        string_format(log, "  settings end: rows %b, wheel %b, bar %b, finger %b\n", (bipolar)rows_ok, (bipolar)wheel_ok, (bipolar)bar_ok, (bipolar)finger_ok);
         check("settings list: the rows are the scroll's content, and its maximum is the rows minus the view to the pixel", rows_ok);
         check("settings list: a wheel turned down to the end, the bar paged to it and a finger pulled past it and let go each stop at that maximum",
               wheel_ok && bar_ok && finger_ok);
@@ -138698,11 +138712,11 @@ static fn check_kit_scroll_robust(void)
         static const char address_to kinds[2] = {"a trackpad", "a finger"};
         struct rb_result r;
         long over = 0, lag = 0, back = 0, pop = 0, phantom = 0, idle = 0, busy = 0, jump = 0, going = 0, runs = 0;
-        long throw_min[2][RB_GESTURES], throw_max[2][RB_GESTURES];
+        long throw_min[2][RB_GESTURES], throw_max[2][RB_GESTURES], late_min[2][RB_GESTURES], late_max[2][RB_GESTURES];
 
         for (int kind = 0; kind < 2; kind++)
                 for (int k = 0; k < RB_GESTURES; k++)
-                        throw_min[kind][k] = 1l << 40, throw_max[kind][k] = -1;
+                        throw_min[kind][k] = late_min[kind][k] = 1l << 40, throw_max[kind][k] = late_max[kind][k] = -1;
         for (int kind = 0; kind < 2; kind++)
                 for (int rate = 0; rate < 4; rate++)
                         for (int delivery = 0; delivery < 3; delivery++)
@@ -138724,10 +138738,15 @@ static fn check_kit_scroll_robust(void)
                                                 phantom = rb_abs(r.post_rest) > phantom ? rb_abs(r.post_rest) : phantom;
                                         idle = r.idle_ms > idle ? r.idle_ms : idle;
                                         busy = r.busy_after > busy ? r.busy_after : busy;
-                                        if (g->flick)
+                                        if (g->flick && delivery == 0)
                                         {
                                                 throw_min[kind][k] = r.throw_px < throw_min[kind][k] ? r.throw_px : throw_min[kind][k];
                                                 throw_max[kind][k] = r.throw_px > throw_max[kind][k] ? r.throw_px : throw_max[kind][k];
+                                        }
+                                        else if (g->flick)
+                                        {
+                                                late_min[kind][k] = r.throw_px < late_min[kind][k] ? r.throw_px : late_min[kind][k];
+                                                late_max[kind][k] = r.throw_px > late_max[kind][k] ? r.throw_px : late_max[kind][k];
                                         }
                                         if (g->flick)
                                         {
@@ -138741,8 +138760,9 @@ static fn check_kit_scroll_robust(void)
         for (int kind = 0; kind < 2; kind++)
                 for (int k = 0; k < RB_GESTURES; k++)
                         if (rb_gestures[k].flick)
-                                string_format(log, "  scroll matrix: %s, %s throws %b to %b px\n", (string_address)kinds[kind], (string_address)rb_gestures[k].name,
-                                              (bipolar)throw_min[kind][k], (bipolar)throw_max[kind][k]);
+                                string_format(log, "  scroll matrix: %s, %s throws %b to %b px at every rate with the reports at their own time; %b to %b px when the last report is joined or held late (a lone late report reads as a slowing finger)\n",
+                                              (string_address)kinds[kind], (string_address)rb_gestures[k].name, (bipolar)throw_min[kind][k], (bipolar)throw_max[kind][k],
+                                              (bipolar)late_min[kind][k], (bipolar)late_max[kind][k]);
         log_flush();
         check("kit scroll matrix: the content is never ahead of the finger", over <= 2);
         check("kit scroll matrix: the content is never behind the finger by more than the reports it has not been given", lag <= 0);
@@ -138763,8 +138783,62 @@ static fn check_kit_scroll_robust(void)
                                         alike = alike && throw_min[kind][k] * 100 >= expect * 45 && throw_max[kind][k] * 100 <= expect * 115 &&
                                                 throw_max[kind][k] * 100 <= throw_min[kind][k] * 140;
                                 }
-                check("kit scroll matrix: a flick throws alike at every report rate and delivery, near its speed times 500 ms", alike);
+                check("kit scroll matrix: a flick throws alike at every report rate, near its speed times 500 ms", alike);
         }
+}
+
+// The kit's event context: a finger's event says so for everything handled after it and a mouse's or a key's says not, and the time it
+// holds is the one the event is handled at.
+static fn check_kit_event_context(void)
+{
+        struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0}, mouse = {WINDOW_EVENT_MOTION, 0, 0, 0}, key = {WINDOW_EVENT_KEY, 0, 0, 0};
+        b64 before = (b64)clock_monotonic_nanoseconds();
+        b32 touch, not_mouse, not_key;
+
+        ui_kit.now = 1;
+        ui_event_context(&finger);
+        touch = ui_kit_touch && ui_kit.now >= before;
+        ui_event_context(&mouse);
+        not_mouse = !ui_kit_touch;
+        ui_event_context(&finger);
+        ui_event_context(&key);
+        not_key = !ui_kit_touch;
+        check("kit event context: a finger's event says so and a mouse's or a key's says not, and the time is the one it is handled at",
+              touch && not_mouse && not_key);
+}
+
+// A finger pulling a bounded region past an end holds it by at most a view, however far it goes, and the stretch springs home in
+// the one time: a pull of 2400 px is not a stretch of 2400 px that takes seconds to run down.
+static fn check_kit_finger_pull(void)
+{
+        struct ui ui;
+        struct ui_scroll s;
+        b32 held = true, home = false;
+        int frames = 0;
+
+        memory_zero(&ui, sizeof(ui));
+        memory_zero(&s, sizeof(s));
+        ui.scale = 100;
+        s.x = 100, s.y = 10, s.height = 200, s.view = 200, s.content = 1000, s.bounds = 1, s.scale = 100;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_scroll_set(&s, 800);
+        for (int k = 0; k < 60; k++)
+        {
+                ui_scroll_drag(&s, 40);
+                held = held && s.at <= (800 + 200) * UI_SCROLL_SCALE;
+                ui_kit.now += ENDS_FRAME;
+        }
+        ui_scroll_let_go(&s, 0, 0);
+        for (frames = 0; frames < 120; frames++)
+        {
+                ui_kit.now += ENDS_FRAME, ui_kit.busy = 0, ui_kit.wheel_clock = ui_kit.now;
+                if (!ui_scroll_glide(&ui, &s) && !s.back.live)
+                {
+                        home = s.scroll == 800;
+                        break;
+                }
+        }
+        check("kit finger: a pull of 2400 px past an end holds the region a view past it at most, and it springs home within two seconds", held && home);
 }
 
 static fn check_kit_scroll_ends(void)
@@ -138909,14 +138983,14 @@ static fn check_kit_hand(void)
         check("kit hand: released, the minor push springs back with its speed, no more than 6 px past the release, then monotone to rest at the end",
               fell && released && past_peak <= 20 * 256 + 6 * 256 && minor.scroll == 800 && minor.at == 800 * UI_SCROLL_SCALE);
 
-        // A release carries its speed: reports of 5 px a frame (300 px a second) run on through the throw for the one time constant,
-        // the distance being the speed times 500 ms, 150 px, and the throw's speed falls by e in that time.
+        // A release carries its speed: reports of 6 px a frame (360 px a second, a speed over the throw's least) run on through the throw
+        // for the one time constant, the distance being the speed times 500 ms, 180 px, and the throw's speed falls by e in that time.
         memory_zero(&glide, sizeof(glide));
         glide.x = 100, glide.y = 10, glide.height = 200, glide.content = 1000, glide.view = 200, glide.bounds = 1, glide.scale = 100;
         ui_scroll_set(&glide, 200);
         for (int k = 0; k < 10; k++)
         {
-                hand_report(&ui, &glide, -5 * 256);
+                hand_report(&ui, &glide, -6 * 256);
                 hand_frame(&ui, &glide);
         }
         start = glide.scroll;
@@ -138933,8 +139007,8 @@ static fn check_kit_hand(void)
                         speed_at_half = glide.speed;
         }
         travel = glide.scroll - start;
-        check("kit hand: a release carries its speed through a throw: 300 px a second travels about 150 px (the speed times 500 ms)",
-              travel >= 120 && travel <= 180 && glide.scroll < 800);
+        check("kit hand: a release carries its speed through a throw: 360 px a second travels about 180 px (the speed times 500 ms)",
+              travel >= 145 && travel <= 215 && glide.scroll < 800);
         step = speed_at_start > 0 && speed_at_half > 0 ? (int)((speed_at_half * 1000) / speed_at_start) : 0;
         check("kit hand: the throw's speed falls by e in 500 ms (the same decay every flick takes): 368 in a thousand after 0.5 s",
               step >= 340 && step <= 400);
@@ -145581,6 +145655,8 @@ b32 main()
         check_kit_scroll_ends();
         check_kit_scroll_robust();
         check_kit_ripple_pace();
+        check_kit_event_context();
+        check_kit_finger_pull();
         check_kit_hand();
         check_terminal_wheel_curve();
         check_kit_turn();

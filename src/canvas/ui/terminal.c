@@ -663,6 +663,7 @@ static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to
         unsigned int first, shown, total;
         struct ui kit = terminal_kit(null);
         unsigned int lit;
+        b32 held;
         int scroll, most;
 
         *moved = false;
@@ -673,9 +674,10 @@ static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to
         }
         terminal_bar_place(first, shown, total);
         lit = terminal_bar_key();
+        held = terminal.bar.held;
         scroll = ui_scroll_pointer(&kit, &terminal.bar, type, x, y, down);
         // A thumb dragged past an end holds a stretch: its release lets it go (the page's bars do the same), or it never springs home.
-        if (type == WINDOW_EVENT_BUTTON && !down && terminal.bar.dragging && !terminal.bar.hand)
+        if (type == WINDOW_EVENT_BUTTON && !down && held && terminal.bar.dragging && !terminal.bar.hand)
         {
                 ui_scroll_let_go(&terminal.bar, 0, 0);
                 *moved = true;
@@ -2187,15 +2189,15 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 kit.scale = terminal_scale();
                 *handled = true;
                 if (!terminal.finger_press.dragged && ui_press_move(&kit, &terminal.finger_press, terminal.pointer_x, terminal.pointer_y))
-                        ui_drag_start(&terminal.fling, terminal.finger_press.y, clock_monotonic_nanoseconds());
+                        ui_drag_start(&terminal.fling, terminal.pointer_y, (positive)ui_kit.now); // from where the finger is: no jump by the slop
                 if (!terminal.finger_press.dragged)
                         return true;
                 if (!alternate)
                 {
-                        terminal_bar_drag(ui_drag_follow(&terminal.fling, terminal.pointer_y, clock_monotonic_nanoseconds()), dirty);
+                        terminal_bar_drag(ui_drag_follow(&terminal.fling, terminal.pointer_y, (positive)ui_kit.now), dirty);
                         return true;
                 }
-                return terminal_finger_scroll(master, ui_drag_follow(&terminal.fling, terminal.pointer_y, clock_monotonic_nanoseconds()),
+                return terminal_finger_scroll(master, ui_drag_follow(&terminal.fling, terminal.pointer_y, (positive)ui_kit.now),
                                               dirty, &moved);
         }
         if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
@@ -2219,7 +2221,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         clicked = ui_press_end(&terminal.finger_press, (event->flags & WINDOW_KEY_CANCEL) != 0) >= 0;
         if (dragged)
         {
-                positive now = clock_monotonic_nanoseconds();
+                positive now = (positive)ui_kit.now; // the event's own time (ui_event_context)
 
                 if (!alternate)
                 {

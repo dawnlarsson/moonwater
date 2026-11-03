@@ -1003,8 +1003,9 @@ static b64 ui_exp_neg(b64 x);
 #define UI_DRAG_STILL 20    // the speed a throw stops at
 #define UI_DRAG_SLOW_NS 325000000l // a throw's speed falls by e in this long, whatever the step (the wheel glide's rule)
 
-#define UI_DRAG_SAMPLES 8
-#define UI_FLING_NS 60000000ul // the window a flick's velocity is fitted over: the reports of its last 60 ms
+#define UI_DRAG_SAMPLES 16
+#define UI_FLING_NS 40000000ul // the horizon a flick's velocity is fitted over: the reports of its last 40 ms (at least three)
+#define UI_FLING_STALE_NS 60000000ul // a lift this long after the last report is a finger that rested: it throws nothing
 
 struct ui_drag
 {
@@ -1017,12 +1018,14 @@ struct ui_drag
         int samples;       // the finger's last reports, oldest first: when, and where it was
         positive when[UI_DRAG_SAMPLES];
         int where[UI_DRAG_SAMPLES];
+        int batch;         // the first of the reports handed over together (within 2 ms of batch_at), whose time is shared out
+        positive batch_at; // when the batch came
 };
 
 static fn ui_drag_start(struct ui_drag address_to drag, int at, positive now)
 {
         drag->last = at, drag->speed = 0, drag->owed = 0, drag->rate = 0, drag->at = now, drag->flying = false;
-        drag->samples = 0;
+        drag->samples = 0, drag->batch = 0, drag->batch_at = 0;
 }
 
 static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
@@ -1030,13 +1033,31 @@ static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
         int moved = at - drag->last;
         long gap = now > drag->at ? (long)(now - drag->at) : 0;
 
-        if (drag->samples == UI_DRAG_SAMPLES)
         {
-                for (int k = 1; k < UI_DRAG_SAMPLES; k++)
-                        drag->when[k - 1] = drag->when[k], drag->where[k - 1] = drag->where[k];
-                drag->samples--;
+                // Reports handed over together (a window that was busy, or a compositor that joins what came within a frame) carry
+                // the time they were handed over at, which is no time at all: the time since the report before them is shared out
+                // evenly among them, so a burst of four reads as four steps and not as one finger that stopped.
+                b32 joined = drag->samples && drag->batch_at && now >= drag->batch_at && now - drag->batch_at < 2000000ul;
+
+                if (drag->samples == UI_DRAG_SAMPLES)
+                {
+                        for (int k = 1; k < UI_DRAG_SAMPLES; k++)
+                                drag->when[k - 1] = drag->when[k], drag->where[k - 1] = drag->where[k];
+                        drag->samples--;
+                        drag->batch = drag->batch > 0 ? drag->batch - 1 : 0;
+                }
+                drag->when[drag->samples] = now, drag->where[drag->samples] = at, drag->samples++;
+                if (!joined)
+                        drag->batch = drag->samples - 1, drag->batch_at = now;
+                else if (drag->batch > 0)
+                {
+                        positive from = drag->when[drag->batch - 1];
+                        long count = drag->samples - drag->batch;
+
+                        for (long j = 0; j < count; j++)
+                                drag->when[drag->batch + j] = from + (now - from) * (positive)(j + 1) / (positive)count;
+                }
         }
-        drag->when[drag->samples] = now, drag->where[drag->samples] = at, drag->samples++;
 
         // The speed is the moves of the last few reports, the newest weighed most.
         if (gap > 0)
@@ -1050,41 +1071,82 @@ static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
         return moved;
 }
 
-// The finger's velocity at its lift: a least-squares line through the reports of its last UI_FLING_NS (pixels a second, signed).
-// Fitted rather than differenced, so one jittery report does not set the throw; zero with fewer than two reports in the window.
+/*
+        The finger's velocity at its lift, pixels a second, signed: the derivative at its last report of a parabola fitted (least squares)
+        through the reports of the UI_FLING_NS before it (at least the last three). A line through a window is the window's mean, and a
+        finger that slowed to a stop in it still has a mean: the parabola's slope at the end is what the finger was doing as it let go,
+        so a gesture that came to rest throws nothing and a flick that is still fast keeps its speed, at any report rate. Fitted rather
+        than differenced, so one jittery report does not set the throw. Two reports give the line through them; none, one, a stale last
+        report (the lift is more than UI_FLING_STALE_NS after it: the finger rested) or a slope that goes the other way than the line
+        gives 0; and the speed is never more than a quarter over the fastest step between two of the reports. Times are in ms before the
+        last report, which keeps the sums in 64 bits (at most sixteen reports in 100 ms); a slope in pixels a ms is a thousand times that
+        a second. Reports handed over together have the time since the report before them shared out evenly (ui_drag_follow), so a
+        batch handed over at once is not a speed made of equal times.
+*/
+static long ui_drag_slope(long address_to num, long address_to den)
+{
+        long whole, rest, unit;
+
+        if (*den <= 0)
+                return 0;
+        whole = *num / *den;
+        rest = *num % *den;
+        unit = *den / 1000;
+        return whole * 1000 + (unit ? rest / unit : rest * 1000 / *den);
+}
+
 static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
 {
-        long n = 0, st = 0, sy = 0, stt = 0, sty = 0, num, den;
+        long t[UI_DRAG_SAMPLES], y[UI_DRAG_SAMPLES], n = 0, st = 0, sy = 0, stt = 0, sty = 0, fastest = 0, line_num, line_den, line, speed;
+        positive last;
 
-        for (int k = 0; k < drag->samples; k++)
+        if (drag->samples < 2)
+                return 0;
+        last = drag->when[drag->samples - 1];
+        if (now > last && now - last > UI_FLING_STALE_NS)
+                return 0;
+        // The newest first: those within the horizon, and at least the last three while they are within 100 ms.
+        for (int k = drag->samples - 1; k >= 0; k--)
         {
-                long t;
+                positive age = last - drag->when[k];
 
-                if (now < drag->when[k] || now - drag->when[k] > UI_FLING_NS)
-                        continue;
-                t = -(long)((now - drag->when[k]) / 128ul); // 128 ns units before the lift, as a negative time: fine enough for back-to-back reports
-                n++, st += t, sy += drag->where[k], stt += t * t, sty += t * drag->where[k];
+                if (drag->when[k] > last || age > 100000000ul || (age > UI_FLING_NS && n >= 3))
+                        break;
+                t[n] = -(long)((age + 500000ul) / 1000000ul);
+                y[n] = (long)drag->where[k] - (long)drag->where[drag->samples - 1];
+                n++;
         }
         if (n < 2)
                 return 0;
-        num = n * sty - st * sy;
-        den = n * stt - st * st;
-        if (den <= 0)
-                return 0;
-        // A slope in pixels a 128 ns unit, times 1e9 / 128, is pixels a second.
-        num = num * 7812500l / den;
-        // The line is the mean of the window, and a finger that slowed to a stop in it still has a mean: the throw is cut to a quarter
-        // over the speed of the reports' own last moves (drag->speed, the newest weighed most), and none when those went the other way.
-        // So steady reports keep their line, a slowing finger throws in proportion, one that came to rest throws nothing, at any report
-        // rate, and a flick that is still fast at the lift keeps it.
-        if ((num > 0) != (drag->speed > 0) || drag->speed == 0)
-                return 0;
+        for (int k = 0; k < n; k++)
         {
-                long mean = num < 0 ? -num : num, cap = drag->speed < 0 ? -drag->speed : drag->speed;
+                st += t[k], sy += y[k], stt += t[k] * t[k], sty += t[k] * y[k];
+                if (k && t[k - 1] > t[k])
+                {
+                        long step = (y[k - 1] - y[k]) * 1000 / (t[k - 1] - t[k]);
 
-                cap += cap / 4;
-                return mean > cap ? (drag->speed < 0 ? -cap : cap) : num;
+                        fastest = (step < 0 ? -step : step) > fastest ? (step < 0 ? -step : step) : fastest;
+                }
         }
+        line_num = n * sty - st * sy, line_den = n * stt - st * st;
+        line = ui_drag_slope(&line_num, &line_den);
+        speed = line;
+        if (n >= 3)
+        {
+                long s3 = 0, s4 = 0, s2y = 0, det, det_b;
+
+                for (int k = 0; k < n; k++)
+                        s3 += t[k] * t[k] * t[k], s4 += t[k] * t[k] * t[k] * t[k], s2y += t[k] * t[k] * y[k];
+                // The normal equations of y = a + b t + c t^2: b by Cramer's rule, the slope at t = 0 (the last report).
+                det = n * (stt * s4 - s3 * s3) - st * (st * s4 - s3 * stt) + stt * (st * s3 - stt * stt);
+                det_b = n * (sty * s4 - s3 * s2y) - sy * (st * s4 - s3 * stt) + stt * (st * s2y - sty * stt);
+                if (det > 0)
+                        speed = ui_drag_slope(&det_b, &det);
+        }
+        if (speed == 0 || (speed > 0) != (line > 0))
+                return 0;
+        fastest += fastest / 4;
+        return speed > fastest ? fastest : speed < -fastest ? -fastest : speed;
 }
 
 // The release's velocity, for every drag (a finger, a trackpad's hand, a terminal's scrollback): the fit over its last reports, and
@@ -5613,6 +5675,13 @@ static b32 ui_scroll_drag(struct ui_scroll address_to s, int pixels)
                 s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0;
         }
         s->at += (b64)pixels * UI_SCROLL_SCALE;
+        {
+                // A finger may hold the region past its ends by as much as a hand does (UI_SCROLL_VIEW_PAST views), and no more: a pull
+                // of any length is a stretch of one size, and springs home in one time.
+                b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
+
+                s->at = s->at < -lim ? -lim : s->at > most + lim ? most + lim : s->at;
+        }
         ui_scroll_show(s);
         return s->scroll != before || s->bounds; // a bounded region's pull is a stretch, drawn whatever the scroll does
 }
@@ -7388,7 +7457,7 @@ static struct ui_control address_to ui_list_trailing(struct ui address_to ui, st
 }
 
 /*
-        A row at its place, y its top: the row the keys are on in the secondary container (ringed in the accent while
+        A row at its place, y its top: the row the keys are on, the whole row square in the secondary container (ringed in the accent while
         the keys are in the list), the row's own control (its hover layer and its ripple, edge to edge, or its switch),
         the label at the left cut to leave its value a third of the row, and the value as its kind says at the right.
 */
@@ -7409,8 +7478,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 ink = quiet;
         if (l->lit && id == l->focus)
         {
-                struct ui_box box = {(x + ui_dev(ui, 3)) * 256, (y + ui_dev(ui, 2)) * 256, (x + w - ui_dev(ui, 3)) * 256,
-                                     (y + height - ui_dev(ui, 2)) * 256, ui_q8(ui, 6), ui_q8(ui, 6)};
+                // The row the keys are on is the whole row, square, as the hover layer is: the row's own extents, not a box set in from them.
+                struct ui_box box = {x * 256, y * 256, (x + w) * 256, (y + height) * 256, 0, 0};
 
                 ui_kit_fill(ui, &box, ui_well(ui, UI_SECONDARY_CONTAINER, 36), null);
                 if (l->keys && !ui->glass)
@@ -7878,12 +7947,13 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
 
         for (int k = 0; k < 3; k++)
         {
-                b32 lit;
+                b32 lit, held;
                 int scroll;
 
                 if (!bars[k])
                         continue;
                 lit = bars[k]->hover;
+                held = bars[k]->held;
                 scroll = ui_scroll_pointer(ui, bars[k], type, p->pointer_x, p->pointer_y, down);
                 if (scroll >= 0)
                 {
@@ -7892,7 +7962,8 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                         if (!bars[k]->dragging)
                                 ui_scroll_set(bars[k], scroll);
                 }
-                if (type == WINDOW_EVENT_BUTTON && !down && bars[k]->dragging)
+                // Only a thumb that was held lets go: a finger dragging the content has the region dragging too, and its own release throws it.
+                if (type == WINDOW_EVENT_BUTTON && !down && held && bars[k]->dragging)
                         ui_scroll_let_go(bars[k], 0, 0);
                 if (scroll >= 0 || lit != bars[k]->hover)
                         ui_page_moved(ui, p, bars[k]);
