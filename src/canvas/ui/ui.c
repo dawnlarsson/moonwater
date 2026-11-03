@@ -1078,7 +1078,19 @@ static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
         if (den <= 0)
                 return 0;
         // A slope in pixels a 128 ns unit, times 1e9 / 128, is pixels a second.
-        return num * 7812500l / den;
+        num = num * 7812500l / den;
+        // The line is the mean of the window, and a finger that slowed to a stop in it still has a mean: the throw is cut to a quarter
+        // over the speed of the reports' own last moves (drag->speed, the newest weighed most), and none when those went the other way.
+        // So steady reports keep their line, a slowing finger throws in proportion, one that came to rest throws nothing, at any report
+        // rate, and a flick that is still fast at the lift keeps it.
+        if ((num > 0) != (drag->speed > 0) || drag->speed == 0)
+                return 0;
+        {
+                long mean = num < 0 ? -num : num, cap = drag->speed < 0 ? -drag->speed : drag->speed;
+
+                cap += cap / 4;
+                return mean > cap ? (drag->speed < 0 ? -cap : cap) : num;
+        }
 }
 
 // The release's velocity, for every drag (a finger, a trackpad's hand, a terminal's scrollback): the fit over its last reports, and
@@ -1156,7 +1168,8 @@ static fn ui_drag_stop(struct ui_drag address_to drag)
                         its clock starts at the first frame drawn after it is let go
             squash      C() and BB(): the pull of a drag, 400 px to the unit
             stretch     the domino: up 80 ms (ease out), held 15, back 210 (ease in)
-            ripple      NB(): grows in 225 ms and travels to the middle in 425
+            ripple      NB(): grows in 225 ms and travels to the middle in 425 (all its times
+                        at a pace of 1.2 to 1.6 by its reach, ui_ripple_go)
                         on cubic-bezier(.4,0,.2,1) solved as ui.js solves it, is
                         in for 75 ms, held to 225 ms after the press and out in 150
             tween       a CSS transition: a cubic-bezier solved as Chrome
@@ -1329,6 +1342,7 @@ struct ui_spring
         b64 start; // the first frame's time, 0 before it
         b32 live;
         b64 speed[2]; // the speed each channel starts at, per second (Q30): a release carries it into the spring
+        b64 pace;     // how much faster than ui.js's clock it runs (Q30; 0 is 1): the same curve in less time, its carried speed with it
 };
 
 static fn ui_spring_go(struct ui_spring address_to s, b64 scale, b64 nudge)
@@ -1363,11 +1377,13 @@ static b32 ui_spring_at(struct ui_spring address_to s, b64 now)
         if (!s->start)
                 s->start = now;
         h = ui_ms(now - s->start) / 1000;
+        if (s->pace)
+                h = ui_qmul(h, s->pace);
         j = ui_exp_neg(ui_qmul(UI_SPRING_DECAY, h));
         ui_sincos(ui_qmul(UI_SPRING_FREQ, h), &sine, &cosine);
         for (int k = 0; k < 2; k++)
         {
-                b64 a = s->amplitude[k], b = ui_qmul(UI_SPRING_UB, a) + (s->speed[k] ? ui_qdiv(s->speed[k], UI_SPRING_FREQ) : 0);
+                b64 a = s->amplitude[k], b = ui_qmul(UI_SPRING_UB, a) + (s->speed[k] ? ui_qdiv(s->pace ? ui_qdiv(s->speed[k], s->pace) : s->speed[k], UI_SPRING_FREQ) : 0);
                 b64 f = ui_qmul(j, ui_qmul(a, cosine) + ui_qmul(b, sine));
                 b64 rest = k ? UI_REST_PX : UI_REST_SCALE;
 
@@ -1617,6 +1633,7 @@ struct ui_ripple
 {
         b64 x, y, w, h, margin;   // the press and the box, Q30 logical pixels
         b64 reach;                // the radius at full size
+        b64 pace;                 // how much longer than ui.js's times it takes (Q30; 0 is 1): by its reach, so a wide row's is seen
         b64 start, exit, hold;    // ns: the first frame, the exit (0 before it), what the exit waits
         b32 live;
         b32 rides;                // a tab's ripple from a press on the tab the indicator was on: it moves with the indicator
@@ -1629,20 +1646,34 @@ static fn ui_ripple_go(struct ui_ripple address_to r, b64 x, b64 y, b64 w, b64 h
 
         r->x = x, r->y = y, r->w = w, r->h = h, r->margin = margin;
         r->reach = ui_qsqrt(ui_qmul(rx, rx) + ui_qmul(ry, ry));
+        // Slower than ui.js's by a touch on a small control and by more on a wide row, where the same 225 ms flew past: 1.2 at a
+        // reach of 80 px or less, rising to 1.6 at 300 px and over.
+        {
+                b64 over = r->reach - ui_q(80), span = ui_q(220);
+
+                over = over < 0 ? 0 : over > span ? span : over;
+                r->pace = UI_Q2(120) + ui_qmul(UI_Q2(40), ui_qdiv(over, span));
+        }
         r->start = r->exit = r->hold = 0;
         r->live = 1;
         r->rides = 0;
 }
 
+// A time of ui.js's ripple, ms, at this ripple's pace: ns.
+static inline b64 ui_ripple_ns(const struct ui_ripple address_to r, b64 ms)
+{
+        return ui_qmul(ms * UI_MS, r->pace ? r->pace : UI_ONE);
+}
+
 static fn ui_ripple_exit(struct ui_ripple address_to r, b64 now)
 {
-        b64 shown;
+        b64 shown, grown = ui_ripple_ns(r, 225);
 
         if (!r->live || r->exit)
                 return;
         r->exit = now;
         shown = r->start ? now - r->start : 0;
-        r->hold = shown > 0 && shown < 225 * UI_MS ? 225 * UI_MS - shown : 0;
+        r->hold = shown > 0 && shown < grown ? grown - shown : 0;
 }
 
 // The ripple at a frame: its middle in the clip's own place (x, y from the clip's top left), its radius and its
@@ -1657,8 +1688,8 @@ static b32 ui_ripple_at(struct ui_ripple address_to r, b64 now, b64 address_to c
         if (!r->start)
                 r->start = now;
         h = now - r->start;
-        grow = ui_ripple_ease(ui_progress(h, 225 * UI_MS));
-        travel = ui_ripple_ease(ui_progress(h, 425 * UI_MS));
+        grow = ui_ripple_ease(ui_progress(h, ui_ripple_ns(r, 225)));
+        travel = ui_ripple_ease(ui_progress(h, ui_ripple_ns(r, 425)));
         f = r->margin + r->w / 2;
         v = r->margin + r->h / 2;
         *cx = f + ui_qmul(r->x + r->margin - f, UI_ONE - travel);
@@ -1670,7 +1701,7 @@ static b32 ui_ripple_at(struct ui_ripple address_to r, b64 now, b64 address_to c
         {
                 b64 n = now - r->exit - r->hold;
 
-                a = n < 0 ? UI_ONE : UI_ONE - ui_progress(n, 150 * UI_MS);
+                a = n < 0 ? UI_ONE : UI_ONE - ui_progress(n, ui_ripple_ns(r, 150));
         }
         *opacity = ui_qmul(a, UI_Q2(20));
         if (r->exit && a <= 0)
@@ -3835,10 +3866,21 @@ static b32 ui_span_q8(const struct ui_control address_to c, b32 q8)
         return mapped == px ? q8 : (b32)mapped * 256 + (q8 & 255); // at rest the value is the same, its fraction and all
 }
 
+// Where a column's rows run across, logical pixels: the whole row the page gave it (row_x, row_w: flush with the window's
+// edge to the scroll bar's), or the column's own box where it has none.
+static fn ui_vtabs_row(const struct ui_control address_to c, int address_to x, int address_to w)
+{
+        *x = c->row_w > 0 ? c->row_x : c->x;
+        *w = c->row_w > 0 ? c->row_w : c->w;
+}
+
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         b32 busy = ui_kit.busy;
         b64 pip_y;
+        int rx, rw;
+
+        ui_vtabs_row(c, &rx, &rw);
 
         // What moves is said item by item: the column is count items, and its box (c->h) is one of them. The pip's
         // way is from where it set out to where it goes, which holds where it was drawn the frame before.
@@ -3854,21 +3896,16 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
         }
         busy |= ui_kit.busy;
         {
-                struct ui_box pip = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
+                // The chosen group is its whole row, square, a touch off the ground: the surface's high face, as a field's well is.
+                struct ui_box pip = ui_box_of(ui, ui_q(rx), pip_y, ui_q(rw), ui_q(c->h), 0);
 
                 pip.y0 = (b32)ui_span_q8(c, (b32)((pip_y * ui->scale / 100) >> 22)), pip.y1 = (b32)ui_span_q8(c, (b32)(((pip_y + ui_q(c->h)) * ui->scale / 100) >> 22));
 
                 if (!c->disabled && c->count > 0) // no items, no chosen one to show
-                        ui_kit_fill(ui, &pip, ui_role(UI_PRIMARY), null);
-                // The keys in the column: the kit's focus ring, 2 out from the chosen item.
+                        ui_kit_fill(ui, &pip, ui_role(UI_SURFACE_HIGH), null);
+                // The keys in the column: the kit's focus ring, on the row's own edge (it runs to the window's).
                 if (c->focused && !c->disabled)
-                {
-                        struct ui_box ring = pip;
-
-                        ring.x0 -= ui_q8(ui, 2), ring.y0 -= ui_q8(ui, 2), ring.x1 += ui_q8(ui, 2), ring.y1 += ui_q8(ui, 2);
-                        ring.rx += ui_q8(ui, 2), ring.ry += ui_q8(ui, 2);
-                        ui_kit_outline(ui, &ring, ui_q8(ui, 2), ui_role(UI_PRIMARY));
-                }
+                        ui_kit_outline(ui, &pip, ui_q8(ui, 2), ui_role(UI_PRIMARY));
         }
         for (int item = 0; item < c->count; item++)
         {
@@ -3876,7 +3913,7 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 b32 live = 0;
                 b64 dom = ui_stretch_at(&c->item_dom[item], ui_kit.now, &live);
                 b32 by = ui_span_q8(c, ui_q8(ui, y)), bh = ui_span_q8(c, ui_q8(ui, y + c->h)) - by, anchor = c->dom_origin > 0 ? by : by + bh;
-                struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(y), ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8));
+                struct ui_box face = ui_box_of(ui, ui_q(rx), ui_q(y), ui_q(rw), ui_q(c->h), 0);
 
                 face.y0 = (b32)by, face.y1 = (b32)(by + bh);
                 unsigned int ink;
@@ -3886,7 +3923,7 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 ui_kit.busy = live;
                 if (y + c->h + 8 < ui->top * 100 / ui->scale || y - 8 > ui->bottom * 100 / ui->scale)
                         continue;
-                ui_kit_colour_to(&c->item_ink[item], item == c->at && !c->disabled ? ui_role(UI_ON_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT), 200, &ui_ease);
+                ui_kit_colour_to(&c->item_ink[item], item == c->at && !c->disabled ? ui_role(UI_ON_SURFACE) : ui_role(UI_ON_SURFACE_VARIANT), 200, &ui_ease);
                 ink = ui_kit_colour(&c->item_ink[item]);
                 face = ui_box_transform(face, UI_ONE, dom, 0, anchor, 0, 0);
                 if (c->item == item)
@@ -3898,10 +3935,9 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                         layer = ui_kit_layer(c);
                         ui_kit_layer_fill(ui, &face, ink, layer);
                         {
-                                b64 radius = ui_q(c->h) / 2 < ui_q(8) ? ui_q(c->h) / 2 : ui_q(8);
-                                struct ui_box pill = ui_box_of(ui, ui_q(c->x), pip_y, ui_q(c->w), ui_q(c->h), radius);
+                                struct ui_box pill = ui_box_of(ui, ui_q(rx), pip_y, ui_q(rw), ui_q(c->h), 0);
 
-                                ui_kit_ripples_on(ui, c, ui_q8(ui, c->x - 8), by - ui_q8(ui, 8), &place, &face, ink, &pill);
+                                ui_kit_ripples_on(ui, c, ui_q8(ui, rx - 8), by - ui_q8(ui, 8), &place, &face, ink, &pill);
                         }
                 }
                 // The text at whole pixels where the stretch takes the item's middle.
@@ -4769,8 +4805,11 @@ static int ui_control_hit(struct ui address_to ui, const struct ui_control addre
         // A tab is a finger's UI_TARGET each way where it is smaller, as every control is (ui_hit).
         if (c->kind == UI_TABS && c->variant == UI_TABS_VERTICAL)
         {
+                int rx, rw;
+
+                ui_vtabs_row(c, &rx, &rw);
                 for (int k = 0; k < c->count; k++)
-                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + k * c->h), ui_dev(ui, c->w), ui_dev(ui, c->h)))
+                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + k * c->h), ui_dev(ui, rw), ui_dev(ui, c->h)))
                                 return k;
                 return -1;
         }
@@ -4815,6 +4854,18 @@ static b64 ui_slider_at(struct ui address_to ui, const struct ui_control address
         motion till the release (setPointerCapture).
 */
 static struct ui_control address_to ui_kit_held;
+
+/*
+        What every event is handled in, taken once for every loop that reads events (ui_app_run, a popup's pump), so no
+        app and no control passes it around: whether it is a finger's (WINDOW_KEY_TOUCH: what it can press and grab is at
+        least UI_TARGET each way, in every control and every scrollbar, ui_hit) and the time it is handled at, which is what
+        the animations an event starts are stamped with (the frame's clock is the last frame's, and an idle window's is old).
+*/
+static fn ui_event_context(const struct window_event address_to event)
+{
+        ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+        ui_kit.now = (b64)clock_monotonic_nanoseconds();
+}
 
 static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, struct ui_control address_to controls, int count, int type, int x, int y,
                                                    b32 down, unsigned int flags)
@@ -4961,9 +5012,13 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         else if (c->kind == UI_TABS)
                         {
                                 // The tab's own box (on end, its item's row); a press on the chosen tab rides its indicator.
-                                struct ui_ripple address_to r = c->variant == UI_TABS_VERTICAL
-                                                                    ? ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + hit * c->h),
-                                                                                          ui_dev(ui, c->w), ui_dev(ui, c->h), 8)
+                                int rx, rw;
+                                struct ui_ripple address_to r;
+
+                                ui_vtabs_row(c, &rx, &rw);
+                                r = c->variant == UI_TABS_VERTICAL
+                                                                    ? ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + hit * c->h),
+                                                                                          ui_dev(ui, rw), ui_dev(ui, c->h), 8)
                                                                     : ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y),
                                                                                           ui_dev(ui, ui_tab_width(ui, c, hit)), ui_dev(ui, c->variant ? 32 : 40), 8);
 
@@ -5264,12 +5319,12 @@ static fn ui_scroll_draw(struct ui address_to ui, struct ui_scroll address_to s)
         Whether a press at x, y takes the bar: its track. A finger's reach is UI_TARGET each way, the track's middle kept
         (ui_hit), so a finger lands on a bar four pixels wide; a pointer's is the track as drawn.
 */
-static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll address_to s, int x, int y, b32 touch)
+static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll address_to s, int x, int y)
 {
         int top, height;
 
         ui_scroll_track(ui, s, &top, &height);
-        return ui_hit(ui, touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale / 100, height);
+        return ui_hit(ui, ui_kit_touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale / 100, height);
 }
 
 /*
@@ -5280,17 +5335,18 @@ static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll
 */
 static void ui_scroll_show(struct ui_scroll address_to s);
 
-static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down, b32 touch)
+static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down)
 {
         int top, length, at, track, rest = s->content - s->view;
+        b32 touch = ui_kit_touch;
         b32 bar = ui_scroll_thumb(ui, s, &top, &length);
-        b32 on_track = bar && ui_scroll_reach(ui, s, x, y, touch);
+        b32 on_track = bar && ui_scroll_reach(ui, s, x, y);
         b32 on_thumb = on_track && ui_hit(ui, touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale / 100, length);
 
         ui_scroll_track(ui, s, &at, &track);
         if (type == WINDOW_EVENT_MOTION)
         {
-                s->hover = on_thumb;
+                s->hover = on_thumb && !touch; // a finger hovers nothing: the thumb lights where it is held
                 if (!s->held || !bar)
                         return -1;
                 if (track - length <= 0)
@@ -5327,6 +5383,9 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
                 s->grab = y - top;
                 return s->scroll;
         }
+        // A finger beside the bar but off its thumb is on the content it means to drag or press, not the track: only a pointer pages.
+        if (touch)
+                return -1;
         return y < top ? s->scroll - s->view : s->scroll + s->view;
 }
 
@@ -5356,6 +5415,7 @@ static int ui_scroll_most(const struct ui_scroll address_to s)
 #define UI_SCROLL_REST 128             // a glide within half a device pixel of its aim is at it
 #define UI_SCROLL_SCALE 256            // 256ths of a device pixel in a pixel
 #define UI_FLING_TAU_NS 500000000ll  // a throw's speed falls by e in this long, whatever the region's length: macOS's normal rate (0.998 a millisecond)
+#define UI_SCROLL_BACK_PACE UI_Q2(125) // the overscroll's spring home runs this much faster than the kit's release spring (a touch quicker)
 #define UI_HAND_GAP_NS 40000000l     // the hand is let go this long after its last report: a wheel or a precise input has no release of its own
 #define UI_RUBBER_CARRY 400          // the most a release carries past an end, in px a second: the spring's first frames run on from it
 #define UI_FLING_MAX 6000            // the fastest a throw may be, in px a second: a release is a flick, not a jump
@@ -5619,6 +5679,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
                         if (pulled)
                         {
                                 ui_spring_go(&s->back, 0, over << 22);
+                                s->back.pace = UI_SCROLL_BACK_PACE;
                                 ui_spring_speed(&s->back, 1, (b64)(from > 0 ? carry : -carry) * UI_ONE);
                         }
                 }
@@ -5629,6 +5690,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
                         s->at = shown, s->aim = edge;
                         // The kit's release spring takes the part past the end home: its amplitude is that part, in Q30 pixels.
                         ui_spring_go(&s->back, 0, (shown - edge) << 22);
+                        s->back.pace = UI_SCROLL_BACK_PACE;
                 }
                 ui_scroll_show(s);
                 return;
@@ -6249,7 +6311,7 @@ static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu addre
 
         if (m->scroll.content <= m->scroll.view && !m->scroll.held)
                 return false;
-        scroll = ui_scroll_pointer(ui, &m->scroll, type, x, y, down, m->touch);
+        scroll = ui_scroll_pointer(ui, &m->scroll, type, x, y, down);
         if (scroll < 0)
                 return false;
         if (!m->scroll.dragging)
@@ -6538,6 +6600,7 @@ static int ui_popup_pump(struct ui_popup address_to p)
         }
         while (windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
         {
+                ui_event_context(&event);
                 // What the picture shows: the hot item, the top one (a wheel or the bar moves it) and the bar's own lit state.
                 int hot = p->menu.hot, top = p->menu.top, scroll = p->menu.scroll.scroll;
                 b32 lit = p->menu.scroll.hover, held = p->menu.scroll.held;
@@ -6605,6 +6668,7 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_COLUMN_LEAST 88   // no narrower than this, no wider than the most, and never more than half of the window
 #define UI_COLUMN_MOST 170
 #define UI_COLUMN_GUTTER 14  // between the column and the body
+#define UI_COLUMN_BAR_GAP ((UI_COLUMN_GUTTER - UI_SCROLL_WIDTH) / 2) // from the column's edge to its scroll bar: a group's row runs to it
 #define UI_COLUMN_PAGE 3     // Page Up and Page Down in a column move three groups
 #define UI_SECTION 34        // a section's header over its first row
 #define UI_SECTION_GAP 10    // under its last row
@@ -7418,15 +7482,16 @@ static b32 ui_finger_move(const struct ui address_to ui, struct ui_finger addres
                 return false;
         if (!f->press.dragged && ui_press_move(ui, &f->press, x, y))
         {
-                ui_drag_start(&f->drag, f->press.y, clock_monotonic_nanoseconds());
+                // The drag follows from where the finger is when the slop is passed, so the list does not jump by the slop.
+                ui_drag_start(&f->drag, y, (positive)ui_kit.now);
                 changed = true;
         }
         if (f->press.dragged && f->region)
         {
-                int moved = ui_drag_follow(&f->drag, y, clock_monotonic_nanoseconds());
+                // A pull past an end gives as the hand's does, from its first pixel, whatever the finger's speed: a stretch that
+                // came and went with the speed popped in and out under a finger crossing the end.
+                int moved = ui_drag_follow(&f->drag, y, (positive)ui_kit.now);
 
-                // A finger moving at a throw's speed is flinging: it is not pulling, so the region does not give past an end.
-                f->region->flung = f->drag.speed >= UI_DRAG_THROW || f->drag.speed <= -UI_DRAG_THROW;
                 changed |= ui_scroll_drag(f->region, -moved);
         }
         return changed;
@@ -7437,7 +7502,7 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
 {
         if (f->press.dragged)
         {
-                positive now = clock_monotonic_nanoseconds();
+                positive now = (positive)ui_kit.now; // the event's own time (ui_event_context)
                 // The throw's speed is the finger's velocity over its last reports (ui_drag_fling), down the screen positive; the
                 // region moves the other way (ui_finger_move).
                 long speed = ui_drag_velocity(&f->drag, now);
@@ -7506,7 +7571,7 @@ static int ui_page_column_hit(const struct ui address_to ui, const struct ui_pag
 {
         int group = (y - p->top + p->column_scroll.scroll) / ui_dev(ui, UI_ROW);
 
-        if (!p->column_on || y < p->top || y >= p->bottom || x < ui_dev(ui, UI_PAD) || x >= ui_dev(ui, UI_PAD) + p->column_w ||
+        if (!p->column_on || y < p->top || y >= p->bottom || x < 0 || x >= ui_dev(ui, UI_PAD) + p->column_w + ui_dev(ui, UI_COLUMN_BAR_GAP) ||
             group >= p->column.count)
                 return -1;
         return group;
@@ -7575,6 +7640,7 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
         c->y = (p->top - p->column_scroll.scroll) * 100 / ui->scale;
         c->w = p->column_w * 100 / ui->scale;
         c->h = UI_ROW;
+        c->row_x = 0, c->row_w = c->x + c->w + UI_COLUMN_BAR_GAP; // a group is a whole row, flush with the window's edge, to the bar's
         c->disabled = disabled;
         c->focused = keys;
         c->item = ui_control_hit(ui, c, p->pointer_x, p->pointer_y);
@@ -7629,7 +7695,7 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                 if (!bars[k])
                         continue;
                 lit = bars[k]->hover;
-                scroll = ui_scroll_pointer(ui, bars[k], type, p->pointer_x, p->pointer_y, down, 0);
+                scroll = ui_scroll_pointer(ui, bars[k], type, p->pointer_x, p->pointer_y, down);
                 if (scroll >= 0)
                 {
                         taken = true;
@@ -7887,6 +7953,7 @@ static int ui_app_run(struct ui_app address_to app)
                         app->pass();
                 while (running && windows_event(app->own, &event))
                 {
+                        ui_event_context(&event);
                         // A scroll over the window closes its open popup before the app has the scroll (ui_popup_scroll).
                         if (app->popup)
                         {

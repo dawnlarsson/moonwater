@@ -4233,7 +4233,7 @@ static b32 settings_gallery_event(const struct window_event address_to event)
 
                 if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
                         return true;
-                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0, 0);
+                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0);
                 if (bar >= 0)
                         moved = ui_scroll_set(s, bar) || true;
                 else
@@ -4481,8 +4481,8 @@ static b32 settings_event(const struct window_event address_to event)
         // A press anywhere else is the pointer's, and the keys leave the map for it.
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 settings.map.keys = false;
-        // The scrollbars take a mouse's motion, press and release on them (a finger drags the region itself).
-        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_KEY_TOUCH) &&
+        // The scrollbars take a pointer's motion, press and release on them, and a finger's on a thumb (the kit knows which it is).
+        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) &&
             (event->type != WINDOW_EVENT_BUTTON || event->a == UI_POINTER_LEFT) &&
             ui_page_bars(&settings.ui, &settings.page, (int)event->type, (event->flags & WINDOW_KEY_DOWN) != 0))
                 return true;

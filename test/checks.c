@@ -117337,6 +117337,14 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
         what has been said), one held below it scrolls forward to the live end, a line at a time with the time, and the
         selection's end follows the text. A mouse and a finger that has held a word, each both ways.
 */
+
+// An event to the terminal as the app's loop gives it (ui_app_run): the kit's context for the event first (a finger's, the time).
+static b32 terminal_deliver(b32 master, const struct window_event address_to event, b32 address_to dirty)
+{
+        ui_event_context(event);
+        return terminal_receive(master, event, dirty);
+}
+
 static void check_terminal_select_scroll(void)
 {
     b32 dirty = false;
@@ -117361,16 +117369,16 @@ static void check_terminal_select_scroll(void)
     terminal_view_live();
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
-    terminal_receive(-1, &at, &dirty);
-    terminal_receive(-1, &press, &dirty);
+    terminal_deliver(-1, &at, &dirty);
+    terminal_deliver(-1, &press, &dirty);
     line_before = terminal.select_active_line;
     at.b = top - 25;
-    terminal_receive(-1, &at, &dirty);
+    terminal_deliver(-1, &at, &dirty);
     for (int step = 0; step <= 40; step++)
         terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a mouse held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
     check("terminal: and the selection's end follows the text up", terminal.select_active_line < line_before);
-    terminal_receive(-1, &release, &dirty);
+    terminal_deliver(-1, &release, &dirty);
 
     /* A mouse, below the grid: from the scrollback, pressed mid-grid and dragged down past its bottom; the view goes forward. */
     terminal_view_live();
@@ -117378,34 +117386,34 @@ static void check_terminal_select_scroll(void)
     back = terminal.view;
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
     at.a = x, at.b = top + (int)ROWS / 2 * cell + cell / 2;
-    terminal_receive(-1, &at, &dirty);
-    terminal_receive(-1, &press, &dirty);
+    terminal_deliver(-1, &at, &dirty);
+    terminal_deliver(-1, &press, &dirty);
     line_before = terminal.select_active_line;
     at.b = top + (int)ROWS * cell + 25;
-    terminal_receive(-1, &at, &dirty);
+    terminal_deliver(-1, &at, &dirty);
     for (int step = 0; step <= 40; step++)
         terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a mouse held below the grid scrolls the scrollback forward", terminal.view == TERMINAL_LIVE || terminal.view > back);
     check("terminal: and the selection's end follows the text down", terminal.select_active_line > line_before);
-    terminal_receive(-1, &release, &dirty);
+    terminal_deliver(-1, &release, &dirty);
 
     /* A finger: held on the third row for the long press (its word selected), then dragged up past the grid's top. */
     terminal_view_live();
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
     touch_at.a = x, touch_at.b = top + 2 * cell + cell / 2;
-    terminal_receive(-1, &touch_at, &dirty);
-    terminal_receive(-1, &land, &dirty);
-    terminal_receive(-1, &held, &dirty);
-    terminal_receive(-1, &right_down, &dirty);
-    terminal_receive(-1, &right_up, &dirty);
+    terminal_deliver(-1, &touch_at, &dirty);
+    terminal_deliver(-1, &land, &dirty);
+    terminal_deliver(-1, &held, &dirty);
+    terminal_deliver(-1, &right_down, &dirty);
+    terminal_deliver(-1, &right_up, &dirty);
     line_before = terminal.select_active_line;
     touch_at.b = top - 25;
-    terminal_receive(-1, &touch_at, &dirty);
+    terminal_deliver(-1, &touch_at, &dirty);
     for (int step = 0; step <= 40; step++)
         terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a finger held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
     check("terminal: and the held selection's end follows the text up", terminal.select_active_line < line_before);
-    terminal_receive(-1, &lift, &dirty);
+    terminal_deliver(-1, &lift, &dirty);
     terminal_view_live();
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
 }
@@ -117432,10 +117440,10 @@ static void check_terminal_select_speed(void)
     terminal_view_live();
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
-    terminal_receive(-1, &at, &dirty);
-    terminal_receive(-1, &press, &dirty);
+    terminal_deliver(-1, &at, &dirty);
+    terminal_deliver(-1, &press, &dirty);
     at.b = top - 25;
-    terminal_receive(-1, &at, &dirty);
+    terminal_deliver(-1, &at, &dirty);
     terminal_select_autoscroll(now, &dirty);
     terminal_extent(&first_before, &shown, &total);
     for (int step = 1; step <= 40; step++)
@@ -117445,7 +117453,7 @@ static void check_terminal_select_speed(void)
     want = 17280l / (100l * (long)cell);
     check("terminal: a drag 25 pixels past the grid's top at scale 100 scrolls about 172.8 pixels in 0.64 s, not 100 times that",
           moved >= want - 1 && moved <= want + 1);
-    terminal_receive(-1, &release, &dirty);
+    terminal_deliver(-1, &release, &dirty);
     terminal_view_live();
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
 }
@@ -117491,7 +117499,7 @@ static fn check_keys(void)
                 b32 dirty = false;
 
                 to_shell_length = 0;
-                terminal_receive(-1, &event, &dirty);
+                terminal_deliver(-1, &event, &dirty);
                 check("keys: the shell is sent the bytes the kernel's window sent",
                       to_shell_length == keys[at].length &&
                           !memory_compare(to_shell, keys[at].sent, keys[at].length));
@@ -117523,33 +117531,33 @@ static fn check_pointer(void)
         mouse_sgr = false;
         terminal.modifiers = 0;
         to_shell_length = 0;
-        terminal_receive(-1, &motion, &dirty);
+        terminal_deliver(-1, &motion, &dirty);
         check("pointer: a motion is nothing to a program that asked for clicks", !to_shell_length);
 
-        terminal_receive(-1, &press, &dirty);
+        terminal_deliver(-1, &press, &dirty);
         expect[0] = 27, expect[1] = '[', expect[2] = 'M', expect[3] = 32, expect[4] = (char)(32 + column),
         expect[5] = (char)(32 + row);
         check("pointer: a press is the button and the cell", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
 
         to_shell_length = 0;
-        terminal_receive(-1, &release, &dirty);
+        terminal_deliver(-1, &release, &dirty);
         expect[3] = 32 + 3;
         check("pointer: a release is button 3", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
 
         to_shell_length = 0;
-        terminal_receive(-1, &wheel, &dirty);
+        terminal_deliver(-1, &wheel, &dirty);
         expect[3] = 32 + 64;
         check("pointer: the wheel is button 64", to_shell_length == 6 && !memory_compare(to_shell, expect, 6));
 
         mouse_sgr = true;
         to_shell_length = 0;
-        terminal_receive(-1, &press, &dirty);
+        terminal_deliver(-1, &press, &dirty);
         check("pointer: SGR press", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4M", 9));
         to_shell_length = 0;
-        terminal_receive(-1, &right, &dirty);
+        terminal_deliver(-1, &right, &dirty);
         check("pointer: the right button is 2", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<2;3;4M", 9));
         to_shell_length = 0;
-        terminal_receive(-1, &release, &dirty);
+        terminal_deliver(-1, &release, &dirty);
         check("pointer: SGR release", to_shell_length == 9 && !memory_compare(to_shell, "\x1b[<0;3;4m", 9));
 
         mouse_mode = 0;
@@ -117573,25 +117581,25 @@ static fn check_pointer(void)
                         term_bytes("scrollback\r\n", 12);
                 terminal_view_live();
                 terminal_extent(&before, &shown, &total);
-                terminal_receive(-1, &finger, &dirty);
-                terminal_receive(-1, &land, &dirty);
+                terminal_deliver(-1, &finger, &dirty);
+                terminal_deliver(-1, &land, &dirty);
                 quiet = !to_shell_length;
                 for (int step = 1; step <= 4; step++)
                 {
                         finger.b = y + step * (int)terminal.cell_h;
-                        terminal_receive(-1, &finger, &dirty);
+                        terminal_deliver(-1, &finger, &dirty);
                 }
                 terminal_extent(&first, &shown, &total);
                 check("pointer: a finger dragged four cells down the paper takes the scrollback four lines back, and sends nothing",
                       quiet && !to_shell_length && first + 4 == before);
-                terminal_receive(-1, &lift, &dirty);
+                terminal_deliver(-1, &lift, &dirty);
                 check("pointer: let go moving, the view is thrown", ui_scroll_going(&terminal.bar));
                 ui_drag_stop(&terminal.fling);
                 terminal_view_live();
                 finger.b = y;
-                terminal_receive(-1, &finger, &dirty);
-                terminal_receive(-1, &land, &dirty);
-                terminal_receive(-1, &lift, &dirty);
+                terminal_deliver(-1, &finger, &dirty);
+                terminal_deliver(-1, &land, &dirty);
+                terminal_deliver(-1, &lift, &dirty);
                 check("pointer: a finger's tap is a click where it landed, the press and the release",
                       to_shell_length == 0 && !terminal.finger_press.down && !terminal.finger_press.dragged);
                 to_shell_length = 0;
@@ -117619,16 +117627,16 @@ static fn check_pointer(void)
                 kit = terminal_kit(null);
                 ui_scroll_thumb(&kit, &terminal.bar, &top, &length);
                 at.a = terminal.bar.x - 8 * scale, at.b = top + length / 2;
-                terminal_receive(-1, &at, &dirty);
-                terminal_receive(-1, &down, &dirty);
+                terminal_deliver(-1, &at, &dirty);
+                terminal_deliver(-1, &down, &dirty);
                 check("pointer: a finger 8 pixels left of the bar takes its thumb, which is drawn four pixels wide",
                       terminal.bar.held != 0);
                 start = first;
                 at.b -= 4 * (int)terminal.cell_h;
-                terminal_receive(-1, &at, &dirty);
+                terminal_deliver(-1, &at, &dirty);
                 terminal_extent(&first, &shown, &total);
                 check("pointer: a finger dragged up four cells on the thumb takes the view back with it", first < start);
-                terminal_receive(-1, &up, &dirty);
+                terminal_deliver(-1, &up, &dirty);
                 check("pointer: let go, the thumb is let go too", !terminal.bar.held);
 
                 terminal_view_live();
@@ -117638,22 +117646,22 @@ static fn check_pointer(void)
                 start = first;
                 /* The thumb's reach is UI_TARGET tall, so a thumb shorter than that reaches a little past it: the track's top is beyond. */
                 at.a = terminal.bar.x + 5 * scale, at.b = terminal.bar.y + (UI_CLOSE_BOTTOM + 2) * scale;
-                terminal_receive(-1, &at, &dirty);
-                terminal_receive(-1, &down, &dirty);
-                terminal_receive(-1, &up, &dirty);
+                terminal_deliver(-1, &at, &dirty);
+                terminal_deliver(-1, &down, &dirty);
+                terminal_deliver(-1, &up, &dirty);
                 terminal_extent(&first, &shown, &total);
-                check("pointer: a finger on the track above the thumb pages the view toward it, and grabs nothing",
-                      first < start && !terminal.bar.held);
+                check("pointer: a finger on the track beside the thumb is on the content, not the bar's: the view does not page and nothing is grabbed",
+                      first == start && !terminal.bar.held);
 
                 terminal_view_live();
                 terminal_extent(&first, &shown, &total);
                 terminal_bar_place(first, shown, total);
                 ui_scroll_thumb(&kit, &terminal.bar, &top, &length);
                 mouse_at.a = terminal.bar.x - 8 * scale, mouse_at.b = top + length / 2;
-                terminal_receive(-1, &mouse_at, &dirty);
-                terminal_receive(-1, &mouse_down, &dirty);
+                terminal_deliver(-1, &mouse_at, &dirty);
+                terminal_deliver(-1, &mouse_down, &dirty);
                 check("pointer: a mouse 8 pixels left of the bar is the grid's, and takes no thumb", !terminal.bar.held);
-                terminal_receive(-1, &mouse_up, &dirty);
+                terminal_deliver(-1, &mouse_up, &dirty);
                 terminal.selecting = false;
                 terminal_view_live();
         }
@@ -117721,11 +117729,11 @@ static fn check_pointer(void)
                 term_bytes("\x1b[H\x1b[2Jalpha bravo charlie\r\n", 28);
                 terminal_view_live();
                 at.a = (int)(terminal.pad + 8 * terminal.cell_w + terminal.cell_w / 2), at.b = (int)(terminal.pad_y + terminal.cell_h / 2);
-                terminal_receive(-1, &at, &dirty);
-                terminal_receive(-1, &down, &dirty);
-                terminal_receive(-1, &held, &dirty);
-                terminal_receive(-1, &right_down, &dirty);
-                terminal_receive(-1, &right_up, &dirty);
+                terminal_deliver(-1, &at, &dirty);
+                terminal_deliver(-1, &down, &dirty);
+                terminal_deliver(-1, &held, &dirty);
+                terminal_deliver(-1, &right_down, &dirty);
+                terminal_deliver(-1, &right_up, &dirty);
                 length = terminal_select_text(&text, &room);
                 check("touch: a long press selects the word under the finger, and no menu opens",
                       terminal.touch_select && terminal.selecting && length == 5 && !memory_compare(text, "bravo", 5) &&
@@ -117733,21 +117741,21 @@ static fn check_pointer(void)
                 array_store_release(text, room, length);
 
                 at.a = (int)(terminal.pad + 14 * terminal.cell_w + 1);
-                terminal_receive(-1, &at, &dirty);
+                terminal_deliver(-1, &at, &dirty);
                 length = terminal_select_text(&text, &room);
                 check("touch: a drag after the long press extends the selection by cells, from the word's first cell",
                       length == 8 && !memory_compare(text, "bravo ch", 8));
                 array_store_release(text, room, length);
 
-                terminal_receive(-1, &lift, &dirty);
+                terminal_deliver(-1, &lift, &dirty);
                 check("touch: the lift ends the press and copies the selection, which stays marked",
                       !terminal.touch_select && !terminal.select_dragging && terminal.selecting && to_shell_length == 0);
 
                 terminal.selecting = terminal.select_touch = false;
                 at.a = (int)(terminal.pad + 8 * terminal.cell_w + terminal.cell_w / 2);
-                terminal_receive(-1, &at, &dirty);
-                terminal_receive(-1, &down, &dirty);
-                terminal_receive(-1, &up, &dirty);
+                terminal_deliver(-1, &at, &dirty);
+                terminal_deliver(-1, &down, &dirty);
+                terminal_deliver(-1, &up, &dirty);
                 check("touch: a short touch with no movement selects nothing", !terminal.selecting && !terminal.touch_select &&
                       to_shell_length == 0);
                 to_shell_length = 0;
@@ -127975,6 +127983,14 @@ static void settings_menu_gone(void)
         settings_chose(UI_MENU_GONE);
 }
 
+// An event to Settings as the app's loop gives it (ui_app_run): the kit's context for it first, the time it is handled at being the
+// real one, which is what a finger's speed is made of when events come one after another.
+static b32 settings_event_real(const struct window_event address_to event)
+{
+        ui_event_context(event);
+        return settings_event(event);
+}
+
 static fn check_settings(string_address regular, string_address bold)
 {
         check_registry();
@@ -128978,18 +128994,18 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_scroll_to(0);
                                 finger.a = (settings.page.left + settings.page.right) / 2;
                                 finger.b = settings.page.top + ui_px(&settings.ui, 60);
-                                settings_event(&finger);
-                                settings_event(&land);
+                                settings_event_real(&finger);
+                                settings_event_real(&land);
                                 for (int step = 1; step <= 6; step++)
                                 {
                                         finger.b -= ui_px(&settings.ui, 10); // short of the end, so the lift has room to throw
-                                        settings_event(&finger);
+                                        settings_event_real(&finger);
                                 }
                                 check("settings: a finger dragged up the rows moves them its way, and opens nothing",
                                       settings.choice < 0 && settings.queued == 0 && settings.editing < 0);
-                                settings_event(&lift);
+                                settings_event_real(&lift);
                                 check("settings: let go while moving, the rows are thrown, and a press stops them",
-                                      settings.list.scroll.gliding && (settings_event(&land), !settings.list.scroll.gliding));
+                                      settings.list.scroll.gliding && (settings_event_real(&land), !settings.list.scroll.gliding));
                                 lift.flags |= WINDOW_KEY_CANCEL;
                                 settings_event(&lift);
                                 lift.flags &= ~WINDOW_KEY_CANCEL;
@@ -130280,6 +130296,8 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
 
 // A finger flicks the list down: it lands at the list's middle, moves up the rows by step pixels a frame for steps frames
 // from start pixels above the end, and lets go. The drawn scroll is watched to the end of the glide.
+
+
 static b32 settings_flick_check(string_address name, int start, int step, int steps)
 {
         struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
@@ -135609,6 +135627,7 @@ static fn check_kit_motion(void)
 
                         // The outlined button inside its border, 61 by 34, pressed at 9, 7; out 120 ms after the first frame.
                         ui_ripple_go(&ripple, ui_q(9), ui_q(7), ui_q(61), ui_q(34), ui_q(8));
+                        ripple.pace = UI_ONE; // the curve at the reference's own pace; the kit's pace (ui_ripple_go) is checked in check_kit_ripple_pace
                         ui_ripple_at(&ripple, first, &cx, &cy, &radius, &opacity);
                         if (r->t >= 120000000ll)
                                 ui_ripple_exit(&ripple, first + 120000000ll);
@@ -136316,6 +136335,28 @@ static int bounds_span(const struct ui address_to ui, const struct ui_list addre
         one forgotten (its page shown again) and changed while unseen is placed again; a change after its first frame
         moves; and the kit settled (a resize) puts a moving control at its end at once.
 */
+
+static b32 reach_as(struct ui address_to ui, const struct ui_scroll address_to s, int x, int y, b32 touch)
+{
+        b32 answer;
+
+        ui_kit_touch = touch;
+        answer = ui_scroll_reach(ui, s, x, y);
+        ui_kit_touch = 0;
+        return answer;
+}
+
+// The kit's pointer on a scrollbar as a mouse's (touch 0) or a finger's (touch 1) event: the kit's context says which.
+static int pointer_as(struct ui address_to ui, struct ui_scroll address_to s, int type, int x, int y, b32 down, b32 touch)
+{
+        int answer;
+
+        ui_kit_touch = touch;
+        answer = ui_scroll_pointer(ui, s, type, x, y, down);
+        ui_kit_touch = 0;
+        return answer;
+}
+
 static fn check_kit_place(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -136533,19 +136574,24 @@ static fn check_kit_place(void)
                 bar.content = 100000;
                 least = ui_scroll_thumb(&ui, &bar, &top, &length) && length == UI_SCROLL_LEAST;
                 bar.content = 1000, bar.scroll = 0;
-                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 15, true, 0);
-                scroll = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 95, true, 0);
+                pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 15, true, 0);
+                scroll = pointer_as(&ui, &bar, WINDOW_EVENT_MOTION, 104, 95, true, 0);
                 dragged = bar.held && scroll == 400;
                 bar.scroll = scroll;
-                dragged = dragged && ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 95, false, 0) == 400 && !bar.held &&
-                          ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 104, 150, false, 0) == -1;
-                paged = ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 200, true, 0) == 600 &&
-                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 20, true, 0) == 200 &&
-                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 150, true, 0) == -1;
-                /* A finger's reach: UI_TARGET each way of the 10-wide track at 100, so 90 is the bar's and 60 is not; a mouse's 90 is not. */
-                paged = paged && ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 200, true, 1) == 600 &&
-                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 200, true, 0) == -1 &&
-                        ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 200, true, 1) == -1;
+                dragged = dragged && pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 95, false, 0) == 400 && !bar.held &&
+                          pointer_as(&ui, &bar, WINDOW_EVENT_MOTION, 104, 150, false, 0) == -1;
+                paged = pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 200, true, 0) == 600 &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 104, 20, true, 0) == 200 &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 150, true, 0) == -1;
+                /* A finger's reach: UI_TARGET each way of the 10-wide track at 100, so 90 is the bar's and 60 is not. A finger on the thumb
+                   within it holds the thumb; a finger on the track off the thumb is on the content (it is not paged, as a pointer's press is),
+                   and a mouse's 90 is not the bar's. */
+                bar.scroll = 400;
+                paged = paged && pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 100, true, 1) == 400 && bar.held &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 100, false, 1) == 400 && !bar.held &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 200, true, 1) == -1 && !bar.held &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 90, 200, true, 0) == -1 &&
+                        pointer_as(&ui, &bar, WINDOW_EVENT_BUTTON, 60, 100, true, 1) == -1;
                 bar.scroll = 0;
                 ui_fill(&ui, 90, 0, 30, 220, paper);
                 ui.top = 0, ui.bottom = 300;
@@ -136574,8 +136620,8 @@ static fn check_kit_place(void)
                 starts = starts && ui_scroll_thumb(&ui, &capped, &top, &length) && top == inset;
                 capped.scroll = 800;
                 ends = ui_scroll_thumb(&ui, &capped, &top, &length) && top + length == 200 && top >= inset;
-                pressed = !ui_scroll_reach(&ui, &capped, 104, 10, 0) && ui_scroll_reach(&ui, &capped, 104, 30, 0) &&
-                          ui_scroll_pointer(&ui, &capped, WINDOW_EVENT_BUTTON, 104, 10, true, 0) == -1 && !capped.held;
+                pressed = !reach_as(&ui, &capped, 104, 10, 0) && reach_as(&ui, &capped, 104, 30, 0) &&
+                          pointer_as(&ui, &capped, WINDOW_EVENT_BUTTON, 104, 10, true, 0) == -1 && !capped.held;
                 check("kit scrollbar: a track with an inset starts at the inset and reaches the region's bottom at the end of its content",
                       starts && ends);
                 check("kit scrollbar: a press in the inset is not the bar's, and the track below it is", pressed);
@@ -136592,13 +136638,13 @@ static fn check_kit_place(void)
                 int top = 0, length = 0;
                 b32 same_frame = false, no_glide = false, target_drawn = false;
 
-                ui_scroll_pointer(&ui, &held, WINDOW_EVENT_BUTTON, 104, 20, true, 0);
-                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true, 0));
+                pointer_as(&ui, &held, WINDOW_EVENT_BUTTON, 104, 20, true, 0);
+                ui_scroll_set(&held, pointer_as(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true, 0));
                 same_frame = held.held && held.scroll == 400 && ui_scroll_thumb(&ui, &held, &top, &length) && top == 100 - 10;
                 no_glide = !held.gliding;
                 ui_scroll_wheel(&ui, &held, -120);
                 target_drawn = held.scroll == 400 && held.gliding && ui_scroll_thumb(&ui, &held, &top, &length) && top == 10 + 160 * 440 / 800;
-                ui_scroll_set(&held, ui_scroll_pointer(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true, 0));
+                ui_scroll_set(&held, pointer_as(&ui, &held, WINDOW_EVENT_MOTION, 104, 100, true, 0));
                 check("kit scrollbar: a dragged thumb is at the pointer on the frame the pointer moved it, and does not glide", same_frame && no_glide);
                 check("kit scrollbar: a held thumb is drawn at its glide's target, and at the pointer again once it moves", target_drawn &&
                       ui_scroll_thumb(&ui, &held, &top, &length) && top == 100 - 10);
@@ -136614,7 +136660,7 @@ static fn check_kit_place(void)
                 ui_fill(&ui, 90, 0, 30, 220, paper);
                 ui.top = 0, ui.bottom = 300;
                 ui_scroll_draw(&ui, &pressed);
-                ui_scroll_pointer(&ui, &pressed, WINDOW_EVENT_BUTTON, 104, 180, true, 0);
+                pointer_as(&ui, &pressed, WINDOW_EVENT_BUTTON, 104, 180, true, 0);
                 for (int frame = 0; frame < 3; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
@@ -136643,7 +136689,7 @@ static fn check_kit_place(void)
                 ui_scroll_thumb(&ui, &grip, &top, &length);
                 ui_scroll_box(&ui, &grip, top, length, &box);
                 rest_width = box.x1 - box.x0;
-                ui_scroll_pointer(&ui, &grip, WINDOW_EVENT_BUTTON, 104, 20, true, 0);
+                pointer_as(&ui, &grip, WINDOW_EVENT_BUTTON, 104, 20, true, 0);
                 for (int frame = 0; frame < 4; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
@@ -136671,7 +136717,7 @@ static fn check_kit_place(void)
                 held_width = box.x1 - box.x0;
                 settled = held == ink && !ui_kit.busy && held_width * 4 == rest_width * 5 && rest_width == 4 * 256 &&
                           pixels[30 * 600 + 105] == ink;
-                ui_scroll_pointer(&ui, &grip, WINDOW_EVENT_BUTTON, 104, 20, false, 0);
+                pointer_as(&ui, &grip, WINDOW_EVENT_BUTTON, 104, 20, false, 0);
                 for (int frame = 0; frame < 30; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
@@ -137606,6 +137652,350 @@ static void check_terminal_wheel_curve(void)
         check("terminal scrollback: the view is the bar's offset to the nearest row, the grid's only rounding of it", view_follows);
 }
 
+/*
+        A ripple's pace: its times are ui.js's times at 1.2 on a small control to 1.6 on a wide row (by its reach), so a ripple on a
+        wide row is seen. The curve is the same curve in more time: the radius at t times the pace is the reference's at t, and on a
+        600 px row the ripple is still growing at 225 ms, where the reference's had reached its size.
+*/
+static fn check_kit_ripple_pace(void)
+{
+        struct ui_ripple small, wide, middle, plain;
+        b64 cx, cy, radius, opacity, first = 5000000000ll, worst = 0, near, far;
+        b32 hold_kept, gone;
+
+        ui_ripple_go(&small, ui_q(30), ui_q(17), ui_q(61), ui_q(34), ui_q(8));
+        ui_ripple_go(&wide, ui_q(300), ui_q(20), ui_q(600), ui_q(40), 0);
+        ui_ripple_go(&middle, ui_q(190), ui_q(20), ui_q(380), ui_q(40), 0);
+        check("kit ripple pace: 1.2 on a small control, 1.6 on a wide row, between them by the reach",
+              small.pace == UI_Q2(120) && wide.pace >= UI_Q2(159) && wide.pace <= UI_Q2(160) && middle.pace > UI_Q2(130) && middle.pace < UI_Q2(150));
+        plain = wide;
+        plain.pace = UI_ONE;
+        ui_ripple_at(&wide, first, &cx, &cy, &radius, &opacity);
+        ui_ripple_at(&plain, first, &cx, &cy, &radius, &opacity);
+        for (int ms = 20; ms <= 340; ms += 20)
+        {
+                b64 slow, reference, error;
+
+                ui_ripple_at(&wide, first + (b64)ms * UI_MS * wide.pace / UI_ONE, &cx, &cy, &slow, &opacity);
+                ui_ripple_at(&plain, first + (b64)ms * UI_MS, &cx, &cy, &reference, &opacity);
+                error = slow > reference ? slow - reference : reference - slow;
+                worst = error > worst ? error : worst;
+        }
+        check("kit ripple pace: the same curve in more time: the radius at t times the pace is the reference's at t", worst < ui_q(1) / 1000);
+        ui_ripple_at(&wide, first + 225 * UI_MS, &cx, &cy, &near, &opacity);
+        ui_ripple_at(&plain, first + 225 * UI_MS, &cx, &cy, &far, &opacity);
+        check("kit ripple pace: on a 600 px row the ripple is still growing at 225 ms (under 90 percent of its size), where the reference's had reached it",
+              far >= wide.reach - ui_q(1) / 1000 && near < ui_qmul(wide.reach, UI_Q2(90)));
+        // Let go at 100 ms: held until the grown time (the pace's 225 ms) after the press, out in the pace's 150 ms, then gone.
+        ui_ripple_go(&middle, ui_q(190), ui_q(20), ui_q(380), ui_q(40), 0);
+        ui_ripple_at(&middle, first, &cx, &cy, &radius, &opacity);
+        ui_ripple_exit(&middle, first + 100 * UI_MS);
+        hold_kept = ui_ripple_at(&middle, first + ui_qmul(225 * UI_MS, middle.pace) - 5 * UI_MS, &cx, &cy, &radius, &opacity) &&
+                    opacity == ui_qmul(UI_ONE, UI_Q2(20));
+        gone = !ui_ripple_at(&middle, first + ui_qmul(225 * UI_MS, middle.pace) + ui_qmul(150 * UI_MS, middle.pace) + 5 * UI_MS, &cx, &cy, &radius, &opacity);
+        check("kit ripple pace: a ripple let go early is held to its own grown time, fades over its own 150 ms, and is gone", hold_kept && gone);
+}
+
+/* ---- the scroll matrix: a trackpad's and a finger's streams, at every report rate and delivery ---- */
+
+/*
+        Whatever the device and however its reports reach the window, a region under a hand or a finger is smooth: the content is
+        never ahead of the finger, never behind it by more than the reports it has not been given, never goes back while the finger
+        goes on, never pops its stretch, a gesture that came to rest throws nothing, a flick throws alike at every rate, a new touch
+        on a throw takes it where it is drawn, and everything comes to rest. A stream is one finger's motion (a speed profile of up,
+        level and down) given to the region as a trackpad's precise reports (one for one, through ui_wheel_turn) or as a finger's
+        moves (ui_finger_down, ui_finger_move, ui_finger_up), at 60, 90, 125 and 240 reports a second, each at its own time, joined at
+        the frame, or held 30 ms and let out at once. The kit's clock is the test's: every handler is given the time of the event.
+*/
+#define RB_GESTURES 7
+#define RB_FRAMES 520
+#define RB_MOVES 900
+struct rb_gesture
+{
+        const char address_to name;
+        int up, hold, down, rest;     // ms: the speed's rise, level and fall, and the finger's rest before it lifts
+        long peak;                    // px a second
+        int start, content;           // the region's offset and length (its view is 400)
+        b32 flick, stops, into_end;   // lifts at speed; ends at rest; pushes past the end
+};
+
+static const struct rb_gesture rb_gestures[RB_GESTURES] = {
+    {"fast", 100, 100, 150, 20, 1500, 1000, 4000, 0, 0, 0},
+    {"slows to a stop", 80, 40, 200, 80, 900, 1000, 4000, 0, 1, 0},
+    {"crawl", 100, 200, 100, 20, 120, 1000, 4000, 0, 0, 0},
+    {"flick", 40, 80, 0, 20, 1800, 1000, 8000, 1, 0, 0},
+    {"short flick", 0, 50, 0, 10, 1800, 1000, 8000, 1, 0, 0},
+    {"into the end", 100, 200, 150, 20, 900, 3500, 4000, 0, 0, 1},
+    {"stops and holds", 80, 120, 60, 200, 1200, 1000, 4000, 0, 1, 0},
+};
+
+struct rb_report
+{
+        long arrive, deliver, want;   // us; the finger's position, 256ths of a pixel
+};
+
+struct rb_result
+{
+        long over, lag_excess, backwards, pop, release_pop, post_rest, throw_px, idle_ms, busy_after, regrab_jump, regrab_going;
+};
+
+static long rb_speed_at(const struct rb_gesture address_to g, long t)
+{
+        if (t < g->up)
+                return g->peak * t / g->up;
+        if (t < g->up + g->hold)
+                return g->peak;
+        if (g->down && t < g->up + g->hold + g->down)
+                return g->peak * (g->up + g->hold + g->down - t) / g->down;
+        return 0;
+}
+
+static long rb_abs(long v)
+{
+        return v < 0 ? -v : v;
+}
+
+// One report to the region at the kit's clock: a trackpad's precise turn, the sum of what it has had made whole (a device's report
+// is whole units of a 120th of a notch, its remainder carried), or a finger's move to where it is.
+static void rb_give(int kind, struct ui address_to ui, struct ui_scroll address_to region, struct ui_finger address_to finger, b32 address_to down,
+                    long want, long address_to sent)
+{
+        if (kind == 0)
+        {
+                long whole = (-want) * 120 / ((long)UI_ROW * ui->scale / 100 * UI_SCROLL_SCALE), a = whole - *sent;
+
+                *sent = whole;
+                if (a)
+                {
+                        struct window_event report = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, (int)a, 0};
+
+                        ui_wheel_turn(ui, region, &report);
+                }
+                return;
+        }
+        if (!*down)
+                ui_finger_down(finger, 100, 300, 0, region), *down = true;
+        ui_finger_move(ui, finger, 100, 300 - (int)((want + 128) >> 8));
+}
+
+// kind 0 a trackpad, 1 a finger; hz the report rate; delivery 0 at its own time, 1 joined at the frame, 2 held 30 ms mid-gesture.
+// again: a second touch begins 200 ms after the first lets go, on whatever it left moving.
+static void rb_run(int kind, int hz, int delivery, const struct rb_gesture address_to g, b32 again, struct rb_result address_to out)
+{
+        static long pos[RB_MOVES], drawn[RB_FRAMES], ideal[RB_FRAMES], stretch[RB_FRAMES];
+        static struct rb_report reports[RB_MOVES];
+        struct ui ui;
+        struct ui_scroll region;
+        struct ui_finger finger;
+        long frame_us = 16666, event_us = 1000000l / hz, total = g->up + g->hold + g->down, count = 0, previous = 0, sent = 0;
+        long lift_us, second_us = 0, last_arrive = 0, frames = 0, next = 0, first_scroll, lag_allowed, end_input_frame = 0, settled = 0;
+        long final_scroll = 0, at_rest_frame = -1, delivered_at_lift = 0;
+        b32 down = false, lifted = false, second = false, quiet = false;
+        int edge;
+
+        memory_zero(out, sizeof(*out));
+        memory_zero(&ui, sizeof(ui));
+        memory_zero(&region, sizeof(region));
+        memory_zero(&finger, sizeof(finger));
+        ui.scale = 100;
+        region.x = 100, region.y = 10, region.height = 400, region.view = 400, region.content = g->content, region.bounds = 1, region.scale = 100;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_scroll_set(&region, g->start);
+        first_scroll = region.scroll;
+        pos[0] = 0;
+        for (long t = 1; t < RB_MOVES; t++)
+                pos[t] = pos[t - 1] + (t - 1 < total ? rb_speed_at(g, t - 1) * 256 / 1000 : 0);
+        for (long k = 1; k * event_us <= (total + 1) * 1000 && count < RB_MOVES; k++)
+        {
+                long ms = k * event_us / 1000, want = pos[ms > total ? total : ms], arrive = k * event_us;
+
+                if (want == previous)
+                        continue;
+                previous = want;
+                reports[count].arrive = arrive, reports[count].want = want;
+                reports[count].deliver = delivery == 0 ? arrive : delivery == 1 ? (arrive / frame_us + 1) * frame_us
+                                                                               : (arrive >= 120000 && arrive < 150000 ? 150000 : arrive);
+                last_arrive = arrive;
+                count++;
+        }
+        lift_us = last_arrive + (long)g->rest * 1000;
+        lag_allowed = g->peak * (frame_us + event_us + (delivery == 2 ? 30000 : 0) + (delivery == 1 ? frame_us : 0)) / 1000000 + 3;
+        if (kind == 1)
+                lag_allowed += UI_SLOP + 2;
+        if (again)
+                second_us = lift_us + (kind == 0 ? 40000 : 0) + 200000;
+
+        for (long tf = frame_us; frames < RB_FRAMES && tf < 8000000; tf += frame_us)
+        {
+                long ms = tf / 1000;
+
+                while (next < count && reports[next].deliver <= tf)
+                {
+                        ui_kit.now = 9000000000ll + reports[next].deliver * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        rb_give(kind, &ui, &region, &finger, &down, reports[next].want, &sent);
+                        next++;
+                }
+                if (kind == 1 && down && !lifted && next == count && tf >= lift_us)
+                {
+                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        ui_finger_up(&finger, false);
+                        lifted = true;
+                        delivered_at_lift = region.scroll - first_scroll;
+                }
+                if (again && !second && second_us && tf >= second_us)
+                {
+                        long before = region.scroll;
+
+                        ui_kit.now = 9000000000ll + tf * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        if (kind == 0)
+                        {
+                                struct window_event report = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -2, 0};
+
+                                ui_wheel_turn(&ui, &region, &report);
+                        }
+                        else
+                        {
+                                ui_finger_down(&finger, 100, 300, 0, &region);
+                                ui_finger_move(&ui, &finger, 100, 295);
+                        }
+                        out->regrab_jump = rb_abs(region.scroll - before);
+                        second = true;
+                }
+                ui_kit.now = 9000000000ll + tf * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                if (ui_scroll_glide(&ui, &region) || 1)
+                {
+                        drawn[frames] = region.scroll - first_scroll;
+                        ideal[frames] = (pos[ms > total ? total : ms] + 128) >> 8;
+                        stretch[frames] = (long)ui_scroll_stretched(&region, &edge);
+                        if (ms <= total)
+                                end_input_frame = frames;
+                        if (second && at_rest_frame < 0)
+                                out->regrab_going = region.gliding ? 1 : 0;
+                        if (last_arrive + 60000 <= tf && at_rest_frame < 0)
+                                at_rest_frame = frames;
+                        frames++;
+                }
+                final_scroll = region.scroll - first_scroll;
+                if (tf > last_arrive + (long)g->rest * 1000 + 400000 && (!again || second) && !ui_scroll_going(&region) && !region.dragging && !region.hand &&
+                    !region.back.live)
+                {
+                        if (++settled > 8)
+                        {
+                                out->idle_ms = (tf - (last_arrive + (long)g->rest * 1000)) / 1000;
+                                quiet = true;
+                                break;
+                        }
+                }
+                else
+                        settled = 0;
+        }
+        if (!quiet)
+                out->idle_ms = 99999;
+        // After it rests the region reports nothing moving and stays put, with no stretch left.
+        for (int k = 0; quiet && k < 10; k++)
+        {
+                long before = region.scroll;
+
+                ui_kit.now += frame_us * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                if (ui_scroll_glide(&ui, &region) || region.scroll != before || ui_scroll_stretched(&region, &edge))
+                        out->busy_after++;
+        }
+        for (long i = 1; i <= end_input_frame && i < frames; i++)
+        {
+                long behind = ideal[i] - drawn[i] - lag_allowed;
+                int at_end = g->into_end && drawn[i] >= g->content - 400 - g->start - 1;
+
+                if (!at_end)
+                {
+                        out->over = drawn[i] - ideal[i] > out->over ? drawn[i] - ideal[i] : out->over;
+                        out->lag_excess = behind > out->lag_excess ? behind : out->lag_excess;
+                }
+                if (drawn[i] < drawn[i - 1])
+                        out->backwards += drawn[i - 1] - drawn[i];
+                out->pop = rb_abs(stretch[i] - stretch[i - 1]) > out->pop ? rb_abs(stretch[i] - stretch[i - 1]) : out->pop;
+        }
+        if (at_rest_frame >= 0 && at_rest_frame < frames)
+                out->post_rest = final_scroll - drawn[at_rest_frame];
+        out->throw_px = final_scroll - (end_input_frame < frames ? drawn[end_input_frame] : 0);
+        out->release_pop = (long)region.hand_drag.speed;
+        (void)delivered_at_lift;
+}
+
+static fn check_kit_scroll_robust(void)
+{
+        static const int rates[4] = {60, 90, 125, 240};
+        static const char address_to kinds[2] = {"a trackpad", "a finger"};
+        struct rb_result r;
+        long over = 0, lag = 0, back = 0, pop = 0, phantom = 0, idle = 0, busy = 0, jump = 0, going = 0, runs = 0;
+        long throw_min[2][RB_GESTURES], throw_max[2][RB_GESTURES];
+
+        for (int kind = 0; kind < 2; kind++)
+                for (int k = 0; k < RB_GESTURES; k++)
+                        throw_min[kind][k] = 1l << 40, throw_max[kind][k] = -1;
+        for (int kind = 0; kind < 2; kind++)
+                for (int rate = 0; rate < 4; rate++)
+                        for (int delivery = 0; delivery < 3; delivery++)
+                                for (int k = 0; k < RB_GESTURES; k++)
+                                {
+                                        const struct rb_gesture address_to g = &rb_gestures[k];
+                                        rb_run(kind, rates[rate], delivery, g, false, &r);
+                                        runs++;
+                                        if (r.over > 2 || (g->stops && rb_abs(r.post_rest) > 4) || r.idle_ms > 5000 || (g->flick && r.throw_px * 100 < (g->peak / 2) * 60))
+                                                string_format(log, "  scroll matrix run: %s, %s, %p Hz, %s: ahead %b, moved %b after rest, throw %b, rest in %b ms, last speed %b\n",
+                                                              (string_address)kinds[kind], (string_address)g->name, (positive)rates[rate],
+                                                              (string_address)(delivery == 0 ? "own time" : delivery == 1 ? "joined" : "held"), (bipolar)r.over,
+                                                              (bipolar)r.post_rest, (bipolar)r.throw_px, (bipolar)r.idle_ms, (bipolar)r.release_pop);
+                                        over = r.over > over ? r.over : over;
+                                        lag = r.lag_excess > lag ? r.lag_excess : lag;
+                                        back = r.backwards > back ? r.backwards : back;
+                                        pop = r.pop > pop ? r.pop : pop;
+                                        if (g->stops)
+                                                phantom = rb_abs(r.post_rest) > phantom ? rb_abs(r.post_rest) : phantom;
+                                        idle = r.idle_ms > idle ? r.idle_ms : idle;
+                                        busy = r.busy_after > busy ? r.busy_after : busy;
+                                        if (g->flick)
+                                        {
+                                                throw_min[kind][k] = r.throw_px < throw_min[kind][k] ? r.throw_px : throw_min[kind][k];
+                                                throw_max[kind][k] = r.throw_px > throw_max[kind][k] ? r.throw_px : throw_max[kind][k];
+                                        }
+                                        if (g->flick)
+                                        {
+                                                rb_run(kind, rates[rate], delivery, g, true, &r);
+                                                jump = r.regrab_jump > jump ? r.regrab_jump : jump;
+                                                going = r.regrab_going > going ? r.regrab_going : going;
+                                        }
+                                }
+        string_format(log, "  scroll matrix: %p runs; ahead of the finger by %b px, behind by %b px over what it has not been given, back %b px, stretch change %b (Q30), at rest %b px moved, rest in %b ms, busy %b frames after rest, new touch jump %b px\n",
+                      (positive)runs, (bipolar)over, (bipolar)lag, (bipolar)back, (bipolar)pop, (bipolar)phantom, (bipolar)idle, (bipolar)busy, (bipolar)jump);
+        for (int kind = 0; kind < 2; kind++)
+                for (int k = 0; k < RB_GESTURES; k++)
+                        if (rb_gestures[k].flick)
+                                string_format(log, "  scroll matrix: %s, %s throws %b to %b px\n", (string_address)kinds[kind], (string_address)rb_gestures[k].name,
+                                              (bipolar)throw_min[kind][k], (bipolar)throw_max[kind][k]);
+        log_flush();
+        check("kit scroll matrix: the content is never ahead of the finger", over <= 2);
+        check("kit scroll matrix: the content is never behind the finger by more than the reports it has not been given", lag <= 0);
+        check("kit scroll matrix: the content never goes back while the finger goes on", back <= 1);
+        check("kit scroll matrix: the stretch past an end never pops (under 3 percent of the view in a frame)", pop <= (1ll << 30) * 3 / 100);
+        check("kit scroll matrix: a gesture that came to rest throws nothing (under 4 px after 60 ms of rest)", phantom <= 4);
+        check("kit scroll matrix: a new touch on a throw takes it where it is drawn (no jump, nothing carried)", jump <= 3 && going == 0);
+        check("kit scroll matrix: everything comes to rest (a throw's 500 ms decay takes under 5 seconds), and reports nothing moving after", idle <= 5000 && busy == 0);
+        {
+                b32 alike = true;
+
+                for (int kind = 0; kind < 2; kind++)
+                        for (int k = 0; k < RB_GESTURES; k++)
+                                if (rb_gestures[k].flick)
+                                {
+                                        long expect = rb_gestures[k].peak / 2;
+
+                                        alike = alike && throw_min[kind][k] * 100 >= expect * 45 && throw_max[kind][k] * 100 <= expect * 115 &&
+                                                throw_max[kind][k] * 100 <= throw_min[kind][k] * 140;
+                                }
+                check("kit scroll matrix: a flick throws alike at every report rate and delivery, near its speed times 500 ms", alike);
+        }
+}
+
 static fn check_kit_scroll_ends(void)
 {
         struct ui ui = terminal.ui;
@@ -138083,10 +138473,10 @@ static fn check_kit_states(void)
                 bar.x = 100, bar.y = 10, bar.height = 200, bar.content = 1000, bar.view = 200;
                 ui_kit.now += 1000000000ll, ui_kit.busy = 0;
                 ui_scroll_draw(&ui, &bar);
-                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 105, 20, false, 0);
+                pointer_as(&ui, &bar, WINDOW_EVENT_MOTION, 105, 20, false, 0);
                 hovered = bar.hover;
                 lit = sweep_settle_scroll(&ui, &bar);
-                ui_scroll_pointer(&ui, &bar, WINDOW_EVENT_MOTION, 300, 200, false, 0);
+                pointer_as(&ui, &bar, WINDOW_EVENT_MOTION, 300, 200, false, 0);
                 unlit = sweep_settle_scroll(&ui, &bar);
                 check("kit states: a bar hovered and left goes lit and back, and is idle after each",
                       hovered && lit > 0 && !bar.hover && unlit > 0);
@@ -138736,6 +139126,7 @@ static fn frames_run(string_address name, const struct frames_step address_to st
                 next += 16666667;
         }
 }
+
 
 b32 main()
 {
@@ -142838,7 +143229,7 @@ static fn kit_composites_check(struct ui address_to wui)
                 int x = reopened.scroll.x + s, y = reopened.scroll.y + reopened.scroll.height / 2;
 
                 check("menu: a menu opened again has no thumb held over from its last opening",
-                      ui_scroll_pointer(wui, &reopened.scroll, WINDOW_EVENT_MOTION, x, y, false, 0) == -1);
+                      pointer_as(wui, &reopened.scroll, WINDOW_EVENT_MOTION, x, y, false, 0) == -1);
         }
 }
 
@@ -143754,9 +144145,9 @@ static fn terminal_gutter_check(void)
         terminal.pointer_x = (int)(COLUMNS * terminal.cell_w) + 2;
         terminal.pointer_y = 2 * (int)terminal.cell_h;
         event.type = WINDOW_EVENT_BUTTON, event.a = 0x110, event.b = 0, event.flags = WINDOW_KEY_DOWN;
-        terminal_receive((b32)ends[1], &event, &dirty);
+        terminal_deliver((b32)ends[1], &event, &dirty);
         event.flags = 0;
-        terminal_receive((b32)ends[1], &event, &dirty);
+        terminal_deliver((b32)ends[1], &event, &dirty);
         length = system_read_once((b32)ends[0], got, sizeof(got));
         check("terminal gutter: a press and a release in the gutter are not the program's", length < 0);
         mouse_mode = 0;
@@ -144181,6 +144572,8 @@ b32 main()
         check_kit_controls();
         check_kit_states();
         check_kit_scroll_ends();
+        check_kit_scroll_robust();
+        check_kit_ripple_pace();
         check_kit_hand();
         check_terminal_wheel_curve();
         check_kit_turn();
