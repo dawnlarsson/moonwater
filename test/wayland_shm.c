@@ -7,9 +7,11 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-q]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
-        only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -q quiet.
+        only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -q quiet,
+        -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
+        compiled by libxkbcommon and each key says its keysym and its text).
         Exit 0 once the frames are drawn, 1 on a protocol error or a connection that ends, 2 when it cannot start.
 */
 #define _GNU_SOURCE
@@ -22,6 +24,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
+#ifdef HAVE_XKB
+#include <xkbcommon/xkbcommon.h>
+#endif
 
 #include "xdg-shell-client.h"
 
@@ -44,7 +49,7 @@ static struct wl_callback *frame_callback;
 static struct buffer buffers[2];
 
 static int width = 320, height = 240, frames_wanted = 60, frames, configures, acked, closed, quiet, still, damage_only;
-static int maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1;
+static int maximize, fullscreen, ready, pointer_events, key_events, enters, leaves, scale = 1, verbose;
 static const char *title = "wayland-shm", *app_id = "wayland-shm";
 
 static void say(const char *what, long value)
@@ -222,32 +227,42 @@ static const struct wl_surface_listener wl_surface_listener = {surface_enter, su
 
 static void pointer_enter(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *su, wl_fixed_t x, wl_fixed_t y)
 {
-        (void)d; (void)p; (void)s; (void)su; (void)x; (void)y;
+        (void)d; (void)p; (void)s; (void)su;
         pointer_events++;
+        if (verbose)
+                printf("pointer enter %d %d\n", wl_fixed_to_int(x), wl_fixed_to_int(y)), fflush(stdout);
 }
 
 static void pointer_leave(void *d, struct wl_pointer *p, uint32_t s, struct wl_surface *su)
 {
         (void)d; (void)p; (void)s; (void)su;
         pointer_events++;
+        if (verbose)
+                printf("pointer leave\n"), fflush(stdout);
 }
 
 static void pointer_motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl_fixed_t y)
 {
-        (void)d; (void)p; (void)t; (void)x; (void)y;
+        (void)d; (void)p; (void)t;
         pointer_events++;
+        if (verbose)
+                printf("pointer motion %d %d\n", wl_fixed_to_int(x), wl_fixed_to_int(y)), fflush(stdout);
 }
 
 static void pointer_button(void *d, struct wl_pointer *p, uint32_t s, uint32_t t, uint32_t b, uint32_t st)
 {
-        (void)d; (void)p; (void)s; (void)t; (void)b; (void)st;
+        (void)d; (void)p; (void)s; (void)t;
         pointer_events++;
+        if (verbose)
+                printf("pointer button %u %u\n", b, st), fflush(stdout);
 }
 
 static void pointer_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v)
 {
-        (void)d; (void)p; (void)t; (void)a; (void)v;
+        (void)d; (void)p; (void)t;
         pointer_events++;
+        if (verbose)
+                printf("pointer axis %u %d\n", a, wl_fixed_to_int(v)), fflush(stdout);
 }
 
 static void pointer_frame(void *d, struct wl_pointer *p)
@@ -272,7 +287,9 @@ static void pointer_axis_discrete(void *d, struct wl_pointer *p, uint32_t a, int
 
 static void pointer_axis_value120(void *d, struct wl_pointer *p, uint32_t a, int32_t v)
 {
-        (void)d; (void)p; (void)a; (void)v;
+        (void)d; (void)p;
+        if (verbose)
+                printf("pointer value120 %u %d\n", a, v), fflush(stdout);
 }
 
 static void pointer_axis_direction(void *d, struct wl_pointer *p, uint32_t a, uint32_t v)
@@ -281,41 +298,100 @@ static void pointer_axis_direction(void *d, struct wl_pointer *p, uint32_t a, ui
 }
 
 static const struct wl_pointer_listener pointer_listener = {
-    pointer_enter, pointer_leave, pointer_motion, pointer_button, pointer_axis, pointer_frame,
-    pointer_axis_source, pointer_axis_stop, pointer_axis_discrete, pointer_axis_value120, pointer_axis_direction};
+    .enter = pointer_enter, .leave = pointer_leave, .motion = pointer_motion, .button = pointer_button, .axis = pointer_axis,
+    .frame = pointer_frame, .axis_source = pointer_axis_source, .axis_stop = pointer_axis_stop,
+    .axis_discrete = pointer_axis_discrete, .axis_value120 = pointer_axis_value120,
+    .axis_relative_direction = pointer_axis_direction};
+
+#ifdef HAVE_XKB
+static struct xkb_context *xkb_ctx;
+static struct xkb_keymap *xkb_map;
+static struct xkb_state *xkb_st;
+#endif
 
 static void keyboard_keymap(void *d, struct wl_keyboard *k, uint32_t f, int32_t fd, uint32_t size)
 {
-        (void)d; (void)k; (void)f; (void)size;
+        (void)d; (void)k;
+        if (verbose)
+                printf("keymap %u %u\n", f, size), fflush(stdout);
+#ifdef HAVE_XKB
+        {
+                char *text = f == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 ? mmap(0, size, PROT_READ, MAP_PRIVATE, fd, 0) : MAP_FAILED;
+
+                if (text != MAP_FAILED)
+                {
+                        if (!xkb_ctx)
+                                xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_DEFAULT_INCLUDES);
+                        if (xkb_st)
+                                xkb_state_unref(xkb_st);
+                        if (xkb_map)
+                                xkb_keymap_unref(xkb_map);
+                        xkb_map = xkb_keymap_new_from_buffer(xkb_ctx, text, size - 1 + (text[size - 1] ? 1 : 0), XKB_KEYMAP_FORMAT_TEXT_V1, 0);
+                        xkb_st = xkb_map ? xkb_state_new(xkb_map) : 0;
+                        if (verbose)
+                                printf("xkb %s\n", xkb_map ? "ok" : "refused"), fflush(stdout);
+                        munmap(text, size);
+                }
+        }
+#endif
         close(fd);
 }
 
 static void keyboard_enter(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surface *su, struct wl_array *keys)
 {
-        (void)d; (void)k; (void)s; (void)su; (void)keys;
+        (void)d; (void)k; (void)s; (void)su;
         key_events++;
+        if (verbose)
+                printf("keyboard enter %zu\n", keys->size / 4), fflush(stdout);
 }
 
 static void keyboard_leave(void *d, struct wl_keyboard *k, uint32_t s, struct wl_surface *su)
 {
         (void)d; (void)k; (void)s; (void)su;
         key_events++;
+        if (verbose)
+                printf("keyboard leave\n"), fflush(stdout);
 }
 
 static void keyboard_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t, uint32_t key, uint32_t state)
 {
-        (void)d; (void)k; (void)s; (void)t; (void)key; (void)state;
+        (void)d; (void)k; (void)s; (void)t;
         key_events++;
+        if (verbose)
+        {
+#ifdef HAVE_XKB
+                if (xkb_st)
+                {
+                        char name[64] = "?", utf8[16] = "";
+                        xkb_keysym_t sym = xkb_state_key_get_one_sym(xkb_st, key + 8);
+
+                        xkb_keysym_get_name(sym, name, sizeof name);
+                        xkb_state_key_get_utf8(xkb_st, key + 8, utf8, sizeof utf8);
+                        printf("key %u %u %s %s\n", key, state, name, utf8);
+                }
+                else
+#endif
+                        printf("key %u %u\n", key, state);
+                fflush(stdout);
+        }
 }
 
 static void keyboard_modifiers(void *d, struct wl_keyboard *k, uint32_t s, uint32_t a, uint32_t b, uint32_t c, uint32_t g)
 {
-        (void)d; (void)k; (void)s; (void)a; (void)b; (void)c; (void)g;
+        (void)d; (void)k; (void)s;
+#ifdef HAVE_XKB
+        if (xkb_st)
+                xkb_state_update_mask(xkb_st, a, b, c, 0, 0, g);
+#endif
+        if (verbose)
+                printf("modifiers %u %u %u\n", a, b, c), fflush(stdout);
 }
 
 static void keyboard_repeat(void *d, struct wl_keyboard *k, int32_t rate, int32_t delay)
 {
-        (void)d; (void)k; (void)rate; (void)delay;
+        (void)d; (void)k;
+        if (verbose)
+                printf("repeat %d %d\n", rate, delay), fflush(stdout);
 }
 
 static const struct wl_keyboard_listener keyboard_listener = {keyboard_keymap, keyboard_enter, keyboard_leave, keyboard_key,
@@ -349,7 +425,7 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
         else if (!strcmp(interface, xdg_wm_base_interface.name))
                 wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, version < 6 ? version : 6);
         else if (!strcmp(interface, wl_seat_interface.name))
-                seat = wl_registry_bind(registry, name, &wl_seat_interface, version < 5 ? version : 5);
+                seat = wl_registry_bind(registry, name, &wl_seat_interface, version < 9 ? version : 9);
 }
 
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name)
@@ -366,7 +442,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdq")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdqv")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -379,6 +455,7 @@ int main(int argc, char **argv)
                 case 'f': fullscreen = 1; break;
                 case 'd': damage_only = 1; break;
                 case 'q': quiet = 1; break;
+                case 'v': verbose = 1; break;
                 default: return 2;
                 }
         display = wl_display_connect(0);

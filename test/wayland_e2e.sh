@@ -1,15 +1,18 @@
 #!/bin/sh
 # The Wayland shim end to end: the compositor (built with CONFIG_MOONWATER_WAYLAND) headless, real clients on libwayland.
 #
-#     unshare -rm sh test/wayland_e2e.sh COMPOSITOR CLIENT [WAYLAND_INFO] [WORKDIR]
+#     unshare -rm sh test/wayland_e2e.sh COMPOSITOR CLIENT [WAYLAND_INFO] [WORKDIR] [INPUT]
 #
 # COMPOSITOR is the shell binary reached by the name `compositor`, CLIENT is test/wayland_shm.c built, WAYLAND_INFO is
-# the wayland-info program when there is one. It runs as root of a user namespace with a private /run, so nothing of the
+# the wayland-info program when there is one, and INPUT is 1 when CLIENT was built with libxkbcommon (-DHAVE_XKB), which
+# runs the seat's rows (test/wayland_input.py). It runs as root of a user namespace with a private /run, so nothing of the
 # machine's is touched. One line a row: "ok NAME" or "FAIL NAME ...", and the exit status is the number of failures.
 compositor=$1
 client=$2
 info=${3:-}
 work=${4:-$(mktemp -d)}
+input=${5:-}
+extra=
 failures=0
 mkdir -p "$work/bin"
 ln -sf "$compositor" "$work/bin/compositor"
@@ -25,7 +28,8 @@ row()
 start()
 {
         rm -f /run/moonwater/wayland-0
-        "$work/bin/compositor" -H 800x600 "$work/scan.img" > "$work/compositor.log" 2>&1 &
+        # shellcheck disable=SC2086
+        "$work/bin/compositor" -H 800x600 "$work/scan.img" $extra > "$work/compositor.log" 2>&1 &
         cpid=$!
         i=0
         while [ ! -S /run/moonwater/wayland-0 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
@@ -265,6 +269,35 @@ if alive && [ "$cut" = dropped ]; then
                 row FAIL "a pool cut under the compositor's read is a client dropped" "$out"
 else
         row FAIL "a pool cut under the compositor's read does not end the compositor" "$(tail -3 "$work/compositor.log")"
+fi
+
+# The seat, end to end: a pointer, a wheel and keys written to a FIFO the compositor reads as one more input device, and a
+# client with libxkbcommon saying what it was told, on three layouts.
+if [ -n "$input" ]; then
+        for layout in us de fr; do
+                stop
+                rm -f "$work/in.fifo"
+                mkfifo "$work/in.fifo"
+                extra="-i $work/in.fifo -l $layout"
+                if ! start; then
+                        row FAIL "the compositor starts with a keyboard layout ($layout)" "$(tail -3 "$work/compositor.log")"
+                        continue
+                fi
+                MOONWATER_ASKED=1 "$client" -n 1000000 -s -v -w 320 -h 240 > "$work/client.log" 2>&1 &
+                shown=$!
+                python3 "$(dirname "$0")/wayland_input.py" "$work/in.fifo" "$work/client.log" "$layout" > "$work/input.out" 2>&1
+                result=$?
+                sed "s/\$/ ($layout)/" "$work/input.out" | cut -c1-400
+                failures=$((failures + result))
+                kill "$shown" 2> /dev/null
+                wait "$shown" 2> /dev/null
+                if ! alive; then
+                        row FAIL "the compositor survives a person's pointer and keys ($layout)" "$(tail -3 "$work/compositor.log")"
+                fi
+        done
+        extra=
+        stop
+        start
 fi
 
 # The compositor ends when asked, and takes its socket with it.

@@ -37,8 +37,14 @@ static struct
         int listen;
         int fd[WAYLAND_CLIENTS];
         int uid[WAYLAND_CLIENTS], pid[WAYLAND_CLIENTS];
+        unsigned char asked[WAYLAND_CLIENTS]; // the connection's first window has been opened, so its launch is not read again
         int started, handler;
         unsigned long frames;
+        // The keymap of each layout, made when a keyboard first needs it: a sealed file of xkb's text, kept for as long as the
+        // compositor runs, and the layout the clients were last told.
+        int keymap[16];
+        unsigned long keymap_size[16];
+        unsigned int layout_told;
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
         struct
         {
@@ -46,6 +52,235 @@ static struct
                 volatile int bad;
         } map[WAYLAND_CLIENTS * WAYLAND_POOLS];
 } compositor_wl = {.listen = -1};
+
+/* ---- the keymap a client reads ---- */
+
+/*
+        The compositor decides what a key means with its own tables (compositor_keymap_character); a Wayland client
+        decides it itself, from a keymap in xkb's text the compositor sends, and then handles dead keys, compose and
+        repeat as its toolkit does. So the keymap is made from the same tables: every key of the layout at its four
+        levels as the compositor reads them (the characters as Unicode keysyms, the accents as dead keys), the keys that
+        are no characters by name (modifiers, the function and cursor keys, the keypad), and the modifiers the way a
+        client's xkb reads them: Shift, Lock, Control, Alt on Mod1, Num Lock on Mod2, the logo keys on Mod4 and AltGr,
+        the third level, on Mod5. It is written in full, with no `include`, so a client that has no xkb data on the
+        machine reads it all the same.
+*/
+#define COMPOSITOR_WL_KEYMAP_ROOM 24576
+
+// The keys that are no characters, by Linux code: the symbol's name, and the type of key it is.
+static const struct
+{
+        unsigned char code;
+        const char *name;
+} compositor_wl_named[] = {
+    {1, "Escape"},      {14, "BackSpace"}, {15, "Tab"},        {28, "Return"},     {29, "Control_L"}, {42, "Shift_L"},
+    {54, "Shift_R"},    {56, "Alt_L"},     {58, "Caps_Lock"},  {59, "F1"},         {60, "F2"},        {61, "F3"},
+    {62, "F4"},         {63, "F5"},        {64, "F6"},         {65, "F7"},         {66, "F8"},        {67, "F9"},
+    {68, "F10"},        {69, "Num_Lock"},  {70, "Scroll_Lock"}, {87, "F11"},       {88, "F12"},       {96, "KP_Enter"},
+    {97, "Control_R"},  {98, "KP_Divide"}, {99, "Print"},      {100, "ISO_Level3_Shift"}, {102, "Home"}, {103, "Up"},
+    {104, "Prior"},     {105, "Left"},     {106, "Right"},     {107, "End"},       {108, "Down"},     {109, "Next"},
+    {110, "Insert"},    {111, "Delete"},   {119, "Pause"},     {125, "Super_L"},   {126, "Super_R"},  {127, "Menu"},
+};
+
+// The keypad's, which Num Lock turns into digits: the code, the symbol without Num Lock and the one with.
+static const struct
+{
+        unsigned char code;
+        const char *plain, *locked;
+} compositor_wl_keypad[] = {
+    {71, "KP_Home", "KP_7"},   {72, "KP_Up", "KP_8"},      {73, "KP_Prior", "KP_9"}, {75, "KP_Left", "KP_4"},
+    {76, "KP_Begin", "KP_5"},  {77, "KP_Right", "KP_6"},   {79, "KP_End", "KP_1"},   {80, "KP_Down", "KP_2"},
+    {81, "KP_Next", "KP_3"},   {82, "KP_Insert", "KP_0"},  {83, "KP_Delete", "KP_Decimal"},
+};
+
+struct compositor_wl_text
+{
+        char *at;
+        unsigned long room, used;
+        int full;
+};
+
+static void compositor_wl_put(struct compositor_wl_text *t, const char *text)
+{
+        while (*text)
+        {
+                if (t->used + 1 >= t->room)
+                {
+                        t->full = 1;
+                        return;
+                }
+                t->at[t->used++] = *text++;
+        }
+}
+
+static void compositor_wl_number(struct compositor_wl_text *t, unsigned int value)
+{
+        char text[8];
+        unsigned int digits = 0;
+
+        for (unsigned int copy = value; copy; copy /= 10)
+                digits++;
+        digits = digits ? digits : 1;
+        for (unsigned int index = digits; index--; value /= 10)
+                text[index] = (char)('0' + value % 10);
+        text[digits] = 0;
+        compositor_wl_put(t, text);
+}
+
+static void compositor_wl_put_hex(struct compositor_wl_text *t, unsigned int value)
+{
+        char text[8] = {'U', 0, 0, 0, 0, 0, 0, 0};
+        int digits = value > 0xffff ? 6 : 4;
+
+        for (int at = 0; at < digits; at++)
+                text[1 + at] = "0123456789abcdef"[(value >> (4 * (digits - 1 - at))) & 15];
+        compositor_wl_put(t, text);
+}
+
+// A character as the keysym a client's xkb reads: a dead accent by name, anything else as the Unicode keysym of it.
+static void compositor_wl_symbol(struct compositor_wl_text *t, unsigned int c)
+{
+        if (c & CK_DEAD)
+        {
+                unsigned int accent = c & ~CK_DEAD;
+
+                compositor_wl_put(t, accent == CK_ACUTE      ? "dead_acute"
+                                     : accent == CK_GRAVE     ? "dead_grave"
+                                     : accent == CK_DIAERESIS ? "dead_diaeresis"
+                                     : accent == CK_CIRCUMFLEX ? "dead_circumflex"
+                                     : accent == CK_TILDE      ? "dead_tilde"
+                                                               : "NoSymbol");
+                return;
+        }
+        if (!c)
+        {
+                compositor_wl_put(t, "NoSymbol");
+                return;
+        }
+        compositor_wl_put_hex(t, c);
+}
+
+// Whether a pair of characters is a letter and its capital, which Caps Lock turns over.
+static int compositor_wl_letters(unsigned int low, unsigned int high)
+{
+        return low && high && !(low & CK_DEAD) && !(high & CK_DEAD) && compositor_letter_flip(low) == high && low != high;
+}
+
+/*
+        The keymap of a layout, written into into: its length, or 0 when it did not fit (a full keymap is about 8
+        KiB). A key's four levels are what compositor_keymap_character says at none, Shift, AltGr and both.
+*/
+static unsigned long compositor_wl_keymap_text(unsigned int layout, char *into, unsigned long room)
+{
+        struct compositor_wl_text text = {into, room, 0, 0};
+        struct compositor_keymap map;
+        static const unsigned char codes[] = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                                              23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
+                                              45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
+                                              67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 86, 87, 88, 96, 97,
+                                              98, 99, 100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 119, 125, 126, 127};
+
+        memory_zero(&map, sizeof map);
+        map.layout = (unsigned char)layout;
+        compositor_wl_put(&text, "xkb_keymap {\n");
+        compositor_wl_put(&text, "xkb_keycodes \"canvas\" {\n  minimum = 8;\n  maximum = 255;\n");
+        for (unsigned long at = 0; at < sizeof codes; at++)
+        {
+                unsigned int code = codes[at];
+
+                compositor_wl_put(&text, "  <K");
+                compositor_wl_number(&text, code);
+                compositor_wl_put(&text, "> = ");
+                compositor_wl_number(&text, code + 8);
+                compositor_wl_put(&text, ";\n");
+        }
+        compositor_wl_put(&text, "};\n");
+        compositor_wl_put(&text, "xkb_types \"canvas\" {\n  virtual_modifiers NumLock,LevelThree;\n");
+        compositor_wl_put(&text, "  type \"ONE_LEVEL\" { modifiers = none; map[none] = Level1; };\n");
+        compositor_wl_put(&text, "  type \"TWO_LEVEL\" { modifiers = Shift; map[Shift] = Level2; };\n");
+        compositor_wl_put(&text, "  type \"ALPHABETIC\" { modifiers = Shift+Lock; map[Shift] = Level2; map[Lock] = Level2; };\n");
+        compositor_wl_put(&text, "  type \"FOUR_LEVEL\" { modifiers = Shift+LevelThree; map[Shift] = Level2; map[LevelThree] = Level3;"
+                                 " map[Shift+LevelThree] = Level4; };\n");
+        compositor_wl_put(&text, "  type \"FOUR_LEVEL_ALPHABETIC\" { modifiers = Shift+Lock+LevelThree; map[Shift] = Level2;"
+                                 " map[Lock] = Level2; map[LevelThree] = Level3; map[Shift+LevelThree] = Level4;"
+                                 " map[Lock+LevelThree] = Level4; map[Shift+Lock+LevelThree] = Level3; };\n");
+        compositor_wl_put(&text, "  type \"KEYPAD\" { modifiers = Shift+NumLock; map[none] = Level1; map[Shift] = Level2;"
+                                 " map[NumLock] = Level2; map[Shift+NumLock] = Level1; };\n");
+        compositor_wl_put(&text, "};\n");
+        compositor_wl_put(&text, "xkb_compat \"canvas\" {\n  virtual_modifiers NumLock,LevelThree;\n");
+        compositor_wl_put(&text, "  interpret.useModMapMods = AnyLevel;\n  interpret.repeat = False;\n");
+        compositor_wl_put(&text, "  interpret Shift_L { action = SetMods(modifiers = Shift); };\n");
+        compositor_wl_put(&text, "  interpret Shift_R { action = SetMods(modifiers = Shift); };\n");
+        compositor_wl_put(&text, "  interpret Control_L { action = SetMods(modifiers = Control); };\n");
+        compositor_wl_put(&text, "  interpret Control_R { action = SetMods(modifiers = Control); };\n");
+        compositor_wl_put(&text, "  interpret Alt_L { action = SetMods(modifiers = Mod1); };\n");
+        compositor_wl_put(&text, "  interpret Super_L { action = SetMods(modifiers = Mod4); };\n");
+        compositor_wl_put(&text, "  interpret Super_R { action = SetMods(modifiers = Mod4); };\n");
+        compositor_wl_put(&text, "  interpret Caps_Lock { action = LockMods(modifiers = Lock); };\n");
+        compositor_wl_put(&text, "  interpret Num_Lock { virtualModifier = NumLock; action = LockMods(modifiers = NumLock); };\n");
+        compositor_wl_put(&text, "  interpret ISO_Level3_Shift { virtualModifier = LevelThree; action = SetMods(modifiers = LevelThree); };\n");
+        compositor_wl_put(&text, "};\n");
+        compositor_wl_put(&text, "xkb_symbols \"canvas\" {\n  name[Group1] = \"Canvas\";\n");
+        for (unsigned long at = 0; at < sizeof codes; at++)
+        {
+                unsigned int code = codes[at], levels[4], named = 0, keypad = 0;
+                const char *name = 0, *plain = 0, *locked = 0;
+
+                for (unsigned long index = 0; index < sizeof compositor_wl_named / sizeof compositor_wl_named[0]; index++)
+                        if (compositor_wl_named[index].code == code)
+                                name = compositor_wl_named[index].name, named = 1;
+                for (unsigned long index = 0; index < sizeof compositor_wl_keypad / sizeof compositor_wl_keypad[0]; index++)
+                        if (compositor_wl_keypad[index].code == code)
+                                plain = compositor_wl_keypad[index].plain, locked = compositor_wl_keypad[index].locked, keypad = 1;
+                compositor_wl_put(&text, "  key <K");
+                compositor_wl_number(&text, code);
+                compositor_wl_put(&text, "> { ");
+                if (named)
+                {
+                        compositor_wl_put(&text, "[ ");
+                        compositor_wl_put(&text, name);
+                        compositor_wl_put(&text, " ] };\n");
+                        continue;
+                }
+                if (keypad)
+                {
+                        compositor_wl_put(&text, "type = \"KEYPAD\", [ ");
+                        compositor_wl_put(&text, plain);
+                        compositor_wl_put(&text, ", ");
+                        compositor_wl_put(&text, locked);
+                        compositor_wl_put(&text, " ] };\n");
+                        continue;
+                }
+                levels[0] = compositor_keymap_character(&map, code, 0);
+                levels[1] = compositor_keymap_character(&map, code, WINDOW_KEY_SHIFT);
+                levels[2] = compositor_keymap_character(&map, code, WINDOW_KEY_ALTGR);
+                levels[3] = compositor_keymap_character(&map, code, WINDOW_KEY_SHIFT | WINDOW_KEY_ALTGR);
+                {
+                        int letters = compositor_wl_letters(levels[0], levels[1]);
+                        int four = levels[2] != levels[0] || levels[3] != levels[1];
+
+                        compositor_wl_put(&text, "type = \"");
+                        compositor_wl_put(&text, four ? (letters ? "FOUR_LEVEL_ALPHABETIC" : "FOUR_LEVEL")
+                                                      : levels[0] == levels[1] ? "ONE_LEVEL" : letters ? "ALPHABETIC" : "TWO_LEVEL");
+                        compositor_wl_put(&text, "\", [ ");
+                        for (int level = 0; level < (four ? 4 : levels[0] == levels[1] ? 1 : 2); level++)
+                        {
+                                if (level)
+                                        compositor_wl_put(&text, ", ");
+                                compositor_wl_symbol(&text, levels[level]);
+                        }
+                        compositor_wl_put(&text, " ] };\n");
+                }
+        }
+        compositor_wl_put(&text, "  modifier_map Shift { <K42>, <K54> };\n  modifier_map Lock { <K58> };\n");
+        compositor_wl_put(&text, "  modifier_map Control { <K29>, <K97> };\n  modifier_map Mod1 { <K56> };\n");
+        compositor_wl_put(&text, "  modifier_map Mod2 { <K69> };\n  modifier_map Mod4 { <K125>, <K126> };\n");
+        compositor_wl_put(&text, "  modifier_map Mod5 { <K100> };\n};\n};\n");
+        if (text.full)
+                return 0;
+        into[text.used] = 0;
+        return text.used;
+}
 
 /* ---- the host ---- */
 
@@ -165,6 +400,52 @@ static int compositor_wl_cut(const void *pixels)
         return 0;
 }
 
+/*
+        Whether the person asked for the program a client is: MOONWATER_ASKED=1 in its environment, which the launcher, a typed
+        command or a terminal the keys opened set, and which a program of the compositor's own empties after its first window.
+        Read from /proc as the compositor, which is root; at most a few KiB, and the first window of a connection only.
+*/
+static int compositor_wl_asked(long client)
+{
+        char path[32] = "/proc/", text[4096];
+        unsigned int length = 6, pid = compositor_wl.pid[client] > 0 ? (unsigned int)compositor_wl.pid[client] : 0, digits = 0;
+        long handle, got, held = 0;
+        int found = 0;
+
+        if (!pid)
+                return 0;
+        for (unsigned int copy = pid; copy; copy /= 10)
+                digits++;
+        for (unsigned int index = digits; index--; pid /= 10)
+                path[length + index] = (char)('0' + pid % 10);
+        length += digits;
+        for (const char *tail = "/environ"; *tail; tail++)
+                path[length++] = *tail;
+        path[length] = 0;
+        handle = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        if (handle < 0)
+                return 0;
+        // The variables run together, ended by NULs; an entry cut by the end of what was read is not looked at.
+        while (!found && (got = (long)system_read_once((int)handle, text + held, sizeof text - 1 - (unsigned long)held)) > 0)
+        {
+                long start = 0, limit = held + got;
+
+                for (long at = 0; at < limit; at++)
+                        if (!text[at])
+                        {
+                                found |= at - start == 17 && !memory_compare(text + start, "MOONWATER_ASKED=1", 17);
+                                start = at + 1;
+                        }
+                held = limit - start;
+                for (long at = 0; at < held; at++)
+                        text[at] = text[start + at];
+                if (held >= (long)sizeof text - 1)
+                        held = 0;
+        }
+        system_close((int)handle);
+        return found;
+}
+
 /* A table row for a client's window, claimed as a program claims one, with its pid. -1 when none is free. */
 static int compositor_wl_row_open(void *context, long client, long kind, int parent, long x, long y)
 {
@@ -182,6 +463,12 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                 windows_reset_row(table, (unsigned int)row);
                 // A client draws its own frame, and keeps the whole of its picture, the top included.
                 table->glass[row] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB;
+                // The person's own launch takes the keys with its first window, as a program of the compositor's does.
+                if (kind == WAYLAND_KIND_TOPLEVEL && !compositor_wl.asked[client])
+                {
+                        compositor_wl.asked[client] = 1;
+                        table->asked[row] = (unsigned int)compositor_wl_asked(client);
+                }
                 if (kind == WAYLAND_KIND_POPUP)
                 {
                         table->popup_parent[row] = (unsigned int)parent + 1;
@@ -416,6 +703,85 @@ static long compositor_wl_now(void *context)
         return (long)(clock_monotonic_nanoseconds() / 1000000ull);
 }
 
+/*
+        The keymap of the layout in use, as a sealed file the shim hands out beside the keyboard's event: made the first time,
+        written whole and sealed against any change, and the same file for every client after. Clients map it private and
+        read-only, as xkb's libraries do.
+*/
+static long compositor_wl_keymap(void *context, long *size)
+{
+        static char text[COMPOSITOR_WL_KEYMAP_ROOM];
+        unsigned int layout = compositor.keymap.layout;
+        unsigned long length, done = 0;
+        long fd;
+
+        (void)context;
+        if (layout >= 16)
+                return -1;
+        if (compositor_wl.keymap[layout] < 0)
+        {
+                length = compositor_wl_keymap_text(layout, text, sizeof text);
+                if (!length)
+                        return -1;
+                // MFD_CLOEXEC | MFD_ALLOW_SEALING
+                fd = compositor_call(syscall(memfd_create), (positive) "moonwater-keymap", 3, 0, 0, 0, 0);
+                if (fd < 0)
+                        return -1;
+                while (done < length)
+                {
+                        long put = compositor_call(syscall(write), (positive)fd, (positive)(text + done), length - done, 0, 0, 0);
+
+                        if (put <= 0)
+                        {
+                                system_close((int)fd);
+                                return -1;
+                        }
+                        done += (unsigned long)put;
+                }
+                // F_ADD_SEALS: SEAL, SHRINK, GROW and WRITE
+                compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0);
+                compositor_wl.keymap[layout] = (int)fd;
+                compositor_wl.keymap_size[layout] = length;
+        }
+        *size = (long)compositor_wl.keymap_size[layout];
+        return compositor_wl.keymap[layout];
+}
+
+// How fast a held key repeats, as the settings keep it, or as the keyboard has it: the delay in milliseconds and the rate a second.
+static void compositor_wl_repeat(void *context, long *rate, long *delay)
+{
+        long own_delay = 250, own_period = 33;
+
+        (void)context;
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+                if (compositor.repeats[at])
+                {
+                        own_delay = compositor.repeat_own[at][0] > 0 ? compositor.repeat_own[at][0] : own_delay;
+                        own_period = compositor.repeat_own[at][1] > 0 ? compositor.repeat_own[at][1] : own_period;
+                        break;
+                }
+        *delay = (compositor.repeat_kept & 1) ? compositor.repeat_delay : own_delay;
+        *rate = (compositor.repeat_kept & 2) ? compositor.repeat_rate : 1000 / own_period;
+        if (*delay < 0 || *delay > 10000)
+                *delay = 250;
+        if (*rate < 0 || *rate > 1000)
+                *rate = 30;
+}
+
+// What the seat can do: a pointer and a keyboard; touch is not offered yet.
+static long compositor_wl_seat(void *context)
+{
+        (void)context;
+        return WLN_wl_seat_capability_pointer | WLN_wl_seat_capability_keyboard;
+}
+
+// Caps Lock, as the keymap's own Lock mask.
+static long compositor_wl_locks(void *context)
+{
+        (void)context;
+        return compositor.keymap.caps ? 2 : 0;
+}
+
 static const struct wayland_host compositor_wl_host = {
     0,
     compositor_wl_alloc,
@@ -432,6 +798,10 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_row_facts,
     compositor_wl_screens,
     compositor_wl_now,
+    compositor_wl_keymap,
+    compositor_wl_repeat,
+    compositor_wl_seat,
+    compositor_wl_locks,
 };
 
 /* ---- the socket ---- */
@@ -471,6 +841,9 @@ static void compositor_wl_start(void)
         compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)COMPOSITOR_WL_PATH, 0666, 0, 0, 0);
         for (long at = 0; at < WAYLAND_CLIENTS; at++)
                 compositor_wl.fd[at] = -1;
+        for (long at = 0; at < 16; at++)
+                compositor_wl.keymap[at] = -1;
+        compositor_wl.layout_told = compositor.keymap.layout;
         if (wayland_start(&compositor_wl_host) < 0)
         {
                 system_close(compositor_wl.listen);
@@ -523,6 +896,7 @@ static void compositor_wl_accept(void)
                         continue;
                 }
                 compositor_wl.fd[slot] = (int)fd;
+                compositor_wl.asked[slot] = 0;
                 compositor_wl.pid[slot] = credentials[0];
                 compositor_wl.uid[slot] = credentials[1];
         }
@@ -692,17 +1066,151 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
         }
 }
 
+/* ---- input: the pointer and the keys, as a client is told of them ---- */
+
 /*
-        The windows the compositor knocked on this pass, said to their clients (a size asked, a state changed, a close),
-        and everything queued sent. Called before the frame is drawn, so no event waits for it.
+        The window the pointer is over, for a client: the one a button is held on, else the one it moved over last, when it is
+        a client's window and it is shown and is not being moved or resized. Just outside a window's picture is the edge the
+        compositor resizes by, and no client's.
+*/
+static int compositor_wl_pointer_row(void)
+{
+        int row = compositor.grab >= 0 ? compositor.grab : compositor.hover;
+
+        if (row < 0 || compositor.drag >= 0 || compositor.resize >= 0 || wayland_row_owner(row) < 0 || !compositor.showing[row] ||
+            (compositor.state[row] & WINDOW_MINIMIZED))
+                return -1;
+        if (compositor.grab < 0 &&
+            (compositor.pointer_x < compositor.x[row] || compositor.pointer_y < compositor.y[row] ||
+             compositor.pointer_x >= compositor.x[row] + (int)compositor.w[row] || compositor.pointer_y >= compositor.y[row] + (int)compositor.h[row]))
+                return -1;
+        return row;
+}
+
+/*
+        The window the keys go to, for a client: the topmost popup of the window that has them, but a popup that did not ask
+        to grab (a tooltip) is not given the keys, its window is. -1 when it is not a client's window.
+*/
+static int compositor_wl_key_row(void)
+{
+        int row = compositor.focus;
+
+        if (row < 0)
+                return -1;
+        row = compositor_popup_top(row);
+        while (row >= 0 && compositor_popup_parent[row] >= 0 && wayland_row_owner(row) >= 0 && !wayland_row_grabs(row))
+                row = compositor_popup_parent[row];
+        return wayland_row_owner(row) >= 0 ? row : -1;
+}
+
+/*
+        A key that is the window's own to read: the key as it is, to the client that has the keys, with Caps Lock kept here
+        where the compositor keeps it, and no repeat (the client repeats at the rate it was told). The compositor's own
+        reading of a key (its characters, its dead accents) is for its own windows, which a client does by its keymap. True
+        when the key was a client's.
+*/
+static int compositor_wl_key(unsigned int code, int value)
+{
+        int row;
+
+        if (!compositor_wl.started)
+                return 0;
+        if (compositor.focus < 0)
+                compositor_refocus();
+        row = compositor_wl_key_row();
+        if (row < 0)
+                return 0;
+        if (code == CK_CAPSLOCK && value == 1)
+                compositor.keymap.caps ^= 1;
+        // The keys down, and the window they went to, as the compositor keeps them for its own windows.
+        if (code < 128)
+        {
+                unsigned char mask = (unsigned char)(1u << (code & 7)), *down = &compositor.keys_down[code >> 3];
+
+                if (value == 1)
+                {
+                        if (compositor.keys_to != row)
+                                compositor_keys_release();
+                        *down |= mask;
+                        compositor.keys_to = row;
+                }
+                else if (!(*down & mask))
+                        return 1;
+                else if (!value)
+                        *down &= (unsigned char)~mask;
+        }
+        if (value == 1)
+                compositor_clip_gesture(row);
+        if (value != 2)
+                wayland_key(row, code, value);
+        return 1;
+}
+
+// A client's ring, read as the compositor posted it: a motion, a button, a turn of the wheel, and the releases of keys held.
+static void compositor_wl_drain(int row)
+{
+        struct windows *table = compositor.table;
+        unsigned int tail = table->event_tail[row], head = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
+
+        for (unsigned int taken = 0; tail != head && taken < WINDOWS_EVENTS; taken++, tail++)
+        {
+                unsigned int at = tail % WINDOWS_EVENTS, type = table->event_type[row][at], flags = table->event_flags[row][at];
+                int a = __atomic_exchange_n(&table->event_a[row][at], 0, __ATOMIC_ACQ_REL), b = table->event_b[row][at];
+
+                if (type == WINDOW_EVENT_KEY)
+                {
+                        if (!(flags & WINDOW_KEY_REPEAT))
+                                wayland_key(row, a, (flags & WINDOW_KEY_DOWN) ? 1 : 0);
+                        continue;
+                }
+                if (type != WINDOW_EVENT_MOTION && type != WINDOW_EVENT_BUTTON && type != WINDOW_EVENT_WHEEL)
+                        continue;
+                // Whatever the event, the pointer is on this window for the client first.
+                if (wayland.pointer_row != row)
+                        wayland_pointer_to(row, type == WINDOW_EVENT_MOTION ? a : compositor.pointer_x - compositor.x[row],
+                                           type == WINDOW_EVENT_MOTION ? b : compositor.pointer_y - compositor.y[row]);
+                if (type == WINDOW_EVENT_MOTION)
+                        wayland_pointer_motion(row, a, b);
+                else if (type == WINDOW_EVENT_BUTTON)
+                        wayland_pointer_button(row, a, (flags & WINDOW_KEY_DOWN) ? 1 : 0);
+                else
+                        // A wheel's v120 is the evdev sign, up positive; the protocol's vertical axis is positive downward.
+                        wayland_pointer_axis(row, b != 0, b ? a : -a, (flags & WINDOW_WHEEL_PRECISE) != 0);
+        }
+        __atomic_store_n(&table->event_tail[row], tail, __ATOMIC_RELEASE);
+}
+
+/*
+        What changed for the clients this pass: where the pointer and the keys are, the layout (every keyboard is sent the
+        new keymap), and each window the compositor knocked on, its ring read and its state and size said. Called before the
+        frame is drawn, so no event waits for it; everything queued is sent.
 */
 static void compositor_wl_wake(void)
 {
+        struct wayland_stats stats;
+
         if (!compositor_wl.started)
                 return;
+        wayland_stats_get(&stats);
+        if (stats.rows > 0 || stats.clients > 0)
+        {
+                int want = compositor_wl_pointer_row(), keys = compositor_wl_key_row();
+
+                if (compositor.keymap.layout != compositor_wl.layout_told)
+                {
+                        compositor_wl.layout_told = compositor.keymap.layout;
+                        wayland_keymap_changed();
+                }
+                if (want != wayland.pointer_row)
+                        wayland_pointer_to(want, want >= 0 ? compositor.pointer_x - compositor.x[want] : 0,
+                                           want >= 0 ? compositor.pointer_y - compositor.y[want] : 0);
+                if (keys != wayland.keyboard_row)
+                        wayland_keyboard_to(keys);
+        }
         for (int row = 0; row < WINDOWS; row++)
                 if ((compositor.woken & (1u << row)) && wayland_row_owner(row) >= 0)
                 {
+                        compositor_wl_drain(row);
                         wayland_row_wake(row);
                         compositor.woken &= ~(1u << row);
                 }
@@ -726,6 +1234,9 @@ static void compositor_wl_stop(void)
                 if (compositor_wl.fd[slot] >= 0)
                         compositor_wl_drop(slot);
         wayland_stop();
+        for (long at = 0; at < 16; at++)
+                if (compositor_wl.keymap[at] >= 0)
+                        system_close(compositor_wl.keymap[at]);
         system_close(compositor_wl.listen);
         compositor_wl.listen = -1;
         compositor_wl.started = 0;

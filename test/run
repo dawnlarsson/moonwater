@@ -6432,15 +6432,22 @@ lane_wayland()
                 unshare -rm true 2> /dev/null; then
                 wayland_xml=$(pkg-config --variable=pkgdatadir wayland-protocols 2> /dev/null)/stable/xdg-shell/xdg-shell.xml
                 mkdir -p "$work/client"
+                # With libxkbcommon the client compiles the keymap it is sent and says each key's keysym, which the seat's rows read.
+                wayland_xkb=
+                wayland_input=
+                if pkg-config --exists xkbcommon 2> /dev/null; then
+                        wayland_xkb="-DHAVE_XKB $(pkg-config --cflags --libs xkbcommon)"
+                        wayland_input=1
+                fi
                 # shellcheck disable=SC2046
                 wayland_row client-build sh -c "wayland-scanner client-header '$wayland_xml' '$work/client/xdg-shell-client.h' &&
                         wayland-scanner private-code '$wayland_xml' '$work/client/xdg-shell-code.c' &&
-                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' test/wayland_shm.c '$work/client/xdg-shell-code.c' \
+                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb test/wayland_shm.c '$work/client/xdg-shell-code.c' \
                         $(pkg-config --cflags --libs wayland-client) -o '$work/client/wayland-shm'"
                 if [ -x "$work/client/wayland-shm" ] && freestanding programs/shell.c "$work/shell-wayland" "" -DCONFIG_MOONWATER_WAYLAND; then
                         wayland_e2e=0
                         unshare -rm sh test/wayland_e2e.sh "$work/shell-wayland" "$work/client/wayland-shm" \
-                                "$(command -v wayland-info || true)" "$work/e2e" > "$work/e2e.out" 2>&1 || wayland_e2e=$?
+                                "$(command -v wayland-info || true)" "$work/e2e" "$wayland_input" > "$work/e2e.out" 2>&1 || wayland_e2e=$?
                         wayland_at=0
                         while IFS= read -r wayland_line; do
                                 case $wayland_line in
