@@ -138867,6 +138867,30 @@ static fn check_kit_finger_pull(void)
         check("kit finger: a pull of 2400 px past an end holds the region a view past it at most, and it springs home within two seconds", held && home);
 }
 
+// A confirm is asked by a press, and a held key's repeats are not presses: the first press arms it, its repeats neither fire it nor
+// arm it again, and the next press of the same key fires it, in every app (the editor's close of a changed file, the save over a
+// file changed on disk, a forget, a command that asks).
+static fn check_kit_confirm_repeat(void)
+{
+        struct ui_confirm confirm;
+        struct window_event press = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, 0}, repeat = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_REPEAT, 0, 0};
+        b32 armed, held, fires, once;
+
+        memory_zero(&confirm, sizeof(confirm));
+        ui_event_context(&press);
+        armed = !ui_confirm_ask(&confirm, 7, "close") && confirm.armed;
+        ui_event_context(&repeat);
+        held = !ui_confirm_ask(&confirm, 7, "close") && !ui_confirm_ask(&confirm, 7, "close") && confirm.armed;
+        ui_event_context(&press);
+        fires = ui_confirm_ask(&confirm, 7, "close") && !confirm.armed;
+        once = !ui_confirm_ask(&confirm, 7, "close") && confirm.armed; // and the next asks again
+        ui_event_context(&repeat);
+        ui_confirm_drop(&confirm);
+        check("kit confirm: a press arms it, a held key's repeats neither fire nor re-arm it, and the next press fires it",
+              armed && held && fires && once && !ui_confirm_ask(&confirm, 7, "close") && !confirm.armed);
+        ui_event_context(&press);
+}
+
 static fn check_kit_scroll_ends(void)
 {
         struct ui ui = terminal.ui;
@@ -147207,6 +147231,7 @@ b32 main()
         check_kit_ripple_pace();
         check_kit_event_context();
         check_kit_finger_pull();
+        check_kit_confirm_repeat();
         check_kit_hand();
         check_terminal_wheel_curve();
         check_kit_turn();

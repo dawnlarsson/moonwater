@@ -945,6 +945,8 @@ static int ui_click_count(const struct ui address_to ui, struct ui_click address
 */
 #define UI_CONFIRM_TEXT 96
 
+static b32 ui_kit_repeat; // the event is a key held down repeating (WINDOW_KEY_REPEAT): a repeat is never a second press
+
 struct ui_confirm
 {
         int what;
@@ -952,9 +954,12 @@ struct ui_confirm
         char text[UI_CONFIRM_TEXT];
 };
 
-// Answers true when this press fires the confirm; any other press arms it for this thing and says nothing.
+// Answers true when this press fires the confirm; any other press arms it for this thing and says nothing. A held key's repeats are
+// not presses: they neither arm nor fire, so holding the key that asked cannot answer its own question.
 static b32 ui_confirm_ask(struct ui_confirm address_to c, int what, const char address_to text)
 {
+        if (ui_kit_repeat)
+                return false;
         if (c->armed && c->what == what && string_equals((string_address)c->text, (string_address)text))
         {
                 c->armed = 0;
@@ -4929,6 +4934,7 @@ static struct ui_control address_to ui_kit_held;
 static fn ui_event_context(const struct window_event address_to event)
 {
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+        ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
         ui_kit.now = (b64)clock_monotonic_nanoseconds();
 }
 
