@@ -142,6 +142,16 @@ static int compositor_px1(int percent)
         return px < 1 ? 1 : px;
 }
 
+// The line round a window at a scale in percent, in whole device pixels: COMPOSITOR_LINE logical pixels cut to whole ones and
+// never less than one. At 50 and 75 percent the cut alone is none, and a window with no line was drawn with no corners
+// either (compositor_frame_of), so at those scales a window was square with no outline.
+static int compositor_line_px(int percent)
+{
+        int px = COMPOSITOR_LINE * percent / 100;
+
+        return px < 1 ? 1 : px;
+}
+
 /*
         One thing to draw. A window is its buffer and nothing around it; the
         panel is a band with a mark a window, one byte each:
@@ -3692,20 +3702,34 @@ static int compositor_visible(int row)
         return compositor.showing[row] && !(compositor.state[row] & WINDOW_MINIMIZED);
 }
 
-// The line round a window while it floats, in device pixels; a window filling the output or half of it
-// meets the output's edges with none, and square. Glass has the same line and corners: it is what is under it, inside them.
+static int compositor_row_scale(int row);
+
+// The line round a window while it floats, in device pixels, at the scale of the screen it is on; a window filling the
+// output or half of it meets the output's edges with none, and square. Glass has the same line and corners: it is what is
+// under it, inside them.
 static int compositor_line(int row)
 {
-        return compositor.arranged[row] == COMPOSITOR_FLOATING ? COMPOSITOR_LINE * compositor.scale / 100 : 0;
+        return compositor.arranged[row] == COMPOSITOR_FLOATING ? compositor_line_px(compositor_row_scale(row)) : 0;
 }
 
-// The line a window is drawn with: a floating window's, and a tile's (a half or a quarter reads as a window, the same
-// line and corners). A window filling the output, or its room, is square and has none: its edges are the screen's.
-// The geometry keeps compositor_line, which a placement clamps to.
+// A window filling the output, or its room: its edges are the screen's, so it has no line and square corners.
+static int compositor_filling(int row)
+{
+        return compositor.arranged[row] == COMPOSITOR_MAXIMIZED || compositor.arranged[row] == COMPOSITOR_ROOM;
+}
+
+// Whether a window's corners are round: a floating one's, and a tile's (a half or a quarter reads as a window, the same
+// line and corners); a window filling the output, or its room, is square.
+static int compositor_rounded(int row)
+{
+        return !compositor_filling(row);
+}
+
+// The line a window is drawn with, at the scale of its screen: a floating window's, and a tile's. A window filling the output,
+// or its room, has none. The geometry keeps compositor_line, which a placement clamps to.
 static int compositor_frame_line(int row)
 {
-        return compositor.arranged[row] == COMPOSITOR_MAXIMIZED || compositor.arranged[row] == COMPOSITOR_ROOM
-                   ? 0 : COMPOSITOR_LINE * compositor.scale / 100;
+        return compositor_filling(row) ? 0 : compositor_line_px(compositor_row_scale(row));
 }
 
 /*
@@ -4077,12 +4101,13 @@ static int compositor_output_scale(int at);
 
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
-        int line = compositor_frame_line(row);
+        int line = compositor_frame_line(row), scale = compositor_row_scale(row);
 
+        // The corners are the window's own: UI_RADIUS at its scale, whatever the line comes to (it is a pixel at the least).
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
-                                           (int)compositor.h[row], compositor_row_scale(row), compositor_pixels(row),
+                                           (int)compositor.h[row], scale, compositor_pixels(row),
                                            (unsigned long)compositor_stride(), 0, null, 0,
-                                           line ? UI_RADIUS * compositor_row_scale(row) / 100 : 0, line,
+                                           compositor_rounded(row) ? UI_RADIUS * scale / 100 : 0, line,
                                            row == compositor.focus ? compositor_line_lit() : compositor_ink_shadow()};
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         // A program is knocked when the scale its window is drawn at is not the one the table had: the kit lays its picture out again at it.
@@ -9597,6 +9622,14 @@ static unsigned int compositor_snap_edge(unsigned int percent)
         return ui_mix(ink, percent > 100 ? 100 : percent, ground) & 0xffffffu;
 }
 
+// The percent the overlays of a screen are drawn at: the screen's own, or the desktop's where it has none.
+static int compositor_overlay_scale(int screen)
+{
+        int scale = compositor_output_scale(screen);
+
+        return scale > 0 ? scale : compositor.scale;
+}
+
 // The rectangles the overlays are drawn in now: each thumbnail's, and the grid's row while it is up or fading out (or, with
 // all, wherever they were last, shown or not).
 static int compositor_overlay_boxes_of(int boxes[COMPOSITOR_ASSIST_MAX + 1][4], int all)
@@ -9608,7 +9641,7 @@ static int compositor_overlay_boxes_of(int boxes[COMPOSITOR_ASSIST_MAX + 1][4], 
         for (int thumb = 0; shown && thumb < compositor.assist_count; thumb++)
         {
                 const int *rect = compositor.assist_rect[thumb];
-                int line = COMPOSITOR_LINE * compositor.scale / 100;
+                int line = compositor_line_px(compositor_overlay_scale(compositor.assist_screen));
 
                 boxes[n][0] = rect[0] - line, boxes[n][1] = rect[1] - line;
                 boxes[n][2] = rect[2] + 2 * line, boxes[n][3] = rect[3] + 2 * line;
@@ -9617,12 +9650,13 @@ static int compositor_overlay_boxes_of(int boxes[COMPOSITOR_ASSIST_MAX + 1][4], 
         if (shown && compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
         {
                 const int *screen = screens[compositor.grid_screen];
+                int line = compositor_line_px(compositor_overlay_scale(compositor.grid_screen));
 
                 compositor_grid_tile(screen, 0, first);
                 compositor_grid_tile(screen, COMPOSITOR_GRID_TILES - 1, last);
-                boxes[n][0] = first[0] - COMPOSITOR_LINE * compositor.scale / 100, boxes[n][1] = screen[1] - COMPOSITOR_LINE * compositor.scale / 100;
-                boxes[n][2] = last[0] + last[2] - first[0] + 2 * COMPOSITOR_LINE * compositor.scale / 100;
-                boxes[n][3] = first[3] + 2 * COMPOSITOR_LINE * compositor.scale / 100;
+                boxes[n][0] = first[0] - line, boxes[n][1] = screen[1] - line;
+                boxes[n][2] = last[0] + last[2] - first[0] + 2 * line;
+                boxes[n][3] = first[3] + 2 * line;
                 n++;
         }
         return n;
@@ -9671,14 +9705,15 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
         for (int thumb = 0; shown && thumb < compositor.assist_count; thumb++)
         {
                 const int *rect = compositor.assist_rect[thumb];
-                int row = (int)compositor.assist_rows[thumb], line = COMPOSITOR_LINE * compositor.scale / 100;
+                int row = (int)compositor.assist_rows[thumb], scale = compositor_overlay_scale(compositor.assist_screen);
+                int line = compositor_line_px(scale);
                 struct compositor_frame *picture = &frames[at + added], *veil = &frames[at + added + 1];
 
                 compositor_frame_of(row, picture);
                 picture->x = rect[0], picture->y = rect[1];
                 picture->width = rect[2], picture->height = rect[3];
                 picture->source_w = (int)compositor.w[row], picture->source_h = (int)compositor.h[row];
-                picture->radius = UI_RADIUS * compositor.scale / 100, picture->line = line;
+                picture->radius = UI_RADIUS * scale / 100, picture->line = line;
                 picture->edge = compositor_snap_edge(percent);
                 picture->close = 0;
                 picture->lit = 0;
@@ -9697,7 +9732,8 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
         if (shown && compositor.grid_on && compositor.grid_screen >= 0 && (unsigned int)compositor.grid_screen < count)
         {
                 const int *screen = screens[compositor.grid_screen];
-                unsigned int line = COMPOSITOR_LINE * compositor.scale / 100;
+                int scale = compositor_overlay_scale(compositor.grid_screen);
+                unsigned int line = (unsigned int)compositor_line_px(scale);
 
                 for (unsigned int tile = 0; tile < COMPOSITOR_GRID_TILES; tile++)
                 {
@@ -9714,7 +9750,7 @@ static unsigned int compositor_overlays(struct compositor_frame *frames, unsigne
                         border->scale = compositor.scale;
                         border->x = box[0], border->y = box[1];
                         border->width = box[2], border->height = box[3];
-                        border->radius = UI_RADIUS * compositor.scale / 100, border->line = (int)line;
+                        border->radius = UI_RADIUS * scale / 100, border->line = (int)line;
                         border->edge = compositor_snap_edge(percent);
                         added += 2;
                 }

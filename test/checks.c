@@ -118479,6 +118479,197 @@ static void check_compositor_scales(void)
 }
 
 /*
+        A window's corners and its line at every scale, on the screen it is on. The line is COMPOSITOR_LINE logical pixels
+        cut to whole ones, a pixel at the least, and the corners are UI_RADIUS logical pixels at the scale: 4 device pixels
+        at 50 percent, 6 at 75. At 50 and 75 percent the cut alone is no pixel, and a window with no line was drawn square
+        (its radius was kept only where it had a line), so it lost its corners with its outline. A window is probed on
+        what is on the screen: the outline's corner is the desktop's, the line is along the top, the desktop is beyond
+        the line, and the contents' own corner pixel is cut by the arc. The scales are the six the settings offer, on one
+        screen and with two at their own; the close and minimise buttons are drawn at each, and the assist's thumbnail and
+        the grid's tile have the radius and line of their screen.
+*/
+#define CORNERS_SIDE GLASS_SIDE
+#define CORNERS_PICTURE 0x404040u
+static const int corner_scales[] = {50, 75, 100, 125, 150, 200};
+
+// A floating row's frame at its scale, and the bits of what the screen shows of it that are as they should be.
+static unsigned int corner_probe(int row, int scale, unsigned int *geometry)
+{
+    struct compositor_frame frame;
+    const unsigned int *screen = compositor.scanout;
+    unsigned int pitch = compositor.scanout_pitch / 4, ground = compositor_ground & 0xffffffu;
+    unsigned int edge = compositor_ink_shadow() & 0xffffffu, bits = 0;
+    int line = scale / 100 > 1 ? scale / 100 : 1, radius = UI_RADIUS * scale / 100, x, y, w, h;
+
+    compositor_frame_of(row, &frame);
+    x = frame.x, y = frame.y, w = frame.width, h = frame.height;
+    *geometry = frame.scale == scale && frame.radius == radius && frame.line == line && compositor_radius(&frame) == radius;
+    bits |= (screen[(y - line) * (int)pitch + (x - line)] & 0xffffffu) == ground;
+    bits |= ((screen[(y - line) * (int)pitch + x + w / 2] & 0xffffffu) == edge) << 1;
+    bits |= ((screen[(y - line - 1) * (int)pitch + x + w / 2] & 0xffffffu) == ground) << 2;
+    bits |= ((screen[y * (int)pitch + x] & 0xffffffu) != CORNERS_PICTURE) << 3;
+    bits |= ((screen[(y + h / 2) * (int)pitch + x] & 0xffffffu) == CORNERS_PICTURE) << 4;
+    return bits;
+}
+
+// A compositor of CORNERS_SIDE square, a window of width by 60 on the first screen at 20, 40 and, with two screens (each half
+// the width), one 80 by 60 on the second at 150, 40; the first screen at scale a and the second at b; painted, and drawn.
+static unsigned int address_to corner_scene(unsigned int *scanout, int outputs, int a, int b, int width)
+{
+    unsigned int address_to mapped;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.shared_row = compositor.mark_row = compositor.preview_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = compositor.height = CORNERS_SIDE;
+    compositor.scale = a;
+    compositor.card = -1;
+    compositor.scanout = scanout;
+    compositor.scanout_pitch = CORNERS_SIDE * 4;
+    compositor.outputs = (unsigned int)outputs;
+    if (outputs == 2)
+    {
+        compositor.screen[0][2] = CORNERS_SIDE / 2, compositor.screen[0][3] = CORNERS_SIDE;
+        compositor.screen[1][0] = CORNERS_SIDE / 2, compositor.screen[1][2] = CORNERS_SIDE / 2, compositor.screen[1][3] = CORNERS_SIDE;
+        compositor.output[0].scale = a, compositor.output[1].scale = b;
+    }
+    else if (outputs == 1)
+    {
+        compositor.screen[0][2] = compositor.screen[0][3] = CORNERS_SIDE;
+        compositor.output[0].scale = a;
+    }
+    mapped = glass_table_map();
+    if (!mapped)
+        return null;
+    compositor.table->scale = (unsigned int)a;
+    compositor.table->x[1] = 20, compositor.table->y[1] = 40, compositor.table->width[1] = (unsigned int)width, compositor.table->height[1] = 60;
+    compositor.table->x[2] = 150, compositor.table->y[2] = 40, compositor.table->width[2] = 80, compositor.table->height[2] = 60;
+    glass_paint(1, 0, 0, width, 60, CORNERS_PICTURE, true);
+    if (outputs == 2)
+        glass_paint(2, 0, 0, 80, 60, CORNERS_PICTURE, true);
+    for (unsigned int at = 0; at < CORNERS_SIDE * CORNERS_SIDE; at++)
+        scanout[at] = 0x123456u;
+    compositor_damage(0, 0, CORNERS_SIDE, CORNERS_SIDE);
+    compositor_present();
+    return mapped;
+}
+
+static void corner_scene_end(unsigned int address_to mapped)
+{
+    unsigned long header = (sizeof(struct windows) + 4095) & ~4095ul;
+    unsigned long buffer = ((unsigned long)GLASS_SIDE * GLASS_SIDE * 4 + 4095) & ~4095ul;
+
+    compositor_call(syscall(munmap), (positive)mapped, header + buffer * 2 * WINDOWS, 0, 0, 0, 0);
+    memory_zero(&compositor, sizeof(compositor));
+}
+
+static void check_compositor_corner_scales(void)
+{
+    static unsigned int scanout[CORNERS_SIDE * CORNERS_SIDE];
+    static const int pairs[][2] = {{50, 100}, {100, 50}, {75, 200}, {200, 75}, {100, 200}, {150, 100}, {125, 50}};
+    unsigned int geometry = ~0u, shown = ~0u, both = ~0u, buttons = ~0u, thumbs = ~0u;
+    unsigned int address_to mapped;
+
+    // One screen, each scale: the frame and the screen.
+    for (unsigned int at = 0; at < array_count(corner_scales); at++)
+    {
+        unsigned int fine = 0, bits;
+
+        mapped = corner_scene(scanout, 0, corner_scales[at], corner_scales[at], 80);
+        if (!mapped)
+        {
+            check("corner scales: the table is mapped", false);
+            return;
+        }
+        bits = corner_probe(1, corner_scales[at], &fine);
+        geometry &= fine ? ~0u : ~(1u << at);
+        shown &= bits == 31u ? ~0u : ~(1u << at);
+        if (!fine || bits != 31u)
+            string_format(log, "  corner scales: %p percent: geometry %p, screen bits %p\n", (positive)corner_scales[at],
+                          (positive)fine, (positive)bits);
+        corner_scene_end(mapped);
+    }
+    check("corner scales: a window's corners are UI_RADIUS to its scale (4 device pixels at 50 percent, 6 at 75) and its line a pixel "
+          "at the least, at 50, 75, 100, 125, 150 and 200 percent",
+          geometry == ~0u);
+    check("corner scales: presented, the outline's corner is the desktop's, the line runs along the top with the desktop beyond it, "
+          "and the contents' corner is cut by the arc, at every scale",
+          shown == ~0u);
+
+    // Two screens each at its own scale: the window on each has the radius and line of its own screen's.
+    for (unsigned int at = 0; at < array_count(pairs); at++)
+    {
+        unsigned int fine_a = 0, fine_b = 0, bits_a, bits_b;
+
+        mapped = corner_scene(scanout, 2, pairs[at][0], pairs[at][1], 80);
+        if (!mapped)
+        {
+            check("corner scales: the table is mapped for two screens", false);
+            return;
+        }
+        bits_a = corner_probe(1, pairs[at][0], &fine_a);
+        bits_b = corner_probe(2, pairs[at][1], &fine_b);
+        both &= fine_a && fine_b && bits_a == 31u && bits_b == 31u ? ~0u : ~(1u << at);
+        if (!fine_a || !fine_b || bits_a != 31u || bits_b != 31u)
+            string_format(log, "  corner scales: %p and %p percent: geometry %p %p, screen bits %p %p\n", (positive)pairs[at][0],
+                          (positive)pairs[at][1], (positive)fine_a, (positive)fine_b, (positive)bits_a, (positive)bits_b);
+        corner_scene_end(mapped);
+    }
+    check("corner scales: on two screens at 50 and 100, 100 and 50, 75 and 200, 200 and 75, 100 and 200, 150 and 100, 125 and 50 "
+          "percent a window has the radius and line of its own screen's scale, and the corner and the line drawn",
+          both == ~0u);
+
+    // The close and the minimise buttons: drawn, in their boxes, at every scale.
+    for (unsigned int at = 0; at < array_count(corner_scales); at++)
+    {
+        struct compositor_frame frame;
+        int bx = 0, by = 0, side = 0, mx = 0, my = 0, mside = 0, seen = 0, dash = 0;
+
+        mapped = corner_scene(scanout, 0, corner_scales[at], corner_scales[at], 200);
+        if (!mapped)
+            return;
+        compositor_frame_of(1, &frame);
+        if (compositor_close_box(&frame, &bx, &by, &side) && compositor_minimize_box(&frame, &mx, &my, &mside))
+        {
+            for (int y = by; y < by + side; y++)
+                for (int x = bx; x < bx + side; x++)
+                    seen += (scanout[y * CORNERS_SIDE + x] & 0xffffffu) != CORNERS_PICTURE;
+            for (int x = mx; x < mx + mside; x++)
+                dash += (scanout[(my + mside / 2) * CORNERS_SIDE + x] & 0xffffffu) != CORNERS_PICTURE;
+        }
+        buttons &= side > 0 && mside > 0 && seen > 0 && dash > 0 ? ~0u : ~(1u << at);
+        corner_scene_end(mapped);
+    }
+    check("corner scales: the close button and the minimise dash are drawn in their boxes at every scale", buttons == ~0u);
+
+    // The assist's thumbnail and the grid's tile: the radius and the line of their screen's scale, a pixel at the least.
+    for (unsigned int at = 0; at < array_count(corner_scales); at++)
+    {
+        static struct compositor_frame frames[COMPOSITOR_FRAMES];
+        int line = corner_scales[at] / 100 > 1 ? corner_scales[at] / 100 : 1, radius = UI_RADIUS * corner_scales[at] / 100;
+        unsigned int added, ok;
+
+        mapped = corner_scene(scanout, 1, corner_scales[at], corner_scales[at], 80);
+        if (!mapped)
+            return;
+        compositor.assist_on = compositor.grid_on = 1;
+        compositor.assist_count = 1, compositor.assist_rows[0] = 1, compositor.grid_screen = 0, compositor.assist_screen = 0;
+        compositor.assist_rect[0][0] = 40, compositor.assist_rect[0][1] = 100, compositor.assist_rect[0][2] = 60;
+        compositor.assist_rect[0][3] = 40;
+        compositor.overlay_goal = 100;
+        memory_zero(frames, sizeof(frames));
+        added = compositor_overlays(frames, 0);
+        ok = added > 3 && frames[0].radius == radius && frames[0].line == line && frames[3].radius == radius && frames[3].line == line;
+        thumbs &= ok ? ~0u : ~(1u << at);
+        corner_scene_end(mapped);
+    }
+    check("corner scales: an assist thumbnail and a grid tile have the radius and line of their screen's scale at every scale",
+          thumbs == ~0u);
+}
+
+/*
         The snap preview is a tint on its target and on nothing else. Over the desktop, the target is the kit's selection
         at its own alpha; the window dragged is as it is over the tint, and a window above it is as it is too. Everything
         else is the desktop, untouched.
@@ -142998,6 +143189,7 @@ b32 main()
         check_compositor_held();
         check_compositor_screens();
         check_compositor_scales();
+        check_compositor_corner_scales();
         check_compositor_preview();
         check_compositor_snap_tint();
         check_compositor_preview_held();
