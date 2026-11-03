@@ -335,6 +335,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_u32
       'paired timing against the row loop compositor_blit had, one memory_copy a row, over a window 1160 words wide '
       'with rows 2560 apart, a sliver of 40 words, a band of 300 and a row of 96, with AVX-512 and without, '
       'NEON, and V and scalar on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_copy_rect', 'memory_copy_rect_stream_u32',
+      'paired timing against memory_copy_rect_u32 over the same windows of ordinary memory, a control that the streaming '
+      'loads lose nothing where they have nothing to win (they are for a GPU buffer mapped write-combined, 9x faster to '
+      'read there, measured by hand on the box); AVX2 on x86_64, the same copy elsewhere')
 cover('direct_benchmark', 'test/checks.c#BENCH_runs', 'memory_runs_u32',
       'paired timing against the C loop of the same chunk walk, over 64 rows 1160 words wide with rows 2560 apart: '
       'a blank window, lines of text and noise, with AVX-512 and without, NEON, and riscv64')

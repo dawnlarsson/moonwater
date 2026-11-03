@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        435 routines (411 public, 24 local), 425 of them on all three and 10 local to one.
+        436 routines (412 public, 24 local), 426 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -226,6 +226,7 @@
           memory_copy_changed_u32        public  yes     yes     yes
           memory_copy_end                public  yes     yes     yes
           memory_copy_match              public  yes     yes     yes
+          memory_copy_rect_stream_u32    public  yes     yes     yes
           memory_copy_rect_u32           public  yes     yes     yes
           memory_copy_source_first       public  yes     yes     yes
           memory_copy_until              public  yes     yes     yes
@@ -15494,6 +15495,38 @@ __asm__(
     ASM_END(memory_copy_rect_u32)
 
     //
+    //       memory_copy_rect_stream_u32 -- rdi into, rsi into_stride in words, rdx from, rcx from_stride in words,
+    //       r8 width in words, r9 height. memory_copy_rect_u32 for a source the processor does not cache and for
+    //       rectangles that do not overlap: a GPU's buffer mapped write-combined, where every load is an uncached
+    //       read of its own width and a 1080p frame takes 30 ms to copy. With AVX2 the aligned middle of a row of
+    //       128 bytes or more is read with 32-byte streaming loads (vmovntdqa), which fill a whole line a load
+    //       and read that memory nine times as fast; the up to 31 bytes before it and what is left after it are
+    //       plain byte copies. A shorter row, a machine with no AVX2 and a kernel build are memory_copy_rect_u32.
+    //
+    ASM_FUNC(memory_copy_rect_stream_u32)
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "9f")
+    "test %r8, %r8\n   jz 8f\n   test %r9, %r9\n   jz 8f\n"
+    "mov %r8, %r10\n   shl $2, %r10\n   cmp $128, %r10\n   jb 9f\n"
+    "push %rbx\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n"
+    "shl $2, %rsi\n   shl $2, %rcx\n   mov %r10, %r8\n"
+    "mov %rdi, %r12\n   mov %rdx, %r13\n   mov %r9, %rbx\n   mov %rsi, %r14\n   mov %rcx, %r15\n"
+    "1:  mov %r12, %rdi\n   mov %r13, %rsi\n   mov %r8, %rdx\n"
+    "mov %rsi, %rcx\n   neg %rcx\n   and $31, %rcx\n   sub %rcx, %rdx\n   rep movsb\n"
+    "mov %rdx, %rax\n   shr $6, %rax\n   jz 3f\n"
+    "2:  vmovntdqa (%rsi), %ymm0\n   vmovntdqa 32(%rsi), %ymm1\n   vmovdqu %ymm0, (%rdi)\n   vmovdqu %ymm1, 32(%rdi)\n"
+    "add $64, %rsi\n   add $64, %rdi\n   dec %rax\n   jnz 2b\n"
+    "3:  mov %rdx, %rcx\n   and $63, %rcx\n   rep movsb\n"
+    "add %r14, %r12\n   add %r15, %r13\n   dec %rbx\n   jnz 1b\n"
+    "vzeroupper\n"
+    "pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbx\n"
+    "8:  " ASM_RET
+    "9:\n"
+    )
+    "jmp memory_copy_rect_u32\n"
+    ASM_END(memory_copy_rect_stream_u32)
+
+    //
     //       memory_runs_u32 -- rdi rows, rsi from, rdx from_stride in words, rcx width in words, r8 height. Reads a
     //       picture for the stretches of one colour a compose can fill, where it would copy, and writes them as one
     //       row of 128 bytes a picture row: a count and a spare word (written as 0), then up to 15 runs of x0 and x1
@@ -25407,6 +25440,16 @@ __asm__(
     ASM_END(memory_copy_rect_u32)
 
     //
+    //       memory_copy_rect_stream_u32 -- x0 into, x1 into_stride in words, x2 from, x3 from_stride in words, x4 width
+    //       in words, x5 height. The x86_64 block carries the contract: memory_copy_rect_u32 for a source the processor
+    //       does not cache and for rectangles that do not overlap. Here it is that copy: no load of NEON's is wider or
+    //       faster for such memory.
+    //
+    ASM_FUNC(memory_copy_rect_stream_u32)
+    "b memory_copy_rect_u32\n"
+    ASM_END(memory_copy_rect_stream_u32)
+
+    //
     //       memory_runs_u32 -- x0 rows, x1 from, x2 from_stride in words, x3 width in words, x4 height. The x86_64
     //       block carries the contract. A chunk of 16 words is four q registers compared with its first word
     //       (ld1r), the four results anded and reduced to a byte by uminv: 255 is flat; a kernel build has no vector
@@ -35271,6 +35314,15 @@ __asm__(
     "addi sp, sp, 64\n"
     "8:  " ASM_RET
     ASM_END(memory_copy_rect_u32)
+
+    //
+    //       memory_copy_rect_stream_u32 -- a0 into, a1 into_stride in words, a2 from, a3 from_stride in words, a4 width
+    //       in words, a5 height. The x86_64 block carries the contract: memory_copy_rect_u32 for a source the processor
+    //       does not cache and for rectangles that do not overlap, which here is that copy.
+    //
+    ASM_FUNC(memory_copy_rect_stream_u32)
+    "j memory_copy_rect_u32\n"
+    ASM_END(memory_copy_rect_stream_u32)
 
     //
     //       memory_runs_u32 -- a0 rows, a1 from, a2 from_stride in words, a3 width in words, a4 height. The x86_64
@@ -46725,6 +46777,12 @@ fn memory_mix_u32_rect(p32 address_to into, positive into_stride, const p8 addre
 // rectangles are copied row by row in order, as memory_copy copies them.
 fn memory_copy_rect_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
                         positive width, positive height);
+// memory_copy_rect_u32 for a source the processor does not cache (a GPU's buffer mapped write-combined) and for rectangles
+// that do not overlap: on x86_64 with AVX2 a row is read with 32-byte streaming loads, which read such memory nine times as
+// fast as plain loads; elsewhere, and for a row under 128 bytes, it is memory_copy_rect_u32. Overlapping rectangles are
+// not copied as memory_copy would.
+fn memory_copy_rect_stream_u32(p32 address_to into, positive into_stride, const p32 address_to from, positive from_stride,
+                               positive width, positive height);
 // height rows of a picture (width words, from_stride words a row) read for the stretches of one colour that a compose
 // could fill where it would copy, written as height rows of 128 bytes at rows: a 32-bit count, a spare word of 0, and up to
 // 15 runs of a 16-bit x0, a 16-bit x1 (not part of the run) and a 32-bit colour. A row is seen as chunks of 16 words, the

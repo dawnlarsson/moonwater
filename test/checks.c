@@ -115997,6 +115997,73 @@ static fn check_copy_rect()
 }
 
 /*
+        memory_copy_rect_stream_u32: the rectangle memory_copy_rect_u32 makes when the two do not overlap, for widths from zero
+        to 400 words (the streaming loop begins at 32 words), zero to three rows, the source at every word offset to sixteen
+        (every alignment of 32 bytes the loop's head walks) and the destination at the first few, strides of the width plus a few
+        words, the rectangles ending a few words short of a page that faults so a word read or written past them does too, every
+        word beside the rectangle held to a canary and the source to what it was; with AVX2 and without on x86_64.
+*/
+static fn check_copy_rect_stream()
+{
+        static const positive gaps[3][2] = {{0, 0}, {1, 37}, {37, 1}};
+        p32 address_to from_pool = memory(4 * 4096);
+        p32 address_to to_pool = memory(4 * 4096);
+        bool guarded = from_pool && to_pool && system_call_3(syscall(mprotect), (positive)((p8 address_to)from_pool + 3 * 4096), 4096, 0) == 0 &&
+                       system_call_3(syscall(mprotect), (positive)((p8 address_to)to_pool + 3 * 4096), 4096, 0) == 0;
+
+        check("copy rect stream: a guard page at the end of each", guarded);
+        if (!guarded)
+                return;
+#if X64
+        p8 wide_on = cpu_has_avx2;
+        for (p32 tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier ? 0 : wide_on;
+#endif
+                bool fine = true, kept = true;
+                p32 address_to from_end = from_pool + 3 * 4096 / 4;
+                p32 address_to to_end = to_pool + 3 * 4096 / 4;
+
+                for (positive w = 0; w <= 400; w++)
+                        for (positive height = 0; height <= 3; height++)
+                                for (positive g = 0; g < 3; g++)
+                                        for (positive sa = 0; sa < 16; sa++)
+                                                for (positive da = 0; da < 4; da++)
+                                                {
+                                                        positive ds = w + gaps[g][0], ss = w + gaps[g][1];
+                                                        positive span_d = height ? (height - 1) * ds + w : 0;
+                                                        positive span_s = height ? (height - 1) * ss + w : 0;
+                                                        p32 address_to fwin = from_end - (48 + span_s);
+                                                        p32 address_to twin = to_end - (48 + span_d);
+                                                        p32 address_to frect = fwin + 16 + sa;
+                                                        p32 address_to trect = twin + 16 + da;
+
+                                                        for (positive i = 0; i < 48 + span_s; i++)
+                                                                fwin[i] = 0x5a000000u + (p32)i;
+                                                        for (positive i = 0; i < 48 + span_d; i++)
+                                                                twin[i] = 0xdeadbeef;
+                                                        memory_copy_rect_stream_u32(trect, ds, frect, ss, w, height);
+                                                        for (positive r = 0; r < height; r++)
+                                                                for (positive c = 0; c < w; c++)
+                                                                        fine = fine && trect[r * ds + c] == frect[r * ss + c];
+                                                        for (b64 i = 0; i < (b64)(48 + span_d); i++)
+                                                        {
+                                                                b64 j = i - (16 + (b64)da);
+                                                                bool inside = j >= 0 && j < (b64)span_d && (positive)j % ds < w;
+
+                                                                fine = fine && (inside || twin[i] == 0xdeadbeef);
+                                                        }
+                                                        for (positive i = 0; i < 48 + span_s; i++)
+                                                                kept = kept && fwin[i] == 0x5a000000u + (p32)i;
+                                                }
+                check("copy rect stream: every word of the rectangle, nothing else, the source unchanged", fine && kept);
+#if X64
+        }
+        cpu_has_avx2 = wide_on;
+#endif
+}
+
+/*
         memory_runs_u32 is the contract in its comment, written out: a row is chunks of 16 words, the last short one and any
         past the 4095th left out, a chunk is flat when its words are its first, a run is two or more flat chunks in a row of one
         colour, and a row keeps the first 15. The reference is that, a chunk at a time with the loops in plain sight; the
@@ -117096,6 +117163,7 @@ b32 main()
         check_fill_rect();
         check_over_tone();
         check_copy_rect();
+        check_copy_rect_stream();
         check_runs();
         check_resample_rect();
         check_copy_changed();
@@ -166873,6 +166941,29 @@ __attribute__((noinline, noclone)) static p64 run(bool assembly, positive width,
         return get_cpu_time() - start;
 }
 
+/* memory_copy_rect_stream_u32 against memory_copy_rect_u32 on ordinary cached memory, where it has nothing to win (its
+   streaming loads are for a GPU's write-combined buffer, which this file cannot make): a control that it does not lose. */
+__attribute__((noinline, noclone)) static p64 run_stream(bool stream, positive width, positive height, positive rounds)
+{
+        positive answers = 0;
+        p64 start;
+
+        start = get_cpu_time();
+        for (positive round = 0; round < rounds; round++)
+        {
+                unsigned int address_to into = into_plane + round % 8;
+                const unsigned int address_to from = from_plane + 3 + round % 8;
+
+                if (stream)
+                        memory_copy_rect_stream_u32(into, STRIDE, from, STRIDE, width, height);
+                else
+                        memory_copy_rect_u32(into, STRIDE, from, STRIDE, width, height);
+                answers += into[width - 1] + round;
+        }
+        sink = answers;
+        return get_cpu_time() - start;
+}
+
 b32 main(void)
 {
         static const positive shapes[][2] = {{1160, 64}, {40, 32}, {300, 16}, {96, 64}};
@@ -166923,6 +167014,18 @@ b32 main(void)
 #elif RISCV64
         cpu_has_vector = vector;
 #endif
+        for (positive at = 0; at < sizeof(shapes) / sizeof(shapes[0]); at++)
+        {
+                positive ratios[TRIES];
+                positive rounds = 4000000 / (shapes[at][0] * shapes[at][1] / 16 + 64) + 1;
+
+                BENCH_PAIRED(ratios, former, run_stream(false, shapes[at][0], shapes[at][1], rounds), assembly,
+                             run_stream(true, shapes[at][0], shapes[at][1], rounds));
+                string_format(log, "memory_copy_rect_stream_u32 %s, ordinary memory: paired median stream/plain %p.", names[at],
+                              (string_address) "", ratios[TRIES / 2] / 100);
+                positive_to_padded(log, ratios[TRIES / 2] % 100, 2, '0', 0);
+                log("%\n", 2);
+        }
         log_flush();
         return 0;
 }

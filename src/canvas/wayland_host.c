@@ -656,6 +656,12 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         for (long c = left; c < right; c++)
                                                 into[c] = compositor_wl_over(from[c], into[c]);
                                 }
+                        else if (picture->sync_fd >= 0)
+                                // A GPU's buffer, mapped write-combined: read with the streaming loads that are nine times as fast.
+                                memory_copy_rect_stream_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
+                                                            (const unsigned int *)(picture->pixels + top * picture->stride) + left,
+                                                            (unsigned long)picture->stride / 4, (unsigned long)(right - left),
+                                                            (unsigned long)(bottom - top));
                         else
                                 memory_copy_rect_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
                                                      (const unsigned int *)(picture->pixels + top * picture->stride) + left,
