@@ -284,7 +284,7 @@ glass:
 	v_cndmask_b32_e64 \o, \o, v23, s[88:89]
 .endm
 
-; op 6: a scene (records of 8 words in the lists: 0 fill, 1 tone over, 2 box as ui_kit_fill takes it with its radii already scaled as CSS draws them),
+; op 6: a scene, from the patch (x0, y0 in the arguments, in patches of 64 pixels by 4 rows) on for the grid's size, so that a part of the picture is drawn alone (records of 8 words in the lists: 0 fill, 1 tone over, 2 box as ui_kit_fill takes it with its radii already scaled as CSS draws them),
 ; a wave a patch of 64 pixels by 4 rows, a lane four pixels in a row (v5 to v8), each written once; the width and the pitch a multiple of 4.
 ; The wave leaves if its 64-pixel square has no op, does not read the picture when the first op holds the patch, and skips an op that misses it.
 ; The lanes of a row in a box's corner take a line each of its sixteen (the 64-bit quotient and the root by a float and a correction, exact)
@@ -295,11 +295,14 @@ glass:
 scene:
 	s_load_dwordx4	s[8:11], s[4:5], 0x8
 	s_load_dwordx4	s[12:15], s[4:5], 0x18
+	s_load_dwordx2	s[2:3], s[4:5], 0x30
 	v_and_b32	v1, 15, v0
 	v_lshrrev_b32	v2, 4, v0
+	s_waitcnt	lgkmcnt(0)
+	s_add_u32	s6, s6, s2
+	s_add_u32	s7, s7, s3
 	s_lshl_b32	s28, s6, 6
 	s_lshl_b32	s29, s7, 2
-	s_waitcnt	lgkmcnt(0)
 	s_add_u32	s16, s12, 63
 	s_lshr_b32	s16, s16, 6
 	s_add_u32	s17, s14, 63

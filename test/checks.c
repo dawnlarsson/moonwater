@@ -185488,7 +185488,7 @@ b32 main(void)
                                                 memory_over_tone_u32(gpu_want + (positive)y * SP + q[1], width, q[5]);
                                 }
                 }
-                check("gpu: the scene finishes", gpu_scene(ops_at, N, bins_at, scene_at, SP, SWD, SHT));
+                check("gpu: the scene finishes", gpu_scene(ops_at, N, bins_at, scene_at, SP, SWD, SHT, 0, 0, SWD, SHT));
                 for (int y = 0; y < SHT; y++)
                         for (int x = 0; x < SWD; x++)
                         {
@@ -185537,7 +185537,7 @@ b32 main(void)
                         host = began < host ? began : host;
                 }
                 memory_zero(sd, (positive)KW * KH * 4);
-                check("gpu: the 8K scene finishes", gpu_scene(ops_at, M, bins_at, scene_at, KW, KW, KH));
+                check("gpu: the 8K scene finishes", gpu_scene(ops_at, M, bins_at, scene_at, KW, KW, KH, 0, 0, KW, KH));
                 for (positive i = 0; i < (positive)KW * KH; i++)
                 {
                         checks++;
@@ -185548,7 +185548,7 @@ b32 main(void)
                 {
                         memory_zero(sd, (positive)KW * KH * 4);
                         began = clock_monotonic_nanoseconds();
-                        gpu_scene(ops_at, M, bins_at, scene_at, KW, KW, KH);
+                        gpu_scene(ops_at, M, bins_at, scene_at, KW, KW, KH, 0, 0, KW, KH);
                         began = clock_monotonic_nanoseconds() - began;
                         total = began < total ? began : total;
                         memory_zero(sd, (positive)KW * KH * 4);
@@ -185621,7 +185621,7 @@ b32 main(void)
                         q[7] = (unsigned int)ry;
                         ui_kit_fill(&ui, &box, argb, 0);
                 }
-                if (!gpu_scene(ops_at, N, bins_at, pic_at, PP, PW, PH))
+                if (!gpu_scene(ops_at, N, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
                 {
                         check("gpu kit: the scene finishes", false);
                         return test_report(null);
@@ -185672,18 +185672,66 @@ b32 main(void)
                         host = began < host ? began : host;
                 }
                 memory_zero(big, (positive)KW * KH * 4);
-                check("gpu kit: the 8K scene finishes", gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH));
+                check("gpu kit: the 8K scene finishes", gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH));
                 for (positive i = 0; i < (positive)KW * KH; i++)
                 {
                         checks++;
                         if (big[i] != want[i] && (++failures, ++bad) < 6)
                                 string_format(log, "  FAIL gpu kit 8K: pixel %p,%p is %p, wanted %p\n", i % KW, i / KW, (positive)big[i], (positive)want[i]);
                 }
+                // Damage: a rectangle drawn alone is what the whole drawing makes in it (rounded out to the kernel's patches) and leaves everything outside as it was (the scene's first op
+                // is the window's clear, so its patches do not need what was under them); 24 rectangles, one the size of a line of typing.
+                {
+                        positive part_bad = 0, small = ~0ull;
+
+                        for (int d = 0; d < 24; d++)
+                        {
+                                unsigned int x0 = d == 0 ? 3001 : gpu_random() % (KW - 1), y0 = d == 0 ? 2003 : gpu_random() % (KH - 1);
+                                unsigned int x1 = x0 + (d == 0 ? 256 : 1 + gpu_random() % 600), y1 = y0 + (d == 0 ? 64 : 1 + gpu_random() % 200);
+
+                                x1 = x1 > KW ? KW : x1, y1 = y1 > KH ? KH : y1;
+                                memory_zero(big, (positive)KW * KH * 4);
+                                check("gpu kit: a part finishes", gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, x0, y0, x1, y1));
+                                // what is drawn is the rectangle rounded out to the kernel's patches of 64 pixels by 4 rows: all of that is what the whole drawing makes
+                                {
+                                        unsigned int rx0 = (x0 >> 6) << 6, rx1 = ((x1 + 63) >> 6) << 6, ry0 = (y0 >> 2) << 2, ry1 = ((y1 + 3) >> 2) << 2;
+
+                                        rx1 = rx1 > KW ? KW : rx1, ry1 = ry1 > KH ? KH : ry1;
+                                        for (unsigned int y = ry0; y < ry1; y++)
+                                                for (unsigned int x = rx0; x < rx1; x++)
+                                                {
+                                                        checks++;
+                                                        if (big[(positive)y * KW + x] != want[(positive)y * KW + x] && (++failures, ++part_bad) < 6)
+                                                                string_format(log, "  FAIL gpu kit part %p: pixel %p,%p is %p, wanted %p\n", (positive)d, (positive)x, (positive)y,
+                                                                              (positive)big[(positive)y * KW + x], (positive)want[(positive)y * KW + x]);
+                                                }
+                                        for (int i = 0; i < 20000; i++)
+                                        {
+                                                unsigned int x = gpu_random() % KW, y = gpu_random() % KH;
+
+                                                if (x >= rx0 && x < rx1 && y >= ry0 && y < ry1)
+                                                        continue;
+                                                checks++;
+                                                if (big[(positive)y * KW + x] && (++failures, ++part_bad) < 6)
+                                                        string_format(log, "  FAIL gpu kit part %p: pixel %p,%p outside was touched: %p\n", (positive)d, (positive)x, (positive)y,
+                                                                      (positive)big[(positive)y * KW + x]);
+                                        }
+                                }
+                        }
+                        for (int i = 0; i < 8; i++)
+                        {
+                                began = clock_monotonic_nanoseconds();
+                                gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, 3001, 2003, 3257, 2067);
+                                began = clock_monotonic_nanoseconds() - began;
+                                small = began < small ? began : small;
+                        }
+                        string_format(log, "  gpu kit: a 256 by 64 change in the 8K scene: %p us (the binning and the run)\n", small / 1000);
+                }
                 for (int i = 0; i < 5; i++)
                 {
                         memory_zero(big, (positive)KW * KH * 4);
                         began = clock_monotonic_nanoseconds();
-                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH);
                         began = clock_monotonic_nanoseconds() - began;
                         total = began < total ? began : total;
                         memory_zero(big, (positive)KW * KH * 4);
@@ -185702,13 +185750,13 @@ b32 main(void)
                         for (int i = 0; i < 4; i++)
                         {
                                 memory_zero(big, (positive)KW * KH * 4);
-                                gpu_scene(kops_at, 1, kbins_at, big_at, KW, KW, KH);
+                                gpu_scene(kops_at, 1, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH);
                                 began = clock_monotonic_nanoseconds();
                                 gpu_run();
                                 began = clock_monotonic_nanoseconds() - began;
                                 t_clear = began < t_clear ? began : t_clear;
                                 memory_zero(big, (positive)KW * KH * 4);
-                                gpu_scene(kops_at + 32, M - 1, kbins_at, big_at, KW, KW, KH);
+                                gpu_scene(kops_at + 32, M - 1, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH);
                                 began = clock_monotonic_nanoseconds();
                                 gpu_run();
                                 began = clock_monotonic_nanoseconds() - began;
@@ -185722,7 +185770,7 @@ b32 main(void)
                                         kops[8 * k + 5] |= 0xff000000u;
                                 for (int i = 0; i < 3; i++)
                                 {
-                                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH);
                                         memory_zero(big, (positive)KW * KH * 4);
                                         began = clock_monotonic_nanoseconds();
                                         gpu_run();
@@ -185733,7 +185781,7 @@ b32 main(void)
                                         kops[8 * k + 6] = kops[8 * k + 7] = 0;
                                 for (int i = 0; i < 3; i++)
                                 {
-                                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH);
                                         memory_zero(big, (positive)KW * KH * 4);
                                         began = clock_monotonic_nanoseconds();
                                         gpu_run();
@@ -185750,7 +185798,7 @@ b32 main(void)
                                 q[0] = 0, q[1] = (unsigned int)((int)q[1] >> 8), q[2] = (unsigned int)((int)q[2] >> 8), q[3] = (unsigned int)((int)(q[3] + 255) >> 8), q[4] = (unsigned int)((int)(q[4] + 255) >> 8);
                                 q[5] |= 0xff000000u;
                         }
-                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH);
+                        gpu_scene(kops_at, M, kbins_at, big_at, KW, KW, KH, 0, 0, KW, KH);
                         for (int i = 0; i < 4; i++)
                         {
                                 GPU_ARGS->op = 5;
