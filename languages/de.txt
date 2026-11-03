@@ -45,6 +45,29 @@ menu_redo	ac45	&Wiederholen
 menu_select_all	f6f6	Alles &auswählen
 menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
+tray_am	0d13	AM
+tray_charging	60c2	lädt
+tray_day_fri	fbe8	Fr
+tray_day_mon	82e1	Mo
+tray_day_sat	2a77	Sa
+tray_day_sun	d701	So
+tray_day_thu	308c	Do
+tray_day_tue	f425	Di
+tray_day_wed	5757	Mi
+tray_discharging	41a0	entlädt
+tray_month_apr	1df2	Apr
+tray_month_aug	8fd4	Aug
+tray_month_dec	7a73	Dez
+tray_month_feb	4b82	Feb
+tray_month_jan	ceae	Jan
+tray_month_jul	2ebc	Jul
+tray_month_jun	31e2	Jun
+tray_month_mar	ed2b	Mär
+tray_month_may	e226	Mai
+tray_month_nov	c404	Nov
+tray_month_oct	f3e9	Okt
+tray_month_sep	a4ef	Sep
+tray_pm	f466	PM
 ui_confirm_again	b3ff	zur Bestätigung erneut drücken: 
 ui_field_digits	f52b	eine Zahl besteht aus Ziffern
 ui_field_full	fe02	mehr passt nicht hinein

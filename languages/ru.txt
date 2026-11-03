@@ -45,6 +45,29 @@ menu_redo	ac45	Повторить
 menu_select_all	f6f6	Выделить всё
 menu_toggle_comment	92ac	Закомментировать/раскомментировать
 menu_undo	b9d3	Отменить
+tray_am	0d13	ДП
+tray_charging	60c2	заряжается
+tray_day_fri	fbe8	пт
+tray_day_mon	82e1	пн
+tray_day_sat	2a77	сб
+tray_day_sun	d701	вс
+tray_day_thu	308c	чт
+tray_day_tue	f425	вт
+tray_day_wed	5757	ср
+tray_discharging	41a0	разряжается
+tray_month_apr	1df2	апр
+tray_month_aug	8fd4	авг
+tray_month_dec	7a73	дек
+tray_month_feb	4b82	фев
+tray_month_jan	ceae	янв
+tray_month_jul	2ebc	июл
+tray_month_jun	31e2	июн
+tray_month_mar	ed2b	мар
+tray_month_may	e226	май
+tray_month_nov	c404	ноя
+tray_month_oct	f3e9	окт
+tray_month_sep	a4ef	сен
+tray_pm	f466	ПП
 ui_confirm_again	b3ff	нажмите ещё раз для подтверждения: 
 ui_field_digits	f52b	число состоит из цифр
 ui_field_full	fe02	больше не помещается

@@ -45,6 +45,29 @@ menu_redo	ac45	Επανάληψη
 menu_select_all	f6f6	Επιλογή όλων
 menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
+tray_am	0d13	πμ
+tray_charging	60c2	φορτίζει
+tray_day_fri	fbe8	Παρ
+tray_day_mon	82e1	Δευ
+tray_day_sat	2a77	Σάβ
+tray_day_sun	d701	Κυρ
+tray_day_thu	308c	Πέμ
+tray_day_tue	f425	Τρί
+tray_day_wed	5757	Τετ
+tray_discharging	41a0	αποφορτίζεται
+tray_month_apr	1df2	Απρ
+tray_month_aug	8fd4	Αυγ
+tray_month_dec	7a73	Δεκ
+tray_month_feb	4b82	Φεβ
+tray_month_jan	ceae	Ιαν
+tray_month_jul	2ebc	Ιουλ
+tray_month_jun	31e2	Ιουν
+tray_month_mar	ed2b	Μαρ
+tray_month_may	e226	Μάι
+tray_month_nov	c404	Νοε
+tray_month_oct	f3e9	Οκτ
+tray_month_sep	a4ef	Σεπ
+tray_pm	f466	μμ
 ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
 ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
 ui_field_full	fe02	δεν χωράει περισσότερο

@@ -45,6 +45,29 @@ menu_redo	ac45	Op&nieuw
 menu_select_all	f6f6	&Alles selecteren
 menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
+tray_am	0d13	a.m.
+tray_charging	60c2	laadt op
+tray_day_fri	fbe8	vr
+tray_day_mon	82e1	ma
+tray_day_sat	2a77	za
+tray_day_sun	d701	zo
+tray_day_thu	308c	do
+tray_day_tue	f425	di
+tray_day_wed	5757	wo
+tray_discharging	41a0	ontlaadt
+tray_month_apr	1df2	apr
+tray_month_aug	8fd4	aug
+tray_month_dec	7a73	dec
+tray_month_feb	4b82	feb
+tray_month_jan	ceae	jan
+tray_month_jul	2ebc	jul
+tray_month_jun	31e2	jun
+tray_month_mar	ed2b	mrt
+tray_month_may	e226	mei
+tray_month_nov	c404	nov
+tray_month_oct	f3e9	okt
+tray_month_sep	a4ef	sep
+tray_pm	f466	p.m.
 ui_confirm_again	b3ff	druk nogmaals om te bevestigen: 
 ui_field_digits	f52b	een getal bestaat uit cijfers
 ui_field_full	fe02	meer past er niet in

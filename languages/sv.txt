@@ -45,6 +45,29 @@ menu_redo	ac45	&Gör om
 menu_select_all	f6f6	&Markera allt
 menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
+tray_am	0d13	fm
+tray_charging	60c2	laddar
+tray_day_fri	fbe8	fre
+tray_day_mon	82e1	mån
+tray_day_sat	2a77	lör
+tray_day_sun	d701	sön
+tray_day_thu	308c	tors
+tray_day_tue	f425	tis
+tray_day_wed	5757	ons
+tray_discharging	41a0	laddar ur
+tray_month_apr	1df2	apr
+tray_month_aug	8fd4	aug
+tray_month_dec	7a73	dec
+tray_month_feb	4b82	feb
+tray_month_jan	ceae	jan
+tray_month_jul	2ebc	jul
+tray_month_jun	31e2	jun
+tray_month_mar	ed2b	mar
+tray_month_may	e226	maj
+tray_month_nov	c404	nov
+tray_month_oct	f3e9	okt
+tray_month_sep	a4ef	sep
+tray_pm	f466	em
 ui_confirm_again	b3ff	tryck igen för att bekräfta: 
 ui_field_digits	f52b	ett tal består av siffror
 ui_field_full	fe02	mer ryms inte

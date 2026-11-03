@@ -45,6 +45,29 @@ menu_redo	ac45	&Ponów
 menu_select_all	f6f6	&Zaznacz wszystko
 menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
+tray_am	0d13	AM
+tray_charging	60c2	ładowanie
+tray_day_fri	fbe8	pt
+tray_day_mon	82e1	pn
+tray_day_sat	2a77	sb
+tray_day_sun	d701	nd
+tray_day_thu	308c	cz
+tray_day_tue	f425	wt
+tray_day_wed	5757	śr
+tray_discharging	41a0	rozładowanie
+tray_month_apr	1df2	kwi
+tray_month_aug	8fd4	sie
+tray_month_dec	7a73	gru
+tray_month_feb	4b82	lut
+tray_month_jan	ceae	sty
+tray_month_jul	2ebc	lip
+tray_month_jun	31e2	cze
+tray_month_mar	ed2b	mar
+tray_month_may	e226	maj
+tray_month_nov	c404	lis
+tray_month_oct	f3e9	paź
+tray_month_sep	a4ef	wrz
+tray_pm	f466	PM
 ui_confirm_again	b3ff	naciśnij ponownie, aby potwierdzić: 
 ui_field_digits	f52b	liczba składa się z cyfr
 ui_field_full	fe02	więcej się nie zmieści

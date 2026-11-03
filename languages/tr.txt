@@ -45,6 +45,29 @@ menu_redo	ac45	&Yinele
 menu_select_all	f6f6	&Tümünü Seç
 menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
+tray_am	0d13	ÖÖ
+tray_charging	60c2	şarj oluyor
+tray_day_fri	fbe8	Cum
+tray_day_mon	82e1	Pzt
+tray_day_sat	2a77	Cmt
+tray_day_sun	d701	Paz
+tray_day_thu	308c	Per
+tray_day_tue	f425	Sal
+tray_day_wed	5757	Çar
+tray_discharging	41a0	boşalıyor
+tray_month_apr	1df2	Nis
+tray_month_aug	8fd4	Ağu
+tray_month_dec	7a73	Ara
+tray_month_feb	4b82	Şub
+tray_month_jan	ceae	Oca
+tray_month_jul	2ebc	Tem
+tray_month_jun	31e2	Haz
+tray_month_mar	ed2b	Mar
+tray_month_may	e226	May
+tray_month_nov	c404	Kas
+tray_month_oct	f3e9	Eki
+tray_month_sep	a4ef	Eyl
+tray_pm	f466	ÖS
 ui_confirm_again	b3ff	onaylamak için tekrar basın: 
 ui_field_digits	f52b	bir sayı rakamlardan oluşur
 ui_field_full	fe02	daha fazlası sığmaz

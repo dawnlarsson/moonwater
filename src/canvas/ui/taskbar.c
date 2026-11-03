@@ -612,7 +612,7 @@ static void taskbar_tray_one(char *into, int *at, int room, int which, const tm 
                 break;
         case 2: // battery.state
                 if (taskbar.battery_item)
-                        taskbar_tray_put(word, &(int){0}, (int)sizeof(word), taskbar.battery_charging ? "charging" : "discharging");
+                        taskbar_tray_put(word, &(int){0}, (int)sizeof(word), taskbar.battery_charging ? WORDS(tray_charging) : WORDS(tray_discharging));
                 break;
         case 3:
                 taskbar_tray_two(into, at, room, broken->tm_hour);
@@ -624,7 +624,7 @@ static void taskbar_tray_one(char *into, int *at, int room, int which, const tm 
                 taskbar_digits(word, broken->tm_hour % 12 ? broken->tm_hour % 12 : 12);
                 break;
         case 6:
-                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), broken->tm_hour < 12 ? "AM" : "PM");
+                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), broken->tm_hour < 12 ? WORDS(tray_am) : WORDS(tray_pm));
                 break;
         case 7:
         {
@@ -642,17 +642,21 @@ static void taskbar_tray_one(char *into, int *at, int room, int which, const tm 
                 return;
         case 10:
         {
-                static const char *const days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+                static const unsigned short days[7] = {LANGUAGE_tray_day_sun, LANGUAGE_tray_day_mon, LANGUAGE_tray_day_tue,
+                                                       LANGUAGE_tray_day_wed, LANGUAGE_tray_day_thu, LANGUAGE_tray_day_fri,
+                                                       LANGUAGE_tray_day_sat};
 
-                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), days[(unsigned)broken->tm_wday % 7]);
+                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), language_text(days[(unsigned)broken->tm_wday % 7]));
                 break;
         }
         case 11:
         {
-                static const char *const months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+                static const unsigned short months[12] = {LANGUAGE_tray_month_jan, LANGUAGE_tray_month_feb, LANGUAGE_tray_month_mar,
+                                                          LANGUAGE_tray_month_apr, LANGUAGE_tray_month_may, LANGUAGE_tray_month_jun,
+                                                          LANGUAGE_tray_month_jul, LANGUAGE_tray_month_aug, LANGUAGE_tray_month_sep,
+                                                          LANGUAGE_tray_month_oct, LANGUAGE_tray_month_nov, LANGUAGE_tray_month_dec};
 
-                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), months[(unsigned)broken->tm_mon % 12]);
+                taskbar_tray_put(word, &(int){0}, (int)sizeof(word), language_text(months[(unsigned)broken->tm_mon % 12]));
                 break;
         }
         case 12: // cpu.load: the first word of /proc/loadavg
@@ -717,6 +721,8 @@ static void taskbar_tray_render(void)
         time_t seconds;
         tm broken;
 
+        // The words of the tray are the language the compositor has published in the window table (its program reads /root/language).
+        language_take(compositor.table ? compositor.table->language : 0);
         into[0] = 0;
         taskbar.tray_chars = 0;
         if (!taskbar.tray_custom)

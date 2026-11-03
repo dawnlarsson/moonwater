@@ -45,6 +45,29 @@ menu_redo	ac45	&Rehacer
 menu_select_all	f6f6	Seleccionar t&odo
 menu_toggle_comment	92ac	Alternar co&mentario
 menu_undo	b9d3	&Deshacer
+tray_am	0d13	a. m.
+tray_charging	60c2	cargando
+tray_day_fri	fbe8	vie
+tray_day_mon	82e1	lun
+tray_day_sat	2a77	sáb
+tray_day_sun	d701	dom
+tray_day_thu	308c	jue
+tray_day_tue	f425	mar
+tray_day_wed	5757	mié
+tray_discharging	41a0	descargando
+tray_month_apr	1df2	abr
+tray_month_aug	8fd4	ago
+tray_month_dec	7a73	dic
+tray_month_feb	4b82	feb
+tray_month_jan	ceae	ene
+tray_month_jul	2ebc	jul
+tray_month_jun	31e2	jun
+tray_month_mar	ed2b	mar
+tray_month_may	e226	may
+tray_month_nov	c404	nov
+tray_month_oct	f3e9	oct
+tray_month_sep	a4ef	sep
+tray_pm	f466	p. m.
 ui_confirm_again	b3ff	pulse de nuevo para confirmar: 
 ui_field_digits	f52b	un número son dígitos
 ui_field_full	fe02	no cabe más

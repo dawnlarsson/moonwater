@@ -143220,7 +143220,8 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
     "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c"};
-static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c", "src/canvas/ui/editor.c", "src/canvas/ui/launcher.c"};
+static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c", "src/canvas/ui/editor.c", "src/canvas/ui/launcher.c",
+                                                         "src/canvas/ui/taskbar.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -143663,6 +143664,79 @@ static fn launcher_words_check(void)
 }
 #endif
 
+#if MOONWATER_UI_TASKBAR
+/*
+        The tray's words: the weekday, the month, AM or PM and the battery's state, which a format of the person's puts in the
+        tray. English is the three-letter names it always had (written out here), and a language taken says them in its own.
+*/
+static fn taskbar_words_check(void)
+{
+        static const char address_to const days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        static const char address_to const months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        struct windows address_to saved = compositor.table;
+        static struct windows table;
+        positive wrong = 0;
+        char word[32];
+        int at;
+        tm broken;
+
+        compositor.table = &table;
+        table.language = 0;
+        memory_zero(&broken, sizeof(broken));
+        taskbar.tray_custom = 1;
+        taskbar.battery_item = 1;
+        for (int day = 0; day < 7; day++)
+        {
+                broken.tm_wday = day, at = 0;
+                taskbar_tray_one(word, &at, sizeof(word), 10, &broken);
+                wrong += !!string_compare_max((string_address)word, (string_address)days[day], 8);
+        }
+        for (int month = 0; month < 12; month++)
+        {
+                broken.tm_mon = month, at = 0;
+                taskbar_tray_one(word, &at, sizeof(word), 11, &broken);
+                wrong += !!string_compare_max((string_address)word, (string_address)months[month], 8);
+        }
+        for (int hour = 0; hour < 24; hour += 11)
+        {
+                broken.tm_hour = hour, at = 0;
+                taskbar_tray_one(word, &at, sizeof(word), 6, &broken);
+                wrong += !!string_compare_max((string_address)word, (string_address)(hour < 12 ? "AM" : "PM"), 3);
+        }
+        for (int charging = 0; charging < 2; charging++)
+        {
+                taskbar.battery_charging = charging, at = 0;
+                taskbar_tray_one(word, &at, sizeof(word), 2, &broken);
+                wrong += !!string_compare_max((string_address)word, (string_address)(charging ? "charging" : "discharging"), 12);
+        }
+        check("taskbar words: the weekdays, the months, AM and PM and the battery's state are the English they were", !wrong);
+        table.language = 'd' | 'e' << 8;
+        language_take(table.language);
+        broken.tm_wday = 0, at = 0;
+        taskbar_tray_one(word, &at, sizeof(word), 10, &broken);
+        wrong = !!string_compare_max((string_address)word, (string_address) "So", 8);
+        broken.tm_mon = 2, at = 0;
+        taskbar_tray_one(word, &at, sizeof(word), 11, &broken);
+        wrong += !!string_compare_max((string_address)word, (string_address) "M\xc3\xa4r", 8);
+        taskbar.battery_charging = 1, at = 0;
+        taskbar_tray_one(word, &at, sizeof(word), 2, &broken);
+        wrong += !!string_compare_max((string_address)word, (string_address) "l\xc3\xa4" "dt", 8);
+        check("taskbar words: in German the same tokens say the German weekday, month and state", !wrong);
+        // A tray rendered takes the language the table says, as the compositor publishes it.
+        taskbar.tray_custom = 1;
+        string_copy_bounded((string_address)taskbar.tray_format, (string_address) "{date.weekday} {date.monthname}", sizeof(taskbar.tray_format));
+        table.language = 'f' | 'r' << 8;
+        taskbar_tray_render();
+        check("taskbar words: a tray drawn takes the language of the table, not the one it drew in before", language.code == ('f' | 'r' << 8) && taskbar.tray_chars > 0);
+        table.language = 0;
+        taskbar_tray_render();
+        check("taskbar words: and English again when the table says none", !language.code);
+        taskbar.tray_custom = 0, taskbar.battery_item = 0, taskbar.battery_charging = 0;
+        taskbar.tray_format[0] = 0;
+        compositor.table = saved;
+}
+#endif
+
 static fn language_check(void)
 {
         font_face regular, bold;
@@ -143690,6 +143764,9 @@ static fn language_check(void)
 #endif
 #if MOONWATER_UI_LAUNCHER
         launcher_words_check();
+#endif
+#if MOONWATER_UI_TASKBAR
+        taskbar_words_check();
 #endif
 }
 #endif
