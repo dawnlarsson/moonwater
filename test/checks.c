@@ -185096,54 +185096,130 @@ int main(int argc, char **argv)
 #include "../src/lib.util.c"
 #include "../src/canvas/gpu.c"
 /*
-        The GPU's copy against the CPU's, on a window of a screen's size: the rows land where they were put and nothing
-        around them moves. Needs an amdgpu render node; without one it says so and passes.
+        The GPU's four operations against the CPU's own routines (memory_copy, memory_fill_u32_rect, memory_over_tone_u32,
+        memory_glass_over_u32), pixel for pixel over a whole screen, on a window of an odd width at an odd place, with
+        random pixels of every alpha; then each operation timed on a window of a real size against the same routine.
+        Needs an amdgpu render node; without one it says so and passes.
 */
 #define SHARED_counted
 #include "checks.c"
 #undef SHARED_counted
 
+static unsigned int gpu_seed = 2463534242u;
+static unsigned int gpu_random(void)
+{
+        gpu_seed ^= gpu_seed << 13, gpu_seed ^= gpu_seed >> 17, gpu_seed ^= gpu_seed << 5;
+        return gpu_seed;
+}
+
+// The glass grain as compositor_grain_row builds it: a four by four ordered pattern of 0 to 3 levels, added (dark) or taken away (light).
+static unsigned int gpu_grains[2][4][128];
+static const unsigned int *gpu_grain(unsigned int light, int x, int y)
+{
+        static const unsigned char order[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+
+        for (int side = 0; side < 2; side++)
+                for (int row = 0; row < 4; row++)
+                        for (int at = 0; at < 64; at++)
+                        {
+                                unsigned int level = (unsigned int)order[row][at & 3] >> 2;
+
+                                gpu_grains[side][row][at] = side ? 0 : level * 0x010101u;
+                                gpu_grains[side][row][64 + at] = side ? level * 0x010101u : 0;
+                        }
+        return gpu_grains[light ? 1 : 0][y & 3] + (x & 15);
+}
+
+static unsigned int gpu_want[1500 * 300];
+
 b32 main(void)
 {
-        enum { W = 1220, H = 1320, OW = 2560, OH = 1440, X = 300, Y = 60 };
-        unsigned int address_to src, address_to dst;
-        positive from = GPU_DATA, to = GPU_DATA + (positive)W * H * 4, began, spent[16];
-        b32 done;
+        enum { BW = 1220, BH = 1320, SW = 2560, SH = 1440, W = 1219, H = 211, OW = 1500, OH = 300, X = 301, Y = 7 };
+        positive src_at = GPU_DATA, dst_at = GPU_DATA + (positive)BW * BH * 4, gnd_at = dst_at + (positive)SW * SH * 4;
+        unsigned int address_to src, address_to dst, address_to gnd;
+        struct gpu_args address_to a;
+        static const char *const names[4] = {"copy", "fill", "tone over", "glass over (dark)"};
+        unsigned int tones[5] = {0x80402010u, 0u, 0xff112233u, 0x01ffffffu, 0};
+        positive began, cpu[4], gpu_time[4];
 
-        if (!gpu_start((positive)(W * H + OW * OH) * 4))
+        if (!gpu_start(((positive)BW * BH * 2 + (positive)SW * SH) * 4))
         {
                 string_format(log, "gpu: no amdgpu render node, skipped\n");
                 return test_report(null);
         }
-        src = (unsigned int address_to)((p8 address_to)gpu.at + from), dst = (unsigned int address_to)((p8 address_to)gpu.at + to);
-        for (positive i = 0; i < (positive)W * H; i++)
-                src[i] = 0xff000000u | (unsigned int)(i * 2654435761u >> 8);
-        for (positive i = 0; i < (positive)OW * OH; i++)
-                dst[i] = 0x55555555u;
-        done = gpu_copy(from, W * 4, to + ((positive)Y * OW + X) * 4, OW * 4, W * 4, H);
-        check("gpu: the copy finishes", done);
-        for (int y = 0; y < OH; y++)
-                for (int x = 0; x < OW; x++)
-                {
-                        b32 inside = x >= X && x < X + W && y >= Y && y < Y + H;
-                        unsigned int want = inside ? src[(y - Y) * W + (x - X)] : 0x55555555u;
+        src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
+        gnd = (unsigned int address_to)((p8 address_to)gpu.at + gnd_at), a = GPU_ARGS;
+        tones[4] = gpu_random() | 0x80000000u;
 
-                        checks++;
-                        if (dst[(positive)y * OW + x] != want && ++failures < 5)
-                                string_format(log, "  FAIL gpu: pixel %p,%p is %p, wanted %p\n", (positive)x, (positive)y,
-                                              (positive)dst[(positive)y * OW + x], (positive)want);
-                }
-        for (int i = 0; i < 16; i++)
+        // 1. Every operation, the whole OW by OH screen compared, the rect W by H at X, Y.
+        for (int op = 0; op < 8; op++)
         {
-                began = clock_monotonic_nanoseconds();
-                gpu_copy(from, W * 4, to + ((positive)Y * OW + X) * 4, OW * 4, W * 4, H);
-                spent[i] = clock_monotonic_nanoseconds() - began;
+                unsigned int v = op == 1 ? gpu_random() : op >= 2 && op < 7 ? tones[op - 2] : 0, light = op == 7;
+                int kind = op < 2 ? op : op < 7 ? 2 : 3;
+                positive mismatches = 0;
+
+                for (positive i = 0; i < (positive)W * H; i++)
+                        src[i] = gpu_random(), gnd[i] = gpu_random() | 0xff000000u;
+                for (positive i = 0; i < (positive)OW * OH; i++)
+                        dst[i] = gpu_want[i] = gpu_random();
+                for (int r = 0; r < H; r++)
+                {
+                        unsigned int address_to row = gpu_want + (positive)(Y + r) * OW + X;
+
+                        if (kind == 0)
+                                memory_copy(row, src + (positive)r * W, W * 4);
+                        else if (kind == 1)
+                                memory_fill_u32_rect(row, OW, W, 1, v);
+                        else if (kind == 2)
+                                memory_over_tone_u32(row, W, v);
+                        else
+                                memory_glass_over_u32(row, src + (positive)r * W, gnd + (positive)r * W, W, gpu_grain(light, X, Y + r));
+                }
+                a->s = GPU_VA + src_at, a->d = GPU_VA + dst_at + ((positive)Y * OW + X) * 4, a->g = GPU_VA + gnd_at;
+                a->sp = W, a->dp = OW, a->gp = W, a->w = W, a->rows = H, a->op = (unsigned int)kind, a->v = kind == 3 ? light : v, a->x0 = X, a->y0 = Y;
+                check("gpu: the operation finishes", gpu_run());
+                for (positive i = 0; i < (positive)OW * OH; i++)
+                {
+                        checks++;
+                        if (dst[i] != gpu_want[i] && (++failures, ++mismatches) < 4)
+                                string_format(log, "  FAIL gpu %s %p: pixel %p,%p is %p, wanted %p\n", names[kind], (positive)op, i % OW, i / OW,
+                                              (positive)dst[i], (positive)gpu_want[i]);
+                }
         }
-        for (int i = 1; i < 16; i++)
-                if (spent[i] < spent[0])
-                        spent[0] = spent[i];
-        string_format(log, "  gpu: copy %p x %p into %p x %p, best of 16: %p us\n", (positive)W, (positive)H, (positive)OW, (positive)OH,
-                      spent[0] / 1000);
+
+        // 2. Each operation at the size a window is, GPU (submit and wait) against the CPU's routine, best of 8, each side run back to back.
+        for (int kind = 0; kind < 4; kind++)
+        {
+                cpu[kind] = gpu_time[kind] = ~0ull;
+                a->s = GPU_VA + src_at, a->d = GPU_VA + dst_at + ((positive)60 * SW + 300) * 4, a->g = GPU_VA + src_at;
+                a->sp = BW, a->dp = SW, a->gp = BW, a->w = BW, a->rows = BH, a->op = (unsigned int)kind, a->v = kind == 3 ? 0 : 0x80402010u, a->x0 = 300, a->y0 = 60;
+                for (int i = 0; i < 8; i++)
+                {
+                        unsigned int address_to row = dst + (positive)60 * SW + 300;
+
+                        began = clock_monotonic_nanoseconds();
+                        for (int r = 0; r < BH; r++)
+                                if (kind == 0)
+                                        memory_copy(row + (positive)r * SW, src + (positive)r * BW, BW * 4);
+                                else if (kind == 1)
+                                        memory_fill_u32_rect(row + (positive)r * SW, SW, BW, 1, 0x80402010u);
+                                else if (kind == 2)
+                                        memory_over_tone_u32(row + (positive)r * SW, BW, 0x80402010u);
+                                else
+                                        memory_glass_over_u32(row + (positive)r * SW, src + (positive)r * BW, src + (positive)r * BW, BW, gpu_grain(0, 300, 60 + r));
+                        began = clock_monotonic_nanoseconds() - began;
+                        cpu[kind] = began < cpu[kind] ? began : cpu[kind];
+                }
+                for (int i = 0; i < 8; i++)
+                {
+                        began = clock_monotonic_nanoseconds();
+                        gpu_run();
+                        began = clock_monotonic_nanoseconds() - began;
+                        gpu_time[kind] = began < gpu_time[kind] ? began : gpu_time[kind];
+                }
+                string_format(log, "  gpu: %s of %p x %p into %p x %p: GPU %p us, CPU %p us\n", names[kind], (positive)BW, (positive)BH, (positive)SW, (positive)SH,
+                              gpu_time[kind] / 1000, cpu[kind] / 1000);
+        }
         return test_report(null);
 }
 #endif /* CHECK_gpu */
