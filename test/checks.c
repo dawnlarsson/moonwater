@@ -134054,7 +134054,7 @@ static fn check_launcher_anchor(void)
                                 case TASKBAR_LEFT: button[0] = screen[0], button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
                                 default: button[0] = right - thick, button[1] = screen[1] + gap, button[2] = thick, button[3] = high; break;
                                 }
-                                ui_anchor_place(edges[at], button, screen, width, height, &x, &y);
+                                ui_anchor_place(ui_panel_side(edges[at]), 0, button, screen, width, height, &x, &y);
                                 beside &= edges[at] == TASKBAR_BOTTOM ? y + height == button[1] && x == button[0]
                                           : edges[at] == TASKBAR_TOP  ? y == button[1] + button[3] && x == button[0]
                                           : edges[at] == TASKBAR_LEFT ? x == button[0] + button[2] && y == button[1]
@@ -134065,11 +134065,11 @@ static fn check_launcher_anchor(void)
         {
                 int button[4] = {1900, 1056, 21, 24}, x, y;
 
-                ui_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 300, &x, &y);
+                ui_anchor_place(UI_ABOVE, 0, button, screens[0], 560, 300, &x, &y);
                 inside &= x == 1920 - 560 && y == 1056 - 300;
-                ui_anchor_place(TASKBAR_BOTTOM, button, screens[0], 560, 1200, &x, &y);
+                ui_anchor_place(UI_ABOVE, 0, button, screens[0], 560, 1200, &x, &y);
                 inside &= x == 1920 - 560 && y == 0;
-                ui_anchor_place(TASKBAR_RIGHT, (int[4]){1896, 4, 24, 21}, screens[0], 2400, 300, &x, &y);
+                ui_anchor_place(UI_LEFT, 0, (int[4]){1896, 4, 24, 21}, screens[0], 2400, 300, &x, &y);
                 inside &= x == 0 && y == 4;
         }
         check("launcher beside the button: the bar is above a bottom panel's button, below a top panel's and beside a side panel's, at every scale and on any screen", beside);
@@ -145963,6 +145963,25 @@ static fn check_kit_spring_fresh(void)
         check("kit spring: a spring that is started is the same whatever memory it was in: the pace it starts at is the clock's", same);
 }
 
+// ui_anchor_place: one placement for every side, flipped when asked and only then. Above a rectangle at the top flips below it;
+// right of a rectangle at the right flips left; a point's menu flips up and left; an exact place is clamped, not flipped.
+static fn check_kit_anchor_flip(void)
+{
+        const int screen[4] = {0, 0, 1000, 800}, rect[4] = {400, 10, 100, 20};
+        int x = 0, y = 0;
+
+        ui_anchor_place(UI_ABOVE, 0, rect, screen, 200, 100, &x, &y);
+        check("kit anchor: above a rectangle at the top, not flipped, is kept on the screen at the top", x == 400 && y == 0);
+        ui_anchor_place(UI_ABOVE, UI_FLIP_SIDE, rect, screen, 200, 100, &x, &y);
+        check("kit anchor: above a rectangle at the top, flipped, goes below it", x == 400 && y == 30);
+        ui_anchor_place(UI_RIGHT, UI_FLIP_SIDE, (int[4]){900, 300, 80, 20}, screen, 200, 100, &x, &y);
+        check("kit anchor: right of a rectangle at the right edge, flipped, goes left of it", x == 700 && y == 300);
+        ui_anchor_place(UI_BELOW, UI_FLIP_SIDE | UI_FLIP_CROSS, (int[4]){990, 600, 0, 0}, screen, 200, 300, &x, &y);
+        check("kit anchor: a point's menu flipped across and up goes left and up of the point", x == 790 && y == 300);
+        ui_anchor_place(UI_AT, 0, (int[4]){990, 790, 0, 0}, screen, 200, 300, &x, &y);
+        check("kit anchor: an exact place is clamped to the screen and not flipped", x == 800 && y == 500);
+}
+
 // ui_pair_press: the second press within the gap of the first is the pair; a pair clears the mark (so a third is a first),
 // and a press after the gap is a first.
 static fn check_kit_pair_press(void)
@@ -156269,6 +156288,7 @@ b32 main()
         check_kit_wheel_near_end();
         check_kit_notch_take();
         check_kit_pair_press();
+        check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();
         check_terminal_wheel_curve();

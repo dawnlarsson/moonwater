@@ -12177,38 +12177,20 @@ static int compositor_popup_parent[WINDOWS] = {-1, -1, -1, -1, -1, -1, -1, -1, -
 static void compositor_popup_place(int ax, int ay, int aw, int ah, int width, int height, unsigned int flags, const int *screen,
                                    int *x, int *y)
 {
-        int left = screen[0], top = screen[1], right = screen[0] + screen[2], bottom = screen[1] + screen[3];
+        // The window's flags say the side and the flips (ui_anchor_place does the placing, for the kit's panels too): EXACT is
+        // its own place, its top left held on the screen; RIGHT is beside the rectangle's right edge, flipped left when it
+        // would run off; a POINT is a rectangle of no size, below and flipped above, and left when it would run off the right;
+        // else below the rectangle, flipped above when it would run off the bottom.
+        int rect[4] = {ax, ay, aw, ah};
+        unsigned int side = UI_BELOW, flip = UI_FLIP_SIDE;
 
-        // Its program worked out the place: its top left is the anchor, held on the screen and no more.
         if (flags & WINDOW_POPUP_EXACT)
-        {
-                *x = ax + width > right ? right - width : ax;
-                *y = ay + height > bottom ? bottom - height : ay;
-                *x = *x < left ? left : *x;
-                *y = *y < top ? top : *y;
-                return;
-        }
-        if (flags & WINDOW_POPUP_RIGHT)
-        {
-                *x = ax + aw, *y = ay;
-                if (*x + width > right)
-                        *x = ax - width;
-                if (*y + height > bottom)
-                        *y = bottom - height;
-        }
-        else
-        {
-                *x = ax;
-                *y = flags & WINDOW_POPUP_POINT ? ay : ay + ah;
-                if (*x + width > right)
-                        *x = flags & WINDOW_POPUP_POINT ? ax - width : right - width;
-                if (*y + height > bottom)
-                        *y = ay - height;
-        }
-        *x = *x + width > right ? right - width : *x;
-        *y = *y + height > bottom ? bottom - height : *y;
-        *x = *x < left ? left : *x;
-        *y = *y < top ? top : *y;
+                side = UI_AT, flip = 0;
+        else if (flags & WINDOW_POPUP_RIGHT)
+                side = UI_RIGHT;
+        else if (flags & WINDOW_POPUP_POINT)
+                rect[2] = rect[3] = 0, flip |= UI_FLIP_CROSS;
+        ui_anchor_place(side, flip, rect, screen, width, height, x, y);
 }
 
 // The window a popup belongs to at the root of its chain, or the row itself.

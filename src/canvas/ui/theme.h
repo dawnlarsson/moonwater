@@ -232,4 +232,57 @@ static fn ui_theme_make(struct ui_theme address_to theme, unsigned int dark, uns
         }
 }
 
+/*
+        Where a width by height window goes beside a rectangle (rect: x, y, width, height, in the desktop's space) on a screen
+        (x, y, width, height). side is where it goes: UI_AT its top left, UI_BELOW the rectangle's bottom edge, UI_ABOVE its top
+        edge, UI_RIGHT its right edge and UI_LEFT its left edge; it is aligned to the rectangle along the other axis and kept
+        inside the screen. flip says what to do when it does not fit: UI_FLIP_SIDE turns it to the other side of the rectangle
+        (below is flipped above, to the right is flipped to the left), and UI_FLIP_CROSS turns it to the other side along the
+        other axis (a menu at a point goes left when it would run off the right). Without flips it is kept on its side and
+        clamped. This is the one place a window is put beside something: the kit's panel buttons (ui_anchor_set), the menus
+        and the compositor's popups (compositor_popup_place maps a window's popup flags onto it).
+*/
+#define UI_AT 0
+#define UI_BELOW 1
+#define UI_ABOVE 2
+#define UI_RIGHT 3
+#define UI_LEFT 4
+#define UI_FLIP_SIDE 1u
+#define UI_FLIP_CROSS 2u
+
+static inline void ui_anchor_place(unsigned int side, unsigned int flip, const int *rect, const int *screen, int width, int height,
+                                   int *x, int *y)
+{
+        int left = screen[0], top = screen[1], right = screen[0] + screen[2], bottom = screen[1] + screen[3];
+        int ax = rect[0], ay = rect[1], aw = rect[2], ah = rect[3];
+
+        *x = ax, *y = ay;
+        if (side == UI_BELOW)
+        {
+                *y = ay + ah;
+                if ((flip & UI_FLIP_SIDE) && *y + height > bottom)
+                        *y = ay - height;
+        }
+        else if (side == UI_ABOVE)
+        {
+                *y = ay - height;
+                if ((flip & UI_FLIP_SIDE) && *y < top)
+                        *y = ay + ah;
+        }
+        else if (side == UI_RIGHT)
+        {
+                *x = ax + aw;
+                if ((flip & UI_FLIP_SIDE) && *x + width > right)
+                        *x = ax - width;
+        }
+        else if (side == UI_LEFT)
+                *x = ax - width;
+        if ((side == UI_BELOW || side == UI_ABOVE) && (flip & UI_FLIP_CROSS) && *x + width > right)
+                *x = ax - width;
+        *x = *x + width > right ? right - width : *x;
+        *y = *y + height > bottom ? bottom - height : *y;
+        *x = *x < left ? left : *x;
+        *y = *y < top ? top : *y;
+}
+
 #endif

@@ -10239,22 +10239,10 @@ struct ui_anchor
         unsigned int edge, number; // the edge the panel is along, and the screen's number
 };
 
-static void ui_anchor_place(unsigned int edge, const int address_to button, const int address_to screen, int width, int height,
-                            int address_to x, int address_to y)
+// The side of a panel's button a window goes on: above a bottom panel, below a top one, right of a left one, left of the rest.
+static unsigned int ui_panel_side(unsigned int edge)
 {
-        *x = button[0], *y = button[1];
-        if (edge == TASKBAR_BOTTOM)
-                *y = button[1] - height;
-        else if (edge == TASKBAR_TOP)
-                *y = button[1] + button[3];
-        else if (edge == TASKBAR_LEFT)
-                *x = button[0] + button[2];
-        else
-                *x = button[0] - width;
-        *x = *x > screen[0] + screen[2] - width ? screen[0] + screen[2] - width : *x;
-        *y = *y > screen[1] + screen[3] - height ? screen[1] + screen[3] - height : *y;
-        *x = *x < screen[0] ? screen[0] : *x;
-        *y = *y < screen[1] ? screen[1] : *y;
+        return edge == TASKBAR_BOTTOM ? UI_ABOVE : edge == TASKBAR_TOP ? UI_BELOW : edge == TASKBAR_LEFT ? UI_RIGHT : UI_LEFT;
 }
 
 static void ui_anchor_take(struct ui_anchor address_to anchor, const struct windows address_to table, b32 asked)
@@ -10278,7 +10266,7 @@ static void ui_anchor_set(const struct ui_anchor address_to anchor, struct windo
         int x, y;
 
         memory_zero(&place, sizeof(place));
-        ui_anchor_place(anchor->edge, anchor->button, anchor->screen, width, height, &x, &y);
+        ui_anchor_place(ui_panel_side(anchor->edge), 0, anchor->button, anchor->screen, width, height, &x, &y);
         place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
         place.x = x - anchor->screen[0], place.y = y - anchor->screen[1];
         place.width = (unsigned int)width, place.height = (unsigned int)height;
