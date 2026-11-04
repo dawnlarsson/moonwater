@@ -167539,6 +167539,7 @@ static void test_touch(void)
         wlc_forget(c);
         wlc_send(c, seat, WLQ_wl_seat_get_touch, touch);
         WLCHECK(c->errors == 0, "a seat with touch gives a touch object");
+        WLCHECK(wayland_row_takes_touch(0) == 1, "a client with a touch takes the fingers on its window, so the pointer's are not sent to it");
         wlc_forget(c);
 
         wayland_touch_down(0, 3, 10, 20);
@@ -167639,6 +167640,7 @@ static void test_axis_stop(void)
         wayland_pointer_axis_stop(0);
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_stop) == 0, "a wheel's scroll has no stop");
+        WLCHECK(wayland_row_takes_touch(0) == 0, "a client with no touch takes no finger, and keeps the pointer's events for one");
         WLCHECK(c->errors == 0, "none of it is a protocol error");
         wlc_end(c);
         leak_check("axis stop");

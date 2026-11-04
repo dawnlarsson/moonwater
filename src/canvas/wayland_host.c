@@ -2050,6 +2050,10 @@ static void compositor_wl_drain(int row)
                 }
                 if (type != WINDOW_EVENT_MOTION && type != WINDOW_EVENT_BUTTON && type != WINDOW_EVENT_WHEEL)
                         continue;
+                // A finger on a window whose client holds a wl_touch is told of by its touch (compositor_wl_touch_report): the
+                // pointer's version of the same finger (the kit's press and motion, which say so) is not sent to that client.
+                if ((flags & WINDOW_KEY_TOUCH) && wayland_row_takes_touch(row))
+                        continue;
                 // Whatever the event, the pointer is on this window for the client first.
                 if (wayland.pointer_row != row)
                         wayland_pointer_to(row, type == WINDOW_EVENT_MOTION ? a : compositor.pointer_x - compositor.x[row],
@@ -2108,6 +2112,10 @@ static void compositor_wl_wake(void)
                                 wayland_repeat_changed();
                         }
                 }
+                // A finger was the last thing used (the pointer is hidden under it) on a window whose client holds a touch: the
+                // pointer is not on that window for the client, the touch is; no enter is sent for the finger's move.
+                if (want >= 0 && compositor.touch.hidden && wayland_row_takes_touch(want))
+                        want = -1;
                 if (want != wayland.pointer_row)
                         wayland_pointer_to(want, want >= 0 ? compositor.pointer_x - compositor.x[want] : 0,
                                            want >= 0 ? compositor.pointer_y - compositor.y[want] : 0);

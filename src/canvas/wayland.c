@@ -3596,6 +3596,21 @@ static void wayland_touch_frame_to(struct wayland_client *c, long slot)
         wayland_end(&e);
 }
 
+/*
+        Whether the window in row has a client that holds a wl_touch. A finger on such a window is the touch's: the compositor's
+        pointer events for it (the kit's gesture turns a finger into a press and a motion) are not sent to that client, so it is
+        told each finger once, as a touch, and not twice.
+*/
+WAYLAND_API long wayland_row_takes_touch(long row)
+{
+        struct wayland_client *c = 0;
+        long slots[WAYLAND_SEATS];
+
+        if (row < 0 || row >= WAYLAND_ROWS || !wayland_row_surface(row, &c))
+                return 0;
+        return wayland_seats(c, WLI_wl_touch, slots) > 0;
+}
+
 /* A finger went down on row at (x, y) of its picture; id is its tracking id, unique while it is down. */
 WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
 {
