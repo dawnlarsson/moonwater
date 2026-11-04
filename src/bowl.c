@@ -8816,6 +8816,166 @@ bowl_profile_session(const struct bowl_profile address_to profile,
         return bowl_refuse("cannot start /bin/sh\n");
 }
 
+/*
+        Whether a local database entry (NAME-VERSION-RELEASE, the directory
+        pacman keeps each installed package in) is the package NAME. Versions
+        and releases have no dash in them, so the last two dashes are the
+        package's own.
+*/
+static bool bowl_entry_is(string_address entry, string_address name)
+{
+        positive dashes = 0;
+        positive cut = 0;
+
+        for (positive at = string_length(entry); at-- > 0 && dashes < 2;)
+                if (entry[at] == '-')
+                {
+                        dashes++;
+                        cut = at;
+                }
+        return dashes == 2 && cut == string_length(name) &&
+               !string_compare_max(entry, name, cut);
+}
+
+/* The packages of a component the bowl's own database already has before the install: the install did not add them. */
+static fn __attribute__((__noinline__))
+bowl_profile_held(string_address root, string_address address_to packages,
+                  bool address_to held)
+{
+        file_walk walk;
+        struct linux_dirent64 address_to entry;
+        p8 where[BOWL_PATH_LIMIT];
+
+        if (!bowl_root_path(where, sizeof(where), root, "/var/lib/pacman/local") ||
+            !file_walk_open(address_of walk, AT_FDCWD, where))
+                return;
+
+        while ((entry = file_walk_next(address_of walk)))
+                for (positive at = 0; packages[at] && at < BOWL_PROFILE_ARGV; at++)
+                        if (!held[at] && bowl_entry_is(entry->d_name, packages[at]))
+                                held[at] = true;
+
+        file_walk_close(address_of walk);
+}
+
+/* One marker line for a package: "package NAME added", or "held" for one the bowl already had. */
+static fn bowl_profile_note_package(bipolar marker, string_address package, bool held)
+{
+        static const p8 head[] = "package ";
+        p8 line[BOWL_SHEBANG_LIMIT];
+        string_address word = held ? " held\n" : " added\n";
+        positive length = string_length(package);
+        positive used = sizeof(head) - 1;
+
+        if (marker < 0 || used + length + 8 >= sizeof(line))
+                return;
+        memory_copy(line, head, used);
+        memory_copy(line + used, package, length);
+        used += length;
+        memory_copy(line + used, word, string_length(word));
+        used += string_length(word);
+        system_write_all((positive)marker, line, used);
+}
+
+/*
+        The marker says which packages the install added and which the bowl
+        already held, so a remove takes away only what the install put in.
+        Lines the marker already has (launchers' names) are unchanged: a
+        package line has a space in it, which no launcher's name has.
+*/
+static b32 __attribute__((__noinline__))
+bowl_profile_note_packages(string_address root, string_address name,
+                           string_address address_to packages,
+                           bool address_to held)
+{
+        p8 marker_path[BOWL_PATH_LIMIT];
+        p8 state[BOWL_PATH_LIMIT];
+        bipolar marker;
+        bipolar failed;
+
+        if (!bowl_profile_marker(marker_path, sizeof(marker_path), root, name) ||
+            !bowl_root_path(state, sizeof(state), root, BOWL_PROFILE_STATE))
+                return bowl_refuse("bowl path is too long\n");
+
+        failed = bowl_mkdir_parents(state);
+        return_if(failed < 0, bowl_fail(state, failed));
+        marker = bowl_profile_marker_open(root, name, FILE_APPEND);
+        return_if(marker < 0, bowl_fail(marker_path, marker));
+
+        for (positive at = 0; packages[at] && at < BOWL_PROFILE_ARGV; at++)
+                bowl_profile_note_package(marker, packages[at], held[at]);
+        system_close(marker);
+        return 0;
+}
+
+/*
+        One marker line. "package NAME added" marks NAME as one this install
+        added; "held" marks one the bowl had. Any other line is a launcher's
+        name, and not read here.
+*/
+static bool bowl_profile_recorded_line(string_address line,
+                                       string_address address_to packages,
+                                       bool address_to added,
+                                       bool address_to recorded)
+{
+        positive at = 8;
+        positive stop = at;
+
+        if (!string_has_prefix(line, "package "))
+                return false;
+        address_to recorded = true;
+        while (line[stop] && line[stop] != ' ')
+                stop++;
+        if (line[stop] != ' ')
+                return true;
+        for (positive which = 0; packages[which] && which < BOWL_PROFILE_ARGV; which++)
+                if (string_length(packages[which]) == stop - at &&
+                    !string_compare_max(line + at, packages[which], stop - at) &&
+                    string_equals(line + stop + 1, "added"))
+                        added[which] = true;
+        return true;
+}
+
+/* Reads a profile's marker for the packages its install added. recorded says whether the marker has any package line at all:
+   a marker from before packages were recorded has none, and the remove takes every package of the list, as it always did. */
+static fn __attribute__((__noinline__))
+bowl_profile_recorded(string_address root, string_address name,
+                      string_address address_to packages, bool address_to added,
+                      bool address_to recorded)
+{
+        p8 chunk[4096];
+        p8 line[BOWL_SHEBANG_LIMIT];
+        positive have = 0;
+        bool whole = true;
+        bipolar handle;
+        bipolar got;
+
+        address_to recorded = false;
+        handle = bowl_profile_marker_open(root, name, FILE_READ);
+        if (handle < 0)
+                return;
+
+        while ((got = system_read_retry((positive)handle, chunk, sizeof(chunk))) > 0)
+                for (bipolar at = 0; at < got; at++)
+                {
+                        if (chunk[at] != '\n')
+                        {
+                                if (have + 1 < sizeof(line))
+                                        line[have++] = chunk[at];
+                                else
+                                        whole = false;
+                                continue;
+                        }
+                        line[have] = end;
+                        if (whole)
+                                bowl_profile_recorded_line(line, packages, added, recorded);
+                        have = 0;
+                        whole = true;
+                }
+
+        system_close(handle);
+}
+
 static b32 bowl_profile_install(const struct bowl_profile address_to profile)
 {
         return_if(profile->unavailable, bowl_refuse(profile->unavailable));
@@ -8827,6 +8987,7 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                 const struct bowl_distro address_to distro =
                     bowl_find_distro(part->distro);
                 b32 failed;
+                bool held[BOWL_PROFILE_ARGV] = {false};
 
                 if (!distro || !distro->install)
                         return bowl_refuse("a profile cannot use that "
@@ -8849,10 +9010,14 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                         string_format(log, bowl_label "%s: adding %s packages\n",
                                       profile->name, distro->label);
                         log_flush();
+                        bowl_profile_held(distro->root, part->packages, held);
                         failed = bowl_profile_packages(
                             distro, distro->install, part->packages,
                             "the package manager could not add them\n");
                 }
+                if (!failed)
+                        failed = bowl_profile_note_packages(
+                            distro->root, profile->name, part->packages, held);
                 if (!failed)
                         failed = profile->libraries
                                      ? bowl_profile_mark(distro->root,
@@ -9065,14 +9230,23 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                 failed = bowl_profile_unexpose(distro->root, profile->name, marker);
                 if (!failed && bowl_has(distro->root, distro->marker))
                 {
-                        // Not those another installed profile holds as well.
+                        // Only those the install added (a marker from before
+                        // packages were recorded has none, and takes its whole
+                        // list), and not those another installed profile holds as well.
                         string_address left[BOWL_PROFILE_ARGV];
+                        bool added[BOWL_PROFILE_ARGV] = {false};
+                        bool recorded = false;
                         positive count = 0;
 
+                        bowl_profile_recorded(distro->root, profile->name,
+                                              part->packages, added,
+                                              address_of recorded);
                         for (positive at = 0;
-                             part->packages[at] && count + 1 < BOWL_PROFILE_ARGV;
+                             part->packages[at] && at < BOWL_PROFILE_ARGV &&
+                             count + 1 < BOWL_PROFILE_ARGV;
                              at++)
-                                if (!bowl_profile_package_shared(
+                                if ((!recorded || added[at]) &&
+                                    !bowl_profile_package_shared(
                                         profile, part->distro, distro->root,
                                         part->packages[at]))
                                         left[count++] = part->packages[at];

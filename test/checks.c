@@ -97591,6 +97591,35 @@ static fn multilib_rows(void)
                   bowl_multilib_has(ended, string_length(ended)));
 }
 
+/*
+        What an install records of its packages, and what a remove reads back: a local
+        database entry names its package by the last two dashes, and a marker line
+        "package NAME added" is one a remove takes away, "held" one it leaves. A line
+        with no package word is a launcher's name, and is not one of these.
+*/
+static fn record_rows(void)
+{
+        static string_address listed[] = {"mesa", "libpulse", "lib32-mesa", null};
+        bool added[BOWL_PROFILE_ARGV] = {false};
+        bool recorded = false;
+        bool grants = bowl_profile_recorded_line("package mesa added", listed, added, address_of recorded);
+        bool held = bowl_profile_recorded_line("package libpulse held", listed, added, address_of recorded);
+        bool named = bowl_profile_recorded_line("package lib32-mesa added", listed, added, address_of recorded);
+        bool launcher_recorded = false;
+        bool launcher_line = bowl_profile_recorded_line("steam", listed, added, address_of launcher_recorded);
+
+        check("A local database entry is its package by name: lib32-mesa is not mesa, mesa is mesa, and no version is no package",
+              bowl_entry_is("lib32-mesa-26.0-1", "lib32-mesa") && !bowl_entry_is("lib32-mesa-26.0-1", "mesa") &&
+                  bowl_entry_is("mesa-26.0-1", "mesa") && !bowl_entry_is("mesa-libs-26.0-1", "mesa") &&
+                  !bowl_entry_is("mesa", "mesa"));
+        check("A marker's package line is not a launcher's name, which bowl_name refuses",
+              !bowl_name("package mesa added", true));
+        check("A package line marks the packages the install added, and the bowl's own are left unmarked",
+              grants && held && named && recorded && added[0] && !added[1] && added[2]);
+        check("A launcher's name is no package line and marks nothing",
+              !launcher_line && !launcher_recorded);
+}
+
 static fn steam_profile(void)
 {
         const struct bowl_profile address_to steam = bowl_find_profile("steam");
@@ -99698,6 +99727,7 @@ b32 main(void)
         profiles();
         chrome_profile();
         multilib_rows();
+        record_rows();
         steam_profile();
         downloads();
         download_ceiling();
