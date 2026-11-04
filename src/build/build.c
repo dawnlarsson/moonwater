@@ -34,6 +34,7 @@
 
 #define STANDARD_APPLETS
 #define STANDARD_KEEP_SPOOL
+#define MOONWATER_BUILD_TOOL // the shell below is the tool's own: it composes nothing, and the GPU's kernels are what this tool makes
 #include "../lib.util.c"
 #include "../moonwater/spark.c"
 #include "../sh/shell.c"

@@ -12,7 +12,9 @@ client=$2
 info=${3:-}
 work=${4:-$(mktemp -d)}
 input=${5:-}
-extra=
+# Options for the compositor. A machine with a render node has the headless one compose on the GPU (-G): the desktop is drawn by the card there, as it is in a
+# running system, and by the processor where there is no card (WAYLAND_E2E_EXTRA= says none, whatever the machine has).
+if [ -z "${WAYLAND_E2E_EXTRA+x}" ] && [ -c /dev/dri/renderD128 ]; then extra=-G; else extra=${WAYLAND_E2E_EXTRA:-}; fi
 failures=0
 mkdir -p "$work/bin"
 ln -sf "$compositor" "$work/bin/compositor"
@@ -80,6 +82,21 @@ esac
 case $out in
 *"configures 1"*"acks 1"*) row ok "its toplevel is configured once and acknowledged once" ;;
 *) row FAIL "its toplevel is configured once and acknowledged once" "$out" ;;
+esac
+
+# With -G the card composed the desktop the client drew into: the compositor says so once on its log, or says why it did not (a card its kernels are not
+# for is no failure; a card that drew its self-test wrong is).
+case $extra in
+*-G*)
+        if grep -q "the GPU composes the desktop" "$work/compositor.log"; then
+                row ok "the GPU composed the desktop the client drew into"
+        elif grep -q "the GPU is not trusted" "$work/compositor.log"; then
+                row FAIL "the GPU composed the desktop the client drew into" "$(grep "compositor: the GPU" "$work/compositor.log" | head -1)"
+        elif grep -q "no card the GPU's kernels are for" "$work/compositor.log"; then
+                row ok "the GPU composed the desktop the client drew into (skipped: the card is not one the kernels are for)"
+        else
+                row FAIL "the GPU composed the desktop the client drew into" "the compositor said nothing of it"
+        fi ;;
 esac
 
 # The picture is on the screen: a window of the size it drew.

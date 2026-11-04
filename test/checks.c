@@ -189268,6 +189268,7 @@ b32 main(void)
 
         if (!gpu_start(((positive)BW * BH * 2 + (positive)SW * SH + (positive)7680 * 4320) * 4 + (33 << 20)))
         {
+                check("gpu: the card passes the self-test", !gpu.broken);
                 string_format(log, "gpu: no amdgpu render node, skipped\n");
                 return test_report(null);
         }
@@ -189477,6 +189478,7 @@ b32 main(void)
 
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {
+                check("gpu: the card passes the self-test", !gpu.broken);
                 string_format(log, "gpu: no amdgpu render node, skipped\n");
                 return test_report(null);
         }

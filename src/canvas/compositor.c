@@ -121,6 +121,9 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #include "ui/theme.h"
 #include "ui/motion.h"
 #include "ui/taskbar.h"
+#if !defined(SHELL_NO_GPU) && !defined(MOONWATER_BUILD_TOOL)
+#include "gpu.c" // GPU rendering, on unless the build's header says SHELL_NO_GPU (CONFIG_MOONWATER_GPU=n); the build tool, which makes its kernels, is without it
+#endif
 
 static struct taskbar_view compositor_taskbar_view(void);
 static unsigned int compositor_line_lit(void); // the lit line of the window with the keys, the theme's (compositor_theme_read)
@@ -6831,6 +6834,118 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
         }
 }
 
+#ifdef MOONWATER_GPU_C
+/*
+        The present on the GPU (src/canvas/gpu.c): the frames of a present as the records of its scene (compositor_gpu_frames), drawn by the card straight into
+        the scanout -- the display node's dumb buffer, which the render node is given by PRIME, or a headless file's pages as a userptr buffer -- over the union of
+        the damage, and the card told what changed as it is when the processor drew it. It is for what it draws exactly as the processor does (every frame is a
+        window with a picture at its own size, a tab, a line, a close button); anything else, a software cursor, a finger's mark, a scaled landing, a turned screen, a
+        mode whose width is not a multiple of 4, a card of another family, a refusal or a hang, is the processor's, for that present, and three hangs in a row
+        end the GPU's compose until the setting is read again. Headless it is for -G.
+*/
+static int compositor_gpu; // GPU rendering as the setting has it (below)
+static void compositor_say(string_address what, bipolar value);
+#define COMPOSITOR_GPU_OPS_AT GPU_DATA
+#define COMPOSITOR_GPU_TABLES_AT (GPU_DATA + (1 << 20))
+#define COMPOSITOR_GPU_BINS_AT (GPU_DATA + (2 << 20))
+static struct
+{
+        int up, dead, force, told; // started; given up; headless is to use it (-G); said once that it composes
+        unsigned int failures;     // hangs in a row
+        positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer)
+} compositor_gpu_state;
+
+// The GPU started once, on a card it has kernels for, with the pools laid out in its buffer.
+static int compositor_gpu_up(void)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+
+        if (compositor_gpu_state.up || compositor_gpu_state.dead)
+                return compositor_gpu_state.up;
+        if (!gpu_start((2 << 20) + (16 << 20)))
+        {
+                compositor_gpu_state.dead = 1;
+                compositor_say(gpu.broken ? "the GPU is not trusted, its self-test drew wrong, family" : "no card the GPU's kernels are for, the processor composes", gpu.family);
+                return 0;
+        }
+        g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (1 << 20) / 32;
+        g->tables = (unsigned char *)gpu.at + COMPOSITOR_GPU_TABLES_AT, g->tables_at = COMPOSITOR_GPU_TABLES_AT, g->tables_size = 1 << 20;
+        compositor_gpu_state.up = 1;
+        return 1;
+}
+
+// The scanout's address for the GPU, made when the scanout is new.
+static positive compositor_gpu_output(void)
+{
+        positive key = compositor.card < 0 ? (positive)compositor.scanout : compositor.scanout_handle;
+
+        if (compositor.card < 0)
+        {
+                positive at = gpu_va_bytes(compositor.scanout, compositor.scanout_bytes);
+
+                if (!at && gpu_map(compositor.scanout, compositor.scanout_bytes))
+                        at = gpu_va_bytes(compositor.scanout, compositor.scanout_bytes);
+                compositor_gpu_state.out = at, compositor_gpu_state.out_key = key;
+        }
+        else if (compositor_gpu_state.out_key != key || !compositor_gpu_state.out)
+                compositor_gpu_state.out = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes), compositor_gpu_state.out_key = key;
+        return compositor_gpu_state.out;
+}
+
+// A frame's picture, wholly, reachable by the GPU: mapped the first time it is asked for.
+static int compositor_gpu_picture(const struct compositor_frame *f)
+{
+        positive bytes;
+
+        if (f->builtin)
+                return 1;
+        if (!f->pixels || f->width <= 0 || f->height <= 0)
+                return 0;
+        bytes = 4 * (f->pitch * (positive)(f->height - 1) + (positive)f->width);
+        return gpu_va_bytes(f->pixels, bytes) || (gpu_map(f->pixels, bytes) && gpu_va_bytes(f->pixels, bytes));
+}
+
+// The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it.
+static int compositor_gpu_present(const struct compositor_frame *frames, unsigned int count)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        int x1 = compositor.width, y1 = compositor.height, x2 = 0, y2 = 0;
+        positive out;
+
+        if (!compositor_gpu || compositor_gpu_state.dead || (compositor.card < 0 && !compositor_gpu_state.force) || compositor.cursor.drawn ||
+            compositor_spots_any(0) || (compositor.width & 3) || (compositor.scanout_pitch & 15))
+                return 0;
+        if (!compositor_gpu_up() || !(out = compositor_gpu_output()))
+                return 0;
+        g->width = (unsigned int)compositor.width, g->height = (unsigned int)compositor.height;
+        for (unsigned int k = 0; k < count; k++)
+                if (!compositor_gpu_picture(&frames[k]))
+                        return 0;
+        if (!compositor_gpu_frames(frames, count, compositor_ground))
+                return 0;
+        for (unsigned int at = 0; at < compositor.damages; at++)
+        {
+                const int *d = compositor.damage[at];
+
+                x1 = d[0] < x1 ? d[0] : x1, y1 = d[1] < y1 ? d[1] : y1, x2 = d[2] > x2 ? d[2] : x2, y2 = d[3] > y2 ? d[3] : y2;
+        }
+        if (x2 <= x1 || y2 <= y1)
+                return 0;
+        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), (unsigned int)compositor.width,
+                       (unsigned int)compositor.height, (unsigned int)x1, (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
+        {
+                if (++compositor_gpu_state.failures >= 3)
+                        compositor_gpu_state.dead = 1;
+                return 0;
+        }
+        if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
+                compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
+        compositor_gpu_state.failures = 0;
+        gpu_trim();
+        return 1;
+}
+#endif
+
 /*
         The damage, composed straight onto the scanout and then announced.
         The scanout is a mapping of the card's memory, so it is only ever
@@ -7036,7 +7151,12 @@ static void compositor_present(void)
                 }
         }
 
+#ifdef MOONWATER_GPU_C
+        int gpu = !turning && compositor_gpu_present(frames, count);
+        int apart = !gpu && compositor_changed_ready();
+#else
         int apart = compositor_changed_ready();
+#endif
         struct compositor_apart slices = {compositor_slice_flush, compositor.composing, (unsigned long)compositor.width};
         unsigned int clips = 0;
 
@@ -7048,6 +7168,11 @@ static void compositor_present(void)
                     compositor.height, rectangle[0], rectangle[1], rectangle[2], rectangle[3]};
                 int rows[2];
 
+#ifdef MOONWATER_GPU_C
+                if (gpu)
+                        rows[0] = rectangle[1], rows[1] = rectangle[3] - 1; // the GPU drew it all
+                else
+#endif
                 compositor_scene_banded(&target, frames, count, apart ? &slices : 0, rows);
 
                 // Composed apart, each slice had the fingers' marks; on a scanout only written, they are composed aside.
@@ -14948,6 +15073,10 @@ static b32 compositor_main()
                         compositor.scale = (int)compositor_number(program_argument(++at), 0) * 100;
                 else if (at + 1 < program_argument_count() && compositor_option(option, 'f'))
                         font = program_argument(++at);
+#ifdef MOONWATER_GPU_C
+                else if (compositor_option(option, 'G'))
+                        compositor_gpu_state.force = 1;
+#endif
                 else if (at + 2 < program_argument_count() && compositor_option(option, 'H'))
                 {
                         headless = program_argument(at + 1);

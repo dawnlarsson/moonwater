@@ -7,7 +7,7 @@
 #define GPU_VA 0x1000000000ull
 #define GPU_DATA 40960 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024
 
-static struct { int fd; unsigned int ctx; unsigned int address_to at; } gpu;
+static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; unsigned int address_to at; positive size; } gpu; // broken: the card is there and drew the self-test wrong
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
 static const unsigned int gpu_cp[] = {
@@ -440,11 +440,16 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 
 #define gpu_io(dir, n, size, a) (system_control(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 
+static b32 gpu_selftest(void);
+
+// The card must draw what it should before anything is trusted to it: families of the ISA the kernels are in (RDNA2, gfx10.3: Van Gogh 144, Yellow Carp 146, Raphael 149,
+// Mendocino 151) are tried, and each is held to the hash of the picture one small scene of every kind of op made on the card they were written on.
+#define GPU_FAMILIES(f) ((f) == 144 || (f) == 146 || (f) == 149 || (f) == 151)
 // The first render node of a card the kernels are for (amdgpu, family 149: gfx1036, Raphael's), with bytes of pixels behind the page of commands, and one
 // context; false if there is none or any step is refused. Another card is passed over here and not hung by code that is not its own.
 static b32 gpu_start(positive bytes)
 {
-        positive size = (GPU_DATA + bytes + 4095) & ~4095ull;
+        positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
         p64 make[4] = {size, 4096, 2, 64}, map[1] = {0}, va[8] = {0, 1 | 14ull << 32, GPU_VA, 0, size};
         unsigned int ctx[4] = {1, 0, 0, 0}, who[16] = {0};
         char path[] = "/dev/dri/renderD128", name[8] = "";
@@ -457,32 +462,36 @@ static b32 gpu_start(positive bytes)
                 gpu.fd = (int)system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
                 if (gpu.fd < 0)
                         continue;
-                if (system_control(gpu.fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && string_equals((string_address)name, (string_address)"amdgpu") && gpu_io(1u, 5, 32, ask) && who[4] == 149)
+                if (system_control(gpu.fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && string_equals((string_address)name, (string_address)"amdgpu") && gpu_io(1u, 5, 32, ask) && GPU_FAMILIES(who[4]))
+                {
+                        gpu.family = who[4];
                         break;
+                }
                 system_close(gpu.fd), gpu.fd = -1;
         }
         if (gpu.fd < 0 || !gpu_io(3u, 0, 32, make))
                 return false;
-        va[0] = map[0] = (unsigned int)make[0];
+        va[0] = map[0] = gpu.handle = (unsigned int)make[0];
         if (!gpu_io(3u, 1, 8, map) || !gpu_io(1u, 8, 64, va) || !gpu_io(3u, 2, 16, ctx))
                 return false;
         at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, map[0]);
         if (at < 0 && at > -4096)
                 return false;
-        gpu.at = (unsigned int address_to)at, gpu.ctx = ctx[0];
+        gpu.at = (unsigned int address_to)at, gpu.ctx = ctx[0], gpu.size = size;
         for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
         {
                 gpu_kernel_at[i] = here;
                 memory_copy((p8 address_to)gpu.at + here, gpu_kernels[i].words + 2, gpu_kernels[i].size - 8);
                 here = (here + gpu_kernels[i].size - 8 + 255) & ~255u;
         }
-        return true;
+        return gpu_selftest();
 }
 
 // Pages of the processor's (a window's picture: a memfd's, mapped shared) the GPU can reach, as userptr buffers at addresses of their own: gpu_map widens
-// [addr, addr + size) to pages and maps them; gpu_va answers the GPU's address of a pointer into them, 0 for one that is not.
-static struct { positive from, to, va; } gpu_maps[64];
-static unsigned int gpu_map_count;
+// [addr, addr + size) to pages and maps them; gpu_va answers the GPU's address of a pointer that is inside one that holds bytes from it, 0 for none, and marks
+// the map as used in this tick; gpu_trim lets go of the maps that were not used in the last few ticks (one tick a frame).
+static struct { positive from, to, va; unsigned int handle, used; } gpu_maps[64];
+static unsigned int gpu_map_count, gpu_tick;
 static positive gpu_map_next = 0x2000000000ull;
 
 static b32 gpu_map(const void *addr, positive size)
@@ -495,17 +504,59 @@ static b32 gpu_map(const void *addr, positive size)
         va[0] = up[2] >> 32;
         if (!gpu_io(1u, 8, 64, va))
                 return false;
-        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count++].va = gpu_map_next;
+        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = gpu_map_next;
+        gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count++].used = gpu_tick;
         gpu_map_next += to - from;
         return true;
 }
 
-static positive gpu_va(const void *pointer)
+static positive gpu_va_bytes(const void *pointer, positive bytes)
 {
         for (unsigned int i = 0; i < gpu_map_count; i++)
-                if ((positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to)
+                if ((positive)pointer >= gpu_maps[i].from && (positive)pointer + bytes <= gpu_maps[i].to)
+                {
+                        gpu_maps[i].used = gpu_tick;
                         return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
+                }
         return 0;
+}
+#define gpu_va(pointer) gpu_va_bytes(pointer, 1)
+
+// A tick is over: the maps unused for 120 ticks are unmapped and their buffers closed.
+static void gpu_trim(void)
+{
+        gpu_tick++;
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (gpu_tick - gpu_maps[i].used > 120)
+                {
+                        p64 va[8] = {gpu_maps[i].handle, 2, gpu_maps[i].va, 0, gpu_maps[i].to - gpu_maps[i].from}, close[1] = {gpu_maps[i].handle};
+
+                        gpu_io(1u, 8, 64, va);
+                        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
+                        gpu_maps[i--] = gpu_maps[--gpu_map_count];
+                }
+}
+
+// A buffer of another node of the card (the scanout's dumb buffer on the display node, by its handle on that node's descriptor), made reachable here: its address, 0 for none.
+// bytes is its size; the address is the one it keeps while the buffer lives.
+static positive gpu_import(int node, unsigned int handle, positive bytes)
+{
+        unsigned int share[3] = {handle, 2 | 0x80000, 0};
+        p64 va[8] = {0, 1 | 14ull << 32, gpu_map_next, 0, (bytes + 4095) & ~4095ull};
+        positive at = gpu_map_next;
+
+        if (system_control(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
+                return 0;
+        share[0] = 0;
+        if (system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, share) != 0)
+                return 0;
+        system_close((int)share[2]);
+        va[0] = share[0];
+        if (!gpu_io(1u, 8, 64, va) || gpu.imports == 8)
+                return 0;
+        gpu.imported[gpu.imports++] = share[0];
+        gpu_map_next += va[4];
+        return at;
 }
 
 // The arguments the kernel reads, at byte 512 of the buffer: s, d, g are GPU addresses (GPU_VA + an offset), pitches in pixels, op 0 copy
@@ -519,17 +570,31 @@ static b32 gpu_run(void)
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), address_to k = gpu_kernels[which].words;
         positive code = GPU_VA + gpu_kernel_at[which], args = GPU_VA + 512;
         unsigned int ib[] = {
+            // The caches that hold what the last job read -- the scalar and the instruction caches and the vector ones, with the arguments and the lists of ops the processor
+            // rewrote since -- are emptied before the dispatch, as every driver does; a job that follows another read stale arguments one time in three without it.
+            GPU_PKT(0x58, 6), 0, 0xffffffffu, 0xffffff, 0, 0, 10, 1 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 14,
             GPU_PKT(0x76, 2), 0x20c, (unsigned int)(code >> 8), (unsigned int)(code >> 40),
             GPU_PKT(0x76, 2), 0x212, k[0], k[1], GPU_PKT(0x76, 1), 0x218, 0x100,
             GPU_PKT(0x76, 6), 0x240, 0, 0, 0, 0, (unsigned int)args, (unsigned int)(args >> 32),
             GPU_PKT(0x76, 1), 0x215, 0, GPU_PKT(0x76, 3), 0x207, 64, 1, 1,
             GPU_PKT(0x15, 3), (GPU_ARGS->w + 63) / 64, GPU_ARGS->rows, 1, 0x45};
-        p64 ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[2] = {1 | 8ull << 32, (positive)ibc}, list = (positive)chunk,
-            cs[3] = {gpu.ctx, 1, (positive)&list}, wait[4] = {0, 0, 1, (positive)gpu.ctx << 32};
+        // The job names the buffers it may touch besides the main one (the scanout's and the pages of windows, which are userptr buffers): the kernel pins and rebinds
+        // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
+        p64 bos[1 + 8 + 64], boin[3] = {0, 0, 0}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
+            list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, 2, (positive)list}, wait[4] = {0, 0, 1, (positive)gpu.ctx << 32};
+        unsigned int named = 0, tries = 0;
 
+        for (unsigned int i = 0; i < gpu.imports; i++)
+                bos[named++] = gpu.imported[i];
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                bos[named++] = gpu_maps[i].handle;
+        boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
+        if (!named) // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
+                cs[1] = 1;
         memory_copy(gpu.at, ib, sizeof(ib));
-        if (!gpu_io(3u, 4, 24, cs))
-                return false;
+        while (!gpu_io(3u, 4, 24, cs))
+                if (++tries == 3) // a page moved under the job as it was submitted: asked again
+                        return false;
         wait[0] = cs[0], wait[1] = clock_monotonic_nanoseconds() + 2000000000ull;
         return gpu_io(3u, 9, 32, wait) && wait[0] == 0;
 }
@@ -569,12 +634,16 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
                 return true;
         dx0 &= ~63u, dy0 &= ~3u, dx1 = (dx1 + 63) & ~63u, dy1 = (dy1 + 3) & ~3u; // the kernel draws whole patches: so the ops are binned for them
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
+        if (bins_at + 8ull * cw * ch > gpu.size)
+                return false;
         memory_zero(tab, (positive)cw * ch * 8);
         GPU_SQUARES(tab[2 * c + 1] += 1 + m;)
         for (c = 0; c < cw * ch; c++)
                 tab[2 * c] = at, at += tab[2 * c + 1], tab[2 * c + 1] = 0;
+        if (bins_at + 8ull * cw * ch + 32ull * at > gpu.size) // the lists must fit what the buffer has left
+                return false;
         GPU_SQUARES(unsigned int address_to r = list + 8 * (tab[2 * c] + tab[2 * c + 1]); int j; tab[2 * c + 1] += 1 + m; memory_copy(r, q, 32 * (1 + m)); if (e) for (j = 0; j <= m; j++) gpu_radii(r + 8 * j);)
-        a->s = GPU_VA, a->d = GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = 4;
+        a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at, a->dp = pitch, a->sp = w, a->gp = h, a->x0 = a->y0 = 0, a->w = w, a->rows = (h + 3) >> 2, a->op = 4;
         for (i = 0; i < n; i++)
                 if ((ops[8 * i] & 255) == 2)
                         a->op = 5, hand |= ops[8 * i] > 2;
@@ -583,5 +652,65 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         if (!(w & 3) && !(pitch & 3) && !(d_at & 15))
                 a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
         return (a->op == 6 || !hand) && gpu_run(); // text and a box with changes of cover are the kernel by hand's alone
+}
+
+// One small scene of every kind of op, made from nothing but numbers (a generator for the pictures, the covers and the glyph's bitmap), and the hash of its pixels,
+// 0 if the card did not finish it.
+#define GPU_TEST_HASH 2024535671u
+static unsigned int gpu_test_hash(void)
+{
+        enum { W = 256, H = 32 };
+        positive base = gpu.size - (1 << 20), ops_at = base, bins_at = base + 4096, pic_at = base + 65536, src_at = base + 131072, cover_at = base + 196608, glyph_at = base + 200704;
+        unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), address_to pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at);
+        unsigned int address_to src = (unsigned int address_to)((p8 address_to)gpu.at + src_at);
+        p8 address_to cover = (p8 address_to)gpu.at + cover_at, address_to glyph = (p8 address_to)gpu.at + glyph_at;
+        unsigned int seed = 12345u, hash = 2166136261u, n = 0;
+        static const unsigned int rows[][8] = {
+            {0, 0, 0, W, H, 0xff203040u, 0, 0},
+            {1, 10, 2, 200, 30, 0x80c0a020u, 0, 0},
+            {2, 20 * 256, 4 * 256 + 100, 120 * 256 + 50, 28 * 256, 0xc0ff4020u, 6 * 256, 5 * 256},
+            {2 | 1 << 8, 130 * 256, 3 * 256, 250 * 256, 29 * 256, 0xe0ffffffu, 10 * 256, 10 * 256},
+            {8, 132 * 256, 5 * 256, 248 * 256, 27 * 256, 0, 8 * 256, 8 * 256},
+            {4, 4, 6, 68, 22, 0, 0, 64},
+            {5 | 32 << 8, 100, 4, 132, 20, 0, 0xff4080c0u, 0},
+            {5 | 32 << 8 | 64 << 16, 150, 6, 182, 22, 0, 0, 0},
+            {3 | 34 << 8, 40, 10, 72, 20, 0xff00ff80u, 200 | 100 << 8, 0},
+            {6 | 14 << 8 | 64 << 16, 200, 10, 214, 24, 0, 0, 0}};
+
+        for (unsigned int i = 0; i < 64 * 16; i++)
+                seed = seed * 1664525u + 1013904223u, src[i] = seed;
+        for (unsigned int i = 0; i < 32 * 16 + 14 * 14; i++)
+                seed = seed * 1664525u + 1013904223u, cover[i] = (p8)((seed >> 24) % 4 == 0 ? 0 : (seed >> 24) % 4 == 1 ? 255 : seed >> 16);
+        for (unsigned int i = 0; i < 34 * 12; i++)
+                seed = seed * 1664525u + 1013904223u, glyph[i] = (p8)(seed >> 24);
+        for (unsigned int i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        {
+                unsigned int address_to q = ops + 8 * n;
+
+                memory_copy(q, rows[i], 32);
+                if (i == 5)
+                        q[5] = (unsigned int)(GPU_VA + src_at), q[6] = (unsigned int)((GPU_VA + src_at) >> 32);
+                else if (i == 6)
+                        q[5] = (unsigned int)cover_at;
+                else if (i == 7)
+                        q[5] = (unsigned int)cover_at, q[6] = (unsigned int)(GPU_VA + src_at), q[7] = (unsigned int)((GPU_VA + src_at) >> 32);
+                else if (i == 8)
+                        q[7] = (unsigned int)(glyph_at + 35);
+                else if (i == 9)
+                        q[5] = (unsigned int)(cover_at + 32 * 16), q[6] = (unsigned int)(GPU_VA + src_at), q[7] = (unsigned int)((GPU_VA + src_at) >> 32 & 0xff) | 0xe0e0e0u << 8;
+                n++;
+        }
+        memory_zero(pic, W * H * 4);
+        if (!gpu_scene(ops_at, n, bins_at, pic_at, W, W, H, 0, 0, W, H))
+                return 0;
+        for (unsigned int i = 0; i < W * H; i++)
+                hash = (hash ^ pic[i]) * 16777619u;
+        return hash | 1;
+}
+
+static b32 gpu_selftest(void)
+{
+        gpu.broken = gpu_test_hash() != GPU_TEST_HASH;
+        return !gpu.broken;
 }
 #endif
