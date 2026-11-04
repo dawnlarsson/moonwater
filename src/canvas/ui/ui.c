@@ -4963,7 +4963,7 @@ static fn ui_tabs_choose(struct ui address_to ui, struct ui_control address_to c
         has its label above it, 6 under that the well; a bare field is its well at the control's top and its own height.
 */
 #define UI_FIELD_BARE 1  // a field's variant: no label above it, the well at the control's top and its own height
-#define UI_FIELD_TINT 10 // a focused field's accent over its face, as alpha out of 255 (4%)
+#define UI_FIELD_TINT 10 // a focused field's bright accent over its face (the old focus fill's mix), as alpha out of 255 (4%)
 #define UI_FIELD_LIT 2   // the focused rule's thickness at 100%, in logical pixels (the rest rule is one)
 
 struct ui_text;
@@ -4984,8 +4984,8 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
                 ui_control_label(ui, c, 0, 0, UI_BODY_LARGE, ui_role(UI_ON_SURFACE));
         // The face: a glass well (16, or 24 focused) as it was; otherwise the ground, none at rest and the accent's tint when focused.
         ui_kit_colour_to(&c->fill, ui->glass ? ui_well(ui, UI_SURFACE_HIGH, c->focused ? 24 : 16)
-                                             : c->focused ? (ui_role(UI_PRIMARY) & 0xffffffu) | (unsigned int)UI_FIELD_TINT << 24
-                                                          : ui_role(UI_PRIMARY) & 0xffffffu,
+                                             : c->focused ? (ui_role(UI_ACCENT_BRIGHT) & 0xffffffu) | (unsigned int)UI_FIELD_TINT << 24
+                                                          : ui_role(UI_ACCENT_BRIGHT) & 0xffffffu,
                          180, &ui_ease);
         ui_kit_fill(ui, &face, ui_kit_colour(&c->fill), null);
         // The row's hover layer over it, and the same press layer a list row takes.
