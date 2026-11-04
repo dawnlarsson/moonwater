@@ -5468,6 +5468,11 @@ static fn ui_event_context(const struct window_event address_to event)
         ui_kit.now = (b64)clock_monotonic_nanoseconds();
 }
 
+// The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle).
+#define UI_POINTER_LEFT 0x110
+#define UI_POINTER_RIGHT 0x111
+#define UI_POINTER_MIDDLE 0x112
+
 static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, struct ui_control address_to controls, int count, int type, int x, int y,
                                                    b32 down, unsigned int flags)
 {
@@ -5775,6 +5780,32 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 }
                 return changed;
         }
+}
+
+/*
+        Tabs handed a pointer event: a press on a tab and its release are the tabs' (taken), a motion moves their hover, and what another
+        control holds the pointer for is left to it. The bits say what to do with it: the picture is due again, the event was the tabs',
+        a tab was chosen (c->at is it). x, y: where the pointer is, for a press, which carries no place of its own.
+*/
+#define UI_TABS_DRAW 1u
+#define UI_TABS_TAKEN 2u
+#define UI_TABS_CHOSEN 4u
+
+static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to c, const struct window_event address_to event, int x, int y)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, had = c->down;
+        int was = c->hover | c->down << 1;
+        p32 bits;
+
+        if ((event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON) || (ui_kit_held && ui_kit_held != c) ||
+            (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT))
+                return 0;
+        if (event->type == WINDOW_EVENT_MOTION)
+                x = event->a, y = event->b;
+        bits = ui_kit_pointer(ui, c, 1, (int)event->type, x, y, down, event->flags) ? UI_TABS_DRAW | UI_TABS_CHOSEN : 0;
+        bits |= was != (c->hover | c->down << 1) ? UI_TABS_DRAW : 0;
+        bits |= event->type == WINDOW_EVENT_BUTTON && (c->down || had) ? UI_TABS_TAKEN : 0;
+        return bits;
 }
 
 /*
@@ -7383,41 +7414,11 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_KEY_LEFT 105
 #define UI_KEY_RIGHT 106
 #define UI_KEY_DELETE 111
-// The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle).
-#define UI_POINTER_LEFT 0x110
-#define UI_POINTER_RIGHT 0x111
-#define UI_POINTER_MIDDLE 0x112
 
 // Whether a key is a modifier alone (Control, Shift, Alt, AltGr, Super, Caps Lock), which no widget takes as a key of its own.
 static b32 ui_key_modifier(int code)
 {
         return code == 29 || code == 97 || code == 42 || code == 54 || code == 56 || code == 100 || code == 125 || code == 126 || code == 58;
-}
-
-/*
-        Tabs handed a pointer event: a press on a tab and its release are the tabs' (taken), a motion moves their hover, and what another
-        control holds the pointer for is left to it. The bits say what to do with it: the picture is due again, the event was the tabs',
-        a tab was chosen (c->at is it). x, y: where the pointer is, for a press, which carries no place of its own.
-*/
-#define UI_TABS_DRAW 1u
-#define UI_TABS_TAKEN 2u
-#define UI_TABS_CHOSEN 4u
-
-static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to c, const struct window_event address_to event, int x, int y)
-{
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, had = c->down;
-        int was = c->hover | c->down << 1;
-        p32 bits;
-
-        if ((event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON) || (ui_kit_held && ui_kit_held != c) ||
-            (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT))
-                return 0;
-        if (event->type == WINDOW_EVENT_MOTION)
-                x = event->a, y = event->b;
-        bits = ui_kit_pointer(ui, c, 1, (int)event->type, x, y, down, event->flags) ? UI_TABS_DRAW | UI_TABS_CHOSEN : 0;
-        bits |= was != (c->hover | c->down << 1) ? UI_TABS_DRAW : 0;
-        bits |= event->type == WINDOW_EVENT_BUTTON && (c->down || had) ? UI_TABS_TAKEN : 0;
-        return bits;
 }
 
 /*
@@ -9941,7 +9942,18 @@ struct ui_app
         void (*chose)(int id);
         b32 mono;                       // the kit's mono face is loaded too (a tag, a code well, a key)
         b32 own_title;                  // the app names its window itself as it runs (the terminal): the kit sets the title once, at the start
+        b32 dismiss;                    // a popup: the loop ends when the keys go elsewhere after they have been its (had_keys is the kit's)
+        b32 had_keys;
 };
+
+// The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done, as is an app whose focus hook says so.
+static b32 ui_app_keys(struct ui_app address_to app, b32 focused)
+{
+        app->had_keys |= focused;
+        if (app->dismiss && app->had_keys && !focused)
+                return false;
+        return !app->focus || app->focus(focused);
+}
 
 // Every row is due: the picture, and the app's changed hook when it has one.
 static fn ui_app_changed(struct ui_app address_to app)
@@ -10047,7 +10059,7 @@ static int ui_app_run(struct ui_app address_to app)
                 {
                         *app->focused = table->focus == row;
                         ui_app_changed(app);
-                        if (app->focus && !app->focus(*app->focused))
+                        if (!ui_app_keys(app, *app->focused))
                                 running = false;
                 }
                 if (table->ground[row] && table->ground[row] != *app->ground)

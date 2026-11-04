@@ -146521,7 +146521,6 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 char said[256];
                 int x, y, got;
                 struct window_event move, press, lift;
-                int edge_place[4][2], room = 0;
 
                 mixer.quick = true;
                 mixer.width = ui_px(&mixer.ui, MIXER_QUICK_W), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
@@ -146587,49 +146586,32 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_event(&lift);
                 check("mixer popup: and so is the release: nothing is started", ui_kit_held == null && file_text(started_path, said, sizeof(said)) == 0);
 
-                // The keys going elsewhere ends it; before they came it had never had them; the whole mixer is not ended by it.
-                check("mixer popup: it is not ended before it has had the keys", mixer_focus(false));
-                mixer_focus(true);
-                check("mixer popup: and is ended by losing them", !mixer_focus(false));
-                mixer.quick = false;
-                check("mixer: the whole mixer is not", mixer_focus(false));
-                mixer.quick = true;
-
-                // Beside the cell: above a bottom panel, below a top one, beside a side one, its right edge kept on the screen.
+                // The keys going elsewhere ends a popup (the kit's rule, ui_app_keys); before they came it had never had them; a window that is not a popup is not ended by it.
                 {
-                        static const int cell[4] = {2400, 1416, 40, 24}, screen[4] = {0, 0, 2560, 1440}, side[4] = {0, 600, 24, 40};
-                        int ax, ay;
+                        struct ui_app keys = {0};
 
-                        mixer_anchor_place(TASKBAR_BOTTOM, cell, screen, 108, 380, &ax, &ay);
-                        edge_place[0][0] = ax, edge_place[0][1] = ay;
-                        mixer_anchor_place(TASKBAR_TOP, (const int[4]){2400, 0, 40, 24}, screen, 108, 380, &ax, &ay);
-                        edge_place[1][0] = ax, edge_place[1][1] = ay;
-                        mixer_anchor_place(TASKBAR_LEFT, side, screen, 108, 380, &ax, &ay);
-                        edge_place[2][0] = ax, edge_place[2][1] = ay;
-                        mixer_anchor_place(TASKBAR_RIGHT, (const int[4]){2536, 600, 24, 40}, screen, 108, 380, &ax, &ay);
-                        edge_place[3][0] = ax, edge_place[3][1] = ay;
-                        room = edge_place[0][0] == 2400 && edge_place[0][1] == 1416 - 380 && edge_place[1][0] == 2400 && edge_place[1][1] == 24 &&
-                               edge_place[2][0] == 24 && edge_place[2][1] == 600 && edge_place[3][0] == 2536 - 108 && edge_place[3][1] == 600;
-                        mixer_anchor_place(TASKBAR_BOTTOM, (const int[4]){2530, 1416, 30, 24}, screen, 108, 380, &ax, &ay);
-                        room &= ax == 2560 - 108 && ay == 1416 - 380;
-                        mixer_anchor_place(TASKBAR_BOTTOM, (const int[4]){0, 20, 30, 24}, screen, 108, 380, &ax, &ay);
-                        room &= ax == 0 && ay == 0;
-                        check("mixer popup: it opens above a bottom panel at the cell, below a top one, beside a side one, and is kept on the screen", room);
+                        keys.dismiss = true;
+                        check("mixer popup: it is not ended before it has had the keys", ui_app_keys(&keys, false));
+                        check("mixer popup: and is ended by losing them", ui_app_keys(&keys, true) && !ui_app_keys(&keys, false));
+                        keys = (struct ui_app){0};
+                        check("mixer: the whole mixer is not", ui_app_keys(&keys, true) && ui_app_keys(&keys, false));
                 }
+
+                // Beside the cell: the kit's anchor takes the rectangle the compositor left (the kit's own checks place a window beside it).
                 mixer.beside = true;
                 mixer_fixture_table.outputs = 2;
                 mixer_fixture_table.button_x = 2400, mixer_fixture_table.button_y = 1416, mixer_fixture_table.button_w = 40, mixer_fixture_table.button_h = 24;
                 mixer_fixture_table.button_edge = TASKBAR_BOTTOM, mixer_fixture_table.button_screen = 1;
                 mixer_fixture_table.output_x[0] = 0, mixer_fixture_table.output_y[0] = 0, mixer_fixture_table.output_w[0] = 2560, mixer_fixture_table.output_h[0] = 1440;
                 mixer_fixture_table.output_x[1] = 2560, mixer_fixture_table.output_y[1] = 0, mixer_fixture_table.output_w[1] = 1920, mixer_fixture_table.output_h[1] = 1080;
-                mixer.anchored = false;
-                mixer_anchor_take();
+                mixer.anchor.anchored = false;
+                ui_anchor_take(&mixer.anchor, &mixer_fixture_table, mixer.beside);
                 check("mixer popup: the rectangle the compositor left is taken once, with the screen it names",
-                      mixer.anchored && mixer.edge == TASKBAR_BOTTOM && mixer.number == 1 && mixer.anchor[0] == 2400 && mixer.anchor[2] == 40);
-                mixer.anchored = false;
+                      mixer.anchor.anchored && mixer.anchor.edge == TASKBAR_BOTTOM && mixer.anchor.number == 1 && mixer.anchor.button[0] == 2400 && mixer.anchor.button[2] == 40);
+                mixer.anchor.anchored = false;
                 mixer_fixture_table.button_w = 0;
-                mixer_anchor_take();
-                check("mixer popup: and a table with no press in it leaves it in the middle", !mixer.anchored);
+                ui_anchor_take(&mixer.anchor, &mixer_fixture_table, mixer.beside);
+                check("mixer popup: and a table with no press in it leaves it in the middle", !mixer.anchor.anchored);
                 mixer.beside = false;
                 mixer.quick = false;
                 mixer.width = 640, mixer.height = 400;

@@ -89,9 +89,9 @@ static struct
         b32 focused, dirty, have, connected, listed, recording, capture_off;
         b64 next_poll, seen_at;
         // The tray's popup (-q), and where it opens (-a).
-        b32 quick, beside, anchored, had_focus;
-        int anchor[4], screen[4], pointer_x, pointer_y;
-        unsigned int edge, number;
+        b32 quick, beside;
+        struct ui_anchor anchor; // the panel's button it opens beside (-a): the kit's
+        int pointer_x, pointer_y;
         struct ui_buttons row;   // its Mixer row
         struct ui_buttons allow; // Allow, on the Recording page with recording turned off
         struct ui_control tabs;  // the two pages
@@ -549,57 +549,6 @@ static fn mixer_language(void)
         mixer.dirty = true;
 }
 
-// Where a window of width by height opens beside a rectangle (a button of the panel) on the edge the panel is along: above a bottom panel,
-// below a top one, beside a left or right one, the other way kept where the button is, and the whole of it inside the screen where it fits.
-static fn mixer_anchor_place(unsigned int edge, const int address_to button, const int address_to screen, int width, int height, int address_to x,
-                             int address_to y)
-{
-        *x = button[0], *y = button[1];
-        if (edge == TASKBAR_BOTTOM)
-                *y = button[1] - height;
-        else if (edge == TASKBAR_TOP)
-                *y = button[1] + button[3];
-        else if (edge == TASKBAR_LEFT)
-                *x = button[0] + button[2];
-        else
-                *x = button[0] - width;
-        *x = *x > screen[0] + screen[2] - width ? screen[0] + screen[2] - width : *x;
-        *y = *y > screen[1] + screen[3] - height ? screen[1] + screen[3] - height : *y;
-        *x = *x < screen[0] ? screen[0] : *x;
-        *y = *y < screen[1] ? screen[1] : *y;
-}
-
-// The rectangle the compositor wrote when the cell was pressed, the screen it is on and the edge of it the panel is along, taken once;
-// a table with no press in it leaves the popup unanchored, in the middle.
-static fn mixer_anchor_take(void)
-{
-        struct windows address_to table = mixer.own.table;
-        unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
-
-        if (!mixer.beside || !table->button_w || !table->button_h || table->button_edge > TASKBAR_RIGHT || table->button_screen >= (count ? count : 1))
-                return;
-        mixer.anchor[0] = table->button_x, mixer.anchor[1] = table->button_y;
-        mixer.anchor[2] = (int)table->button_w, mixer.anchor[3] = (int)table->button_h;
-        mixer.edge = table->button_edge, mixer.number = table->button_screen;
-        windows_output(table, mixer.number, &mixer.screen[0], &mixer.screen[1], &mixer.screen[2], &mixer.screen[3]);
-        mixer.anchored = true;
-}
-
-// The popup's place asked of the compositor, in its row's placement columns, counted from its screen's top left.
-static fn mixer_place(void)
-{
-        struct window_place place;
-        int x, y;
-
-        memory_zero(&place, sizeof(place));
-        mixer_anchor_place(mixer.edge, mixer.anchor, mixer.screen, mixer.width, mixer.height, &x, &y);
-        place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
-        place.x = x - mixer.screen[0], place.y = y - mixer.screen[1];
-        place.width = (unsigned int)mixer.width, place.height = (unsigned int)mixer.height;
-        place.screen = mixer.number;
-        windows_place_set(mixer.own.table, mixer.own.row, &place);
-}
-
 // How many strips wide the recording popup is: the microphone and up to three programs, and room for a line beside the microphone at least.
 static int mixer_quick_shown(int count)
 {
@@ -630,24 +579,14 @@ static int mixer_open(void)
                 width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(mixer_quick_shown(mixer.big->strips.count)));
         mixer_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
                    (unsigned int)(height < room ? height : room > 0 ? room : height));
-        mixer_anchor_take();
-        if (mixer.anchored)
-                mixer_place();
+        ui_anchor_take(&mixer.anchor, table, mixer.beside);
+        if (mixer.anchor.anchored)
+                ui_anchor_set(&mixer.anchor, table, row, mixer.width, mixer.height);
         else
                 ui_centre(table, row, mixer.width, mixer.height, ui_px(&mixer.ui, 12));
         language_listen(mixer_language);
         mixer_frame();
         return -1;
-}
-
-// The popup goes when the keys go elsewhere (a press on the desktop, another window raised); before they came here it had never had them.
-static b32 mixer_focus(b32 focused)
-{
-        if (focused)
-                mixer.had_focus = true;
-        else if (mixer.quick && mixer.had_focus)
-                return false;
-        return true;
 }
 
 static struct ui_app mixer_app = {
@@ -665,7 +604,6 @@ static struct ui_app mixer_app = {
         .frame = mixer_frame,
         .event = mixer_event,
         .changed = mixer_dirty,
-        .focus = mixer_focus,
         .size = mixer_size,
         .tick = mixer_tick,
 };
@@ -691,6 +629,7 @@ static b32 mixer_main()
                 {
                         mixer.quick = true;
                         mixer_app.glass = WINDOW_DISMISS | WINDOW_NO_TAB; // put away by a press anywhere but on it, and no tab
+                        mixer_app.dismiss = true;                          // and by the keys going elsewhere
                         mixer_app.name = (string_address) "mixer-quick";
                         continue;
                 }

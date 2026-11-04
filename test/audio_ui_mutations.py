@@ -96,10 +96,6 @@ M = [
     (C, "the server waited for as long as the mixer does", "compositor_ctl.timeout_ms = COMPOSITOR_VOLUME_WAIT_MS;", "compositor_ctl.timeout_ms = 0;"),
     (C, "a page with no sink name told", "if (!compositor_volume.present || !sink[0])", "if (!compositor_volume.present)"),
     (C, "everything told at every change", "compositor_volume_tell(percent != compositor_volume.percent ? percent : -1, muted != compositor_volume.muted ? muted : -1);", "compositor_volume_tell(percent, muted);"),
-    (X, "the popup ended before it had the keys", "else if (mixer.quick && mixer.had_focus)", "else if (mixer.quick)"),
-    (X, "the whole mixer ended by losing the keys", "else if (mixer.quick && mixer.had_focus)", "else if (mixer.had_focus)"),
-    (X, "the popup opens under a bottom panel", "*y = button[1] - height;", "*y = button[1] + button[3];"),
-    (X, "the popup not kept on the screen", "*x = *x > screen[0] + screen[2] - width ? screen[0] + screen[2] - width : *x;", "*x = *x;"),
     (X, "the popup lists the programs", "programs = mixer.have && (!mixer.quick || mixer.recording) && !off;", "programs = mixer.have && !off;"),
     (X, "a program that records what plays is shown", "if (stream->index == MIXER_NONE || (mixer.recording && (stream->flags & AUDIO_STATE_MONITOR)))", "if (stream->index == MIXER_NONE)"),
     (X, "recording turned off listed anyway", "programs = mixer.have && (!mixer.quick || mixer.recording) && !off;", "programs = mixer.have && (!mixer.quick || mixer.recording);"),
@@ -130,6 +126,8 @@ M = [
     (C, "the microphone's mute thrown not shown", "compositor_volume.recording || compositor_volume.mic_flash_until", "compositor_volume.recording"),
     (C, "the microphone's cell asks for the volume's popup", "compositor_script_say(\"mic_button\");", "compositor_script_say(\"volume_button\");"),
     (T, "the microphone not struck when muted", "size, taskbar.mic_muted, ui_role(UI_ERROR)", "size, 0, ui_role(UI_ERROR)"),
+    (U, "a popup ended before it had the keys", "if (app->dismiss && app->had_keys && !focused)", "if (app->dismiss && !focused)"),
+    (U, "a window that is not a popup ended by losing the keys", "if (app->dismiss && app->had_keys && !focused)", "if (app->had_keys && !focused)"),
     (X, "the off message missing", "ui_strips_message(ui, strips, WORDS(mixer_off), false);", "(void)strips;"),
 ]
 
