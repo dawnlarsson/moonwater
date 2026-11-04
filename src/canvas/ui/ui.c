@@ -10555,6 +10555,8 @@ static int ui_app_run(struct ui_app address_to app)
                 ready = windows_wait_also(app->own, app->popup && app->popup->open ? app->popup->own.wake : -1, other, timeout);
                 if (ready < 0)
                         break;
+                // The wait is over: its ready (the app's other source, a child's output) is answered at this time, not the time before the wait.
+                ui_kit_pass();
                 if (other >= 0)
                         app->ready();
         }

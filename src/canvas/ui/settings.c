@@ -2066,7 +2066,7 @@ static b32 settings_start(string_address address_to words, positive count, const
         settings.child = child;
         settings.output = ends[0];
         settings.said_length = 0;
-        settings.began = clock_monotonic_nanoseconds();
+        settings.began = (positive)ui_kit.now;
         return true;
 }
 
@@ -2561,7 +2561,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
         positive before, was = 0;
         b32 changed;
 
-        settings.feed_due = clock_monotonic_nanoseconds() + (positive)settings_feeds[feed].every * 1000000ull;
+        settings.feed_due = (positive)ui_kit.now + (positive)settings_feeds[feed].every * 1000000ull;
         // What is being typed for a row of the list is for the row as it was: nothing is changed under it.
         if (killed || settings_editing() >= (int)SETTINGS_LIST)
                 return;
@@ -2624,7 +2624,7 @@ static fn settings_feed_rows(void)
 static long settings_feed_tick(void)
 {
         int feed = settings_feed_of_group();
-        positive now = clock_monotonic_nanoseconds();
+        positive now = (positive)ui_kit.now;
         string_address words[SETTINGS_WORDS];
         positive count = 1;
 
@@ -4585,7 +4585,7 @@ static long settings_tick(long timeout, long address_to other)
         {
                 struct ui_text address_to t = settings_gallery.on ? &settings_gallery.field[settings_gallery.field[1].focused]
                                               : settings_editing() >= 0 ? &settings.edit : &settings.filter_edit;
-                positive now = clock_monotonic_nanoseconds();
+                positive now = (positive)ui_kit.now;
                 b32 redraw = false;
 
                 if (!settings_gallery.on)
@@ -4600,7 +4600,7 @@ static long settings_tick(long timeout, long address_to other)
         }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {
-                positive now = clock_monotonic_nanoseconds(), left;
+                positive now = (positive)ui_kit.now, left;
                 positive most = settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
                                 : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
                                                                    : (positive)SETTINGS_WAIT_NS;

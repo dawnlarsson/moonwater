@@ -151884,7 +151884,7 @@ static fn check_kit_standard(void)
                 {"src/canvas/ui/settings.c", "WINDOW_KEY_TOUCH", 3},
                 {"src/canvas/ui/launcher.c", "WINDOW_KEY_TOUCH", 3},
                 {"src/canvas/ui/terminal.c", "WINDOW_KEY_TOUCH", 0},
-                {"src/canvas/ui/settings.c", "clock_monotonic_nanoseconds", 5},
+                {"src/canvas/ui/settings.c", "clock_monotonic_nanoseconds", 0},
                 {"src/canvas/ui/launcher.c", "clock_monotonic_nanoseconds", 0},
                 {"src/canvas/ui/editor.c", "clock_monotonic_nanoseconds", 0},
                 {"src/canvas/ui/terminal.c", "clock_monotonic_nanoseconds", 15},
