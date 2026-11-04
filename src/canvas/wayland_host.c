@@ -30,6 +30,7 @@
 #define COMPOSITOR_POLLERR 8
 #define COMPOSITOR_WL_SIGBUS 7
 #define COMPOSITOR_WL_SIGPIPE 13
+#define COMPOSITOR_WL_SIGALRM 14
 #define COMPOSITOR_WL_TRANSFERS 16               // copies being read and pastes being written, all clients together
 #define COMPOSITOR_WL_TRANSFERS_PER_CLIENT 4
 #define COMPOSITOR_WL_PULL_NS 3000000000ull      // a copy's source has this long to write its text and end
@@ -582,6 +583,7 @@ static void compositor_wl_laid(int row, long x1, long y1, long x2, long y2)
 }
 
 static int compositor_wl_dmabuf_ready(long client, int fd);
+static int compositor_wl_sync_start(long client, int fd);
 
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
@@ -597,9 +599,9 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 return -1;
         if (picture->sync_fd >= 0 && picture->pixels)
         {
-                if (!compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd))
+                if (!compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd) ||
+                    !compositor_wl_sync_start(wayland_row_owner(row), (int)picture->sync_fd))
                         return 1;
-                compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
         }
         width = width < 0 ? 0 : width > (long)compositor_most_width() ? (long)compositor_most_width() : width;
         height = height < 0 ? 0 : height > (long)compositor_most_height() ? (long)compositor_most_height() : height;
@@ -1205,6 +1207,36 @@ static int compositor_wl_dmabuf_ready(long client, int fd)
         return 0;
 }
 
+/*
+        The sync that begins a read of a dma-buf (DMA_BUF_SYNC_START | READ). It waits for the GPU work the buffer was given, and the
+        poll above says only that it had none a moment before: work its client gives it in between is waited for, however long it runs
+        (measured on the box's amdgpu: the ioctl returned when the owner's shader was done, 150 ms for one of 5000 steps a pixel, 600 ms
+        for 20000, and up to the GPU's job timeout would do). The wait is interruptible, so a timer of COMPOSITOR_WL_DMABUF_WAIT_NS that
+        ends it (a SIGALRM that does nothing, taken without SA_RESTART: EINTR at 30.0 ms in the same measure) bounds it, and a read
+        whose sync was cut is not made: the picture is skipped as one whose writer was not done, and its client is not waited for again
+        for a while. True when the read may be made.
+*/
+static void compositor_wl_alarm(int number)
+{
+        (void)number;
+}
+
+static int compositor_wl_sync_start(long client, int fd)
+{
+        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
+        positive timer[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // struct itimerval, in us
+        long got;
+
+        compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
+        got = compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        compositor_call(syscall(setitimer), 0, (positive)off, 0, 0, 0, 0);
+        if (got != -4) // EINTR: the timer ended the wait; anything else is read as it always was
+                return 1;
+        if (client >= 0 && client < WAYLAND_CLIENTS)
+                compositor_wl.slow_until[client] = clock_monotonic_nanoseconds() + COMPOSITOR_WL_DMABUF_SLOW_NS;
+        return 0;
+}
+
 /* ---- the clipboard ---- */
 
 /*
@@ -1645,6 +1677,9 @@ static void compositor_wl_start(void)
         compositor_wl.hold_row = -1;
         // A paste's reader that has gone is an error of the write, not a signal that ends the compositor.
         system_signal_install(COMPOSITOR_WL_SIGPIPE, 1, 0, 0, null);
+        // The timer that bounds a dma-buf's sync (compositor_wl_sync_start): a handler that does nothing, and no restart, so the wait ends.
+        system_signal_install(COMPOSITOR_WL_SIGALRM, (positive)compositor_wl_alarm, SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART,
+                              SIGNAL_CATCH_RESTORER, null);
         // The handler of a pool cut under a read: SA_SIGINFO and SA_NODEFER, with the library's restorer.
         compositor_wl.handler = system_signal_install(COMPOSITOR_WL_SIGBUS, (positive)compositor_wl_bus,
                                                       (SIGNAL_CATCH_FLAGS & ~SIGNAL_RESTART) | 4 | 0x40000000,
