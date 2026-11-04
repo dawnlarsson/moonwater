@@ -49,9 +49,15 @@ menu_toggle_comment	92ac	החלף הערה
 menu_undo	b9d3	בטל
 menu_zoom_in	5bcf	הגדל זום
 menu_zoom_out	9234	הקטן זום
+mixer_allow	19d2	אפשר
 mixer_empty	eef1	לא מושמע צליל
 mixer_mute	9f74	השתקה
+mixer_no_mic	412a	אין מיקרופון
+mixer_nobody	cc29	אף תוכנית לא מקליטה
 mixer_off	e944	שרת השמע כבוי
+mixer_playback	110c	השמעה
+mixer_recording	f20c	הקלטה
+mixer_recording_off	9c09	ההקלטה כבויה
 mixer_unmute	72bb	ביטול השתקה
 settings_already_joined	71fb	כבר מחובר אל %s
 settings_any_text	89dc	כל פקודה, כמילים שאחרי moonwater: הפעולה שלה ואז הארגומנטים

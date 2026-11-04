@@ -7354,6 +7354,32 @@ static b32 ui_key_modifier(int code)
 }
 
 /*
+        Tabs handed a pointer event: a press on a tab and its release are the tabs' (taken), a motion moves their hover, and what another
+        control holds the pointer for is left to it. The bits say what to do with it: the picture is due again, the event was the tabs',
+        a tab was chosen (c->at is it). x, y: where the pointer is, for a press, which carries no place of its own.
+*/
+#define UI_TABS_DRAW 1u
+#define UI_TABS_TAKEN 2u
+#define UI_TABS_CHOSEN 4u
+
+static p32 ui_tabs_pointer(struct ui address_to ui, struct ui_control address_to c, const struct window_event address_to event, int x, int y)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, had = c->down;
+        int was = c->hover | c->down << 1;
+        p32 bits;
+
+        if ((event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON) || (ui_kit_held && ui_kit_held != c) ||
+            (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT))
+                return 0;
+        if (event->type == WINDOW_EVENT_MOTION)
+                x = event->a, y = event->b;
+        bits = ui_kit_pointer(ui, c, 1, (int)event->type, x, y, down, event->flags) ? UI_TABS_DRAW | UI_TABS_CHOSEN : 0;
+        bits |= was != (c->hover | c->down << 1) ? UI_TABS_DRAW : 0;
+        bits |= event->type == WINDOW_EVENT_BUTTON && (c->down || had) ? UI_TABS_TAKEN : 0;
+        return bits;
+}
+
+/*
         A row of buttons that are one thing: the actions at the foot of a window (a launcher's Power off and Restart), the kit's
         outlined buttons at the right of a row of UI_ROW, the first leftmost. The kit does all of it, so an app says only what
         each is, hands the row its events and acts on the one that fired:
@@ -7807,6 +7833,46 @@ static fn ui_speaker(struct ui address_to ui, int left, int top, int size, int w
 }
 
 /*
+        A microphone, in the speaker's grid (24, whole rows, size to a side, the window's direction): a capsule 6 wide with round ends,
+        the holder under it (a half ring with two short sides), a stem and a foot. Struck, a diagonal runs from the top left to
+        the bottom right across all of it, a little longer than the glyph so that it shows where it lies over the capsule.
+*/
+static fn ui_microphone(struct ui address_to ui, int left, int top, int size, b32 struck, unsigned int argb)
+{
+        f64 high = 24.0 / (f64)size;
+
+        for (int row = 0; row < size; row++)
+        {
+                f64 y = ((f64)row) * high - 12.0 + high / 2.0, reach = 1.0 + high / 2.0;
+
+                if (y >= -10.0 && y <= 2.0)
+                {
+                        f64 beyond = y < -7.0 ? y + 7.0 : y > -1.0 ? y + 1.0 : 0.0, half = __builtin_sqrt(9.0 - beyond * beyond);
+
+                        ui_speaker_span(ui, left, size, top + row, 12.0 - half, 12.0 + half, argb);
+                }
+                if (y >= -4.0 && y <= 5.5)
+                {
+                        f64 down = y + 1.0, outer = y < -1.0 ? 6.5 : __builtin_sqrt(6.5 * 6.5 - down * down), inner = y < -1.0 ? 4.5 : down < 4.5 ? __builtin_sqrt(4.5 * 4.5 - down * down) : 0.0;
+
+                        if (inner > 0.0)
+                        {
+                                ui_speaker_span(ui, left, size, top + row, 12.0 - outer, 12.0 - inner, argb);
+                                ui_speaker_span(ui, left, size, top + row, 12.0 + inner, 12.0 + outer, argb);
+                        }
+                        else
+                                ui_speaker_span(ui, left, size, top + row, 12.0 - outer, 12.0 + outer, argb);
+                }
+                if (y > 5.5 && y <= 8.0)
+                        ui_speaker_span(ui, left, size, top + row, 11.0, 13.0, argb);
+                if (y > 8.0 && y <= 10.0)
+                        ui_speaker_span(ui, left, size, top + row, 8.0, 16.0, argb);
+                if (struck && y >= -10.0 && y <= 10.0)
+                        ui_speaker_span(ui, left, size, top + row, 12.0 + y * 0.8 - reach, 12.0 + y * 0.8 + reach, argb);
+        }
+}
+
+/*
         A level meter's state, one channel's. What is fed it is the greatest sample since the last look (15 bits, the sound
         server's page), and what it shows is that on a scale of decibels from 60 under full scale to full scale, which rises
         at once and falls over 1.5 seconds from the top to the bottom, with a line that holds the highest for a second and
@@ -8193,7 +8259,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
 
                 if (left + ui_dev(ui, UI_STRIP_W) <= s->x || left >= s->x + s->w)
                         continue;
-                // The disc: the device's has a speaker in it, a program's its letter and a dot while it plays.
+                // The disc: the output device's has a speaker in it, the microphone's (master 2) a microphone, a program's its letter and a dot while it plays.
                 if (strip->master)
                 {
                         int waves = strip->muted || !strip->percent ? 0 : strip->percent < 50 ? 1 : 2, size = ui_dev(ui, 22);
@@ -8201,7 +8267,10 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
                         ui_kit_fill(ui, &(struct ui_box){(centre - face / 2) * 256, (s->y + ui_dev(ui, 16)) * 256, (centre + face / 2) * 256,
                                                          (s->y + ui_dev(ui, 16) + face) * 256, face * 128, face * 128},
                                     ui_role(UI_SURFACE_HIGHEST), null);
-                        ui_speaker(ui, centre - size / 2, s->y + ui_dev(ui, 16) + (face - size) / 2, size, waves, strip->muted, ink);
+                        if (strip->master == 2)
+                                ui_microphone(ui, centre - size / 2, s->y + ui_dev(ui, 16) + (face - size) / 2, size, strip->muted, ink);
+                        else
+                                ui_speaker(ui, centre - size / 2, s->y + ui_dev(ui, 16) + (face - size) / 2, size, waves, strip->muted, ink);
                 }
                 else
                 {

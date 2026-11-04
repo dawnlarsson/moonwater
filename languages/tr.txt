@@ -48,9 +48,15 @@ menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
 menu_zoom_in	5bcf	&Yakınlaştır
 menu_zoom_out	9234	&Uzaklaştır
+mixer_allow	19d2	İzin ver
 mixer_empty	eef1	Çalan ses yok
 mixer_mute	9f74	Sessiz
+mixer_no_mic	412a	Mikrofon yok
+mixer_nobody	cc29	Hiçbir program kayıt yapmıyor
 mixer_off	e944	Ses sunucusu kapalı
+mixer_playback	110c	Oynatma
+mixer_recording	f20c	Kayıt
+mixer_recording_off	9c09	Kayıt kapalı
 mixer_unmute	72bb	Sesi aç
 settings_already_joined	71fb	%s ağına zaten bağlı
 settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri

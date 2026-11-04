@@ -49,9 +49,15 @@ menu_toggle_comment	92ac	تبديل التعليق
 menu_undo	b9d3	تراجع
 menu_zoom_in	5bcf	تكبير
 menu_zoom_out	9234	تصغير
+mixer_allow	19d2	السماح
 mixer_empty	eef1	لا يوجد صوت قيد التشغيل
 mixer_mute	9f74	كتم الصوت
+mixer_no_mic	412a	لا يوجد ميكروفون
+mixer_nobody	cc29	لا يوجد برنامج يسجّل
 mixer_off	e944	خادم الصوت متوقف
+mixer_playback	110c	التشغيل
+mixer_recording	f20c	التسجيل
+mixer_recording_off	9c09	التسجيل متوقف
 mixer_unmute	72bb	إلغاء الكتم
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
 settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط

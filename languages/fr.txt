@@ -48,9 +48,15 @@ menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
 menu_zoom_in	5bcf	Zoom a&vant
 menu_zoom_out	9234	Zoom a&rrière
+mixer_allow	19d2	Autoriser
 mixer_empty	eef1	Aucun son n'est lu
 mixer_mute	9f74	Couper le son
+mixer_no_mic	412a	Aucun microphone
+mixer_nobody	cc29	Aucun programme n'enregistre
 mixer_off	e944	Le serveur de son est arrêté
+mixer_playback	110c	Lecture
+mixer_recording	f20c	Enregistrement
+mixer_recording_off	9c09	L'enregistrement est désactivé
 mixer_unmute	72bb	Rétablir le son
 settings_already_joined	71fb	déjà connecté à %s
 settings_any_text	89dc	n'importe quelle commande, comme les mots après moonwater : son verbe, puis ses arguments

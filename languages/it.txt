@@ -48,9 +48,15 @@ menu_toggle_comment	92ac	Attiva/disattiva co&mmento
 menu_undo	b9d3	&Annulla
 menu_zoom_in	5bcf	I&ngrandisci
 menu_zoom_out	9234	&Riduci
+mixer_allow	19d2	Consenti
 mixer_empty	eef1	Nessun suono in riproduzione
 mixer_mute	9f74	Disattiva audio
+mixer_no_mic	412a	Nessun microfono
+mixer_nobody	cc29	Nessun programma sta registrando
 mixer_off	e944	Il server audio è spento
+mixer_playback	110c	Riproduzione
+mixer_recording	f20c	Registrazione
+mixer_recording_off	9c09	La registrazione è disattivata
 mixer_unmute	72bb	Riattiva audio
 settings_already_joined	71fb	già connesso a %s
 settings_any_text	89dc	un comando qualsiasi, come le parole dopo moonwater: il verbo e i suoi argomenti

@@ -48,9 +48,15 @@ menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
 menu_zoom_in	5bcf	&Powiększ
 menu_zoom_out	9234	Pom&niejsz
+mixer_allow	19d2	Zezwól
 mixer_empty	eef1	Nic nie jest odtwarzane
 mixer_mute	9f74	Wycisz
+mixer_no_mic	412a	Brak mikrofonu
+mixer_nobody	cc29	Żaden program nie nagrywa
 mixer_off	e944	Serwer dźwięku jest wyłączony
+mixer_playback	110c	Odtwarzanie
+mixer_recording	f20c	Nagrywanie
+mixer_recording_off	9c09	Nagrywanie jest wyłączone
 mixer_unmute	72bb	Włącz dźwięk
 settings_already_joined	71fb	już połączono z %s
 settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty

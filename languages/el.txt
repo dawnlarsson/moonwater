@@ -48,9 +48,15 @@ menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
 menu_zoom_in	5bcf	Μεγέθυνση
 menu_zoom_out	9234	Σμίκρυνση
+mixer_allow	19d2	Επιτρέπω
 mixer_empty	eef1	Δεν παίζει ήχος
 mixer_mute	9f74	Σίγαση
+mixer_no_mic	412a	Δεν υπάρχει μικρόφωνο
+mixer_nobody	cc29	Κανένα πρόγραμμα δεν εγγράφει
 mixer_off	e944	Ο διακομιστής ήχου είναι απενεργοποιημένος
+mixer_playback	110c	Αναπαραγωγή
+mixer_recording	f20c	Εγγραφή
+mixer_recording_off	9c09	Η εγγραφή είναι απενεργοποιημένη
 mixer_unmute	72bb	Επαναφορά ήχου
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
 settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα

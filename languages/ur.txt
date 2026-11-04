@@ -49,9 +49,15 @@ menu_toggle_comment	92ac	تبصرہ بدلیں
 menu_undo	b9d3	کالعدم کریں
 menu_zoom_in	5bcf	بڑا کریں
 menu_zoom_out	9234	چھوٹا کریں
+mixer_allow	19d2	اجازت دیں
 mixer_empty	eef1	کوئی آواز نہیں چل رہی
 mixer_mute	9f74	خاموش
+mixer_no_mic	412a	کوئی مائیکروفون نہیں
+mixer_nobody	cc29	کوئی پروگرام ریکارڈ نہیں کر رہا
 mixer_off	e944	آواز کا سرور بند ہے
+mixer_playback	110c	پلے بیک
+mixer_recording	f20c	ریکارڈنگ
+mixer_recording_off	9c09	ریکارڈنگ بند ہے
 mixer_unmute	72bb	آواز بحال کریں
 settings_already_joined	71fb	پہلے سے %s سے منسلک ہے
 settings_any_text	89dc	کوئی بھی کمانڈ، moonwater کے بعد آنے والے الفاظ کی صورت میں: پہلے فعل، پھر آرگیومنٹس

@@ -1,7 +1,9 @@
 /*
-        The mixer, a window of the sound server's volumes: the output device first, then a strip for every program that has
-        a sound (the kit's strips, ui.c: a disc, its name, its volume, a level meter beside a vertical slider, a mute
-        button). It says what each strip is, hands the strips its events and acts on the one that changed; the sliders,
+        The mixer, a window of the sound server's volumes in two pages (the kit's segmented tabs along its top): Playback, the
+        output device first and then a strip for every program that has a sound, and Recording, the microphone programs are
+        given first and then a strip for every program that records from one (a program that records what plays is none);
+        the kit's strips, ui.c: a disc, its name, its volume, a level meter beside a vertical slider, a mute button. It says
+        what each strip is, hands the strips its events and acts on the one that changed; the sliders,
         the keys, the wheel, the meters' fall and hold, the scrolling when there are more strips than room and the
         mirroring of a window that reads from the right are the kit's.
 
@@ -9,19 +11,25 @@
         read-only and copied whole), at the pace the page is written while anything plays and twice a second when all is quiet.
         What it changes goes the other way over the server's socket (src/audio/control.c): a program's volume or mute is
         the program's streams' (the streams of one program, by the name it gave, are one strip), and the device's volume
-        and mute are the sink's, which the server keeps in /root/audio.volume and /root/audio.mute for the next boot. A
+        and mute are the sink's, which the server keeps in /root/audio.volume and /root/audio.mute for the next boot (the
+        microphone's, on the Recording page, are the source's, in /root/audio.source.volume and .mute). A
         strip the person is moving is the person's for a moment whatever the page says meanwhile (ui.c), and what is
         changed is sent once a pass of the loop however many events came, so a drag costs a request a frame.
 
-        With the server not running, or no page, the window says so, and the strips come when the page does.
+        With the server not running, or no page, the window says so, and the strips come when the page does. On the Recording
+        page, with recording turned off (/root/audio.capture, `moonwater audio capture`), it says so and has a button, Allow,
+        that turns it on; with no microphone it says that.
 
-            mixer [-q [-a]] [-f FONT.ttf] [-b BOLD.ttf] [-p PAGE] [-s SOCKET]
+            mixer [-q [-a]] [-i] [-f FONT.ttf] [-b BOLD.ttf] [-p PAGE] [-s SOCKET]
 
         One window: a second start finds the first and lifts it. Escape closes it.
 
+        -i starts it on the Recording page.
+
         -q is the tray's popup (a press on the tray's volume cell, the machine script starts it): the device's strip alone, in a window
         that is put away by a press anywhere but on it, by losing the keys and by Escape, with a row under it, Mixer, that starts the
-        whole mixer and puts the popup away. -a opens it beside the cell that was pressed (the compositor leaves its rectangle, the edge
+        whole mixer and puts the popup away. With -i (the tray's microphone cell: recording is never silent) it is the Recording page's
+        strips instead, the microphone and the programs that record, up to four wide. -a opens it beside the cell that was pressed (the compositor leaves its rectangle, the edge
         its band is along and its screen in the table, as it does for the launcher's button), above a bottom band, below a top one and
         beside a side one, kept on the screen.
 
@@ -44,9 +52,10 @@
 #define MIXER_MEMBERS 16               // the streams of one program that are one strip
 #define MIXER_VOLUME 65536u
 #define MIXER_NONE 0xffffffffu
-#define MIXER_QUICK_W (2 * UI_STRIP_PAD + UI_STRIP_W) // the popup: one strip wide,
-#define MIXER_QUICK_H 380                              // this tall,
-#define MIXER_QUICK_ROW 44                             // the last of it the Mixer row
+#define MIXER_QUICK_WIDTH(n) (2 * UI_STRIP_PAD + (n) * UI_STRIP_W + ((n) > 1 ? UI_STRIP_GAP : 0)) // the popup: n strips wide,
+#define MIXER_QUICK_W MIXER_QUICK_WIDTH(1)                                                      // one for the output,
+#define MIXER_QUICK_H 380                                                                       // this tall, the last of it the Mixer row
+#define MIXER_TABS (UI_TABS_H + 16)                                                             // the tabs of the full window and their room
 
 struct mixer_group
 {
@@ -62,7 +71,9 @@ struct mixer_big
         struct audio_state copy;
         struct ctl ctl;
         unsigned char send[UI_STRIPS_MOST]; // what is to be sent for a strip: 1 its volume, 2 its mute
-        char sink[64];                      // the device as programs name it, for its volume
+        char sink[64];                      // the output device as programs name it, for its volume
+        char source[64];                    // and the microphone
+        int device;                         // 1 when strip 0 is the device's: the programs' groups follow it
 };
 
 static struct
@@ -75,14 +86,17 @@ static struct
         const char address_to socket_path;
         int width, height, shown;
         unsigned int ground;
-        b32 focused, dirty, have, connected, listed;
+        b32 focused, dirty, have, connected, listed, recording, capture_off;
         b64 next_poll, seen_at;
         // The tray's popup (-q), and where it opens (-a).
-        b32 quick, beside, anchored, had_focus, on_button;
+        b32 quick, beside, anchored, had_focus;
         int anchor[4], screen[4], pointer_x, pointer_y;
         unsigned int edge, number;
-        struct ui_control open; // its Mixer row
-        string_address font;    // the face this is drawn in (-f), which the mixer it starts is drawn in too
+        struct ui_buttons row;   // its Mixer row
+        struct ui_buttons allow; // Allow, on the Recording page with recording turned off
+        struct ui_control tabs;  // the two pages
+        const char address_to capture_path;
+        string_address font;     // the face this is drawn in (-f), which the mixer it starts is drawn in too
 } mixer;
 
 /* ---- the page ---- */
@@ -144,6 +158,9 @@ static fn mixer_list(b64 now)
 {
         struct mixer_big address_to big = mixer.big;
         const struct audio_state address_to page = &big->copy;
+        const struct audio_state_stream address_to streams = mixer.recording ? page->record : page->stream;
+        int most = mixer.recording ? AUDIO_STATE_RECORDS : AUDIO_STATE_STREAMS;
+        b32 off = mixer.have && mixer.recording && !page->capture, programs = mixer.have && (!mixer.quick || mixer.recording) && !off;
         struct
         {
                 int first, percent;
@@ -153,22 +170,34 @@ static fn mixer_list(b64 now)
         int groups = 0;
 
         ui_strips_begin(&big->strips);
-        if (mixer.have)
+        // The Allow button has the keys when it appears: nothing else is on the page to have them.
+        if (off && !mixer.capture_off)
+                mixer.allow.keys = 1;
+        mixer.capture_off = off;
+        if (mixer.have && !mixer.recording)
         {
                 ui_strips_add(&big->strips, 0xfffffffffffffffeul, page->device[0] ? page->device : page->name[0] ? page->name : "?", mixer_percent(page->volume),
                               page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
                 string_copy_bounded((string_address)big->sink, (string_address)page->name, sizeof(big->sink));
         }
-        for (int slot = 0; mixer.have && !mixer.quick && slot < AUDIO_STATE_STREAMS && groups + 1 < UI_STRIPS_MOST; slot++)
+        else if (programs && page->input[0])
         {
-                const struct audio_state_stream address_to stream = &page->stream[slot];
+                ui_strips_add(&big->strips, 0xfffffffffffffffdul, page->input, mixer_percent(page->input_volume), page->input_muted != 0, 2, 0, page->input_peak_left,
+                              page->input_peak_right, now);
+                string_copy_bounded((string_address)big->source, (string_address)page->input_name, sizeof(big->source));
+        }
+        big->device = big->strips.count;
+        for (int slot = 0; programs && slot < most && groups + 1 < UI_STRIPS_MOST; slot++)
+        {
+                const struct audio_state_stream address_to stream = &streams[slot];
                 struct mixer_group address_to group;
                 int at = -1;
 
-                if (stream->index == MIXER_NONE)
+                // A program that records what plays is no microphone's: it is not shown, and it is not the person's to be told of.
+                if (stream->index == MIXER_NONE || (mixer.recording && (stream->flags & AUDIO_STATE_MONITOR)))
                         continue;
                 for (int k = 0; k < groups; k++)
-                        if (mixer_same(&page->stream[agg[k].first], stream))
+                        if (mixer_same(&streams[agg[k].first], stream))
                                 at = k;
                 if (at < 0)
                 {
@@ -187,7 +216,7 @@ static fn mixer_list(b64 now)
         }
         for (int k = 0; k < groups; k++)
         {
-                const struct audio_state_stream address_to first = &page->stream[agg[k].first];
+                const struct audio_state_stream address_to first = &streams[agg[k].first];
 
                 // A program's number is its name's and its user's, else its connection's: the same through every listing.
                 unsigned long id = 0x100000000ul + first->client;
@@ -256,20 +285,29 @@ static fn mixer_flush(void)
                         mixer.connected = ctl_connect(&big->ctl, mixer.socket_path) == 0;
                 if (!mixer.connected)
                         break;
-                if (strip->master)
+                if (strip->master && !mixer.recording)
                 {
                         if (big->send[k] & 1)
                                 answer = ctl_set_sink_volume(&big->ctl, big->sink, volume);
                         if (answer >= 0 && (big->send[k] & 2))
                                 answer = ctl_set_sink_mute(&big->ctl, big->sink, strip->muted);
                 }
+                else if (strip->master)
+                {
+                        if (big->send[k] & 1)
+                                answer = ctl_set_source_volume(&big->ctl, big->source, volume);
+                        if (answer >= 0 && (big->send[k] & 2))
+                                answer = ctl_set_source_mute(&big->ctl, big->source, strip->muted);
+                }
                 else
-                        for (int member = 0; member < big->group[k - 1].count && answer >= 0; member++)
+                        for (int member = 0; member < big->group[k - big->device].count && answer >= 0; member++)
                         {
+                                unsigned long number = big->group[k - big->device].member[member];
+
                                 if (big->send[k] & 1)
-                                        answer = ctl_set_input_volume(&big->ctl, big->group[k - 1].member[member], volume);
+                                        answer = mixer.recording ? ctl_set_output_volume(&big->ctl, number, volume) : ctl_set_input_volume(&big->ctl, number, volume);
                                 if (answer >= 0 && (big->send[k] & 2))
-                                        answer = ctl_set_input_mute(&big->ctl, big->group[k - 1].member[member], strip->muted);
+                                        answer = mixer.recording ? ctl_set_output_mute(&big->ctl, number, strip->muted) : ctl_set_input_mute(&big->ctl, number, strip->muted);
                         }
                 // A connection that broke is made again at the next pass, and what was to be sent stays to be; what the server
                 // refused or no longer has is not asked again.
@@ -285,6 +323,42 @@ static fn mixer_flush(void)
 
 /* ---- the window ---- */
 
+// The other page shown: what was to be sent is sent first, and the strips are listed again from nothing (their keys, their scroll and what they held are the other page's).
+static fn mixer_page(b32 recording)
+{
+        struct ui_strips address_to strips = &mixer.big->strips;
+
+        if (mixer.recording == recording)
+                return;
+        mixer_flush();
+        mixer.recording = recording;
+        strips->ready = 0, strips->count = 0, strips->before_count = 0, strips->focus_id = 0;
+        memory_zero(mixer.big->send, sizeof(mixer.big->send));
+        mixer.capture_off = false;
+        mixer_list(ui_kit.now);
+        mixer.dirty = true;
+}
+
+// Recording turned on, where the server reads it; its page follows within a moment.
+static fn mixer_allow(void)
+{
+        compositor_volume_write(mixer.capture_path, "on\n");
+        mixer.dirty = true;
+}
+
+// The two pages as the kit's segmented tabs along the top of the window.
+static fn mixer_tabs_layout(struct ui address_to ui)
+{
+        struct ui_control address_to c = &mixer.tabs;
+
+        if (c->kind != UI_TABS)
+                c->kind = UI_TABS, c->variant = UI_TABS_SEGMENTED, ui_control_start(c);
+        c->x = UI_STRIP_PAD, c->y = (MIXER_TABS - UI_TABS_H) / 2, c->w = mixer.width * 100 / ui->scale - 2 * UI_STRIP_PAD, c->h = UI_TABS_H;
+        c->count = 2;
+        c->items[0] = WORDS(mixer_playback), c->items[1] = WORDS(mixer_recording);
+        c->at = mixer.recording;
+}
+
 static fn mixer_dirty(void)
 {
         mixer.dirty = true;
@@ -294,27 +368,41 @@ static fn mixer_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &mixer.ui;
         struct ui_strips address_to strips = &mixer.big->strips;
-
-        int height = mixer.quick ? mixer.height - ui_px(ui, MIXER_QUICK_ROW) : mixer.height;
+        const struct audio_state address_to page = &mixer.big->copy;
+        int row = mixer.quick ? ui_px(ui, UI_ROW) : 0, top = mixer.quick ? 0 : ui_px(ui, MIXER_TABS), button = ui_px(ui, UI_BUTTONS_W);
 
         ui_begin(ui, pixels, mixer.own.table->stride, mixer.width, mixer.height);
-        ui_strips_place(ui, strips, 0, 0, mixer.width, height);
+        ui_strips_place(ui, strips, 0, top, mixer.width, mixer.height - row - top);
         if (!mixer.have)
         {
                 ui_strips_message(ui, strips, WORDS(mixer_off), false);
                 return;
         }
-        ui_strips_draw(ui, strips, mixer.focused && !mixer.on_button);
+        if (top)
+        {
+                mixer_tabs_layout(ui);
+                ui_control_draw(ui, &mixer.tabs);
+        }
+        ui_strips_draw(ui, strips, mixer.focused && !mixer.row.keys && !mixer.allow.keys);
         if (mixer.quick)
         {
-                struct ui_control address_to open = &mixer.open;
-
-                open->kind = UI_BUTTON, open->variant = UI_BUTTON_TEXT, open->label = language_of("Mixer"), open->focused = mixer.focused && mixer.on_button;
-                open->w = MIXER_QUICK_W - 2 * UI_STRIP_PAD, open->h = 32, open->x = UI_STRIP_PAD;
-                open->y = (height + (ui_px(ui, MIXER_QUICK_ROW) - ui_px(ui, open->h)) / 2) * 100 / ui->scale;
-                ui_control_draw(ui, open);
+                ui_buttons_set(&mixer.row, 0, language_of("Mixer"), null);
+                ui_buttons_place(ui, &mixer.row, (mixer.width - button) / 2, mixer.height - row, button);
+                ui_buttons_draw(ui, &mixer.row, mixer.focused);
         }
-        else if (strips->count <= 1)
+        // What there is to say instead of strips or beside them.
+        if (mixer.capture_off)
+        {
+                ui_strips_message(ui, strips, WORDS(mixer_recording_off), false);
+                ui_buttons_set(&mixer.allow, 0, WORDS(mixer_allow), null);
+                ui_buttons_place(ui, &mixer.allow, (mixer.width - button) / 2, strips->y + strips->h / 2, button);
+                ui_buttons_draw(ui, &mixer.allow, mixer.focused);
+        }
+        else if (mixer.recording && !page->input[0] && !strips->count)
+                ui_strips_message(ui, strips, WORDS(mixer_no_mic), false);
+        else if (mixer.recording && strips->count <= 1)
+                ui_strips_message(ui, strips, WORDS(mixer_nobody), true);
+        else if (!mixer.recording && !mixer.quick && strips->count <= 1)
                 ui_strips_message(ui, strips, WORDS(mixer_empty), true);
 }
 
@@ -366,70 +454,55 @@ static b32 mixer_start(string_address address_to words, positive count)
 // The Mixer row: the whole mixer started, in the face this one is drawn in.
 static b32 mixer_start_full(void)
 {
-        string_address words[4] = {(string_address) "/mixer", (string_address) "-f", mixer.font ? mixer.font : (string_address)UI_FONT_REGULAR, null};
+        string_address face = mixer.font ? mixer.font : (string_address)UI_FONT_REGULAR;
+        string_address words[5] = {(string_address) "/mixer", (string_address) "-f", face, null, null};
 
-        return mixer_start(words, 3);
-}
-
-/*
-        The popup's own events, before the strips': Tab goes between the strip and the Mixer row, Enter and Space on the row start the
-        mixer, and the pointer is the row's first (a press on it is not the strips'; a slider being dragged is theirs whole). 1 when the
-        event was taken, 0 when it is the strips', -1 when the popup is done (the mixer was started).
-*/
-static int mixer_quick_event(const struct window_event address_to event)
-{
-        struct ui_control address_to open = &mixer.open;
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
-
-        if (event->type == WINDOW_EVENT_KEY && down)
-        {
-                if (event->a == UI_KEY_TAB)
-                {
-                        mixer.on_button = !mixer.on_button;
-                        mixer.dirty = true;
-                        return 1;
-                }
-                if (mixer.on_button && (event->a == UI_KEY_ENTER || event->a == UI_KEY_ENTER_PAD || event->a == UI_KEY_SPACE))
-                        return (event->flags & WINDOW_KEY_REPEAT) ? 1 : mixer_start_full() ? -1 : 1;
-        }
-        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(ui_kit_held && ui_kit_held != open))
-        {
-                int x = mixer.pointer_x, y = mixer.pointer_y;
-                struct ui_control address_to clicked;
-
-                if (event->type == WINDOW_EVENT_MOTION)
-                        x = mixer.pointer_x = event->a, y = mixer.pointer_y = event->b;
-                if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
-                        return 0;
-                clicked = ui_kit_pointer(&mixer.ui, open, 1, (int)event->type, x, y, down, event->flags);
-                mixer.dirty = true;
-                if (event->type == WINDOW_EVENT_BUTTON && down && ui_kit_held == open)
-                {
-                        mixer.on_button = true;
-                        return 1;
-                }
-                if (clicked == open)
-                        return mixer_start_full() ? -1 : 1;
-        }
-        return 0;
+        if (mixer.recording)
+                words[1] = (string_address) "-i", words[2] = (string_address) "-f", words[3] = face;
+        return mixer_start(words, mixer.recording ? 4 : 3);
 }
 
 static b32 mixer_event(const struct window_event address_to event)
 {
-        p32 bits;
+        struct ui address_to ui = &mixer.ui;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        p32 bits, allow, row;
 
-        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_KEY_ESCAPE)
+        if (event->type == WINDOW_EVENT_KEY && down && event->a == UI_KEY_ESCAPE)
                 return false;
-        if (mixer.quick)
+        if (event->type == WINDOW_EVENT_MOTION)
+                mixer.pointer_x = event->a, mixer.pointer_y = event->b;
+        // The pages: Control with Page Up and Page Down, or Tab, and a press on a tab.
+        if (!mixer.quick && mixer.have && event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) &&
+            (event->a == UI_KEY_PAGE_UP || event->a == UI_KEY_PAGE_DOWN || event->a == UI_KEY_TAB))
         {
-                int taken = mixer_quick_event(event);
+                mixer_page(event->a == UI_KEY_TAB ? !mixer.recording : event->a == UI_KEY_PAGE_DOWN);
+                return true;
+        }
+        if (!mixer.quick && mixer.have)
+        {
+                p32 tabs;
 
-                if (taken < 0)
-                        return false;
-                if (taken)
+                mixer_tabs_layout(ui);
+                tabs = ui_tabs_pointer(ui, &mixer.tabs, event, mixer.pointer_x, mixer.pointer_y);
+                if (tabs & UI_TABS_CHOSEN)
+                        mixer_page(mixer.tabs.at == 1);
+                mixer.dirty |= (tabs & UI_TABS_DRAW) != 0;
+                if (tabs & UI_TABS_TAKEN)
                         return true;
         }
-        bits = ui_strips_event(&mixer.ui, &mixer.big->strips, event);
+        // The buttons of the window: Allow (recording is off), and the popup's Mixer row.
+        allow = mixer.capture_off ? ui_buttons_event(ui, &mixer.allow, event, mixer.pointer_x, mixer.pointer_y) : 0;
+        if (allow & UI_BUTTONS_FIRED)
+                mixer_allow();
+        row = mixer.quick && !(allow & UI_BUTTONS_TAKEN) ? ui_buttons_event(ui, &mixer.row, event, mixer.pointer_x, mixer.pointer_y) : 0;
+        if (row & UI_BUTTONS_FIRED)
+                return !mixer_start_full();
+        if ((allow | row) & UI_BUTTONS_DRAW)
+                mixer.dirty = true;
+        if ((allow | row) & UI_BUTTONS_TAKEN)
+                return true;
+        bits = ui_strips_event(ui, &mixer.big->strips, event);
         if (bits & UI_STRIPS_VOLUME)
                 mixer.big->send[mixer.big->strips.changed] |= 1;
         if (bits & UI_STRIPS_MUTE)
@@ -527,6 +600,12 @@ static fn mixer_place(void)
         windows_place_set(mixer.own.table, mixer.own.row, &place);
 }
 
+// How many strips wide the recording popup is: the microphone and up to three programs, and room for a line beside the microphone at least.
+static int mixer_quick_shown(int count)
+{
+        return count < 3 ? 3 : count > 4 ? 4 : count;
+}
+
 static int mixer_open(void)
 {
         struct windows address_to table = mixer.own.table;
@@ -545,6 +624,10 @@ static int mixer_open(void)
                 return 1;
         }
         mixer.big = (struct mixer_big address_to)mapped;
+        // The page is read first: the recording popup is as wide as the strips it shows (the microphone and up to three programs; room for a line beside one at least).
+        mixer_poll((b64)clock_monotonic_nanoseconds());
+        if (mixer.quick && mixer.recording)
+                width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(mixer_quick_shown(mixer.big->strips.count)));
         mixer_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
                    (unsigned int)(height < room ? height : room > 0 ? room : height));
         mixer_anchor_take();
@@ -553,7 +636,6 @@ static int mixer_open(void)
         else
                 ui_centre(table, row, mixer.width, mixer.height, ui_px(&mixer.ui, 12));
         language_listen(mixer_language);
-        mixer_poll((b64)clock_monotonic_nanoseconds());
         mixer_frame();
         return -1;
 }
@@ -594,9 +676,16 @@ static b32 mixer_main()
         mixer.shown = -1;
         mixer.page_path = AUDIO_STATE_PATH;
         mixer.socket_path = MIXER_SOCKET;
-        for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
+        mixer.capture_path = SETTING_AUDIO_CAPTURE_PATH;
+        for (positive at = 1; at < (positive)program_argument_count(); at++)
         {
                 string_address value;
+
+                if (string_equals(program_argument(at), (string_address) "-i"))
+                {
+                        mixer.recording = true;
+                        continue;
+                }
 
                 if (string_equals(program_argument(at), (string_address) "-q"))
                 {
@@ -610,6 +699,8 @@ static b32 mixer_main()
                         mixer.beside = true;
                         continue;
                 }
+                if (at + 1 >= (positive)program_argument_count())
+                        break;
                 if ((value = ui_argument(at, (string_address) "-f")))
                         mixer_app.font = mixer.font = value;
                 else if ((value = ui_argument(at, (string_address) "-b")))

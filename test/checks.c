@@ -145861,6 +145861,18 @@ static fn mixer_fixture_streams(void)
         page->stream[2] = (struct audio_state_stream){12, 5, 13107, AUDIO_STATE_MUTED | AUDIO_STATE_CORKED | AUDIO_STATE_PLAYING, 0, 0, 101, 1000, "mpv", "film.mkv", ""};
         page->stream[3] = (struct audio_state_stream){20, 8, 65536, AUDIO_STATE_PLAYING, 500, 500, 102, 1000, "", "Unnamed Track", "audio-x-generic"};
         page->streams = 4;
+        // The input half: a microphone at 50 percent, and Chromium recording from it with two streams, obs muted, and parec recording what plays.
+        for (int k = 0; k < AUDIO_STATE_RECORDS; k++)
+                page->record[k].index = 0xffffffffu;
+        page->capture = 1;
+        page->input_volume = 32768, page->input_peak_left = 8192, page->input_peak_right = 4096;
+        string_copy_bounded((string_address)page->input, (string_address) "Built-in Microphone", sizeof(page->input));
+        string_copy_bounded((string_address)page->input_name, (string_address) "alsa_input.pci", sizeof(page->input_name));
+        page->record[0] = (struct audio_state_stream){3, 8, 65536, AUDIO_STATE_PLAYING, 10000, 5000, 200, 1000, "Chromium", "Meet", ""};
+        page->record[1] = (struct audio_state_stream){4, 9, 13107, AUDIO_STATE_MUTED | AUDIO_STATE_PLAYING, 0, 0, 201, 1000, "obs", "mic", ""};
+        page->record[2] = (struct audio_state_stream){5, 10, 65536, AUDIO_STATE_PLAYING | AUDIO_STATE_MONITOR, 700, 700, 202, 1000, "parec", "monitor", ""};
+        page->record[3] = (struct audio_state_stream){6, 8, 32768, AUDIO_STATE_PLAYING, 2000, 1000, 200, 1000, "Chromium", "Meet two", ""};
+        page->inputs = 1, page->records = 4;
 }
 
 static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixels)
@@ -146062,7 +146074,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
 
                 mixer.quick = true;
                 mixer.width = ui_px(&mixer.ui, MIXER_QUICK_W), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
-                mixer.shown = -1, mixer.on_button = false;
+                mixer.shown = -1;
                 mixer.font = (string_address) "/fonts/ui.ttf";
                 mixer_fixture_streams();
                 mixer_fixture_page.seq += 2;
@@ -146073,37 +146085,37 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 mixer.ui.opaque = 1;
                 mixer_draw(pixels);
-                check("mixer popup: the Mixer row is under the strip, in the last 44 pixels, a button of the kit's across the strip's width",
-                      mixer.open.kind == UI_BUTTON && string_equals((string_address)mixer.open.label, (string_address) "Mixer") && mixer.open.y >= MIXER_QUICK_H - MIXER_QUICK_ROW &&
-                          mixer.open.y + mixer.open.h <= MIXER_QUICK_H && mixer.open.w == UI_STRIP_W && s->control[1].y + s->control[1].h <= MIXER_QUICK_H - MIXER_QUICK_ROW);
-                x = mixer.open.x + mixer.open.w / 2, y = mixer.open.y + mixer.open.h / 2;
                 {
+                        struct ui_control address_to open = &mixer.row.button[0];
                         int ink = 0;
 
-                        for (int py = mixer.open.y; py < mixer.open.y + mixer.open.h; py++)
-                                for (int px = mixer.open.x; px < mixer.open.x + mixer.open.w; px++)
+                        check("mixer popup: the Mixer row is under the strip, in the last row of the window, a button of the kit's buttons",
+                              open->kind == UI_BUTTON && string_equals((string_address)open->label, (string_address) "Mixer") && open->y >= MIXER_QUICK_H - ui_row_height() &&
+                                  open->y + open->h <= MIXER_QUICK_H && open->w == UI_BUTTONS_W && s->control[1].y + s->control[1].h <= MIXER_QUICK_H - ui_row_height());
+                        x = open->x + open->w / 2, y = open->y + open->h / 2;
+                        for (int py = open->y; py < open->y + open->h; py++)
+                                for (int px = open->x; px < open->x + open->w; px++)
                                         ink += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
                         check("mixer popup: the row is written", ink > 30);
                 }
 
-                // Keys: Tab is between the strip and the row, Enter on the row starts the mixer and ends the popup, anywhere else it is the strip's.
+                // Keys: Shift-Tab gives the row the keys and Tab gives them back, Enter on the row starts the mixer and ends the popup, anywhere else it is the strip's.
                 system_remove_at(AT_FDCWD, started_path, 0);
                 s->focus = 0, s->focus_id = s->item[0].id;
                 move = strips_key(UI_KEY_ENTER, 0);
                 check("mixer popup: Enter with the keys on the strip mutes it, and starts nothing", mixer_event(&move) && !file_text(started_path, said, sizeof(said)) && s->item[0].muted);
                 mixer_flush();
-                move = strips_key(UI_KEY_TAB, 0);
-                check("mixer popup: Tab puts the keys on the row", mixer_event(&move) && mixer.on_button);
+                move = strips_key(UI_KEY_TAB, WINDOW_KEY_SHIFT);
+                check("mixer popup: Shift-Tab puts the keys on the row", mixer_event(&move) && mixer.row.keys == 1);
                 move = strips_key(UI_KEY_ENTER, WINDOW_KEY_REPEAT);
                 check("mixer popup: and a held key is nothing on it", mixer_event(&move) && !file_text(started_path, said, sizeof(said)));
                 move = strips_key(UI_KEY_ENTER, 0);
                 check("mixer popup: Enter on the row starts the whole mixer apart and ends the popup", !mixer_event(&move));
                 got = mixer_waits(started_path, said, sizeof(said));
                 check("mixer popup: it is started in the face the popup has, as /mixer", got >= 23 && !memory_compare(said, "/mixer -f /fonts/ui.ttf", 23));
-                mixer.on_button = true;
                 move = strips_key(UI_KEY_TAB, 0);
                 mixer_event(&move);
-                check("mixer popup: Tab again gives the keys back to the strip", !mixer.on_button);
+                check("mixer popup: and Tab, past the row, gives the keys back to the strip", !mixer.row.keys);
 
                 // The pointer: a press on the row is the row's, a release on it starts the mixer; a press on the slider is the strip's.
                 system_remove_at(AT_FDCWD, started_path, 0);
@@ -146112,14 +146124,14 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
                 ui_kit_held = null;
                 mixer_event(&move);
-                check("mixer popup: a press on the row takes the keys to it and starts nothing", mixer_event(&press) && mixer.on_button && !file_text(started_path, said, sizeof(said)));
+                check("mixer popup: a press on the row takes the keys to it and starts nothing", mixer_event(&press) && mixer.row.keys == 1 && !file_text(started_path, said, sizeof(said)));
                 check("mixer popup: its release there starts the mixer and ends the popup", !mixer_event(&lift) && mixer_waits(started_path, said, sizeof(said)) >= 23);
                 system_remove_at(AT_FDCWD, started_path, 0);
-                mixer.on_button = false;
+                mixer.row.keys = 0;
                 ui_kit_held = null;
                 move = (struct window_event){WINDOW_EVENT_MOTION, 0, s->control[0].x + s->control[0].w / 2, s->control[0].y + 40};
                 mixer_event(&move);
-                check("mixer popup: a press on the slider is the strip's, and the row starts nothing", mixer_event(&press) && ui_kit_held == &s->control[0] && !mixer.on_button &&
+                check("mixer popup: a press on the slider is the strip's, and the row starts nothing", mixer_event(&press) && ui_kit_held == &s->control[0] && !mixer.row.keys &&
                                                                                                       s->item[0].percent > 70);
                 mixer_event(&lift);
                 check("mixer popup: and so is the release: nothing is started", ui_kit_held == null && file_text(started_path, said, sizeof(said)) == 0);
@@ -146169,7 +146181,221 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer popup: and a table with no press in it leaves it in the middle", !mixer.anchored);
                 mixer.beside = false;
                 mixer.quick = false;
-                mixer.on_button = false;
+                mixer.width = 640, mixer.height = 400;
+        }
+
+        // The Recording page: the microphone, then a strip for each program that records from one (a monitor is none), the changes sent as the
+        // source's and the record streams', recording turned off and no microphone said, the Allow button, the tabs and the popup of the tray's microphone.
+        {
+                static const char started_path[] = "/tmp/mw-launcher-started", capture_path[] = "/tmp/mw-capture";
+                char said[256];
+                struct window_event press, lift, move;
+
+                mixer_fixture_streams();
+                mixer_fixture_page.seq += 2;
+                mixer.listed = false;
+                mixer_poll(mixer_t0 + 900000000ll);
+                mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                mixer.big->ctl.open = 1;
+                mixer.connected = true;
+                mixer.capture_path = capture_path;
+                mixer.font = (string_address) "/fonts/ui.ttf";
+                system_remove_at(AT_FDCWD, capture_path, 0);
+                mixer_page(true);
+                check("mixer recording: the microphone, Chromium (two streams) and obs are three strips, and the program that records what plays is none",
+                      mixer.recording && s->count == 3 && mixer.big->device == 1);
+                check("mixer recording: the microphone is a strip of its own (a microphone's disc), named as shown, at 50 percent",
+                      s->item[0].master == 2 && string_equals((string_address)s->item[0].name, (string_address) "Built-in Microphone") && s->item[0].percent == 50 && !s->item[0].muted &&
+                          string_equals((string_address)mixer.big->source, (string_address) "alsa_input.pci"));
+                check("mixer recording: a program's record streams are one strip at the loudest of their volumes, and a muted one is muted",
+                      string_equals((string_address)s->item[1].name, (string_address) "Chromium") && s->item[1].percent == 100 && s->item[1].playing && !s->item[1].master &&
+                          mixer.big->group[0].count == 2 && mixer.big->group[0].member[0] == 3 && mixer.big->group[0].member[1] == 6 &&
+                          string_equals((string_address)s->item[2].name, (string_address) "obs") && s->item[2].percent == 20 && s->item[2].muted &&
+                          mixer.big->group[1].count == 1 && mixer.big->group[1].member[0] == 4);
+                check("mixer recording: the microphone's meters are its peaks", s->item[0].level[0].shown == ui_level_of(8192) && s->item[0].level[1].shown == ui_level_of(4096));
+
+                // What a change sends: the microphone's to the source by its name, a program's to each of its record streams by their numbers.
+                mixer_logged = 0;
+                s->focus = 0, s->focus_id = s->item[0].id;
+                e = strips_key(UI_KEY_DOWN, 0);
+                mixer_event(&e);
+                mixer_flush();
+                check("mixer recording: the microphone's volume goes to the source by its name, on both channels, as the percent of 65536",
+                      mixer_logged == 1 && mixer_log[0].command == PULSE_COMMAND_SET_SOURCE_VOLUME && string_equals((string_address)mixer_log[0].text, (string_address) "alsa_input.pci") &&
+                          mixer_log[0].channels == 2 && mixer_log[0].volume == 49u * 65536 / 100);
+                e = strips_key(UI_KEY_M, 0);
+                mixer_event(&e);
+                mixer_flush();
+                check("mixer recording: and its mute to the source", mixer_logged == 2 && mixer_log[1].command == PULSE_COMMAND_SET_SOURCE_MUTE && mixer_log[1].mute == 1 &&
+                                                                        string_equals((string_address)mixer_log[1].text, (string_address) "alsa_input.pci"));
+                e = strips_key(UI_KEY_TAB, 0);
+                mixer_event(&e);
+                e = strips_key(UI_KEY_DOWN, 0);
+                mixer_event(&e);
+                mixer_flush();
+                check("mixer recording: a program's volume goes to each of its record streams",
+                      mixer_logged == 4 && mixer_log[2].command == PULSE_COMMAND_SET_SOURCE_OUTPUT_VOLUME && mixer_log[2].index == 3 && mixer_log[2].channels == 2 &&
+                          mixer_log[2].volume == 99u * 65536 / 100 && mixer_log[3].command == PULSE_COMMAND_SET_SOURCE_OUTPUT_VOLUME && mixer_log[3].index == 6);
+                e = strips_key(UI_KEY_TAB, 0);
+                mixer_event(&e);
+                e = strips_key(UI_KEY_M, 0);
+                mixer_event(&e);
+                mixer_flush();
+                check("mixer recording: and a muted program unmuted is the request that unmutes its record stream",
+                      mixer_logged == 5 && mixer_log[4].command == PULSE_COMMAND_SET_SOURCE_OUTPUT_MUTE && mixer_log[4].index == 4 && mixer_log[4].mute == 0);
+
+                // The pages: the tabs and the keys. A page change sends what was to be sent first, and starts the strips from nothing.
+                e = strips_key(UI_KEY_DOWN, 0);
+                mixer_event(&e);
+                check("mixer recording: a change not yet sent", mixer.big->send[2] == 1);
+                got_log = mixer_logged;
+                e = strips_key(UI_KEY_PAGE_UP, WINDOW_KEY_CONTROL);
+                check("mixer pages: Control with Page Up shows Playback, after sending what was to be sent",
+                      mixer_event(&e) && !mixer.recording && mixer_logged == got_log + 1 && s->count == 4 && s->item[0].master == 1 && mixer.big->device == 1 && !mixer.big->send[2]);
+                e = strips_key(UI_KEY_PAGE_DOWN, WINDOW_KEY_CONTROL);
+                check("mixer pages: and Page Down shows Recording", mixer_event(&e) && mixer.recording && s->count == 3 && s->focus == 0);
+                e = strips_key(UI_KEY_TAB, WINDOW_KEY_CONTROL);
+                check("mixer pages: Control Tab goes to the other", mixer_event(&e) && !mixer.recording);
+                e = strips_key(UI_KEY_TAB, WINDOW_KEY_CONTROL);
+                mixer_event(&e);
+                {
+                        int x, y;
+
+                        mixer.ui.pixels = pixels;
+                        mixer_tabs_layout(&mixer.ui);
+                        x = ui_tab_left(&mixer.ui, &mixer.tabs, 0) + ui_tab_width(&mixer.ui, &mixer.tabs, 0) / 2, y = mixer.tabs.y + UI_TABS_H / 2;
+                        move = (struct window_event){WINDOW_EVENT_MOTION, 0, x, y};
+                        press = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                        lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                        ui_kit_held = null;
+                        mixer_event(&move);
+                        mixer_event(&press);
+                        mixer_event(&lift);
+                        check("mixer pages: a press and release on the Playback tab shows it", !mixer.recording && s->item[0].master == 1);
+                        x = ui_tab_left(&mixer.ui, &mixer.tabs, 1) + ui_tab_width(&mixer.ui, &mixer.tabs, 1) / 2;
+                        move = (struct window_event){WINDOW_EVENT_MOTION, 0, x, y};
+                        mixer_event(&move);
+                        mixer_event(&press);
+                        mixer_event(&lift);
+                        check("mixer pages: and on the Recording tab shows that", mixer.recording && s->item[0].master == 2);
+                }
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer.ui.opaque = 1;
+                ui_kit.now += 5000000000ll;
+                mixer_draw(pixels);
+                {
+                        int tabs = 0, disc = 0;
+
+                        for (int py = 0; py < ui_px(&mixer.ui, MIXER_TABS); py++)
+                                for (int px = 0; px < 640; px++)
+                                        tabs += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                        for (int py = ui_px(&mixer.ui, MIXER_TABS) + 16; py < ui_px(&mixer.ui, MIXER_TABS) + 16 + UI_STRIP_FACE; py++)
+                                for (int px = UI_STRIP_PAD; px < UI_STRIP_PAD + UI_STRIP_W; px++)
+                                        disc += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                        check("mixer pages: the two tabs are drawn along the top, and the microphone's disc below them", tabs > 500 && disc > 200);
+                }
+
+                // Recording turned off: it says so, the Allow button has the keys and turns it on (where the server reads it).
+                mixer_fixture_streams();
+                mixer_fixture_page.capture = 0;
+                mixer_fixture_page.seq += 2;
+                mixer.listed = false;
+                mixer_poll(mixer_t0 + 1000000000ll);
+                check("mixer recording off: no strips, and the Allow button has the keys", mixer.capture_off && s->count == 0 && mixer.allow.keys == 1);
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer_draw(pixels);
+                {
+                        struct ui_control address_to allow = &mixer.allow.button[0];
+                        int said_ink = 0, button_ink = 0;
+
+                        for (int py = 0; py < allow->y - 4; py++)
+                                for (int px = 100; px < 540; px++)
+                                        said_ink += py > ui_px(&mixer.ui, MIXER_TABS) && (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                        for (int py = allow->y; py < allow->y + allow->h; py++)
+                                for (int px = allow->x; px < allow->x + allow->w; px++)
+                                        button_ink += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                        check("mixer recording off: it says so above the button, which is centred and drawn", said_ink > 100 && button_ink > 200 && allow->kind == UI_BUTTON &&
+                                                                                                           allow->x + allow->w / 2 == 320);
+                        e = strips_key(UI_KEY_ENTER, WINDOW_KEY_REPEAT);
+                        mixer_event(&e);
+                        check("mixer recording off: a held key turns nothing on", !file_text(capture_path, said, sizeof(said)));
+                        e = strips_key(UI_KEY_ENTER, 0);
+                        check("mixer recording off: Enter turns recording on, as the server reads it", mixer_event(&e) && file_text(capture_path, said, sizeof(said)) == 3 &&
+                                                                                                        !memory_compare(said, "on\n", 3));
+                        system_remove_at(AT_FDCWD, capture_path, 0);
+                        move = (struct window_event){WINDOW_EVENT_MOTION, 0, allow->x + allow->w / 2, allow->y + allow->h / 2};
+                        ui_kit_held = null;
+                        mixer_event(&move);
+                        mixer_event(&press);
+                        check("mixer recording off: a press on the button turns nothing on", !file_text(capture_path, said, sizeof(said)));
+                        mixer_event(&lift);
+                        check("mixer recording off: its release does", file_text(capture_path, said, sizeof(said)) == 3);
+                        system_remove_at(AT_FDCWD, capture_path, 0);
+                }
+
+                // No microphone, and a microphone that nothing records from: a line each.
+                mixer_fixture_streams();
+                mixer_fixture_page.input[0] = 0;
+                for (int k = 0; k < AUDIO_STATE_RECORDS; k++)
+                        mixer_fixture_page.record[k].index = 0xffffffffu;
+                mixer_fixture_page.seq += 2;
+                mixer.listed = false;
+                mixer_poll(mixer_t0 + 1100000000ll);
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer_draw(pixels);
+                {
+                        int ink = 0, middle = 0;
+
+                        for (int py = ui_px(&mixer.ui, MIXER_TABS); py < 400; py++)
+                                for (int px = 0; px < 640; px++)
+                                        if ((pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu))
+                                        {
+                                                ink++;
+                                                middle += py > 180 && py < 260 && px > 100 && px < 540;
+                                        }
+                        check("mixer recording: with no microphone it says so in the middle, with no strips and no button", s->count == 0 && !mixer.capture_off && ink > 100 && ink == middle);
+                }
+                mixer_fixture_streams();
+                for (int k = 0; k < AUDIO_STATE_RECORDS; k++)
+                        mixer_fixture_page.record[k].index = 0xffffffffu;
+                mixer_fixture_page.seq += 2;
+                mixer.listed = false;
+                mixer_poll(mixer_t0 + 1200000000ll);
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer_draw(pixels);
+                {
+                        int beside = 0;
+
+                        for (int py = ui_px(&mixer.ui, MIXER_TABS) + 100; py < 400; py++)
+                                for (int px = UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP; px < 640; px++)
+                                        beside += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                        check("mixer recording: with nothing recording there is the microphone's strip and a line beside it", s->count == 1 && s->item[0].master == 2 && beside > 100);
+                }
+
+                // The tray's microphone cell opens the same page as a popup: as wide as the strips it shows (three to four), the Mixer row starting the whole mixer on this page.
+                check("mixer popup recording: three strips wide for up to three, then as many as there are to four", mixer_quick_shown(0) == 3 && mixer_quick_shown(1) == 3 &&
+                                                                                                                        mixer_quick_shown(3) == 3 && mixer_quick_shown(4) == 4 &&
+                                                                                                                        mixer_quick_shown(9) == 4);
+                mixer_fixture_streams();
+                mixer_fixture_page.seq += 2;
+                mixer.listed = false;
+                mixer_poll(mixer_t0 + 1300000000ll);
+                mixer.quick = true;
+                mixer.width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(3)), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
+                mixer.row.keys = 1;
+                system_remove_at(AT_FDCWD, started_path, 0);
+                e = strips_key(UI_KEY_ENTER, 0);
+                check("mixer popup recording: the Mixer row starts the whole mixer on this page (-i) and ends the popup", !mixer_event(&e) &&
+                                                                                                                              mixer_waits(started_path, said, sizeof(said)) >= 26 &&
+                                                                                                                              !memory_compare(said, "/mixer -i -f /fonts/ui.ttf", 26));
+                system_remove_at(AT_FDCWD, started_path, 0);
+                mixer.quick = false;
+                mixer.row.keys = 0;
+                mixer.recording = false;
                 mixer.width = 640, mixer.height = 400;
         }
 
@@ -146695,6 +146921,36 @@ static fn check_kit_strips(void)
                         counts[muted] = count;
                 }
                 check("kit strips: the device's disc, muted, has the cross in its right half and not muted it has none at volume 0", counts[0] == 0 && counts[1] > 8);
+        }
+
+        // The microphone's disc (master 2): a capsule in the middle in the ink, and muted a diagonal that runs past the glyph's foot at the right.
+        {
+                int capsule[2], past[2];
+
+                for (int muted = 0; muted < 2; muted++)
+                {
+                        int centre, inside = 0, outside = 0;
+                        unsigned int ink = ui_role(muted ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE) & 0xffffffu;
+
+                        for (int k = 0; k < 640 * 400; k++)
+                                strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                        ui_kit.now += 5000000000ll;
+                        ui_strips_begin(s);
+                        ui_strips_add(s, 0xfffffffdul, "Microphone", 50, muted, 2, 0, 0, 0, ui_kit.now);
+                        ui_strips_end(s);
+                        ui_strips_place(&ui, s, 0, 0, 640, 400);
+                        ui_strips_draw(&ui, s, false);
+                        centre = ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2;
+                        for (int y = 27; y <= 33; y++)
+                                for (int x = centre - 2; x <= centre + 2; x++)
+                                        inside += strips_pixel(x, y) == ink;
+                        for (int y = 38; y <= 46; y++)
+                                for (int x = centre + 5; x <= centre + 11; x++)
+                                        outside += strips_pixel(x, y) == ink;
+                        capsule[muted] = inside, past[muted] = outside;
+                }
+                check("kit strips: the microphone's disc has a capsule in its middle, and muted a diagonal past the foot that unmuted has none of",
+                      capsule[0] > 20 && capsule[1] > 20 && past[0] == 0 && past[1] > 4);
         }
 
         // A message instead of strips: written in the middle of the window, or of the room beside the device.

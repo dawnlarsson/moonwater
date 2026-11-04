@@ -48,9 +48,15 @@ menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
 menu_zoom_in	5bcf	&Vergrößern
 menu_zoom_out	9234	Verk&leinern
+mixer_allow	19d2	Erlauben
 mixer_empty	eef1	Es wird kein Ton wiedergegeben
 mixer_mute	9f74	Stummschalten
+mixer_no_mic	412a	Kein Mikrofon
+mixer_nobody	cc29	Kein Programm nimmt auf
 mixer_off	e944	Der Tonserver ist aus
+mixer_playback	110c	Wiedergabe
+mixer_recording	f20c	Aufnahme
+mixer_recording_off	9c09	Aufnahme ist aus
 mixer_unmute	72bb	Ton einschalten
 settings_already_joined	71fb	bereits verbunden mit %s
 settings_any_text	89dc	ein beliebiger Befehl, wie die Wörter nach moonwater: sein Verb, dann seine Argumente

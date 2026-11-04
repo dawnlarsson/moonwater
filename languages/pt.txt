@@ -48,9 +48,15 @@ menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
 menu_zoom_in	5bcf	&Aumentar zoom
 menu_zoom_out	9234	&Diminuir zoom
+mixer_allow	19d2	Permitir
 mixer_empty	eef1	Nenhum som está tocando
 mixer_mute	9f74	Silenciar
+mixer_no_mic	412a	Nenhum microfone
+mixer_nobody	cc29	Nenhum programa está gravando
 mixer_off	e944	O servidor de som está desligado
+mixer_playback	110c	Reprodução
+mixer_recording	f20c	Gravação
+mixer_recording_off	9c09	A gravação está desativada
 mixer_unmute	72bb	Ativar som
 settings_already_joined	71fb	já conectado a %s
 settings_any_text	89dc	qualquer comando, como as palavras depois de moonwater: o verbo e os argumentos
