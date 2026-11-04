@@ -7992,7 +7992,7 @@ static fn shell_privilege_prepare()
                 string_format(log_error, "bash: cannot %s process privileges\n", "read");
                 log_flush();
                 system_call_1(syscall(exit_group), 1);
-                __builtin_unreachable();
+                unreachable_here();
         }
 
         shell_real_uid = uid[0];
@@ -8018,7 +8018,7 @@ static fn shell_privilege_drop()
                 string_format(log_error, "bash: cannot %s process privileges\n", "drop");
                 log_flush();
                 system_call_1(syscall(exit_group), 1);
-                __builtin_unreachable();
+                unreachable_here();
         }
 
         shell_privilege_resettable = false;

@@ -1487,7 +1487,7 @@ static DEAD_END fn link_child_exec(string_address address_to words,
         (void)shell_exec_file((string_address) "/proc/self/exe", words, count,
                               environment);
         system_call_1(syscall(exit), 127);
-        __builtin_unreachable();
+        unreachable_here();
 }
 
 static bool link_nonblocking(bipolar handle)

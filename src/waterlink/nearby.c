@@ -1013,7 +1013,7 @@ static DEAD_END COLD fn link_mdns_child(b32 channel, bipolar parent)
                         break;
         }
         system_call_1(syscall(exit_group), 0);
-        __builtin_unreachable();
+        unreachable_here();
 }
 
 static COLD fn link_mdns_end(void)

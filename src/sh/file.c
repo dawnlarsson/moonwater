@@ -3241,8 +3241,8 @@ static pd_token pd_lex(pd_parser address_to pc)
                         {
                                 b64 digit = sign < 0 ? '0' - (b64)c : (b64)c - '0';
 
-                                if (__builtin_mul_overflow(value, (b64)10, address_of value) ||
-                                    __builtin_add_overflow(value, digit, address_of value))
+                                if (mul_overflow(value, (b64)10, address_of value) ||
+                                    add_overflow(value, digit, address_of value))
                                 {
                                         token.type = PD_ERROR;
                                         return token;
@@ -3292,7 +3292,7 @@ static pd_token pd_lex(pd_parser address_to pc)
                                         p++;
                                 if (sign < 0 && ns)
                                 {
-                                        if (__builtin_sub_overflow(s, (b64)1, address_of s))
+                                        if (sub_overflow(s, (b64)1, address_of s))
                                         {
                                                 token.type = PD_ERROR;
                                                 return token;
@@ -3612,21 +3612,21 @@ static bool pd_apply(pd_parser address_to pc, pd_relative rel, b64 factor)
         bool over;
 
         if (factor < 0)
-                over = __builtin_sub_overflow(pc->rel.ns, rel.ns, address_of pc->rel.ns) |
-                       __builtin_sub_overflow(pc->rel.seconds, rel.seconds, address_of pc->rel.seconds) |
-                       __builtin_sub_overflow(pc->rel.minutes, rel.minutes, address_of pc->rel.minutes) |
-                       __builtin_sub_overflow(pc->rel.hour, rel.hour, address_of pc->rel.hour) |
-                       __builtin_sub_overflow(pc->rel.day, rel.day, address_of pc->rel.day) |
-                       __builtin_sub_overflow(pc->rel.month, rel.month, address_of pc->rel.month) |
-                       __builtin_sub_overflow(pc->rel.year, rel.year, address_of pc->rel.year);
+                over = sub_overflow(pc->rel.ns, rel.ns, address_of pc->rel.ns) |
+                       sub_overflow(pc->rel.seconds, rel.seconds, address_of pc->rel.seconds) |
+                       sub_overflow(pc->rel.minutes, rel.minutes, address_of pc->rel.minutes) |
+                       sub_overflow(pc->rel.hour, rel.hour, address_of pc->rel.hour) |
+                       sub_overflow(pc->rel.day, rel.day, address_of pc->rel.day) |
+                       sub_overflow(pc->rel.month, rel.month, address_of pc->rel.month) |
+                       sub_overflow(pc->rel.year, rel.year, address_of pc->rel.year);
         else
-                over = __builtin_add_overflow(pc->rel.ns, rel.ns, address_of pc->rel.ns) |
-                       __builtin_add_overflow(pc->rel.seconds, rel.seconds, address_of pc->rel.seconds) |
-                       __builtin_add_overflow(pc->rel.minutes, rel.minutes, address_of pc->rel.minutes) |
-                       __builtin_add_overflow(pc->rel.hour, rel.hour, address_of pc->rel.hour) |
-                       __builtin_add_overflow(pc->rel.day, rel.day, address_of pc->rel.day) |
-                       __builtin_add_overflow(pc->rel.month, rel.month, address_of pc->rel.month) |
-                       __builtin_add_overflow(pc->rel.year, rel.year, address_of pc->rel.year);
+                over = add_overflow(pc->rel.ns, rel.ns, address_of pc->rel.ns) |
+                       add_overflow(pc->rel.seconds, rel.seconds, address_of pc->rel.seconds) |
+                       add_overflow(pc->rel.minutes, rel.minutes, address_of pc->rel.minutes) |
+                       add_overflow(pc->rel.hour, rel.hour, address_of pc->rel.hour) |
+                       add_overflow(pc->rel.day, rel.day, address_of pc->rel.day) |
+                       add_overflow(pc->rel.month, rel.month, address_of pc->rel.month) |
+                       add_overflow(pc->rel.year, rel.year, address_of pc->rel.year);
         //      ns is an int in GNU's relative_time.
         if (over || pc->rel.ns > 2147483647 || pc->rel.ns < -2147483647 - 1)
                 return false;
@@ -3685,14 +3685,14 @@ static bool pd_zone_hhmm(pd_parser address_to pc, pd_token s, b64 mm)
 
         if (s.digits <= 2 && mm < 0)
         {
-                if (__builtin_mul_overflow(s.value, (b64)100, address_of s.value))
+                if (mul_overflow(s.value, (b64)100, address_of s.value))
                         return false;
         }
         if (mm < 0)
                 minutes = (s.value / 100) * 60 + s.value % 100;
-        else if (__builtin_mul_overflow(s.value, (b64)60, address_of minutes) ||
-                 (s.negative ? __builtin_sub_overflow(minutes, mm, address_of minutes)
-                             : __builtin_add_overflow(minutes, mm, address_of minutes)))
+        else if (mul_overflow(s.value, (b64)60, address_of minutes) ||
+                 (s.negative ? sub_overflow(minutes, mm, address_of minutes)
+                             : add_overflow(minutes, mm, address_of minutes)))
                 return false;
         if (minutes < -24 * 60 || minutes > 24 * 60)
                 return false;
@@ -3713,7 +3713,7 @@ static bool pd_relunit(pd_token count, pd_token unit, pd_relative address_to rel
                 rel->month = count.value;
                 return true;
         case PD_DAY_UNIT:
-                return !__builtin_mul_overflow(count.value, unit.value, address_of rel->day);
+                return !mul_overflow(count.value, unit.value, address_of rel->day);
         case PD_HOUR_UNIT:
                 rel->hour = count.value;
                 return true;
@@ -3875,8 +3875,8 @@ static bool pd_item(pd_parser address_to pc)
                                 pc->year = first.value;
                                 pc->year_negative = first.negative;
                                 pc->year_digits = first.digits;
-                                if (__builtin_sub_overflow((b64)0, second.value, address_of pc->month) ||
-                                    __builtin_sub_overflow((b64)0, third.value, address_of pc->day))
+                                if (sub_overflow((b64)0, second.value, address_of pc->month) ||
+                                    sub_overflow((b64)0, third.value, address_of pc->day))
                                         return false;
                                 if (pd_peek(pc).type != 'T')
                                 {
@@ -3954,7 +3954,7 @@ static bool pd_item(pd_parser address_to pc)
                         else if (next.type == PD_SNUMBER)
                         {
                                 pd_take(pc);
-                                if (__builtin_sub_overflow((b64)0, next.value, address_of pc->year))
+                                if (sub_overflow((b64)0, next.value, address_of pc->year))
                                         return false;
                                 pc->year_negative = false;
                                 pc->year_digits = next.digits;
@@ -4161,8 +4161,8 @@ static bool pd_item(pd_parser address_to pc)
                         if (year.type != PD_SNUMBER)
                                 return false;
                         pc->month = first.value;
-                        if (__builtin_sub_overflow((b64)0, next.value, address_of pc->day) ||
-                            __builtin_sub_overflow((b64)0, year.value, address_of pc->year))
+                        if (sub_overflow((b64)0, next.value, address_of pc->day) ||
+                            sub_overflow((b64)0, year.value, address_of pc->year))
                                 return false;
                         pc->year_negative = false;
                         pc->year_digits = year.digits;
@@ -4209,7 +4209,7 @@ static bool pd_item(pd_parser address_to pc)
                                 mm = minutes.value;
                         }
                         if (!pd_zone_hhmm(pc, s, mm) ||
-                            __builtin_add_overflow(pc->time_zone, zone, address_of pc->time_zone))
+                            add_overflow(pc->time_zone, zone, address_of pc->time_zone))
                                 return false;
                         pd_zone_done(pc);
                         return true;
@@ -4309,8 +4309,8 @@ static b64 pd_mktime(pd_tm address_to t)
         b64 months = t->year + 1900;
 
         t->wday = -1;
-        if (__builtin_mul_overflow(months, (b64)12, address_of months) ||
-            __builtin_add_overflow(months, t->mon, address_of months))
+        if (mul_overflow(months, (b64)12, address_of months) ||
+            add_overflow(months, t->mon, address_of months))
                 return -1;
 
         b64 year = pd_floor_div(months, 12);
@@ -4322,8 +4322,8 @@ static b64 pd_mktime(pd_tm address_to t)
         b64 days = clock_days_from_civil(year, month + 1, 1) + t->mday - 1;
         b64 civil;
 
-        if (__builtin_mul_overflow(days, (b64)86400, address_of civil) ||
-            __builtin_add_overflow(civil, t->hour * 3600 + t->min * 60 + t->sec, address_of civil))
+        if (mul_overflow(days, (b64)86400, address_of civil) ||
+            add_overflow(civil, t->hour * 3600 + t->min * 60 + t->sec, address_of civil))
                 return -1;
 
         b64 utc;
@@ -4874,10 +4874,10 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                         b64 increment;
                         bool made = false;
 
-                        if (!__builtin_mul_overflow(ordinal, (b64)7, address_of increment) &&
-                            !__builtin_add_overflow(increment, (b64)((pc->day_number - t.wday + 7) % 7),
+                        if (!mul_overflow(ordinal, (b64)7, address_of increment) &&
+                            !add_overflow(increment, (b64)((pc->day_number - t.wday + 7) % 7),
                                                     address_of increment) &&
-                            !__builtin_add_overflow(increment, t.mday, address_of t.mday) &&
+                            !add_overflow(increment, t.mday, address_of t.mday) &&
                             t.mday <= 2147483647 && t.mday >= -2147483647 - 1)
                         {
                                 t.isdst = -1;
@@ -4949,9 +4949,9 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                         b64 month_now = t.mon + pc->rel.month;
                         b64 day_now = t.mday + pc->rel.day;
 
-                        if (__builtin_add_overflow(t.year, pc->rel.year, address_of year_now) ||
-                            __builtin_add_overflow(t.mon, pc->rel.month, address_of month_now) ||
-                            __builtin_add_overflow(t.mday, pc->rel.day, address_of day_now) ||
+                        if (add_overflow(t.year, pc->rel.year, address_of year_now) ||
+                            add_overflow(t.mon, pc->rel.month, address_of month_now) ||
+                            add_overflow(t.mday, pc->rel.day, address_of day_now) ||
                             year_now > 2147483647 || year_now < -2147483647 - 1 ||
                             month_now > 2147483647 || month_now < -2147483647 - 1 ||
                             day_now > 2147483647 || day_now < -2147483647 - 1)
@@ -5018,7 +5018,7 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                 {
                         b64 delta = (b64)pc->time_zone - t.gmtoff;
 
-                        if (__builtin_sub_overflow(moment, delta, address_of moment))
+                        if (sub_overflow(moment, delta, address_of moment))
                         {
                                 if (debug)
                                 {
@@ -5046,12 +5046,12 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                 b64 d2;
                 b64 total;
 
-                if (__builtin_mul_overflow(pc->rel.hour, (b64)3600, address_of d1) ||
-                    __builtin_add_overflow(moment, d1, address_of total) ||
-                    __builtin_mul_overflow(pc->rel.minutes, (b64)60, address_of d2) ||
-                    __builtin_add_overflow(total, d2, address_of total) ||
-                    __builtin_add_overflow(total, pc->rel.seconds, address_of total) ||
-                    __builtin_add_overflow(total, whole, address_of total))
+                if (mul_overflow(pc->rel.hour, (b64)3600, address_of d1) ||
+                    add_overflow(moment, d1, address_of total) ||
+                    mul_overflow(pc->rel.minutes, (b64)60, address_of d2) ||
+                    add_overflow(total, d2, address_of total) ||
+                    add_overflow(total, pc->rel.seconds, address_of total) ||
+                    add_overflow(total, whole, address_of total))
                 {
                         if (debug)
                                 pd_say("error: adding relative time caused an overflow\n");

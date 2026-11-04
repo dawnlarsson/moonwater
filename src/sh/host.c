@@ -11466,7 +11466,7 @@ static DEAD_END COLD fn radio_station_run(b32 channel, bipolar broker, p8 addres
         }
         wifi_link_close(address_of link);
         system_call_1(syscall(exit_group), 0);
-        __builtin_unreachable();
+        unreachable_here();
 }
 
 /* A status the join can return: joined, an errno, an access point's reason
@@ -11608,7 +11608,7 @@ static DEAD_END COLD fn radio_broker(b32 told, p8 address_to ssid, positive ssid
         else if (joined)
                 radio_keeper_said("its station died; the link is joined again");
         system_call_1(syscall(exit_group), 0);
-        __builtin_unreachable();
+        unreachable_here();
 }
 
 /* A join, apart: whatever kept the last link is ended, a broker is forked
@@ -18182,7 +18182,7 @@ static DEAD_END fn locale_child_end(locale_child address_to child, p8 code)
 {
         (void)system_write_once(child->answer, address_of code, 1);
         system_call_1(syscall(exit), code);
-        __builtin_unreachable();
+        unreachable_here();
 }
 
 //      A query nobody wants any more, ended and waited for.

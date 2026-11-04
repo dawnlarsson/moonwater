@@ -44714,9 +44714,9 @@ static expr_value expr_arithmetic(positive operation, expr_value address_to left
 
                 switch (operation)
                 {
-                case 8: over = __builtin_add_overflow(a, b, address_of made.number); break;
-                case 9: over = __builtin_sub_overflow(a, b, address_of made.number); break;
-                case 10: over = __builtin_mul_overflow(a, b, address_of made.number); break;
+                case 8: over = add_overflow(a, b, address_of made.number); break;
+                case 9: over = sub_overflow(a, b, address_of made.number); break;
+                case 10: over = mul_overflow(a, b, address_of made.number); break;
                 case 11:
                         over = b == -1 && a == (bipolar)((positive)1 << 63);
                         if (!over)

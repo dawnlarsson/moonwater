@@ -852,6 +852,18 @@ __attribute__((optimize("inline-max-size=" #max_size)))
 #define unreachable_here() __builtin_unreachable()
 #define trap_now() __builtin_trap()
 
+/*
+        The byte mask of a sixteen-byte vector compare: bit i of the answer is
+        the top bit of byte i of the compare's result, which is set where the
+        bytes agreed (the compare yields all ones there). pmovmskb is the one
+        instruction, and the caller keeps its own compare, so what is asked is
+        what was asked before the name. X86-64 only, as the instruction is.
+*/
+#if X64
+typedef char library_v16 __attribute__((vector_size(16), aligned(1), may_alias));
+#define vector_byte_mask16(compare) ((p32)__builtin_ia32_pmovmskb128((library_v16)(compare)))
+#endif
+
 #define atomic_add(address, val) __sync_fetch_and_add(address, val)
 #define atomic_sub(address, val) __sync_fetch_and_sub(address, val)
 #define atomic_inc(address) atomic_add(address, 1)

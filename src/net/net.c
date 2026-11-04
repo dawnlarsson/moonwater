@@ -6210,7 +6210,7 @@ static fn tls_record_header(p8 address_to header, p8 type, positive length)
 #elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
         memory_store_unaligned(p32, header, word);
 #else
-        memory_store_unaligned(p32, header, __builtin_bswap32(word));
+        network_store_32(header, word);
 #endif
         header[4] = (p8)length;
 }
@@ -16476,7 +16476,7 @@ static DEAD_END COLD fn net_apart_child(net_apart_task task, address_any context
             !net_filter_install(address_of filter))
                 system_call_1(syscall(exit_group), NET_APART_EXIT_UNCONFINED);
         system_call_1(syscall(exit_group), task(context, answer) ? 0 : 1);
-        __builtin_unreachable();
+        unreachable_here();
 }
 
 //      The signal the last confined child died of, for the line that says

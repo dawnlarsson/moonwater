@@ -2657,8 +2657,7 @@ static inline INLINE positive gzip_extend(p8 address_to here, p8 address_to ther
            past sixteen. */
         if (limit - at >= 16)
         {
-                p32 equal = (p32)__builtin_ia32_pmovmskb128(
-                        (gzip_v16)(*(gzip_v16 *)(here + at) == *(gzip_v16 *)(there + at)));
+                p32 equal = vector_byte_mask16(*(gzip_v16 *)(here + at) == *(gzip_v16 *)(there + at));
                 positive n = bottom_bit_known(~equal | 0x10000u);
 
                 if (n < 16)
