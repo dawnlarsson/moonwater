@@ -150763,7 +150763,7 @@ b32 main()
                                                 settings_press(frame % 60 ? UI_KEY_UP : UI_KEY_DOWN);
                                         ui_kit.damage_top = ui_kit.damage_bottom = 0;
                                         ui_kit_turn();
-                                        settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
+                                        ui_buffers_paint(&settings.page.buffers, (int)(frame % 2), 0, 0, settings.height, frames_pixels, settings_draw_rows, &top, &bottom);
                                         if (ui_kit.busy)
                                                 ui_app_moved(&settings_app, ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
                                         continue;
@@ -150785,7 +150785,7 @@ b32 main()
                                         }
                                         ui_kit.damage_top = ui_kit.damage_bottom = 0;
                                         ui_kit_turn();
-                                        settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
+                                        ui_buffers_paint(&settings.page.buffers, (int)(frame % 2), 0, 0, settings.height, frames_pixels, settings_draw_rows, &top, &bottom);
                                         if (ui_kit.busy)
                                                 ui_app_moved(&settings_app, ui_kit.damage_top, ui_kit.damage_bottom, !ui_tween_still(&ui_kit.turn));
                                         continue;
@@ -150798,7 +150798,7 @@ b32 main()
 
                                         settings_event_at(&over);
                                 }
-                                settings_paint(frames_pixels, (int)(frame % 2), 0, 0, &top, &bottom);
+                                ui_buffers_paint(&settings.page.buffers, (int)(frame % 2), 0, 0, settings.height, frames_pixels, settings_draw_rows, &top, &bottom);
                         }
                         string_format(log, "  kit bench %s: %p frames, busy at the end %p\n", what, count, (positive)ui_kit.busy);
                         return 0;

@@ -10662,23 +10662,17 @@ static fn ui_buffers_start(struct ui_buffers address_to b)
 }
 
 /*
-        One picture into the buffer the compositor is not reading: paint draws its rows [top, bottom), within height. False
-        while the compositor has not taken the last one (the picture is due again). True once it is done, even when no row
-        changed and nothing was shown: showing the picture again is a knock, a take and a present for no pixel.
+        The buffer's picture in its rows: the rows that changed or were spoiled in slot, or the whole picture where slot lacks all of
+        it, painted into pixels (paint draws the rows [top, bottom)); and both buffers' state moved on (slot is the picture now, the
+        other lacks what changed). Answers whether the whole was drawn, and the rows drawn, [top, bottom).
 */
-static b32 ui_buffers_present(struct ui_buffers address_to b, const struct window_row address_to own, int width, int height,
-                              void (*paint)(unsigned int address_to pixels, int top, int bottom), void (*before)(void))
+static b32 ui_buffers_paint(struct ui_buffers address_to b, int slot, int spoiled_top, int spoiled_bottom, int height,
+                            unsigned int address_to pixels, void (*paint)(unsigned int address_to pixels, int top, int bottom), int address_to top,
+                            int address_to bottom)
 {
-        struct windows address_to table = own->table;
-        unsigned int row = own->row;
-        int slot = b->shown < 0 ? 0 : 1 - b->shown, other = 1 - slot, spoiled_x, spoiled_y, spoiled_width, spoiled_height;
-        int spoiled_top = 0, spoiled_bottom = 0, drawn_top = b->stale_top[slot], drawn_bottom = b->stale_bottom[slot];
+        int other = 1 - slot, drawn_top = b->stale_top[slot], drawn_bottom = b->stale_bottom[slot];
         b32 whole = b->stale_all[slot] || b->change_all;
 
-        if (b->shown >= 0 && !windows_ready(own))
-                return false;
-        if (windows_spoiled(own, (unsigned int)slot, &spoiled_x, &spoiled_y, &spoiled_width, &spoiled_height))
-                spoiled_top = spoiled_y, spoiled_bottom = spoiled_y + spoiled_height;
         ui_rows_add(&drawn_top, &drawn_bottom, b->change_top, b->change_bottom);
         ui_rows_add(&drawn_top, &drawn_bottom, spoiled_top, spoiled_bottom);
         if (whole)
@@ -10686,7 +10680,7 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, const struct windo
         drawn_top = drawn_top < 0 ? 0 : drawn_top;
         drawn_bottom = drawn_bottom > height ? height : drawn_bottom;
         if (drawn_bottom > drawn_top)
-                paint(windows_buffer(table, row, (unsigned int)slot), drawn_top, drawn_bottom);
+                paint(pixels, drawn_top, drawn_bottom);
         else
                 drawn_top = drawn_bottom = 0;
         // The buffer is the picture now; the other lacks what changed since it was last drawn, which is what changed now.
@@ -10697,7 +10691,30 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, const struct windo
         b->stale_all[other] = b->change_all;
         b->change_top = b->change_bottom = 0;
         b->change_all = false;
-        if (!whole && drawn_bottom <= drawn_top && b->shown >= 0)
+        *top = drawn_top, *bottom = drawn_bottom;
+        return whole;
+}
+
+/*
+        One picture into the buffer the compositor is not reading: paint draws its rows [top, bottom), within height. False
+        while the compositor has not taken the last one (the picture is due again). True once it is done, even when no row
+        changed and nothing was shown: showing the picture again is a knock, a take and a present for no pixel.
+*/
+static b32 ui_buffers_present(struct ui_buffers address_to b, const struct window_row address_to own, int width, int height,
+                              void (*paint)(unsigned int address_to pixels, int top, int bottom), void (*before)(void))
+{
+        struct windows address_to table = own->table;
+        unsigned int row = own->row;
+        int slot = b->shown < 0 ? 0 : 1 - b->shown, spoiled_x, spoiled_y, spoiled_width, spoiled_height;
+        int spoiled_top = 0, spoiled_bottom = 0, top, bottom;
+        b32 whole;
+
+        if (b->shown >= 0 && !windows_ready(own))
+                return false;
+        if (windows_spoiled(own, (unsigned int)slot, &spoiled_x, &spoiled_y, &spoiled_width, &spoiled_height))
+                spoiled_top = spoiled_y, spoiled_bottom = spoiled_y + spoiled_height;
+        whole = ui_buffers_paint(b, slot, spoiled_top, spoiled_bottom, height, windows_buffer(table, row, (unsigned int)slot), paint, &top, &bottom);
+        if (!whole && bottom <= top && b->shown >= 0)
                 return true;
         table->width[row] = (unsigned int)width;
         table->height[row] = (unsigned int)height;
@@ -10706,9 +10723,9 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, const struct windo
         else
         {
                 table->damage_x[row] = 0;
-                table->damage_y[row] = drawn_top;
+                table->damage_y[row] = top;
                 table->damage_width[row] = (unsigned int)width;
-                table->damage_height[row] = drawn_bottom - drawn_top;
+                table->damage_height[row] = bottom - top;
         }
         // The app's knock that comes with its picture (before, optional): its size and damage are set, and the buffer is not shown yet.
         if (before)
