@@ -129448,6 +129448,82 @@ static fn table_sealed_write(const char *path, const char *text)
         system_write_once(handle, text, string_length((string_address)text)), system_close(handle);
 }
 
+/*
+        A program takes the headless compositor's table by its path (windows_take: the device gives none, so the plain path). The compositor
+        makes the table as compositor_table makes it with no card (a memfd reached through WINDOWS_TABLE, a symlink to /proc/PID/fd/N), and a
+        program opens that path, maps the table read-write, reads the compositor's header through its own mapping, and finds the rows free. A cut
+        through the path is refused (the seal), and the program's own mapping still reads the header. In a child with a /run of its own, as above.
+*/
+static void check_compositor_table_taken(void)
+{
+    unsigned int uid = (unsigned int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
+    unsigned int gid = (unsigned int)compositor_call(syscall(getgid), 0, 0, 0, 0, 0, 0);
+    bipolar child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0), waited = -1;
+    positive status = 0;
+
+    if (child == 0)
+    {
+        char map[40] = "0 ";
+        positive at = 2;
+        bipolar handle;
+        long mapped;
+        struct windows address_to table;
+
+        if (compositor_call(syscall(unshare), 0x10000000 | 0x00020000, 0, 0, 0, 0, 0) != 0)
+            system_call_1(syscall(exit_group), 77);
+        table_sealed_write("/proc/self/setgroups", "deny");
+        at += positive_into_string((p8 address_to)map + at, uid);
+        string_copy((string_address)map + at, (string_address) " 1");
+        table_sealed_write("/proc/self/uid_map", map);
+        at = 2;
+        at += positive_into_string((p8 address_to)map + at, gid);
+        string_copy((string_address)map + at, (string_address) " 1");
+        table_sealed_write("/proc/self/gid_map", map);
+        if (compositor_call(syscall(mount), (positive) "none", (positive) "/run", (positive) "tmpfs", 0, 0, 0) != 0)
+            system_call_1(syscall(exit_group), 77);
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.card = -1;
+        compositor.width = compositor.height = 64;
+        compositor.scale = 100;
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        if (compositor_table() < 0)
+            system_call_1(syscall(exit_group), 78);
+        // the program: its own open of the path, its own mapping of the table, the compositor's header read through it
+        handle = system_open_at(AT_FDCWD, (string_address)WINDOWS_TABLE, FILE_READ_WRITE | O_CLOEXEC);
+        if (handle < 0)
+            system_call_1(syscall(exit_group), 79);
+        mapped = compositor_call(syscall(mmap), 0, sizeof(struct windows), 3, 1, (positive)handle, 0);
+        if (mapped < 0 && mapped > -4096)
+            system_call_1(syscall(exit_group), 80);
+        table = (struct windows address_to)mapped;
+        if (table->output_width != 64 || table->output_height != 64)
+            system_call_1(syscall(exit_group), 81);
+        // a row free to take through the program's mapping is the compositor's table's: the compositor sees the claim
+        if (table->pid[0] != 0)
+            system_call_1(syscall(exit_group), 82);
+        __atomic_store_n(&table->pid[0], 4242u, __ATOMIC_RELEASE);
+        if (compositor.table->pid[0] != 4242u)
+            system_call_1(syscall(exit_group), 83);
+        // the cut through the path is refused, and the header is what it was
+        if (compositor_call(syscall(ftruncate), (positive)handle, 0, 0, 0, 0, 0) >= 0)
+            system_call_1(syscall(exit_group), 84);
+        if (table->output_width != 64)
+            system_call_1(syscall(exit_group), 85);
+        system_call_1(syscall(exit_group), 0);
+    }
+    if (child > 0)
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    if (waited == child && (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 77)
+    {
+        string_format(log, "  table taken: NOT RUN, no user namespace with a /run of its own here\n");
+        return;
+    }
+    check("table taken: a program opens the headless table through its path, maps it, claims a row, and a cut through the path is refused",
+          child > 0 && waited == child && (status & 0xffff) == 0);
+    if (child > 0 && waited == child && (status & 0x7f) == 0 && ((status >> 8) & 0xff) != 0)
+        string_format(log, "  table taken: the program's step %p failed\n", (positive)((status >> 8) & 0xff));
+}
+
 static void check_compositor_table_sealed(void)
 {
     unsigned int uid = (unsigned int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
@@ -159904,6 +159980,7 @@ b32 main()
         check_compositor_setting_opens();
         check_compositor_pipe_ignored();
         check_compositor_table_sealed();
+        check_compositor_table_taken();
         check_compositor_doors_held();
         check_compositor_asked();
         check_compositor_tiling();
@@ -219900,6 +219977,29 @@ b32 main(void)
                         began = clock_monotonic_nanoseconds();
                         gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4);
                         idle[run] = clock_monotonic_nanoseconds() - began;
+                }
+                // the same after idle, with the wake an input event makes (gpu_wake at the event, then 5 ms of the program's handling, then the
+                // commit's job): what the keep-alive buys the first present after a pause
+                {
+                        positive woken[IDLE_RUNS];
+
+                        for (int run = 0; run < IDLE_RUNS; run++)
+                        {
+                                positive began;
+
+                                for (began = clock_monotonic_nanoseconds(); clock_monotonic_nanoseconds() - began < 500000000ull;)
+                                        ;
+                                gpu_wake();
+                                for (began = clock_monotonic_nanoseconds(); clock_monotonic_nanoseconds() - began < 5000000ull;)
+                                        ;
+                                began = clock_monotonic_nanoseconds();
+                                gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4);
+                                woken[run] = clock_monotonic_nanoseconds() - began;
+                        }
+                        gpu_bench_sort(woken, IDLE_RUNS);
+                        gpu_bench_sort(idle, IDLE_RUNS);
+                        string_format(log, "  gpu bench: after half a second idle with the input's wake, median %p us (best %p us), without it median %p us (best %p us)\n",
+                                      woken[IDLE_RUNS / 2] / 1000, woken[0] / 1000, idle[IDLE_RUNS / 2] / 1000, idle[0] / 1000);
                 }
                 gpu_bench_sort(tiny, RUNS);
                 gpu_bench_sort(idle, IDLE_RUNS);

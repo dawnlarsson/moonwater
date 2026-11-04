@@ -7799,6 +7799,14 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         return 1;
 }
 
+// An input event on a card that composes: the card's idle clock is woken if it has been idle a while (gpu_wake); nothing when the setting is off
+// or the GPU never started.
+static void compositor_gpu_wake(void)
+{
+        if (compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead)
+                gpu_wake();
+}
+
 // A screen Canvas turns, the damage of it (x0, y0, x1, y1 of the screen) turned from the scanout into the screen's own buffer by the GPU (windows_rotate_u32's turn:
 // one op over the whole panel with a step along its rows and one down them): 1 when it is, 0 when the processor is to.
 static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned int degrees, unsigned int x0, unsigned int y0, unsigned int x1, unsigned int y1)
@@ -16200,6 +16208,11 @@ static void compositor_input_read(unsigned int at)
 
                 if (got <= 0)
                         break;
+#ifdef MOONWATER_GPU_C
+                // The first input after a pause wakes the card's idle clock (gpu_wake: a tiny job, only when the card has been idle a while)
+                if (!compositor.wakeonly[at])
+                        compositor_gpu_wake();
+#endif
 
                 // It woke the loop, and that was all it was for.
                 if (compositor.wakeonly[at])

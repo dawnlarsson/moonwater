@@ -10,6 +10,7 @@
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
 static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size, pending; } gpu;
+static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
 static const unsigned int gpu_cp[] = {
@@ -733,6 +734,7 @@ static b32 gpu_run(void)
         if (!GPU_WAIT_CS(wait) || wait[0])
                 return false;
         gpu.pending = 0;
+        gpu_last_job = clock_monotonic_nanoseconds();
         return true;
 }
 
@@ -808,6 +810,28 @@ static b32 gpu_scale(positive src, unsigned int sp, positive dst, unsigned int d
 
 // One small scene of every kind of op, made from nothing but numbers (a generator for the pictures, the covers and the glyph's bitmap), and the hash of its pixels,
 // 0 if the card did not finish it.
+/*
+        The card's idle clock: a job after a pause pays the clock's ramp (measured on the box's 610M: the first fill after half a second idle took a
+        median of 2.2 ms, back to back 57 us). gpu_wake runs one tiny job when the card has been idle for longer than GPU_WAKE_IDLE, so that whatever the
+        program then commits finds the card awake. It is called on an input event only (no timer: nothing runs while nothing happens), and it writes
+        nothing the compositor reads: a fill of 64 by 4 into the last 64 KB of the buffer, after the card is known idle. Not called before the card
+        has run a job, and never while a job may still run (gpu_idle).
+*/
+#define GPU_WAKE_IDLE 200000000ull
+#define GPU_WAKE_AT 65536ull
+static void gpu_wake(void)
+{
+        positive now = clock_monotonic_nanoseconds(), ops_at, bins_at, d_at;
+        unsigned int address_to ops;
+
+        if (!gpu.at || !gpu_last_job || now - gpu_last_job < GPU_WAKE_IDLE || !gpu_idle())
+                return;
+        ops_at = gpu.size - GPU_WAKE_AT, bins_at = ops_at + 4096, d_at = ops_at + 8192;
+        ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+        ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0, ops[6] = ops[7] = 0;
+        gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+}
+
 #define GPU_TEST_HASH 2024535671u
 static unsigned int gpu_test_hash(void)
 {
