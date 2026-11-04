@@ -403,8 +403,7 @@ static long ctl_start(struct ctl *c)
         c->kept_next = 0;
         for (int i = 0; i < CTL_CACHE; i++)
                 c->kept[i].index = CTL_NONE;
-        for (int i = 0; i < 256; i++)
-                cookie[i] = 0;
+        memory_zero(cookie, sizeof(cookie));
         ctl_budget(c);
         ctl_begin(c, &w, CTL_COMMAND_AUTH);
         ctl_w_u32(&w, CTL_VERSION);
@@ -801,8 +800,7 @@ static long ctl_connect(struct ctl *c, const char *path)
         unsigned char address[110];
         long length = 0, fd;
 
-        for (int i = 0; i < (int)sizeof(address); i++)
-                address[i] = 0;
+        memory_zero(address, sizeof(address));
         address[0] = 1; // AF_UNIX
         while (path[length] && length < 100)
         {

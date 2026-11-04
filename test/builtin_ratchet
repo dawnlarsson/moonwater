@@ -1,5 +1,4 @@
 # __builtin_ names outside src/lib.c and src/lib.util.c, per file: a file may not have more than this,
 # and the aim is none. Lower it with python3 test/function_audit.py --builtins.
 kernel/patch/fold-x86.h 5
-src/audio/alsa.c 17
 src/sh/text.c 5

@@ -175500,6 +175500,23 @@ static long audio_sys_ioctl(int fd, unsigned long request, void *argument);
 static long audio_sys_read(int fd, void *buffer, unsigned long bytes);
 static long audio_sys_write(int fd, const void *buffer, unsigned long bytes);
 
+// The library's names alsa.c calls, as the hosted build has them: the library's own are in the freestanding build.
+typedef unsigned long positive;
+typedef void *address_any;
+typedef char *string_address;
+static void *al_translate_hosted(void *block, unsigned long size, const void *table)
+{
+        unsigned char *bytes = block;
+
+        for (unsigned long at = 0; at < size; at++)
+                bytes[at] = ((const unsigned char *)table)[bytes[at]];
+        return block;
+}
+#define memory_zero(to, size) memset((to), 0, (size))
+#define memory_copy(to, from, size) memmove((to), (from), (size))
+#define string_length_max(text, bound) strnlen((const char *)(text), (bound))
+#define memory_translate(block, size, table) al_translate_hosted((block), (size), (table))
+
 #include "../src/audio/alsa.c"
 
 static unsigned al_checks, al_failures;
@@ -177102,6 +177119,7 @@ int main(void)
 #define memory_copy(to, from, size) memmove((to), (from), (size))
 #define string_length(text) strlen((const char *)(text))
 #define memory_first_of(block, value, size) memchr((block), (value), (size))
+#define memory_zero(to, size) memset((to), 0, (size))
 #define CTL_NO_SYSTEM
 #include "../src/audio/control.c"
 
@@ -183336,6 +183354,7 @@ static long system_call_6(long number, long a, long b, long c, long d, long e, l
 #define memory_copy(to, from, size) memmove((to), (from), (size))
 #define string_length(text) strlen((const char *)(text))
 #define memory_first_of(block, value, size) memchr((block), (value), (size))
+#define memory_zero(to, size) memset((to), 0, (size))
 #include "../src/audio/control.c"
 #include "../src/audio/service.c"
 
@@ -183976,6 +183995,7 @@ static long system_call_6(positive number, positive a, positive b, positive c, p
 #define memory_copy(to, from, size) memmove((to), (from), (size))
 #define string_length(text) strlen((const char *)(text))
 #define memory_first_of(block, value, size) memchr((block), (value), (size))
+#define memory_zero(to, size) memset((to), 0, (size))
 
 #include "../src/audio/control.c"
 

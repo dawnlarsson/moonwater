@@ -209,7 +209,7 @@ static inline int audio_alsa_has(const struct audio_alsa_mask *mask, unsigned in
 // Every parameter open: what hw_params_any is.
 AUDIO_API void audio_alsa_any(struct audio_alsa_hw *hw)
 {
-        __builtin_memset(hw, 0, sizeof(*hw));
+        memory_zero(hw, sizeof(*hw));
         for (int m = 0; m < 3; m++)
                 for (int w = 0; w < 8; w++)
                         hw->masks[m].bits[w] = ~0u;
@@ -223,7 +223,7 @@ AUDIO_API void audio_alsa_any(struct audio_alsa_hw *hw)
 
 static inline void audio_alsa_only(struct audio_alsa_hw *hw, int param, unsigned int bit)
 {
-        __builtin_memset(&hw->masks[param], 0, sizeof(hw->masks[param]));
+        memory_zero(&hw->masks[param], sizeof(hw->masks[param]));
         hw->masks[param].bits[bit >> 5] = 1u << (bit & 31);
         hw->rmask = ~0u;
 }
@@ -336,7 +336,7 @@ AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int
         long fd, result, format_at = -1, channels, got_rate = 0, period;
         unsigned int low, high;
 
-        __builtin_memset(pcm, 0, sizeof(*pcm));
+        memory_zero(pcm, sizeof(*pcm));
         pcm->fd = -1;
         if (card < 0 || card >= AUDIO_ALSA_CARDS || device < 0 || device >= 256 || rate < 1 || period_at_48000 < 1)
                 return AUDIO_EINVAL;
@@ -475,7 +475,7 @@ AUDIO_API long audio_pcm_open(struct audio_pcm *pcm, long card, long device, int
 
         // Kept filled to three periods (the whole buffer when it is smaller); woken when a period has been played.
         pcm->target = pcm->buffer < 3 * pcm->period ? pcm->buffer : 3 * pcm->period;
-        __builtin_memset(&sw, 0, sizeof(sw));
+        memory_zero(&sw, sizeof(sw));
         sw.tstamp_mode = 0;
         sw.period_step = 1;
         sw.proto = AUDIO_ALSA_VERSION;
@@ -540,7 +540,7 @@ AUDIO_API long audio_pcm_avail(struct audio_pcm *pcm)
         struct audio_alsa_sync sync;
         long result, avail;
 
-        __builtin_memset(&sync, 0, sizeof(sync));
+        memory_zero(&sync, sizeof(sync));
         sync.flags = AUDIO_ALSA_SYNC_HWSYNC | AUDIO_ALSA_SYNC_APPL | AUDIO_ALSA_SYNC_AVAIL_MIN;
         result = audio_sys_ioctl(pcm->fd, AUDIO_ALSA_SYNC_PTR, &sync);
         if (result < 0)
@@ -650,13 +650,34 @@ struct audio_card
         } device[AUDIO_ALSA_DEVICES];
 };
 
+// The bytes a driver's name keeps: a printable byte is itself, anything else is a question mark.
+static const unsigned char audio_alsa_printable[256] = {
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        32,  33,  34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,  45,  46,  47,
+        48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,  62,  63,
+        64,  65,  66,  67,  68,  69,  70,  71,  72,  73,  74,  75,  76,  77,  78,  79,
+        80,  81,  82,  83,  84,  85,  86,  87,  88,  89,  90,  91,  92,  93,  94,  95,
+        96,  97,  98,  99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+       112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+        63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,  63,
+};
+
 static void audio_alsa_text(char *to, const unsigned char *from, long room)
 {
-        long at = 0;
+        // A name is what the driver says; it is shown, so only printable bytes of it are kept. The name ends at its null or at the
+        // room left, whichever is first: string_length_max is that count, the copy and the table do the rest.
+        long at = (long)string_length_max((string_address)from, (positive)(room - 1));
 
-        // A name is what the driver says; it is shown, so only printable bytes of it are kept.
-        for (; at < room - 1 && from[at]; at++)
-                to[at] = from[at] >= 32 && from[at] < 127 ? (char)from[at] : '?';
+        memory_copy(to, from, (positive)at);
+        memory_translate(to, (positive)at, (address_any)audio_alsa_printable);
         to[at] = 0;
 }
 
@@ -680,13 +701,13 @@ AUDIO_API long audio_cards_scan(struct audio_card *cards, long room)
                 fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
                 if (fd < 0)
                         continue;
-                __builtin_memset(&info, 0, sizeof(info));
+                memory_zero(&info, sizeof(info));
                 if (audio_sys_ioctl((int)fd, AUDIO_ALSA_CARD_INFO, &info) < 0)
                 {
                         audio_sys_close((int)fd);
                         continue;
                 }
-                __builtin_memset(card, 0, sizeof(*card));
+                memory_zero(card, sizeof(*card));
                 card->number = number;
                 audio_alsa_text(card->id, info.id, sizeof(card->id));
                 audio_alsa_text(card->name, info.name, sizeof(card->name));
@@ -699,7 +720,7 @@ AUDIO_API long audio_cards_scan(struct audio_card *cards, long room)
                         card->device[card->devices].device = device;
                         for (int stream = 0; stream < 2; stream++)
                         {
-                                __builtin_memset(&pcm, 0, sizeof(pcm));
+                                memory_zero(&pcm, sizeof(pcm));
                                 pcm.device = (unsigned int)device;
                                 pcm.subdevice = 0;
                                 pcm.stream = stream;
@@ -923,7 +944,7 @@ static long audio_mixer_zero_db(int fd, const struct audio_ctl_info *info)
 
         if (!(info->access & AUDIO_CTL_ACCESS_TLV_READ))
                 return -1;
-        __builtin_memset(&tlv, 0, sizeof(tlv));
+        memory_zero(&tlv, sizeof(tlv));
         tlv.numid = info->id.numid;
         tlv.length = sizeof(tlv.tlv);
         if (audio_sys_ioctl(fd, AUDIO_CTL_TLV_READ, &tlv) < 0 || tlv.tlv[1] < 8)
@@ -956,7 +977,7 @@ static int audio_mixer_set(int fd, const struct audio_ctl_info *info, long want,
         int changed = 0;
         unsigned int count = info->count < 128 ? info->count : 128;
 
-        __builtin_memset(&now, 0, sizeof(now));
+        memory_zero(&now, sizeof(now));
         now.id = info->id;
         if (audio_sys_ioctl(fd, AUDIO_CTL_ELEM_READ, &now) < 0)
                 return -1;
@@ -1014,12 +1035,12 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
         char path[40];
         long fd, result;
 
-        __builtin_memset(report, 0, sizeof(*report));
+        memory_zero(report, sizeof(*report));
         audio_alsa_path(path, card, 0, 0, 1);
         fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
         if (fd < 0)
                 return fd;
-        __builtin_memset(&list, 0, sizeof(list));
+        memory_zero(&list, sizeof(list));
         list.space = AUDIO_MIXER_MAX;
         list.pids = ids;
         result = audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_LIST, &list);
@@ -1040,7 +1061,7 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
                 kind = audio_mixer_kind(ids[k].name);
                 if (!kind || !(which & (kind == 3 || kind == 4 ? 2 : 1)))
                         continue;
-                __builtin_memset(&info, 0, sizeof(info));
+                memory_zero(&info, sizeof(info));
                 info.id = ids[k];
                 if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_INFO, &info) < 0 || !(info.access & AUDIO_CTL_ACCESS_WRITE) || (info.access & AUDIO_CTL_ACCESS_INACTIVE))
                         continue;
@@ -1080,7 +1101,7 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
                 {
                         struct audio_ctl_value now;
 
-                        __builtin_memset(&now, 0, sizeof(now));
+                        memory_zero(&now, sizeof(now));
                         now.id = info.id;
                         if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_READ, &now) == 0 && now.value.integer[0] == 0)
                         {
@@ -1155,12 +1176,12 @@ AUDIO_API long audio_jacks_read(long card, struct audio_jacks *jacks)
         char path[40];
         long fd, result;
 
-        __builtin_memset(jacks, 0, sizeof(*jacks));
+        memory_zero(jacks, sizeof(*jacks));
         audio_alsa_path(path, card, 0, 0, 1);
         fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
         if (fd < 0)
                 return fd;
-        __builtin_memset(&list, 0, sizeof(list));
+        memory_zero(&list, sizeof(list));
         list.space = AUDIO_MIXER_MAX;
         list.pids = ids;
         result = audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_LIST, &list);
@@ -1194,7 +1215,7 @@ AUDIO_API long audio_jacks_read(long card, struct audio_jacks *jacks)
                                 continue;
                         }
                 }
-                __builtin_memset(&now, 0, sizeof(now));
+                memory_zero(&now, sizeof(now));
                 now.id = ids[k];
                 if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_READ, &now) < 0)
                         continue;
