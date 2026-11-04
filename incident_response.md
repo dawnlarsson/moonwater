@@ -41,6 +41,29 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-112: one Wayland commit of a deep subsurface tree held the compositor for a quarter of a second
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Work a client controls that grows faster than what it sends (CWE-407); denial of service of the desktop |
+| Attacker | any program that can connect to `/run/moonwater/wayland-0` |
+| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the walk in every copy since `4563ba64` (2026-11-03 21:09 +0100) |
+| Fixed by | the commit that adds this entry (`src/canvas/wayland.c`: `wayland_window_of`, `wayland_child_copy`, `wayland_flatten`) |
+| Tests that fail without it | `CHECK_wayland` `test_tree_cost`: a root commit of a chain of 63 subsurfaces with eight damaged rectangles each, mean of three under 50 ms; `test/wayland_mutations.py` "every copy walks the window again" puts the walk back and the row is red (158 ms) |
+
+**What it was.** Each copy of a subsurface's picture into its window (`wayland_child_copy`) made the window's
+rectangle again (`wayland_window_rect`, a walk of all 64 surfaces with each one's chain up to its root), and a commit
+lays each subsurface and everything under it once per damaged rectangle. With the 63 subsurfaces a client may have hung
+in one chain, each with eight rectangles of damage, the root's commit made about 16,000 copies and as many walks: 266 ms
+(424 at worst) of the compositor's one thread on an M2, for some 14 KB a client sends, and the host reads 64 KB of a
+client a pass, so a client that repeats it holds the desktop (input, every other window) for a second a pass.
+
+**Fix.** The rectangle is made once for a run of copies, by whoever starts the run (a flatten, a relay, a subsurface's
+apply, a commit), since a run changes nothing it is made of; what is drawn is the same (all of `CHECK_wayland`'s pixel
+rows unchanged). The same commit takes 8.7 ms. What is left is the copies themselves, one per rectangle per surface
+under it, which is what the protocol asks.
+
 ### MW-2026-151: a few programs on the session bus could have every other program's calls refused
 
 | | |
@@ -90,6 +113,7 @@ bytes chose the rest of the name.
 absolute name that does not exist, and asks for that name exactly. With the terminator taken out (the mutant) the
 row fails: the path is the target with the stack's bytes after it.
 
+
 ### MW-2026-111: a Wayland client's extra descriptors stayed open in the compositor
 
 | | |
@@ -98,7 +122,7 @@ row fails: the path is the target with the stack's bytes after it.
 | Class | Descriptor leak in a root process; denial of service by descriptor exhaustion |
 | Attacker | any program that can connect to `/run/moonwater/wayland-0` (mode 0666: every local user, every bowl program) |
 | Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; built in since `0a4629ac` (2026-11-03 19:44 +0100) where `CONFIG_MOONWATER_WAYLAND` was set |
-| Fixed by | the commit that adds this entry (`src/canvas/wayland_host.c`, `compositor_wl_read`) |
+| Fixed by | `fb6f5ae0` (`src/canvas/wayland_host.c`, `compositor_wl_read`) |
 | Tests that fail without it | `test/wayland_e2e.sh` row "a client that sends more descriptors than the shim takes leaves none open in the compositor": 32 descriptors left open after four clients on the parent, 0 with the fix |
 
 **What it was.** `compositor_wl_read` receives with a control buffer of 160 bytes, so the kernel installs up to 36

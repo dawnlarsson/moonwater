@@ -162976,6 +162976,7 @@ int main(void) {
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef CONFIG_MOONWATER_WAYLAND
@@ -165802,6 +165803,60 @@ static void test_subsurfaces(void)
 }
 
 /*
+        What one commit of a window costs the compositor when its subsurfaces are as many as a client may make, hung in one chain
+        (the deepest tree), each with a picture of eight damaged rectangles waiting for the root's commit (MW-2026-112): every copy
+        of a run made the window's rectangle again, a walk of every surface and its chain, and the root's commit took a quarter of a
+        second on an M2 (424 ms at worst) for some 14 KB a client sends; made once a run, it is under 10 ms. The bound is a mean of
+        three under 50 ms, which a loaded or sanitized build keeps and the walk in every copy (158 ms) does not.
+*/
+static void test_tree_cost(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long subcompositor, surface[WAYLAND_SURFACES], buffer[WAYLAND_SURFACES];
+        double total = 0;
+        long count = WAYLAND_SURFACES - 1, rounds = 3;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        subcompositor = wl_global(c, s.registry, WLI_wl_subcompositor, 1);
+        session_window(&s, 0xff303030);
+        surface[0] = s.surface;
+        for (long k = 1; k <= count; k++)
+        {
+                surface[k] = wlc_id(c, WLI_wl_surface, 6);
+                wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, surface[k]);
+                wlc_send(c, subcompositor, WLQ_wl_subcompositor_get_subsurface, wlc_id(c, WLI_wl_subsurface, 1), surface[k], surface[k - 1]);
+                buffer[k] = wl_buffer_of(&s, 24, 16, 0xff00ff00u, WLN_wl_shm_format_xrgb8888);
+        }
+        for (long round = 0; round < rounds; round++)
+        {
+                struct timespec start, end;
+
+                for (long k = 1; k <= count; k++)
+                {
+                        wlc_send(c, surface[k], WLQ_wl_surface_attach, buffer[k], 0L, 0L);
+                        for (long d = 0; d < 8; d++)
+                                wlc_send(c, surface[k], WLQ_wl_surface_damage_buffer, d * 3, 0L, 2L, 2L);
+                        wlc_send(c, surface[k], WLQ_wl_surface_commit);
+                }
+                clock_gettime(CLOCK_MONOTONIC, &start);
+                wlc_send(c, surface[0], WLQ_wl_surface_commit);
+                clock_gettime(CLOCK_MONOTONIC, &end);
+                total += (double)(end.tv_sec - start.tv_sec) * 1e3 + (double)(end.tv_nsec - start.tv_nsec) / 1e6;
+        }
+        WLCHECK(c->errors == 0 && fake.row[0].pixels[5 * FAKE_W + 5] == 0xff00ff00, "a chain of %ld subsurfaces is shown (%s)", count,
+                c->error_text);
+        WLCHECK(total / (double)rounds < 50.0, "a commit of a window with a chain of %ld subsurfaces costs %.1f ms, under 50", count,
+                total / (double)rounds);
+        wlc_end(c);
+        leak_check("tree cost");
+        wayland_stop();
+}
+
+/*
         Trees of surfaces: made, hung from each other (and from themselves, and in rings), drawn on, moved, ordered,
         synchronized and desynchronized, and taken apart by random steps, with the pointer moving over them and the
         window woken between. What each step shows is the rows above's; what is asked here is that nothing fails, no event
@@ -167865,6 +167920,7 @@ int main(int argc, char **argv)
         test_caps();
         test_seat();
         test_subsurfaces();
+        test_tree_cost();
         test_geometry();
         test_cursor();
         test_dmabuf();
