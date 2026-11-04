@@ -28,14 +28,19 @@
            is the size of anything.
         2. A message is read whole and validated whole (the header's fields by type, every name, path and signature by
            its grammar, the body by its signature down to the padding and the UTF-8 of each string) before anything of it
-           is acted on or passed on; a message that is not valid is the end of that connection.
+           is acted on or passed on; a message that is not valid is the end of that connection. Valid is at least as
+           strict as every client library a message is passed to: libdbus and GDBus end their own connection on a
+           message they cannot read, so one this bus passed on would let any client disconnect any other. So the
+           reserved org.freedesktop.DBus.Local interface and path (where a library's own Disconnected comes from), a
+           reply serial of 0, and containers nested past libdbus's 64 (dict entries counted) are not valid here.
         3. The sender of a message is the bus's to say: it is stamped on what is passed on and what a client wrote there
            is not kept. A reply is passed only to the caller it answers, from the callee it was asked of.
-        4. A client that does not read never blocks the bus: its output queue is bounded. What other clients send it
-           (calls, signals, the bus's broadcasts) may fill only part of it, and past that is refused, with an error to
-           a caller that waits for a reply; the rest is kept for what the bus owes it, the answers to its own calls, and
-           a client that does not read those is dropped. So no client can have another dropped by sending it more than
-           it reads. A connection that has not said Hello in a few seconds is dropped.
+        4. A client that does not read never blocks the bus, and no client can make the bus drop another: a queue holds
+           what its client asked for (answers to its calls, the bus's own words to it) up to DBUS_OUT, and what others
+           sent it unasked (calls, signals) only up to DBUS_UNASKED, so a flood is refused (a call so refused is an
+           error to its caller) and the client's own answers still have room. A client whose queue refuses a message
+           and that then reads nothing for DBUS_STALL_MS is dropped. A connection that has not said Hello in a few
+           seconds is dropped.
         5. A name is a client's only while it is connected; the bus's own names, and the service's, are not for taking.
 
         It is freestanding C with no allocator, in ring 3, the same way the Wayland shim is, with the host behind a small
@@ -46,20 +51,22 @@
 
 #define DBUS_API static __attribute__((unused))
 
-#define DBUS_CLIENTS 32
-#define DBUS_PER_UID 12          // connections of one uid, root's as many as the table has room for
+#define DBUS_CLIENTS 128         // a desktop's programs: a browser alone holds three or four
+#define DBUS_PER_UID 96          // connections of one uid (a bowl's user is every program of the bowls), root's as many as there is room for
 #define DBUS_MESSAGE 262144      // the most a message may be, header and body
-#define DBUS_STAMPED (DBUS_MESSAGE + 4096) // the most a message may be once the bus has stamped its sender on it
-#define DBUS_OUT (4 * DBUS_MESSAGE) // a client's output queue
-#define DBUS_OWED DBUS_STAMPED      // of it, the room only the answers to its own calls may take: the largest message there is
-#define DBUS_NAMES 128           // well-known names, all clients together
+#define DBUS_STAMPED (DBUS_MESSAGE + 4096)   // the most a message may be once the bus has stamped its sender on it
+#define DBUS_OUT (2 * DBUS_MESSAGE + 16384)  // a client's output queue: what it asked for, and what others sent it
+#define DBUS_UNASKED (DBUS_STAMPED + 4096)   // the part of it others may fill unasked (their calls, signals): the largest message, stamped
+#define DBUS_STALL_MS 15000      // how long a client whose queue refused a message may go without reading
+#define DBUS_NAMES 256           // well-known names, all clients together
 #define DBUS_NAMES_PER 8
 #define DBUS_RULES 64            // match rules one client holds
+#define DBUS_RULE_TEXT 1024      // the longest match rule read
 #define DBUS_PENDING_PER 64      // method calls of one client waiting for a reply
-#define DBUS_PENDING (DBUS_CLIENTS * DBUS_PENDING_PER) // all clients together: room for every client's, so none takes another's
+#define DBUS_PENDING (DBUS_CLIENTS * DBUS_PENDING_PER) // all clients together: slot s's own rows are [s * DBUS_PENDING_PER, (s + 1) * DBUS_PENDING_PER), so none takes another's
 #define DBUS_SETTINGS 64
 #define DBUS_NAME_TEXT 128       // the longest well-known name kept (the protocol's 255 are refused)
-#define DBUS_DEPTH 32            // how deep the containers of a value nest
+#define DBUS_DEPTH 64            // how deep the containers of a value nest: arrays, dict entries, structs and variants, as libdbus counts
 #define DBUS_AUTH_LINE 512
 #define DBUS_AUTH_TOTAL 4096
 #define DBUS_HELLO_MS 5000       // how long a connection has to authenticate and say Hello
@@ -101,7 +108,9 @@ struct dbus_client
 {
         long live, dead, slot, pid, uid, state; // state: 0 awaits the first byte, 1 the authentication, 2 messages
         const char *why;                        // what ended it, for the log
-        long in_length, out_length, auth_total, born;
+        long in_length, auth_total, born;
+        long out_head, out_length;              // the queue is out[out_head, out_length): what is sent moves the head
+        long full_since;                        // when its queue first refused a message since it last read (0: it has not)
         long id;                                // the unique name is :1.id
         unsigned char hello, uid_ok, no_fds, want_data; // want_data: EXTERNAL was named with no data, and DATA is asked for
         long names, pending;
@@ -311,12 +320,12 @@ static int dbus_valid_name(const char *s, long n, int kind)
         return dots >= 1 && s[n - 1] != '.';
 }
 
-// One complete type of a signature, from *at; the depth of arrays and of structs counted.
-static int dbus_sig_one(const char *s, long n, long *at, int arrays, int structs)
+// One complete type of a signature, from *at; the depth of arrays, of structs and of dict entries counted apart, each to 32, as libdbus does.
+static int dbus_sig_one(const char *s, long n, long *at, int arrays, int structs, int dicts)
 {
         char c;
 
-        if (*at >= n || arrays > 32 || structs > 32)
+        if (*at >= n || arrays > 32 || structs > 32 || dicts > 32)
                 return 0;
         c = s[(*at)++];
         switch (c)
@@ -334,18 +343,18 @@ static int dbus_sig_one(const char *s, long n, long *at, int arrays, int structs
                                           s[*at] == 'h'))
                                 return 0;
                         (*at)++;
-                        if (!dbus_sig_one(s, n, at, arrays + 1, structs + 1) || *at >= n || s[(*at)++] != '}')
+                        if (!dbus_sig_one(s, n, at, arrays + 1, structs, dicts + 1) || *at >= n || s[(*at)++] != '}')
                                 return 0;
                         return 1;
                 }
-                return dbus_sig_one(s, n, at, arrays + 1, structs);
+                return dbus_sig_one(s, n, at, arrays + 1, structs, dicts);
         case '(':
         {
                 long members = 0;
 
                 while (*at < n && s[*at] != ')')
                 {
-                        if (!dbus_sig_one(s, n, at, arrays, structs + 1))
+                        if (!dbus_sig_one(s, n, at, arrays, structs + 1, dicts))
                                 return 0;
                         members++;
                 }
@@ -367,9 +376,24 @@ static int dbus_valid_signature(const char *s, long n)
         if (n > 255)
                 return 0;
         while (at < n)
-                if (!dbus_sig_one(s, n, &at, 0, 0))
+                if (!dbus_sig_one(s, n, &at, 0, 0, 0))
                         return 0;
         return 1;
+}
+
+// A variant's signature at p[*at] (a byte count, the text, a NUL) that is one complete type; its length, or -1. *at moves past it.
+static long dbus_variant_sig(const unsigned char *p, long *at, long limit)
+{
+        long length, inner = 0, start;
+
+        if (*at + 1 > limit)
+                return -1;
+        length = p[(*at)++];
+        start = *at;
+        if (length > limit - *at - 1 || p[*at + length] || !dbus_sig_one((const char *)p + start, length, &inner, 0, 0, 0) || inner != length)
+                return -1;
+        *at += length + 1;
+        return length;
 }
 
 /* ---- a body, valid down to its padding ---- */
@@ -434,54 +458,60 @@ static int dbus_value(const unsigned char *p, long *at, long limit, const char *
                 return 1;
         case 'v':
         {
-                long inner = 0, start;
+                long inner = 0, start = *at + 1;
 
-                if (*at + 1 > limit)
-                        return 0;
-                length = p[(*at)++];
-                start = *at;
-                if (length > limit - *at - 1 || p[*at + length] || !dbus_valid_signature((const char *)p + *at, length))
-                        return 0;
-                *at += length + 1;
-                if (!dbus_sig_one((const char *)p + start, length, &inner, 0, 0) || inner != length)
-                        return 0;
-                inner = 0;
-                return dbus_value(p, at, limit, (const char *)p + start, length, &inner, depth + 1);
+                length = dbus_variant_sig(p, at, limit);
+                return length >= 0 && dbus_value(p, at, limit, (const char *)p + start, length, &inner, depth + 1);
         }
         case 'a':
         {
-                long element = *s, after, stop, align;
+                long element = *s, after, stop, align, counted, previous = 0, elements = 0;
                 char first;
 
                 if (!dbus_pad_zero(p, at, limit, 4) || *at + 4 > limit)
                         return 0;
                 length = (long)dbus_get32(p + *at);
                 *at += 4;
+                counted = *at;
                 first = sig[element];
                 align = first == '{' || first == '(' ? 8 : dbus_fixed_size(first) ? dbus_fixed_size(first) : first == 's' || first == 'o' || first == 'a' ? 4 : 1;
                 if (!dbus_pad_zero(p, at, limit, align) || length < 0 || length > 67108864 || length > limit - *at)
                         return 0;
                 stop = *at + length;
                 after = element - 1; // the array's own type, from its a, for where the signature goes on
-                if (!dbus_sig_one(sig, sig_length, &after, 0, 0))
+                if (!dbus_sig_one(sig, sig_length, &after, 0, 0, 0))
                         return 0;
                 while (*at < stop)
                 {
                         long each = element;
 
+                        previous = *at;
+                        elements++;
                         if (first == '{')
                         {
+                                // a dict entry is a container of its own, a level below the array's (libdbus counts it so)
                                 if (!dbus_pad_zero(p, at, stop, 8))
                                         return 0;
                                 each++;
-                                if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 1) ||
-                                    !dbus_value(p, at, stop, sig, sig_length, &each, depth + 1))
+                                if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 2) ||
+                                    !dbus_value(p, at, stop, sig, sig_length, &each, depth + 2))
                                         return 0;
                         }
                         else if (!dbus_value(p, at, stop, sig, sig_length, &each, depth + 1))
                                 return 0;
                 }
-                if (*at != stop)
+                /*
+                        GDBus (GLib's gdbusmessage.c, 2.90 at least) counts an array's length from where the length ends, before
+                        the padding to its elements' 8: when that padding is 4 bytes, it takes the array to end 4 bytes early,
+                        and an element that begins after that point is not read. The last element is lost and what follows is
+                        read 4 or more bytes back from where it is: sent (a(ay)y) of [([1,2,3,4],), ([],)] and 9, GDBus reads
+                        [([1,2,3,4],)] and 0; where that misreading meets something not valid, GDBus ends its connection. So
+                        such an array, valid as it is and read rightly by libdbus, is not taken: that a client would read other
+                        values than the bus passed on, or be disconnected by another, is worse than refusing a layout no
+                        program has use for (the last of two or more structs or dict entries no more than four bytes).
+                        GDBus stops before the last element when the one before it ends where GDBus takes the end to be.
+                */
+                if (*at != stop || ((first == '(' || first == '{') && counted + 4 == stop - length && elements > 1 && previous >= stop - 4))
                         return 0;
                 *s = after;
                 return 1;
@@ -532,7 +562,7 @@ struct dbus_message
 #define DBUS_HAS_FDS 256u
 
 // 0 when the bytes are one whole message, valid; the message read into m. (A client's own are cut at DBUS_MESSAGE before; one the bus
-// stamped its sender on may be up to DBUS_STAMPED, and is read again by this to be broadcast.)
+// stamped its sender on may be up to DBUS_STAMPED.)
 static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
 {
         long fields, limit, at = 16, body, pos;
@@ -561,94 +591,50 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
                         return -1;
         while (at < limit)
         {
+                // a field is a struct of its code and a variant: aligned to 8, the code, the variant's type, its value
                 unsigned char code;
+                long length, type_at, inner = 0;
                 char kind;
-                long length;
+                const char *text;
 
-                for (long k = at; k < DBUS_ALIGN(at, 8); k++)
-                        if (k >= limit || b[k])
-                                return -1;
-                at = DBUS_ALIGN(at, 8);
-                if (at + 4 > limit)
+                if (!dbus_pad_zero(b, &at, limit, 8) || at + 1 > limit)
                         return -1;
-                code = b[at];
-                if (b[at + 1] != 1 || b[at + 3])
+                code = b[at++];
+                type_at = at + 1;
+                length = dbus_variant_sig(b, &at, limit);
+                // a field this bus does not know is valid as its type says and is not passed on (the stamp writes only the
+                // fields below); code 0 is INVALID, which no message carries, and no branch below takes it
+                if (length < 0 || !dbus_value(b, &at, limit, (const char *)b + type_at, length, &inner, 3))
                         return -1;
-                kind = (char)b[at + 2];
-                at += 4;
-                if (code >= 1 && code <= 9 && (seen & (1u << code)))
+                if (code > 9)
+                        continue;
+                kind = (char)b[type_at];
+                if (length != 1 || (seen & (1u << code)) || kind != (code == 1 ? 'o' : code == 5 || code == 9 ? 'u' : code == 8 ? 'g' : 's'))
                         return -1;
-                if (kind == 'u')
-                {
-                        for (long k = at; k < DBUS_ALIGN(at, 4); k++)
-                                if (k >= limit || b[k])
-                                        return -1;
-                        at = DBUS_ALIGN(at, 4);
-                        if (at + 4 > limit)
-                                return -1;
-                        if (code == 5)
-                        {
-                                m->reply = dbus_get32(b + at);
-                                m->has |= DBUS_HAS_REPLY;
-                        }
-                        else if (code == 9)
-                        {
-                                // GDBus says 0 descriptors on every call; a message with any is one this bus cannot take (none are passed)
-                                if (dbus_get32(b + at))
-                                        return -1;
-                                m->has |= DBUS_HAS_FDS;
-                        }
-                        at += 4;
-                }
-                else if (kind == 's' || kind == 'o')
-                {
-                        for (long k = at; k < DBUS_ALIGN(at, 4); k++)
-                                if (k >= limit || b[k])
-                                        return -1;
-                        at = DBUS_ALIGN(at, 4);
-                        if (at + 4 > limit)
-                                return -1;
-                        length = (long)dbus_get32(b + at);
-                        at += 4;
-                        if (length < 0 || length > limit - at - 1 || b[at + length] || !dbus_utf8(b + at, length))
-                                return -1;
-                        if (code == 1 && kind == 'o' && dbus_valid_path((const char *)b + at, length))
-                                m->path = (const char *)b + at, m->has |= DBUS_HAS_PATH;
-                        else if (code == 2 && kind == 's' && dbus_valid_name((const char *)b + at, length, 0))
-                                m->interface = (const char *)b + at, m->has |= DBUS_HAS_INTERFACE;
-                        else if (code == 3 && kind == 's' && dbus_valid_name((const char *)b + at, length, 2))
-                                m->member = (const char *)b + at, m->has |= DBUS_HAS_MEMBER;
-                        else if (code == 4 && kind == 's' && dbus_valid_name((const char *)b + at, length, 0))
-                                m->error = (const char *)b + at, m->has |= DBUS_HAS_ERROR;
-                        else if (code == 6 && kind == 's' && dbus_valid_name((const char *)b + at, length, 1))
-                                m->destination = (const char *)b + at, m->has |= DBUS_HAS_DESTINATION;
-                        else if (code == 7 && kind == 's' && dbus_valid_name((const char *)b + at, length, 1))
-                                m->sender = (const char *)b + at, m->has |= DBUS_HAS_SENDER;
-                        else if (code >= 1 && code <= 7 && code != 5)
-                                return -1;
-                        at += length + 1;
-                }
-                else if (kind == 'g')
-                {
-                        if (at + 1 > limit)
-                                return -1;
-                        length = b[at++];
-                        if (length > limit - at - 1 || b[at + length] || !dbus_valid_signature((const char *)b + at, length))
-                                return -1;
-                        if (code == 8)
-                                m->signature = (const char *)b + at, m->has |= DBUS_HAS_SIGNATURE;
-                        at += length + 1;
-                }
+                seen |= 1u << code;
+                // the value is valid for its type (its UTF-8, its path, its signature), and ends at `at`
+                text = kind == 'g' ? (const char *)b + type_at + 3 : (const char *)b + DBUS_ALIGN(type_at + 2, 4) + 4;
+                length = kind == 'g' ? b[type_at + 2] : kind == 'u' ? 0 : at - 1 - (text - (const char *)b);
+                if (code == 1)
+                        m->path = text, m->has |= DBUS_HAS_PATH;
+                else if (code == 2 && dbus_valid_name(text, length, 0))
+                        m->interface = text, m->has |= DBUS_HAS_INTERFACE;
+                else if (code == 3 && dbus_valid_name(text, length, 2))
+                        m->member = text, m->has |= DBUS_HAS_MEMBER;
+                else if (code == 4 && dbus_valid_name(text, length, 0))
+                        m->error = text, m->has |= DBUS_HAS_ERROR;
+                else if (code == 5 && (m->reply = dbus_get32(b + at - 4)) != 0)
+                        m->has |= DBUS_HAS_REPLY; // a reply serial of 0 is none: libdbus ends a connection that is sent one
+                else if (code == 6 && dbus_valid_name(text, length, 1))
+                        m->destination = text, m->has |= DBUS_HAS_DESTINATION;
+                else if (code == 7 && dbus_valid_name(text, length, 1))
+                        m->sender = text, m->has |= DBUS_HAS_SENDER;
+                else if (code == 8)
+                        m->signature = text, m->has |= DBUS_HAS_SIGNATURE;
+                else if (code == 9 && !dbus_get32(b + at - 4))
+                        m->has |= DBUS_HAS_FDS; // GDBus says 0 descriptors on every call; one with any is a message this bus cannot take
                 else
                         return -1;
-                if (code >= 1 && code <= 9)
-                {
-                        // a field of the wrong type for its code
-                        if ((code == 1 && kind != 'o') || (code >= 2 && code <= 4 && kind != 's') || (code == 5 && kind != 'u') ||
-                            (code >= 6 && code <= 7 && kind != 's') || (code == 8 && kind != 'g') || (code == 9 && kind != 'u'))
-                                return -1;
-                        seen |= 1u << code;
-                }
         }
         if (at != limit)
                 return -1;
@@ -656,6 +642,9 @@ static int dbus_parse(const unsigned char *b, long size, struct dbus_message *m)
             (m->type == DBUS_SIGNAL && (!(m->has & DBUS_HAS_PATH) || !(m->has & DBUS_HAS_INTERFACE) || !(m->has & DBUS_HAS_MEMBER))) ||
             (m->type == DBUS_RETURN && !(m->has & DBUS_HAS_REPLY)) ||
             (m->type == DBUS_ERROR && (!(m->has & DBUS_HAS_REPLY) || !(m->has & DBUS_HAS_ERROR))))
+                return -1;
+        // the interface and the path a client library's own Disconnected comes from: libdbus and GDBus end a connection sent either
+        if (dbus_equal(m->interface, "org.freedesktop.DBus.Local") || dbus_equal(m->path, "/org/freedesktop/DBus/Local"))
                 return -1;
         m->body_at = pos;
         m->body_length = body;
@@ -823,16 +812,22 @@ static struct dbus_client *dbus_client_of(long slot)
         return slot == DBUS_SERVICE ? &dbus.service : slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
 }
 
-// The slot a unique name (:1.N) is, or -1.
+// The slot a unique name (:1.N) is, or -1: N read as the number it is (no leading zero), then the client that has it.
 static long dbus_unique_slot(const char *name)
 {
-        if (name[0] != ':' || name[1] != '1' || name[2] != '.')
+        long id = 0, at = 3;
+
+        if (name[0] != ':' || name[1] != '1' || name[2] != '.' || name[3] < '1' || name[3] > '9')
                 return -1;
-        if (dbus_equal(name, dbus.service.unique))
+        while (at < 15 && name[at] >= '0' && name[at] <= '9')
+                id = id * 10 + (name[at++] - '0');
+        if (name[at])
+                return -1;
+        if (id == dbus.service.id)
                 return DBUS_SERVICE;
-        for (long at = 0; at < DBUS_CLIENTS; at++)
-                if (dbus.client[at] && dbus.client[at]->hello && dbus_equal(name, dbus.client[at]->unique))
-                        return at;
+        for (long slot = 0; slot < DBUS_CLIENTS; slot++)
+                if (dbus.client[slot] && dbus.client[slot]->hello && dbus.client[slot]->id == id)
+                        return slot;
         return -1;
 }
 
@@ -871,30 +866,32 @@ static void dbus_unique_text(char *into, long id)
         into[at] = 0;
 }
 
-// Queued to a client, what the bus owes it (an answer to its own call): a client with no room for it does not read, and is dropped.
-static void dbus_deliver(struct dbus_client *c, const unsigned char *bytes, long n)
-{
-        if (!c || c->slot == DBUS_SERVICE || c->dead)
-                return;
-        if (c->out_length + n > DBUS_OUT)
-        {
-                c->dead = 2;
-                c->why = "it did not read what it was sent";
-                return;
-        }
-        dbus_copy(c->out + c->out_length, bytes, n);
-        c->out_length += n;
-}
+#define DBUS_UNASKED_FOR 0 // a call or a signal of another, or the bus's NameOwnerChanged: up to DBUS_UNASKED of the queue
+#define DBUS_ASKED_FOR 1   // an answer to the client's own call, or the bus's own words to it: up to DBUS_OUT
 
 /*
-        Queued to a client, what another client sent it (a call, a signal) or the bus tells everyone: 1 when it was, 0
-        when the queue has no room for it short of the room kept for what the bus owes the client. A sender cannot end
-        a client by sending it more than it reads: what does not fit is not given, and the client is not ended for it.
+        Queued to a client: 1, or 0 when it is not (no client, the service, one that has ended, or no room for it under
+        what it is). A message there is no room for is refused, never the client: what it asked for has the room above
+        DBUS_UNASKED that nothing unasked can take, so another client's flood cannot crowd out its answers or have it
+        dropped. The first refusal since it last read starts its stall clock, which dbus_tick ends it by.
 */
-static int dbus_offer(struct dbus_client *c, const unsigned char *bytes, long n)
+static int dbus_deliver(struct dbus_client *c, const unsigned char *bytes, long n, int asked)
 {
-        if (!c || c->slot == DBUS_SERVICE || c->dead || c->out_length + n > DBUS_OUT - DBUS_OWED)
+        if (!c || c->slot == DBUS_SERVICE || c->dead)
                 return 0;
+        if (c->out_length - c->out_head + n > (asked ? DBUS_OUT : DBUS_UNASKED))
+        {
+                if (!c->full_since)
+                        c->full_since = dbus.host->now(dbus.host->context) | 1;
+                return 0;
+        }
+        if (c->out_length + n > DBUS_OUT)
+        {
+                // what is not sent yet goes to the front, once, so that there is room behind it
+                dbus_copy(c->out, c->out + c->out_head, c->out_length - c->out_head);
+                c->out_length -= c->out_head;
+                c->out_head = 0;
+        }
         dbus_copy(c->out + c->out_length, bytes, n);
         c->out_length += n;
         return 1;
@@ -999,7 +996,9 @@ static int dbus_rule_matches(const struct dbus_rule *r, long from, const struct 
                         char value[96];
                         long want = dbus_length(r->arg[k]), got = dbus_arg_string(m, k, value, sizeof value);
 
-                        if (got < 0)
+                        // argN and arg0namespace match a string, argNpath a string or an object path (the argument's type is
+                        // signature[k] when there is one: every argument before it is of one character)
+                        if (got < 0 || (r->arg_mode[k] != 1 && m->signature[k] != 's'))
                                 return 0;
                         if (r->arg_mode[k] == 1)
                         {
@@ -1137,14 +1136,15 @@ static void dbus_broadcast(const unsigned char *bytes, long n, long from, const 
                 for (long k = 0; k < DBUS_RULES; k++)
                         if (c->rule[k].used && dbus_rule_matches(&c->rule[k], from, m))
                         {
-                                dbus_offer(c, bytes, n);
+                                dbus_deliver(c, bytes, n, DBUS_UNASKED_FOR);
                                 break;
                         }
         }
 }
 
-// A signal of the bus: NameOwnerChanged to those who ask for it, or a unicast one (NameAcquired, NameLost) to a client.
-static void dbus_bus_signal(long to, const char *member, const char *a, const char *b, const char *c)
+// A signal of the bus: NameOwnerChanged to those who ask for it, or a unicast one to a client: NameAcquired (what it asked
+// for, asked 1) or NameLost (a name another took from it, asked 0).
+static void dbus_bus_signal(long to, const char *member, const char *a, const char *b, const char *c, int asked)
 {
         struct dbus_out w = {dbus.scratch, 0, DBUS_MESSAGE, 0};
         struct dbus_fields f = {"/org/freedesktop/DBus", DBUS_NAME_BUS, member, "", "", DBUS_NAME_BUS, c ? "sss" : "s", 0, 0};
@@ -1166,7 +1166,7 @@ static void dbus_bus_signal(long to, const char *member, const char *a, const ch
                 return;
         if (to >= 0)
         {
-                dbus_deliver(dbus_client_of(to), w.at, w.length);
+                dbus_deliver(dbus_client_of(to), w.at, w.length, asked);
                 return;
         }
         if (dbus_parse(w.at, w.length, &m) == 0)
@@ -1175,7 +1175,7 @@ static void dbus_bus_signal(long to, const char *member, const char *a, const ch
 
 static void dbus_name_changed(const char *name, const char *old_owner, const char *new_owner)
 {
-        dbus_bus_signal(-1, "NameOwnerChanged", name, old_owner, new_owner);
+        dbus_bus_signal(-1, "NameOwnerChanged", name, old_owner, new_owner, DBUS_UNASKED_FOR);
 }
 
 /* ---- the bus's own methods ---- */
@@ -1194,7 +1194,7 @@ static void dbus_error_reply(struct dbus_client *to, const struct dbus_message *
         dbus_o_string(&w, text);
         dbus_o_end(&w, body);
         if (!w.bad)
-                dbus_deliver(to, w.at, w.length);
+                dbus_deliver(to, w.at, w.length, DBUS_ASKED_FOR);
 }
 
 static void dbus_reply_begin(struct dbus_out *w, struct dbus_client *to, const struct dbus_message *m, const char *signature,
@@ -1214,7 +1214,7 @@ static void dbus_reply_end(struct dbus_out *w, struct dbus_client *to, const str
 {
         dbus_o_end(w, body);
         if (!w->bad && !(m->flags & DBUS_FLAG_NO_REPLY))
-                dbus_deliver(to, w->at, w->length);
+                dbus_deliver(to, w->at, w->length, DBUS_ASKED_FOR);
 }
 
 static void dbus_reply_u32(struct dbus_client *to, const struct dbus_message *m, unsigned long v, const char *from)
@@ -1272,7 +1272,12 @@ static void dbus_name_release(long slot, struct dbus_name *n)
         dbus_name_changed(n->text, c ? c->unique : "", "");
 }
 
-// RequestName: 1 primary owner, 3 exists, 4 already owner; the flags: 1 allow replacement, 2 replace existing, 4 do not queue.
+/*
+        RequestName: 1 primary owner, 3 exists, 4 already owner, or 0 when the client may own no more names (or the table
+        has no room), which its caller answers as LimitsExceeded. The flags: 1 allow replacement, 2 replace existing, 4 do
+        not queue; there is no queue, so a name that is taken is 3 whatever the flags. An owner that asks again has its
+        allow-replacement set as it asks now, as dbus-daemon does.
+*/
 static unsigned long dbus_request_name(struct dbus_client *c, const char *name, unsigned long flags)
 {
         struct dbus_name *n = dbus_name_find(name);
@@ -1283,18 +1288,23 @@ static unsigned long dbus_request_name(struct dbus_client *c, const char *name, 
                 struct dbus_client *old;
 
                 if (n->owner == c->slot)
+                {
+                        n->replaceable = (flags & 1) != 0;
                         return 4;
+                }
                 if (n->owner == DBUS_SERVICE || !(flags & 2) || !n->replaceable)
                         return 3;
+                if (c->names >= DBUS_NAMES_PER)
+                        return 0;
                 old = dbus_client_of(n->owner);
-                dbus_bus_signal(n->owner, "NameLost", name, 0, 0);
+                dbus_bus_signal(n->owner, "NameLost", name, 0, 0, DBUS_UNASKED_FOR);
                 if (old && old->names > 0)
                         old->names--;
-                n->owner = c->slot;
+                n->owner = (short)c->slot;
                 n->replaceable = (flags & 1) != 0;
                 c->names++;
                 dbus_name_changed(name, old ? old->unique : "", c->unique);
-                dbus_bus_signal(c->slot, "NameAcquired", name, 0, 0);
+                dbus_bus_signal(c->slot, "NameAcquired", name, 0, 0, DBUS_ASKED_FOR);
                 return 1;
         }
         for (long at = 0; at < DBUS_NAMES && free_at < 0; at++)
@@ -1308,7 +1318,7 @@ static unsigned long dbus_request_name(struct dbus_client *c, const char *name, 
         dbus_text(dbus.name[free_at].text, DBUS_NAME_TEXT, name);
         c->names++;
         dbus_name_changed(name, "", c->unique);
-        dbus_bus_signal(c->slot, "NameAcquired", name, 0, 0);
+        dbus_bus_signal(c->slot, "NameAcquired", name, 0, 0, DBUS_ASKED_FOR);
         return 1;
 }
 
@@ -1345,13 +1355,14 @@ static void dbus_reply_names(struct dbus_client *to, const struct dbus_message *
         length_at = w.length - 4;
         first = w.length;
         dbus_o_string(&w, DBUS_NAME_BUS);
-        for (long at = 0; at < DBUS_NAMES; at++)
-                if (dbus.name[at].used)
-                        dbus_o_string(&w, dbus.name[at].text);
+        // ListActivatableNames is the bus and the portal (the one service there is, always running); ListNames every name
         if (!all)
                 dbus_o_string(&w, DBUS_NAME_PORTAL);
         if (all)
         {
+                for (long at = 0; at < DBUS_NAMES; at++)
+                        if (dbus.name[at].used)
+                                dbus_o_string(&w, dbus.name[at].text);
                 dbus_o_string(&w, dbus.service.unique);
                 for (long at = 0; at < DBUS_CLIENTS; at++)
                         if (dbus.client[at] && dbus.client[at]->hello)
@@ -1438,16 +1449,21 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "That name cannot be owned", DBUS_NAME_BUS);
                         return;
                 }
-                dbus_reply_u32(from, m, dbus_request_name(from, text, flags), DBUS_NAME_BUS);
+                flags = dbus_request_name(from, text, flags);
+                if (!flags)
+                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "No more names can be owned", DBUS_NAME_BUS);
+                else
+                        dbus_reply_u32(from, m, flags, DBUS_NAME_BUS);
                 return;
         }
         if (dbus_equal(member, "ReleaseName"))
         {
                 struct dbus_name *n;
 
-                if (!dbus_equal(m->signature, "s") || (length = dbus_call_string(m, text, sizeof text)) < 0)
+                if (!dbus_equal(m->signature, "s") || (length = dbus_call_string(m, text, sizeof text)) < 0 || text[0] == ':' ||
+                    !dbus_name_ok(text) || dbus_equal(text, DBUS_NAME_BUS))
                 {
-                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "ReleaseName takes a name", DBUS_NAME_BUS);
+                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "ReleaseName takes a well-known name", DBUS_NAME_BUS);
                         return;
                 }
                 n = dbus_name_find(text);
@@ -1530,13 +1546,14 @@ static void dbus_bus_call(struct dbus_client *from, const struct dbus_message *m
         {
                 struct dbus_rule rule;
                 long free_at = -1, found = -1;
+                char rule_text[DBUS_RULE_TEXT];
 
-                if (!dbus_equal(m->signature, "s") || (length = dbus_call_string(m, text, sizeof text)) < 0 || length > 400)
+                if (!dbus_equal(m->signature, "s") || dbus_call_string(m, rule_text, sizeof rule_text) < 0)
                 {
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "A match rule is a string", DBUS_NAME_BUS);
                         return;
                 }
-                if (dbus_rule_parse(text, &rule) < 0)
+                if (dbus_rule_parse(rule_text, &rule) < 0)
                 {
                         dbus_error_reply(from, m, "org.freedesktop.DBus.Error.MatchRuleInvalid", "That match rule is not one this bus takes", DBUS_NAME_BUS);
                         return;
@@ -1630,50 +1647,49 @@ static struct dbus_setting *dbus_setting_find(const char *ns, const char *key)
         return 0;
 }
 
-// Whether a namespace is one a ReadAll filter names: the filter is empty, or the namespace, or a prefix ending in .* of it.
-static int dbus_ns_wanted(const char *ns, const char *pattern)
+/*
+        Whether a namespace is one a ReadAll asks for, as xdg-desktop-portal reads its patterns: there are none, or one is
+        empty, or one is the namespace, or one ends in * and the namespace starts with what is before it (org.gnome.*
+        is org.gnome.desktop.interface, and not org.gnomeish). The patterns are the call's body, an array of strings
+        the parser has held valid, read where they are: any number of them, of any length.
+*/
+static int dbus_ns_wanted(const char *ns, const unsigned char *body)
 {
-        long n = dbus_length(pattern);
+        long limit = 4 + (long)dbus_get32(body), at = 4;
 
-        if (!n)
+        if (limit == 4)
                 return 1;
-        if (n >= 3 && pattern[n - 1] == '*' && pattern[n - 2] == '.')
+        while (at < limit)
         {
-                for (long k = 0; k < n - 2; k++)
-                        if (ns[k] != pattern[k])
-                                return 0;
-                return 1;
+                long n, k = 0;
+                const char *pattern;
+
+                at = DBUS_ALIGN(at, 4);
+                n = (long)dbus_get32(body + at);
+                pattern = (const char *)body + at + 4;
+                at += 4 + n + 1;
+                if (!n || dbus_equal(ns, pattern))
+                        return 1;
+                if (pattern[n - 1] != '*')
+                        continue;
+                while (k < n - 1 && ns[k] == pattern[k])
+                        k++;
+                if (k == n - 1)
+                        return 1;
         }
-        return dbus_equal(ns, pattern);
+        return 0;
 }
 
 static void dbus_portal_read_all(struct dbus_client *from, const struct dbus_message *m)
 {
         struct dbus_out w;
-        long body, outer_at, outer_first, count = 0;
-        char filter[8][96];
+        long body, outer_at, outer_first;
         const unsigned char *b = m->bytes + m->body_at;
-        long at = 4, limit;
 
         if (!dbus_equal(m->signature, "as"))
         {
                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.InvalidArgs", "ReadAll takes an array of namespaces", DBUS_NAME_PORTAL);
                 return;
-        }
-        limit = 4 + (long)dbus_get32(b);
-        while (at < limit)
-        {
-                long n;
-
-                at = DBUS_ALIGN(at, 4);
-                n = (long)dbus_get32(b + at);
-                at += 4;
-                if (count < 8 && n < 96)
-                {
-                        dbus_copy(filter[count], b + at, n);
-                        filter[count++][n] = 0;
-                }
-                at += n + 1;
         }
         dbus_reply_begin(&w, from, m, "a{sa{sv}}", DBUS_NAME_PORTAL, &body);
         dbus_o_u32(&w, 0);
@@ -1683,14 +1699,10 @@ static void dbus_portal_read_all(struct dbus_client *from, const struct dbus_mes
         for (long a = 0; a < DBUS_SETTINGS; a++)
         {
                 const struct dbus_setting *s = &dbus.setting[a];
-                int wanted = !count, first_of_ns = 1;
+                int first_of_ns = 1;
                 long inner_at, inner_first;
 
-                if (!s->used)
-                        continue;
-                for (long k = 0; k < count && !wanted; k++)
-                        wanted = dbus_ns_wanted(s->ns, filter[k]);
-                if (!wanted)
+                if (!s->used || !dbus_ns_wanted(s->ns, b))
                         continue;
                 for (long earlier = 0; earlier < a; earlier++)
                         if (dbus.setting[earlier].used && dbus_equal(dbus.setting[earlier].ns, s->ns))
@@ -1864,12 +1876,14 @@ static long dbus_stamp(const struct dbus_message *m, const char *sender)
         return w.bad ? -1 : w.length;
 }
 
+// A call of `caller` waiting for a reply: among its own rows only (a caller is a client's slot, never the service).
 static struct dbus_pending *dbus_pending_find(long caller, unsigned long serial, long callee)
 {
-        for (long at = 0; at < DBUS_PENDING; at++)
-                if (dbus.pending[at].used && dbus.pending[at].caller == caller && dbus.pending[at].serial == serial &&
-                    (callee < 0 || dbus.pending[at].callee == callee))
-                        return &dbus.pending[at];
+        struct dbus_pending *row = &dbus.pending[caller * DBUS_PENDING_PER];
+
+        for (long at = 0; at < DBUS_PENDING_PER; at++)
+                if (row[at].used && row[at].serial == serial && (callee < 0 || row[at].callee == callee))
+                        return &row[at];
         return 0;
 }
 
@@ -1900,6 +1914,10 @@ static void dbus_trace(struct dbus_client *from, const struct dbus_message *m)
                 line[n++] = ']';
         }
         line[n] = 0;
+        // what a client wrote goes to the log, and so to a terminal: a byte a terminal acts on is shown as ?
+        for (long k = 0; k < n; k++)
+                if ((unsigned char)line[k] < 32 || line[k] == 127)
+                        line[k] = '?';
         dbus.host->trace(dbus.host->context, line);
 }
 
@@ -1908,7 +1926,6 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
 {
         long to, n;
         struct dbus_client *target;
-        struct dbus_pending *waits = 0;
 
         if (dbus.host->trace)
                 dbus_trace(from, m);
@@ -1935,29 +1952,34 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
                         return;
                 }
                 target = dbus_client_of(to);
-                if (!(m->flags & DBUS_FLAG_NO_REPLY))
                 {
-                        for (long at = 0; at < DBUS_PENDING && !waits; at++)
+                        struct dbus_pending *p = 0;
+                        int answered = !(m->flags & DBUS_FLAG_NO_REPLY);
+
+                        for (long at = from->slot * DBUS_PENDING_PER; answered && at < (from->slot + 1) * DBUS_PENDING_PER && !p; at++)
                                 if (!dbus.pending[at].used)
-                                        waits = &dbus.pending[at];
-                        if (!waits || from->pending >= DBUS_PENDING_PER)
+                                        p = &dbus.pending[at];
+                        if (answered && (!p || from->pending >= DBUS_PENDING_PER))
                         {
                                 dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "Too many calls wait for a reply", DBUS_NAME_BUS);
                                 return;
                         }
-                        waits->used = 1;
-                        waits->caller = (short)from->slot;
-                        waits->callee = (short)to;
-                        waits->serial = m->serial;
-                        from->pending++;
-                }
-                n = dbus_stamp(m, from->unique);
-                if (n > 0 && !dbus_offer(target, dbus.stamped, n) && waits)
-                {
-                        // not given: the caller is told at once, and no reply is waited for
-                        waits->used = 0;
-                        from->pending--;
-                        dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded", "The client it was sent to has no room for it", DBUS_NAME_BUS);
+                        n = dbus_stamp(m, from->unique);
+                        if (n <= 0 || !dbus_deliver(target, dbus.stamped, n, DBUS_UNASKED_FOR))
+                        {
+                                // the callee's queue holds what others sent it and it has not read: the call is refused, not the callee
+                                dbus_error_reply(from, m, "org.freedesktop.DBus.Error.LimitsExceeded",
+                                                 "The recipient has not read what it was sent", DBUS_NAME_BUS);
+                                return;
+                        }
+                        if (answered)
+                        {
+                                p->used = 1;
+                                p->caller = (short)from->slot;
+                                p->callee = (short)to;
+                                p->serial = m->serial;
+                                from->pending++;
+                        }
                 }
                 return;
         }
@@ -1970,15 +1992,12 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
                 {
                         to = dbus_resolve(m->destination);
                         if (to >= 0 && to != DBUS_SERVICE)
-                                dbus_offer(dbus_client_of(to), dbus.stamped, n);
+                                dbus_deliver(dbus_client_of(to), dbus.stamped, n, DBUS_UNASKED_FOR);
                         return;
                 }
-                {
-                        struct dbus_message stamped;
-
-                        if (dbus_parse(dbus.stamped, n, &stamped) == 0)
-                                dbus_broadcast(dbus.stamped, n, from->slot, &stamped);
-                }
+                // the rules are matched against the message as it came (the sender a rule names is `from`, never what it wrote),
+                // which is the stamped one but for the sender: it is not parsed again
+                dbus_broadcast(dbus.stamped, n, from->slot, m);
                 return;
         }
         // a reply or an error: to the caller that asked it of this client, once
@@ -1996,7 +2015,7 @@ static void dbus_route(struct dbus_client *from, const struct dbus_message *m)
         }
         n = dbus_stamp(m, from->unique);
         if (n > 0)
-                dbus_deliver(dbus_client_of(to), dbus.stamped, n);
+                dbus_deliver(dbus_client_of(to), dbus.stamped, n, DBUS_ASKED_FOR);
 }
 
 // The first call of a connection, which must be Hello: it gets its unique name.
@@ -2014,7 +2033,7 @@ static int dbus_hello(struct dbus_client *c, const struct dbus_message *m)
         dbus_reply_begin(&w, c, m, "s", DBUS_NAME_BUS, &body);
         dbus_o_string(&w, c->unique);
         dbus_reply_end(&w, c, m, body);
-        dbus_bus_signal(c->slot, "NameAcquired", c->unique, 0, 0);
+        dbus_bus_signal(c->slot, "NameAcquired", c->unique, 0, 0, DBUS_ASKED_FOR);
         dbus_name_changed(c->unique, "", c->unique);
         return 0;
 }
@@ -2028,7 +2047,7 @@ static int dbus_hex_value(char c)
 
 static void dbus_say(struct dbus_client *c, const char *text)
 {
-        dbus_deliver(c, (const unsigned char *)text, dbus_length(text));
+        dbus_deliver(c, (const unsigned char *)text, dbus_length(text), DBUS_ASKED_FOR);
 }
 
 // The decimal text of a uid as hex of its characters, which is what EXTERNAL sends.
@@ -2345,6 +2364,12 @@ DBUS_API void dbus_in_done(long slot, long count)
                         }
                         if (c->in_length - at < total)
                                 break;
+                        if (c->in[at] == 'l' && c->in[at + 3] == 1 && c->in[at + 1] > DBUS_SIGNAL)
+                        {
+                                // a type of message this bus does not know is ignored, as the specification asks; it goes nowhere
+                                at += total;
+                                continue;
+                        }
                         if (dbus_parse(c->in + at, total, &m) < 0)
                         {
                                 c->dead = 1;
@@ -2363,8 +2388,8 @@ DBUS_API void dbus_in_done(long slot, long count)
         }
         if (at > 0)
         {
-                for (long k = at; k < c->in_length; k++)
-                        c->in[k - at] = c->in[k];
+                // what is left is less than a message: it goes to the front once a read, after every whole one is taken
+                dbus_copy(c->in, c->in + at, c->in_length - at);
                 c->in_length -= at;
         }
 }
@@ -2373,19 +2398,21 @@ DBUS_API long dbus_out(long slot, const unsigned char **bytes)
 {
         struct dbus_client *c = slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
 
-        *bytes = c ? c->out : 0;
-        return c ? c->out_length : 0;
+        *bytes = c ? c->out + c->out_head : 0;
+        return c ? c->out_length - c->out_head : 0;
 }
 
+// count bytes of what dbus_out gave were written: they leave the queue, and a client that read anything is not stalled.
 DBUS_API void dbus_sent(long slot, long count)
 {
         struct dbus_client *c = slot >= 0 && slot < DBUS_CLIENTS ? dbus.client[slot] : 0;
 
-        if (!c || count <= 0 || count > c->out_length)
+        if (!c || count <= 0 || count > c->out_length - c->out_head)
                 return;
-        for (long k = count; k < c->out_length; k++)
-                c->out[k - count] = c->out[k];
-        c->out_length -= count;
+        c->out_head += count;
+        if (c->out_head == c->out_length)
+                c->out_head = c->out_length = 0;
+        c->full_since = 0;
 }
 
 // 0 while a client is well, else why not (1 it spoke wrong, 2 it did not read).
@@ -2396,7 +2423,8 @@ DBUS_API long dbus_dead(long slot)
         return c ? c->dead : 1;
 }
 
-// Connections that have not said Hello in DBUS_HELLO_MS are ended; called now and then.
+// Connections that have not said Hello in DBUS_HELLO_MS are ended, and those whose queue refused a message and that have read
+// nothing for DBUS_STALL_MS since; called now and then.
 DBUS_API void dbus_tick(void)
 {
         long now;
@@ -2405,8 +2433,16 @@ DBUS_API void dbus_tick(void)
                 return;
         now = dbus.host->now(dbus.host->context);
         for (long at = 0; at < DBUS_CLIENTS; at++)
-                if (dbus.client[at] && !dbus.client[at]->hello && !dbus.client[at]->dead && now - dbus.client[at]->born > DBUS_HELLO_MS)
-                        dbus.client[at]->dead = 1, dbus.client[at]->why = "it did not say Hello in time";
+        {
+                struct dbus_client *c = dbus.client[at];
+
+                if (!c || c->dead)
+                        continue;
+                if (!c->hello && now - c->born > DBUS_HELLO_MS)
+                        c->dead = 1, c->why = "it did not say Hello in time";
+                else if (c->full_since && now - c->full_since > DBUS_STALL_MS)
+                        c->dead = 2, c->why = "it did not read what it was sent";
+        }
 }
 
 // What ended a client, for the log (or "").

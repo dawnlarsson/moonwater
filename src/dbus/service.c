@@ -111,7 +111,8 @@ static void sessionbus_word(const char *path, char *word, unsigned room)
                 full[length++] = name[k];
         full[length] = 0;
         word[0] = 0;
-        handle = system_open_at(AT_FDCWD, (string_address)full, FILE_READ | O_CLOEXEC);
+        // not blocking: a FIFO (or a link to a device) where a setting is opens and reads at once with nothing, never holding the bus
+        handle = system_open_at(AT_FDCWD, (string_address)full, FILE_READ | O_NONBLOCK | O_CLOEXEC);
         if (handle >= 0)
         {
                 got = system_read_once(handle, word, room - 1);
@@ -297,12 +298,13 @@ static void sessionbus_read(long slot)
 {
         for (int reads = 0; reads < SESSIONBUS_READS; reads++)
         {
-                long room, got;
+                long room, got, asked;
                 unsigned char *to = dbus_in_room(slot, &room);
 
                 if (!to || room <= 0)
                         return;
-                got = sessionbus_call(syscall(read), (positive)sessionbus.fd[slot], (positive)to, (positive)(room > SESSIONBUS_READ ? SESSIONBUS_READ : room), 0, 0, 0);
+                asked = room > SESSIONBUS_READ ? SESSIONBUS_READ : room;
+                got = sessionbus_call(syscall(read), (positive)sessionbus.fd[slot], (positive)to, (positive)asked, 0, 0, 0);
                 if (got == -11)
                         return;
                 if (got <= 0)
@@ -311,7 +313,8 @@ static void sessionbus_read(long slot)
                         return;
                 }
                 dbus_in_done(slot, got);
-                if (dbus_dead(slot))
+                // a read that came short has emptied the socket: asking again would only be told EAGAIN (the poll says when there is more)
+                if (dbus_dead(slot) || got < asked)
                         return;
         }
 }

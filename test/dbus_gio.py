@@ -9,6 +9,8 @@ ADDRESS is the bus (unix:path=...), SETTINGS_DIRECTORY the directory of the file
 place): the rows change a file there and ask the bus, a second connection, what it says and what it is told.
 """
 import os
+import socket
+import struct
 import sys
 import time
 
@@ -222,5 +224,57 @@ pump(300)
 r = call(c, "org.example.Server", "/org/example", "org.example.Server", "Echo", GLib.Variant("(s)", ("gone",)), "(s)")
 row(isinstance(r, GLib.Error) and "ServiceUnknown" in str(r) or "NameHasNoOwner" in str(r), "when the owner goes the name goes with it", str(r))
 c.close_sync(None)
+
+
+# Another client against this one, from a socket of its own (2026-11-04): GDBus ends its own connection when it is sent a
+# message it cannot read, and the bus dropped a client whose queue overflowed, so before then any client could disconnect any
+# other. Each attack is sent to a GDBus connection's unique name; the connection must stay open and answer.
+def wire(kind, fields, body=b"", flags=0, serial=[0]):
+    def pad(b, n):
+        return b + b"\0" * ((-len(b)) % n)
+    serial[0] += 1
+    array = b""
+    for code, sig, value in fields:
+        array = pad(array, 8) + bytes([code, 1]) + sig.encode() + b"\0" + value
+    return pad(b"l" + bytes([kind, flags, 1]) + struct.pack("<III", len(body), serial[0], len(array)) + array, 8) + body
+
+
+def text(value):
+    value = value.encode()
+    return struct.pack("<I", len(value)) + value + b"\0"
+
+
+def attacker():
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(address.split("=", 1)[1])
+    s.settimeout(3)
+    s.sendall(b"\0AUTH EXTERNAL\r\nDATA\r\nBEGIN\r\n" + wire(1, [(1, "o", text("/org/freedesktop/DBus")), (3, "s", text("Hello")), (6, "s", text("org.freedesktop.DBus"))]))
+    return s
+
+
+attacks = {
+    "a signal on the reserved org.freedesktop.DBus.Local interface":
+        lambda to: wire(4, [(1, "o", text("/a")), (2, "s", text("org.freedesktop.DBus.Local")), (3, "s", text("Disconnected")), (6, "s", text(to))]),
+    "a call carrying a reply serial of 0": lambda to: wire(1, [(1, "o", text("/a")), (3, "s", text("M")), (5, "u", struct.pack("<I", 0)), (6, "s", text(to))], flags=1),
+    # (a(ay)s) of [([1,2,3,4],), ([],)] and "hello": GDBus takes the array to end 4 bytes early, reads the string from the empty ay's length
+    # and finds no NUL after it
+    "an array GDBus reads 4 bytes short":
+        lambda to: wire(4, [(1, "o", text("/a")), (2, "s", text("org.example.Short")), (3, "s", text("M")), (6, "s", text(to)), (8, "g", b"\6a(ay)s\0")],
+                        struct.pack("<I", 12) + b"\0" * 4 + struct.pack("<I", 4) + b"\1\2\3\4" + struct.pack("<I", 0) + text("hello")),
+    "a flood of signals past its queue in one write":
+        lambda to: b"".join(wire(4, [(1, "o", text("/a")), (2, "s", text("org.example.Flood")), (3, "s", text("M")), (6, "s", text(to)), (8, "g", b"\1s\0")],
+                                  text("x" * 1000)) for _ in range(700)),
+}
+for name, attack in attacks.items():
+    v = connect()
+    pump(100)
+    s = attacker()
+    s.sendall(attack(v.get_unique_name()))
+    pump(1500)
+    r = call(v, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetId", None, "(s)")
+    row(not v.is_closed() and not isinstance(r, GLib.Error), "a GDBus client sent %s by another stays connected and is answered" % name, str(r))
+    s.close()
+    if not v.is_closed():
+        v.close_sync(None)
 a.close_sync(None)
 sys.exit(failures)

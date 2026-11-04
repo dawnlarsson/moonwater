@@ -6654,6 +6654,11 @@ lane_dbus()
                 dbus_row "checks-$dbus_cc" sh -c "$dbus_cc $dbus_warn -Wno-comment -D_GNU_SOURCE -DCHECK_dbus test/checks.c \
                         -o '$work/check-dbus-$dbus_cc' && '$work/check-dbus-$dbus_cc'"
         done
+        #       what the bus gives its clients in the grammar's fuzz, held to libdbus and GDBus, which must each read every message as it is
+        if [ -x "$work/check-dbus-${CC:-gcc}" ] && python3 -c 'import ctypes, gi; ctypes.CDLL("libdbus-1.so.3")' > /dev/null 2>&1; then
+                dbus_row libraries sh -c "DBFUZZ_DUMP='$work/dump.bin' '$work/check-dbus-${CC:-gcc}' 0 20000 > /dev/null &&
+                        python3 test/dbus_libraries.py '$work/dump.bin'"
+        fi
         if [ "$(uname -s)" = Linux ] && command -v busctl > /dev/null 2>&1 && command -v dbus-send > /dev/null 2>&1 &&
                 command -v gdbus > /dev/null 2>&1 && command -v unshare > /dev/null 2>&1 && [ -z "${DBUS_E2E_SKIP:-}" ]; then
                 if freestanding programs/shell.c "$work/shell-dbus" ""; then

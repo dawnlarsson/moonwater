@@ -125,6 +125,17 @@ if kill -0 $bpid 2> /dev/null; then row ok "the bus is alive after noise, a floo
 out=$(busctl --address="$address" call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Settings ReadOne ss org.freedesktop.appearance color-scheme 2>&1)
 [ "$out" = "v u 1" ] && row ok "and still answers" || row FAIL "and still answers" "$out"
 
+# A FIFO where a setting's file is (2026-11-04): the bus opened each file to read it and would wait on a FIFO for a writer for ever.
+rm -f /root/canvas.motion
+mkfifo /root/canvas.motion
+echo light > /root/canvas.theme
+sleep 1.5
+out=$(timeout 5 busctl --address="$address" call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Settings ReadOne ss org.freedesktop.appearance color-scheme 2>&1)
+[ "$out" = "v u 2" ] && row ok "a FIFO where a setting is does not hold the bus: it reads the theme turn light and answers" || row FAIL "a FIFO where a setting is does not hold the bus" "$out"
+rm -f /root/canvas.motion
+echo dark > /root/canvas.theme
+sleep 1.5
+
 # The bus ends when asked, and takes its socket with it.
 kill -TERM $bpid 2> /dev/null
 i=0

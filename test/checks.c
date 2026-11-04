@@ -168709,6 +168709,14 @@ static void db_drain(long slot)
         dbus_sent(slot, n);
 }
 
+// The bytes queued for a client and not yet taken.
+static long db_queued(long slot)
+{
+        const unsigned char *bytes;
+
+        return dbus_out(slot, &bytes);
+}
+
 static void db_reset(void)
 {
         for (long slot = 0; slot < DBUS_CLIENTS; slot++)
@@ -169298,7 +169306,7 @@ static void db_test_hostile(void)
                 } cases[] = {
                     {"the other byte order", {'B', 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0}, 16},
                     {"a version that is not 1", {'l', 1, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, 16},
-                    {"a type that is none", {'l', 9, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, 16},
+                    {"a type of 0, INVALID", {'l', 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, 16},
                     {"a serial of 0", {'l', 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 16},
                     {"a call with no path or member", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, 16},
                     {"fields longer than the cap", {'l', 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff}, 16},
@@ -169404,10 +169412,11 @@ static void db_test_hostile(void)
         }
         DBCHECK(dbus_dead(slot), "a message that announces more than the cap ends the connection");
         dbus_drop(slot);
-        // a client that does not read is not waited for: what is sent it past its room is refused (db_test_queue has the rest)
+        // a client that does not read is dropped, not waited for: its queue refuses what does not fit, and once it has read
+        // nothing for DBUS_STALL_MS after that, it goes
         {
                 long a = db_connect(1000), b = db_connect(1000);
-                int full = 0;
+                int dropped = 0;
 
                 db_hello(a);
                 db_hello(b);
@@ -169425,9 +169434,14 @@ static void db_test_hostile(void)
                         db_send(b, &spam);
                         db_drain(b);
                 }
-                full = dbus.client[a]->out_length > DBUS_OUT - DBUS_OWED - 512 && dbus.client[a]->out_length <= DBUS_OUT - DBUS_OWED;
-                DBCHECK(full && !dbus_dead(a), "a client that does not read fills its queue to the most others may give it, and is not ended for it (%ld, %ld)",
-                        dbus.client[a]->out_length, dbus_dead(a));
+                DBCHECK(!dbus_dead(a), "a client whose queue is full is not dropped at once (%ld)", dbus_dead(a));
+                db_time += DBUS_STALL_MS / 2;
+                dbus_tick();
+                DBCHECK(!dbus_dead(a), "nor before it has had DBUS_STALL_MS to read");
+                db_time += DBUS_STALL_MS / 2 + 10;
+                dbus_tick();
+                dropped = dbus_dead(a) == 2;
+                DBCHECK(dropped, "a client that does not read fills its queue and is dropped (%ld)", dbus_dead(a));
                 DBCHECK(!dbus_dead(b), "and the one that called it is not");
                 dbus_drop(a);
                 dbus_drop(b);
@@ -169515,21 +169529,21 @@ static void db_test_queue(void)
         n = db_big_signal(big, sizeof big, ":1.2", 200000);
         for (int k = 0; k < 40 && !dbus_dead(victim) && !dbus_dead(attacker); k++)
         {
-                long before = dbus.client[victim]->out_length;
+                long before = db_queued(victim);
 
                 db_feed(attacker, big, n);
-                refused += dbus.client[victim]->out_length == before;
+                refused += db_queued(victim) == before;
         }
         DBCHECK(!dbus_dead(victim) && !dbus_dead(attacker) && refused > 0, "signals past the room a client has are refused, and end no one (%ld refused, dead %ld %ld)",
                 refused, dbus_dead(victim), dbus_dead(attacker));
-        DBCHECK(dbus.client[victim]->out_length <= DBUS_OUT - DBUS_OWED, "and what others sent it is within the most they may have (%ld)",
+        DBCHECK(dbus.client[victim]->out_length - dbus.client[victim]->out_head <= DBUS_UNASKED, "and what others sent it is within the most they may have (%ld)",
                 dbus.client[victim]->out_length);
         // a broadcast too
         db_call(victim, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", "type='signal',member='Big'", 0);
         n = db_big_signal(big, sizeof big, "", 200000);
         for (int k = 0; k < 10 && !dbus_dead(victim); k++)
                 db_feed(attacker, big, n);
-        DBCHECK(!dbus_dead(victim) && dbus.client[victim]->out_length <= DBUS_OUT, "broadcasts to a client whose queue is full end it not (dead %ld)",
+        DBCHECK(!dbus_dead(victim) && db_queued(victim) <= DBUS_OUT, "broadcasts to a client whose queue is full end it not (dead %ld)",
                 dbus_dead(victim));
 
         // the client's own call is still answered: the room the bus owes it was kept
@@ -169539,7 +169553,7 @@ static void db_test_queue(void)
 
         // a call that waits for a reply, to a client with no room: the caller is told, and nothing is left waiting
         n = db_big_signal(big, sizeof big, ":1.2", 0);
-        for (int k = 0; k < 20000 && dbus.client[victim]->out_length + n <= DBUS_OUT - DBUS_OWED; k++)
+        for (int k = 0; k < 20000 && dbus.client[victim]->out_length - dbus.client[victim]->out_head + n <= DBUS_UNASKED; k++)
                 db_feed(attacker, big, n);
         db_drain(attacker);
         db_call(attacker, ":1.2", "/o", "org.example.I", "Ask", "s", "a question longer than the signals that filled the queue, which are the smallest", 0);
@@ -169557,6 +169571,9 @@ static void db_test_queue(void)
         db_drain(victim);
         for (int k = 0; k < 4000 && !dbus_dead(victim); k++)
                 db_call(victim, DBUS_NAME_BUS, "/org/freedesktop/DBus", "org.freedesktop.DBus.Introspectable", "Introspect", "", 0, 0);
+        DBCHECK(!dbus_dead(victim), "a client whose own answers find no room is not ended at once (%ld)", dbus_dead(victim));
+        db_time += DBUS_STALL_MS + 10;
+        dbus_tick();
         DBCHECK(dbus_dead(victim) == 2, "a client that does not read what it asked for is ended (%ld)", dbus_dead(victim));
         DBCHECK(!dbus_dead(attacker), "and that ends no other");
         dbus_drop(victim);
@@ -169669,6 +169686,751 @@ static void db_test_caps(void)
         }
         dbus_drop(a);
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+/* ---- what one client can do to another (2026-11-04 review) ---- */
+
+// A message written field by field, for the fields the bus's writer has no word for (a REPLY_SERIAL of 0, code 0, code 10).
+struct db_raw
+{
+        unsigned char *bytes;
+        struct dbus_out w;
+        long body;
+};
+
+static void db_raw_begin(struct db_raw *r, unsigned char *bytes, long room, unsigned type, unsigned flags)
+{
+        r->bytes = bytes;
+        r->w = (struct dbus_out){bytes, 0, room, 0};
+        dbus_o_u8(&r->w, 'l');
+        dbus_o_u8(&r->w, type);
+        dbus_o_u8(&r->w, flags);
+        dbus_o_u8(&r->w, 1);
+        dbus_o_u32(&r->w, 0);
+        dbus_o_u32(&r->w, ++db_serial);
+        dbus_o_u32(&r->w, 0);
+}
+
+// A field's code and its variant's type; the value is the caller's to write.
+static void db_raw_field(struct db_raw *r, unsigned code, const char *type)
+{
+        dbus_o_pad(&r->w, 8);
+        dbus_o_u8(&r->w, code);
+        dbus_o_sig(&r->w, type);
+}
+
+static void db_raw_string(struct db_raw *r, unsigned code, char kind, const char *value)
+{
+        char type[2] = {kind, 0};
+
+        db_raw_field(r, code, type);
+        if (kind == 'g')
+                dbus_o_sig(&r->w, value);
+        else
+                dbus_o_string(&r->w, value);
+}
+
+static void db_raw_body(struct db_raw *r)
+{
+        dbus_o_patch32(&r->w, 12, (unsigned long)(r->w.length - 16));
+        dbus_o_pad(&r->w, 8);
+        r->body = r->w.length;
+}
+
+static long db_raw_end(struct db_raw *r)
+{
+        dbus_o_patch32(&r->w, 4, (unsigned long)(r->w.length - r->body));
+        return r->w.bad ? -1 : r->w.length;
+}
+
+// db_find with more patience: a reply behind a flood.
+static int db_find_far(long slot, struct db_seen *s, unsigned type, const char *member)
+{
+        for (int k = 0; k < 4000; k++)
+        {
+                db_next(slot, s);
+                if (!s->ok)
+                        return 0;
+                if (s->m.type == type && (!member || dbus_equal(s->m.member, member)))
+                        return 1;
+        }
+        return 0;
+}
+
+static void db_rule(long slot, const char *rule)
+{
+        db_call(slot, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "AddMatch", "s", rule, 0);
+}
+
+static const char *db_unique(long slot)
+{
+        return dbus.client[slot]->unique;
+}
+
+/*
+        A flood: before 2026-11-04 a client's queue that overflowed dropped the client, so any client could disconnect any
+        other by writing it more than its queue in one go (unicast signals need no rule), and take its names after it.
+*/
+static void db_test_flood(void)
+{
+        long victim, attacker, third;
+        struct db_seen s;
+        static unsigned char batch[900000];
+        long n = 0;
+
+        db_reset();
+        victim = db_connect(1000);
+        attacker = db_connect(1000);
+        third = db_connect(1000);
+        db_hello(victim);
+        db_hello(attacker);
+        db_hello(third);
+        db_request(victim, "org.example.Victim", 0);
+        db_drain(victim);
+        db_drain(attacker);
+        db_drain(third);
+        for (int k = 0; k < 800; k++)
+        {
+                struct db_call c;
+                struct dbus_fields f = {"/a", "org.example.Flood", "M", "", db_unique(victim), "", "s", 0, 0};
+                char text[1001];
+
+                memset(text, 'x', 1000);
+                text[1000] = 0;
+                db_begin(&c, DBUS_SIGNAL, 0, &f);
+                dbus_o_string(&c.w, text);
+                memcpy(batch + n, c.bytes, (size_t)db_end(&c));
+                n += c.w.length;
+        }
+        db_feed(attacker, batch, n);
+        DBCHECK(!dbus_dead(victim), "a client written more than its queue holds in one go is not dropped for it (%ld)", dbus_dead(victim));
+        DBCHECK(!dbus_dead(attacker), "and the client that wrote it is not either (it broke no rule)");
+        DBCHECK(db_queued(victim) <= DBUS_UNASKED && db_queued(victim) > DBUS_UNASKED - 2048,
+                "what it did not ask for fills its queue to DBUS_UNASKED and no further (%ld of %d)", db_queued(victim), DBUS_UNASKED);
+        {
+                char text[1501];
+
+                // larger than the room the flood's last signal left
+                memset(text, 'q', 1500);
+                text[1500] = 0;
+                db_call(third, "org.example.Victim", "/o", "org.example.I", "M", "s", text, 0);
+        }
+        DBCHECK(db_find(third, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.LimitsExceeded"),
+                "a call to it while its queue is full of what it did not read is an error to the caller");
+        {
+                long waiting = 0;
+
+                for (long k = 0; k < DBUS_PENDING; k++)
+                        waiting += dbus.pending[k].used;
+                DBCHECK(!waiting && dbus.client[third]->pending == 0, "and waits for no reply (%ld)", waiting);
+        }
+        db_call(victim, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ListNames", "", 0, 0);
+        DBCHECK(db_find_far(victim, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "as"),
+                "its own call is answered behind the flood: what it asks for has room the others cannot take");
+        db_drain(victim);
+        db_feed(attacker, batch, n);
+        db_drain(victim);
+        db_time += DBUS_STALL_MS + 10;
+        dbus_tick();
+        DBCHECK(!dbus_dead(victim), "a client that is flooded and reads is never dropped (%ld)", dbus_dead(victim));
+        db_feed(attacker, batch, n);
+        db_time += DBUS_STALL_MS + 10;
+        dbus_tick();
+        DBCHECK(dbus_dead(victim) == 2, "a client that is flooded and reads nothing is dropped after DBUS_STALL_MS (%ld)", dbus_dead(victim));
+        dbus_drop(victim);
+        db_drain(attacker);
+
+        // a queue read a little at a time while more comes keeps every message whole and in order, through its moves to the front
+        victim = db_connect(1000);
+        db_hello(victim);
+        db_drain(victim);
+        db_drain(attacker);
+        {
+                long sent = 0, taken = 0, in_order = 1;
+
+                // a backlog of a hundred, then seven in and seven out a turn: the queue never empties, its end reaches the end of
+                // the buffer every sixty turns or so and what is unread moves to the front
+                for (int turn = 0; turn < 400; turn++)
+                {
+                        for (int k = 0; k < (turn ? 7 : 100); k++)
+                        {
+                                struct db_call c;
+                                struct dbus_fields f = {"/a", "org.example.Order", "M", "", db_unique(victim), "", "suy", 0, 0};
+                                char text[901];
+
+                                memset(text, 'a' + (int)(sent % 26), 900);
+                                text[900] = 0;
+                                db_begin(&c, DBUS_SIGNAL, 0, &f);
+                                dbus_o_string(&c.w, text);
+                                dbus_o_u32(&c.w, (unsigned long)sent);
+                                dbus_o_u8(&c.w, (unsigned)(sent * 7 + 1) & 255); // the last byte of each, never the same twice running
+                                db_send(attacker, &c);
+                                sent++;
+                        }
+                        for (int k = 0; k < (turn ? 7 : 0) || (turn == 399 && db_queued(victim)); k++)
+                        {
+                                db_next(victim, &s);
+                                if (!s.ok)
+                                        break;
+                                in_order &= dbus_get32(s.bytes + s.m.body_at + DBUS_ALIGN(4 + 900 + 1, 4)) == (unsigned long)taken &&
+                                            s.bytes[s.m.body_at + 4] == 'a' + taken % 26 && s.m.body_length == DBUS_ALIGN(4 + 900 + 1, 4) + 5 &&
+                                            s.bytes[s.m.body_at + s.m.body_length - 1] == ((taken * 7 + 1) & 255);
+                                taken++;
+                        }
+                }
+                DBCHECK(sent == 100 + 399 * 7 && taken == sent && in_order && !dbus_dead(victim),
+                        "a queue read part by part as more comes gives every message whole and in order (%ld of %ld)", taken, sent);
+        }
+        dbus_drop(victim);
+
+        // the largest message there is reaches a client that is reading: stamped with its sender it is past DBUS_MESSAGE
+        victim = db_connect(1000);
+        db_hello(victim);
+        db_drain(victim);
+        {
+                unsigned char *big = malloc(DBUS_MESSAGE);
+                struct db_raw r;
+                long body_room, size;
+
+                db_raw_begin(&r, big, DBUS_MESSAGE, DBUS_SIGNAL, 0);
+                db_raw_string(&r, 1, 'o', "/a");
+                db_raw_string(&r, 2, 's', "org.example.Big");
+                db_raw_string(&r, 3, 's', "M");
+                db_raw_string(&r, 6, 's', db_unique(victim));
+                db_raw_string(&r, 8, 'g', "ay");
+                db_raw_body(&r);
+                body_room = DBUS_MESSAGE - r.w.length - 4;
+                dbus_o_u32(&r.w, (unsigned long)body_room);
+                memset(big + r.w.length, 7, (size_t)body_room);
+                r.w.length += body_room;
+                size = db_raw_end(&r);
+                db_drain(attacker);
+                db_feed(attacker, big, size);
+                DBCHECK(size == DBUS_MESSAGE && !dbus_dead(attacker) && db_queued(victim) > DBUS_MESSAGE,
+                        "a message of DBUS_MESSAGE bytes reaches its client with the sender stamped on it (%ld queued)", db_queued(victim));
+                db_drain(victim);
+                db_feed(attacker, big, size);
+                db_feed(attacker, big, size);
+                DBCHECK(!dbus_dead(victim) && db_queued(victim) > DBUS_MESSAGE && db_queued(victim) <= DBUS_UNASKED,
+                        "and a second one before it read is refused, not the client");
+                free(big);
+        }
+        dbus_drop(victim);
+        dbus_drop(attacker);
+        dbus_drop(third);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+/*
+        Messages no client library takes. libdbus and GDBus end their own connection when they are sent a message they
+        cannot read (libdbus: "Message is corrupted"; GDBus: "Cannot deserialize message" and the connection closes), so
+        each of these, had the bus passed it on, would have let any client disconnect any other: the reserved Local
+        interface and path (libdbus and GDBus both), and a reply serial of 0 (libdbus). Each now ends the connection
+        that sent it, and reaches nobody.
+*/
+static void db_test_reserved(void)
+{
+        static const struct
+        {
+                const char *name;
+                unsigned type;
+                const char *path, *interface;
+                int reply_zero, code_zero, unicast;
+        } cases[] = {
+            {"a signal on org.freedesktop.DBus.Local sent to a client", DBUS_SIGNAL, "/a", "org.freedesktop.DBus.Local", 0, 0, 1},
+            {"a signal on org.freedesktop.DBus.Local to everyone", DBUS_SIGNAL, "/a", "org.freedesktop.DBus.Local", 0, 0, 0},
+            {"a signal from /org/freedesktop/DBus/Local", DBUS_SIGNAL, "/org/freedesktop/DBus/Local", "org.example.I", 0, 0, 1},
+            {"a call of org.freedesktop.DBus.Local", DBUS_CALL, "/a", "org.freedesktop.DBus.Local", 0, 0, 1},
+            {"a call on /org/freedesktop/DBus/Local", DBUS_CALL, "/org/freedesktop/DBus/Local", "org.example.I", 0, 0, 1},
+            {"a call carrying a reply serial of 0", DBUS_CALL, "/a", "org.example.I", 1, 0, 1},
+            {"a signal carrying a reply serial of 0", DBUS_SIGNAL, "/a", "org.example.I", 1, 0, 1},
+            {"a signal with a header field of code 0", DBUS_SIGNAL, "/a", "org.example.I", 0, 1, 0},
+        };
+
+        for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++)
+        {
+                long victim, attacker, size;
+                unsigned char bytes[512];
+                struct db_raw r;
+
+                db_reset();
+                victim = db_connect(1000);
+                attacker = db_connect(1000);
+                db_hello(victim);
+                db_hello(attacker);
+                db_request(victim, "org.example.Victim", 0);
+                db_rule(victim, "type='signal'");
+                db_drain(victim);
+                db_drain(attacker);
+                db_raw_begin(&r, bytes, sizeof bytes, cases[k].type, 0);
+                db_raw_string(&r, 1, 'o', cases[k].path);
+                db_raw_string(&r, 2, 's', cases[k].interface);
+                db_raw_string(&r, 3, 's', "Disconnected");
+                if (cases[k].reply_zero)
+                {
+                        db_raw_field(&r, 5, "u");
+                        dbus_o_u32(&r.w, 0);
+                }
+                if (cases[k].code_zero)
+                {
+                        db_raw_field(&r, 0, "u");
+                        dbus_o_u32(&r.w, 1);
+                }
+                if (cases[k].unicast)
+                        db_raw_string(&r, 6, 's', cases[k].type == DBUS_CALL ? "org.example.Victim" : db_unique(victim));
+                db_raw_body(&r);
+                size = db_raw_end(&r);
+                db_feed(attacker, bytes, size);
+                DBCHECK(dbus_dead(attacker) == 1 && db_queued(victim) == 0, "%s ends the connection that sent it and reaches nobody (%ld, %ld queued)",
+                        cases[k].name, dbus_dead(attacker), db_queued(victim));
+        }
+        db_reset();
+        {
+                // a reply of serial 0 to a call that waits: libdbus would end the caller for it
+                long caller = db_connect(1000), callee = db_connect(1000), size;
+                unsigned char bytes[256];
+                struct db_raw r;
+                struct db_seen s;
+
+                db_hello(caller);
+                db_hello(callee);
+                db_request(callee, "org.example.Callee", 0);
+                db_drain(caller);
+                db_drain(callee);
+                db_call(caller, "org.example.Callee", "/o", "org.example.I", "M", "", 0, 0);
+                DBCHECK(db_find(callee, &s, DBUS_CALL, "M"), "the call reaches its callee");
+                db_raw_begin(&r, bytes, sizeof bytes, DBUS_RETURN, 1);
+                db_raw_field(&r, 5, "u");
+                dbus_o_u32(&r.w, 0);
+                db_raw_string(&r, 6, 's', db_unique(caller));
+                db_raw_body(&r);
+                size = db_raw_end(&r);
+                db_feed(callee, bytes, size);
+                DBCHECK(dbus_dead(callee) == 1 && db_queued(caller) == 0, "a reply with a reply serial of 0 ends its sender and reaches nobody");
+        }
+        /*
+                An array GDBus misreads (found by test/dbus_libraries.py on the grammar fuzz's output): of structs or dict entries,
+                its length 8-aligned so that 4 bytes of padding follow it, and its last element beginning where the one before
+                ended, no more than 4 bytes before the end. GLib 2.90.1 reads (a(ay)y) of [([1,2,3,4],), ([],)] and 9 as
+                [([1,2,3,4],)] and 0, and ends its connection where the misreading meets bytes that are not valid.
+        */
+        {
+                static const struct
+                {
+                        const char *name;
+                        long last, ok;
+                } layouts[] = {
+                    {"an array GDBus would read short (its last struct an empty ay after one that ends on 8)", 0, 0},
+                    {"and the same with a byte in its last element, which GDBus reads whole", 1, 1},
+                };
+
+                for (unsigned k = 0; k < 2; k++)
+                {
+                        long victim, attacker, size, length_at, first;
+                        unsigned char bytes[512];
+                        struct db_raw r;
+                        struct db_seen s;
+
+                        db_reset();
+                        victim = db_connect(1000);
+                        attacker = db_connect(1000);
+                        db_hello(victim);
+                        db_hello(attacker);
+                        db_rule(victim, "type='signal'");
+                        db_drain(victim);
+                        db_drain(attacker);
+                        db_raw_begin(&r, bytes, sizeof bytes, DBUS_SIGNAL, 0);
+                        db_raw_string(&r, 1, 'o', "/a");
+                        db_raw_string(&r, 2, 's', "org.example.I");
+                        db_raw_string(&r, 3, 's', "Short");
+                        db_raw_string(&r, 8, 'g', "a(ay)y");
+                        db_raw_body(&r);
+                        dbus_o_u32(&r.w, 0);
+                        length_at = r.w.length - 4;
+                        dbus_o_pad(&r.w, 8);
+                        first = r.w.length;
+                        dbus_o_u32(&r.w, 4);
+                        dbus_o_raw(&r.w, "\1\2\3\4", 4);
+                        dbus_o_pad(&r.w, 8);
+                        dbus_o_u32(&r.w, (unsigned long)layouts[k].last);
+                        if (layouts[k].last)
+                                dbus_o_u8(&r.w, 5);
+                        dbus_o_patch32(&r.w, length_at, (unsigned long)(r.w.length - first));
+                        dbus_o_u8(&r.w, 9);
+                        size = db_raw_end(&r);
+                        db_feed(attacker, bytes, size);
+                        if (layouts[k].ok)
+                                DBCHECK(!dbus_dead(attacker) && db_find(victim, &s, DBUS_SIGNAL, "Short"), "%s is passed on", layouts[k].name);
+                        else
+                                DBCHECK(dbus_dead(attacker) == 1 && db_queued(victim) == 0, "%s ends its sender and reaches nobody", layouts[k].name);
+                }
+        }
+        db_reset();
+}
+
+// What the specification allows that the bus refused before 2026-11-04 (each ended a client that did nothing wrong).
+static void db_test_allowed(void)
+{
+        long a, b;
+        struct db_seen s;
+
+        db_reset();
+        a = db_connect(1000);
+        b = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_rule(b, "type='signal'");
+        db_drain(a);
+        db_drain(b);
+        {
+                // a header field of a code the bus does not know, of any type: kept by nobody, the message passed on without it
+                unsigned char bytes[512];
+                struct db_raw r;
+                long size;
+
+                db_raw_begin(&r, bytes, sizeof bytes, DBUS_SIGNAL, 0);
+                db_raw_string(&r, 1, 'o', "/a");
+                db_raw_string(&r, 2, 's', "org.example.I");
+                db_raw_string(&r, 3, 's', "Unknown");
+                db_raw_field(&r, 11, "y");
+                dbus_o_u8(&r.w, 5);
+                db_raw_field(&r, 200, "a{sv}");
+                dbus_o_u32(&r.w, 0);
+                {
+                        long length_at = r.w.length - 4, first;
+
+                        dbus_o_pad(&r.w, 8);
+                        first = r.w.length;
+                        dbus_o_string(&r.w, "key");
+                        dbus_o_sig(&r.w, "u");
+                        dbus_o_u32(&r.w, 9);
+                        dbus_o_patch32(&r.w, length_at, (unsigned long)(r.w.length - first));
+                }
+                db_raw_body(&r);
+                size = db_raw_end(&r);
+                db_feed(a, bytes, size);
+                DBCHECK(!dbus_dead(a) && db_find(b, &s, DBUS_SIGNAL, "Unknown") && s.size < size,
+                        "header fields of codes the bus does not know (a byte, a dictionary) are taken, and not passed on");
+                // a type of message the bus does not know is ignored
+                bytes[1] = 7;
+                db_feed(a, bytes, size);
+                DBCHECK(!dbus_dead(a) && db_queued(b) == 0, "a message of a type the bus does not know is ignored, not the end of its sender");
+                // the same with a field of code 10 that is not valid for its type
+                db_raw_begin(&r, bytes, sizeof bytes, DBUS_SIGNAL, 0);
+                db_raw_string(&r, 1, 'o', "/a");
+                db_raw_string(&r, 2, 's', "org.example.I");
+                db_raw_string(&r, 3, 's', "Unknown");
+                db_raw_field(&r, 10, "b");
+                dbus_o_u32(&r.w, 2);
+                db_raw_body(&r);
+                size = db_raw_end(&r);
+                db_feed(a, bytes, size);
+                DBCHECK(dbus_dead(a) == 1 && db_queued(b) == 0, "but a field of a code it does not know is still valid for its type (a boolean of 2 is not)");
+                dbus_drop(a);
+                a = db_connect(1000);
+                db_hello(a);
+                db_drain(a);
+        }
+        // nesting as libdbus counts it: arrays, dict entries, structs and variants, a value no deeper than 64
+        {
+                static const struct
+                {
+                        const char *name;
+                        int variants, dicts, ok;
+                } nests[] = {
+                    {"41 variants, one in another, the byte at 41", 40, 0, 1},
+                    {"64 variants in a variant, the last at depth 63, its byte at 64", 63, 0, 1},
+                    {"65 variants, the byte at 65", 64, 0, 0},
+                    {"21 levels of v(a{sv}), the byte at 64", 21, 1, 1},
+                    {"22 levels of v(a{sv}), the byte at 67", 22, 1, 0},
+                };
+
+                for (unsigned k = 0; k < sizeof nests / sizeof nests[0]; k++)
+                {
+                        static unsigned char bytes[8192];
+                        struct db_raw r;
+                        long size;
+
+                        db_raw_begin(&r, bytes, sizeof bytes, DBUS_SIGNAL, 0);
+                        db_raw_string(&r, 1, 'o', "/a");
+                        db_raw_string(&r, 2, 's', "org.example.I");
+                        db_raw_string(&r, 3, 's', "Deep");
+                        db_raw_string(&r, 8, 'g', "v");
+                        db_raw_body(&r);
+                        if (!nests[k].dicts)
+                        {
+                                for (int v = 0; v < nests[k].variants; v++)
+                                        dbus_o_sig(&r.w, "v");
+                                dbus_o_sig(&r.w, "y");
+                                dbus_o_u8(&r.w, 1);
+                        }
+                        else
+                        {
+                                long length_at[32], first[32];
+
+                                for (int v = 0; v < nests[k].variants; v++)
+                                {
+                                        dbus_o_sig(&r.w, "a{sv}");
+                                        dbus_o_u32(&r.w, 0);
+                                        length_at[v] = r.w.length - 4;
+                                        dbus_o_pad(&r.w, 8);
+                                        first[v] = r.w.length;
+                                        dbus_o_string(&r.w, "k");
+                                }
+                                dbus_o_sig(&r.w, "y");
+                                dbus_o_u8(&r.w, 7);
+                                for (int v = nests[k].variants - 1; v >= 0; v--)
+                                        dbus_o_patch32(&r.w, length_at[v], (unsigned long)(r.w.length - first[v]));
+                        }
+                        size = db_raw_end(&r);
+                        db_feed(a, bytes, size);
+                        if (nests[k].ok)
+                                DBCHECK(!dbus_dead(a) && db_find(b, &s, DBUS_SIGNAL, "Deep"), "%s is taken and passed on", nests[k].name);
+                        else
+                                DBCHECK(dbus_dead(a) == 1 && db_queued(b) == 0, "%s ends its sender and reaches nobody", nests[k].name);
+                        db_drain(b);
+                        if (dbus_dead(a))
+                        {
+                                dbus_drop(a);
+                                a = db_connect(1000);
+                                db_hello(a);
+                                db_drain(a);
+                        }
+                }
+        }
+        {
+                // libdbus counts arrays, structs and dict entries apart in a signature, each to 32: twenty structs in thirteen
+                // dict entries is a signature, which the bus refused counting dict entries as structs
+                char sig[128];
+                long n = 0;
+                struct db_call c;
+                struct dbus_fields f = {"/a", "org.example.I", "Sig", "", "", "", sig, 0, 0};
+
+                for (int k = 0; k < 13; k++)
+                        sig[n++] = 'a', sig[n++] = '{', sig[n++] = 's';
+                for (int k = 0; k < 20; k++)
+                        sig[n++] = '(';
+                sig[n++] = 'y';
+                for (int k = 0; k < 20; k++)
+                        sig[n++] = ')';
+                for (int k = 0; k < 13; k++)
+                        sig[n++] = '}';
+                sig[n] = 0;
+                db_begin(&c, DBUS_SIGNAL, 0, &f);
+                dbus_o_u32(&c.w, 0);
+                dbus_o_pad(&c.w, 8);
+                db_send(a, &c);
+                DBCHECK(!dbus_dead(a) && db_find(b, &s, DBUS_SIGNAL, "Sig"), "a signature of twenty structs in thirteen dict entries is taken");
+                for (int k = 0; k < 13; k++)
+                        sig[3 * k + 1] = '(';
+                for (long k = n - 13; k < n; k++)
+                        sig[k] = ')';
+                db_begin(&c, DBUS_SIGNAL, 0, &f);
+                dbus_o_u32(&c.w, 0);
+                dbus_o_pad(&c.w, 8);
+                db_send(a, &c);
+                DBCHECK(dbus_dead(a) == 1, "and thirty-three structs are not (%s)", sig);
+        }
+        dbus_drop(a);
+        dbus_drop(b);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+// The bus's own methods, where they said what the specification does not.
+static void db_test_methods(void)
+{
+        long a, b;
+        struct db_seen s;
+        char text[200], name[40];
+
+        db_reset();
+        a = db_connect(1000);
+        b = db_connect(1000);
+        db_hello(a);
+        db_hello(b);
+        db_drain(a);
+        db_drain(b);
+        for (int k = 0; k < DBUS_NAMES_PER; k++)
+        {
+                snprintf(name, sizeof name, "org.example.Many%d", k);
+                db_request(a, name, 0);
+        }
+        db_drain(a);
+        db_request(a, "org.example.OneTooMany", 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.LimitsExceeded"),
+                "a name past the cap is LimitsExceeded, not a reply of 0 (which is no answer RequestName has)");
+        db_request(b, "org.example.Replace", 0);
+        db_request(b, "org.example.Replace", 1);
+        db_drain(b);
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ReleaseName", "s", "org.example.Many0", 0);
+        db_drain(a);
+        db_request(a, "org.example.Replace", 2);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_u32_body(&s) == 1,
+                "an owner that asks again with allow-replacement may then be replaced, as dbus-daemon has it");
+        DBCHECK(db_find(b, &s, DBUS_SIGNAL, "NameLost"), "and is told it lost the name");
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ReleaseName", "s", db_unique(b), 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.InvalidArgs"), "ReleaseName of a unique name is InvalidArgs");
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ReleaseName", "s", "not a name", 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0) && !strcmp(s.m.error, "org.freedesktop.DBus.Error.InvalidArgs"), "and of a text that is no name");
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "ListActivatableNames", "", 0, 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && dbus_equal(s.m.signature, "as") && s.m.body_length > 4, "ListActivatableNames answers");
+        {
+                long count = 0, at = 4, limit = 4 + (long)dbus_get32(s.bytes + s.m.body_at);
+                int bus = 0, portal = 0, other = 0;
+
+                while (at < limit)
+                {
+                        const char *t = (const char *)s.bytes + s.m.body_at + at + 4;
+
+                        bus += !strcmp(t, DBUS_NAME_BUS);
+                        portal += !strcmp(t, DBUS_NAME_PORTAL);
+                        other += strcmp(t, DBUS_NAME_BUS) && strcmp(t, DBUS_NAME_PORTAL);
+                        at = DBUS_ALIGN(at + 4 + (long)dbus_get32(s.bytes + s.m.body_at + at) + 1, 4);
+                        count++;
+                }
+                DBCHECK(count == 2 && bus == 1 && portal == 1 && !other, "and it is the bus and the portal once each, no client's name (%ld names)", count);
+        }
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", ":1.02", 0);
+        DBCHECK(db_find(a, &s, DBUS_ERROR, 0), "a unique name with a leading zero is no client's");
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", db_unique(b), 0);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_string_arg(&s, 0, text, sizeof text) && !strcmp(text, db_unique(b)), "and a client's own is its");
+        {
+                // a match rule longer than the 288 bytes once read, well under the limit
+                char rule[600], part[111];
+
+                memset(part, 'a', 110);
+                part[110] = 0;
+                snprintf(rule, sizeof rule, "type='signal',sender='org.example.%s',interface='org.example.%s',member='M%.60s'", part, part, part);
+                db_rule(a, rule);
+                DBCHECK(strlen(rule) > 300 && db_find(a, &s, DBUS_RETURN, 0), "a match rule of %zu bytes is taken", strlen(rule));
+        }
+        {
+                // argN matches a string, argNpath a string or an object path
+                struct db_call c;
+                struct dbus_fields f = {"/a", "org.example.Args", "M", "", "", "", "o", 0, 0};
+
+                db_rule(b, "type='signal',interface='org.example.Args',arg0='/a/b'");
+                db_drain(b);
+                db_begin(&c, DBUS_SIGNAL, 0, &f);
+                dbus_o_string(&c.w, "/a/b");
+                db_send(a, &c);
+                DBCHECK(!db_find(b, &s, DBUS_SIGNAL, "M"), "arg0 does not match an object path, which is not a string");
+                db_rule(b, "type='signal',interface='org.example.Args',arg0path='/a/b'");
+                db_drain(b);
+                db_begin(&c, DBUS_SIGNAL, 0, &f);
+                dbus_o_string(&c.w, "/a/b");
+                db_send(a, &c);
+                DBCHECK(db_find(b, &s, DBUS_SIGNAL, "M"), "and arg0path does");
+        }
+        {
+                // a bowl's user is every program of every bowl: more connections than one program needs
+                long many[DBUS_PER_UID], made = 0;
+
+                for (long k = 0; k < 48; k++)
+                        made += (many[k] = db_connect(1000)) >= 0;
+                DBCHECK(made == 48, "one user has 48 connections and more (%ld)", made);
+                for (long k = 0; k < 48; k++)
+                        if (many[k] >= 0)
+                                dbus_drop(many[k]);
+        }
+        dbus_drop(a);
+        dbus_drop(b);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+}
+
+static void db_read_all(long slot, const char *const *patterns, int count)
+{
+        struct db_call call;
+        struct dbus_fields f = {DBUS_PATH_PORTAL, "org.freedesktop.portal.Settings", "ReadAll", "", DBUS_NAME_PORTAL, "", "as", 0, 0};
+        long length_at;
+
+        db_begin(&call, DBUS_CALL, 0, &f);
+        dbus_o_u32(&call.w, 0);
+        length_at = call.w.length - 4;
+        for (int k = 0; k < count; k++)
+                dbus_o_string(&call.w, patterns[k]);
+        dbus_o_patch32(&call.w, length_at, (unsigned long)(call.w.length - length_at - 4));
+        db_send(slot, &call);
+}
+
+static int db_holds(const struct db_seen *s, const char *text)
+{
+        long n = (long)strlen(text) + 1;
+
+        for (long at = 0; at + n <= s->size; at++)
+                if (!memcmp(s->bytes + at, text, (size_t)n))
+                        return 1;
+        return 0;
+}
+
+// ReadAll's patterns, as xdg-desktop-portal reads them.
+static void db_test_read_all(void)
+{
+        long a;
+        struct db_seen s;
+        static const char *const nine[] = {"a.b", "c.d", "e.f", "g.h", "i.j", "k.l", "m.n", "o.p", "org.freedesktop.appearance"};
+        char long_pattern[121];
+        const char *one[1];
+
+        db_reset();
+        dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 1, 0, 0);
+        dbus_setting_set("org.gnome.desktop.interface", "gtk-theme", 's', 0, 0, "Adwaita");
+        dbus_setting_set("org.gnomeish", "other", 'u', 3, 0, 0);
+        a = db_connect(1000);
+        db_hello(a);
+        db_drain(a);
+        db_read_all(a, nine, 9);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_holds(&s, "org.freedesktop.appearance") && !db_holds(&s, "org.gnome.desktop.interface"),
+                "the ninth of nine patterns is read like the first");
+        memset(long_pattern, 'x', 120);
+        long_pattern[120] = 0;
+        one[0] = long_pattern;
+        db_read_all(a, one, 1);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && !db_holds(&s, "org.freedesktop.appearance") && !db_holds(&s, "org.gnome.desktop.interface"),
+                "a pattern of 120 bytes that names nothing reads nothing, not everything");
+        one[0] = "org.gnome*";
+        db_read_all(a, one, 1);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_holds(&s, "org.gnome.desktop.interface") && db_holds(&s, "org.gnomeish"),
+                "org.gnome* is every namespace that starts org.gnome");
+        one[0] = "org.gnome.*";
+        db_read_all(a, one, 1);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_holds(&s, "org.gnome.desktop.interface") && !db_holds(&s, "org.gnomeish"),
+                "and org.gnome.* every one that starts org.gnome. (not org.gnomeish)");
+        one[0] = "";
+        db_read_all(a, one, 1);
+        DBCHECK(db_find(a, &s, DBUS_RETURN, 0) && db_holds(&s, "org.gnome.desktop.interface") && db_holds(&s, "org.freedesktop.appearance"),
+                "an empty pattern is every namespace");
+        dbus_drop(a);
+}
+
+static char db_traced[1024];
+
+static void db_trace_take(void *context, const char *line)
+{
+        (void)context;
+        snprintf(db_traced, sizeof db_traced, "%s", line);
+}
+
+// The trace (sessionbus -t) puts what clients wrote on standard error, which is a terminal: no byte of theirs a terminal acts on.
+static void db_test_trace(void)
+{
+        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_trace_take};
+        long a;
+        int clean = 1;
+
+        for (long slot = 0; slot < DBUS_CLIENTS; slot++)
+                dbus_drop(slot);
+        dbus_stop();
+        dbus_start(&traced);
+        a = db_connect(1000);
+        db_hello(a);
+        db_drain(a);
+        db_call(a, DBUS_NAME_BUS, "/org/freedesktop/DBus", DBUS_NAME_BUS, "GetNameOwner", "s", "\033]0;owned\007\033[2J\r\n", 0);
+        for (long k = 0; db_traced[k]; k++)
+                clean &= (unsigned char)db_traced[k] >= 32 && db_traced[k] != 127;
+        DBCHECK(db_traced[0] && clean, "a client's escape and control bytes are not traced as they are: %s", db_traced);
+        dbus_drop(a);
+        db_reset();
 }
 
 /* ---- noise ---- */
@@ -169831,7 +170593,8 @@ static void dbz_signature(char *sig, int depth)
                 // deep: arrays, structs or variants of one another past DBUS_DEPTH
                 long deep = 20 + (long)dbz_pick(30), kind = (long)dbz_pick(3);
 
-                dbz_mutated |= deep > DBUS_DEPTH; // past the cap: no message to take
+                // past the cap, no message to take: more than 32 arrays or structs in one signature, or (half each) a value past DBUS_DEPTH
+                dbz_mutated |= kind == 2 ? deep > DBUS_DEPTH || (deep + 1) / 2 > 32 : deep > 32;
 
                 for (long k = 0; k < deep; k++)
                         sig[n++] = kind == 0 ? 'a' : kind == 1 ? '(' : (k & 1) ? '(' : 'a';
@@ -169938,11 +170701,11 @@ static void dbz_value(struct dbus_out *w, const char *sig, long *s, int budget)
         }
         case 'a':
         {
-                long element = *s, after = *s - 1, length_at, first, count;
+                long element = *s, after = *s - 1, length_at, first, count, previous = 0, made = 0;
                 char e = sig[element];
                 long align = e == '{' || e == '(' ? 8 : dbus_fixed_size(e) ? dbus_fixed_size(e) : e == 's' || e == 'o' || e == 'a' ? 4 : 1;
 
-                dbus_sig_one(sig, (long)strlen(sig), &after, 0, 0);
+                dbus_sig_one(sig, (long)strlen(sig), &after, 0, 0, 0);
                 dbus_o_u32(w, 0);
                 length_at = w->length - 4;
                 dbus_o_pad(w, align);
@@ -169952,6 +170715,8 @@ static void dbz_value(struct dbus_out *w, const char *sig, long *s, int budget)
                 {
                         long each = element;
 
+                        previous = w->length;
+                        made++;
                         if (e == '{')
                         {
                                 dbus_o_pad(w, 8);
@@ -169963,6 +170728,8 @@ static void dbz_value(struct dbus_out *w, const char *sig, long *s, int budget)
                                 dbz_value(w, sig, &each, budget - 1);
                 }
                 dbus_o_patch32(w, length_at, (unsigned long)(w->length - first));
+                // an array GDBus reads short (see dbus_value): valid, and not taken by the bus, so no message to take
+                dbz_mutated |= (e == '{' || e == '(') && first == length_at + 8 && made > 1 && previous >= w->length - 4;
                 *s = after;
                 break;
         }
@@ -170128,6 +170895,7 @@ static long dbz_message(unsigned char *into, long room, long who)
                         // an answer to a call this client was sent (from whom it came), or a forged one
                         f.has_reply = 1;
                         f.reply = dbz_pick(4) ? dbz_asked[who][slot] : dbz_edge32();
+                        dbz_mutated |= !f.reply; // a reply serial of 0 is none (libdbus ends a connection sent one): no message to take
                         f.destination = dbz_pick(4) ? dbz_asker[who][slot] : dbz_unique[dbz_pick(DBZ_CLIENTS)];
                 }
                 else
@@ -170400,6 +171168,634 @@ static void db_test_structured(long rounds)
                "seed %lu\n", rounds, fed, dbz_messages_read, dropped, dbz_whole_refused, dbz_checked, db_seed);
 }
 
+/* ---- a fuzz that knows the grammar ---- */
+
+/*
+        Random messages of every kind, built from random signatures and valid as libdbus has them (arrays, structs and
+        dict entries to 32 each in a signature; a value no deeper than 64, dict entries counted; strings from every plane
+        of UTF-8, control bytes and noncharacters included, never a NUL; paths; signatures; booleans of 0 and 1), sent by
+        six clients that own names and hold match rules: calls to the bus's methods, to the portal's, to each other's
+        names and to nobody, answers to the calls each was given, errors, and signals to all and to one. Half are sent as
+        they are, and each of those must leave its sender connected. The other half have one thing changed: a length, a
+        signature's byte, a padding byte, a byte of the fixed header, any byte, or a cut. After every message, what each
+        client was given is one whole valid message after another, each passed on from a client is stamped with that
+        client's name, every call that waits is counted once by its caller, and every name has an owner that said Hello.
+        DBFUZZ_DUMP=FILE writes each message a client was given (four bytes of its length, then its bytes), for
+        test/dbus_libraries.py to hand to libdbus and to GDBus, which must take every one.
+*/
+struct db_gen
+{
+        struct dbus_out w;
+        long mark[512], marks; // where a length, a signature's byte or a padding byte is: what a mutation picks from
+};
+
+// The message made has what a library does not take or misreads (1 the Local interface, 2 the Local path, 3 a reply serial
+// of 0, 4 an array GDBus reads short): it is a change, not a valid message.
+static int db_gen_reserved;
+
+static void db_mark(struct db_gen *g, long at)
+{
+        if (g->marks < 512)
+                g->mark[g->marks++] = at;
+}
+
+static void db_gpad(struct db_gen *g, long align)
+{
+        while (g->w.length % align && !g->w.bad)
+        {
+                db_mark(g, g->w.length);
+                dbus_o_u8(&g->w, 0);
+        }
+}
+
+static const char db_basic[] = "ybnqiuxtdsogh";
+
+// A complete type into sig at *n, within libdbus's counts; a value of it reaches no deeper than `left` more levels.
+static void db_gen_type(char *sig, long *n, int arrays, int structs, int dicts, int left)
+{
+        unsigned long r = db_random_next() % 20;
+
+        if (*n > 120 || left <= 0 || r < 9)
+                sig[(*n)++] = db_basic[db_random_next() % 13];
+        else if (r < 12 && arrays < 32)
+        {
+                sig[(*n)++] = 'a';
+                db_gen_type(sig, n, arrays + 1, structs, dicts, left - 1);
+        }
+        else if (r < 15 && arrays < 32 && dicts < 32 && left >= 2)
+        {
+                sig[(*n)++] = 'a';
+                sig[(*n)++] = '{';
+                sig[(*n)++] = db_basic[db_random_next() % 13];
+                db_gen_type(sig, n, arrays + 1, structs, dicts + 1, left - 2);
+                sig[(*n)++] = '}';
+        }
+        else if (r < 18 && structs < 32)
+        {
+                long members = 1 + (long)(db_random_next() % 3);
+
+                sig[(*n)++] = '(';
+                for (long k = 0; k < members; k++)
+                        db_gen_type(sig, n, arrays, structs + 1, dicts, left - 1);
+                sig[(*n)++] = ')';
+        }
+        else
+                sig[(*n)++] = 'v';
+}
+
+// Complete types into sig (up to `types` of them), 255 characters at most; its length.
+static long db_gen_signature(char *sig, int types, int left)
+{
+        long n;
+
+        do
+        {
+                n = 0;
+                for (int k = 0, count = (int)(db_random_next() % (unsigned long)(types + 1)); k < count; k++)
+                        db_gen_type(sig, &n, 0, 0, 0, left);
+        } while (n > 255);
+        sig[n] = 0;
+        return n;
+}
+
+static long db_gen_text(char *into, long room)
+{
+        static const unsigned long edges[] = {0xfffe, 0xffff, 0xfdd0, 0x10ffff, 0x7f, 0x80, 0x7ff, 0x800, 0xe000, 0x10000};
+        long n = 0;
+
+        for (long want = (long)(db_random_next() % 24); want > 0 && n + 5 < room; want--)
+        {
+                unsigned long r = db_random_next() % 10, code;
+
+                code = r < 5 ? 32 + db_random_next() % 95 : r < 6 ? 1 + db_random_next() % 31 : r < 7 ? 0x80 + db_random_next() % 0x780
+                       : r < 8 ? 0x800 + db_random_next() % 0xf800 : r < 9 ? 0x10000 + db_random_next() % 0x100000 : edges[db_random_next() % 10];
+                if (code >= 0xd800 && code < 0xe000)
+                        code = 0xfffd;
+                if (code < 0x80)
+                        into[n++] = (char)code;
+                else if (code < 0x800)
+                        into[n++] = (char)(0xc0 | code >> 6), into[n++] = (char)(0x80 | (code & 63));
+                else if (code < 0x10000)
+                        into[n++] = (char)(0xe0 | code >> 12), into[n++] = (char)(0x80 | ((code >> 6) & 63)), into[n++] = (char)(0x80 | (code & 63));
+                else
+                        into[n++] = (char)(0xf0 | code >> 18), into[n++] = (char)(0x80 | ((code >> 12) & 63)), into[n++] = (char)(0x80 | ((code >> 6) & 63)),
+                        into[n++] = (char)(0x80 | (code & 63));
+        }
+        into[n] = 0;
+        return n;
+}
+
+static void db_gen_path(char *into)
+{
+        static const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+        long n = 0;
+        int elements = (int)(db_random_next() % 4);
+
+        if (!elements)
+                into[n++] = '/';
+        for (int e = 0; e < elements; e++)
+        {
+                into[n++] = '/';
+                for (int k = 0, length = 1 + (int)(db_random_next() % 6); k < length; k++)
+                        into[n++] = letters[db_random_next() % 63];
+        }
+        into[n] = 0;
+}
+
+static void db_gen_string(struct db_gen *g, const char *text)
+{
+        db_gpad(g, 4);
+        db_mark(g, g->w.length);
+        dbus_o_string(&g->w, text);
+}
+
+static void db_gen_value(struct db_gen *g, const char *sig, long *s, int left)
+{
+        char c = sig[(*s)++], text[128];
+
+        switch (c)
+        {
+        case 'y':
+                dbus_o_u8(&g->w, (unsigned)db_random_next());
+                return;
+        case 'b':
+                db_gpad(g, 4);
+                db_mark(g, g->w.length);
+                dbus_o_u32(&g->w, db_random_next() & 1);
+                return;
+        case 'n':
+        case 'q':
+        {
+                unsigned char two[2] = {(unsigned char)db_random_next(), (unsigned char)db_random_next()};
+
+                db_gpad(g, 2);
+                dbus_o_raw(&g->w, two, 2);
+                return;
+        }
+        case 'i':
+        case 'u':
+        case 'h':
+                db_gpad(g, 4);
+                dbus_o_u32(&g->w, db_random_next() & 0xffffffffUL);
+                return;
+        case 'x':
+        case 't':
+        case 'd':
+                db_gpad(g, 8);
+                dbus_o_u64(&g->w, db_random_next());
+                return;
+        case 's':
+                db_gen_text(text, sizeof text);
+                db_gen_string(g, text);
+                return;
+        case 'o':
+                db_gen_path(text);
+                db_gen_string(g, text);
+                return;
+        case 'g':
+        {
+                char inner[512];
+
+                db_gen_signature(inner, 2, 8);
+                db_mark(g, g->w.length);
+                dbus_o_sig(&g->w, inner);
+                return;
+        }
+        case 'v':
+        {
+                char inner[512];
+                long n = 0, t = 0;
+
+                do
+                {
+                        n = 0;
+                        db_gen_type(inner, &n, 0, 0, 0, left - 1);
+                } while (n > 255);
+                inner[n] = 0;
+                db_mark(g, g->w.length);
+                dbus_o_sig(&g->w, inner);
+                db_gen_value(g, inner, &t, left - 1);
+                return;
+        }
+        case 'a':
+        {
+                long element = *s, after = *s - 1, length_at, first, count = (long)(db_random_next() % 4), previous = 0, made = 0;
+                char e = sig[element];
+
+                db_gpad(g, 4);
+                db_mark(g, g->w.length);
+                dbus_o_u32(&g->w, 0);
+                length_at = g->w.length - 4;
+                db_gpad(g, e == '{' || e == '(' ? 8 : dbus_fixed_size(e) ? dbus_fixed_size(e) : e == 's' || e == 'o' || e == 'a' ? 4 : 1);
+                first = g->w.length;
+                dbus_sig_one(sig, (long)strlen(sig), &after, 0, 0, 0);
+                for (long k = 0; k < count && g->w.length < 3000; k++)
+                {
+                        long each = element;
+
+                        previous = g->w.length;
+                        made++;
+                        if (e == '{')
+                        {
+                                db_gpad(g, 8);
+                                each++;
+                                db_gen_value(g, sig, &each, left - 2);
+                                db_gen_value(g, sig, &each, left - 2);
+                        }
+                        else
+                                db_gen_value(g, sig, &each, left - 1);
+                }
+                dbus_o_patch32(&g->w, length_at, (unsigned long)(g->w.length - first));
+                // GDBus takes such an array to end 4 bytes early (4 bytes of padding after its length, and the element before
+                // its last ending in those 4): valid, but not taken by the bus, so the message is a change and not a valid one
+                if ((e == '{' || e == '(') && first == length_at + 8 && made > 1 && previous >= g->w.length - 4)
+                        db_gen_reserved = 4;
+                *s = after;
+                return;
+        }
+        case '(':
+                db_gpad(g, 8);
+                while (sig[*s] != ')')
+                        db_gen_value(g, sig, s, left - 1);
+                (*s)++;
+                return;
+        }
+}
+
+#define DB_PEERS 6
+
+static struct
+{
+        long slot;
+        char name[40];                  // the well-known name it owns, or ""
+        unsigned long call[8];          // calls it was given and has not answered: their serials
+        char caller[8][20];             // and who made them
+        long calls;
+        long checked;                   // the bytes at the front of its queue already looked at (a queue left unread)
+} db_peer[DB_PEERS];
+
+static FILE *db_dump;
+static long db_fuzz_failures;
+
+static void db_peer_up(int p)
+{
+        static const char *const rules[] = {
+            "type='signal'", "type='signal',sender='org.freedesktop.DBus',member='NameOwnerChanged'",
+            "type='signal',interface='org.example.I',arg0='a'", "type='signal',path_namespace='/a'", "type='signal',arg0path='/a/'",
+            "type='signal',sender='org.freedesktop.portal.Desktop',interface='org.freedesktop.portal.Settings'",
+            "type='signal',arg0namespace='org.example'", "type='method_call'", "type='signal',member='M',arg1='x'",
+        };
+
+        db_peer[p].slot = db_connect(1000);
+        db_hello(db_peer[p].slot);
+        db_peer[p].calls = 0;
+        db_peer[p].checked = 0;
+        db_peer[p].name[0] = 0;
+        if (p % 2 == 0)
+        {
+                snprintf(db_peer[p].name, sizeof db_peer[p].name, "org.example.Peer%d", p);
+                db_request(db_peer[p].slot, db_peer[p].name, (unsigned)(db_random_next() % 8));
+        }
+        for (int k = 0, count = (int)(db_random_next() % 3); k < count; k++)
+                db_rule(db_peer[p].slot, rules[db_random_next() % (sizeof rules / sizeof rules[0])]);
+}
+
+// What a client was given since it last looked: each must be a whole valid message; those passed on from `sender` carry its name.
+static void db_peer_take(int p, const char *sender, int keep)
+{
+        const unsigned char *bytes;
+        long n = dbus_out(db_peer[p].slot, &bytes), at = db_peer[p].checked;
+
+        while (at < n)
+        {
+                struct dbus_message m;
+                long total = n - at < 16 ? -1 : DBUS_ALIGN(16 + (long)dbus_get32(bytes + at + 12), 8) + (long)dbus_get32(bytes + at + 4);
+
+                if (total < 16 || total > n - at || total > DBUS_MESSAGE + 4096 ||
+                    dbus_parse(bytes + at, total > DBUS_MESSAGE ? DBUS_MESSAGE : total, &m) != 0)
+                {
+                        // a message past DBUS_MESSAGE (the largest, stamped) is only framed here: the parser takes DBUS_MESSAGE
+                        if (total > DBUS_MESSAGE && total <= n - at && total <= DBUS_MESSAGE + 4096)
+                        {
+                                at += total;
+                                continue;
+                        }
+                        if (db_fuzz_failures++ < 5)
+                                DBCHECK(0, "fuzz: the bus gave a client %ld bytes that are not a valid message (%ld of %ld)", total, at, n);
+                        break;
+                }
+                if (db_dump)
+                {
+                        unsigned char size[4] = {(unsigned char)total, (unsigned char)(total >> 8), (unsigned char)(total >> 16), (unsigned char)(total >> 24)};
+
+                        fwrite(size, 1, 4, db_dump);
+                        fwrite(bytes + at, 1, (size_t)total, db_dump);
+                }
+                if (*m.sender && m.sender[0] == ':' && strcmp(m.sender, ":1.1") && sender && strcmp(m.sender, sender) && db_fuzz_failures++ < 5)
+                        DBCHECK(0, "fuzz: a message passed on carries %s, not its sender %s", m.sender, sender);
+                if (m.type == DBUS_CALL && !(m.flags & DBUS_FLAG_NO_REPLY) && db_peer[p].calls < 8 && *m.sender)
+                {
+                        db_peer[p].call[db_peer[p].calls] = m.serial;
+                        snprintf(db_peer[p].caller[db_peer[p].calls++], 20, "%s", m.sender);
+                }
+                at += total;
+        }
+        db_peer[p].checked = at;
+        if (!keep)
+        {
+                dbus_sent(db_peer[p].slot, n);
+                db_peer[p].checked = 0;
+        }
+}
+
+static void db_fuzz_books(void)
+{
+        for (long slot = 0; slot < DBUS_CLIENTS; slot++)
+        {
+                struct dbus_client *c = dbus.client[slot];
+                long waiting = 0;
+
+                if (!c)
+                        continue;
+                for (long k = 0; k < DBUS_PENDING; k++)
+                        waiting += dbus.pending[k].used && dbus.pending[k].caller == slot;
+                if (waiting != c->pending && db_fuzz_failures++ < 5)
+                        DBCHECK(0, "fuzz: client %ld counts %ld calls waiting, the table %ld", slot, c->pending, waiting);
+                if ((c->out_head > c->out_length || c->out_length > DBUS_OUT) && db_fuzz_failures++ < 5)
+                        DBCHECK(0, "fuzz: client %ld's queue is [%ld, %ld)", slot, c->out_head, c->out_length);
+        }
+        for (long k = 0; k < DBUS_NAMES; k++)
+                if (dbus.name[k].used && dbus.name[k].owner != DBUS_SERVICE &&
+                    (!dbus_client_of(dbus.name[k].owner) || !dbus_client_of(dbus.name[k].owner)->hello) && db_fuzz_failures++ < 5)
+                        DBCHECK(0, "fuzz: %s is owned by slot %d, which has no client", dbus.name[k].text, dbus.name[k].owner);
+}
+
+// One random message from peer p into g: valid, as libdbus has it.
+static void db_gen_message(struct db_gen *g, int p)
+{
+        static const char *const interfaces[] = {"org.example.I", DBUS_NAME_BUS, "org.freedesktop.portal.Settings", "org.freedesktop.DBus.Properties",
+                                                 "org.freedesktop.DBus.Peer", "org.freedesktop.DBus.Introspectable", "org.freedesktop.portal.FileChooser"};
+        static const char *const members[] = {"M", "Hello", "RequestName", "ReleaseName", "ListNames", "ListActivatableNames", "NameHasOwner",
+                                              "GetNameOwner", "GetConnectionUnixUser", "GetConnectionUnixProcessID", "GetConnectionCredentials",
+                                              "StartServiceByName", "AddMatch", "RemoveMatch", "GetId", "Read", "ReadOne", "ReadAll", "Get", "GetAll",
+                                              "Ping", "GetMachineId", "Introspect", "Register", "OpenFile", "Changed"};
+        static const char *const typed[] = {"s", "su", "ss", "as", "", "sa{sv}", "u", "v"};
+        unsigned long r = db_random_next() % 20;
+        unsigned type = r < 9 ? DBUS_CALL : r < 14 ? DBUS_SIGNAL : r < 18 ? DBUS_RETURN : DBUS_ERROR;
+        int other = (int)(db_random_next() % DB_PEERS), answer = -1;
+        char sig[512], path[64], text[128];
+        const char *destination = "";
+        long body_at, sig_field = -1;
+
+        if ((type == DBUS_RETURN || type == DBUS_ERROR) && db_peer[p].calls && db_random_next() % 4)
+                answer = (int)(db_random_next() % (unsigned long)db_peer[p].calls);
+        if (type == DBUS_CALL)
+        {
+                unsigned long d = db_random_next() % 10;
+
+                destination = d < 3 ? DBUS_NAME_BUS : d < 6 ? DBUS_NAME_PORTAL : d < 7 && db_peer[other].name[0] ? db_peer[other].name
+                              : d < 9 ? db_unique(db_peer[other].slot) : d < 10 ? "org.example.Nobody" : "";
+        }
+        else if (type == DBUS_SIGNAL && db_random_next() % 3 == 0)
+                destination = db_unique(db_peer[other].slot);
+        else if (answer >= 0)
+                destination = db_peer[p].caller[answer];
+        else if (type != DBUS_SIGNAL)
+                destination = db_unique(db_peer[other].slot);
+        db_gen_reserved = (int)(db_random_next() % 48);
+        db_gen_reserved = db_gen_reserved < 3 ? db_gen_reserved + 1 : 0; // 1 the Local interface, 2 the Local path, 3 a reply serial of 0
+        g->w = (struct dbus_out){g->w.at, 0, 4096, 0};
+        g->marks = 0;
+        dbus_o_u8(&g->w, 'l');
+        dbus_o_u8(&g->w, type);
+        dbus_o_u8(&g->w, (unsigned)(db_random_next() % 8) & (type == DBUS_CALL ? 7u : 1u));
+        dbus_o_u8(&g->w, 1);
+        db_mark(g, 4);
+        dbus_o_u32(&g->w, 0);
+        dbus_o_u32(&g->w, ++db_serial);
+        db_mark(g, 12);
+        dbus_o_u32(&g->w, 0);
+        if (type == DBUS_CALL || type == DBUS_SIGNAL)
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 1);
+                db_mark(g, g->w.length);
+                dbus_o_sig(&g->w, "o");
+                if (db_gen_reserved == 2)
+                        snprintf(path, sizeof path, "/org/freedesktop/DBus/Local");
+                else if (db_random_next() % 3)
+                        snprintf(path, sizeof path, "%s", db_random_next() % 2 ? DBUS_PATH_PORTAL : "/org/freedesktop/DBus");
+                else
+                        db_gen_path(path);
+                db_gen_string(g, path);
+        }
+        if (type == DBUS_SIGNAL || (type == DBUS_CALL && (db_random_next() % 4 || db_gen_reserved == 1)))
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 2);
+                dbus_o_sig(&g->w, "s");
+                db_gen_string(g, db_gen_reserved == 1 ? "org.freedesktop.DBus.Local" : interfaces[db_random_next() % (sizeof interfaces / sizeof interfaces[0])]);
+        }
+        if ((type == DBUS_CALL || type == DBUS_SIGNAL) && db_gen_reserved == 3)
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 5);
+                dbus_o_sig(&g->w, "u");
+                dbus_o_u32(&g->w, 0);
+        }
+        if (type == DBUS_CALL || type == DBUS_SIGNAL)
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 3);
+                dbus_o_sig(&g->w, "s");
+                db_gen_string(g, members[db_random_next() % (sizeof members / sizeof members[0])]);
+        }
+        if (type == DBUS_ERROR)
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 4);
+                dbus_o_sig(&g->w, "s");
+                db_gen_string(g, "org.example.Error.Failed");
+        }
+        if (type == DBUS_RETURN || type == DBUS_ERROR)
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 5);
+                dbus_o_sig(&g->w, "u");
+                db_mark(g, g->w.length);
+                dbus_o_u32(&g->w, db_gen_reserved == 3 ? 0 : answer >= 0 ? db_peer[p].call[answer] : 1 + db_random_next() % 64);
+        }
+        if (destination[0])
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 6);
+                dbus_o_sig(&g->w, "s");
+                db_gen_string(g, destination);
+        }
+        if (db_random_next() % 8 == 0)
+        {
+                // a field the bus does not know: it is to be taken, and not passed on
+                char inner[512];
+                long n = 0, t = 0;
+
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 10 + (unsigned)(db_random_next() % 246));
+                do
+                {
+                        n = 0;
+                        db_gen_type(inner, &n, 0, 0, 0, 3);
+                } while (n > 255);
+                inner[n] = 0;
+                dbus_o_sig(&g->w, inner);
+                db_gen_value(g, inner, &t, 3);
+        }
+        if (db_random_next() % 3 == 0)
+                snprintf(sig, sizeof sig, "%s", typed[db_random_next() % (sizeof typed / sizeof typed[0])]);
+        else
+                db_gen_signature(sig, 4, 64);
+        if (sig[0])
+        {
+                db_gpad(g, 8);
+                dbus_o_u8(&g->w, 8);
+                dbus_o_sig(&g->w, "g");
+                sig_field = g->w.length;
+                dbus_o_sig(&g->w, sig);
+                for (long k = 0; sig[k]; k++)
+                        db_mark(g, sig_field + 1 + k);
+        }
+        dbus_o_patch32(&g->w, 12, (unsigned long)(g->w.length - 16));
+        db_gpad(g, 8);
+        body_at = g->w.length;
+        for (long s = 0, n = (long)strlen(sig); s < n && !g->w.bad;)
+        {
+                if (sig[s] == 's' && db_random_next() % 2)
+                {
+                        // strings a method looks for: names, rules, namespaces
+                        static const char *const words[] = {"org.example.Peer0", "org.example.Peer2", "org.freedesktop.appearance", "color-scheme",
+                                                            "org.freedesktop.portal.Settings", "version", "type='signal'", ":1.2", "org.gnome.*", ""};
+
+                        snprintf(text, sizeof text, "%s", words[db_random_next() % 10]);
+                        db_gen_string(g, text);
+                        s++;
+                }
+                else
+                        db_gen_value(g, sig, &s, 64);
+        }
+        dbus_o_patch32(&g->w, 4, (unsigned long)(g->w.length - body_at));
+        if (answer >= 0)
+        {
+                // answered once: the call leaves the peer's list
+                db_peer[p].call[answer] = db_peer[p].call[db_peer[p].calls - 1];
+                memcpy(db_peer[p].caller[answer], db_peer[p].caller[db_peer[p].calls - 1], 20);
+                db_peer[p].calls--;
+        }
+}
+
+static void db_test_grammar_fuzz(long rounds)
+{
+        static unsigned char bytes[4096 + 64];
+        struct db_gen g;
+        long valid = 0, valid_kept = 0, mutated = 0, mutated_ended = 0;
+        const char *dump = getenv("DBFUZZ_DUMP");
+
+        db_reset();
+        db_fuzz_failures = 0;
+        db_dump = dump ? fopen(dump, "wb") : 0;
+        dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 1, 0, 0);
+        dbus_setting_set("org.gnome.desktop.interface", "gtk-theme", 's', 0, 0, "Adwaita-dark");
+        g.w.at = bytes;
+        for (int p = 0; p < DB_PEERS; p++)
+                db_peer_up(p);
+        for (int p = 0; p < DB_PEERS; p++)
+                db_peer_take(p, 0, 0);
+        for (long round = 0; round < rounds; round++)
+        {
+                int p = (int)(db_random_next() % DB_PEERS), mutate = db_random_next() % 2 == 0, change;
+                long size;
+                char sender[20];
+
+                db_gen_message(&g, p);
+                if (g.w.bad)
+                        continue;
+                // what no library takes is sent as it was made as often as with a change, so that a bus that passes it on is seen
+                change = mutate | db_gen_reserved;
+                size = g.w.length;
+                snprintf(sender, sizeof sender, "%s", db_unique(db_peer[p].slot));
+                if (mutate)
+                {
+                        unsigned long how = db_random_next() % 8;
+                        long at = g.marks ? g.mark[db_random_next() % (unsigned long)g.marks] : 0;
+
+                        if (how < 3 && g.marks)
+                                bytes[at] = (unsigned char)(how == 0 ? bytes[at] + 1u : how == 1 ? bytes[at] - 1u : (unsigned)db_random_next());
+                        else if (how == 3)
+                                bytes[db_random_next() % 16] = (unsigned char)db_random_next();
+                        else if (how == 4)
+                                bytes[db_random_next() % (unsigned long)size] ^= (unsigned char)(1u << (db_random_next() % 8));
+                        else if (how == 5)
+                                size = (long)(db_random_next() % (unsigned long)size);
+                        else if (how == 6 && g.marks)
+                                bytes[at + 1 < size ? at + 1 : at] = (unsigned char)db_random_next();
+                        else
+                                bytes[db_random_next() % (unsigned long)size] = (unsigned char)db_random_next();
+                }
+                if (db_random_next() % 4 == 0 && size > 1)
+                {
+                        // in two reads, cut anywhere
+                        long cut = 1 + (long)(db_random_next() % (unsigned long)(size - 1));
+
+                        db_feed(db_peer[p].slot, bytes, cut);
+                        db_feed(db_peer[p].slot, bytes + cut, size - cut);
+                }
+                else
+                        db_feed(db_peer[p].slot, bytes, size);
+                if (!change)
+                {
+                        valid++;
+                        valid_kept += !dbus_dead(db_peer[p].slot);
+                        if (dbus_dead(db_peer[p].slot) && db_fuzz_failures++ < 5)
+                        {
+                                DBCHECK(0, "fuzz: a valid message of %ld bytes ended its sender (%s)", size, dbus_why(db_peer[p].slot));
+                                for (long k = 0; k < size && getenv("DBDEBUG"); k++)
+                                        fprintf(stderr, "%s%02x", k % 16 ? " " : "\n", bytes[k]);
+                        }
+                }
+                else
+                {
+                        mutated++;
+                        mutated_ended += dbus_dead(db_peer[p].slot) != 0;
+                }
+                for (int q = 0; q < DB_PEERS; q++)
+                        db_peer_take(q, sender, db_random_next() % 64 == 0);
+                if (round % 64 == 0)
+                {
+                        db_time += 1000;
+                        dbus_tick();
+                }
+                db_fuzz_books();
+                for (int q = 0; q < DB_PEERS; q++)
+                        // a peer that was ended, or left with part of a message in (a cut, a length made longer), starts again
+                        if (dbus_dead(db_peer[q].slot) || dbus.client[db_peer[q].slot]->in_length || (db_random_next() % 4096) == 0)
+                        {
+                                dbus_drop(db_peer[q].slot);
+                                db_peer_up(q);
+                                db_peer_take(q, 0, 0);
+                        }
+                if (db_random_next() % 512 == 0)
+                        dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', (long)(1 + db_random_next() % 2), 0, 0);
+        }
+        for (int p = 0; p < DB_PEERS; p++)
+                dbus_drop(db_peer[p].slot);
+        if (db_dump)
+                fclose(db_dump);
+        DBCHECK(valid == valid_kept, "fuzz: every valid message left its sender connected (%ld of %ld)", valid_kept, valid);
+        DBCHECK(db_allocs == db_releases, "every record is returned after the grammar's fuzz (%ld %ld)", db_allocs, db_releases);
+        for (long k = 0; k < DBUS_PENDING; k++)
+                DBCHECK(!dbus.pending[k].used, "no call waits for a reply after the grammar's fuzz");
+        printf("CHECK_dbus grammar fuzz: %ld rounds, %ld valid (%ld kept their sender), %ld changed (%ld ended theirs)\n", rounds, valid, valid_kept,
+               mutated, mutated_ended);
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000, grammar = argc > 2 ? atol(argv[2]) : 20000;
@@ -170414,8 +171810,15 @@ int main(int argc, char **argv)
         db_test_caps();
         db_test_queue();
         db_test_pending();
+        db_test_flood();
+        db_test_reserved();
+        db_test_allowed();
+        db_test_methods();
+        db_test_read_all();
+        db_test_trace();
         db_test_fuzz(rounds);
         db_test_structured(grammar);
+        db_test_grammar_fuzz(grammar);
         printf("CHECK_dbus: %u checks, %u failures\n", db_checks, db_failures);
         return db_failures != 0;
 }
