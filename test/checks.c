@@ -213848,6 +213848,19 @@ b32 main(void)
                         pic[0] = 0;
                         check("gpu pending: the new context runs a scene", gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && pic[0] == 0xff336699u);
                 }
+                // Three hangs end the GPU's compose until the setting is turned off and on again (compositor_gpu_settings; the file /root/canvas.gpu is not
+                // there for this check, which reads as on): read again while on, it stays given up; turned on from off, the GPU composes again; a GPU that never
+                // started stays given up.
+                compositor_gpu_state.dead = 1, compositor_gpu_state.failures = 3, compositor_gpu = 1;
+                compositor_gpu_settings();
+                check("gpu settings: read again while on, a GPU given up on after hangs stays given up", compositor_gpu_state.dead);
+                compositor_gpu = 0;
+                compositor_gpu_settings();
+                check("gpu settings: turned on again, it composes the next present", compositor_gpu && !compositor_gpu_state.dead && compositor_gpu_present(&f, 1) == 1);
+                compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu = 0;
+                compositor_gpu_settings();
+                check("gpu settings: a GPU that never started is not tried again", compositor_gpu_state.dead);
+                compositor_gpu_state.dead = 0;
                 compositor.damages = 0, compositor_gpu_state.up = 0;
         }
         return test_report(null);

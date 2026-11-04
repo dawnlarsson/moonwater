@@ -6932,7 +6932,7 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
         the damage, and the card told what changed as it is when the processor drew it. It is for what it draws exactly as the processor does (every frame is a
         window with a picture at its own size, a tab, a line, a close button); anything else, a finger's mark, a scaled landing, a turned screen, a
         mode whose width is not a multiple of 4, a card of another family, a refusal or a hang, is the processor's, for that present, and three hangs in a row
-        end the GPU's compose until the setting is read again. Headless it is for -G.
+        end the GPU's compose until the setting is turned off and on again (compositor_gpu_settings). Headless it is for -G.
 */
 static int compositor_gpu; // GPU rendering as the setting has it (below)
 static void compositor_say(string_address what, bipolar value);
@@ -11971,9 +11971,18 @@ static int compositor_gpu = 1;
 static void compositor_gpu_settings(void)
 {
         char word[16];
+#ifdef MOONWATER_GPU_C
+        int was = compositor_gpu;
+#endif
 
         compositor_word(SETTING_GPU_PATH, word, sizeof(word));
         compositor_gpu = !string_equals((string_address)word, (string_address) "off");
+#ifdef MOONWATER_GPU_C
+        // Turned on again: a GPU given up on after three hangs is tried again (one that never started, a card that is not one the kernels are for or that
+        // drew its self-test wrong, stays given up).
+        if (compositor_gpu && !was && compositor_gpu_state.up)
+                compositor_gpu_state.dead = 0, compositor_gpu_state.failures = 0;
+#endif
 }
 #endif
 
