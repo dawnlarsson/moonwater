@@ -2578,6 +2578,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                         terminal.selecting = terminal.select_kind != TERMINAL_SELECT_CHARS;
                 }
                 terminal.select_dragging = true;
+                terminal.select_past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
                 terminal.select_touch = false;
                 address_to dirty = true;
                 return true;
@@ -2740,6 +2741,7 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
         terminal.select_kind = TERMINAL_SELECT_CHARS;
         terminal.selecting = true;
         terminal.select_dragging = true;
+        terminal.select_past = 0;
         terminal.touch_select = true;
         terminal.select_touch = true;
         address_to dirty = true;

@@ -121933,6 +121933,48 @@ static void check_terminal_select_speed(void)
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
 }
 
+/*
+        A press in the grid is a press of its own: the edge a drag last held past (select_past) is the drag's, and the press that
+        follows a release has none. Held still in the grid, the selection does not scroll, and its end stays where the press put it.
+*/
+static void check_terminal_select_stale(void)
+{
+    b32 dirty = false;
+    int x = (int)terminal.pad + 4 * (int)terminal.cell_w + (int)terminal.cell_w / 2, top = (int)terminal.pad_y;
+    int cell = (int)terminal.cell_h;
+    unsigned int before, line_after;
+    positive now = 1000000000ull;
+    struct window_event at = {WINDOW_EVENT_MOTION, 0, 0, 0};
+    struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0};
+    struct window_event release = {WINDOW_EVENT_BUTTON, 0, 0x110, 0};
+
+    for (int line = 0; line < 3 * (int)ROWS; line++)
+        term_bytes("scrollback\r\n", 12);
+
+    /* A drag held past the grid's top, released; then a press in the grid, held still for two seconds of steps. */
+    terminal_view_live();
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    at.a = x, at.b = top + 2 * cell + cell / 2;
+    terminal_deliver(-1, &at, &dirty);
+    terminal_deliver(-1, &press, &dirty);
+    at.b = top - 25;
+    terminal_deliver(-1, &at, &dirty);
+    terminal_deliver(-1, &release, &dirty);
+
+    before = terminal.view;
+    at.a = x, at.b = top + (int)ROWS / 2 * cell + cell / 2;
+    terminal_deliver(-1, &at, &dirty);
+    terminal_deliver(-1, &press, &dirty);
+    line_after = terminal.select_active_line;
+    for (int step = 0; step <= 120; step++)
+        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+    check("terminal: a press in the grid after a drag past its top does not scroll the view on its own",
+          terminal.view == before && terminal.select_active_line == line_after);
+    terminal_deliver(-1, &release, &dirty);
+    terminal_view_live();
+    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+}
+
 static fn check_keys(void)
 {
         static const struct
@@ -155146,6 +155188,7 @@ b32 main()
         check_pointer();
         check_terminal_select_scroll();
         check_terminal_select_speed();
+        check_terminal_select_stale();
         check_take();
         check_land();
         check_glass();
