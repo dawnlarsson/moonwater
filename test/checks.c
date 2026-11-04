@@ -97669,7 +97669,10 @@ static fn steam_profile(void)
         positive run = chrome_line(steam ? steam->session : null, "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/steam \"$@\"");
         positive sound = chrome_line(steam ? steam->session : null, "PULSE_SERVER=unix:/run/moonwater/pulse/native");
         positive unset = chrome_line(steam ? steam->session : null, "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND");
-        positive ended = chrome_line(steam ? steam->session : null, "exit $status");
+        positive ended = chrome_line(steam ? steam->session : null, "; exit $status");
+        positive wm_socket = chrome_line(steam ? steam->session : null, "-S /run/moonwater/xwm/wm-0");
+        positive wrapped = chrome_line(steam ? steam->session : null, "/usr/local/bin/xwayland-moonwater /usr/bin/steam \"$@\"");
+        positive fallback = chrome_line(steam ? steam->session : null, "-ne 125");
         check("The session looks for Canvas's socket before it starts anything, and says how to turn the shim on",
               socket == 1 && chrome_count(steam->session[0], "echo ") == 1);
         check("The session names the socket as an absolute path, and marks the launch as the person's",
@@ -97686,9 +97689,40 @@ static fn steam_profile(void)
               ended && ended > run && strstr(steam->session[ended - 1], "kill $xwayland"));
         check("The session passes the arguments it was given to Steam",
               run && strstr(steam->session[run - 1], "\"$@\""));
+        check("Where Canvas listens for the window manager of Xwayland, Steam runs under xwayland-moonwater, with its arguments, "
+              "and that comes before the rootful server",
+              wm_socket && wrapped && wm_socket < wrapped && wrapped < xwayland &&
+                  strstr(steam->session[wrapped - 1], "bowl " BOWL_ROOT_PREFIX "arch "));
+        check("Status 125 of the wrapper (no X server started) is the one that lets the session start the rootful server; any other "
+              "status of Steam ends the session",
+              fallback && fallback > wrapped && fallback < xwayland && strstr(steam->session[fallback - 1], "exit $status"));
+        check("Only the steam profile runs X programs: no other profile holds the wrapper",
+              steam && steam->xwayland && bowl_find_profile("chrome") && !bowl_find_profile("chrome")->xwayland &&
+                  !bowl_find_profile("graphics")->xwayland && !bowl_find_profile("desktop")->xwayland);
         check("The session gives Steam no flags of its own (its CEF sandbox runs on the bowl's user namespaces)",
               run && !strstr(steam->session[run - 1], "--no-sandbox") &&
                   !strstr(steam->session[run - 1], "-no-cef-sandbox"));
+        {
+                positive session_bytes = 0;
+                const char address_to script = bowl_xwayland_script;
+
+                for (positive line = 0; steam && steam->session[line]; line++)
+                        session_bytes += string_length(steam->session[line]) + 1;
+                check("The steam session fits the buffer the launcher builds it in", session_bytes > 0 && session_bytes < BOWL_SHEBANG_LIMIT * 16);
+                check("The wrapper is a Python script, which connects to the socket Canvas listens on for the window manager",
+                      string_has_prefix(script, "#!/usr/bin/python3\n") && strstr(script, "\"/run/moonwater/xwm/wm-0\"") &&
+                          strstr(script, "socket.AF_UNIX") && strstr(script, "sizeof") == null);
+                check("The wrapper starts Xwayland rootless with that connection as its window manager, no local socket, and no reset",
+                      strstr(script, "\"-rootless\", \"-wm\", str(wm.fileno())") && strstr(script, "\"-nolisten\", \"local\"") &&
+                          strstr(script, "\"-noreset\"") && strstr(script, "pass_fds=[wm.fileno()]"));
+                check("The wrapper exits 125 when it cannot start the server, tries a bounded number of displays, and waits a bounded time",
+                      strstr(script, "UNSTARTED = 125") && strstr(script, "DISPLAYS = 32") && strstr(script, "WAIT = 5.0") &&
+                          strstr(script, "range(1, DISPLAYS + 1)"));
+                check("The wrapper ends the server when its program ends, and runs the program with DISPLAY set",
+                      strstr(script, "DISPLAY=display") && strstr(script, "process.terminate()") && strstr(script, "child.wait()"));
+                check("The wrapper is written where the bowl runs it from, and is small",
+                      string_equals(BOWL_XWAYLAND_WRAPPER, "/usr/local/bin/xwayland-moonwater") && sizeof(bowl_xwayland_script) < 8192);
+        }
 #if X64
         check("Steam is on this machine's architecture: the profile can be installed", steam && !steam->unavailable);
 #else

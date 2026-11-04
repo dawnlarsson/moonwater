@@ -14,6 +14,7 @@ WORK is the work directory (the compositor's log is WORK/compositor.log, its scr
 its pid WORK/cpid), XROOT the root Xwayland runs in ("" for the host's), CLIENT the Xlib client's path as the root sees it. One line
 a row: "ok NAME" or "FAIL NAME ...", and the exit status is the number of failures.
 """
+import ast
 import os
 import socket
 import struct
@@ -361,6 +362,85 @@ row(ok, "a window of the new Xwayland is on the screen", f"{count} pixels, box {
 xclient.kill()
 xwayland.terminate()
 xwayland.wait()
+wait_for(LOG, "window manager connection is closed", 4.0, mark)
+
+# ---- the wrapper (xwayland-moonwater, kept in src/bowl.c): the same server, started the way a bowl starts it ----
+def wrapper_script():
+    """The wrapper's text, as src/bowl.c holds it: the C string literals of bowl_xwayland_script, joined."""
+    text = read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "bowl.c"))
+    start = text.index("static const char bowl_xwayland_script[] =")
+    end = text.index(";\n", start)
+    return "".join(ast.literal_eval(line.strip()) for line in text[start:end].splitlines()[1:] if line.strip().startswith('"'))
+
+
+wrapper = os.path.join(work, "xwayland-moonwater")
+with open(wrapper, "w") as f:
+    f.write(wrapper_script())
+os.chmod(wrapper, 0o755)
+x11 = (xroot if xroot else "") + "/tmp/.X11-unix"
+runner = os.path.join(work, "xwayland-run")
+with open(runner, "w") as f:
+    # Xwayland as a bowl has it, in the root of the test: its window manager's connection is the descriptor the wrapper gave it.
+    f.write("#!/bin/sh\n" + ("exec chroot '%s' /usr/bin/env -i %s MOONWATER_ASKED=1 WAYLAND_DISPLAY=/run/moonwater/wayland-0 /usr/bin/Xwayland \"$@\"\n" % (xroot, " ".join(ENV))
+                             if xroot else "exec Xwayland \"$@\"\n"))
+os.chmod(runner, 0o755)
+wenv = dict(os.environ, XWAYLAND_MOONWATER_XWAYLAND=runner, XWAYLAND_MOONWATER_X11=x11, WAYLAND_DISPLAY="/run/moonwater/wayland-0",
+            MOONWATER_ASKED="1")
+program = ([ "chroot", xroot, client ] if xroot else [client]) + ["-w", "300", "-h", "200", "-t", "30"]
+before = set(os.listdir(x11)) if os.path.isdir(x11) else set()
+
+# With no program: the display is printed, and the server runs until the wrapper is ended.
+mark = len(read(LOG))
+server = subprocess.Popen([sys.executable, wrapper], env=wenv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+display = ""
+end = time.time() + 10
+while time.time() < end and not display:
+    line = server.stdout.readline()
+    display = line.strip()
+    if not line:
+        break
+row(display.startswith(":") and display[1:].isdigit() and "X" + display[1:] not in before,
+    "the wrapper starts Xwayland on a display that was free and prints it", f"printed {display!r} stderr {server.stderr.read() if server.poll() is not None else ''}")
+row(wait_for(LOG, "is connected", 5.0, mark) and wait_for(LOG, "redirected", 5.0, mark),
+    "the wrapper's Xwayland is rootless under the compositor's window manager (connected, root redirected)", read(LOG)[mark:][-200:])
+env_client = dict(os.environ, DISPLAY=display)
+wclient = subprocess.Popen(program, env=env_client, stdin=subprocess.PIPE, stdout=open(os.path.join(work, "client-w.log"), "w"), stderr=subprocess.STDOUT)
+ok, (count, box) = wait_colour(BLUE, lambda c, b: c >= 0.9 * 300 * 200 and size_is(b, 300, 200))
+row(ok, "an X client on the wrapper's display is a window of the compositor", f"{count} pixels, box {box}")
+wclient.kill()
+mark = len(read(LOG))
+server.terminate()
+try:
+    status = server.wait(timeout=6)
+except subprocess.TimeoutExpired:
+    server.kill()
+    status = None
+row(status == 143 and wait_for(LOG, "window manager connection is closed", 4.0, mark),
+    "ending the wrapper ends its Xwayland (the window manager's connection closes) and it answers 128 plus the signal", f"status {status}")
+
+# With a program: it runs with DISPLAY set, and the server ends with it, the wrapper answering the program's status.
+mark = len(read(LOG))
+server = subprocess.Popen([sys.executable, wrapper, "--"] + program, env=wenv, stdin=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          stdout=open(os.path.join(work, "client-p.log"), "w"))
+ok, (count, box) = wait_colour(BLUE, lambda c, b: c >= 0.9 * 300 * 200 and size_is(b, 300, 200))
+row(ok, "a program run by the wrapper has its window on the compositor", f"{count} pixels, box {box}")
+server.stdin.write("quit\n")
+server.stdin.flush()
+try:
+    status = server.wait(timeout=8)
+except subprocess.TimeoutExpired:
+    server.kill()
+    status = None
+row(status == 0 and wait_for(LOG, "window manager connection is closed", 4.0, mark),
+    "when the program ends the wrapper ends the server and answers the program's status", f"status {status}")
+
+# No socket for the window manager: nothing is started, the program is not run, and the status is the one that asks for another server.
+marker = os.path.join(work, "program-ran")
+bare = subprocess.run([sys.executable, wrapper, "--", "touch", marker], env=dict(wenv, XWAYLAND_MOONWATER_WM=os.path.join(work, "none")),
+                      capture_output=True, text=True, timeout=20)
+row(bare.returncode == 125 and not os.path.exists(marker) and "no window manager of Xwayland" in bare.stderr,
+    "with no window manager socket the wrapper exits 125 and does not run its program", f"status {bare.returncode} {bare.stderr!r}")
+
 os.close(fifo)
 print(f"{failures} failed", flush=True)
 sys.exit(failures)

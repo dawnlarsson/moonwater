@@ -7905,6 +7905,9 @@ struct bowl_profile
         // verb ends the compositor to give the display to a session, and a
         // program has none to give it to.
         bool program;
+        // The session runs X programs, and so the bowl holds the wrapper
+        // that starts their X server (xwayland-moonwater, below).
+        bool xwayland;
 };
 
 /*
@@ -8239,6 +8242,153 @@ static const struct bowl_component bowl_steam_components[] = {
 #define BOWL_STEAM_SOUND "/run/moonwater/pulse/native"
 #define BOWL_STEAM_DISPLAY ":1"
 #define BOWL_STEAM_X_SOCKET "/tmp/.X11-unix/X1"
+#define BOWL_STEAM_WM "/run/moonwater/xwm/wm-0"
+
+/*
+        The X server wrapper: xwayland-moonwater, a Python script (Steam's package brings Python into its bowl) kept in
+        the bowl at /usr/local/bin and written again at every install and every session, so an update of this binary
+        is what runs. It connects to the socket Canvas listens on for the window manager of Xwayland, starts Xwayland
+        rootless on the first free display with that connection as its window manager (-wm), waits for the X socket,
+        runs its program with DISPLAY set and ends the server when the program ends. It exits 125, without running the
+        program, when it could not start the server: Canvas has no such socket (a Canvas that is not this one's), no
+        display is free, or there is no Xwayland. The session starts the rootful server then.
+*/
+#define BOWL_XWAYLAND_DIRECTORY "/usr/local/bin"
+#define BOWL_XWAYLAND_WRAPPER "/usr/local/bin/xwayland-moonwater"
+static const char bowl_xwayland_script[] =
+    "#!/usr/bin/python3\n"
+    "# xwayland-moonwater [--] [PROGRAM [ARGS...]]\n"
+    "#\n"
+    "# The X server for the programs of this bowl on Moonwater's Canvas: Xwayland, rootless, a client of Canvas's Wayland socket, with the\n"
+    "# connection that makes Canvas its X window manager (the socket Canvas listens on for it). PROGRAM runs with DISPLAY set to the\n"
+    "# server, and the server ends when it does, with PROGRAM's status. With no PROGRAM the display (\":N\") is printed, and the server runs\n"
+    "# until this is ended. Exit status 125: the server could not be started (Canvas listens on no window manager socket, no display is\n"
+    "# free, there is no Xwayland) and PROGRAM was not run, so the caller may start a server of another kind.\n"
+    "import os\n"
+    "import signal\n"
+    "import socket\n"
+    "import subprocess\n"
+    "import sys\n"
+    "import time\n"
+    "\n"
+    "WM = os.environ.get(\"XWAYLAND_MOONWATER_WM\", \"/run/moonwater/xwm/wm-0\")\n"
+    "XWAYLAND = os.environ.get(\"XWAYLAND_MOONWATER_XWAYLAND\", \"/usr/bin/Xwayland\")\n"
+    "X11 = os.environ.get(\"XWAYLAND_MOONWATER_X11\", \"/tmp/.X11-unix\")\n"
+    "UNSTARTED = 125\n"
+    "DISPLAYS = 32  # the display numbers tried, from 1\n"
+    "WAIT = 5.0  # the seconds an X socket is waited for\n"
+    "\n"
+    "\n"
+    "def say(text):\n"
+    "    sys.stderr.write(\"xwayland-moonwater: %s\\n\" % text)\n"
+    "\n"
+    "\n"
+    "def taken(number):\n"
+    "    return os.path.lexists(\"%s/X%d\" % (X11, number)) or os.path.lexists(\"%s/.X%d-lock\" % (os.path.dirname(X11), number))\n"
+    "\n"
+    "\n"
+    "def start(wayland):\n"
+    "    \"\"\"Xwayland on the first free display, with a connection to Canvas's window manager socket of its own: (process, number), or None.\"\"\"\n"
+    "    for number in range(1, DISPLAYS + 1):\n"
+    "        if taken(number):\n"
+    "            continue\n"
+    "        try:\n"
+    "            wm = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+    "            wm.connect(WM)\n"
+    "        except OSError as error:\n"
+    "            say(\"no window manager of Xwayland at %s (%s)\" % (WM, error.strerror))\n"
+    "            return None\n"
+    "        try:\n"
+    "            server = subprocess.Popen(\n"
+    "                [XWAYLAND, \":%d\" % number, \"-rootless\", \"-wm\", str(wm.fileno()), \"-nolisten\", \"local\", \"-noreset\"],\n"
+    "                pass_fds=[wm.fileno()], env=dict(os.environ, WAYLAND_DISPLAY=wayland))\n"
+    "        except OSError as error:\n"
+    "            say(\"cannot run %s (%s)\" % (XWAYLAND, error.strerror))\n"
+    "            return None\n"
+    "        finally:\n"
+    "            wm.close()\n"
+    "        end = time.monotonic() + WAIT\n"
+    "        while server.poll() is None and time.monotonic() < end:\n"
+    "            if os.path.exists(\"%s/X%d\" % (X11, number)):\n"
+    "                return server, number\n"
+    "            time.sleep(0.05)\n"
+    "        if server.poll() is None:\n"
+    "            server.kill()\n"
+    "        server.wait()\n"
+    "        say(\"display :%d did not come up\" % number)\n"
+    "    say(\"no display came up\")\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    arguments = sys.argv[1:]\n"
+    "    if arguments[:1] == [\"--\"]:\n"
+    "        arguments = arguments[1:]\n"
+    "    started = start(os.environ.get(\"WAYLAND_DISPLAY\", \"/run/moonwater/wayland-0\"))\n"
+    "    if not started:\n"
+    "        return UNSTARTED\n"
+    "    server, number = started\n"
+    "    display = \":%d\" % number\n"
+    "    child = None\n"
+    "\n"
+    "    def finish(signal_number, frame):\n"
+    "        raise SystemExit(128 + signal_number)\n"
+    "\n"
+    "    for name in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):\n"
+    "        signal.signal(name, finish)\n"
+    "    try:\n"
+    "        if not arguments:\n"
+    "            print(display, flush=True)\n"
+    "            return server.wait()\n"
+    "        child = subprocess.Popen(arguments, env=dict(os.environ, DISPLAY=display))\n"
+    "        code = child.wait()\n"
+    "        return code if code >= 0 else 128 - code\n"
+    "    except OSError as error:\n"
+    "        say(\"cannot run %s (%s)\" % (arguments[0], error.strerror))\n"
+    "        return 127\n"
+    "    finally:\n"
+    "        for process in (child, server):\n"
+    "            if process is not None and process.poll() is None:\n"
+    "                process.terminate()\n"
+    "        for process in (child, server):\n"
+    "            if process is not None:\n"
+    "                try:\n"
+    "                    process.wait(timeout=3)\n"
+    "                except subprocess.TimeoutExpired:\n"
+    "                    process.kill()\n"
+    "                    process.wait()\n"
+    "\n"
+    "\n"
+    "if __name__ == \"__main__\":\n"
+    "    sys.exit(main())\n";
+
+/* The wrapper written into the bowl of each component of a profile that runs X programs: removed first and made O_EXCL, so a
+   link planted at the name is not followed. A bowl that cannot be written keeps the wrapper it has, and says nothing. */
+static void __attribute__((__noinline__))
+bowl_xwayland_install(const struct bowl_profile address_to profile)
+{
+        for (const struct bowl_component address_to part = profile->components; part->distro; part++)
+        {
+                const struct bowl_distro address_to distro = bowl_find_distro(part->distro);
+                p8 directory[BOWL_PATH_LIMIT];
+                p8 path[BOWL_PATH_LIMIT];
+                bipolar handle;
+
+                if (!distro || !bowl_has(distro->root, distro->marker) ||
+                    !bowl_root_path(directory, sizeof(directory), distro->root, BOWL_XWAYLAND_DIRECTORY) ||
+                    !bowl_root_path(path, sizeof(path), distro->root, BOWL_XWAYLAND_WRAPPER) ||
+                    bowl_mkdir_parents(directory) < 0)
+                        continue;
+                system_remove_at(AT_FDCWD, path, 0);
+                handle = system_open_at_mode(AT_FDCWD, path, FILE_WRITE | FILE_EXCLUSIVE | O_CLOEXEC, 0755);
+                if (handle < 0)
+                        continue;
+                if (system_write_all((positive)handle, (const p8 address_to)bowl_xwayland_script,
+                                     sizeof(bowl_xwayland_script) - 1) != sizeof(bowl_xwayland_script) - 1)
+                        system_remove_at(AT_FDCWD, path, 0);
+                system_close(handle);
+        }
+}
 
 /*
         The session. It runs in the machine's shell with the arguments the
@@ -8261,9 +8411,11 @@ static const struct bowl_component bowl_steam_components[] = {
         no window manager of X's own, the focus of an X window follows the
         pointer otherwise). Its access is the socket file only (-nolisten
         local). The session ends the X server when Steam ends, and does not
-        restart it if it dies while Steam runs. The wrapper that connects it
-        to Canvas's window manager is not in this image yet; this is the plain
-        server, and the wrapper replaces this one line when it lands.
+        restart it if it dies while Steam runs. When Canvas listens for the
+        window manager of Xwayland (BOWL_STEAM_WM) the session runs Steam under
+        xwayland-moonwater instead, and the X server is rootless: each X window
+        is a window of Canvas, with its title, its keys and its popups. Where
+        the wrapper cannot start it (status 125) the server above is started.
 
         No flags are given to Steam. Its CEF sandbox uses user namespaces, which
         the bowl already makes for the program (the browser's sandbox runs the
@@ -8279,6 +8431,14 @@ static string_address bowl_steam_session[] = {
     "unset SDL_VIDEODRIVER PROTON_ENABLE_WAYLAND",
     "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
+    // Rootless, through the wrapper, when Canvas listens for a window manager of Xwayland: Steam runs under it, so the X server
+    // ends with Steam. Status 125 is that the server could not be started, and the rootful one below is the fallback.
+    "if [ -S " BOWL_STEAM_WM " ]; then",
+    "bowl " BOWL_ROOT_PREFIX "arch " BOWL_XWAYLAND_WRAPPER " /usr/bin/steam \"$@\"",
+    "status=$?",
+    "[ $status -ne 125 ] && exit $status",
+    "echo \"steam: the rootless X server did not start, starting the rootful one\" >&2",
+    "fi",
     "bowl " BOWL_ROOT_PREFIX "arch /usr/bin/Xwayland " BOWL_STEAM_DISPLAY " -nolisten local -fullscreen &",
     "xwayland=$!",
     "n=0; while [ ! -S " BOWL_STEAM_X_SOCKET " ] && [ $n -lt 50 ]; do n=$((n + 1)); sleep 0.1; done",
@@ -8308,7 +8468,7 @@ static const struct bowl_profile bowl_profiles[] = {
      false, bowl_chrome_names, BOWL_CHROME_UNAVAILABLE, true},
     {"steam", "Steam (Arch's package, with 32-bit graphics and sound) on Canvas",
      "start it with: steam", bowl_steam_components, bowl_steam_session,
-     false, null, BOWL_STEAM_UNAVAILABLE, true},
+     false, null, BOWL_STEAM_UNAVAILABLE, true, true},
 };
 
 #define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam\n"
@@ -8814,7 +8974,7 @@ static b32 __attribute__((__noinline__))
 bowl_profile_session(const struct bowl_profile address_to profile,
                      positive count, string_address address_to arguments)
 {
-        p8 text[BOWL_SHEBANG_LIMIT * 8];
+        p8 text[BOWL_SHEBANG_LIMIT * 16];
         string_address argv[BOWL_PROFILE_ARGV];
         positive used = 0;
         positive at = 0;
@@ -8830,6 +8990,8 @@ bowl_profile_session(const struct bowl_profile address_to profile,
                 text[used++] = '\n';
         }
         text[used] = end;
+        if (profile->xwayland)
+                bowl_xwayland_install(profile);
 
         argv[at++] = "/bin/sh";
         argv[at++] = "-c";
@@ -9079,6 +9241,9 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                                 return failed;
                 }
         }
+
+        if (profile->xwayland)
+                bowl_xwayland_install(profile);
 
         string_format(log, bowl_label "%s is ready. %s\n", profile->label,
                       profile->next);
