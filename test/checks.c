@@ -174405,6 +174405,9 @@ static void pt_test_text(void)
                      {"c1\xc2\x85x", "c1??x"},
                      {"\xed\xa0\x80sur", "???sur"},
                      {"\xf0\x9f\x8e\xb5 note", "\xf0\x9f\x8e\xb5 note"},
+                     {"\xf0\x80\x80\x80", "????"},                  // overlong four-byte form: not text
+                     {"\xf4\x90\x80\x80", "????"},                  // above U+10FFFF: not text
+                     {"\xf0\x90\x80\x80\xf4\x8f\xbf\xbf", "\xf0\x90\x80\x80\xf4\x8f\xbf\xbf"}, // U+10000 and U+10FFFF: text
                      {"new\nline", "new?line"}};
         struct pulse_props props = {0};
         char shown[PULSE_VALUE + 1];

@@ -711,6 +711,11 @@ static long pulse_props_text(const struct pulse_props *props, const char *key, c
                                                 good = 0;
                                         if (good && extra == 2 && c == 0xe0 && v[at + 1] < 0xa0)
                                                 good = 0;
+                                        // Four bytes are a code point from U+10000 to U+10FFFF: F0 below 90 is overlong, F4 from 90 is past the end.
+                                        if (good && extra == 3 && c == 0xf0 && v[at + 1] < 0x90)
+                                                good = 0;
+                                        if (good && extra == 3 && c == 0xf4 && v[at + 1] >= 0x90)
+                                                good = 0;
                                         if (good)
                                         {
                                                 for (long k = 0; k <= extra; k++)
