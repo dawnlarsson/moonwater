@@ -479,7 +479,8 @@ static long audio_file_read(const char *name, char *text, long room)
 
         text[0] = 0;
         audio_path(path, sizeof(path), name);
-        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80000, 0, 0, 0);
+        // O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK: a link is not followed and a FIFO is not waited for (the server would wait for ever in a read of it).
+        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80000 | 0x20000 | 0x800, 0, 0, 0);
         if (fd < 0)
                 return 0;
         got = audio_call(syscall(read), (positive)fd, (positive)text, (positive)(room - 1), 0, 0, 0);
@@ -494,16 +495,23 @@ static long audio_file_read(const char *name, char *text, long room)
 static void audio_file_write(const char *name, const char *text, long length)
 {
         char path[160], temporary[168];
-        long fd;
+        long fd, put;
 
         audio_path(path, sizeof(path), name);
         audio_copy_text(temporary, sizeof(temporary), path);
         audio_copy_text(temporary + audio_text_length(temporary), (long)sizeof(temporary) - audio_text_length(temporary), ".new");
-        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)temporary, 0x1 | 0x40 | 0x200 | 0x80000, 0644, 0, 0);
+
+        fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)temporary, 0x1 | 0x40 | 0x200 | 0x80000 | 0x20000, 0644, 0, 0); // O_NOFOLLOW
         if (fd < 0)
                 return;
-        audio_call(syscall(write), (positive)fd, (positive)text, (positive)length, 0, 0, 0);
+        put = audio_call(syscall(write), (positive)fd, (positive)text, (positive)length, 0, 0, 0);
         audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+        // A short or failed write is not put over the file that is there: the new one is taken away and the old one stays.
+        if (put != length)
+        {
+                audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)temporary, 0, 0, 0, 0);
+                return;
+        }
         audio_call(syscall(renameat2), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0);
 }
 
@@ -665,12 +673,14 @@ static void audio_settings_read(int first)
 static void audio_settings_write(void)
 {
         struct pulse_sink *sink = audio_service.pulse.sink + audio_service.sink;
+        unsigned long percent = sink->volume[0] * 100 / AUDIO_VOLUME_NORM;
         char text[16];
         long length;
 
-        audio_service.applied_volume = sink->volume[0];
+        // The file keeps whole percents and the read takes them back as percent * NORM / 100: that is what the server last said, so the read is not a change.
+        audio_service.applied_volume = percent * AUDIO_VOLUME_NORM / 100;
         audio_service.applied_mute = sink->muted;
-        length = audio_number_text(text, sink->volume[0] * 100 / AUDIO_VOLUME_NORM);
+        length = audio_number_text(text, percent);
         text[length++] = '\n';
         audio_file_write("audio.volume", text, length);
         audio_file_write("audio.mute", sink->muted ? "on\n" : "off\n", sink->muted ? 3 : 4);
@@ -687,9 +697,11 @@ static void audio_inputs_save(int bits)
                 return;
         if (bits & 4)
         {
-                audio_service.applied_in_volume = p->source[p->default_source].volume[0];
+                unsigned long percent = p->source[p->default_source].volume[0] * 100 / AUDIO_VOLUME_NORM;
+
+                audio_service.applied_in_volume = percent * AUDIO_VOLUME_NORM / 100; // what the file says, read back (as audio_settings_write)
                 audio_service.applied_in_mute = p->source[p->default_source].muted;
-                length = audio_number_text(text, p->source[p->default_source].volume[0] * 100 / AUDIO_VOLUME_NORM);
+                length = audio_number_text(text, percent);
                 text[length++] = '\n';
                 audio_file_write("audio.source.volume", text, length);
                 audio_file_write("audio.source.mute", p->source[p->default_source].muted ? "on\n" : "off\n", p->source[p->default_source].muted ? 3 : 4);
@@ -787,9 +799,18 @@ static void audio_host_remember(void *context, const char *name, unsigned long v
         for (int i = 0; i < audio_service.app_count; i++)
                 if (audio_text_equal(audio_service.apps[i].name, name))
                         at = i;
-        if (at < 0)
+        if (at >= 0)
         {
-                // The oldest is let go when the table is full: the table is a list in the order they were changed.
+                // Moved to the end: the table is a list in the order the volumes were last changed, and the oldest is the one let go when it is full.
+                __typeof__(audio_service.apps[0]) kept = audio_service.apps[at];
+
+                for (int i = at + 1; i < audio_service.app_count; i++)
+                        audio_service.apps[i - 1] = audio_service.apps[i];
+                audio_service.apps[audio_service.app_count - 1] = kept;
+                at = audio_service.app_count - 1;
+        }
+        else
+        {
                 if (audio_service.app_count == AUDIO_APPS)
                 {
                         for (int i = 1; i < AUDIO_APPS; i++)
@@ -831,7 +852,7 @@ static void audio_page_write(void)
         struct audio_state build;
         unsigned int seq;
 
-        if (!page)
+        if (!page || audio_service.sink < 0) // no sink (the sink could not be made): nothing to show, and no sink to index
                 return;
         __builtin_memset(&build, 0, sizeof(build));
         build.magic = AUDIO_STATE_MAGIC;
@@ -945,7 +966,10 @@ static void audio_page_write(void)
                 }
         }
         seq = __atomic_load_n(&page->seq, __ATOMIC_RELAXED);
-        __atomic_store_n(&page->seq, seq + 1, __ATOMIC_RELEASE); // odd: being written
+        __atomic_store_n(&page->seq, seq + 1, __ATOMIC_RELAXED); // odd: being written
+        // A release store orders what is before it, not what follows: the copy's stores could be moved above the odd mark (or land before it
+        // on arm64), and a reader that copied a torn page would find the same even number at both ends. The fence keeps them after it.
+        __atomic_thread_fence(__ATOMIC_RELEASE);
         __builtin_memcpy((char *)page + 16, (char *)&build + 16, sizeof(build) - 16);
         page->magic = build.magic;
         page->version = build.version;
@@ -1229,7 +1253,8 @@ static void audio_clock_pass(void)
         audio_service.stats.wakes++;
         if (expirations > 16)
                 expirations = 16;
-        audio_produce((long)expirations * (AUDIO_PERIOD * audio_service.rate / 48000));
+        // A tick is one period, AUDIO_PERIOD frames at the rate (period_ns above is that many frames of it): the frames are not scaled from 48000.
+        audio_produce((long)expirations * AUDIO_PERIOD);
         pulse_sink_delay(&audio_service.pulse, audio_service.sink, 0);
         took = clock_monotonic_nanoseconds() - began;
         audio_bucket(audio_service.stats.pass, took);
@@ -1839,6 +1864,12 @@ static void audio_listen(void)
         {
                 address[2 + length] = (unsigned char)audio_service.socket_path[length];
                 length++;
+        }
+        // A path that does not fit sun_path is not cut short: the socket would be bound under a name the server did not ask for.
+        if (audio_service.socket_path[length])
+        {
+                audio_say_text("the socket path is too long", audio_service.socket_path);
+                return;
         }
         audio_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)audio_service.socket_path, 0, 0, 0, 0);
         got = audio_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0);
