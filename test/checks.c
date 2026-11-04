@@ -168399,6 +168399,27 @@ static void db_test_portal(void)
                 }
                 DBCHECK(made < DBUS_SETTINGS + 4, "the settings are a table of a size (%d made)", made);
         }
+        // What a setting is given goes on the wire as it is, so what would not be valid there is no setting: a text cut
+        // in a character (63 bytes of "a" and then a letter of two), a text past the room, one that is not UTF-8, a kind
+        // that is none. A boolean is 0 or 1 whatever number it is given.
+        db_reset();
+        {
+                char cut[80];
+                struct dbus_setting *setting;
+
+                memset(cut, 'a', 62);
+                memcpy(cut + 62, "\xc3\xa5", 3);
+                DBCHECK(dbus_setting_set("org.example", "cut", 's', 0, 0, cut) == -1 && !dbus_setting_find("org.example", "cut"),
+                        "a text that would be cut in a character is no setting");
+                cut[62] = 0;
+                DBCHECK(dbus_setting_set("org.example", "fits", 's', 0, 0, cut) == 1, "and one that fits is");
+                DBCHECK(dbus_setting_set("org.example", "bad", 's', 0, 0, "\xff") == -1, "a text that is not UTF-8 is no setting");
+                DBCHECK(dbus_setting_set("org.example", "none", 's', 0, 0, 0) == -1, "nor is a text that is not there");
+                DBCHECK(dbus_setting_set("org.example", "\xc3", 'u', 1, 0, 0) == -1, "nor a key that is not UTF-8");
+                DBCHECK(dbus_setting_set("org.example", "kind", 'z', 1, 0, 0) == -1, "nor a kind that is none");
+                DBCHECK(dbus_setting_set("org.example", "yes", 'b', 7, 0, 0) == 1 && (setting = dbus_setting_find("org.example", "yes")) && setting->number == 1,
+                        "a boolean of 7 is true, 1");
+        }
         dbus_drop(a);
         dbus_drop(b);
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
@@ -168695,10 +168716,672 @@ static void db_test_fuzz(long rounds)
         printf("CHECK_dbus fuzz: %ld rounds, %ld left the connection well, %ld ended it\n", rounds, accepted, ended);
 }
 
+/*
+        A fuzz that knows the grammar. Messages are made from it: a signature of random types (arrays, dictionaries,
+        structs and variants nested, every basic type) and a body of random values of them, random header fields, from a
+        random client to the bus, the portal, a client by its unique or a well-known name, or to nobody; then, a third of
+        the time, changed where a parser is weakest (a length, a count, a byte of a signature or of a pad, a cut). Among
+        them are the bus's own calls with random arguments (names taken, let go and replaced; rules added and removed in
+        the text AddMatch reads, quotes and escapes and lengths at their caps; the portal's reads with random namespaces
+        and keys), replies and errors to the calls a client was sent, forged ones to calls it was not, signatures nested
+        past the cap, clients that read and clients that do not, clients that go, settings that change, and the clock.
+        Bytes go in pieces of random sizes. After every step, every queue is within its cap, every name and every pending
+        call belongs to a client that is there, and the calls each client waits on are counted right; every message a
+        client is given, when it reads, is one the parser takes whole; at the end every record is returned.
+*/
+#define DBZ_CLIENTS 6
+
+static long dbz_slot[DBZ_CLIENTS];
+static char dbz_unique[DBZ_CLIENTS][24];
+static unsigned long dbz_asked[DBZ_CLIENTS][8];  // serials of calls a client was sent, which it may answer
+static char dbz_asker[DBZ_CLIENTS][8][24];       // and who sent them
+static long dbz_checked, dbz_messages_read, dbz_bad_out, dbz_mutated, dbz_whole_refused;
+
+static unsigned long dbz_pick(unsigned long n)
+{
+        return n ? db_random_next() % n : 0;
+}
+
+static const char *const dbz_names[] = {"org.example.A",  "org.example.B",  "org.freedesktop.Notifications", DBUS_NAME_PORTAL, DBUS_NAME_BUS,
+                                        "org.example.A.b-c", "a.b", ":1.2", ":1.3", ":1.4", ":1.1", ":1.999", "org.example.A.B.C.D"};
+static const char *const dbz_paths[] = {"/", "/org/example", DBUS_PATH_PORTAL, "/org/freedesktop/DBus", "/a/b/c", "/org/freedesktop/portal"};
+static const char *const dbz_ifaces[] = {"org.example.I", "org.freedesktop.portal.Settings", DBUS_NAME_BUS, "org.freedesktop.DBus.Properties",
+                                         "org.freedesktop.DBus.Peer", "org.freedesktop.DBus.Introspectable", "org.freedesktop.host.portal.Registry",
+                                         "org.freedesktop.portal.FileChooser"};
+static const char *const dbz_members[] = {"Hello", "RequestName", "ReleaseName", "ListNames", "ListActivatableNames", "NameHasOwner", "GetNameOwner",
+                                          "StartServiceByName", "AddMatch", "RemoveMatch", "GetConnectionUnixUser", "GetConnectionUnixProcessID",
+                                          "GetConnectionCredentials", "GetId", "Ping", "GetMachineId", "Introspect", "ReadAll", "Read", "ReadOne", "Get",
+                                          "GetAll", "Register", "M", "Changed", "SettingChanged", "NameOwnerChanged", "UpdateActivationEnvironment"};
+static const char *const dbz_namespaces[] = {"org.freedesktop.appearance", "org.gnome.desktop.interface", "org.gnome.*", "org.*", "", "o.*", ".*", "org.freedesktop.appearance.*",
+                                             "org.freedesktop.portal.Settings", "org.freedesktop.portal.FileChooser", "org.example"};
+static const char *const dbz_keys[] = {"color-scheme", "accent-color", "contrast", "version", "gtk-theme", "cursor-size", "nothing", "", "k1"};
+
+#define DBZ_COUNT(table) ((unsigned long)(sizeof(table) / sizeof((table)[0])))
+
+static unsigned long dbz_edge32(void)
+{
+        static const unsigned long edges[] = {0, 1, 2, 3, 4, 7, 8, 255, 256, 0x7fffffffUL, 0x80000000UL, 0xffffffffUL, 0xfffffffeUL, 262144, 262145, 67108864, 67108865};
+
+        return dbz_pick(3) ? db_random_next() & (dbz_pick(2) ? 0xffUL : 0xffffffffUL) : edges[dbz_pick(DBZ_COUNT(edges))];
+}
+
+// A random complete type at sig[*n], nested no more than depth containers deep.
+static void dbz_type(char *sig, long *n, int depth)
+{
+        static const char basic[] = "ybnqiuxtdsogh";
+        unsigned long k = dbz_pick(depth > 0 ? 19 : 13);
+
+        if (k < 13)
+                sig[(*n)++] = basic[k];
+        else if (k < 15)
+        {
+                sig[(*n)++] = 'a';
+                dbz_type(sig, n, depth - 1);
+        }
+        else if (k < 17)
+                sig[(*n)++] = 'v';
+        else if (k == 17)
+        {
+                sig[(*n)++] = 'a';
+                sig[(*n)++] = '{';
+                sig[(*n)++] = basic[dbz_pick(13)];
+                dbz_type(sig, n, depth - 1);
+                sig[(*n)++] = '}';
+        }
+        else
+        {
+                sig[(*n)++] = '(';
+                for (long m = 1 + (long)dbz_pick(3); m > 0; m--)
+                        dbz_type(sig, n, depth - 1);
+                sig[(*n)++] = ')';
+        }
+}
+
+// A random signature of up to four complete types, of at most 255 characters (a few times in a hundred, one nested far past the cap).
+static void dbz_signature(char *sig, int depth)
+{
+        long n = 0;
+
+        if (!dbz_pick(40))
+        {
+                // deep: arrays, structs or variants of one another past DBUS_DEPTH
+                long deep = 20 + (long)dbz_pick(30), kind = (long)dbz_pick(3);
+
+                dbz_mutated |= deep > DBUS_DEPTH; // past the cap: no message to take
+
+                for (long k = 0; k < deep; k++)
+                        sig[n++] = kind == 0 ? 'a' : kind == 1 ? '(' : (k & 1) ? '(' : 'a';
+                sig[n++] = 'y';
+                for (long k = deep - 1; k >= 0; k--)
+                        if (sig[k] == '(')
+                                sig[n++] = ')';
+                sig[n] = 0;
+                return;
+        }
+        for (long types = (long)dbz_pick(5); types > 0; types--)
+        {
+                char one[600];
+                long m = 0;
+
+                dbz_type(one, &m, depth);
+                if (n + m > 255)
+                        break;
+                memcpy(sig + n, one, (size_t)m);
+                n += m;
+        }
+        sig[n] = 0;
+}
+
+// A random text of valid UTF-8 with no NUL: mostly ASCII, some letters of two, three and four bytes, now and then long.
+static void dbz_text(char *into, long room)
+{
+        static const char *const pieces[] = {"a", "Z", "_", ".", "/", " ", "'", ",", "=", "\\", "*", "\xc3\xa5", "\xe2\x82\xac", "\xf0\x9f\x98\x80", "\x7f", "\x01"};
+        long most = dbz_pick(8) ? 24 : room - 1, n = 0, length = (long)dbz_pick((unsigned long)most + 1);
+
+        while (n < length)
+        {
+                const char *piece = pieces[dbz_pick(DBZ_COUNT(pieces))];
+                long size = (long)strlen(piece);
+
+                if (n + size > room - 1)
+                        break;
+                memcpy(into + n, piece, (size_t)size);
+                n += size;
+        }
+        into[n] = 0;
+}
+
+static void dbz_value(struct dbus_out *w, const char *sig, long *s, int budget)
+{
+        char c = sig[(*s)++];
+
+        switch (c)
+        {
+        case 'y':
+                dbus_o_u8(w, (unsigned)db_random_next());
+                break;
+        case 'b':
+                dbus_o_u32(w, dbz_pick(2));
+                break;
+        case 'n':
+        case 'q':
+        {
+                unsigned char two[2] = {(unsigned char)db_random_next(), (unsigned char)db_random_next()};
+
+                dbus_o_pad(w, 2);
+                dbus_o_raw(w, two, 2);
+                break;
+        }
+        case 'i':
+        case 'u':
+        case 'h':
+                dbus_o_u32(w, dbz_edge32());
+                break;
+        case 'x':
+        case 't':
+        case 'd':
+                dbus_o_u64(w, db_random_next());
+                break;
+        case 's':
+        {
+                char text[700];
+
+                dbz_text(text, budget > 0 ? (long)sizeof text : 32);
+                dbus_o_string(w, text);
+                break;
+        }
+        case 'o':
+                dbus_o_string(w, dbz_paths[dbz_pick(DBZ_COUNT(dbz_paths))]);
+                break;
+        case 'g':
+        {
+                char g[300];
+
+                dbz_signature(g, 2);
+                dbus_o_sig(w, g);
+                break;
+        }
+        case 'v':
+        {
+                char g[300];
+                long n = 0, k = 0;
+
+                dbz_type(g, &n, budget > 0 ? 3 : 0);
+                g[n] = 0;
+                dbus_o_sig(w, g);
+                dbz_value(w, g, &k, budget - 1);
+                break;
+        }
+        case 'a':
+        {
+                long element = *s, after = *s - 1, length_at, first, count;
+                char e = sig[element];
+                long align = e == '{' || e == '(' ? 8 : dbus_fixed_size(e) ? dbus_fixed_size(e) : e == 's' || e == 'o' || e == 'a' ? 4 : 1;
+
+                dbus_sig_one(sig, (long)strlen(sig), &after, 0, 0);
+                dbus_o_u32(w, 0);
+                length_at = w->length - 4;
+                dbus_o_pad(w, align);
+                first = w->length;
+                count = budget > 0 ? (long)dbz_pick(dbz_pick(6) ? 4 : 200) : 0;
+                for (long k = 0; k < count && !w->bad && w->length < 200000; k++)
+                {
+                        long each = element;
+
+                        if (e == '{')
+                        {
+                                dbus_o_pad(w, 8);
+                                each++;
+                                dbz_value(w, sig, &each, budget - 1);
+                                dbz_value(w, sig, &each, budget - 1);
+                        }
+                        else
+                                dbz_value(w, sig, &each, budget - 1);
+                }
+                dbus_o_patch32(w, length_at, (unsigned long)(w->length - first));
+                *s = after;
+                break;
+        }
+        case '(':
+                dbus_o_pad(w, 8);
+                while (sig[*s] && sig[*s] != ')')
+                        dbz_value(w, sig, s, budget - 1);
+                (*s)++;
+                break;
+        default:
+                break;
+        }
+}
+
+// A rule in AddMatch's text: random keys, values quoted, escaped, bare, long and empty.
+static void dbz_rule(char *rule, long room)
+{
+        static const char *const keys[] = {"type", "sender", "interface", "member", "path", "path_namespace", "destination", "arg0", "arg1", "arg3", "arg4",
+                                           "arg0path", "arg2path", "arg0namespace", "arg1namespace", "eavesdrop", "bogus", "", "type"};
+        static const char *const values[] = {"signal", "method_call", "error", "org.example.I", "org.freedesktop.DBus", ":1.2", "/", "/org/example",
+                                             "/org/example/", "Changed", "NameOwnerChanged", "org.example", "true", "", "it\\'s", "a,b"};
+        long n = 0;
+
+        rule[0] = 0;
+        for (long k = (long)dbz_pick(6); k > 0 && n < room - 200; k--)
+        {
+                const char *key = keys[dbz_pick(DBZ_COUNT(keys))];
+                char value[400];
+                long quote = (long)dbz_pick(3);
+
+                if (dbz_pick(5))
+                        snprintf(value, sizeof value, "%s", values[dbz_pick(DBZ_COUNT(values))]);
+                else
+                {
+                        long length = dbz_pick(2) ? 95 + (long)dbz_pick(4) : 120 + (long)dbz_pick(50);
+
+                        memset(value, dbz_pick(2) ? 'x' : '.', (size_t)length);
+                        value[length] = 0;
+                }
+                n += snprintf(rule + n, (size_t)(room - n), "%s%s=%s%s%s", n ? "," : "", key, quote ? "'" : "", value, quote == 1 ? "'" : "");
+        }
+        if (n >= room)
+                rule[room - 1] = 0;
+}
+
+// What a fuzz client is sent: a random message, or a call of the bus or the portal with random arguments; its length, or -1.
+static long dbz_message(unsigned char *into, long room, long who)
+{
+        struct dbus_out w = {into, 0, room, 0};
+        char sig[300], text[700], other[700], error[64];
+        struct dbus_fields f = {"", "", "", "", "", "", "", 0, 0};
+        unsigned type = DBUS_CALL, flags = dbz_pick(4) ? 0 : (unsigned)dbz_pick(4);
+        long body, kind = (long)dbz_pick(10);
+
+        dbz_mutated = 0;
+        sig[0] = 0;
+        if (kind < 4)
+        {
+                // a call of the bus's or the portal's, with arguments of the right signature (or near it)
+                const char *member = dbz_members[dbz_pick(DBZ_COUNT(dbz_members))];
+
+                f.path = dbz_paths[dbz_pick(DBZ_COUNT(dbz_paths))];
+                f.interface = dbz_pick(4) ? dbz_ifaces[dbz_pick(DBZ_COUNT(dbz_ifaces))] : "";
+                f.member = member;
+                f.destination = dbz_pick(3) ? DBUS_NAME_BUS : dbz_pick(2) ? DBUS_NAME_PORTAL : dbz_names[dbz_pick(DBZ_COUNT(dbz_names))];
+                if (!strcmp(member, "AddMatch") || !strcmp(member, "RemoveMatch"))
+                {
+                        dbz_rule(text, dbz_pick(4) ? 300 : sizeof text);
+                        f.signature = "s";
+                        dbus_o_header(&w, type, flags, ++db_serial, &f);
+                        body = w.length;
+                        dbus_o_string(&w, text);
+                }
+                else if (!strcmp(member, "RequestName") || !strcmp(member, "StartServiceByName"))
+                {
+                        if (dbz_pick(3))
+                                snprintf(text, sizeof text, "%s", dbz_names[dbz_pick(DBZ_COUNT(dbz_names))]);
+                        else
+                                dbz_text(text, 300);
+                        f.signature = "su";
+                        dbus_o_header(&w, type, flags, ++db_serial, &f);
+                        body = w.length;
+                        dbus_o_string(&w, text);
+                        dbus_o_u32(&w, dbz_pick(3) ? dbz_pick(8) : dbz_edge32());
+                }
+                else if (!strcmp(member, "ReadAll"))
+                {
+                        long length_at, first;
+
+                        f.signature = "as";
+                        dbus_o_header(&w, type, flags, ++db_serial, &f);
+                        body = w.length;
+                        dbus_o_u32(&w, 0);
+                        length_at = w.length - 4;
+                        first = w.length;
+                        for (long k = (long)dbz_pick(dbz_pick(4) ? 3 : 20); k > 0; k--)
+                        {
+                                if (dbz_pick(4))
+                                        dbus_o_string(&w, dbz_namespaces[dbz_pick(DBZ_COUNT(dbz_namespaces))]);
+                                else
+                                {
+                                        dbz_text(other, 200);
+                                        dbus_o_string(&w, other);
+                                }
+                        }
+                        dbus_o_patch32(&w, length_at, (unsigned long)(w.length - first));
+                }
+                else if (!strcmp(member, "Read") || !strcmp(member, "ReadOne") || !strcmp(member, "Get"))
+                {
+                        f.signature = "ss";
+                        dbus_o_header(&w, type, flags, ++db_serial, &f);
+                        body = w.length;
+                        if (dbz_pick(4))
+                                dbus_o_string(&w, dbz_namespaces[dbz_pick(DBZ_COUNT(dbz_namespaces))]);
+                        else
+                        {
+                                dbz_text(other, sizeof other);
+                                dbus_o_string(&w, other);
+                        }
+                        if (dbz_pick(4))
+                                dbus_o_string(&w, dbz_keys[dbz_pick(DBZ_COUNT(dbz_keys))]);
+                        else
+                        {
+                                dbz_text(other, sizeof other);
+                                dbus_o_string(&w, other);
+                        }
+                }
+                else
+                {
+                        // the one string most of the bus's methods take: a name, or a text
+                        if (dbz_pick(3))
+                                snprintf(text, sizeof text, "%s", dbz_pick(2) ? dbz_names[dbz_pick(DBZ_COUNT(dbz_names))] : dbz_unique[dbz_pick(DBZ_CLIENTS)]);
+                        else
+                                dbz_text(text, sizeof text);
+                        f.signature = dbz_pick(4) ? "s" : "";
+                        dbus_o_header(&w, type, flags, ++db_serial, &f);
+                        body = w.length;
+                        if (f.signature[0])
+                                dbus_o_string(&w, text);
+                }
+        }
+        else
+        {
+                // a message of any kind, of a random signature and body, to anyone
+                type = 1 + (unsigned)dbz_pick(4);
+                dbz_signature(sig, 1 + (int)dbz_pick(4));
+                f.signature = sig;
+                if (type == DBUS_CALL || type == DBUS_SIGNAL || dbz_pick(4) == 0)
+                {
+                        f.path = dbz_paths[dbz_pick(DBZ_COUNT(dbz_paths))];
+                        f.member = dbz_members[dbz_pick(DBZ_COUNT(dbz_members))];
+                        f.interface = type == DBUS_SIGNAL || dbz_pick(2) ? dbz_ifaces[dbz_pick(DBZ_COUNT(dbz_ifaces))] : "";
+                }
+                if (type == DBUS_ERROR || !dbz_pick(8))
+                {
+                        snprintf(error, sizeof error, "org.example.Error.E%lu", dbz_pick(3));
+                        f.error = error;
+                }
+                if (type == DBUS_RETURN || type == DBUS_ERROR)
+                {
+                        long slot = (long)dbz_pick(8);
+
+                        // an answer to a call this client was sent (from whom it came), or a forged one
+                        f.has_reply = 1;
+                        f.reply = dbz_pick(4) ? dbz_asked[who][slot] : dbz_edge32();
+                        f.destination = dbz_pick(4) ? dbz_asker[who][slot] : dbz_unique[dbz_pick(DBZ_CLIENTS)];
+                }
+                else
+                        f.destination = dbz_pick(5) == 0 ? "" : dbz_pick(2) ? dbz_unique[dbz_pick(DBZ_CLIENTS)] : dbz_names[dbz_pick(DBZ_COUNT(dbz_names))];
+                if (!dbz_pick(10))
+                        f.sender = ":1.77"; // a sender the bus must not keep
+                dbus_o_header(&w, type, flags, ++db_serial, &f);
+                body = w.length;
+                for (long s = 0; sig[s] && !w.bad;)
+                        dbz_value(&w, sig, &s, 2 + (int)dbz_pick(3));
+        }
+        dbus_o_end(&w, body);
+        if (w.bad)
+                return -1;
+        if (!dbz_pick(3))
+        {
+                // changed where a parser is weakest
+                dbz_mutated = 1;
+                for (long k = 1 + (long)dbz_pick(3); k > 0 && w.length > 0; k--)
+                {
+                        long how = (long)dbz_pick(6), at = (long)dbz_pick((unsigned long)w.length);
+
+                        if (how == 0)
+                                into[at] = (unsigned char)db_random_next();
+                        else if (how == 1 && w.length >= 16)
+                                dbus_o_patch32(&w, dbz_pick(2) ? 4 : 12, dbz_pick(2) ? dbz_edge32() : dbus_get32(into + (dbz_pick(2) ? 4 : 12)) + dbz_pick(9) - 4);
+                        else if (how == 2 && w.length >= 8)
+                                dbus_o_patch32(&w, at & ~3L, dbz_edge32());
+                        else if (how == 3)
+                                w.length = at;
+                        else if (how == 4)
+                                into[at] = dbz_pick(2) ? 0 : (unsigned char)"ybnqiuxtdsoghva({)}"[dbz_pick(19)];
+                        else
+                                into[at] ^= (unsigned char)(1u << dbz_pick(8));
+                }
+        }
+        return w.length;
+}
+
+// Bytes to a client in pieces of random size.
+static void dbz_feed(long slot, const unsigned char *bytes, long n)
+{
+        while (n > 0 && !dbus_dead(slot))
+        {
+                long take = dbz_pick(3) ? n : 1 + (long)dbz_pick((unsigned long)n);
+
+                db_feed(slot, bytes, take);
+                bytes += take;
+                n -= take;
+        }
+}
+
+// What a client is given, read whole: every message must be one the parser takes; calls it is sent are kept, to answer.
+static void dbz_read(long k, long most)
+{
+        long slot = dbz_slot[k];
+        const unsigned char *bytes;
+        long n = dbus_out(slot, &bytes), at = 0;
+
+        if (slot < 0)
+                return;
+        // A client still in the authentication is given its lines, which are text.
+        if (!dbus.client[slot] || dbus.client[slot]->state != 2 || !dbus.client[slot]->hello)
+        {
+                db_drain(slot);
+                return;
+        }
+        while (at + 16 <= n && (most < 0 || at < most))
+        {
+                struct dbus_message m;
+                long total = DBUS_ALIGN(16 + (long)dbus_get32(bytes + at + 12), 8) + (long)dbus_get32(bytes + at + 4);
+
+                if (total < 16 || at + total > n || dbus_parse(bytes + at, total, &m) != 0)
+                {
+                        if (getenv("DBDEBUG"))
+                        {
+                                fprintf(stderr, "unparsable in queue of slot %ld (state %ld hello %d dead %ld):", slot, dbus.client[slot]->state, dbus.client[slot]->hello,
+                                        dbus.client[slot]->dead);
+                                for (long b = at; b < n && b < at + 96; b++)
+                                        fprintf(stderr, "%02x", bytes[b]);
+                                fprintf(stderr, "\n");
+                        }
+                        dbz_bad_out++;
+                        DBCHECK(0, "fuzz: a client was given a message the parser does not take, at %ld of %ld", at, n);
+                        break;
+                }
+                dbz_messages_read++;
+                if (m.type == DBUS_CALL && !(m.flags & DBUS_FLAG_NO_REPLY))
+                {
+                        long place = (long)dbz_pick(8);
+
+                        dbz_asked[k][place] = m.serial;
+                        snprintf(dbz_asker[k][place], sizeof dbz_asker[k][place], "%s", m.sender);
+                }
+                if (m.type == DBUS_RETURN && !dbz_unique[k][0] && dbus_equal(m.sender, DBUS_NAME_BUS) && dbus_equal(m.signature, "s"))
+                        dbus_arg_string(&m, 0, dbz_unique[k], sizeof dbz_unique[k]);
+                at += total;
+        }
+        if (at > n)
+                at = n;
+        dbus_sent(slot, at);
+}
+
+static void dbz_connect(long k)
+{
+        static const long uids[] = {1000, 1000, 1000, 0, 1001};
+        long uid = uids[dbz_pick(DBZ_COUNT(uids))];
+
+        dbz_unique[k][0] = 0;
+        memset(dbz_asked[k], 0, sizeof dbz_asked[k]);
+        memset(dbz_asker[k], 0, sizeof dbz_asker[k]);
+        if (dbz_pick(10))
+                dbz_slot[k] = db_connect(uid);
+        else
+        {
+                // the authentication's other ways in, some of which are no way in
+                static const char *const ways[] = {"\0AUTH ANONYMOUS\r\nBEGIN\r\n", "\0AUTH EXTERNAL\r\nDATA\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n",
+                                                   "\0AUTH\r\nCANCEL\r\nAUTH ANONYMOUS 00\r\nERROR x\r\nBEGIN\r\n", "\0BEGIN\r\n", "\0DATA 31\r\nAUTH EXTERNAL 3x\r\n",
+                                                   "\0AUTH EXTERNAL 313030\r\nDATA\r\nBEGIN\r\n"};
+                const char *way = ways[dbz_pick(DBZ_COUNT(ways))];
+                long length = 1 + (long)strlen(way + 1);
+
+                dbz_slot[k] = dbus_connect(4000 + k, uid);
+                if (dbz_slot[k] >= 0)
+                        dbz_feed(dbz_slot[k], (const unsigned char *)way, length);
+        }
+        if (dbz_slot[k] >= 0 && !dbus_dead(dbz_slot[k]))
+        {
+                db_drain(dbz_slot[k]);
+                if (dbz_pick(12))
+                        db_hello(dbz_slot[k]);
+                dbz_read(k, -1);
+        }
+}
+
+// What must hold after every step.
+static void dbz_invariants(void)
+{
+        long pending[DBUS_CLIENTS] = {0}, names[DBUS_CLIENTS] = {0};
+
+        dbz_checked++;
+        for (long at = 0; at < DBUS_PENDING; at++)
+                if (dbus.pending[at].used)
+                {
+                        struct dbus_pending *p = &dbus.pending[at];
+
+                        DBCHECK(p->caller >= 0 && p->caller < DBUS_CLIENTS && dbus.client[p->caller] && p->callee >= 0 && p->callee < DBUS_CLIENTS &&
+                                    dbus.client[p->callee],
+                                "fuzz: a pending call is between clients that are there (%d %d)", p->caller, p->callee);
+                        if (p->caller >= 0 && p->caller < DBUS_CLIENTS)
+                                pending[p->caller]++;
+                }
+        for (long at = 0; at < DBUS_NAMES; at++)
+                if (dbus.name[at].used)
+                {
+                        short owner = dbus.name[at].owner;
+
+                        DBCHECK(owner == DBUS_SERVICE || (owner >= 0 && owner < DBUS_CLIENTS && dbus.client[owner] && dbus.client[owner]->hello),
+                                "fuzz: a name is owned by a client that is there and said Hello (%s, %d)", dbus.name[at].text, owner);
+                        DBCHECK(dbus.name[at].text[0] && dbus_valid_name(dbus.name[at].text, dbus_length(dbus.name[at].text), 1), "fuzz: a name owned is a name");
+                        if (owner >= 0 && owner < DBUS_CLIENTS)
+                                names[owner]++;
+                }
+        for (long slot = 0; slot < DBUS_CLIENTS; slot++)
+        {
+                struct dbus_client *c = dbus.client[slot];
+
+                if (!c)
+                        continue;
+                DBCHECK(c->out_length >= 0 && c->out_length <= DBUS_OUT && c->in_length >= 0 && c->in_length <= (long)sizeof c->in,
+                        "fuzz: the queues are within their caps (%ld %ld)", c->out_length, c->in_length);
+                DBCHECK(c->pending == pending[slot] && c->pending <= DBUS_PENDING_PER, "fuzz: the calls a client waits on are counted (%ld %ld)", c->pending,
+                        pending[slot]);
+                DBCHECK(c->names == names[slot] && c->names <= DBUS_NAMES_PER, "fuzz: the names a client owns are counted (%ld %ld)", c->names, names[slot]);
+        }
+}
+
+static void db_test_structured(long rounds)
+{
+        static unsigned char message[DBUS_MESSAGE + 64];
+        long fed = 0, dropped = 0, failures = db_failures;
+
+        db_reset();
+        dbz_checked = dbz_messages_read = dbz_bad_out = 0;
+        dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', 1, 0, 0);
+        dbus_setting_set("org.gnome.desktop.interface", "gtk-theme", 's', 0, 0, "Adwaita");
+        for (long k = 0; k < DBZ_CLIENTS; k++)
+                dbz_connect(k);
+        for (long round = 0; round < rounds && db_failures - failures < 20; round++)
+        {
+                long k = (long)dbz_pick(DBZ_CLIENTS), what = (long)dbz_pick(100);
+
+                if (dbz_slot[k] < 0 || dbus_dead(dbz_slot[k]) || what < 2)
+                {
+                        // a client that went, or one that goes now: what it was given is read first, then it is gone
+                        if (dbz_slot[k] >= 0)
+                        {
+                                dbz_read(k, -1);
+                                dbus_drop(dbz_slot[k]);
+                                dropped++;
+                        }
+                        dbz_connect(k);
+                }
+                else if (what < 70)
+                {
+                        long n = dbz_message(message, sizeof message, k);
+
+                        if (n > 0)
+                        {
+                                long was = dbus.client[dbz_slot[k]] && dbus.client[dbz_slot[k]]->hello && !dbus.client[dbz_slot[k]]->in_length;
+
+                                dbz_feed(dbz_slot[k], message, n);
+                                fed++;
+                                // a whole message, valid by the grammar, from a client that is well: the bus takes it
+                                if (!dbz_mutated && was && dbus_dead(dbz_slot[k]) == 1)
+                                {
+                                        struct dbus_message m;
+
+                                        dbz_whole_refused++;
+                                        if (getenv("DBDEBUG") && dbz_whole_refused < 6)
+                                        {
+                                                fprintf(stderr, "refused (%s, parse %d):", dbus_why(dbz_slot[k]), dbus_parse(message, n, &m));
+                                                for (long b = 0; b < n; b++)
+                                                        fprintf(stderr, "%02x", message[b]);
+                                                fprintf(stderr, "\n");
+                                        }
+                                }
+                        }
+                }
+                else if (what < 90)
+                        dbz_read((long)dbz_pick(DBZ_CLIENTS), dbz_pick(3) ? -1 : (long)dbz_pick(4096)); // some read part, and some never read
+                else if (what < 93)
+                {
+                        static const char *const keys[] = {"color-scheme", "accent-color", "contrast", "k2"};
+                        unsigned long colour[3] = {db_random_next(), db_random_next(), db_random_next()};
+                        char text[80];
+
+                        dbz_text(text, sizeof text);
+                        dbus_setting_set(dbz_pick(2) ? "org.freedesktop.appearance" : "org.gnome.desktop.interface", keys[dbz_pick(4)], "uibdsc"[dbz_pick(6)],
+                                         (long)db_random_next(), colour, text);
+                }
+                else if (what < 96)
+                {
+                        db_time += (long)dbz_pick(dbz_pick(4) ? 100 : 8000);
+                        dbus_tick();
+                }
+                else
+                {
+                        // bytes that are no message at all
+                        long n = (long)dbz_pick(64);
+
+                        for (long b = 0; b < n; b++)
+                                message[b] = (unsigned char)db_random_next();
+                        dbz_feed(dbz_slot[k], message, n);
+                }
+                dbz_invariants();
+        }
+        for (long k = 0; k < DBZ_CLIENTS; k++)
+                if (dbz_slot[k] >= 0)
+                {
+                        dbz_read(k, -1);
+                        dbus_drop(dbz_slot[k]);
+                        dbz_slot[k] = -1;
+                }
+        DBCHECK(!dbz_whole_refused, "every message the grammar makes whole is taken by the bus (%ld refused)", dbz_whole_refused);
+        DBCHECK(db_allocs == db_releases, "every record is returned after the grammar's fuzz (%ld %ld)", db_allocs, db_releases);
+        for (long k = 0; k < DBUS_PENDING; k++)
+                DBCHECK(!dbus.pending[k].used, "no call waits for a reply after the grammar's fuzz");
+        printf("CHECK_dbus grammar fuzz: %ld rounds, %ld messages fed, %ld read back whole, %ld clients gone, %ld whole ones refused, %ld invariant passes, "
+               "seed %lu\n", rounds, fed, dbz_messages_read, dropped, dbz_whole_refused, dbz_checked, db_seed);
+}
+
 int main(int argc, char **argv)
 {
-        long rounds = argc > 1 ? atol(argv[1]) : 20000;
+        long rounds = argc > 1 ? atol(argv[1]) : 20000, grammar = argc > 2 ? atol(argv[2]) : 20000;
 
+        if (argc > 3)
+                db_seed = strtoul(argv[3], 0, 0) | 1;
         db_test_auth();
         db_test_hello_and_names();
         db_test_routing();
@@ -168706,6 +169389,7 @@ int main(int argc, char **argv)
         db_test_hostile();
         db_test_caps();
         db_test_fuzz(rounds);
+        db_test_structured(grammar);
         printf("CHECK_dbus: %u checks, %u failures\n", db_checks, db_failures);
         return db_failures != 0;
 }

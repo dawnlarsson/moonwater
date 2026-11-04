@@ -77,6 +77,42 @@ this entry: a list reply can outgrow the sound server's reply buffer and drop th
 file, reported with the audit). The two commits after the fix (`7dea3bfd`, `e549a8e7`, a string copy and the output ring)
 change speed only: they are not security fixes and get no entry.
 
+### MW-2026-110: the session bus's portal could put a cut character, or a boolean of 7, on the wire
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04; no exposure (every caller passes a constant) |
+| Class | Output that is not valid D-Bus from an internal API (latent); a client that reads it leaves the bus |
+| Attacker | none today: no byte a program sends, and no settings file, reaches the texts or booleans of `dbus_setting_set` |
+| Moonwater exposure window | none |
+| Fixed by | the commit that adds this entry (`src/dbus/dbus.c` `dbus_setting_set`, `test/checks.c` CHECK_dbus) |
+| Found by | the grammar fuzz this commit adds to CHECK_dbus (`db_test_structured`), seed 111, 1.5 million rounds, under ASan and UBSan with gcc and clang on the box |
+
+**What it was.** `dbus_setting_set` (src/dbus/dbus.c) kept a text setting with `dbus_text`, which cuts at the 63 bytes of
+`struct dbus_setting.text`: a text longer than that, with a letter of two or more bytes across the cut, was kept as
+invalid UTF-8, and a boolean was written as whatever number it was given. ReadAll, Read and SettingChanged put both on
+the wire as they were, and libdbus and GDBus take a message with a string that is not UTF-8, or a boolean that is not 0
+or 1, for one that is not valid: they drop the connection, and a GLib program exits with it. The sessionbus tool's
+callers (`sessionbus_settings`) pass only constants ("prefer-dark", "Adwaita", "12h", ...) and booleans made by `!` and
+`==`, so nothing reached it; it is fixed because the bus's own promise (threat model point 2) is that what it sends is
+valid.
+
+**The fix.** A text that does not fit, a namespace, key or text that is not UTF-8, a kind that is none: no setting (-1).
+A boolean is 1 for any number but 0.
+
+**Tests that fail without it.** CHECK_dbus `db_test_portal`: a text that would be cut in a character, one that is not
+UTF-8, a missing text, a key that is not UTF-8, a kind that is none, a boolean of 7. Mutants (each turns its row red):
+the UTF-8 check of the text removed, the room check removed, the boolean left as given, the kind check removed. The
+grammar fuzz's invariant (every message a client is given parses whole) catches the cut text at seed 111.
+
+**The fuzz.** `db_test_structured` makes messages from the grammar (random signatures of every basic type, arrays,
+dictionaries, structs and variants nested, random values, random header fields, to the bus, the portal, a client by
+unique or well-known name, or to nobody; a third of them changed at a length, a count, a signature byte or a cut), the
+bus's own calls with random arguments, replies and forged replies, clients that read and do not, that go and come back,
+the clock, and bytes in pieces of random size; after every step the queues, names and pending calls are checked, every
+message a client reads must parse whole, every message the grammar makes whole must be taken, and at the end every
+record is returned. `CHECK_dbus ROUNDS GRAMMAR SEED`; the lane runs 20,000 of each.
+
 ### MW-2026-080: the clipboard and paste were designed against snooping and paste injection before either existed
 
 | | |

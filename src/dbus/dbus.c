@@ -2407,8 +2407,15 @@ DBUS_API int dbus_setting_set(const char *ns, const char *key, unsigned kind, lo
         long body;
         int existed = s != 0;
 
-        if (!dbus.host || dbus_length(ns) >= (long)sizeof s->ns || dbus_length(key) >= (long)sizeof s->key)
+        // What is given is put on the wire as it is: a text that does not fit, or is not UTF-8, is no setting (cut, it would be
+        // a character cut in two, which a client takes for a message that is not valid and leaves the bus for), nor is a kind
+        // that is none, and a boolean is 0 or 1.
+        if (!dbus.host || dbus_length(ns) >= (long)sizeof s->ns || dbus_length(key) >= (long)sizeof s->key || !dbus_utf8((const unsigned char *)ns, dbus_length(ns)) ||
+            !dbus_utf8((const unsigned char *)key, dbus_length(key)) || (kind != 'u' && kind != 'i' && kind != 'b' && kind != 'd' && kind != 's' && kind != 'c') ||
+            (kind == 's' && (!text || dbus_length(text) >= (long)sizeof s->text || !dbus_utf8((const unsigned char *)text, dbus_length(text)))))
                 return -1;
+        if (kind == 'b')
+                number = number != 0;
         if (!s)
         {
                 for (long at = 0; at < DBUS_SETTINGS && !s; at++)
