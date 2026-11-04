@@ -22288,6 +22288,15 @@ static b32 host_debug(string_address address_to arguments, positive count)
         for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)
                 if (table->gpu_refused[why])
                         host_say(log, "  gpu refused     %p, %s\n", (positive)table->gpu_refused[why], windows_gpu_reasons[why] ? windows_gpu_reasons[why] : (string_address) "?");
+        //      The apps' draw lists: the windows drawn from their lists (list state 1) and the lists the compositor refused.
+        {
+                unsigned int from_lists = 0;
+
+                for (unsigned int row = 0; row < WINDOWS; row++)
+                        if (table->pid[row] && table->list_state[row] == 1)
+                                from_lists++;
+                host_say(log, "  lists           %p windows drawn from their lists, %p refused\n", (positive)from_lists, (positive)table->list_refused);
+        }
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         host_say(log, "  top window      %s%s\n", table->unscanned ? (string_address) "not shown straight: " : (string_address) "",
