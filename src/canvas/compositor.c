@@ -7844,7 +7844,7 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
                 return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
         compositor_gpu_state.failures = 0;
-        damage[0] = x0, damage[1] = y0, damage[2] = x1, damage[3] = y1;
+        damage[0] = x0, damage[1] = y0, damage[2] = x1 - x0, damage[3] = y1 - y0; // as the table's damage is: the place and the size
         return 1;
 }
 
