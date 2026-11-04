@@ -122718,6 +122718,13 @@ static b32 terminal_deliver(b32 master, const struct window_event address_to eve
         return terminal_receive(master, event, dirty);
 }
 
+// The autoscroll of a selection at a time the row drives: the kit's clock is that time too (ui_edge_steps reads it).
+static positive check_select_autoscroll_at(positive when, int address_to dirty)
+{
+        ui_kit.now = ui_kit.test_clock = when;
+        return terminal_select_autoscroll(when, dirty);
+}
+
 static void check_terminal_select_scroll(void)
 {
     b32 dirty = false;
@@ -122748,7 +122755,7 @@ static void check_terminal_select_scroll(void)
     at.b = top - 25;
     terminal_deliver(-1, &at, &dirty);
     for (int step = 0; step <= 40; step++)
-        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+        check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a mouse held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
     check("terminal: and the selection's end follows the text up", terminal.select_active_line < line_before);
     terminal_deliver(-1, &release, &dirty);
@@ -122765,7 +122772,7 @@ static void check_terminal_select_scroll(void)
     at.b = top + (int)ROWS * cell + 25;
     terminal_deliver(-1, &at, &dirty);
     for (int step = 0; step <= 40; step++)
-        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+        check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a mouse held below the grid scrolls the scrollback forward", terminal.view == TERMINAL_LIVE || terminal.view > back);
     check("terminal: and the selection's end follows the text down", terminal.select_active_line > line_before);
     terminal_deliver(-1, &release, &dirty);
@@ -122783,7 +122790,7 @@ static void check_terminal_select_scroll(void)
     touch_at.b = top - 25;
     terminal_deliver(-1, &touch_at, &dirty);
     for (int step = 0; step <= 40; step++)
-        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+        check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a finger held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
     check("terminal: and the held selection's end follows the text up", terminal.select_active_line < line_before);
     terminal_deliver(-1, &lift, &dirty);
@@ -122817,10 +122824,10 @@ static void check_terminal_select_speed(void)
     terminal_deliver(-1, &press, &dirty);
     at.b = top - 25;
     terminal_deliver(-1, &at, &dirty);
-    terminal_select_autoscroll(now, &dirty);
+    check_select_autoscroll_at(now, &dirty);
     terminal_extent(&first_before, &shown, &total);
     for (int step = 1; step <= 40; step++)
-        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+        check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     terminal_extent(&first_after, &shown, &total);
     moved = (long)first_before - (long)first_after;
     want = 17280l / (100l * (long)cell);
@@ -122865,7 +122872,7 @@ static void check_terminal_select_stale(void)
     terminal_deliver(-1, &press, &dirty);
     line_after = terminal.select_active_line;
     for (int step = 0; step <= 120; step++)
-        terminal_select_autoscroll(now + (positive)step * 16000000ull, &dirty);
+        check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a press in the grid after a drag past its top does not scroll the view on its own",
           terminal.view == before && terminal.select_active_line == line_after);
     terminal_deliver(-1, &release, &dirty);
@@ -122947,13 +122954,13 @@ static void check_edge_steps(void)
     positive now = 1000000000ull;
     long total = 0, first;
 
-    first = ui_edge_steps(&edge, now, 100, 1000l * 17);
+    first = (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_edge_steps(&edge, 100, 1000l * 17));
     for (int step = 1; step <= 40; step++)
-        total += ui_edge_steps(&edge, now + (positive)step * 16000000ull, 100, 1000l * 17);
+        total += (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_edge_steps(&edge, 100, 1000l * 17));
     check("kit: an edge scroll owes nothing at its first call, and 25 pixels past an edge at scale 100 is ten rows of 17 in 40 steps",
           first == 0 && total == 10 && edge.owed == 2800);
     check("kit: an edge scroll's clock that goes back restarts it: no step, and nothing owed",
-          ui_edge_steps(&edge, now, 100, 1000l * 17) == 0 && edge.owed == 0 && edge.at == now);
+          (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_edge_steps(&edge, 100, 1000l * 17)) == 0 && edge.owed == 0 && edge.at == now);
 }
 
 static fn check_keys(void)
@@ -133001,7 +133008,7 @@ static void scroll_ticks(struct ui address_to wui, struct ui_text address_to t, 
     b32 redraw = false;
 
     for (int step = 0; step <= 12; step++)
-        ui_text_autoscroll(wui, t, now + (positive)step * 16000000ull, &redraw);
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_text_autoscroll(wui, t, &redraw));
 }
 
 static void scroll_code(struct ui address_to wui, struct ui_text address_to t, int top)
@@ -133162,7 +133169,7 @@ static void scroll_field_drawn(struct ui address_to wui, struct ui_text address_
     {
         int jump;
 
-        ui_text_autoscroll(wui, t, now + (positive)step * 16000000ull, &redraw);
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_text_autoscroll(wui, t, &redraw));
         ui_text_draw(wui, t, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
         jump = (int)t->scroll_x - prev;
         *largest = jump > *largest ? jump : *largest;
@@ -133187,7 +133194,7 @@ static void caret_fade_check(void)
     ui_kit.caret_speed = UI_CARET_NORMAL;
     while (now < stop)
     {
-        unsigned int cover = ui_caret_at(now, since, since, &due);
+        unsigned int cover = (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_caret_at(since, since, &due));
 
         mids += cover > 0 && cover < UI_CARET_FULL;
         if (!due)
@@ -133308,7 +133315,7 @@ static void check_field_flick(struct ui address_to wui)
     ui_field_event(wui, &field, null, &up, x, y - 400);
     thrown = field.grab.drag.flying;
     for (int step = 1; step <= 150; step++)
-        ui_kit.now = now += 16000000ull, ui_text_timeout(wui, &field, -1, now, &redraw);
+        ui_kit.now = now += 16000000ull, (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &field, -1, &redraw));
     check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !field.grab.drag.flying);
     ui_text_close(&field);
 }
@@ -133343,7 +133350,7 @@ static void check_throw_last_step(struct ui address_to wui)
         p64 was = view.top_line;
         b32 redraw = false;
 
-        ui_kit.now = now += 16000000ull, ui_text_timeout(wui, &view, -1, now, &redraw);
+        ui_kit.now = now += 16000000ull, (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &view, -1, &redraw));
         if (view.top_line != was)
             moved = true, moved_unasked |= !redraw;
     }
@@ -152045,8 +152052,8 @@ static int touch_scroll_rows(struct ui address_to wui, struct ui_text address_to
         row = view->top + 2 * view->line_height + view->line_height / 2;
         field_button(wui, view, 0x110, true, x, row, 0);
         field_motion(wui, view, x, view->top - past);
-        ui_text_autoscroll(wui, view, now, &redraw);
-        ui_text_autoscroll(wui, view, now + 200000000ull, &redraw);
+        (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_autoscroll(wui, view, &redraw));
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + 200000000ull), ui_text_autoscroll(wui, view, &redraw));
         *follows = doc_sel_start(&view->doc.selections[view->doc.primary]) == doc_line_start(&view->doc, view->top_line);
         field_button(wui, view, 0x110, false, x, row, 0);
         ui_text_close(view);
@@ -152070,13 +152077,13 @@ static fn touch_scroll_check(struct ui address_to wui)
         row = view.top + 2 * view.line_height + view.line_height / 2;
         field_button(wui, &view, 0x110, true, x, row, 0);
         field_motion(wui, &view, x, view.top - 200);
-        ui_text_autoscroll(wui, &view, now, &redraw);
+        (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_autoscroll(wui, &view, &redraw));
         field_motion(wui, &view, x, view.top + view.line_height);
-        check("scroll: a drag back inside the box stops it", !ui_text_autoscroll(wui, &view, now + 200000000ull, &redraw) && view.top_line == 10);
+        check("scroll: a drag back inside the box stops it", !(ui_kit.now = ui_kit.test_clock = (b64)(now + 200000000ull), ui_text_autoscroll(wui, &view, &redraw)) && view.top_line == 10);
         field_motion(wui, &view, x, view.top - 200);
-        ui_text_autoscroll(wui, &view, now + 400000000ull, &redraw);
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + 400000000ull), ui_text_autoscroll(wui, &view, &redraw));
         field_button(wui, &view, 0x110, false, x, row, 0);
-        check("scroll: the lift stops it", !ui_text_autoscroll(wui, &view, now + 600000000ull, &redraw) && view.top_line == 10);
+        check("scroll: the lift stops it", !(ui_kit.now = ui_kit.test_clock = (b64)(now + 600000000ull), ui_text_autoscroll(wui, &view, &redraw)) && view.top_line == 10);
         ui_text_close(&view);
 }
 
@@ -152221,7 +152228,7 @@ static void ts_ticks(struct ui address_to wui, struct ui_text address_to t, posi
         b32 redraw = false;
 
         for (int step = 0; step <= steps; step++)
-                ui_text_autoscroll(wui, t, now + (positive)step * 16000000ull, &redraw);
+                (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_text_autoscroll(wui, t, &redraw));
 }
 
 // Whether the bar's items are these ids, in this order (0 for none).
@@ -152443,8 +152450,8 @@ static p64 ts_code(struct ui address_to wui, int scale)
                 got |= (p64)(ts_view.bar && !ts_view.bar_up) << TS_BAR_HIDES;
                 ts_up(wui, &ts_view, fx, fy + 5 * lh);
                 for (int step = 1; step < 600 && ts_view.grab.drag.flying; step++)
-                        ui_text_fling(&ts_view, clock_monotonic_nanoseconds() + (positive)step * 16000000ull);
-                ui_text_bar_tick(&ts_view, clock_monotonic_nanoseconds() + 1000000000ull, &redraw);
+                        (ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + (positive)step * 16000000ull), ui_text_fling(&ts_view));
+                (ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + 1000000000ull), ui_text_bar_tick(&ts_view, &redraw));
                 ts_view.top_line = 20;
                 ts_draw(wui, &ts_view);
                 got |= (p64)(redraw && ts_view.bar_up) << TS_BAR_RETURNS;
@@ -152491,7 +152498,7 @@ static p64 ts_code(struct ui address_to wui, int scale)
                 ui_kit.busy = 0;
                 ts_draw(wui, &ts_view);
                 got |= (p64)(busy && ts_view.bar_up && !ui_kit.busy && first != wui->pixels[(positive)py * TS_WIDTH + (positive)px]) << TS_FADE;
-                got |= (p64)(ui_text_timeout(wui, &ts_view, -1, clock_monotonic_nanoseconds() + 1000000000ull, &redraw) == -1 && !redraw) << TS_IDLE;
+                got |= (p64)((ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + 1000000000ull), ui_text_timeout(wui, &ts_view, -1, &redraw)) == -1 && !redraw) << TS_IDLE;
                 ui_kit.motion = 1;
                 ts_view.bar_up = false;
                 ui_kit.busy = 0;
@@ -153064,13 +153071,14 @@ static fn field_check(struct ui address_to wui)
                 positive now;
 
                 t.focused = true;
+                ui_kit.test_clock = 0; // the real clock: the key stamps the caret with it, and the tick below reads it
                 field_type(wui, &t, "z");
                 now = clock_monotonic_nanoseconds();
-                check("field: the caret blinks after a key", ui_text_tick(&t, now, &redraw) != 0);
+                check("field: the caret blinks after a key", (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_tick(&t, &redraw)) != 0);
                 t.caret_fade = UI_CARET_FULL;
                 redraw = false;
                 check("field: and a while after the last it stays drawn, and no frame is due",
-                      !ui_text_tick(&t, now + UI_TEXT_BLINK_FOR_NS + 1, &redraw) && redraw && !t.caret_fade);
+                      !(ui_kit.now = ui_kit.test_clock = (b64)(now + UI_TEXT_BLINK_FOR_NS + 1), ui_text_tick(&t, &redraw)) && redraw && !t.caret_fade);
         }
         // The caret's width: 1, 2 and 3 pixels at 100 percent (thin, normal, thick), and each scales with the screen, never to nothing:
         // a thin caret at 75 percent is one pixel, not the 0 that 0.75 rounds to. An empty field holds nothing but the caret, so the
@@ -154922,6 +154930,32 @@ static fn check_one_blink(void)
         jumps, its two halves mirror each other, a key restarts it solid, and the speed off is solid for good. The cycle is
         the person's (ui_kit.caret_speed): 1.6 s, 1.06 s and 0.53 s, and off has none.
 */
+// The caret's time in a row: the kit's clock is the time the row drives (ui_kit.now and ui_kit.test_clock together), which the
+// caret reads (ui_caret_cover, ui_caret_wake), so a row's time and the caret's are one.
+static positive check_text_tick_at(struct ui_text address_to t, positive when, b32 address_to redraw)
+{
+        ui_kit.now = ui_kit.test_clock = when;
+        return ui_text_tick(t, redraw);
+}
+
+static unsigned int check_caret_cover_at(positive when)
+{
+        ui_kit.now = ui_kit.test_clock = when;
+        return terminal_caret_cover_at(when);
+}
+
+static void check_caret_step_at(positive when, long address_to timeout)
+{
+        ui_kit.now = ui_kit.test_clock = when;
+        terminal_caret_step(when, timeout);
+}
+
+static void check_caret_restart_at(positive when)
+{
+        ui_kit.now = ui_kit.test_clock = when;
+        terminal_caret_restart(when);
+}
+
 static fn check_caret_blink(void)
 {
         static const unsigned int speeds[4] = {UI_CARET_SLOW, UI_CARET_NORMAL, UI_CARET_FAST, UI_CARET_OFF};
@@ -154982,31 +155016,32 @@ static fn check_caret_blink(void)
         ui_text_open(&t, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
         t.focused = true;
         t.caret.since = t.caret.awake = now;
-        check("caret: solid at the key", ui_text_tick(&t, now, &redraw) != 0 && t.caret_fade == 0);
-        check("caret: gone three quarters round its own cycle", ui_text_tick(&t, now + cycle / 2, &redraw) != 0 && t.caret_fade == UI_CARET_FULL);
+        check("caret: solid at the key", check_text_tick_at(&t, now, &redraw) != 0 && t.caret_fade == 0);
+        check("caret: gone three quarters round its own cycle", check_text_tick_at(&t, now + cycle / 2, &redraw) != 0 && t.caret_fade == UI_CARET_FULL);
         t.caret.since = t.caret.awake = now + cycle / 2 + 1000000;
-        check("caret: a key restarts it solid", ui_text_tick(&t, now + cycle / 2 + 1000000, &redraw) != 0 && t.caret_fade == 0);
+        check("caret: a key restarts it solid", check_text_tick_at(&t, now + cycle / 2 + 1000000, &redraw) != 0 && t.caret_fade == 0);
 
         // Off is solid, and asks for no frame, whatever the time.
         ui_kit.caret_speed = UI_CARET_OFF;
         for (positive k = 0; k < 64; k++)
-                solid = solid && ui_text_tick(&t, now + k * 77000000ull, &redraw) == 0 && t.caret_fade == 0;
+                solid = solid && check_text_tick_at(&t, now + k * 77000000ull, &redraw) == 0 && t.caret_fade == 0;
         check("caret: off is solid, and no frame is due", solid);
 
         // Left alone past the ten seconds, it stays drawn with no frame due.
         ui_kit.caret_speed = UI_CARET_NORMAL;
         redraw = false;
         check("caret: left alone it stays drawn and asks for no frame",
-              ui_text_tick(&t, t.caret.awake + UI_TEXT_BLINK_FOR_NS + 1, &redraw) == 0 && t.caret_fade == 0);
+              check_text_tick_at(&t, t.caret.awake + UI_TEXT_BLINK_FOR_NS + 1, &redraw) == 0 && t.caret_fade == 0);
         // The wait ends at the ten seconds, whatever phase the caret is in, so a caret that is gone then is drawn then.
         {
                 positive due = 0;
 
-                (void)ui_caret_at(now + UI_TEXT_BLINK_FOR_NS - 50000000ull, now, now, &due);
+                (void)(ui_kit.now = ui_kit.test_clock = (b64)(now + UI_TEXT_BLINK_FOR_NS - 50000000ull), ui_caret_at(now, now, &due));
                 check("caret: the wait ends at ten seconds, not at the next change of the wave", due == now + UI_TEXT_BLINK_FOR_NS);
         }
         ui_text_close(&t);
         ui_kit.caret_speed = saved;
+        ui_kit.test_clock = 0;
 }
 
 // The pixel at the middle of the caret's cell (column 3 of row 0) in the buffer a frame was drawn into.
@@ -155043,16 +155078,16 @@ static fn check_caret_terminal(void)
         shown = true;
         terminal.focused = true;
         ui_kit.caret_speed = UI_CARET_NORMAL;
-        terminal_caret_restart(now);
-        check("terminal caret: solid at a key, and gone three quarters round its cycle", terminal_caret_cover_at(now) == UI_CARET_FULL &&
-              terminal_caret_cover_at(now + (positive)cycle / 2) == 0);
-        terminal_caret_restart(now + (positive)cycle / 2 + 5000000ull);
-        check("terminal caret: a key restarts it solid", terminal_caret_cover_at(now + (positive)cycle / 2 + 5000000ull) == UI_CARET_FULL);
+        check_caret_restart_at(now);
+        check("terminal caret: solid at a key, and gone three quarters round its cycle", check_caret_cover_at(now) == UI_CARET_FULL &&
+              check_caret_cover_at(now + (positive)cycle / 2) == 0);
+        check_caret_restart_at(now + (positive)cycle / 2 + 5000000ull);
+        check("terminal caret: a key restarts it solid", check_caret_cover_at(now + (positive)cycle / 2 + 5000000ull) == UI_CARET_FULL);
         ui_kit.caret_speed = UI_CARET_OFF;
-        check("terminal caret: off is solid whatever the time", terminal_caret_cover_at(now + (positive)cycle / 2) == UI_CARET_FULL);
+        check("terminal caret: off is solid whatever the time", check_caret_cover_at(now + (positive)cycle / 2) == UI_CARET_FULL);
         ui_kit.caret_speed = UI_CARET_NORMAL;
         terminal.focused = false;
-        check("terminal caret: a window without the keys draws it solid", terminal_caret_cover_at(now + (positive)cycle / 2) == UI_CARET_FULL);
+        check("terminal caret: a window without the keys draws it solid", check_caret_cover_at(now + (positive)cycle / 2) == UI_CARET_FULL);
 
         // A bar caret's width: the caret setting's pixels, drawn as the marks of a cell, one row of the buffer counted.
         terminal.width = 60, terminal.height = 20, terminal.pitch = 60, terminal.cell_h = 20;
@@ -155119,10 +155154,10 @@ static fn check_caret_terminal(void)
                 positive when = ui_kit.test_clock, later = when + (positive)cycle / 2 + 5000000ull;
                 long timeout = -1;
 
-                terminal_caret_step(when, &timeout);
+                check_caret_step_at(when, &timeout);
                 terminal.caret.since = when, terminal.caret.awake = when;
                 terminal.dirty = false;
-                terminal_caret_step(later, &timeout);
+                check_caret_step_at(later, &timeout);
                 check("terminal caret: the wait that ends where the cover changes repaints it, with nothing else to draw", terminal.dirty);
         }
         terminal.caret.since = since, terminal.caret.awake = awake;
@@ -155150,6 +155185,7 @@ static fn check_caret_terminal(void)
         terminal.focused = was_focused;
         terminal.caret.since = since, terminal.caret.awake = awake;
         ui_kit.caret_speed = saved_speed;
+        ui_kit.test_clock = 0;
         ui_kit.test_clock = 0;
 }
 #endif

@@ -11299,8 +11299,9 @@ struct ui_caret
         positive since, awake;
 };
 
-static void ui_caret_wake(struct ui_caret address_to c, positive now)
+static void ui_caret_wake(struct ui_caret address_to c)
 {
+        positive now = (positive)ui_kit_clock();
         c->since = c->awake = now;
 }
 
@@ -11417,7 +11418,7 @@ static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_
         t->numbers = mode == UI_TEXT_CODE;
         t->wrap = mode == UI_TEXT_AREA;
         t->comment = "//";
-        ui_caret_wake(&t->caret, ui_kit_clock());
+        ui_caret_wake(&t->caret);
         return true;
 }
 
@@ -11593,7 +11594,7 @@ static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_t
         memory_zero(t->preedit, sizeof(t->preedit));
         memory_copy(t->preedit, text, length);
         t->preedit_length = (p32)length;
-        ui_caret_wake(&t->caret, ui_kit_clock()), t->caret_fade = 0;
+        ui_caret_wake(&t->caret), t->caret_fade = 0;
         return true;
 }
 
@@ -11613,7 +11614,7 @@ static p32 SPARE ui_text_preedit_end(struct ui_text address_to t, b32 commit)
         }
         memory_zero(t->preedit, sizeof(t->preedit));
         t->preedit_length = 0;
-        ui_caret_wake(&t->caret, ui_kit_clock()), t->caret_fade = 0;
+        ui_caret_wake(&t->caret), t->caret_fade = 0;
         return (t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED) | (refused ? UI_TEXT_REFUSED : 0);
 }
 
@@ -12173,7 +12174,7 @@ static b64 ui_caret_until(b64 q, b64 cycle)
 // quarter of a cycle into the solid half, so the caret is solid at once and stays solid while the keys keep coming.
 static fn ui_text_wake(struct ui_text address_to t)
 {
-        ui_caret_wake(&t->caret, ui_kit_clock());
+        ui_caret_wake(&t->caret);
         t->caret_fade = 0;
 }
 
@@ -12186,8 +12187,9 @@ static fn ui_text_wake(struct ui_text address_to t)
         A caret's cover at now, for a phase that restarted at since and an awake time (a key or a move, the last of them),
         and when that cover next changes (0 for never). Every caret runs this: a field's and the terminal's.
 */
-static unsigned int ui_caret_at(positive now, positive since, positive awake, positive address_to due)
+static unsigned int ui_caret_at(positive since, positive awake, positive address_to due)
 {
+        positive now = (positive)ui_kit_clock();
         b64 cycle = ui_caret_cycle(), q;
         unsigned int cover;
 
@@ -12204,27 +12206,29 @@ static unsigned int ui_caret_at(positive now, positive since, positive awake, po
 }
 
 // A caret's cover at now (ui_caret_at) for its own blink.
-static unsigned int ui_caret_cover(const struct ui_caret address_to c, positive now, positive address_to due)
+static unsigned int ui_caret_cover(const struct ui_caret address_to c, positive address_to due)
 {
-        return ui_caret_at(now, c->since, c->awake, due);
+        positive now = (positive)ui_kit_clock();
+        return ui_caret_at(c->since, c->awake, due);
 }
 
-static positive ui_text_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
+static positive ui_text_tick(struct ui_text address_to t, b32 address_to redraw)
 {
+        positive now = (positive)ui_kit_clock();
         positive due;
         unsigned int cover;
 
         if (!t->focused || t->read_only)
                 return 0;
-        cover = ui_caret_cover(&t->caret, now, &due);
+        cover = ui_caret_cover(&t->caret, &due);
         if (t->caret_fade != UI_CARET_FULL - cover)
                 t->caret_fade = UI_CARET_FULL - cover, *redraw = true;
         return due;
 }
 
-static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, positive now, b32 address_to redraw);
-static positive ui_text_bar_tick(struct ui_text address_to t, positive now, b32 address_to redraw);
-static b32 ui_text_fling(struct ui_text address_to t, positive now);
+static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, b32 address_to redraw);
+static positive ui_text_bar_tick(struct ui_text address_to t, b32 address_to redraw);
+static b32 ui_text_fling(struct ui_text address_to t);
 
 /*
         The widget's next frame as a loop's timeout: its throw (a finger's flick, ui_text_fling, for a field as for a code view),
@@ -12233,21 +12237,22 @@ static b32 ui_text_fling(struct ui_text address_to t, positive now);
         they asked for. A throw's step that moves the lines asks for the picture, the last one too (the bar's own return is its tick's).
         Every app's tick asks this for its field, and none of them keeps its own deadline.
 */
-static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t, long timeout, positive now, b32 address_to redraw)
+static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t, long timeout, b32 address_to redraw)
 {
+        positive now = (positive)ui_kit_clock();
         positive due, scroll, bar;
 
         if (t->grab.drag.flying)
         {
                 p64 was = t->top_line;
-                b32 flying = ui_text_fling(t, now);
+                b32 flying = ui_text_fling(t);
 
                 if (t->top_line != was)
                         *redraw = true;
                 if (flying && (timeout < 0 || (long)UI_DRAG_FRAME_NS < timeout))
                         timeout = UI_DRAG_FRAME_NS;
         }
-        due = ui_text_tick(t, now, redraw), scroll = ui_text_autoscroll(ui, t, now, redraw), bar = ui_text_bar_tick(t, now, redraw);
+        due = ui_text_tick(t, redraw), scroll = ui_text_autoscroll(ui, t, redraw), bar = ui_text_bar_tick(t, redraw);
         if (due && (timeout < 0 || (long)(due - now) < timeout))
                 timeout = (long)(due - now);
         if (scroll && (timeout < 0 || (long)(scroll - now) < timeout))
@@ -12269,7 +12274,7 @@ static long ui_field_tick(struct ui address_to ui, struct ui_page address_to p, 
 
         t->focused = focused;
         if (t->doc.selections)
-                timeout = ui_text_timeout(ui, t, timeout, now, &redraw);
+                timeout = ui_text_timeout(ui, t, timeout, &redraw);
         if (redraw && (t->bar || t->bar_up || t->over_bottom > t->over_top))
                 ui_page_redraw(p);
         else if (redraw)
@@ -12851,8 +12856,9 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
 }
 
 // A thrown finger's scroll, a frame at a time: whether it still moves.
-static b32 ui_text_fling(struct ui_text address_to t, positive now)
+static b32 ui_text_fling(struct ui_text address_to t)
 {
+        positive now = (positive)ui_kit_clock();
         int moved = ui_drag_step(&t->grab.drag);
         long lines = ui_text_lines_moved(t, -moved);
         b64 to = (b64)t->top_line + lines;
@@ -12888,8 +12894,9 @@ static long ui_edge_speed(long past, int scale)
         first call after the drag starts (or after it stopped) owes none and takes its time as the step's start. The caller is the
         one that knows the drag is on, and what a step does.
 */
-static long ui_edge_steps(struct ui_edge address_to e, positive now, int scale, long unit)
+static long ui_edge_steps(struct ui_edge address_to e, int scale, long unit)
 {
+        positive now = (positive)ui_kit_clock();
         long steps;
 
         if (!e->at || now < e->at)
@@ -12918,8 +12925,9 @@ static b64 ui_text_scroll_most(struct ui address_to ui, struct ui_text address_t
         return most > 0 ? most : 0;
 }
 
-static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, positive now, b32 address_to redraw)
+static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, b32 address_to redraw)
 {
+        positive now = (positive)ui_kit_clock();
         b32 field = t->mode == UI_TEXT_FIELD;
         p64 lines = doc_line_count(&t->doc);
         long steps;
@@ -12930,7 +12938,7 @@ static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text addre
                 t->edge.at = 0;
                 return 0;
         }
-        steps = ui_edge_steps(&t->edge, now, ui->scale, field ? 1000l : 1000l * t->line_height);
+        steps = ui_edge_steps(&t->edge, ui->scale, field ? 1000l : 1000l * t->line_height);
         if (steps <= 0)
                 return now + UI_DRAG_FRAME_NS;
         if (field)
@@ -13168,8 +13176,9 @@ static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, i
         Whether the bar may be seen now: no finger is moving a handle, a selection or the text (a press that has not moved is
         none), nothing is thrown, and the view has been still for UI_TEXT_BAR_AFTER_NS.
 */
-static b32 ui_text_bar_still(const struct ui_text address_to t, positive now)
+static b32 ui_text_bar_still(const struct ui_text address_to t)
 {
+        positive now = (positive)ui_kit_clock();
         return t->finger != UI_TEXT_FINGER_HANDLE && t->finger != UI_TEXT_FINGER_SELECT &&
                !(t->finger == UI_TEXT_FINGER_TEXT && t->grab.press.dragged) && !t->grab.drag.flying && now >= t->quiet_at;
 }
@@ -13249,7 +13258,7 @@ static fn ui_text_overlay_draw(struct ui address_to ui, struct ui_text address_t
                         t->over_bottom = top + t->line_height + 2 * radius > t->over_bottom ? top + t->line_height + 2 * radius : t->over_bottom;
                 }
         }
-        t->bar_want = t->bar && ui_text_bar_still(t, now);
+        t->bar_want = t->bar && ui_text_bar_still(t);
         if (t->bar_want && ui_text_bar_place(ui, t))
         {
                 int line = ui_px(ui, 1), corner = ui_dev(ui, UI_MENU_RADIUS), baseline, alpha = 255;
@@ -13521,9 +13530,10 @@ static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, 
         The bar's coming and going as a tick sees it: it is wanted and the view is still and it was not shown (or the other way
         round), so the frame is drawn; and when it waits for the view to be still, when that is. 0 for no wait.
 */
-static positive ui_text_bar_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
+static positive ui_text_bar_tick(struct ui_text address_to t, b32 address_to redraw)
 {
-        b32 want = t->bar && ui_text_bar_still(t, now);
+        positive now = (positive)ui_kit_clock();
+        b32 want = t->bar && ui_text_bar_still(t);
 
         if (want != t->bar_want)
                 *redraw = true;
@@ -13797,12 +13807,12 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
 }
 
 // The bar's frames with the view's: the view's (its throw, its blink, its drag), and the bar's while it is open or has the keys.
-static long ui_findbar_timeout(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, long timeout, positive now,
-                               b32 address_to redraw)
+static long ui_findbar_timeout(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, long timeout, b32 address_to redraw)
 {
-        timeout = ui_text_timeout(ui, view, timeout, now, redraw);
+        positive now = (positive)ui_kit_clock();
+        timeout = ui_text_timeout(ui, view, timeout, redraw);
         if (bar->mode != UI_FINDBAR_CLOSED || bar->field.focused)
-                timeout = ui_text_timeout(ui, &bar->field, timeout, now, redraw);
+                timeout = ui_text_timeout(ui, &bar->field, timeout, redraw);
         return timeout;
 }
 

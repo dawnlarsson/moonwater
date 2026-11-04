@@ -750,7 +750,7 @@ static unsigned int terminal_caret_cover_at(positive now)
 
         if (!shown || !terminal.focused)
                 return UI_CARET_FULL;
-        return ui_caret_cover(&terminal.caret, now, &due);
+        return ui_caret_cover(&terminal.caret, &due);
 }
 
 // The caret of the frame being made: read here, in its own function, since terminal_frame has a local named shown. With no
@@ -771,7 +771,7 @@ static b32 terminal_caret_held(unsigned int slot)
 
 static void terminal_caret_restart(positive now)
 {
-        ui_caret_wake(&terminal.caret, now);
+        ui_caret_wake(&terminal.caret);
 }
 
 // The caret's phase restarts when it moves; the loop's wait ends when its cover next changes.
@@ -790,7 +790,7 @@ static void terminal_caret_step(positive now, long address_to timeout)
         // as the frame would make it, or it stays at the cover the last frame drew (gone, in the off phase).
         if (terminal.shown >= 0 && (terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at(now)) != terminal.caret_cover[terminal.shown])
                 terminal.dirty = true;
-        ui_caret_cover(&terminal.caret, now, &due);
+        ui_caret_cover(&terminal.caret, &due);
         if (due && (*timeout < 0 || (long)(due - now) < *timeout))
                 *timeout = (long)(due - now);
 }
@@ -3217,7 +3217,7 @@ static positive terminal_select_autoscroll(positive now, b32 address_to dirty)
                 terminal.select_edge.at = 0;
                 return 0;
         }
-        rows = ui_edge_steps(&terminal.select_edge, now, terminal_scale(), 1000l * terminal.cell_h);
+        rows = ui_edge_steps(&terminal.select_edge, terminal_scale(), 1000l * terminal.cell_h);
         if (rows <= 0)
                 return now + UI_DRAG_FRAME_NS;
         if (terminal_view_scroll(terminal.select_edge.past < 0 ? (int)rows : -(int)rows))

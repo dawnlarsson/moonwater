@@ -760,7 +760,7 @@ static long editor_tick(long timeout, long address_to other)
 
         (void)other;
         // The code view's frames and the find bar's (ui_findbar_timeout: its throw, its blink, its drag).
-        timeout = ui_findbar_timeout(&editor.ui, &editor.find, &editor_now()->view, timeout, now, &redraw);
+        timeout = ui_findbar_timeout(&editor.ui, &editor.find, &editor_now()->view, timeout, &redraw);
         if (redraw)
                 editor.dirty = true;
         return timeout;
