@@ -132701,6 +132701,41 @@ static void check_flick_retract(void)
     check("flick: and the same step read as a move of the finger's takes most of it away, which is what the flag is for", unflagged * 3 < plain);
 }
 
+// A lift the device told late (an optical or resistive panel, a slow link, a busy compositor) throws what the finger was doing at its last
+// report, less: as it was up to UI_FLING_STALE_NS after that report, then fallen by e for every UI_FLING_LATE_NS, and nothing past
+// UI_FLING_GONE_NS (160 ms); and a finger that came to rest throws nothing however late or early it lifts. A lift 80 ms after the last report
+// threw nothing (a flick on a Dell touch all-in-one stopped dead) before.
+static void check_kit_late_lift(void)
+{
+    struct ui_drag drag;
+    positive start = 1000000000ull, ms = 1000000ull, last;
+    long at10, at60, at100, at150, at300, at600, rested;
+    static const int slowing[12] = {20, 16, 12, 8, 4, 2, 1, 0, 0, 0, 0, 0};
+    int place = 100;
+
+    (ui_kit.now = (b64)start, ui_drag_start(&drag, 100));
+    for (int k = 1; k <= 12; k++)
+        (ui_kit.now = (b64)(start + (positive)k * 8 * ms), ui_drag_follow(&drag, 100 + 20 * k));
+    last = start + 96 * ms;
+    at10 = ui_drag_velocity(&drag, last + 10 * ms);
+    at60 = ui_drag_velocity(&drag, last + 60 * ms);
+    at100 = ui_drag_velocity(&drag, last + 100 * ms);
+    at150 = ui_drag_velocity(&drag, last + 150 * ms);
+    at300 = ui_drag_velocity(&drag, last + 300 * ms);
+    at600 = ui_drag_velocity(&drag, last + 600 * ms);
+    (ui_kit.now = (b64)start, ui_drag_start(&drag, 100));
+    for (int k = 1; k <= 12; k++)
+        place += slowing[k - 1], (ui_kit.now = (b64)(start + (positive)k * 8 * ms), ui_drag_follow(&drag, place));
+    rested = ui_drag_velocity(&drag, start + 96 * ms + 150 * ms);
+    string_format(log, "  kit late lift: a flick of 2500 px/s thrown at %b (10 ms late), %b (60), %b (100), %b (150), %b (300), %b (600); a finger come to rest throws %b\n",
+                  (bipolar)at10, (bipolar)at60, (bipolar)at100, (bipolar)at150, (bipolar)at300, (bipolar)at600, (bipolar)rested);
+    check("kit late lift: a lift up to UI_FLING_STALE_NS after the last report throws what the finger was doing", at10 > 2000 && at60 * 100 >= at10 * 99 && at60 * 100 <= at10 * 101);
+    check("kit late lift: a lift 100 and 150 ms after it throws less, not nothing (about three quarters, then about a half)",
+          at100 * 100 >= at10 * 55 && at100 * 100 <= at10 * 90 && at150 * 100 >= at10 * 25 && at150 * 100 <= at10 * 65 && at150 < at100);
+    check("kit late lift: and a lift 300 ms after it, which is a finger that rested, throws nothing, as does one 600 ms after it", at300 == 0 && at600 == 0);
+    check("kit late lift: a finger that came to rest throws nothing, lifted 150 ms after its last report", rested < UI_DRAG_THROW && rested > -UI_DRAG_THROW);
+}
+
 static void check_select_scroll(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -152074,6 +152109,7 @@ static fn field_check(struct ui address_to wui)
         check_select_scroll(wui);
         check_flick_lift();
         check_flick_retract();
+    check_kit_late_lift();
         check_field_drag_drawn(wui);
         check_field_flick(wui);
         check_throw_last_step(wui);

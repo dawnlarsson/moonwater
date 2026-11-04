@@ -1161,7 +1161,10 @@ static b64 ui_exp_neg(b64 x);
 
 #define UI_DRAG_SAMPLES 16
 #define UI_FLING_NS 40000000ul // the horizon a flick's velocity is fitted over: the reports of its last 40 ms (at least three)
-#define UI_FLING_STALE_NS 60000000ul // a lift this long after the last report is a finger that rested: it throws nothing
+#define UI_FLING_STALE_NS 60000000ul // a lift this long after the last report is late: what the finger was doing at that report has begun to fall
+#define UI_FLING_LATE_NS 120000000ul // and falls by e in this long past it: a panel tells its finger's lift late (optical and resistive ones by 50 to 150 ms,
+                                     // a slow link or a busy compositor by as much) and the throw is then what the finger did, less, not nothing
+#define UI_FLING_GONE_NS 160000000ul // a lift this long after the last report is a finger that rested (a panel is not later than this): it throws nothing
 
 // The kit's time as the pass or the event set it (ui_kit.now), for the motion functions that take none.
 static positive ui_kit_time(void);
@@ -1246,12 +1249,24 @@ static int ui_drag_follow(struct ui_drag address_to drag, int at)
         finger that slowed to a stop in it still has a mean: the parabola's slope at the end is what the finger was doing as it let go,
         so a gesture that came to rest throws nothing and a flick that is still fast keeps its speed, at any report rate. Fitted rather
         than differenced, so one jittery report does not set the throw. Two reports give the line through them; none, one, a stale last
-        report (the lift is more than UI_FLING_STALE_NS after it: the finger rested) or a slope that goes the other way than the line
-        gives 0; and the speed is never more than a quarter over the fastest step between two of the reports. Times are in ms before the
+        report (the lift is more than UI_FLING_GONE_NS after it: the finger rested) or a slope that goes the other way than the line
+        gives 0; a lift later than UI_FLING_STALE_NS after the last report gets the speed it had there, fallen by e for every
+        UI_FLING_LATE_NS more (ui_drag_late: a finger that came to rest has a slope near nothing at its last report and still throws
+        nothing, and a flick whose lift the device told late still rolls); and the speed is never more than a quarter over the fastest
+        step between two of the reports. Times are in ms before the
         last report, which keeps the sums in 64 bits (at most sixteen reports in 100 ms); a slope in pixels a ms is a thousand times that
         a second. Reports handed over together have the time since the report before them shared out evenly (ui_drag_follow), so a
         batch handed over at once is not a speed made of equal times.
 */
+// A speed (pixels a second) at the last report of a finger, for a lift that came gap ns after that report: as it was up to
+// UI_FLING_STALE_NS, then fallen by e for every UI_FLING_LATE_NS.
+static long ui_drag_late(long speed, positive gap)
+{
+        if (gap <= UI_FLING_STALE_NS)
+                return speed;
+        return (long)ui_qmul((b64)speed, ui_exp_neg((b64)(gap - UI_FLING_STALE_NS) * UI_ONE / (b64)UI_FLING_LATE_NS));
+}
+
 static long ui_drag_slope(long address_to num, long address_to den)
 {
         long whole, rest, unit;
@@ -1272,7 +1287,7 @@ static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
         if (drag->samples < 2)
                 return 0;
         last = drag->when[drag->samples - 1];
-        if (now > last && now - last > UI_FLING_STALE_NS)
+        if (now > last && now - last > UI_FLING_GONE_NS)
                 return 0;
         // The newest first: those within the horizon, and at least the last three while they are within 100 ms.
         for (int k = drag->samples - 1; k >= 0; k--)
@@ -1315,14 +1330,15 @@ static long ui_drag_fling(const struct ui_drag address_to drag, positive now)
         if (speed == 0 || (speed > 0) != (line > 0))
                 return 0;
         fastest += fastest / 4;
-        return speed > fastest ? fastest : speed < -fastest ? -fastest : speed;
+        speed = speed > fastest ? fastest : speed < -fastest ? -fastest : speed;
+        return ui_drag_late(speed, now > last ? now - last : 0);
 }
 
-// The release's velocity, for every drag (a finger, a trackpad's hand, a terminal's scrollback): the fit over its last reports, and
-// none when the finger stopped before it lifted (no report for 80 ms).
+// The release's velocity, for every drag (a finger, a trackpad's hand, a terminal's scrollback): the fit over its last reports, fallen
+// for a lift that came late, and none when the finger rested before it lifted (no report for UI_FLING_GONE_NS).
 static long ui_drag_velocity(const struct ui_drag address_to drag, positive now)
 {
-        if (now > drag->at && now - drag->at > 80000000ul)
+        if (now > drag->at && now - drag->at > UI_FLING_GONE_NS)
                 return 0;
         return ui_drag_fling(drag, now);
 }
@@ -1330,9 +1346,11 @@ static long ui_drag_velocity(const struct ui_drag address_to drag, positive now)
 static b32 ui_drag_let_go(struct ui_drag address_to drag)
 {
         positive now = (positive)ui_kit_time();
-        // A finger that stopped before it lifted throws nothing.
-        if (now > drag->at && now - drag->at > 80000000ul)
+        // A finger that stopped before it lifted throws nothing, and one whose lift came late throws what it was doing, less (ui_drag_late).
+        if (now > drag->at && now - drag->at > UI_FLING_GONE_NS)
                 drag->speed = 0;
+        else
+                drag->speed = ui_drag_late(drag->speed, now > drag->at ? now - drag->at : 0);
         drag->flying = drag->speed >= UI_DRAG_THROW || drag->speed <= -UI_DRAG_THROW;
         drag->owed = 0;
         drag->rate = (b64)drag->speed * UI_ONE;
