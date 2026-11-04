@@ -263,6 +263,7 @@ M = [
     ("pulse", "peak window one frame long","++r->window_count >= window", "++r->window_count > window"),
     ("pulse", "mono peaks never joined", "if (r->channels == 1)", "if (r->channels == 3)"),
     ("pulse", 'a move ignores the no-move request', 'if (s->no_move && !c->root)\n                                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                        if (audio_voice_retarget', 'if (audio_voice_retarget'),
+    ("pulse", 'remembered volumes keyed by name alone', "        key[n++] = '/';\n        if (n + pulse_len(app) + 1 > room)", "        n = 0;\n        key[n++] = '/';\n        if (n + pulse_len(app) + 1 > room)"),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
     ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute"),

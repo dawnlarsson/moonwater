@@ -2068,6 +2068,27 @@ static long pulse_find_sink(struct pulse *p, unsigned long index, const char *na
         return index < PULSE_SINKS && p->sink[index].used ? (long)index : -1;
 }
 
+// The key a program's remembered volume is kept under: its user and its name ("uid/name"). A program of another user with the
+// same name has its own, so one user's volume is never another's (the host keeps the key as the name it was given).
+static int pulse_app_key(const struct pulse_client *c, char *key, long room)
+{
+        char app[PULSE_VALUE + 1], digits[24];
+        long n = 0, v = c->uid, count = 0;
+
+        if (v < 0 || !pulse_props_text(&c->props, "application.name", app, sizeof(app)) || !app[0])
+                return 0;
+        do
+                digits[count++] = (char)('0' + v % 10);
+        while ((v /= 10) > 0);
+        while (count)
+                key[n++] = digits[--count];
+        key[n++] = '/';
+        if (n + pulse_len(app) + 1 > room)
+                return 0;
+        pulse_copy(key + n, room - n, app);
+        return 1;
+}
+
 static int pulse_command_create_playback(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
 {
         struct pulse_client *c = p->client[slot];
@@ -2174,12 +2195,11 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct puls
         else
         {
                 // A program that did not say remembers its volume by its name.
-                char app[PULSE_VALUE + 1];
+                char key[PULSE_VALUE + 16];
                 unsigned long remembered;
                 int mute_remembered;
 
-                pulse_props_text(&c->props, "application.name", app, sizeof(app));
-                if (p->host.recall && app[0] && p->host.recall(p->host.context, app, &remembered, &mute_remembered))
+                if (p->host.recall && pulse_app_key(c, key, sizeof(key)) && p->host.recall(p->host.context, key, &remembered, &mute_remembered))
                 {
                         for (long i = 0; i < channels; i++)
                                 s->volume[i] = remembered;
@@ -2252,11 +2272,11 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
                 pulse_stream_apply(s);
                 if (p->host.remember)
                 {
-                        char app[PULSE_VALUE + 1];
+                        char key[PULSE_VALUE + 16];
                         struct pulse_client *owner = s->client >= 0 ? p->client[s->client] : 0;
 
-                        if (owner && pulse_props_text(&owner->props, "application.name", app, sizeof(app)))
-                                p->host.remember(p->host.context, app, volume[0], s->muted);
+                        if (owner && pulse_app_key(owner, key, sizeof(key)))
+                                p->host.remember(p->host.context, key, volume[0], s->muted);
                 }
                 pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
         }
@@ -2334,11 +2354,11 @@ static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsig
                 pulse_stream_apply(s);
                 if (p->host.remember)
                 {
-                        char app[PULSE_VALUE + 1];
+                        char key[PULSE_VALUE + 16];
                         struct pulse_client *owner = s->client >= 0 ? p->client[s->client] : 0;
 
-                        if (owner && pulse_props_text(&owner->props, "application.name", app, sizeof(app)))
-                                p->host.remember(p->host.context, app, s->volume[0], mute);
+                        if (owner && pulse_app_key(owner, key, sizeof(key)))
+                                p->host.remember(p->host.context, key, s->volume[0], mute);
                 }
                 pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index);
         }
@@ -3112,12 +3132,13 @@ static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_re
         sample->playing++;
         for (long i = 0; i < PULSE_CHANNEL_MAX; i++)
                 s->volume[i] = volume == PULSE_INVALID ? AUDIO_VOLUME_NORM : volume > AUDIO_VOLUME_MAX ? AUDIO_VOLUME_MAX : volume;
-        if (volume == PULSE_INVALID && p->host.recall && pulse_props_text(&c->props, "application.name", value, sizeof(value)) && value[0])
+        if (volume == PULSE_INVALID && p->host.recall)
         {
+                char key[PULSE_VALUE + 16];
                 unsigned long remembered;
                 int mute_remembered;
 
-                if (p->host.recall(p->host.context, value, &remembered, &mute_remembered))
+                if (pulse_app_key(c, key, sizeof(key)) && p->host.recall(p->host.context, key, &remembered, &mute_remembered))
                 {
                         for (long i = 0; i < PULSE_CHANNEL_MAX; i++)
                                 s->volume[i] = remembered;

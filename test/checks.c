@@ -174281,6 +174281,14 @@ static long pt_last_slot;
 static unsigned long pt_recall_volume;
 static int pt_recall_mute, pt_recall_has;
 static char pt_remembered_name[300];
+// What the host remembers, by the name the engine asks under (the fake host keeps a table of them; pt_recall_has overrides it).
+static struct
+{
+        char name[300];
+        unsigned long volume;
+        int mute;
+} pt_memory[16];
+static int pt_memory_n;
 
 static void *pt_alloc(void *context, long bytes)
 {
@@ -174316,21 +174324,40 @@ static void pt_real(void *context, long *seconds, long *microseconds)
 static int pt_recall(void *context, const char *name, unsigned long *volume, int *mute)
 {
         (void)context;
-        (void)name;
-        if (!pt_recall_has)
-                return 0;
-        *volume = pt_recall_volume;
-        *mute = pt_recall_mute;
-        return 1;
+        if (pt_recall_has)
+        {
+                *volume = pt_recall_volume;
+                *mute = pt_recall_mute;
+                return 1;
+        }
+        for (int i = 0; i < pt_memory_n; i++)
+                if (!strcmp(pt_memory[i].name, name))
+                {
+                        *volume = pt_memory[i].volume;
+                        *mute = pt_memory[i].mute;
+                        return 1;
+                }
+        return 0;
 }
 
 static void pt_remember(void *context, const char *name, unsigned long volume, int mute)
 {
+        int at = -1;
+
         (void)context;
-        (void)volume;
-        (void)mute;
         pt_remembered_calls++;
         snprintf(pt_remembered_name, sizeof(pt_remembered_name), "%s", name);
+        for (int i = 0; i < pt_memory_n; i++)
+                if (!strcmp(pt_memory[i].name, name))
+                        at = i;
+        if (at < 0 && pt_memory_n < 16)
+                at = pt_memory_n++;
+        if (at >= 0)
+        {
+                snprintf(pt_memory[at].name, sizeof(pt_memory[at].name), "%s", name);
+                pt_memory[at].volume = volume;
+                pt_memory[at].mute = mute;
+        }
 }
 
 static void pt_changed(void *context, int what, long sink)
@@ -174354,6 +174381,7 @@ static void pt_reset(void)
         pt_recall_has = 0;
         pt_remembered_calls = 0;
         pt_changed_calls = 0;
+        pt_memory_n = 0;
 }
 
 /* ---- a client written from the wire ---- */
@@ -176093,7 +176121,7 @@ static void pt_test_memory(void)
         pt_vol(&w, 2, 0x6000);
         pt_command(slot, PULSE_COMMAND_SET_SINK_INPUT_VOLUME, 22, &w);
         pt_collect(slot);
-        PTCHECK(pt_remembered_calls == 1 && !strcmp(pt_remembered_name, "Remembered App"), "a change is remembered by the program's name: %s", pt_remembered_name);
+        PTCHECK(pt_remembered_calls == 1 && !strcmp(pt_remembered_name, "1000/Remembered App"), "a change is remembered by its user and the program's name: %s", pt_remembered_name);
         pulse_client_close(&pt_engine, slot);
         {
                 static unsigned char out[AUDIO_BLOCK * 4];
@@ -179752,6 +179780,43 @@ static void pt_test_no_move(void)
         pulse_client_close(&pt_engine, owner);
 }
 
+/* ---- a remembered volume belongs to its user: another user's program of the same name neither inherits it nor sets it ---- */
+
+static void pt_set_input_volume(long slot, unsigned long tag, unsigned long index, unsigned long volume)
+{
+        struct pt_w w = {{0}, 0};
+
+        pt_u32(&w, index);
+        pt_vol(&w, 2, volume);
+        pt_command(slot, PULSE_COMMAND_SET_SINK_INPUT_VOLUME, tag, &w);
+        pt_collect(slot);
+}
+
+static void pt_test_remember_users(void)
+{
+        unsigned long channel, missing, mine_first, mine_again, theirs;
+        long mine, other;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        mine = pt_connect(1000, 4800, 35, "Music");
+        other = pt_connect(1001, 4801, 35, "Music");
+        PTCHECK(pt_create(mine, 35, 20, 0, 0, 0, &channel, &mine_first, &missing, 0, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a program of user 1000 named Music is made");
+        pt_set_input_volume(mine, 21, mine_first, 0x4000);
+        PTCHECK(pt_expect_ack(21) && pulse_input_of(&pt_engine, mine_first)->volume[0] == 0x4000, "its volume is set to a quarter");
+
+        // User 1001's Music, which did not say its volume, is not given user 1000's remembered quarter.
+        PTCHECK(pt_create(other, 35, 22, 0, 0, 0, &channel, &theirs, &missing, 0, AUDIO_VOLUME_NORM, 0, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a program of user 1001 named Music is made");
+        PTCHECK(pulse_input_of(&pt_engine, theirs)->volume[0] == AUDIO_VOLUME_NORM, "and it plays at full volume, not at another user's remembered quarter (%lu)", pulse_input_of(&pt_engine, theirs)->volume[0]);
+
+        // Its own setting is user 1001's: user 1000's next Music keeps its quarter.
+        pt_set_input_volume(other, 23, theirs, 0xc000);
+        PTCHECK(pt_create(mine, 35, 24, 0, 0, 0, &channel, &mine_again, &missing, 0, AUDIO_VOLUME_NORM, 0, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "user 1000's next Music is made");
+        PTCHECK(pulse_input_of(&pt_engine, mine_again)->volume[0] == 0x4000, "and remembers its own quarter, not user 1001's three quarters (%lu)", pulse_input_of(&pt_engine, mine_again)->volume[0]);
+        pulse_client_close(&pt_engine, other);
+        pulse_client_close(&pt_engine, mine);
+}
+
 /* ---- frames cut anywhere: one feed, chunks of seven bytes, and single bytes answer the same, in order ---- */
 
 static long pt_split_tags(unsigned char *bytes, long n, long chunk, unsigned long *tags, long room)
@@ -180073,6 +180138,7 @@ int main(void)
         pt_test_feed_cut();
         pt_test_samples_full();
         pt_test_no_move();
+        pt_test_remember_users();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();
