@@ -131024,6 +131024,50 @@ static void check_compositor_wheel(void)
     }
 
     /*
+            A device's value is any 32 bits its maker chose, and a USB device is anyone's: a notch of 2^31 - 1 was
+            multiplied by 120 in an int, which wrapped to a notch the other way; two counts of it in a report were
+            added into an int that wrapped back left; and twenty reports of it at the fastest sensitivity (500
+            percent) in one read moved the place past 2^31 before the read was over and the pointer kept on a
+            screen. Each sum is held to WINDOW_COORD_MAX, the way the device said.
+    */
+    {
+        int was_flat = compositor.flat, was_sensitivity = compositor.sensitivity;
+
+        compositor.hires[0] = 0;
+        table->event_tail[1] = table->event_head[1];
+        wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_WHEEL, 0x7fffffff);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        sum = wheel_unread(1, &events, &last);
+        check("device: a notch of 2^31 - 1 turns the window the way the device said, as far as a turn is held to",
+              events == 1 && last == WINDOW_COORD_MAX);
+        table->event_tail[1] = table->event_head[1];
+        wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_X, 0x7fffffff);
+        wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_X, 0x7fffffff);
+        wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        compositor_input_read(0);
+        check("device: two counts of 2^31 - 1 to the right in one report put the pointer at the right edge, not back to the left",
+              compositor.pointer_x == GLASS_SIDE - 1 && compositor.pointer_y == 40);
+        compositor.pointer_x = 100;
+        compositor.flat = 0;
+        compositor.sensitivity = 500;
+        for (int report = 0; report < 20; report++)
+        {
+            wheel_feed(COMPOSITOR_EV_REL, COMPOSITOR_REL_X, 0x7fffffff);
+            wheel_feed(COMPOSITOR_EV_SYN, 0, 0);
+        }
+        compositor_input_read(0);
+        check("device: twenty reports of 2^31 - 1 at 500 percent in one read put the pointer at the right edge too",
+              compositor.pointer_x == GLASS_SIDE - 1 && compositor.pointer_y == 40);
+        compositor.flat = was_flat;
+        compositor.sensitivity = was_sensitivity;
+        compositor.pointer_x = 100;
+        compositor.pointer_y = 40;
+        compositor.cursor.magnify = compositor.cursor.magnified = 0;
+        table->event_tail[1] = table->event_head[1];
+    }
+
+    /*
             A button held over a window whose program goes is let go nowhere: the row is the next program's, which
             never had the press, and a release with no press is a click it did not get (a terminal reports it).
     */

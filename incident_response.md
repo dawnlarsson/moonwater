@@ -41,6 +41,44 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-120: a pointing device's 32-bit counts overflowed the compositor's sums of them
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Signed integer overflow (undefined behaviour) on device-supplied input; the wheel and the pointer moved the other way |
+| Attacker | (5) a physical peripheral: a USB HID device whose report descriptor declares 32-bit relative fields |
+| Moonwater exposure window | the wheel's `value * 120` and the counts' `raw_x += value` from `c793b422` / `34945374` (2026-10-11 19:16 +02:00 and 2026-10-12 08:42 +02:00), the place's `real_x += accel` from `c9d0df3b` (2026-11-02 19:23 +01:00), to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_counts`) |
+
+**What it was.** The compositor (root) reads every pointing device through evdev, whose `value` is any 32 bits the
+device sent; the kernel passes a HID device's relative fields through at the width its descriptor declares, so a USB
+device anyone can make reports REL_X or REL_WHEEL of 2^31 - 1. `compositor_input_read` multiplied a notch by 120 in an
+int (2^31 - 1 times 120 wraps to -120: a notch down became a notch up), added a report's counts into an int (two of
+2^31 - 1 wrapped to -2: the pointer went left), and `compositor_report` added each report's accelerated move into the
+place before the read ended and the pointer was kept on a screen (twenty reports at 500 percent pass 2^31). All three are
+undefined behaviour the optimizer may build on, in the root compositor's input path; with UBSan in trap mode the hosted
+fuzz of this pass trapped on the third within 20,000 steps.
+
+**Impact.** No memory was touched: every place is kept on a screen (`compositor_screen_keep_point`) before it is used as
+a coordinate. What a device could do was make the pointer and the wheel go the other way, which a device that is a
+keyboard already outdoes by typing. The fix is that the behaviour is defined, not a boundary closed.
+
+**The fix.** `compositor_counts` adds in 64 bits and holds the sum to `WINDOW_COORD_MAX` either way; the wheel's notch,
+the raw counts (a mouse's and a touchpad's) and the place after acceleration go through it. A device that reports what
+devices report sees no change: every legal value is far inside the bound.
+
+**Tests that fail without it.** `CHECK_terminal`, `check_compositor_wheel`, three `device:` rows: a notch of 2^31 - 1
+turns the window the way the device said (`last == WINDOW_COORD_MAX`; -120 before), two counts of 2^31 - 1 in a report
+put the pointer at the right edge (it went left before), and twenty reports of 2^31 - 1 at 500 percent in one read put it
+at the right edge too. Each of the three sums put back as it was turns its own row red (3573 checks, 1 failure each, gcc).
+
+**Still open.** Nothing of this class in the compositor's input path; a tablet's and a touch screen's places go through
+`compositor_tablet`, which was already bounded.
+
+
+
+
 ### MW-2026-131: the editor's save made a mode-0 file readable by all, and root's save of another user's set-id program root's
 
 | | |

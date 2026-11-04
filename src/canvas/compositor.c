@@ -2434,6 +2434,15 @@ static int compositor_accel(int delta, int *remainder, int gain)
         return (int)(scaled < -2147483647 ? -2147483647 : scaled > 2147483647 ? 2147483647 : scaled);
 }
 
+// A device's counts added up, held to WINDOW_COORD_MAX either way: an evdev value is any 32 bits a device (a USB one is
+// anyone's) chose, and two of them, or one past a place, overflowed the int they were added into.
+static int compositor_counts(int sum, long long more)
+{
+        long long total = (long long)sum + more;
+
+        return (int)(total > WINDOW_COORD_MAX ? WINDOW_COORD_MAX : total < -WINDOW_COORD_MAX ? -WINDOW_COORD_MAX : total);
+}
+
 /*
         The gain the hand has chosen: the curve's at the speed, or one to one when
         `moonwater mouse acceleration off` says the curve is not wanted, times the
@@ -14280,8 +14289,8 @@ static int compositor_report(positive now, positive stamp)
                 gain = compositor_gain_wanted(compositor_gain_of(dx, dy, now - compositor.stamp), compositor.flat,
                                               compositor.sensitivity);
                 compositor.stamp = now;
-                compositor.real_x += compositor_accel(dx, &compositor.accel_x, gain);
-                compositor.real_y += compositor_accel(dy, &compositor.accel_y, gain);
+                compositor.real_x = compositor_counts(compositor.real_x, compositor_accel(dx, &compositor.accel_x, gain));
+                compositor.real_y = compositor_counts(compositor.real_y, compositor_accel(dy, &compositor.accel_y, gain));
 #ifdef CONFIG_MOONWATER_WAYLAND
                 compositor_wl_hold_keep();
 #endif
@@ -14377,8 +14386,8 @@ static void compositor_pad_apply(unsigned int at, positive now)
 
         if (kind == 1)
         {
-                compositor.raw_x += x;
-                compositor.raw_y += y;
+                compositor.raw_x = compositor_counts(compositor.raw_x, x);
+                compositor.raw_y = compositor_counts(compositor.raw_y, y);
         }
         else if (kind == 2)
         {
@@ -14962,12 +14971,12 @@ static void compositor_input_read(unsigned int at)
 
                         if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
                         {
-                                compositor.raw_x += event->value;
+                                compositor.raw_x = compositor_counts(compositor.raw_x, event->value);
                                 if (compositor_shaken(event->value, now))
                                         compositor.cursor.magnify = 1;
                         }
                         else if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_Y)
-                                compositor.raw_y += event->value;
+                                compositor.raw_y = compositor_counts(compositor.raw_y, event->value);
                         else if (event->type == COMPOSITOR_EV_REL &&
                                  (event->code == COMPOSITOR_REL_WHEEL || event->code == COMPOSITOR_REL_HWHEEL ||
                                   event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI))
@@ -14981,7 +14990,8 @@ static void compositor_input_read(unsigned int at)
                                 if (fine || !(compositor.hires[at] >> sideways & 1))
                                 {
                                         compositor.table->input_wheel_used[at]++;
-                                        compositor_wheel(fine ? event->value : event->value * 120, sideways);
+                                        compositor_wheel(compositor_counts(0, fine ? (long long)event->value : (long long)event->value * 120),
+                                                         sideways);
                                 }
                         }
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
