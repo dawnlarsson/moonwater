@@ -6406,6 +6406,10 @@ static unsigned int compositor_enums_of(unsigned int object, unsigned int type, 
                 *id = ids[at];
                 property.enums = (unsigned long)enums;
                 property.count_enums = room;
+                // The values are not wanted: the first call left their count in, and the kernel puts that many through the
+                // pointer, which is null, so the call failed (EFAULT) and no card's rotation was ever found.
+                property.values = 0;
+                property.count_values = 0;
                 if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
                         return 0;
                 return property.count_enums < room ? property.count_enums : room;
@@ -6427,8 +6431,12 @@ static int compositor_rotation_hardware(unsigned int crtc_index, unsigned int de
                 unsigned long ids;
                 unsigned int count, pad;
         } resources = {(unsigned long)planes, 32, 0};
+        // DRM_CLIENT_CAP_ATOMIC, which the turn's commit needs and which brings every plane with it: without it the card lists
+        // no primary plane, and the first take of the screens is before compositor_overlay_ready has ever asked for it.
+        unsigned long cap[2] = {3, 1};
 
-        if (system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 32)
+        if (system_control(compositor.card, COMPOSITOR_SET_CLIENT_CAP, address_of cap) != 0 ||
+            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 32)
                 return 0;
         for (unsigned int at = 0; at < resources.count; at++)
         {
@@ -7783,6 +7791,9 @@ static b32 compositor_connected_read(struct compositor_connected *found)
         return 0;
 }
 
+// The displays file, /root's, and a check's own.
+static const char *compositor_displays_path = SETTING_CANVAS_DISPLAYS_PATH;
+
 // Reads the displays file into compositor_display. What is bad in it is said on the kernel log (report), line by line:
 // the field and the screen it is on, which is kept at its default.
 static void compositor_displays_read(int report)
@@ -7792,7 +7803,7 @@ static void compositor_displays_read(int report)
         unsigned int bits[] = {WINDOWS_DISPLAY_NAME, WINDOWS_DISPLAY_ROTATION, WINDOWS_DISPLAY_REFRESH, WINDOWS_DISPLAY_X,
                                WINDOWS_DISPLAY_Y, WINDOWS_DISPLAY_OTHER};
 
-        compositor_text(SETTING_CANVAS_DISPLAYS_PATH, text, sizeof(text));
+        compositor_text(compositor_displays_path, text, sizeof(text));
         compositor_displays = windows_displays_read(text, compositor_display, WINDOWS_DISPLAYS);
         for (unsigned int each = 0; report && each < compositor_displays; each++)
                 for (unsigned int bit = 0; bit < sizeof(bits) / sizeof(bits[0]); bit++)
@@ -8223,7 +8234,9 @@ static b32 compositor_space_take(int first)
                                                              &compositor.output[at].turn_plane,
                                                              &compositor.output[at].turn_property,
                                                              &compositor.output[at].turn_value) ? 1 : 2;
-                        if (compositor.output[at].turned == 2 &&
+                        // A screen the card turns has the buffer of one Canvas turns too: it is set up as that one is, and is
+                        // that one if the card refuses the turn (below).
+                        if (compositor.output[at].turned &&
                             !compositor_turn_buffer(at, (unsigned int)found.mode[n].hdisplay, (unsigned int)found.mode[n].vdisplay,
                                                     &retired[at]))
                         {
@@ -8289,29 +8302,50 @@ static b32 compositor_space_take(int first)
                 compositor_damage_space();
                 compositor_present();
 
+                /*
+                        A turned screen is set up on its own buffer, the panel's size, from the origin: a screen Canvas turns
+                        is shown from it, whole, and one the card turns starts there too, since its mode set on the scanout
+                        with the plane not turned yet is a viewport the space does not hold (a quarter turn's panel is the
+                        space's height wide), which the kernel refuses. A plane still turned from before (a compositor
+                        started again) refuses that buffer the same way, and then the scanout is the one that fits.
+                */
+                unsigned int on_scanout = 0;
+
                 for (unsigned int at = 0; at < lit; at++)
                 {
-                        // A screen Canvas turns is shown from its own buffer, whole: its crtc reads from the origin.
-                        unsigned int from_x = compositor.output[at].turned == 2 ? 0 : (unsigned int)screens[at][0];
-                        unsigned int from_y = compositor.output[at].turned == 2 ? 0 : (unsigned int)screens[at][1];
+                        int turned = compositor.output[at].turned != 0;
+                        unsigned int fb_of = compositor.output[at].fb ? compositor.output[at].fb : compositor.fb;
                         struct compositor_crtc set = {(unsigned long)address_of compositor.output[at].connector, 1,
                                                       compositor.output[at].crtc,
-                                                      compositor.output[at].fb ? compositor.output[at].fb : compositor.fb,
-                                                      from_x, from_y, 0, 1, compositor.output[at].mode};
+                                                      turned ? compositor_turns[at].fb : fb_of,
+                                                      turned ? 0 : (unsigned int)screens[at][0],
+                                                      turned ? 0 : (unsigned int)screens[at][1], 0, 1, compositor.output[at].mode};
 
-                        if (system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set) != 0)
+                        if (system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set) == 0)
+                                continue;
+                        set.fb_id = fb_of, set.x = (unsigned int)screens[at][0], set.y = (unsigned int)screens[at][1];
+                        if (compositor.output[at].turned == 1 && system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set) == 0)
+                                on_scanout |= 1u << at;
+                        else
                                 refused |= 1u << order[at];
                 }
-                // The screens the card turns are turned by their plane once their crtcs are set: a refusal turns it in software.
+                // The screens the card turns are turned by their plane once their crtcs are set: a refusal leaves one on its
+                // own buffer turned in software, and one the plane already turned as the plane has it.
                 for (unsigned int at = 0; at < lit; at++)
                 {
                         unsigned int fb_of = compositor.output[at].fb ? compositor.output[at].fb : compositor.fb;
                         int source[2] = {screens[at][0], screens[at][1]};
 
-                        if (compositor.output[at].turned == 1 &&
+                        if (compositor.output[at].turned == 1 && !(refused >> order[at] & 1) &&
                             !compositor_rotate_commit(&compositor.output[at], source, (unsigned int)screens[at][2],
-                                                      (unsigned int)screens[at][3], fb_of))
+                                                      (unsigned int)screens[at][3], fb_of) &&
+                            !(on_scanout >> at & 1))
+                        {
+                                // Its buffer was not drawn by the present above, which the card was to turn: the next one draws it.
                                 compositor.output[at].turned = 2;
+                                compositor.output[at].fb = compositor_turns[at].fb;
+                                compositor_damage_space();
+                        }
                         if (compositor.output[at].turned && compositor.output[at].degrees)
                                 compositor_turn_say(compositor.output[at].name, compositor.output[at].degrees,
                                                     compositor.output[at].turned == 1);

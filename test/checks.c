@@ -121984,6 +121984,7 @@ static struct
         unsigned int asked[64], asked_count;       // the connectors GETCONNECTOR was asked of
         unsigned short width, height;              // the panel's one mode
         int rotation, refuse_atomic;               // the plane lists a rotation property; the card refuses every commit
+        int universal, atomic;                     // the client asked for every plane (the primary is listed), for commits
         unsigned long plane_rotation;              // the plane's turn: the bit the last commit set, rotate-0's at the start
         unsigned int edid_length;
         unsigned char edid[33024];
@@ -122172,10 +122173,21 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                         unsigned int count, pad;
                 } address_to r = (void address_to)argument;
 
-                if (r->count >= 1 && r->ids)
+                // The primary plane is listed only to a client that asked for every plane (universal planes, or atomic).
+                if (card_fake.universal && r->count >= 1 && r->ids)
                         ((unsigned int address_to)r->ids)[0] = CARD_FAKE_PLANE;
-                r->count = 1;
+                r->count = card_fake.universal ? 1 : 0;
                 return 0;
+        }
+        case COMPOSITOR_SET_CLIENT_CAP:
+        {
+                const unsigned long address_to cap = (const unsigned long address_to)argument;
+
+                if ((cap[0] == 2 || cap[0] == 3) && cap[1])
+                        card_fake.universal = 1;
+                if (cap[0] == 3 && cap[1])
+                        card_fake.atomic = 1;
+                return cap[0] == 2 || cap[0] == 3 ? 0 : -22;
         }
         case COMPOSITOR_GETPLANE:
         {
@@ -122264,6 +122276,8 @@ static bipolar card_fake_control(positive handle, positive request, positive arg
                 unsigned int at = 0;
 
                 card_fake.atomics++;
+                if (!card_fake.atomic)
+                        return -95; // EOPNOTSUPP: the client did not ask for commits
                 if (card_fake.refuse_atomic)
                         return -22;
                 for (unsigned int object = 0; object < a->count; object++)
@@ -128984,6 +128998,102 @@ static void check_compositor_card_lists(void)
     check("card lists: connectors that came between the two calls are not read past the list the kernel wrote",
           unlisted == 0 && card_fake.asked_count >= 2 && found.count == 1 && found.connector[0] == CARD_FAKE_CONNECTOR);
     card_fake_close();
+}
+
+/*
+        A screen its displays line turns a quarter (a panel built portrait, the Steam Deck's), on a card whose primary plane can
+        turn: the plane's rotation property was asked for with the count of its values the first call left and a null pointer
+        for them, which the kernel faults on, so no card's turn was ever found and every turned screen was turned in software;
+        and found, the turn would have failed, since the mode was set on the scanout with the plane not turned yet (a viewport
+        the space does not hold) and a refused turn fell back with no buffer to turn into. Now the card turns it; started
+        again on a plane still turned it still does; and a card that refuses the turn has it turned in software, on its own
+        buffer, from the origin.
+*/
+static int card_turn_take(int refuse, b32 fresh)
+{
+    b32 status;
+
+    if (fresh)
+    {
+        card_fake_close();
+        if (!card_fake_open(800, 1280))
+            return -1;
+        card_fake.rotation = 1;
+    }
+    card_fake.refuse_atomic = refuse;
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(compositor_turns, sizeof(compositor_turns));
+    compositor.card = card_fake.fd;
+    compositor.scale = 100;
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    status = compositor_space_take(1);
+    return (int)status;
+}
+
+static fn card_turn_drop(void)
+{
+    if (compositor.scanout)
+        compositor_call(syscall(munmap), (positive)compositor.scanout, compositor.scanout_bytes, 0, 0, 0, 0);
+    for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
+        if (compositor_turns[at].pixels)
+            compositor_call(syscall(munmap), (positive)compositor_turns[at].pixels, compositor_turns[at].bytes, 0, 0, 0, 0);
+    if (compositor.mirror)
+        compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
+    memory_zero(&compositor, sizeof(compositor));
+    memory_zero(compositor_turns, sizeof(compositor_turns));
+    compositor.card = -1;
+}
+
+static void check_compositor_card_turn(void)
+{
+    static const char path[] = "compositor-card-turn.tmp", line[] = "eDP-1 rotation=90\n";
+    bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, FILE_READ_WRITE | FILE_CREATE | O_TRUNC | O_CLOEXEC, 0600);
+    unsigned int plane = 0, property = 0;
+    unsigned long value = 0;
+    int status;
+
+    if (handle < 0)
+    {
+        check("card turn: the displays line is written", false);
+        return;
+    }
+    system_write_once(handle, line, sizeof(line) - 1);
+    system_close(handle);
+    compositor_displays_path = path;
+    memory_zero(&compositor, sizeof(compositor));
+    if (!card_fake_open(800, 1280))
+    {
+        check("card turn: the fake card is made", false);
+        return;
+    }
+    card_fake.rotation = 1;
+    check("card turn: the plane's rotation property is read, and a quarter turn is the card's",
+          compositor_rotation_hardware(0, 90, &plane, &property, &value) && plane == CARD_FAKE_PLANE && property == 12 && value == 2);
+
+    status = card_turn_take(0, true);
+    check("card turn: a screen turned a quarter is taken, the plane turning the scanout, with no mode refused",
+          status == 0 && compositor.outputs == 1 && compositor.output[0].turned == 1 && card_fake.plane_rotation == 2 &&
+              card_fake.crtc_fb == compositor.fb && card_fake.atomic_fb == compositor.fb && !card_fake.refused &&
+              compositor.width == 1280 && compositor.height == 800);
+    card_turn_drop();
+
+    status = card_turn_take(0, false);
+    check("card turn: started again on the plane still turned, it is taken turned by the card",
+          status == 0 && compositor.output[0].turned == 1 && card_fake.plane_rotation == 2 && card_fake.crtc_fb == compositor.fb);
+    card_turn_drop();
+
+    status = card_turn_take(1, true);
+    check("card turn: a card that refuses the turn has it turned in software, on its own buffer from the origin",
+          status == 0 && compositor.output[0].turned == 2 && compositor_turns[0].pixels && compositor_turns[0].fb &&
+              card_fake.crtc_fb == compositor_turns[0].fb && card_fake.crtc_x == 0 && card_fake.crtc_y == 0 &&
+              compositor.output[0].fb == compositor_turns[0].fb);
+    card_turn_drop();
+
+    card_fake_close();
+    compositor_displays_path = SETTING_CANVAS_DISPLAYS_PATH;
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
 }
 
 /*
@@ -158247,6 +158357,7 @@ b32 main()
         check_compositor_least_scale();
         check_compositor_touch_hold_gone();
         check_compositor_card_lists();
+        check_compositor_card_turn();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();
