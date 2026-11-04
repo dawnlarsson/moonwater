@@ -223140,6 +223140,18 @@ static void iss_rows_kernel_board(void)
         check("kernel notices: an error is kept until it is dismissed, however long ago it was", windows_issues_worst(&copy, "canvas gpu", null) == WINDOWS_ISSUE_ERROR);
 }
 
+// The radio states rfkill gives (window.c's radio_key_of_type and radio_blocked_detail): a Wi-Fi or Bluetooth switch that blocks is on its key,
+// a block in hardware says to turn the switch, and a type that is no radio of Settings' is none.
+static void iss_rows_radio(void)
+{
+        check("radio: a Wi-Fi radio is under the wifi key, a Bluetooth one under bluetooth", string_equals((string_address)radio_key_of_type("wlan"), (string_address)"wifi") &&
+              string_equals((string_address)radio_key_of_type("bluetooth"), (string_address)"bluetooth"));
+        check("radio: another type is no radio of Settings'", radio_key_of_type("wwan") == null && radio_key_of_type("nfc") == null);
+        check("radio: a radio that is not blocked is no issue", radio_blocked_detail("wlan", 0, 0) == null);
+        check("radio: a block in software says how to unblock", radio_blocked_detail("wlan", 1, 0) != null && string_compare((string_address)radio_blocked_detail("wlan", 1, 0), (string_address)"blocked in software (rfkill): run rfkill unblock wifi (or bluetooth)") == 0);
+        check("radio: a block in hardware is said to be the switch", radio_blocked_detail("bluetooth", 0, 1) != null && string_length((string_address)radio_blocked_detail("bluetooth", 0, 1)) > 20);
+}
+
 b32 main(void)
 {
         iss_rows_basic();
@@ -223150,6 +223162,7 @@ b32 main(void)
         iss_rows_metrics();
         iss_rows_kernel();
         iss_rows_kernel_board();
+        iss_rows_radio();
         return test_report(null);
 }
 #endif /* CHECK_issues */

@@ -571,6 +571,7 @@ enum windows_issue_code
         WINDOWS_ISSUE_KERNEL_STORAGE,   // nvme, the filesystems and the block layer (under storage)
         WINDOWS_ISSUE_KERNEL_SYSTEM,    // memory (out of memory, BUG, Oops), thermal and machine checks (under system notices)
         WINDOWS_ISSUE_KERNEL_PROGRAM,   // a program that crashed (under system notices)
+        WINDOWS_ISSUE_RADIO,            // a radio is blocked by rfkill (under wifi or bluetooth): the detail says which switch
         WINDOWS_ISSUE_COUNT
 };
 typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
@@ -581,7 +582,7 @@ static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
         "the kernel has no userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR)", "the audio sink did not open", "the audio sink refused the rate",
         "a prerequisite of the GPU path failed", "a kernel notice about the GPU", "a kernel notice about USB", "a kernel notice about Wi-Fi",
         "a kernel notice about Bluetooth", "a kernel notice about audio", "a kernel notice about storage", "a kernel notice about the system",
-        "a program crashed"};
+        "a program crashed", "a radio is blocked (rfkill)"};
 
 struct windows_issue
 {
@@ -3670,6 +3671,82 @@ static void places_note(struct places *places, const struct place_kept *kept)
 */
 #define WINDOWS_TAKING 0x80000000u
 
+
+// The radio a type of rfkill switch is for, as the Settings key its issue is under (window.c's WINDOWS_KEY_GPU style), or null for a type that is none
+// of the radios Settings has a row for. A radio blocked by a switch, in software or in hardware, is the fault; the detail says which.
+static const char *radio_key_of_type(const char *type)
+{
+        if (type && string_equals((string_address)type, (string_address)"wlan"))
+                return "wifi";
+        if (type && string_equals((string_address)type, (string_address)"bluetooth"))
+                return "bluetooth";
+        return null;
+}
+
+static const char *radio_blocked_detail(const char *type, int soft, int hard)
+{
+        if (!radio_key_of_type(type) || (!soft && !hard))
+                return null;
+        if (hard)
+                return "blocked by its hardware switch: turn the radio on at the switch";
+        return "blocked in software (rfkill): run rfkill unblock wifi (or bluetooth)";
+}
+
+// Reads a small file of sysfs, whole, into buf (ended): its length, or -1.
+static long radio_read_file(const char *path, char *buf, unsigned int room)
+{
+        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0), got = -1;
+
+        if (file < 0)
+                return -1;
+        got = window_call(WINDOW_SYS_READ, file, (long)buf, room - 1, 0, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        if (got < 0)
+                return -1;
+        buf[got] = 0;
+        for (long i = 0; i < got; i++)
+                if (buf[i] == '\n')
+                        buf[i] = 0, got = i;
+        return got;
+}
+
+// The path of one of an rfkill switch's files (/sys/class/rfkill/rfkillN/leaf), for N of one digit.
+static void radio_path(char *path, unsigned int room, unsigned int n, const char *leaf)
+{
+        string_copy_bounded((string_address)path, (string_address)"/sys/class/rfkill/rfkill", room);
+        path[24] = (char)('0' + (n % 10)), path[25] = 0;
+        string_append_bounded((string_address)path, (string_address)"/", room);
+        string_append_bounded((string_address)path, (string_address)leaf, room);
+}
+
+// The rfkill switches (/sys/class/rfkill, eight at most): a radio that is blocked is on the board under its key, and one that is not is cleared.
+// Read once a second with the kernel's records (kernel_notices_tick).
+static void radio_state_tick(struct windows *table)
+{
+        if (!table)
+                return;
+        for (unsigned int n = 0; n < 8; n++)
+        {
+                char type[16], soft[4], hard[4], path[64];
+                const char *key, *detail;
+
+                radio_path(path, sizeof(path), n, "type");
+                if (radio_read_file(path, type, sizeof(type)) < 0 || !(key = radio_key_of_type(type)))
+                        continue;
+                radio_path(path, sizeof(path), n, "soft");
+                if (radio_read_file(path, soft, sizeof(soft)) < 0)
+                        soft[0] = 0;
+                radio_path(path, sizeof(path), n, "hard");
+                if (radio_read_file(path, hard, sizeof(hard)) < 0)
+                        hard[0] = 0;
+                detail = radio_blocked_detail(type, soft[0] == '1', hard[0] == '1');
+                if (detail)
+                        windows_issue_set(table, key, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_RADIO, 0, 0, detail);
+                else
+                        windows_issue_clear(table, key, WINDOWS_ISSUE_RADIO);
+        }
+}
+
 // One tick of the feeder (once a second from the compositor): reads up to KERNEL_NOTICE_MOST records from /dev/kmsg without waiting, counts
 // them, and publishes. /dev/kmsg is opened on the first tick (the compositor is root); a kernel that does not give it is not asked again.
 static void kernel_notices_tick(struct windows *table, unsigned long long now)
@@ -3692,6 +3769,7 @@ static void kernel_notices_tick(struct windows *table, unsigned long long now)
                 kernel_notices_record(k, record, (unsigned int)got, now);
         }
         kernel_notices_publish(table, k, now);
+        radio_state_tick(table);
 }
 
 /*
