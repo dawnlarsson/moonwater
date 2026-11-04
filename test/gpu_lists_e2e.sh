@@ -47,6 +47,8 @@ session()
         cd "$work" || return 1
         if [ "$mode" = off ]; then
                 echo off > /root/canvas.gpu
+        else
+                : > /run/moonwater/lists # the lists are off without it (the compositor looks for it)
         fi
         bin/compositor -H 800x600 "$work/$mode.img" -G > "$work/$mode.compositor.log" 2>&1 &
         cpid=$!

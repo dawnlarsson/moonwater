@@ -7595,14 +7595,34 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
 
 static void compositor_lists_set(int on);
 
-// List mode follows the card: on while it composes (started, not given up) and the setting has it, off otherwise, so that a program records its frames as lists only
-// while the compositor can draw them. The table is changed when the card's state does (compositor_lists_set knocks every window), not made to agree with it at
-// every present: the card going away (a hang's cool-down, canvas gpu off) puts every window back to painting its own pixels, and a check that sets the mode itself
-// to draw lists with a renderer of its own is not undone by a present on a machine with no card.
+// List mode follows the card: on while it composes (started, not given up), the setting has it and the switch is there, off otherwise, so that a program records
+// its frames as lists only while the compositor can draw them. The table is changed when the card's state does (compositor_lists_set knocks every window), not
+// made to agree with it at every present: the card going away (a hang's cool-down, canvas gpu off) puts every window back to painting its own pixels, and a check
+// that sets the mode itself to draw lists with a renderer of its own is not undone by a present on a machine with no card.
+//
+// THE SWITCH: the file /run/moonwater/lists. The apps' lists are off until it is there (looked for every 32nd present), because a window drawn from lists
+// flickered under a hand on a machine with a card (2026-11-04: frames mixed with the program's pixels, a picture written in place); they are turned on by default
+// once the lists lane (test/gpu_lists_e2e.sh) shows no frame differing from the processor's under input.
+static int compositor_lists_switch(void)
+{
+        static unsigned int probes;
+        static int on;
+
+        if ((probes++ & 31) == 0)
+        {
+                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists", FILE_READ | O_CLOEXEC);
+
+                on = handle >= 0;
+                if (handle >= 0)
+                        system_close(handle);
+        }
+        return on;
+}
+
 static void compositor_gpu_lists_sync(void)
 {
         static int was;
-        int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead;
+        int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && compositor_lists_switch();
 
         if (compositor.table && want != was)
                 was = want, compositor_lists_set(want);
