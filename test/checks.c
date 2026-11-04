@@ -133677,18 +133677,25 @@ static void check_ui_press(void)
         function of them; no key that would start a program is pressed.
 */
 #if MOONWATER_UI_LAUNCHER
+/* The loop's way to a launcher event: the kit's event context first (the window's pointer is the last motion's place). */
+static b32 launcher_send(const struct window_event address_to event)
+{
+        ui_event_context(event);
+        return launcher_event(event);
+}
+
 static b32 launcher_typed(unsigned int code)
 {
         struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, (int)code};
 
-        return launcher_event(&event); // as the loop sends it: the layout of the list first
+        return launcher_send(&event); // as the loop sends it: the layout of the list first
 }
 
 static b32 launcher_pressed(int key, unsigned int flags)
 {
         struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, 0};
 
-        return launcher_event(&event);
+        return launcher_send(&event);
 }
 
 /*
@@ -134044,13 +134051,13 @@ static fn check_launcher(void)
                 struct window_event lift = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
                 b32 pressed;
 
-                launcher_event(&finger);
-                launcher_event(&land);
+                launcher_send(&finger);
+                launcher_send(&land);
                 pressed = ui_pressed(&launcher.list.press, 1) && launcher.list.focus == 1;
                 finger.b += 3 * UI_ROW * launcher.ui.scale / 100;
-                launcher_event(&finger);
+                launcher_send(&finger);
                 check("launcher: a finger shows the row it lands on pressed, and run nothing as it slides off",
-                      pressed && !ui_pressed(&launcher.list.press, 1) && launcher_event(&lift) && !launcher.list.press.down);
+                      pressed && !ui_pressed(&launcher.list.press, 1) && launcher_send(&lift) && !launcher.list.press.down);
                 check("launcher: a row is a finger's least height", UI_ROW >= 40);
         }
 #endif
@@ -134116,33 +134123,33 @@ static fn check_launcher(void)
                 motion = (struct window_event){WINDOW_EVENT_MOTION, 0, ax, ay};
                 land = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
-                launcher_event(&motion);
-                launcher_event(&land);
-                check("launcher: a click on Power off arms it and starts nothing", launcher_event(&lift) && launcher.power.confirm.armed && !launcher.power_runs);
+                launcher_send(&motion);
+                launcher_send(&land);
+                check("launcher: a click on Power off arms it and starts nothing", launcher_send(&lift) && launcher.power.confirm.armed && !launcher.power_runs);
                 motion.b = 2, motion.a = 2;
-                launcher_event(&motion);
-                launcher_event(&land);
-                launcher_event(&lift);
+                launcher_send(&motion);
+                launcher_send(&land);
+                launcher_send(&lift);
                 check("launcher: a click elsewhere drops it", !launcher.power.confirm.armed);
                 motion.a = bx, motion.b = by;
-                launcher_event(&motion);
-                launcher_event(&land);
-                launcher_event(&lift);
+                launcher_send(&motion);
+                launcher_send(&land);
+                launcher_send(&lift);
                 check("launcher: a click on Restart arms Restart and not another", launcher.power.confirm.armed && launcher.power.confirm.what == 2);
-                launcher_event(&land);
+                launcher_send(&land);
                 check("launcher: the next click on it starts the shell's reboot once, and the bar goes",
-                      !launcher_event(&lift) && launcher.power_runs == 1 && launcher_waits(started_path, 1) && launcher_started_is(started_path, "/shell -c reboot \n"));
+                      !launcher_send(&lift) && launcher.power_runs == 1 && launcher_waits(started_path, 1) && launcher_started_is(started_path, "/shell -c reboot \n"));
                 launcher_type_text("ls");
                 launcher_layout();
                 motion = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, ax, ay};
                 land = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
                 lift = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
-                launcher_event(&motion);
-                launcher_event(&land);
-                launcher_event(&lift);
-                launcher_event(&land);
+                launcher_send(&motion);
+                launcher_send(&land);
+                launcher_send(&lift);
+                launcher_send(&land);
                 check("launcher: two taps of a finger on Power off start the shell's poweroff once",
-                      !launcher_event(&lift) && launcher.power_runs == 2 && launcher_waits(started_path, 2) &&
+                      !launcher_send(&lift) && launcher.power_runs == 2 && launcher_waits(started_path, 2) &&
                           launcher_started_is(started_path, "/shell -c reboot \n/shell -c poweroff \n"));
                 system_remove_at(AT_FDCWD, started_path, 0);
         }
@@ -151544,7 +151551,7 @@ static fn check_glass_pieces(string_address regular)
         launcher.own.table = &table;
         launcher.ui = ui;
         launcher.width = LAUNCHER_WIDTH, launcher.height = 240;
-        launcher.focused = launcher.had_focus = true;
+        launcher.focused = true, launcher_app.had_keys = true;
         launcher_type_text("ls");
         launcher_layout();
         launcher_draw((unsigned int address_to)picture);
@@ -153712,7 +153719,7 @@ static fn check_kit_defaults(struct ui address_to wui)
             {"src/canvas/ui/editor.c", "Ctrl+W again"},           {"src/canvas/ui/editor.c", "UI_SEARCH_H"},
             {"src/canvas/ui/launcher.c", "UI_SEARCH_H"},          {"src/canvas/ui/launcher.c", "(row == launcher.press.target ? row : -1)"},
             {"src/canvas/ui/launcher.c", "ui_press_begin("}, {"src/canvas/ui/launcher.c", "ui_press_end("}, {"src/canvas/ui/launcher.c", "ui_press_move("},
-            {"src/canvas/ui/launcher.c", "ui_list_let_go("}, {"src/canvas/ui/launcher.c", "ui_list_press_slide("}, {"src/canvas/ui/launcher.c", "ui_list_pointer("}, {"src/canvas/ui/settings.c", "(settings.list.down == settings.press.target))"},
+            {"src/canvas/ui/launcher.c", "ui_list_let_go("}, {"src/canvas/ui/launcher.c", "ui_list_press_slide("}, {"src/canvas/ui/launcher.c", "ui_list_pointer("}, {"src/canvas/ui/launcher.c", "launcher.pointer_x"}, {"src/canvas/ui/launcher.c", "had_focus"}, {"src/canvas/ui/launcher.c", "launcher_focus("}, {"src/canvas/ui/settings.c", "(settings.list.down == settings.press.target))"},
             {"src/canvas/ui/terminal.c", "TERMINAL_CLICKS_NS"},   {"src/canvas/ui/terminal.c", "terminal.click_row"},
             {"src/canvas/ui/ui.c", "UI_SEARCH_H"}};
         positive copied = 0;
@@ -154005,21 +154012,21 @@ static fn check_field_hands(string_address regular)
                 launcher.own.table = &table;
                 launcher.ui = ui;
                 launcher.width = LAUNCHER_WIDTH;
-                launcher.focused = launcher.had_focus = true;
+                launcher.focused = true, launcher_app.had_keys = true;
                 launcher_type_text("lsof");
                 launcher_draw((unsigned int address_to)pixels);
-                launcher_event(&move);
-                launcher_event(&press);
-                launcher_event(&release);
+                launcher_send(&move);
+                launcher_send(&press);
+                launcher_send(&release);
                 launcher_typed('X');
                 check("launcher: a click in the field puts the caret there, and a key types there", launcher_holds("lsXof"));
                 // From the well's padding, left of the text, across it and past its end.
                 move.a = left - 8;
-                launcher_event(&move);
-                launcher_event(&press);
+                launcher_send(&move);
+                launcher_send(&press);
                 move.a = left + 200;
-                launcher_event(&move);
-                launcher_event(&release);
+                launcher_send(&move);
+                launcher_send(&release);
                 launcher_typed('k');
                 check("launcher: a drag across the field selects it, and a key types over it", launcher_holds("k"));
                 // A finger's long press in the field selects its word, and the picture the launcher draws has the handles and the
@@ -154032,12 +154039,12 @@ static fn check_field_hands(string_address regular)
 
                         launcher_type_text("lsof");
                         launcher_draw((unsigned int address_to)pixels);
-                        launcher_event(&at);
-                        launcher_event(&down);
-                        launcher_event(&taken);
-                        launcher_event(&right);
-                        launcher_event(&right_up);
-                        launcher_event(&taken);
+                        launcher_send(&at);
+                        launcher_send(&down);
+                        launcher_send(&taken);
+                        launcher_send(&right);
+                        launcher_send(&right_up);
+                        launcher_send(&taken);
                         launcher_draw((unsigned int address_to)pixels);
                         check("launcher: a finger's long press in the field selects its word, and the picture shows its handles and the actions bar",
                               launcher_holds("lsof") && launcher.field.handles && launcher.field.bar_up && launcher.field.bar_count == 3);
@@ -154058,18 +154065,18 @@ static fn check_field_hands(string_address regular)
                         int row_y = ui_list_row_y(&launcher.list, 0) + ui_px(&launcher.ui, UI_ROW) / 2, row_x = left + 100;
                         struct window_event on = {WINDOW_EVENT_MOTION, 0, row_x, row_y}, off = {WINDOW_EVENT_MOTION, 0, row_x, row_y + 400};
 
-                        launcher_event(&on);
-                        check("launcher: a press on a row shows it pressed and runs nothing", launcher_event(&press) && launcher.list.down == 0 && launcher.list.press.down);
-                        launcher_event(&off);
+                        launcher_send(&on);
+                        check("launcher: a press on a row shows it pressed and runs nothing", launcher_send(&press) && launcher.list.down == 0 && launcher.list.press.down);
+                        launcher_send(&off);
                         check("launcher: a press slid off its row shows none", launcher.list.down < 0 && launcher.list.press.down);
                         launcher.dirty = false;
-                        launcher_event(&on);
+                        launcher_send(&on);
                         check("launcher: and shows it again on coming back to it, and is drawn again", launcher.list.down == 0 && launcher.dirty);
-                        launcher_event(&off);
-                        check("launcher: a release off the row runs nothing", launcher_event(&release) && !launcher.list.press.down && launcher.list.down < 0);
-                        launcher_event(&on);
-                        launcher_event(&press);
-                        check("launcher: a release on the row runs it", !launcher_event(&release) && !launcher.list.press.down);
+                        launcher_send(&off);
+                        check("launcher: a release off the row runs nothing", launcher_send(&release) && !launcher.list.press.down && launcher.list.down < 0);
+                        launcher_send(&on);
+                        launcher_send(&press);
+                        check("launcher: a release on the row runs it", !launcher_send(&release) && !launcher.list.press.down);
                 }
                 // A row's press ripples from where it went down, as every list's row does (ui_list_click, ui_list_pointer). The kit
                 // makes no ripple in motion, so it is cleared for this press, and the press is let go off its row, which runs nothing.
@@ -154080,12 +154087,12 @@ static fn check_field_hands(string_address regular)
                         struct ui_control address_to own;
 
                         ui_kit.motion = 0;
-                        launcher_event(&on);
-                        launcher_event(&press);
+                        launcher_send(&on);
+                        launcher_send(&press);
                         own = ui_list_control(&launcher.list, 0, 0);
                         check("launcher: a press on a row ripples from the press, as every list row does", own && (own->ripple[0].live || own->ripple[1].live || own->ripple[2].live));
-                        launcher_event(&off);
-                        check("launcher: a press let go off its row runs nothing and leaves no press", launcher_event(&release) && !launcher.list.press.down);
+                        launcher_send(&off);
+                        check("launcher: a press let go off its row runs nothing and leaves no press", launcher_send(&release) && !launcher.list.press.down);
                         ui_kit.motion = motion_was;
                 }
                 // The wheel turns a list longer than its window: the four desktop programs in a window one row tall, a notch a
@@ -154098,7 +154105,7 @@ static fn check_field_hands(string_address regular)
                         launcher_search();
                         launcher.height = pad * 2 + ui_px(&launcher.ui, UI_TARGET) + ui_px(&launcher.ui, UI_GAP2) + ui_px(&launcher.ui, UI_ROW);
                         launcher.dirty = false;
-                        launcher_event(&turn);
+                        launcher_send(&turn);
                         check("launcher: the wheel turns a list longer than its window, a notch a row, with the glide",
                               launcher.entries == 4 && launcher.list.scroll.aim > 0 && launcher.dirty);
                 }
@@ -154419,7 +154426,7 @@ static fn inputs_event(const struct inputs_input address_to in, const struct win
                 ui_field_event(&inputs_ui, inputs_target(in), &inputs_popup, event, inputs_pointer_x, inputs_pointer_y);
                 break;
         case INPUTS_LAUNCHER:
-                launcher_event(event);
+                launcher_send(event);
                 break;
         case INPUTS_FILTER: case INPUTS_ROW: case INPUTS_GALLERY:
                 settings_event(event);

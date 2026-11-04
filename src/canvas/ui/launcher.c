@@ -163,8 +163,7 @@ static struct
         int width, height;
         struct ui_buffers buffers; // the bar's two buffers (the kit's): its picture is drawn whole each frame
         unsigned int ground;
-        int pointer_x, pointer_y;
-        b32 focused, had_focus, dirty;
+        b32 focused, dirty;
 
         // Opened beside the panel's launcher button (-a): the kit's anchor (ui_anchor_take), and whether the place is asked again
         // with the next picture, as the list grows and shrinks (a bar above a bottom panel keeps its bottom).
@@ -756,7 +755,7 @@ static b32 launcher_key(const struct window_event address_to event)
                 return true;
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
-        if ((asks = ui_field_event(&launcher.ui, launcher_field(), &launcher.menu, event, 0, 0)))
+        if ((asks = ui_field_send(&launcher.ui, launcher_field(), &launcher.menu, event)))
                 return launcher_asked(asks);
         if (event->a == UI_KEY_UP || event->a == UI_KEY_DOWN ||
             ((event->flags & WINDOW_KEY_CONTROL) && (event->a == UI_KEY_P || event->a == UI_KEY_N)))
@@ -832,6 +831,7 @@ static fn launcher_layout(void)
 static b32 launcher_event(const struct window_event address_to event)
 {
         int row;
+        b32 moved;
         p32 asks;
 
         launcher_layout();
@@ -839,7 +839,7 @@ static b32 launcher_event(const struct window_event address_to event)
         // armed, before the field has the event; what the row takes of a pointer event is not the field's or the list's.
         if (event->type != WINDOW_EVENT_KEY)
         {
-                asks = ui_buttons_event(&launcher.ui, &launcher.power, event, launcher.pointer_x, launcher.pointer_y);
+                asks = ui_buttons_event(&launcher.ui, &launcher.power, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 if (asks & UI_BUTTONS_DRAW)
                         launcher.dirty = true;
                 if (asks & UI_BUTTONS_FIRED)
@@ -851,30 +851,24 @@ static b32 launcher_event(const struct window_event address_to event)
         // clipboard's answers; the rest is the list's.
         // A press outside the field is the list's (the field's answer to it, commit or cancel, is the kit's and changes nothing here).
         if (event->type != WINDOW_EVENT_KEY &&
-            (asks = ui_field_event(&launcher.ui, launcher_field(), &launcher.menu, event,
-                                   event->type == WINDOW_EVENT_MOTION ? event->a : launcher.pointer_x,
-                                   event->type == WINDOW_EVENT_MOTION ? event->b : launcher.pointer_y)) &&
+            (asks = ui_field_send(&launcher.ui, launcher_field(), &launcher.menu, event)) &&
             !(event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL)))
-        {
-                if (event->type == WINDOW_EVENT_MOTION)
-                        launcher.pointer_x = event->a, launcher.pointer_y = event->b;
                 return launcher_asked(asks);
-        }
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
                 return launcher_key(event);
         case WINDOW_EVENT_MOTION:
+                // The row the pointer is on is the highlighted one, where it has moved to it and not where a key put it: a motion
+                // from the place the list was last told (ui_list_pointer keeps it) is a move.
+                moved = event->a != launcher.list.pointer_x || event->b != launcher.list.pointer_y;
                 row = ui_list_hit(&launcher.ui, &launcher.list, event->a, event->b);
                 ui_list_click(&launcher.ui, &launcher.list, event, event->a, event->b);
-                // The row the pointer is on is the highlighted one, where it has moved to it and not where a key put it.
-                if (row >= 0 && (event->a != launcher.pointer_x || event->b != launcher.pointer_y) && row != launcher.list.focus)
+                if (row >= 0 && moved && row != launcher.list.focus)
                 {
                         launcher.list.focus = row;
                         launcher.dirty = true;
                 }
-                launcher.pointer_x = event->a;
-                launcher.pointer_y = event->b;
                 break;
         case WINDOW_EVENT_WHEEL:
                 // The list turns under the wheel with the kit's glide, as the settings list does: a notch is a row.
@@ -884,7 +878,7 @@ static b32 launcher_event(const struct window_event address_to event)
         case WINDOW_EVENT_BUTTON:
                 // The kit's click: a press goes down where the pointer is and runs on its release there, a finger's or a mouse's alike.
                 launcher.dirty = true;
-                if ((row = ui_list_click(&launcher.ui, &launcher.list, event, launcher.pointer_x, launcher.pointer_y)) >= 0)
+                if ((row = ui_list_click(&launcher.ui, &launcher.list, event, ui_kit.pointer_x, ui_kit.pointer_y)) >= 0)
                         return !launcher_run(row);
                 break;
         }
@@ -892,6 +886,8 @@ static b32 launcher_event(const struct window_event address_to event)
 }
 
 /* ---- the picture ---- */
+
+static struct ui_app launcher_app; // the app (defined with its runner below): its had_keys is the kit's, read by the picture
 
 // The label of a row, into into, and what is said at its right.
 static fn launcher_label(const struct launcher_entry address_to entry, char address_to into, positive room,
@@ -945,7 +941,7 @@ static fn launcher_draw(unsigned int address_to pixels)
                         search->items[0] = WORDS(launcher_search_hint);
                         search->edit = launcher_field();
                 }
-                search->focused = (launcher.focused || !launcher.had_focus) && !launcher.power.keys;
+                search->focused = (launcher.focused || !launcher_app.had_keys) && !launcher.power.keys;
                 search->x = pad * 100 / ui->scale, search->y = pad * 100 / ui->scale, search->w = (launcher.width - 2 * pad) * 100 / ui->scale, search->h = UI_TARGET;
                 ui_control_draw(ui, search);
         }
@@ -953,7 +949,7 @@ static fn launcher_draw(unsigned int address_to pixels)
         launcher_layout();
         launcher.list.lit = true;
         ui_list_draw(ui, &launcher.list);
-        ui_buttons_draw(ui, &launcher.power, launcher.focused || !launcher.had_focus);
+        ui_buttons_draw(ui, &launcher.power, launcher.focused || !launcher_app.had_keys);
         // A finger's selection in the field: its handles and actions bar, over the rows and the buttons.
         ui_text_overlay(ui, launcher_field());
 }
@@ -1068,15 +1064,6 @@ static int launcher_open(void)
 
 // The keys going elsewhere (a click on the desktop, another window raised) puts the bar away; before they came here it had
 // never had them.
-static b32 launcher_focus(b32 focused)
-{
-        if (focused)
-                launcher.had_focus = true;
-        else if (launcher.had_focus)
-                return false;
-        return true;
-}
-
 // The caret's blink: the next frame it needs, and none once it has stopped (a while after the last key).
 static long launcher_tick(long timeout, long address_to other)
 {
@@ -1104,7 +1091,7 @@ static struct ui_app launcher_app = {
         .open = launcher_open,
         .frame = launcher_frame,
         .event = launcher_event,
-        .focus = launcher_focus,
+        .dismiss = true,        // a temporary overlay: the keys went elsewhere after it had them, so it is put away (ui_app_keys)
         .size = launcher_size,
         .tick = launcher_tick,
         .popup = &launcher.menu,
