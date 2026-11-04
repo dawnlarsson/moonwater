@@ -219346,7 +219346,7 @@ b32 main(void)
                         app_rows(1, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                         app_rows(2, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                         app_rows(3, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
-                        for (app_group = 0; app_group < 4; app_group++)
+                        for (app_group = 0; app_group < settings_groups(); app_group++)
                                 app_rows(4, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                         {
                                 static const int gallery_scales[4] = {100, 150, 200, 300};
