@@ -133756,8 +133756,9 @@ static fn check_settings(string_address regular, string_address bold)
                                 int where = ui_page_column_hit(&settings.ui, page, pad + 5, page->top + 5),
                                     second = ui_page_column_hit(&settings.ui, page, pad + 5, page->top + row + 5);
 
-                                check("settings: a point on a group names it, and one past the column or past the groups none",
-                                      where == 0 && second == 1 && ui_page_column_hit(&settings.ui, page, pad + side + 2, page->top + 5) == -1 &&
+                                check("settings: a point on a group names it, and one past the column's rows (the middle of its track) or past the groups none",
+                                      where == 0 && second == 1 && ui_page_column_hit(&settings.ui, page, pad + side + 2, page->top + 5) == 0 &&
+                                          ui_page_column_hit(&settings.ui, page, page->seam, page->top + 5) == -1 &&
                                           ui_page_column_hit(&settings.ui, page, pad + 5, page->top - 1) == -1 &&
                                           ui_page_column_hit(&settings.ui, page, pad + 5, page->top + settings_groups() * row) == -1);
                                 check("settings: the column is a third of the window at most and the rows start after it",
@@ -136180,6 +136181,119 @@ static fn check_settings_groups(void)
 }
 
 /*
+        The Settings window is one flush surface. The column's rows run from the window's edge to the middle of the column's scroll
+        track, the body's rows from there to the window's real right edge, and each scroll track lies across the end of the surface it
+        belongs to (the column's across the join, the body's over the blank end of its rows): the rows' hover, press and the row the
+        keys are on are as wide as their list, and the words and controls keep the page's margins, so nothing is drawn under a track.
+        Drawn whole at the scale in use: the keys in the rows on one of the first, and on a long group (so there is a thumb) on the
+        third, and no pixel past the margins but the rows' fills and the thumbs.
+*/
+// The window drawn whole, twice, two seconds apart on the kit's clock: the pip, the hover and the thumb's ink are where they settle.
+static fn settings_seam_draw(void)
+{
+        ui_kit.now += 2000000000ll;
+        ui_kit.busy = 0;
+        settings_draw_rows(settings_frames_whole, 0, 0);
+        ui_kit.now += 2000000000ll;
+        ui_kit.busy = 0;
+        settings_draw_rows(settings_frames_whole, 0, 0);
+}
+
+static fn check_settings_seam(void)
+{
+        struct ui address_to ui = &settings.ui;
+        struct ui_page address_to page = &settings.page;
+        struct ui_list address_to list = &settings.list;
+        const int width = settings.width, track = UI_SCROLL_WIDTH * ui->scale / 100;
+        int seam = page->seam, middle = page->column_scroll.x + track / 2, row = ui_dev(ui, UI_ROW);
+        int y, gaps = 0, past = 0, left_bar = 0, thumb_top = 0, thumb_length = 0, under = 0, stray = 0;
+        unsigned int paper;
+        b32 geometry, hits, joined, ring_ends, bar_over, margins;
+
+        settings.focused = 1, settings.pane = 1, settings.editing = -1, settings.choice = -1, settings.filter_length = 0, settings.filter[0] = 0;
+        settings_group_choose(0);
+        ui_scroll_set(&list->scroll, 0);
+        ui_scroll_set(&page->column_scroll, 0);
+        settings_layout();
+        list->focus = list->id[0];
+        geometry = seam >= middle - 1 && seam <= middle && list->row_x == seam && list->row_x + list->row_w == width && list->x == page->left &&
+                   list->x + list->w == page->right && page->left > seam && page->right < width - track;
+        y = ui_list_row_y(list, 0) + 2;
+        hits = ui_page_column_hit(ui, page, seam - 1, page->top + 5) == 0 && ui_page_column_hit(ui, page, seam, page->top + 5) == -1 &&
+               ui_list_hit(ui, list, seam, y) == list->id[0] && ui_list_hit(ui, list, seam - 1, y) == -1 &&
+               ui_list_hit(ui, list, width - 1, y) == list->id[0] && ui_list_hit(ui, list, width, y) == -1 &&
+               ui_page_region(ui, page, seam - 1, y) == &page->column_scroll && ui_page_region(ui, page, seam, y) == page->body;
+        check("settings seam: the seam is the middle of the column's track; the column's rows end there, the list's begin and run to the window's edge, and its words keep the page's margins",
+              geometry);
+        check("settings seam: a point just left of the seam is the column's, at the seam the list's, and the window's last pixel is a row's", hits);
+
+        // The keys on the first row, the column's first group chosen: one band of lit pixels from the window's left edge to its right edge.
+        settings_seam_draw();
+        paper = settings_frames_whole[(page->top - 3) * SETTINGS_FRAMES_W + width - 1];
+        y = ui_list_row_y(list, 0) + 1;
+        for (int x = 0; x < width; x++)
+                gaps += settings_frames_whole[y * SETTINGS_FRAMES_W + x] == paper;
+        joined = y >= page->top && y < page->top + row && gaps == 0;
+        check("settings seam: the chosen group's row and the row the keys are on make one lit band from the window's left edge to its right edge", joined);
+
+        // A long group, the keys on its third row, which lies in the thumb's reach: the row's ring spans from the seam to the edge,
+        // the thumb is drawn over it, and the track beside the thumb is the row's, not the window's.
+        settings_group_choose(settings_group_of(settings_row_named("Background")));
+        ui_scroll_set(&list->scroll, 0);
+        settings_layout();
+        list->focus = list->id[2];
+        settings_seam_draw();
+        paper = settings_frames_whole[(page->top - 3) * SETTINGS_FRAMES_W + width - 1];
+        y = ui_list_row_y(list, 2);
+        if (!ui_scroll_thumb(ui, &list->scroll, &thumb_top, &thumb_length))
+                thumb_top = thumb_length = 0;
+        for (int x = seam; x < width; x++)
+                past += settings_frames_whole[(y + 1) * SETTINGS_FRAMES_W + x] == paper;
+        ring_ends = past == 0 && settings_frames_whole[(y + 1) * SETTINGS_FRAMES_W + seam - 3 * ui->scale / 100 - 1] == paper && y > page->top + row &&
+                    settings_frames_whole[(y + 1) * SETTINGS_FRAMES_W + width - 1] != paper;
+        {
+                int bar = list->scroll.x, middle_y = y + row / 2;
+                unsigned int beside = settings_frames_whole[middle_y * SETTINGS_FRAMES_W + bar + 1], thumb = settings_frames_whole[middle_y * SETTINGS_FRAMES_W + bar + track / 2];
+
+                left_bar = beside != paper && settings_frames_whole[middle_y * SETTINGS_FRAMES_W + bar - 1] != paper;
+                bar_over = thumb_length > 0 && y >= thumb_top && y + row <= thumb_top + thumb_length && left_bar && thumb != beside;
+        }
+        check("settings seam: the row the keys are on is lit from the seam to the window's last pixel, and not left of the seam", ring_ends);
+        check("settings seam: the list's track is drawn over the row's blank end: the row is lit on both sides of the thumb, and the thumb is over it", bar_over);
+
+        // Nothing but the rows' fills and the thumbs is drawn past the margins: between the list's words and the window's edge (but for the
+        // track), and between the seam and the list's left margin, on every row but the one the keys are on.
+        list->focus = -1;
+        settings.pane = 0;
+        settings.focused = 0;
+        settings_seam_draw();
+        paper = settings_frames_whole[(page->top - 3) * SETTINGS_FRAMES_W + width - 1];
+        for (int row_y = list->y; row_y < list->y + list->h; row_y++)
+        {
+                for (int x = page->right; x < width; x++)
+                        if (!(x >= list->scroll.x + 2 && x < list->scroll.x + track - 2) && settings_frames_whole[row_y * SETTINGS_FRAMES_W + x] != paper)
+                        {
+                                stray++;
+                                if (stray == 1)
+                                        string_format(log, "  seam stray: first at %b,%b is %p\n", (bipolar)x, (bipolar)row_y, (positive)settings_frames_whole[row_y * SETTINGS_FRAMES_W + x]);
+                        }
+                for (int x = seam + 1; x < list->x; x++)
+                        if (!(x >= page->column_scroll.x + 2 && x < page->column_scroll.x + track - 2) && settings_frames_whole[row_y * SETTINGS_FRAMES_W + x] != paper)
+                                stray++;
+        }
+        for (int row_y = list->y; row_y < list->y + list->h; row_y++)
+                under += settings_frames_whole[row_y * SETTINGS_FRAMES_W + list->scroll.x + track / 2] != paper;
+        margins = stray == 0 && under > 0;
+        string_format(log, "  settings seam (scale %p): seam %b (track middle %b), rows %b to %b, words %b to %b; %p unlit pixels in the join band, %p in the ring, %p stray pixels in the margins, thumb %b at %b\n",
+                      (positive)ui->scale / 100, (bipolar)seam, (bipolar)middle, (bipolar)list->row_x, (bipolar)(list->row_x + list->row_w), (bipolar)list->x,
+                      (bipolar)(list->x + list->w), (positive)gaps, (positive)past, (positive)stray, (bipolar)thumb_length, (bipolar)thumb_top);
+        check("settings seam: no pixel is drawn in the margins between the words and the window's edge or the seam, but the thumb in its track", margins);
+        settings.pane = 1;
+        settings.focused = 1;
+        settings_group_choose(0);
+}
+
+/*
         The page's search field, as the settings frames just drew it: the kit's field, UI_FIELD_H high, wholly inside the
         title band (UI_PAGE_TOP from the window's top, and not under the window's top inset), and clear of the close button
         and the minimise button beside it at the top right (their width and their inset from the edge). The band is the
@@ -136253,6 +136367,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_refilter();
         settings_frames_pass();
         check_settings_search();
+        check_settings_seam();
 
         settings_frames_scenario((string_address) "Canvas, Space and Down every 33 ms, answered at 25", false, false,
                                  "Open windows where they were last put", UI_KEY_SPACE, UI_KEY_DOWN, 6, 33, 25);

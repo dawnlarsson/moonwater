@@ -1545,6 +1545,7 @@ static fn settings_layout(void)
                 // The list's view runs from its top to the window's bottom edge; its content is clipped to that view, and its
                 // scroll track has the view's ends. The scroll ends at the rows minus the view.
                 ui_list_place(ui, &settings.list, settings.page.left, top, settings.page.right - settings.page.left, settings.page.bottom - top);
+                ui_page_rows(&settings.page, &settings.list);
         }
         ui_list_layout(ui, &settings.list);
         ui_scroll_clamp(&settings.list.scroll);

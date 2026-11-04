@@ -4113,7 +4113,7 @@ static b32 ui_span_q8(const struct ui_control address_to c, b32 q8)
 }
 
 // Where a column's rows run across, logical pixels: the whole row the page gave it (row_x, row_w: flush with the window's
-// edge to the scroll bar's), or the column's own box where it has none.
+// edge to the middle of the scroll bar's track), or the column's own box where it has none.
 static fn ui_vtabs_row(const struct ui_control address_to c, int address_to x, int address_to w)
 {
         *x = c->row_w > 0 ? c->row_x : c->x;
@@ -6949,7 +6949,6 @@ static int ui_popup_pump(struct ui_popup address_to p)
 #define UI_COLUMN_LEAST 88   // no narrower than this, no wider than the most, and never more than half of the window
 #define UI_COLUMN_MOST 170
 #define UI_COLUMN_GUTTER 14  // between the column and the body
-#define UI_COLUMN_BAR_GAP ((UI_COLUMN_GUTTER - UI_SCROLL_WIDTH) / 2) // from the column's edge to its scroll bar: a group's row runs to it
 #define UI_COLUMN_PAGE 3     // Page Up and Page Down in a column move three groups
 #define UI_SECTION 34        // a section's header over its first row
 #define UI_SECTION_GAP 10    // under its last row
@@ -7412,7 +7411,8 @@ struct ui_list
         int top[UI_LIST_MOST];             // each place's top, from the list's
         unsigned char starts[UI_LIST_MOST]; // each place's first of a section, and with a header (UI_LIST_STARTS, _HEADED)
         int content;
-        int x, y, w, h;                    // where it is in the window, device pixels
+        int x, y, w, h;                    // where it is in the window, device pixels: the box its words and controls keep to
+        int row_x, row_w;                  // how far across its rows run (hover, press, the row the keys are on), device pixels: 0 wide is x, w
         struct ui_scroll scroll;
         int hover, down;                   // the row under the pointer and the row pressed, -1 none
         int part, way;                     // a press's: the item of a tabs or swatches row it was on (-1 none), a step's way
@@ -7474,6 +7474,30 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
         l->scroll.content = l->content;
         l->scroll.bounds = 1, l->scroll.scale = ui->scale;
         ui_scroll_clamp(&l->scroll);
+}
+
+// How far across the list's rows run (device pixels): what the page gave them, else the list's own box.
+static void ui_list_across(const struct ui_list address_to l, int address_to x, int address_to w)
+{
+        *x = l->row_w > 0 ? l->row_x : l->x;
+        *w = l->row_w > 0 ? l->row_w : l->w;
+}
+
+// The same in logical pixels, for the rows' controls. A list the page extended has both edges rounded up: the left edge then
+// lies at or past the edge of what is beside it (the column's rows end at that logical px) and the right one at or past the
+// window's edge, which clips it, so no hairline of the ground is left between a row and the window's edge.
+static void ui_list_across_logical(const struct ui address_to ui, const struct ui_list address_to l, int address_to x, int address_to w)
+{
+        int across, wide;
+
+        ui_list_across(l, &across, &wide);
+        if (l->row_w <= 0)
+        {
+                *x = across * 100 / ui->scale, *w = wide * 100 / ui->scale;
+                return;
+        }
+        *x = (across * 100 + ui->scale - 1) / ui->scale;
+        *w = ((across + wide) * 100 + ui->scale - 1) / ui->scale - *x;
 }
 
 // The place a row is at in the list, or -1.
@@ -7556,9 +7580,10 @@ static fn ui_list_damage_all(const struct ui address_to ui, const struct ui_list
 // The row under a point of the window, or -1.
 static int ui_list_hit(const struct ui address_to ui, const struct ui_list address_to l, int x, int y)
 {
-        int inside = y - l->y + l->scroll.scroll;
+        int inside = y - l->y + l->scroll.scroll, across, wide;
 
-        if (x < l->x || x >= l->x + l->w || y < l->y || y >= l->y + l->h)
+        ui_list_across(l, &across, &wide);
+        if (x < across || x >= across + wide || y < l->y || y >= l->y + l->h)
                 return -1;
         for (int at = 0; at < l->count; at++)
                 if (inside >= l->top[at] && inside < l->top[at] + ui_dev(ui, UI_ROW))
@@ -7683,7 +7708,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
 {
         struct ui_row row;
         int x = l->x, w = l->w, inset = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 10);
-        int right = x + w - inset, text_left = x + inset, baseline, wide = 0, label_room;
+        int right = x + w - inset, text_left = x + inset, baseline, wide = 0, label_room, across, across_w;
         unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         struct ui_control address_to own = ui_list_control(l, id, 0), address_to trailing = null;
         char cut[UI_CUT_TEXT];
@@ -7691,13 +7716,14 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         b32 seen = ui_rows_seen(ui, y - ui_dev(ui, 4), y + height + ui_dev(ui, 4));
 
         ui_list_describe(l, id, &row);
+        ui_list_across(l, &across, &across_w);
         baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM);
         if (row.dim)
                 ink = quiet;
         if (l->lit && id == l->focus)
         {
                 // The row the keys are on is the whole row, square, as the hover layer is: the row's own extents, not a box set in from them.
-                struct ui_box box = {x * 256, y * 256, (x + w) * 256, (y + height) * 256, 0, 0};
+                struct ui_box box = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
 
                 ui_kit_fill(ui, &box, ui_well(ui, UI_SECONDARY_CONTAINER, 36), null);
                 if (l->keys && !ui->glass)
@@ -7719,7 +7745,8 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                         own->label = "";
                         ui_control_start(own);
                 }
-                own->row_x = x * 100 / ui->scale, own->row_y = y * 100 / ui->scale, own->row_w = w * 100 / ui->scale, own->row_h = height * 100 / ui->scale;
+                ui_list_across_logical(ui, l, &own->row_x, &own->row_w);
+                own->row_y = y * 100 / ui->scale, own->row_h = height * 100 / ui->scale;
                 own->x = own->row_x, own->y = own->row_y, own->w = own->row_w, own->h = own->row_h;
                 own->hover = l->hover == id, own->down = l->down == id;
                 own->disabled = row.kind == UI_ROW_FIELD;
@@ -8002,6 +8029,7 @@ struct ui_page
         int top, bottom;                   // the body's band
         int left, right;                   // and its sides
         int column_w;
+        int seam;                          // the middle of the column's scroll bar, device px: the column's rows end and the body's begin there
         struct ui_control search;          // a bare field at the title's right, when the app gave it a placeholder
         struct ui_control column;          // the column: the kit's tabs on end
         struct ui_scroll column_scroll;
@@ -8026,11 +8054,24 @@ static fn ui_page_layout(const struct ui address_to ui, struct ui_page address_t
         p->left = pad + (p->column_on ? p->column_w + ui_dev(ui, UI_COLUMN_GUTTER) : 0);
         p->right = width - pad;
         p->column_scroll.x = pad + p->column_w + (ui_dev(ui, UI_COLUMN_GUTTER) - ui_dev(ui, UI_SCROLL_WIDTH)) / 2;
+        p->seam = p->column_on ? p->column_scroll.x + ui_dev(ui, UI_SCROLL_WIDTH) / 2 : 0;
         // The column scrolls as a list does: its ends squash under a pull or a wheel turn (ui_scroll_span, the same for every region).
         p->column_scroll.bounds = 1, p->column_scroll.scale = ui->scale;
         p->column_scroll.y = p->top, p->column_scroll.height = p->bottom - p->top, p->column_scroll.view = p->bottom - p->top;
         p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
         ui_scroll_clamp(&p->column_scroll);
+}
+
+/*
+        The body's rows run from the seam to the window's own edge, flush: the column's rows end at the middle of the column's scroll
+        track and these begin there, so the track lies across the join of two surfaces and not in a margin of either, and the list's
+        own track is drawn over its rows' last stretch, which is blank. The list's box (ui_list_place's) is unchanged: its words and
+        controls keep the page's margins at both ends, and nothing sits under a track. A page with no column starts at the window's edge.
+*/
+static fn ui_page_rows(const struct ui_page address_to p, struct ui_list address_to l)
+{
+        l->row_x = p->column_on ? p->seam : 0;
+        l->row_w = p->width - l->row_x;
 }
 
 // A page's bottom edge moved from the layout's (an app's body runs to the window's edge): the column's view follows it, so its
@@ -8047,8 +8088,7 @@ static int ui_page_column_hit(const struct ui address_to ui, const struct ui_pag
 {
         int group = (y - p->top + p->column_scroll.scroll) / ui_dev(ui, UI_ROW);
 
-        if (!p->column_on || y < p->top || y >= p->bottom || x < 0 || x >= ui_dev(ui, UI_PAD) + p->column_w + ui_dev(ui, UI_COLUMN_BAR_GAP) ||
-            group >= p->column.count)
+        if (!p->column_on || y < p->top || y >= p->bottom || x < 0 || x >= p->seam || group >= p->column.count)
                 return -1;
         return group;
 }
@@ -8116,7 +8156,9 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
         c->y = (p->top - p->column_scroll.scroll) * 100 / ui->scale;
         c->w = p->column_w * 100 / ui->scale;
         c->h = UI_ROW;
-        c->row_x = 0, c->row_w = c->x + c->w + UI_COLUMN_BAR_GAP; // a group is a whole row, flush with the window's edge, to the bar's
+        // A group is a whole row, flush with the window's edge, to the middle of the bar's track: logical px rounded up, the edge the list's rows
+        // begin at (ui_list_across_logical), so the two lie edge to edge at every scale.
+        c->row_x = 0, c->row_w = (p->seam * 100 + ui->scale - 1) / ui->scale;
         c->disabled = disabled;
         c->focused = keys;
         c->item = ui_control_hit(ui, c, p->pointer_x, p->pointer_y);
@@ -8133,7 +8175,7 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, i
 */
 static struct ui_scroll address_to ui_page_region(const struct ui address_to ui, struct ui_page address_to p, int x, int y)
 {
-        if (p->column_on && x < p->left - ui_dev(ui, UI_COLUMN_GUTTER) / 2)
+        if (p->column_on && x < p->seam)
                 return &p->column_scroll;
         return p->body;
 }
