@@ -8697,12 +8697,6 @@ static void compositor_present_frames(void)
                                 }
         }
 
-        // The close buttons' means, now the glass and the band are made: where a change reaches a box.
-        for (unsigned int at = 0; at < windows; at++)
-        {
-                compositor_close_mean(&frames[at]);
-                compositor_close_ready(&frames[at]);
-        }
         compositor_corner_masks_ready(frames, count);
         if (compositor_spots_any(0))
                 compositor_spots_ready();
@@ -8805,6 +8799,13 @@ static void compositor_present_frames(void)
                 }
         }
 
+        // The close buttons' means, made once the buffer's stale is in the damage (the swap above adds what this buffer missed): a glyph in a
+        // buffer composed from the means of the last present showed that present's ink for a frame (the title bar's buttons, 2026-11-04).
+        for (unsigned int at = 0; at < windows; at++)
+        {
+                compositor_close_mean(&frames[at]);
+                compositor_close_ready(&frames[at]);
+        }
 #ifdef MOONWATER_GPU_C
         int gpu = compositor_gpu_present(frames, count), gpu_composed = gpu && !(compositor.width & 3);
 

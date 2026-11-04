@@ -64,6 +64,7 @@ session()
         mkdir -p /run/moonwater
         cd "$work" || return 1
         mkdir -p bin
+        echo 1 > /root/mouse.acceleration
         for name in compositor moonwater settings; do ln -sf "$compositor" "bin/$name"; done
         mkfifo "$work/input.fifo"
         bin/compositor -H 800x600 "$work/record.img" -i "$work/input.fifo" > "$work/compositor.log" 2>&1 &
@@ -115,7 +116,7 @@ session()
         row "report names the flips" grep -q "^flips " "$work/report.out"
         row "report says the recording is done" grep -q "recording    done" "$work/report.out"
         # a clean sweep has no flash, size jump or blank; a tear in it is reported by its count and frame (headless, under investigation)
-        row "clean recording has no flash, size or blank" grep -Eq "^classes      tear [0-9]+, flash 0, size jump 0, blank 0;" "$work/report.out"
+        row "clean recording has no tear, flash, size or blank" grep -q "^classes      tear 0, flash 0, size jump 0, blank 0;" "$work/report.out"
         row "report request taken" test ! -e /run/moonwater/record/report
 
         # wraparound: more than the ring's size of presents, and the ring keeps the newest 240

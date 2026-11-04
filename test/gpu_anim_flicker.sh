@@ -26,6 +26,8 @@ session()
         mkdir -p /run/moonwater
         fonts_mono=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf fonts_bold=/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf
         cd "$work" || return 1
+        # the pointer is one to one: a relative move is the position the driver counts (the curve would outrun a hand, and the steps would miss their targets)
+        echo 1 > /root/mouse.acceleration
         case $mode in
         cardoff) : > /run/moonwater/lists-off ;;
         processor) echo off > /root/canvas.gpu ;;

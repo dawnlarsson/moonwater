@@ -223,6 +223,7 @@ static unsigned int compositor_record_ring_cap, compositor_record_ring_at, compo
 static unsigned int *compositor_record_ring_pixels;
 static unsigned int compositor_record_taken;      // frames copied in this recording
 static unsigned int compositor_record_classed[COMPOSITOR_RECORD_CLASSES], compositor_record_written;
+static unsigned int compositor_record_class_written[COMPOSITOR_RECORD_CLASSES]; // the files written, by class: each class keeps its own eight
 static unsigned int compositor_record_refused_size; // the screen is too large for the budget: nothing is classified
 static unsigned int compositor_record_events[COMPOSITOR_RECORD_EVENTS][3]; // seq, bits (1 << class), kept
 static unsigned int compositor_record_event_count;
@@ -425,7 +426,10 @@ static void compositor_record_classify(struct compositor_record_shot *s, const s
         long handle;
 
         // The check's tear: the rows of P in a band a quarter down, the rows of N elsewhere. The file is taken with it.
+        // Taken on a triple whose neighbours differ: a splice of two equal frames is the one frame, and no tear.
         handle = (long)system_open_at(AT_FDCWD, (string_address)inject, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle >= 0 && compositor_record_same(p->pixels, n->pixels, width, height))
+                system_close(handle), handle = -1;
         if (handle >= 0)
         {
                 system_close(handle);
@@ -448,11 +452,12 @@ static void compositor_record_classify(struct compositor_record_shot *s, const s
         for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
                 if (bits & (1u << c))
                 {
-                        unsigned int kept = compositor_record_written < COMPOSITOR_RECORD_KEEP;
+                        unsigned int kept = compositor_record_class_written[c] < COMPOSITOR_RECORD_KEEP;
 
                         compositor_record_classed[c]++;
                         if (kept)
-                                compositor_record_write_ppm(s->pixels, width, height, s->seq, compositor_record_class_name[c]);
+                                compositor_record_write_ppm(s->pixels, width, height, s->seq, compositor_record_class_name[c]),
+                                    compositor_record_class_written[c]++;
                         // A tear is kept with the frames either side of it, so the splice can be read against them.
                         if (kept && c == COMPOSITOR_RECORD_TEAR)
                         {
@@ -513,6 +518,8 @@ static void compositor_record_capture(unsigned long long when)
 static void compositor_record_reset(void)
 {
         compositor_record_taken = compositor_record_written = compositor_record_refused_size = 0;
+        for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
+                compositor_record_class_written[c] = 0;
         compositor_record_ring_at = compositor_record_ring_count = compositor_record_event_count = 0;
         for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
                 compositor_record_classed[c] = 0;
