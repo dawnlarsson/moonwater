@@ -26,6 +26,9 @@
 // is a slot of the band's like the tray, its own bit of the redo mask), or TASKBAR_HIT_NONE for none of them.
 #define TASKBAR_HIT_NONE (-3)
 #define TASKBAR_LAUNCHER (-5)
+// The volume item at the start of the tray, a cell of its own when the sound server is there: pressed, it opens the mixer, a middle
+// press mutes, and the wheel over it changes the volume (compositor.c).
+#define TASKBAR_VOLUME (-6)
 
 // The kept settings the battery is named in (the battery verb keeps "battery NAME" there), and the name of that file in
 // /root, which the compositor reads again when it is written.
@@ -105,6 +108,8 @@ static void taskbar_text_set(int edge);
 static void taskbar_tray_set(const char *text);
 static void taskbar_launcher_set(int on);
 static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_volume_set(int present, int percent, int muted, int flash);
+static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 
 #else
 
@@ -141,6 +146,10 @@ static inline void taskbar_text_set(int edge) { (void)edge; }
 static inline void taskbar_tray_set(const char *text) { (void)text; }
 static inline void taskbar_launcher_set(int on) { (void)on; }
 static inline int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_volume_set(int present, int percent, int muted, int flash)
+{ (void)present, (void)percent, (void)muted, (void)flash; return 0; }
+static inline int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 { (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 
 #endif

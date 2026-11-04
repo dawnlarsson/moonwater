@@ -126820,6 +126820,379 @@ static int wheel_unread(int row, unsigned int address_to events, int address_to 
 }
 
 /*
+        The tray's volume cell and the volume keys (compositor.c, taskbar.c) against a page and two files made here: the cell is
+        there only when the server's page is, at the start of the tray and before the battery's, and is what a point there is
+        (TASKBAR_VOLUME); a key or a notch of the wheel over it is five percent, written to the volume file whole, a held key
+        repeats, the mute key throws the mute and a volume key unmutes; none of it does anything with no server; the number is
+        shown for a moment; and the page is not believed for a moment after the desktop's own change.
+*/
+static fn volume_put_page(unsigned int volume, unsigned int muted, unsigned int magic)
+{
+        static struct audio_state page;
+        bipolar handle;
+
+        memory_zero(&page, sizeof(page));
+        page.magic = magic, page.version = AUDIO_STATE_VERSION, page.bytes = sizeof(page), page.seq = 2;
+        page.volume = volume, page.muted = muted;
+        string_copy_bounded((string_address)page.device, (string_address) "Speakers", sizeof(page.device));
+        string_copy_bounded((string_address)page.name, (string_address) "alsa_output.test", sizeof(page.name));
+        handle = system_open_at_mode(AT_FDCWD, (string_address) "/tmp/mw-volume-state", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle >= 0)
+        {
+                system_write_once(handle, &page, sizeof(page));
+                system_close(handle);
+        }
+}
+
+#if MOONWATER_UI_MIXER
+// The transport of a check for the control client: what is sent is kept, read as the engine reads it, and answered; used by the compositor's volume and the mixer.
+struct mixer_sent
+{
+        unsigned long command, index, volume, channels;
+        int mute;
+        char text[64];
+};
+
+static struct mixer_sent mixer_log[16];
+static int mixer_logged, mixer_fail_send;
+static long mixer_timeout; // the wait the last answer was asked to be waited for
+static unsigned char mixer_reply[32];
+static long mixer_reply_have, mixer_reply_at;
+
+// What the mixer sends is read back as the engine reads it: the command, the tag, and the fields of the five that change a volume or a mute.
+static long mixer_fake_send(void *context, const unsigned char *bytes, long count)
+{
+        const unsigned char *payload = bytes + 20;
+        struct mixer_sent *sent = &mixer_log[mixer_logged < 16 ? mixer_logged : 15];
+        long at = 10;
+        unsigned long command = pulse_be32(payload + 1), tag = pulse_be32(payload + 6);
+
+        (void)context, (void)count;
+        if (mixer_fail_send)
+                return -1;
+        memory_zero(sent, sizeof(*sent));
+        sent->command = command;
+        if (payload[at] == 'L')
+                sent->index = pulse_be32(payload + at + 1), at += 5;
+        if (payload[at] == 't')
+        {
+                string_copy_bounded((string_address)sent->text, (string_address)(payload + at + 1), sizeof(sent->text));
+                at += 2 + (long)string_length((string_address)(payload + at + 1));
+        }
+        if (payload[at] == 'v')
+                sent->channels = payload[at + 1], sent->volume = pulse_be32(payload + at + 2);
+        else if (payload[at] == '1' || payload[at] == '0')
+                sent->mute = payload[at] == '1';
+        mixer_logged++;
+        // Its answer: a bare reply with the tag.
+        memory_zero(mixer_reply, sizeof(mixer_reply));
+        mixer_reply[3] = 10, mixer_reply[4] = mixer_reply[5] = mixer_reply[6] = mixer_reply[7] = 0xff;
+        mixer_reply[20] = 'L', mixer_reply[24] = (unsigned char)PULSE_COMMAND_REPLY;
+        mixer_reply[25] = 'L', mixer_reply[26] = (unsigned char)(tag >> 24), mixer_reply[27] = (unsigned char)(tag >> 16), mixer_reply[28] = (unsigned char)(tag >> 8),
+        mixer_reply[29] = (unsigned char)tag;
+        mixer_reply_have = 30, mixer_reply_at = 0;
+        return 0;
+}
+
+static long mixer_fake_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
+{
+        (void)context;
+        mixer_timeout = timeout_ms;
+        if (mixer_reply_have - mixer_reply_at < count)
+                return -1;
+        memory_copy(bytes, mixer_reply + mixer_reply_at, (positive)count);
+        mixer_reply_at += count;
+        return 0;
+}
+#endif
+
+static int volume_file(const char address_to path, char address_to into, positive room)
+{
+        compositor_text(path, into, (unsigned int)room);
+        return into[0] != 0;
+}
+
+static void check_compositor_volume(void)
+{
+        static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+        struct taskbar_view view;
+        char text[16], other[16];
+        int x, y, w, h, cx, cy, cw, ch, bx, by, bw, bh, before;
+        positive now = clock_monotonic_nanoseconds();
+
+        compositor_volume_path[0] = "/tmp/mw-volume-state", compositor_volume_path[1] = "/tmp/mw-volume.file", compositor_volume_path[2] = "/tmp/mw-volume.mute";
+        compositor_volume_path[3] = "/tmp/mw-volume-no-socket";
+        memory_zero(&compositor_ctl, sizeof(compositor_ctl));
+        compositor_ctl_again = 0;
+        for (int k = 0; k < 3; k++)
+                system_remove_at(AT_FDCWD, (string_address)compositor_volume_path[k], 0);
+        compositor_volume_unmap();
+        memory_zero(&compositor_volume, sizeof(compositor_volume));
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = compositor.height = GLASS_SIDE;
+        compositor.scale = 100;
+        compositor.card = -1;
+        compositor.hold = -1;
+        compositor.holds = ~0ul;
+        compositor.told_row = COMPOSITOR_NONE;
+        compositor.scanout = screen;
+        compositor.scanout_pitch = GLASS_SIDE * 4;
+        if (!glass_table_map())
+        {
+                check("volume: the table is made", false);
+                return;
+        }
+        compositor.width = 2560, compositor.height = 1440;
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+        taskbar_volume_set(0, 0, 0, 0);
+        view = compositor_taskbar_view();
+        taskbar_slot(&view, -2, &x, &y, &w, &h);
+        before = w;
+
+        // No page: no cell, and the keys have nothing to turn.
+        compositor_volume_look(now);
+        check("volume: with no server there is no cell in the tray", !compositor_volume.present && !taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch));
+        compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+        check("volume: and a volume key writes nothing", !volume_file(compositor_volume_path[1], text, sizeof(text)) && !volume_file(compositor_volume_path[2], text, sizeof(text)));
+
+        // A page that is not the server's is none.
+        volume_put_page(52429, 0, 0);
+        compositor_volume_unmap();
+        compositor_volume_look(now);
+        check("volume: a page that is not the server's is no server", !compositor_volume.present);
+
+        // The server's: the cell is at the start of the tray, a cell wide more than the tray was, and a point in it is the volume.
+        volume_put_page(52429, 0, AUDIO_STATE_MAGIC);
+        compositor_volume_unmap();
+        compositor_volume_look(now);
+        view = compositor_taskbar_view();
+        check("volume: the page says 80 percent, not muted, and the cell is in the tray", compositor_volume.present && compositor_volume.percent == 80 && !compositor_volume.muted &&
+                                                                                           taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch));
+        taskbar_slot(&view, -2, &x, &y, &w, &h);
+        taskbar_slot(&view, -3, &bx, &by, &bw, &bh);
+        check("volume: the tray is a cell longer, the cell at its start and the clock's after it", w == before + cw && cx == x && bx == cx + cw && cx + cw <= x + w);
+        check("volume: a point in the cell is the volume, a point in the clock's is the tray",
+              taskbar_hit(&view, cx + cw / 2, cy + ch / 2) == TASKBAR_VOLUME && taskbar_hit(&view, bx + bw / 2, by + bh / 2) == -2);
+        taskbar_settings_set("bottom", "primary", "battery BAT0\n");
+        taskbar.battery_item = 1;
+        view = compositor_taskbar_view();
+        taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch);
+        taskbar_slot(&view, -4, &bx, &by, &bw, &bh);
+        check("volume: with a battery the cell is before it", bx == cx + cw);
+        taskbar.battery_item = 0;
+        taskbar_settings_set("left", "primary", "battery none\n");
+        view = compositor_taskbar_view();
+        taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch);
+        taskbar_slot(&view, -3, &bx, &by, &bw, &bh);
+        check("volume: on a side band the cell is above the clock", cy + ch == by && cx == bx);
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        taskbar_tray_set("{time.24h.hour}:{time.24h.min}");
+        view = compositor_taskbar_view();
+        check("volume: a tray of the person's own format has none", !taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch));
+        taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+        view = compositor_taskbar_view();
+        taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch);
+
+        // The cell drawn: the speaker in it with a wave more for a louder volume, a cross when it is muted, the number when it was just changed.
+        {
+                static unsigned int cell_lit[sizeof(band_pixels) / sizeof(unsigned int)];
+                static const char *const titles[3] = {"a", "b", "c"};
+                static const int says[5][4] = {{1, 0, 0, 0}, {1, 30, 0, 0}, {1, 80, 0, 0}, {1, 80, 1, 0}, {1, 80, 0, 1}};
+                int counts[5], rect[4];
+
+                taskbar_settings_set("bottom", "primary", "battery none\n");
+                taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+                for (int variant = 0; variant < 5; variant++)
+                {
+                        struct taskbar_view drawn;
+                        int tx, ty, tw, th, vx, vy, vw, vh, dx, dy, dw, dh, count = 0;
+
+                        taskbar_volume_set(says[variant][0], says[variant][1], says[variant][2], says[variant][3]);
+                        drawn = band_view(TASKBAR_BOTTOM, titles);
+                        taskbar_band(&drawn, &dx, &dy, &dw, &dh);
+                        taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+                        memory_copy(cell_lit, band_pixels, sizeof(band_pixels));
+                        taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
+                        taskbar_slot(&drawn, TASKBAR_VOLUME, &vx, &vy, &vw, &vh);
+                        band_glass(null, rect[0], rect[1], rect[2], rect[3]);
+                        taskbar_glass_tab(&drawn, rect[0], rect[1], rect[2], dx, dy, dw, tx, ty, tw, th, -2, 0);
+                        for (int y = vy - dy; y < vy - dy + vh; y++)
+                                for (int x = vx - dx; x < vx - dx + vw; x++)
+                                        count += look_luma(cell_lit[y * dw + x]) != look_luma(band_pixels[y * dw + x]);
+                        counts[variant] = count;
+                }
+                check("volume: the speaker is drawn in the cell: more of it with each wave, a cross for muted, and the number for a moment",
+                      counts[0] > 20 && counts[1] > counts[0] + 8 && counts[2] > counts[1] + 8 && counts[3] > counts[0] + 8 && counts[4] > 20 && counts[4] != counts[2]);
+                taskbar_volume_set(1, 80, 0, 0);
+                view = compositor_taskbar_view();
+        }
+
+        // The cell pressed: the table holds its rectangle, the edge its band is along and its screen for the popup to open beside, and a
+        // popup that is up (the press has put it away) is not asked for again, so the cell opens it and closes it.
+        {
+                struct windows address_to table = compositor.table;
+                int ax, ay, aw, ah;
+
+                view = compositor_taskbar_view();
+                taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch);
+                taskbar_volume_anchor(&view, &ax, &ay, &aw, &ah);
+                table->button_w = 0, table->button_h = 0;
+                compositor_volume_open(cx + cw / 2, cy + ch / 2);
+                check("volume: a press on the cell leaves its rectangle (along the cell, across the band), the edge and the screen for the popup",
+                      table->button_x == ax && table->button_y == ay && (int)table->button_w == aw && (int)table->button_h == ah && table->button_edge == TASKBAR_BOTTOM &&
+                          table->button_screen == 0 && aw == cw && ah == 24);
+                table->button_w = 0;
+                compositor.showing[5] = 1;
+                string_copy_bounded((string_address)table->name[5], (string_address) "mixer-quick", WINDOWS_NAME);
+                check("volume: the popup, up, is found by its name", compositor_quick_row() == 5);
+                compositor_volume_open(cx + cw / 2, cy + ch / 2);
+                check("volume: and a press on the cell with it up asks for no other", table->button_w == 0);
+                compositor.showing[5] = 0;
+                table->name[5][0] = 0;
+                check("volume: gone, it is not found", compositor_quick_row() == COMPOSITOR_NONE);
+                compositor_volume_open(0, 0);
+                check("volume: a press that is not on the cell leaves the table as it was", table->button_w == 0);
+        }
+
+        // The keys: five percent a press, written whole; a held key repeats; the mute key throws the mute; a volume key unmutes.
+        compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+        check("volume: Volume Up is 85, written as 85 and a newline, and the mute file is not touched",
+              volume_file(compositor_volume_path[1], text, sizeof(text)) && string_equals((string_address)text, (string_address) "85\n") &&
+                  !volume_file(compositor_volume_path[2], other, sizeof(other)) && compositor_volume.percent == 85);
+        check("volume: and the number is shown in the tray for a moment", taskbar.volume_item && taskbar.volume_percent == 85 && taskbar.volume_flash && compositor_volume.flash_until > now);
+        compositor_key(0, CK_KEY_VOLUME_UP, 2, 0);
+        compositor_key(0, CK_KEY_VOLUME_DOWN, 1, 0);
+        compositor_key(0, CK_KEY_VOLUME_DOWN, 1, 0);
+        volume_file(compositor_volume_path[1], text, sizeof(text));
+        check("volume: a held key repeats and Volume Down is five less", string_equals((string_address)text, (string_address) "80\n") && compositor_volume.percent == 80);
+        compositor_key(0, CK_KEY_MUTE, 1, 0);
+        check("volume: Mute throws the mute on and leaves the volume", volume_file(compositor_volume_path[2], text, sizeof(text)) && string_equals((string_address)text, (string_address) "on\n") &&
+                                                                          compositor_volume.muted && compositor_volume.percent == 80 && taskbar.volume_muted);
+        compositor_key(0, CK_KEY_MUTE, 2, 0);
+        check("volume: and a held Mute is one press", compositor_volume.muted);
+        compositor_key(0, CK_KEY_MUTE, 1, 0);
+        volume_file(compositor_volume_path[2], text, sizeof(text));
+        check("volume: Mute again throws it off", string_equals((string_address)text, (string_address) "off\n") && !compositor_volume.muted);
+        compositor_key(0, CK_KEY_MUTE, 1, 0);
+        compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+        volume_file(compositor_volume_path[2], text, sizeof(text));
+        volume_file(compositor_volume_path[1], other, sizeof(other));
+        check("volume: a volume key unmutes, and takes its step", string_equals((string_address)text, (string_address) "off\n") && string_equals((string_address)other, (string_address) "85\n") &&
+                                                                     !compositor_volume.muted);
+#if MOONWATER_UI_MIXER
+        // Told to the server at once over its socket (a fake here): the sink by the name the page gives it, the volume as the percent of 65536
+        // and the mute as it is thrown, before the files; what the files hold is the same, and a socket that fails costs nothing but its speed.
+        {
+                char at_text[16];
+
+                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                compositor_ctl.open = 1;
+                compositor_ctl_again = 0; // the keys before this one tried a socket that is not there, and none is tried for two seconds after
+                mixer_logged = 0, mixer_fail_send = 0;
+                compositor_key(0, CK_KEY_VOLUME_DOWN, 1, 0);
+                check("volume: a volume key is told to the server by the sink's name, as the percent of 65536, and the file holds it too",
+                      mixer_logged == 1 && mixer_log[0].command == CTL_COMMAND_SET_SINK_VOLUME && string_equals((string_address)mixer_log[0].text, (string_address) "alsa_output.test") &&
+                          mixer_log[0].channels == 2 && mixer_log[0].volume == 80u * 65536 / 100 && volume_file(compositor_volume_path[1], at_text, sizeof(at_text)) &&
+                          string_equals((string_address)at_text, (string_address) "80\n"));
+                check("volume: and the server is waited for 20 ms at most, not the mixer's 300", mixer_timeout == COMPOSITOR_VOLUME_WAIT_MS && COMPOSITOR_VOLUME_WAIT_MS == 20);
+                compositor_key(0, CK_KEY_MUTE, 1, 0);
+                check("volume: the mute key is told as the request that mutes, by the same name, with no volume sent",
+                      mixer_logged == 2 && mixer_log[1].command == CTL_COMMAND_SET_SINK_MUTE && mixer_log[1].mute == 1 && string_equals((string_address)mixer_log[1].text, (string_address) "alsa_output.test"));
+                compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+                check("volume: a volume key on a muted machine tells the volume and then the mute off",
+                      mixer_logged == 4 && mixer_log[2].command == CTL_COMMAND_SET_SINK_VOLUME && mixer_log[2].volume == 85u * 65536 / 100 && mixer_log[3].command == CTL_COMMAND_SET_SINK_MUTE &&
+                          mixer_log[3].mute == 0);
+                mixer_logged = 0;
+                mixer_fail_send = 1;
+                compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+                volume_file(compositor_volume_path[1], at_text, sizeof(at_text));
+                check("volume: a socket that fails is let go and the files are written all the same", !compositor_ctl.open && string_equals((string_address)at_text, (string_address) "90\n") &&
+                                                                                                          compositor_volume.percent == 90 && compositor_ctl_again > clock_monotonic_nanoseconds());
+                mixer_fail_send = 0;
+                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                compositor_key(0, CK_KEY_VOLUME_DOWN, 1, 0);
+                volume_file(compositor_volume_path[1], at_text, sizeof(at_text));
+                check("volume: and none is tried again before its time, while the files go on", mixer_logged == 0 && !compositor_ctl.open && string_equals((string_address)at_text, (string_address) "85\n"));
+                compositor_ctl_again = 0;
+                compositor_key(0, CK_KEY_VOLUME_DOWN, 1, 0);
+                check("volume: with its time up a socket that is not there is tried, fails, and costs the keys nothing", mixer_logged == 0 && !compositor_ctl.open &&
+                                                                                                                         compositor_ctl_again > clock_monotonic_nanoseconds() &&
+                                                                                                                         compositor_volume.percent == 80);
+                // and a page with no sink name (a server that is starting) is told nothing
+                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                compositor_ctl.open = 1;
+                compositor_volume.copy.name[0] = 0;
+                compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+                check("volume: a page with no name for the sink is told nothing, and the file is written", mixer_logged == 0 && compositor_ctl.open && compositor_volume.percent == 85);
+                string_copy_bounded((string_address)compositor_volume.copy.name, (string_address) "alsa_output.test", sizeof(compositor_volume.copy.name));
+                compositor_ctl.open = 0;
+                compositor_ctl_again = ~(positive)0; // the checks that follow tell nobody
+        }
+#endif
+
+        // The ends: 100 is the most, and a press at it writes nothing; 0 is the least.
+        for (int k = 0; k < 5; k++)
+                compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+        volume_file(compositor_volume_path[1], text, sizeof(text));
+        check("volume: 100 is the most", string_equals((string_address)text, (string_address) "100\n") && compositor_volume.percent == 100);
+        system_remove_at(AT_FDCWD, (string_address)compositor_volume_path[1], 0);
+        compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+        check("volume: and a press at 100 writes no file", !volume_file(compositor_volume_path[1], text, sizeof(text)) && compositor_volume.percent == 100);
+        for (int k = 0; k < 21; k++)
+                compositor_key(0, CK_KEY_VOLUME_DOWN, 1, 0);
+        volume_file(compositor_volume_path[1], text, sizeof(text));
+        check("volume: 0 is the least", string_equals((string_address)text, (string_address) "0\n") && compositor_volume.percent == 0);
+
+        // The page is not believed for a moment after the desktop's change, and is believed after it.
+        volume_put_page(52429, 0, AUDIO_STATE_MAGIC);
+        compositor_volume_unmap();
+        compositor_volume_look(clock_monotonic_nanoseconds());
+        check("volume: a page looked at at once after our own change does not undo it", compositor_volume.percent == 0);
+        compositor_volume_look(clock_monotonic_nanoseconds() + 2 * COMPOSITOR_VOLUME_HOLD_NS);
+        check("volume: and one a moment later is what the server says", compositor_volume.percent == 80 && !compositor_volume.flash_until);
+
+        // The wheel over the cell: five percent a notch, up raising it; elsewhere it is not the volume's.
+        compositor.pointer_x = cx + cw / 2, compositor.pointer_y = cy + ch / 2;
+        compositor_volume.hold_until = 0;
+        compositor_wheel(120, 0);
+        volume_file(compositor_volume_path[1], text, sizeof(text));
+        check("volume: a notch up over the cell is five more", string_equals((string_address)text, (string_address) "85\n") && compositor_volume.percent == 85);
+        compositor_wheel(-120, 0);
+        compositor_wheel(-120, 0);
+        check("volume: and a notch down five less", compositor_volume.percent == 75);
+        compositor_wheel(60, 0);
+        check("volume: half a notch is nothing yet", compositor_volume.percent == 75);
+        compositor_wheel(60, 0);
+        check("volume: and the other half is the notch", compositor_volume.percent == 80);
+        compositor.pointer_x = 1280, compositor.pointer_y = 700;
+        compositor_wheel(120, 0);
+        check("volume: a notch elsewhere is not the volume's", compositor_volume.percent == 80);
+        compositor.pointer_x = cx + cw / 2, compositor.pointer_y = cy + ch / 2;
+        compositor_wheel(120, 1);
+        check("volume: and nor is one turned sideways", compositor_volume.percent == 80);
+
+        // The server goes: the cell goes with it, and the keys have nothing to turn.
+        volume_put_page(52429, 0, 0);
+        compositor_volume_unmap();
+        compositor_volume.hold_until = 0;
+        compositor_volume_look(clock_monotonic_nanoseconds());
+        view = compositor_taskbar_view();
+        check("volume: a server that is gone takes the cell away", !compositor_volume.present && !taskbar_slot(&view, TASKBAR_VOLUME, &cx, &cy, &cw, &ch));
+        for (int k = 0; k < 3; k++)
+                system_remove_at(AT_FDCWD, (string_address)compositor_volume_path[k], 0);
+        compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
+        check("volume: and a key then writes nothing", !volume_file(compositor_volume_path[1], text, sizeof(text)));
+        compositor_volume_unmap();
+        compositor_volume_path[0] = AUDIO_STATE_PATH, compositor_volume_path[1] = SETTING_AUDIO_VOLUME_PATH, compositor_volume_path[2] = SETTING_AUDIO_MUTE_PATH;
+        compositor_volume_path[3] = CTL_SOCKET;
+        memory_zero(&compositor_ctl, sizeof(compositor_ctl));
+        taskbar_volume_set(0, 0, 0, 0);
+}
+
+/*
         The chrome at the default theme, drawn the way it was before the kit's roles drew it: the line of the window
         with the keys and of one without, the desktop and each window's close and minimise buttons, all in one scene, which is
         pinned by a hash of the whole output so that a changed default pixel is seen. The tabs' inks the band takes for
@@ -145146,61 +145519,14 @@ static struct audio_state mixer_fixture_page;
 static b64 mixer_t0;
 static struct windows mixer_fixture_table;
 
-struct mixer_sent
+// A start is a grandchild's, which the check does not wait on: the file waited for (two seconds at most) and read.
+static positive mixer_waits(const char address_to path, char address_to into, positive room)
 {
-        unsigned long command, index, volume, channels;
-        int mute;
-        char text[64];
-};
+        positive began = clock_monotonic_nanoseconds(), got;
 
-static struct mixer_sent mixer_log[16];
-static int mixer_logged, mixer_fail_send;
-static unsigned char mixer_reply[32];
-static long mixer_reply_have, mixer_reply_at;
-
-// What the mixer sends is read back as the engine reads it: the command, the tag, and the fields of the five that change a volume or a mute.
-static long mixer_fake_send(void *context, const unsigned char *bytes, long count)
-{
-        const unsigned char *payload = bytes + 20;
-        struct mixer_sent *sent = &mixer_log[mixer_logged < 16 ? mixer_logged : 15];
-        long at = 10;
-        unsigned long command = pulse_be32(payload + 1), tag = pulse_be32(payload + 6);
-
-        (void)context, (void)count;
-        if (mixer_fail_send)
-                return -1;
-        memory_zero(sent, sizeof(*sent));
-        sent->command = command;
-        if (payload[at] == 'L')
-                sent->index = pulse_be32(payload + at + 1), at += 5;
-        if (payload[at] == 't')
-        {
-                string_copy_bounded((string_address)sent->text, (string_address)(payload + at + 1), sizeof(sent->text));
-                at += 2 + (long)string_length((string_address)(payload + at + 1));
-        }
-        if (payload[at] == 'v')
-                sent->channels = payload[at + 1], sent->volume = pulse_be32(payload + at + 2);
-        else if (payload[at] == '1' || payload[at] == '0')
-                sent->mute = payload[at] == '1';
-        mixer_logged++;
-        // Its answer: a bare reply with the tag.
-        memory_zero(mixer_reply, sizeof(mixer_reply));
-        mixer_reply[3] = 10, mixer_reply[4] = mixer_reply[5] = mixer_reply[6] = mixer_reply[7] = 0xff;
-        mixer_reply[20] = 'L', mixer_reply[24] = (unsigned char)PULSE_COMMAND_REPLY;
-        mixer_reply[25] = 'L', mixer_reply[26] = (unsigned char)(tag >> 24), mixer_reply[27] = (unsigned char)(tag >> 16), mixer_reply[28] = (unsigned char)(tag >> 8),
-        mixer_reply[29] = (unsigned char)tag;
-        mixer_reply_have = 30, mixer_reply_at = 0;
-        return 0;
-}
-
-static long mixer_fake_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
-{
-        (void)context, (void)timeout_ms;
-        if (mixer_reply_have - mixer_reply_at < count)
-                return -1;
-        memory_copy(bytes, mixer_reply + mixer_reply_at, (positive)count);
-        mixer_reply_at += count;
-        return 0;
+        while (!(got = file_text(path, into, room)) && clock_monotonic_nanoseconds() - began < 2000000000ull)
+                system_call(syscall(sched_yield));
+        return got;
 }
 
 static fn mixer_fixture_streams(void)
@@ -145409,6 +145735,128 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 check("mixer: the device's slider is filled up to its knob at 80 percent and empty above it",
                       strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_ON_SURFACE));
         }
+        // The popup (-q): the device's strip alone, the Mixer row under it, the keys and the pointer, the mixer started by the row, the place
+        // beside the cell, and the keys going elsewhere.
+        {
+                static const char started_path[] = "/tmp/mw-launcher-started";
+                char said[256];
+                int x, y, got;
+                struct window_event move, press, lift;
+                int edge_place[4][2], room = 0;
+
+                mixer.quick = true;
+                mixer.width = ui_px(&mixer.ui, MIXER_QUICK_W), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
+                mixer.shown = -1, mixer.on_button = false;
+                mixer.font = (string_address) "/fonts/ui.ttf";
+                mixer_fixture_streams();
+                mixer_fixture_page.seq += 2;
+                mixer.listed = false; // listed again whatever the page's number was
+                mixer_poll(mixer_t0 + 800000000ll);
+                check("mixer popup: the device's strip alone, with no program in it", s->count == 1 && s->item[0].master && mixer.big->copy.stream[0].index != MIXER_NONE);
+                for (int k = 0; k < 640 * 400; k++)
+                        pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                mixer.ui.opaque = 1;
+                mixer_draw(pixels);
+                check("mixer popup: the Mixer row is under the strip, in the last 44 pixels, a button of the kit's across the strip's width",
+                      mixer.open.kind == UI_BUTTON && string_equals((string_address)mixer.open.label, (string_address) "Mixer") && mixer.open.y >= MIXER_QUICK_H - MIXER_QUICK_ROW &&
+                          mixer.open.y + mixer.open.h <= MIXER_QUICK_H && mixer.open.w == UI_STRIP_W && s->control[1].y + s->control[1].h <= MIXER_QUICK_H - MIXER_QUICK_ROW);
+                x = mixer.open.x + mixer.open.w / 2, y = mixer.open.y + mixer.open.h / 2;
+                {
+                        int ink = 0;
+
+                        for (int py = mixer.open.y; py < mixer.open.y + mixer.open.h; py++)
+                                for (int px = mixer.open.x; px < mixer.open.x + mixer.open.w; px++)
+                                        ink += (pixels[py * 640 + px] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu);
+                        check("mixer popup: the row is written", ink > 30);
+                }
+
+                // Keys: Tab is between the strip and the row, Enter on the row starts the mixer and ends the popup, anywhere else it is the strip's.
+                system_remove_at(AT_FDCWD, started_path, 0);
+                s->focus = 0, s->focus_id = s->item[0].id;
+                move = strips_key(UI_KEY_ENTER, 0);
+                check("mixer popup: Enter with the keys on the strip mutes it, and starts nothing", mixer_event(&move) && !file_text(started_path, said, sizeof(said)) && s->item[0].muted);
+                mixer_flush();
+                move = strips_key(UI_KEY_TAB, 0);
+                check("mixer popup: Tab puts the keys on the row", mixer_event(&move) && mixer.on_button);
+                move = strips_key(UI_KEY_ENTER, WINDOW_KEY_REPEAT);
+                check("mixer popup: and a held key is nothing on it", mixer_event(&move) && !file_text(started_path, said, sizeof(said)));
+                move = strips_key(UI_KEY_ENTER, 0);
+                check("mixer popup: Enter on the row starts the whole mixer apart and ends the popup", !mixer_event(&move));
+                got = mixer_waits(started_path, said, sizeof(said));
+                check("mixer popup: it is started in the face the popup has, as /mixer", got >= 23 && !memory_compare(said, "/mixer -f /fonts/ui.ttf", 23));
+                mixer.on_button = true;
+                move = strips_key(UI_KEY_TAB, 0);
+                mixer_event(&move);
+                check("mixer popup: Tab again gives the keys back to the strip", !mixer.on_button);
+
+                // The pointer: a press on the row is the row's, a release on it starts the mixer; a press on the slider is the strip's.
+                system_remove_at(AT_FDCWD, started_path, 0);
+                move = (struct window_event){WINDOW_EVENT_MOTION, 0, x, y};
+                press = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                ui_kit_held = null;
+                mixer_event(&move);
+                check("mixer popup: a press on the row takes the keys to it and starts nothing", mixer_event(&press) && mixer.on_button && !file_text(started_path, said, sizeof(said)));
+                check("mixer popup: its release there starts the mixer and ends the popup", !mixer_event(&lift) && mixer_waits(started_path, said, sizeof(said)) >= 23);
+                system_remove_at(AT_FDCWD, started_path, 0);
+                mixer.on_button = false;
+                ui_kit_held = null;
+                move = (struct window_event){WINDOW_EVENT_MOTION, 0, s->control[0].x + s->control[0].w / 2, s->control[0].y + 40};
+                mixer_event(&move);
+                check("mixer popup: a press on the slider is the strip's, and the row starts nothing", mixer_event(&press) && ui_kit_held == &s->control[0] && !mixer.on_button &&
+                                                                                                      s->item[0].percent > 70);
+                mixer_event(&lift);
+                check("mixer popup: and so is the release: nothing is started", ui_kit_held == null && file_text(started_path, said, sizeof(said)) == 0);
+
+                // The keys going elsewhere ends it; before they came it had never had them; the whole mixer is not ended by it.
+                check("mixer popup: it is not ended before it has had the keys", mixer_focus(false));
+                mixer_focus(true);
+                check("mixer popup: and is ended by losing them", !mixer_focus(false));
+                mixer.quick = false;
+                check("mixer: the whole mixer is not", mixer_focus(false));
+                mixer.quick = true;
+
+                // Beside the cell: above a bottom panel, below a top one, beside a side one, its right edge kept on the screen.
+                {
+                        static const int cell[4] = {2400, 1416, 40, 24}, screen[4] = {0, 0, 2560, 1440}, side[4] = {0, 600, 24, 40};
+                        int ax, ay;
+
+                        mixer_anchor_place(TASKBAR_BOTTOM, cell, screen, 108, 380, &ax, &ay);
+                        edge_place[0][0] = ax, edge_place[0][1] = ay;
+                        mixer_anchor_place(TASKBAR_TOP, (const int[4]){2400, 0, 40, 24}, screen, 108, 380, &ax, &ay);
+                        edge_place[1][0] = ax, edge_place[1][1] = ay;
+                        mixer_anchor_place(TASKBAR_LEFT, side, screen, 108, 380, &ax, &ay);
+                        edge_place[2][0] = ax, edge_place[2][1] = ay;
+                        mixer_anchor_place(TASKBAR_RIGHT, (const int[4]){2536, 600, 24, 40}, screen, 108, 380, &ax, &ay);
+                        edge_place[3][0] = ax, edge_place[3][1] = ay;
+                        room = edge_place[0][0] == 2400 && edge_place[0][1] == 1416 - 380 && edge_place[1][0] == 2400 && edge_place[1][1] == 24 &&
+                               edge_place[2][0] == 24 && edge_place[2][1] == 600 && edge_place[3][0] == 2536 - 108 && edge_place[3][1] == 600;
+                        mixer_anchor_place(TASKBAR_BOTTOM, (const int[4]){2530, 1416, 30, 24}, screen, 108, 380, &ax, &ay);
+                        room &= ax == 2560 - 108 && ay == 1416 - 380;
+                        mixer_anchor_place(TASKBAR_BOTTOM, (const int[4]){0, 20, 30, 24}, screen, 108, 380, &ax, &ay);
+                        room &= ax == 0 && ay == 0;
+                        check("mixer popup: it opens above a bottom panel at the cell, below a top one, beside a side one, and is kept on the screen", room);
+                }
+                mixer.beside = true;
+                mixer_fixture_table.outputs = 2;
+                mixer_fixture_table.button_x = 2400, mixer_fixture_table.button_y = 1416, mixer_fixture_table.button_w = 40, mixer_fixture_table.button_h = 24;
+                mixer_fixture_table.button_edge = TASKBAR_BOTTOM, mixer_fixture_table.button_screen = 1;
+                mixer_fixture_table.output_x[0] = 0, mixer_fixture_table.output_y[0] = 0, mixer_fixture_table.output_w[0] = 2560, mixer_fixture_table.output_h[0] = 1440;
+                mixer_fixture_table.output_x[1] = 2560, mixer_fixture_table.output_y[1] = 0, mixer_fixture_table.output_w[1] = 1920, mixer_fixture_table.output_h[1] = 1080;
+                mixer.anchored = false;
+                mixer_anchor_take();
+                check("mixer popup: the rectangle the compositor left is taken once, with the screen it names",
+                      mixer.anchored && mixer.edge == TASKBAR_BOTTOM && mixer.number == 1 && mixer.anchor[0] == 2400 && mixer.anchor[2] == 40);
+                mixer.anchored = false;
+                mixer_fixture_table.button_w = 0;
+                mixer_anchor_take();
+                check("mixer popup: and a table with no press in it leaves it in the middle", !mixer.anchored);
+                mixer.beside = false;
+                mixer.quick = false;
+                mixer.on_button = false;
+                mixer.width = 640, mixer.height = 400;
+        }
+
         // The model of a page read by another writer while it is read: a page whose sequence is odd is not taken.
         mixer_fixture_page.seq |= 1;
         check("mixer: a page that is being written is not read (the sequence is odd at every try)", !audio_state_read(&mixer_fixture_page, &mixer.big->copy));
@@ -145907,6 +146355,30 @@ static fn check_kit_strips(void)
                       right[0] == 0 && right[1] > 8 && right[2] > right[1] + 8 && right[3] > 8);
                 check("kit strips: reading from the right it is turned over: the same on the other side, and nothing past its box",
                       left[0] == 0 && left[1] == right[1] && left[2] == right[2] && left[3] == right[3] && !outside);
+        }
+
+        // The device's disc, muted: the cross where the waves were, whatever the volume (and none when it is not muted at zero).
+        {
+                int counts[2];
+
+                for (int muted = 0; muted < 2; muted++)
+                {
+                        int count = 0;
+
+                        for (int k = 0; k < 640 * 400; k++)
+                                strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                        ui_kit.now += 5000000000ll;
+                        ui_strips_begin(s);
+                        ui_strips_add(s, 0xfffffffeul, "Speakers", 0, muted, 1, 0, 0, 0, ui_kit.now);
+                        ui_strips_end(s);
+                        ui_strips_place(&ui, s, 0, 0, 640, 400);
+                        ui_strips_draw(&ui, s, false);
+                        for (int y = 16; y < 16 + UI_STRIP_FACE; y++)
+                                for (int x = ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 + 2; x < ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 + UI_STRIP_FACE / 2; x++)
+                                        count += strips_pixel(x, y) == (ui_role(UI_ON_SURFACE_VARIANT) & 0xffffffu);
+                        counts[muted] = count;
+                }
+                check("kit strips: the device's disc, muted, has the cross in its right half and not muted it has none at volume 0", counts[0] == 0 && counts[1] > 8);
         }
 
         // A message instead of strips: written in the middle of the window, or of the room beside the device.
@@ -154638,6 +155110,7 @@ b32 main()
 #endif
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
+        check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
 #endif
 #if MOONWATER_UI_SETTINGS
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),
@@ -173438,7 +173911,7 @@ static void pt_test_fuzz(void)
 
 static long pt_ctl_slot;
 static unsigned char pt_ctl_bytes[PULSE_OUT];
-static long pt_ctl_have, pt_ctl_at, pt_ctl_sends, pt_ctl_deaf, pt_ctl_fail_send, pt_ctl_stale;
+static long pt_ctl_have, pt_ctl_at, pt_ctl_sends, pt_ctl_deaf, pt_ctl_fail_send, pt_ctl_stale, pt_ctl_timeout;
 
 // What the client sends goes to the engine as the bytes a connection would carry.
 static long pt_ctl_send(void *context, const unsigned char *bytes, long count)
@@ -173464,7 +173937,7 @@ static long pt_ctl_send(void *context, const unsigned char *bytes, long count)
 static long pt_ctl_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
 {
         (void)context;
-        (void)timeout_ms;
+        pt_ctl_timeout = timeout_ms;
         while (pt_ctl_have - pt_ctl_at < count)
         {
                 const unsigned char *out;
@@ -173535,6 +174008,8 @@ static void pt_test_control_client(void)
                 PTCHECK(!strcmp(name, CTL_NAME), "the client names itself: %s", name);
         }
 
+        PTCHECK(pt_ctl_timeout == CTL_TIMEOUT_MS, "an answer is waited for CTL_TIMEOUT_MS by default (%ld)", pt_ctl_timeout);
+
         // What it reads of a stream: its channels, its volume, its mute.
         PTCHECK(ctl_get_input(&pt_ctl, index, &info) == 0 && info.index == index && info.channels == 2 && info.volume == 0x10000 && !info.muted,
                 "a stereo stream: 2 channels, 100%%, not muted (%ld %lu %d)", info.channels, info.volume, info.muted);
@@ -173577,6 +174052,11 @@ static void pt_test_control_client(void)
         PTCHECK(ctl_set_input_mute(&pt_ctl, index, 1) == 0 && pt_stream_of(index)->muted == 1 && ctl_set_input_mute(&pt_ctl, index, 0) == 0 && !pt_stream_of(index)->muted,
                 "a reply and an error with other tags before the answer are read past");
         pt_ctl_stale = 0;
+
+        // A caller that must not wait shortens the wait: the transport is asked for that.
+        pt_ctl.timeout_ms = 20;
+        PTCHECK(ctl_set_input_mute(&pt_ctl, index, 0) == 0 && pt_ctl_timeout == 20, "the connection's own timeout is what the transport is asked to wait (%ld)", pt_ctl_timeout);
+        pt_ctl.timeout_ms = 0;
 
         // The master volume and mute, by the sink's name: the person's.
         PTCHECK(ctl_set_sink_volume(&pt_ctl, "null", 0x8000) == 0 && pt_engine.sink[0].volume[0] == 0x8000 && pt_engine.sink[0].volume[1] == 0x8000,

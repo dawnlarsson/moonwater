@@ -121,6 +121,8 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #include "ui/theme.h"
 #include "ui/motion.h"
 #include "ui/taskbar.h"
+#include "../audio/state.c" // the sound server's page: the tray's volume cell and the volume keys
+#include "../audio/control.c" // and its socket, which the keys and the wheel tell the volume to at once
 #if !defined(SHELL_NO_GPU) && !defined(MOONWATER_BUILD_TOOL)
 #include "gpu.c" // GPU rendering, on unless the build's header says SHELL_NO_GPU (CONFIG_MOONWATER_GPU=n); the build tool, which makes its kernels, is without it
 #endif
@@ -1963,6 +1965,9 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
 #define CK_KEY_TAB 15
 #define CK_KEY_F4 62
 #define CK_KEY_F9 67
+#define CK_KEY_MUTE 113
+#define CK_KEY_VOLUME_DOWN 114
+#define CK_KEY_VOLUME_UP 115
 #define CK_KEY_UP 103
 #define CK_KEY_LEFT 105
 #define CK_KEY_RIGHT 106
@@ -12527,6 +12532,271 @@ static void compositor_key_fire(unsigned int which)
 }
 
 /*
+        The sound server's master volume on the desktop: the keys (mute, volume down and volume up, five percent a press and a
+        held key repeats), the wheel over the tray's volume cell and a middle press on it. The compositor reads the server's page
+        (src/audio/state.c, mapped read-only) for the volume and for whether there is a server at all, which the tray's cell
+        shows (and shows only then), and it changes the volume at once over the server's socket (control.c: SET_SINK_VOLUME and the
+        mute, the sink by the name the page gives it) and as the settings do, /root/audio.volume and /root/audio.mute replaced whole,
+        which keeps it across a restart and is all there is when the socket does not answer. What it shows of its own change it shows at once, as the
+        number for a moment, and the page is not believed for a moment after, so the cell does not go back to the old value before
+        the server has the new. A left press on the cell is the script's (volume_button): the mixer is a program, and everything on
+        the desktop is started by the machine script.
+*/
+#define COMPOSITOR_VOLUME_STEP 5
+#define COMPOSITOR_VOLUME_WAIT_MS 20           // the most the desktop waits for the server's answer: a key is not to hold the compositor
+#define COMPOSITOR_VOLUME_AGAIN_NS 2000000000ull // a server that did not answer is tried again no sooner than this
+#define COMPOSITOR_VOLUME_LOOK_NS 500000000ull // the page is looked at this often while there is a server,
+#define COMPOSITOR_VOLUME_FIND_NS 2000000000ull // and this often for one to start
+#define COMPOSITOR_VOLUME_FLASH_NS 1500000000ull
+#define COMPOSITOR_VOLUME_HOLD_NS 800000000ull
+#define COMPOSITOR_VOLUME_STALE_NS 4000000000ull // a page that has not moved for this long is looked for again by its name
+
+// The page, the two files and the socket, which a check points at files of its own.
+static const char *compositor_volume_path[4] = {AUDIO_STATE_PATH, SETTING_AUDIO_VOLUME_PATH, SETTING_AUDIO_MUTE_PATH, CTL_SOCKET};
+
+// The connection to the server's socket (src/audio/control.c), made at the first change and kept; one that failed is tried again later.
+static struct ctl compositor_ctl;
+static positive compositor_ctl_again;
+
+static struct
+{
+        const volatile struct audio_state *page;
+        struct audio_state copy;
+        positive look_at, flash_until, hold_until, seen_at;
+        unsigned int seen_seq;
+        int percent, muted, present;
+} compositor_volume;
+
+static void compositor_volume_unmap(void)
+{
+        if (compositor_volume.page)
+                compositor_call(syscall(munmap), (positive)compositor_volume.page, 4096ul * ((sizeof(struct audio_state) + 4095) / 4096), 0, 0, 0, 0);
+        compositor_volume.page = null;
+}
+
+static int compositor_volume_map(void)
+{
+        long fd, size, got;
+
+        if (compositor_volume.page)
+                return 1;
+        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)compositor_volume_path[0], 0x80000, 0, 0, 0);
+        if (fd < 0)
+                return 0;
+        size = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
+        got = size < (long)sizeof(struct audio_state) ? -1
+              : compositor_call(syscall(mmap), 0, 4096ul * ((sizeof(struct audio_state) + 4095) / 4096), 1, 1, (positive)fd, 0);
+        compositor_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+        if (got < 0 && got > -4096)
+                return 0;
+        compositor_volume.page = (const volatile struct audio_state *)got;
+        return 1;
+}
+
+/*
+        The volume cell pressed: the popup is started by the machine script (volume_button), which starts the mixer in its popup form
+        (-q -a) beside the cell, as the launcher is beside its button; the table holds the cell's rectangle, the edge its band is along
+        and its screen before the script is told. A popup that is up is put away by this very press (WINDOW_DISMISS), and the cell then
+        asks for none, so the cell opens it and closes it.
+*/
+static int compositor_quick_row(void)
+{
+        for (unsigned int row = 0; row < WINDOWS; row++)
+        {
+                const volatile char *name = compositor.table->name[row];
+                static const char quick[] = "mixer-quick";
+                unsigned int at = 0;
+
+                if (!compositor.showing[row])
+                        continue;
+                while (at < sizeof(quick) && name[at] == quick[at] && quick[at])
+                        at++;
+                if (at == sizeof(quick) - 1 && !name[at])
+                        return (int)row;
+        }
+        return COMPOSITOR_NONE;
+}
+
+static void compositor_volume_open(int x, int y)
+{
+        struct windows *table = compositor.table;
+        int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale / 100 : 0;
+
+        if (compositor_quick_row() >= 0)
+                return;
+        for (compositor.band_at = 0; table && compositor.band_at < compositor_bands(); compositor.band_at++)
+        {
+                struct taskbar_view view = compositor_band_view();
+                int rect[4];
+
+                if (taskbar_hit_reach(&view, x, y, reach) != TASKBAR_VOLUME || !taskbar_volume_anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
+                        continue;
+                table->button_x = rect[0], table->button_y = rect[1];
+                table->button_w = (unsigned int)rect[2], table->button_h = (unsigned int)rect[3];
+                table->button_edge = view.position, table->button_screen = (unsigned int)compositor.band_at;
+                break;
+        }
+        compositor.band_at = 0;
+        compositor_script_say("volume_button");
+}
+
+// What the tray's cell shows, told to the band; the band is drawn again when it changed.
+static void compositor_volume_show(void)
+{
+        if (taskbar_volume_set(compositor_volume.present, compositor_volume.percent, compositor_volume.muted, compositor_volume.flash_until != 0))
+                compositor_tabs_changed();
+}
+
+// The page looked at: whether there is a server, and the volume and the mute it says (not for a moment after our own change).
+static void compositor_volume_look(positive now)
+{
+        struct audio_state *copy = &compositor_volume.copy;
+
+        if (compositor_volume.flash_until && now >= compositor_volume.flash_until)
+                compositor_volume.flash_until = 0;
+        if (now >= compositor_volume.hold_until)
+        {
+                if (!compositor_volume_map() || !audio_state_read(compositor_volume.page, copy))
+                        compositor_volume.present = 0;
+                else
+                {
+                        unsigned long percent = ((unsigned long)copy->volume * 100 + 32768) / 65536;
+
+                        compositor_volume.present = 1;
+                        compositor_volume.percent = percent > 100 ? 100 : (int)percent;
+                        compositor_volume.muted = copy->muted != 0;
+                        if (copy->seq != compositor_volume.seen_seq)
+                                compositor_volume.seen_seq = copy->seq, compositor_volume.seen_at = now;
+                        // A server that was started again has a page of its own: this one is let go when it stands still.
+                        if (now - compositor_volume.seen_at > COMPOSITOR_VOLUME_STALE_NS)
+                        {
+                                compositor_volume_unmap();
+                                compositor_volume.seen_at = now;
+                        }
+                }
+        }
+        compositor_volume.look_at = now + (compositor_volume.present ? COMPOSITOR_VOLUME_LOOK_NS : COMPOSITOR_VOLUME_FIND_NS);
+        if (compositor_volume.flash_until && compositor_volume.flash_until < compositor_volume.look_at)
+                compositor_volume.look_at = compositor_volume.flash_until;
+        compositor_volume_show();
+}
+
+// A small file of /root replaced whole: written beside it and renamed over it.
+static void compositor_volume_write(const char *path, const char *text)
+{
+        char stage[48];
+        positive length = string_length((string_address)path), size = string_length((string_address)text);
+        bipolar handle, written;
+
+        if (length + sizeof(".new") > sizeof(stage))
+                return;
+        memory_copy(stage, path, length);
+        memory_copy(stage + length, ".new", sizeof(".new"));
+        handle = system_open_at_mode(AT_FDCWD, (string_address)stage, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (handle < 0)
+                return;
+        written = system_write_once(handle, text, size);
+        system_close(handle);
+        if (written != (bipolar)size || system_rename_at(AT_FDCWD, (string_address)stage, AT_FDCWD, (string_address)path, 0) < 0)
+                system_remove_at(AT_FDCWD, (string_address)stage, 0);
+}
+
+/*
+        The volume and the mute told to the server over its socket (the sink by the name the page gives it), so a key is heard at once and
+        not at the server's next look at the files. volume is a percent or -1 for none, mute is 0, 1 or -1 for none. The wait for the
+        server's answer is short (COMPOSITOR_VOLUME_WAIT_MS), and a server that does not answer is let go and tried again in two seconds;
+        the files are written all the same, so the person's volume is kept whatever the socket did.
+*/
+static void compositor_volume_tell(int volume, int mute)
+{
+        positive now = clock_monotonic_nanoseconds();
+        const char *sink = compositor_volume.copy.name;
+        long answer = 0;
+
+        if (!compositor_volume.present || !sink[0])
+                return;
+        compositor_ctl.timeout_ms = COMPOSITOR_VOLUME_WAIT_MS;
+        if (!compositor_ctl.open)
+        {
+                if (now < compositor_ctl_again)
+                        return;
+                if (ctl_connect(&compositor_ctl, compositor_volume_path[3]) < 0)
+                {
+                        compositor_ctl_again = now + COMPOSITOR_VOLUME_AGAIN_NS;
+                        return;
+                }
+        }
+        if (volume >= 0)
+                answer = ctl_set_sink_volume(&compositor_ctl, sink, (unsigned long)volume * 65536 / 100);
+        if (answer >= 0 && mute >= 0)
+                answer = ctl_set_sink_mute(&compositor_ctl, sink, mute);
+        if (answer == CTL_FAILED)
+        {
+                ctl_disconnect(&compositor_ctl);
+                compositor_ctl_again = now + COMPOSITOR_VOLUME_AGAIN_NS;
+        }
+}
+
+/*
+        A change of the master volume: step percent more (or less) and unmuted, or with toggle the mute thrown and the volume as it
+        is. Nothing without a server: the keys have nothing to turn. The number is shown for a moment in the tray.
+*/
+static void compositor_volume_step(int step, int toggle)
+{
+        positive now = clock_monotonic_nanoseconds();
+        char text[8];
+        int percent, muted;
+
+        compositor_volume_look(now); // inside a moment of our own change it is our own number that is stepped, so a held key adds up
+        if (!compositor_volume.present)
+                return;
+        percent = compositor_volume.percent, muted = compositor_volume.muted;
+        if (toggle)
+                muted = !muted;
+        else
+        {
+                percent += step;
+                percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+                muted = 0;
+        }
+        compositor_volume_tell(percent != compositor_volume.percent ? percent : -1, muted != compositor_volume.muted ? muted : -1);
+        if (percent != compositor_volume.percent)
+        {
+                int at = 0;
+
+                if (percent >= 100)
+                        text[at++] = '1', text[at++] = '0', text[at++] = '0';
+                else
+                {
+                        if (percent >= 10)
+                                text[at++] = (char)('0' + percent / 10);
+                        text[at++] = (char)('0' + percent % 10);
+                }
+                text[at++] = '\n', text[at] = 0;
+                compositor_volume_write(compositor_volume_path[1], text);
+        }
+        if (muted != compositor_volume.muted)
+                compositor_volume_write(compositor_volume_path[2], muted ? "on\n" : "off\n");
+        compositor_volume.percent = percent, compositor_volume.muted = muted;
+        compositor_volume.flash_until = now + COMPOSITOR_VOLUME_FLASH_NS;
+        compositor_volume.hold_until = now + COMPOSITOR_VOLUME_HOLD_NS;
+        compositor_volume.look_at = compositor_volume.flash_until;
+        compositor_volume_show();
+}
+
+// A volume key: five percent a press, the mute thrown by its own key; a held key repeats the steps and not the mute.
+static void compositor_volume_key(unsigned int code, int value)
+{
+        if (code == CK_KEY_MUTE)
+        {
+                if (value == 1)
+                        compositor_volume_step(0, 1);
+        }
+        else
+                compositor_volume_step(code == CK_KEY_VOLUME_UP ? COMPOSITOR_VOLUME_STEP : -COMPOSITOR_VOLUME_STEP, 0);
+}
+
+/*
         The tray, the clock and the battery, pressed twice quickly: the settings. A window of that name that is
         up is brought up and given the keys; with none, the script is told (tray_double) and starts it, since
         everything on the desktop is started by the machine script and by nothing else.
@@ -12798,6 +13068,15 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         {
                 if (value == 1)
                         compositor_minimize_focused();
+                return;
+        }
+
+        // The volume keys are the desktop's, whichever window has the keys.
+        if (!(modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) &&
+            (code == CK_KEY_MUTE || code == CK_KEY_VOLUME_DOWN || code == CK_KEY_VOLUME_UP))
+        {
+                if (value)
+                        compositor_volume_key(code, value);
                 return;
         }
 
@@ -13419,6 +13698,16 @@ static void compositor_button(unsigned int code, int down)
                 return;
         }
 
+        // The volume cell: a left press opens the mixer (the script starts it), a middle one mutes.
+        if (tab == TASKBAR_VOLUME)
+        {
+                if (code == COMPOSITOR_BTN_LEFT)
+                        compositor_volume_open(compositor.pointer_x, compositor.pointer_y);
+                else if (code == COMPOSITOR_BTN_MIDDLE)
+                        compositor_volume_step(0, 1);
+                return;
+        }
+
         // The tray takes no press but a pair of left ones, which open the settings (compositor_settings_open).
         if (tab == COMPOSITOR_TRAY && code == COMPOSITOR_BTN_LEFT)
         {
@@ -13995,6 +14284,19 @@ static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
         // done when the batch is over): kept first, as before a button, or a flick past the edge sends the wheel to
         // no window, or to one in the room beside a shorter screen.
         compositor_pointer_clamp();
+        if (row < 0 && !horizontal && compositor_band_hit(compositor.pointer_x, compositor.pointer_y) == TASKBAR_VOLUME)
+        {
+                // The wheel over the tray's volume cell turns the volume, five percent a notch (120ths of one add up).
+                static int notch;
+
+                notch += v120;
+                if (notch >= 120 || notch <= -120)
+                {
+                        compositor_volume_step(COMPOSITOR_VOLUME_STEP * (notch / 120), 0);
+                        notch %= 120;
+                }
+                return;
+        }
         if (row < 0)
                 row = compositor.hover = compositor_picture_under(compositor.pointer_x, compositor.pointer_y);
         // Where the pointer is goes first, as it does before a button: a window that turns a wheel by where the pointer
@@ -15509,6 +15811,15 @@ static b32 compositor_main()
                                                                                      : until;
                 }
 
+                // The sound server's volume, looked at for the tray's cell, while there is a band to show it on.
+                if (compositor.band)
+                {
+                        positive due = compositor_volume.look_at ? compositor_volume.look_at : 1; // 1: not yet looked, so now
+
+                        now = clock_monotonic_nanoseconds();
+                        until = !until || due < until ? due : until;
+                }
+
                 // A lead is cleared a frame after its newest place, so the loop wakes for it.
                 if (compositor_predict_due())
                 {
@@ -15643,6 +15954,8 @@ static b32 compositor_main()
 
                 if (compositor.band && taskbar_tick())
                         compositor_tabs_changed();
+                if (compositor.band && clock_monotonic_nanoseconds() >= compositor_volume.look_at)
+                        compositor_volume_look(clock_monotonic_nanoseconds());
 
 #ifdef CONFIG_MOONWATER_WAYLAND
                 // The windows' clients are told of what changed, before the frame is drawn: no event waits for it.

@@ -115,16 +115,17 @@ M = [
     ("pulse", "cork not applied", "s->corked = cork;\n                if (cork)\n                        s->underrun = 1;\n                pulse_stream_apply(s);", "s->corked = cork;"),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
-    ("control", "a mute turned over", "pulse_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended", "pulse_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended"),
+    ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\n// A stream ended"),
     ("control", "the channel count not kept", "        c->kept[c->kept_next].index = index;\n        c->kept[c->kept_next].channels = channels;\n        c->kept_next = (c->kept_next + 1) % CTL_CACHE;", "        c->kept_next = (c->kept_next + 1) % CTL_CACHE;"),
     ("control", "a wrong count not mended", "                if (got != CTL_INVALID)\n                        return got < 0 ? got : 0;", "                return got < 0 ? got : 0;"),
-    ("control", "an access error as a failure", "return code == PULSE_ERR_ACCESS ? CTL_ACCESS :", "return code == PULSE_ERR_ACCESS ? CTL_FAILED :"),
-    ("control", "a missing stream as a failure", "code == PULSE_ERR_NOENTITY ? CTL_NOENTITY", "code == PULSE_ERR_NOENTITY ? CTL_FAILED"),
+    ("control", "an access error as a failure", "return code == CTL_ERR_ACCESS ? CTL_ACCESS :", "return code == CTL_ERR_ACCESS ? CTL_FAILED :"),
+    ("control", "a missing stream as a failure", "code == CTL_ERR_NOENTITY ? CTL_NOENTITY", "code == CTL_ERR_NOENTITY ? CTL_FAILED"),
     ("control", "any tag taken for ours", "if (frame[20] != 'L' || frame[25] != 'L' || answered != tag)", "if (frame[20] != 'L' || frame[25] != 'L')"),
     ("control", "a lost answer not a failure", "        c->open = 0;\n        return CTL_FAILED;\n}\n\n// A request begun", "        return CTL_FAILED;\n}\n\n// A request begun"),
-    ("control", "the sink named by nothing", "pulse_w_u32(&w, PULSE_INVALID);\n        pulse_w_string(&w, sink);\n        pulse_w_cvolume(&w, both, 2);", "pulse_w_u32(&w, PULSE_INVALID);\n        pulse_w_string(&w, 0);\n        pulse_w_cvolume(&w, both, 2);"),
-    ("control", "a stream's mute misread", "into->muted = pulse_r_bool(&r);", "into->muted = 0, (void)pulse_r_bool(&r);"),
-    ("control", "the stream killed is another", "ctl_begin(c, &w, PULSE_COMMAND_KILL_SINK_INPUT);\n        pulse_w_u32(&w, index);", "ctl_begin(c, &w, PULSE_COMMAND_KILL_SINK_INPUT);\n        pulse_w_u32(&w, index + 1);"),
+    ("control", "the sink named by nothing", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, sink);\n        ctl_w_cvolume(&w, both, 2);", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
+    ("control", "the timeout of the connection ignored", "long wait = c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS;", "long wait = CTL_TIMEOUT_MS;"),
+    ("control", "a stream's mute misread", "into->muted = ctl_r_bool(&r);", "into->muted = 0, (void)ctl_r_bool(&r);"),
+    ("control", "the stream killed is another", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index);", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index + 1);"),
 ]
 
 sources = {k: open(v).read() for k, v in engines.items()}

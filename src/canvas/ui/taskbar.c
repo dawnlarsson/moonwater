@@ -45,6 +45,9 @@ static struct taskbar_state
         char tray_text[SETTING_TRAY_MOST * 4];  // what it says this minute
         int tray_chars;                         // characters in tray_text
         int launcher;                           // `taskbar launcher on`: the band has a launcher button at its leading end
+        int volume_item;                        // the sound server is there: the tray has a volume cell before the battery's
+        int volume_percent, volume_muted;       // what it says (the master volume, 0 to 100, and whether it is muted)
+        int volume_flash;                       // a key or the wheel changed it just now: the cell says the percent, not the speaker
 } taskbar = {1, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
@@ -132,7 +135,7 @@ static int taskbar_tray(int high)
 {
         if (taskbar.tray_custom)
                 return taskbar_text(high, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
-        return taskbar_text(high, 5) * (taskbar.battery_item ? 2 : 1);
+        return taskbar_text(high, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0));
 }
 
 static int taskbar_tab_width(const struct taskbar_layout *lay, int which)
@@ -181,11 +184,12 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
 
 /*
         Where a slot is along the edge: its start and length. Slot -2 is the
-        tray as a whole, -3 the clock and -4 the battery (both inside the tray),
-        and TASKBAR_LAUNCHER (-5) the launcher button, a gap in from the leading
+        tray as a whole, -3 the clock, -4 the battery and TASKBAR_VOLUME (-6) the
+        volume item (all three inside the tray, the volume first), and
+        TASKBAR_LAUNCHER (-5) the launcher button, a gap in from the leading
         end. Answers 0 for a slot that has none: a tab past the count or too
-        narrow for one, the battery when none is shown, or the button when the
-        band has none.
+        narrow for one, the battery when none is shown, the volume when the
+        sound server is not there, or the button when the band has none.
 */
 static int taskbar_along(const struct taskbar_layout *lay, int which, int *along, int *length)
 {
@@ -212,11 +216,17 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
         {
                 if (taskbar.tray_custom)
                         return 0;
-                *along = lay->tray_at + (taskbar.battery_item ? text : 0), *length = text;
+                *along = lay->tray_at + (taskbar.battery_item ? text : 0) + (taskbar.volume_item ? text : 0), *length = text;
         }
         else if (which == -4)
         {
                 if (!taskbar.battery_item || taskbar.tray_custom)
+                        return 0;
+                *along = lay->tray_at + (taskbar.volume_item ? text : 0), *length = text;
+        }
+        else if (which == TASKBAR_VOLUME)
+        {
+                if (!taskbar.volume_item || taskbar.tray_custom)
                         return 0;
                 *along = lay->tray_at, *length = text;
         }
@@ -269,7 +279,7 @@ static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, in
 {
         int half = reach ? 2 * view->scale / 100 : 0;
 
-        for (int which = TASKBAR_LAUNCHER; which < (int)view->count; which++)
+        for (int which = TASKBAR_VOLUME; which < (int)view->count; which++)
         {
                 int x, y, width, height;
 
@@ -835,6 +845,43 @@ static void taskbar_launcher_glyph(const struct taskbar_view *view, const struct
 }
 
 /*
+        The volume cell: the speaker (ui_speaker, in the band's own pixels) with no waves, one or two by the volume, or crossed out
+        when it is muted; for a moment after a key or the wheel changed the volume, the number instead, as the battery's is.
+*/
+static void taskbar_volume_cell(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y, int width, int height,
+                                unsigned int ink, unsigned int ground)
+{
+        struct ui ui;
+        int size = (width < height ? width : height) * 70 / 100, waves = taskbar.volume_muted || !taskbar.volume_percent ? 0 : taskbar.volume_percent < 50 ? 1 : 2;
+
+        if (taskbar.volume_flash)
+        {
+                char text[8];
+                int at = 0;
+
+                if (taskbar.volume_percent >= 100)
+                        text[at++] = '1', text[at++] = '0', text[at++] = '0';
+                else
+                {
+                        if (taskbar.volume_percent >= 10)
+                                text[at++] = (char)('0' + taskbar.volume_percent / 10);
+                        text[at++] = (char)('0' + taskbar.volume_percent % 10);
+                }
+                text[at++] = '%', text[at] = 0;
+                if (taskbar.volume_muted)
+                        text[0] = '-', text[1] = '-', text[2] = 0;
+                if (lay->vertical)
+                        taskbar_text_turned(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
+                else
+                        taskbar_text_line(view, lay->bx, lay->by, lay->bw, x, y, width, height, text, ink, ground);
+                return;
+        }
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui_speaker(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, waves, taskbar.volume_muted, ink | 0xff000000u);
+}
+
+/*
         The band drawn over what is under it: each tab redone made glass with
         its title on it, and the tray made glass with the clock and the
         battery. Only the slots in redo are made again, and only their span
@@ -960,6 +1007,8 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                         taskbar_text_line(view, lay.bx, lay.by, lay.bw, ax, ay, aw, ah, text, ink, ground);
                         }
                 }
+                if (taskbar_slot(view, TASKBAR_VOLUME, &x, &y, &width, &height))
+                        taskbar_volume_cell(view, &lay, x, y, width, height, ink, ground);
         }
         return 1;
 }
@@ -1084,6 +1133,24 @@ static int taskbar_display_all(void)
         return taskbar.all;
 }
 
+/*
+        What the sound server says of the master volume, for the volume cell: present when the server is there (else the cell is
+        not), the percent, whether it is muted, and flash when the person has just changed it. Answers 1 when the tray is to be
+        drawn again for it.
+*/
+static int taskbar_volume_set(int present, int percent, int muted, int flash)
+{
+        int changed;
+
+        present = present != 0, muted = muted != 0, flash = flash != 0;
+        percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+        changed = present != taskbar.volume_item || (present && (percent != taskbar.volume_percent || muted != taskbar.volume_muted || flash != taskbar.volume_flash));
+        taskbar.volume_item = present, taskbar.volume_percent = percent, taskbar.volume_muted = muted, taskbar.volume_flash = flash;
+        if (changed)
+                taskbar.stale = 1;
+        return changed;
+}
+
 // `taskbar text`: edge turns a side band's letters' tops toward the edge it is on, else toward the middle.
 static void taskbar_text_set(int edge)
 {
@@ -1096,6 +1163,22 @@ static void taskbar_launcher_set(int on)
 {
         taskbar.launcher = on != 0;
         taskbar.stale = 1;
+}
+
+// The same for the volume cell: where the popup opens beside, the cell's length along the edge and the band's whole thickness across it.
+static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{
+        struct taskbar_layout lay;
+        int along, length;
+
+        taskbar_layout(view, &lay);
+        if (!taskbar_along(&lay, TASKBAR_VOLUME, &along, &length))
+                return 0;
+        if (lay.vertical)
+                *x = lay.bx, *y = along, *width = lay.bw, *height = length;
+        else
+                *x = along, *y = lay.by, *width = length, *height = lay.bh;
+        return 1;
 }
 
 /*

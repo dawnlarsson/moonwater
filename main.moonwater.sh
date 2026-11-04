@@ -191,6 +191,15 @@ function desktop_settings {
   desktop_run /settings -f "$desktop_text"
 }
 
+# The mixer. The compositor's saying volume_button (the tray's volume cell pressed) starts its popup, -q, beside the cell, -a: the
+# device's volume and mute and a row that starts the whole mixer. A mixer that is already open is lifted by its own second start,
+# which finds it and ends.
+function desktop_mixer {
+  desktop_font
+  [ -n "$desktop_text" ] || return
+  desktop_run /mixer "$@" -f "$desktop_text"
+}
+
 # The key_ functions, for the compositor to listen for, and the FIFO it names a
 # pressed one on; the listener runs what it names.
 function desktop_keys_list {
@@ -210,6 +219,7 @@ function desktop_keys_answer {
       key_*) declare -F "$desktop_pressed" > /dev/null && "$desktop_pressed" ;;
       tray_double) desktop_asked desktop_settings ;;
       launcher_button) desktop_asked desktop_launcher -a ;;
+      volume_button) desktop_asked desktop_mixer -q -a ;;
       esac
     done < /run/moonwater/keys.fire
   done

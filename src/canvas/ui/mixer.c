@@ -15,9 +15,15 @@
 
         With the server not running, or no page, the window says so, and the strips come when the page does.
 
-            mixer [-f FONT.ttf] [-b BOLD.ttf] [-p PAGE] [-s SOCKET]
+            mixer [-q [-a]] [-f FONT.ttf] [-b BOLD.ttf] [-p PAGE] [-s SOCKET]
 
         One window: a second start finds the first and lifts it. Escape closes it.
+
+        -q is the tray's popup (a press on the tray's volume cell, the machine script starts it): the device's strip alone, in a window
+        that is put away by a press anywhere but on it, by losing the keys and by Escape, with a row under it, Mixer, that starts the
+        whole mixer and puts the popup away. -a opens it beside the cell that was pressed (the compositor leaves its rectangle, the edge
+        its band is along and its screen in the table, as it does for the launcher's button), above a bottom band, below a top one and
+        beside a side one, kept on the screen.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -38,6 +44,9 @@
 #define MIXER_MEMBERS 16               // the streams of one program that are one strip
 #define MIXER_VOLUME 65536u
 #define MIXER_NONE 0xffffffffu
+#define MIXER_QUICK_W (2 * UI_STRIP_PAD + UI_STRIP_W) // the popup: one strip wide,
+#define MIXER_QUICK_H 380                              // this tall,
+#define MIXER_QUICK_ROW 44                             // the last of it the Mixer row
 
 struct mixer_group
 {
@@ -68,6 +77,12 @@ static struct
         unsigned int ground;
         b32 focused, dirty, have, connected, listed;
         b64 next_poll, seen_at;
+        // The tray's popup (-q), and where it opens (-a).
+        b32 quick, beside, anchored, had_focus, on_button;
+        int anchor[4], screen[4], pointer_x, pointer_y;
+        unsigned int edge, number;
+        struct ui_control open; // its Mixer row
+        string_address font;    // the face this is drawn in (-f), which the mixer it starts is drawn in too
 } mixer;
 
 /* ---- the page ---- */
@@ -144,7 +159,7 @@ static fn mixer_list(b64 now)
                               page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
                 string_copy_bounded((string_address)big->sink, (string_address)page->name, sizeof(big->sink));
         }
-        for (int slot = 0; mixer.have && slot < AUDIO_STATE_STREAMS && groups + 1 < UI_STRIPS_MOST; slot++)
+        for (int slot = 0; mixer.have && !mixer.quick && slot < AUDIO_STATE_STREAMS && groups + 1 < UI_STRIPS_MOST; slot++)
         {
                 const struct audio_state_stream address_to stream = &page->stream[slot];
                 struct mixer_group address_to group;
@@ -280,15 +295,26 @@ static fn mixer_draw(unsigned int address_to pixels)
         struct ui address_to ui = &mixer.ui;
         struct ui_strips address_to strips = &mixer.big->strips;
 
+        int height = mixer.quick ? mixer.height - ui_px(ui, MIXER_QUICK_ROW) : mixer.height;
+
         ui_begin(ui, pixels, mixer.own.table->stride, mixer.width, mixer.height);
-        ui_strips_place(ui, strips, 0, 0, mixer.width, mixer.height);
+        ui_strips_place(ui, strips, 0, 0, mixer.width, height);
         if (!mixer.have)
         {
                 ui_strips_message(ui, strips, WORDS(mixer_off), false);
                 return;
         }
-        ui_strips_draw(ui, strips, mixer.focused);
-        if (strips->count <= 1)
+        ui_strips_draw(ui, strips, mixer.focused && !mixer.on_button);
+        if (mixer.quick)
+        {
+                struct ui_control address_to open = &mixer.open;
+
+                open->kind = UI_BUTTON, open->variant = UI_BUTTON_TEXT, open->label = language_of("Mixer"), open->focused = mixer.focused && mixer.on_button;
+                open->w = MIXER_QUICK_W - 2 * UI_STRIP_PAD, open->h = 32, open->x = UI_STRIP_PAD;
+                open->y = (height + (ui_px(ui, MIXER_QUICK_ROW) - ui_px(ui, open->h)) / 2) * 100 / ui->scale;
+                ui_control_draw(ui, open);
+        }
+        else if (strips->count <= 1)
                 ui_strips_message(ui, strips, WORDS(mixer_empty), true);
 }
 
@@ -311,12 +337,98 @@ static b32 mixer_frame(void)
         return true;
 }
 
+// Another program started apart: in a session of its own and a process nobody waits for, its input and output nowhere, as the machine
+// script starts what is on the desktop (the launcher starts its programs the same way).
+static b32 mixer_start(string_address address_to words, positive count)
+{
+        bipolar child = system_fork();
+        positive status = 0;
+
+        if (child < 0)
+                return false;
+        if (child == 0)
+        {
+                bipolar quiet;
+
+                if (system_fork())
+                        system_call_1(syscall(exit_group), 0);
+                system_call(syscall(setsid));
+                quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
+                for (positive at = 0; quiet >= 0 && at < 3; at++)
+                        system_call_3(syscall(dup3), (positive)quiet, at, 0);
+                (void)shell_exec_file(words[0], words, count, window_asked_environment());
+                system_call_1(syscall(exit_group), 127);
+        }
+        system_wait4_retry(child, address_of status, 0, null);
+        return true;
+}
+
+// The Mixer row: the whole mixer started, in the face this one is drawn in.
+static b32 mixer_start_full(void)
+{
+        string_address words[4] = {(string_address) "/mixer", (string_address) "-f", mixer.font ? mixer.font : (string_address)UI_FONT_REGULAR, null};
+
+        return mixer_start(words, 3);
+}
+
+/*
+        The popup's own events, before the strips': Tab goes between the strip and the Mixer row, Enter and Space on the row start the
+        mixer, and the pointer is the row's first (a press on it is not the strips'; a slider being dragged is theirs whole). 1 when the
+        event was taken, 0 when it is the strips', -1 when the popup is done (the mixer was started).
+*/
+static int mixer_quick_event(const struct window_event address_to event)
+{
+        struct ui_control address_to open = &mixer.open;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+
+        if (event->type == WINDOW_EVENT_KEY && down)
+        {
+                if (event->a == UI_KEY_TAB)
+                {
+                        mixer.on_button = !mixer.on_button;
+                        mixer.dirty = true;
+                        return 1;
+                }
+                if (mixer.on_button && (event->a == UI_KEY_ENTER || event->a == UI_KEY_ENTER_PAD || event->a == UI_KEY_SPACE))
+                        return (event->flags & WINDOW_KEY_REPEAT) ? 1 : mixer_start_full() ? -1 : 1;
+        }
+        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !(ui_kit_held && ui_kit_held != open))
+        {
+                int x = mixer.pointer_x, y = mixer.pointer_y;
+                struct ui_control address_to clicked;
+
+                if (event->type == WINDOW_EVENT_MOTION)
+                        x = mixer.pointer_x = event->a, y = mixer.pointer_y = event->b;
+                if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
+                        return 0;
+                clicked = ui_kit_pointer(&mixer.ui, open, 1, (int)event->type, x, y, down, event->flags);
+                mixer.dirty = true;
+                if (event->type == WINDOW_EVENT_BUTTON && down && ui_kit_held == open)
+                {
+                        mixer.on_button = true;
+                        return 1;
+                }
+                if (clicked == open)
+                        return mixer_start_full() ? -1 : 1;
+        }
+        return 0;
+}
+
 static b32 mixer_event(const struct window_event address_to event)
 {
         p32 bits;
 
         if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_KEY_ESCAPE)
                 return false;
+        if (mixer.quick)
+        {
+                int taken = mixer_quick_event(event);
+
+                if (taken < 0)
+                        return false;
+                if (taken)
+                        return true;
+        }
         bits = ui_strips_event(&mixer.ui, &mixer.big->strips, event);
         if (bits & UI_STRIPS_VOLUME)
                 mixer.big->send[mixer.big->strips.changed] |= 1;
@@ -364,14 +476,67 @@ static fn mixer_language(void)
         mixer.dirty = true;
 }
 
+// Where a window of width by height opens beside a rectangle (a button of the panel) on the edge the panel is along: above a bottom panel,
+// below a top one, beside a left or right one, the other way kept where the button is, and the whole of it inside the screen where it fits.
+static fn mixer_anchor_place(unsigned int edge, const int address_to button, const int address_to screen, int width, int height, int address_to x,
+                             int address_to y)
+{
+        *x = button[0], *y = button[1];
+        if (edge == TASKBAR_BOTTOM)
+                *y = button[1] - height;
+        else if (edge == TASKBAR_TOP)
+                *y = button[1] + button[3];
+        else if (edge == TASKBAR_LEFT)
+                *x = button[0] + button[2];
+        else
+                *x = button[0] - width;
+        *x = *x > screen[0] + screen[2] - width ? screen[0] + screen[2] - width : *x;
+        *y = *y > screen[1] + screen[3] - height ? screen[1] + screen[3] - height : *y;
+        *x = *x < screen[0] ? screen[0] : *x;
+        *y = *y < screen[1] ? screen[1] : *y;
+}
+
+// The rectangle the compositor wrote when the cell was pressed, the screen it is on and the edge of it the panel is along, taken once;
+// a table with no press in it leaves the popup unanchored, in the middle.
+static fn mixer_anchor_take(void)
+{
+        struct windows address_to table = mixer.own.table;
+        unsigned int count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE);
+
+        if (!mixer.beside || !table->button_w || !table->button_h || table->button_edge > TASKBAR_RIGHT || table->button_screen >= (count ? count : 1))
+                return;
+        mixer.anchor[0] = table->button_x, mixer.anchor[1] = table->button_y;
+        mixer.anchor[2] = (int)table->button_w, mixer.anchor[3] = (int)table->button_h;
+        mixer.edge = table->button_edge, mixer.number = table->button_screen;
+        windows_output(table, mixer.number, &mixer.screen[0], &mixer.screen[1], &mixer.screen[2], &mixer.screen[3]);
+        mixer.anchored = true;
+}
+
+// The popup's place asked of the compositor, in its row's placement columns, counted from its screen's top left.
+static fn mixer_place(void)
+{
+        struct window_place place;
+        int x, y;
+
+        memory_zero(&place, sizeof(place));
+        mixer_anchor_place(mixer.edge, mixer.anchor, mixer.screen, mixer.width, mixer.height, &x, &y);
+        place.how = WINDOW_PLACE_AT | WINDOW_PLACE_SCREEN | WINDOW_PLACE_SIZE;
+        place.x = x - mixer.screen[0], place.y = y - mixer.screen[1];
+        place.width = (unsigned int)mixer.width, place.height = (unsigned int)mixer.height;
+        place.screen = mixer.number;
+        windows_place_set(mixer.own.table, mixer.own.row, &place);
+}
+
 static int mixer_open(void)
 {
         struct windows address_to table = mixer.own.table;
         unsigned int row = mixer.own.row;
-        int width = ui_px(&mixer.ui, MIXER_WIDTH), height = ui_px(&mixer.ui, MIXER_HEIGHT), room = (int)table->output_height - ui_px(&mixer.ui, 2 * (24 + 24));
+        int width = ui_px(&mixer.ui, mixer.quick ? MIXER_QUICK_W : MIXER_WIDTH), height = ui_px(&mixer.ui, mixer.quick ? MIXER_QUICK_H : MIXER_HEIGHT);
+        int room = (int)table->output_height - ui_px(&mixer.ui, 2 * (24 + 24));
         long mapped;
 
-        if (ui_lift_other(&mixer.own, (string_address) "mixer", false))
+        // The popup is not lifted by a second start: pressed again, the cell puts it away.
+        if (!mixer.quick && ui_lift_other(&mixer.own, (string_address) "mixer", false))
                 return 0;
         mapped = ui_map(sizeof(struct mixer_big));
         if (mapped < 0 && mapped > -4096)
@@ -382,11 +547,25 @@ static int mixer_open(void)
         mixer.big = (struct mixer_big address_to)mapped;
         mixer_size((unsigned int)(width > (int)table->output_width ? (int)table->output_width : width),
                    (unsigned int)(height < room ? height : room > 0 ? room : height));
-        ui_centre(table, row, mixer.width, mixer.height, ui_px(&mixer.ui, 12));
+        mixer_anchor_take();
+        if (mixer.anchored)
+                mixer_place();
+        else
+                ui_centre(table, row, mixer.width, mixer.height, ui_px(&mixer.ui, 12));
         language_listen(mixer_language);
         mixer_poll((b64)clock_monotonic_nanoseconds());
         mixer_frame();
         return -1;
+}
+
+// The popup goes when the keys go elsewhere (a press on the desktop, another window raised); before they came here it had never had them.
+static b32 mixer_focus(b32 focused)
+{
+        if (focused)
+                mixer.had_focus = true;
+        else if (mixer.quick && mixer.had_focus)
+                return false;
+        return true;
 }
 
 static struct ui_app mixer_app = {
@@ -404,6 +583,7 @@ static struct ui_app mixer_app = {
         .frame = mixer_frame,
         .event = mixer_event,
         .changed = mixer_dirty,
+        .focus = mixer_focus,
         .size = mixer_size,
         .tick = mixer_tick,
 };
@@ -418,8 +598,20 @@ static b32 mixer_main()
         {
                 string_address value;
 
+                if (string_equals(program_argument(at), (string_address) "-q"))
+                {
+                        mixer.quick = true;
+                        mixer_app.glass = WINDOW_DISMISS | WINDOW_NO_TAB; // put away by a press anywhere but on it, and no tab
+                        mixer_app.name = (string_address) "mixer-quick";
+                        continue;
+                }
+                if (string_equals(program_argument(at), (string_address) "-a"))
+                {
+                        mixer.beside = true;
+                        continue;
+                }
                 if ((value = ui_argument(at, (string_address) "-f")))
-                        mixer_app.font = value;
+                        mixer_app.font = mixer.font = value;
                 else if ((value = ui_argument(at, (string_address) "-b")))
                         mixer_app.bold = value;
                 else if ((value = ui_argument(at, (string_address) "-p")))
