@@ -155938,6 +155938,32 @@ static fn editor_hostile_check(struct ui address_to wui)
                 }
         }
 
+        // A mapped file cut short by another program while it is open (a log rotated by copytruncate): read on as zeros
+        // past the cut and said to have changed on disk. The read was SIGBUS, and the editor (this check with it) gone.
+        {
+                char cut_path[96];
+                static p8 chunk[1 << 20];
+                bipolar handle;
+                p8 head[4] = {0}, tail[4] = {1, 1, 1, 1};
+
+                for (positive at = 0; at < sizeof(chunk); at++)
+                        chunk[at] = at % 64 == 63 ? '\n' : 'a';
+                string_copy(string_copy((string_address)cut_path, (string_address)dir) + string_length((string_address)dir), (string_address) "/cut.log");
+                handle = system_open_at_mode(AT_FDCWD, (string_address)cut_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                for (int k = 0; k < 9; k++)
+                        system_write_all((b32)handle, chunk, sizeof(chunk));
+                system_close(handle);
+                editor.count = 0;
+                check("editor hostile: a file of 9 MiB opens, mapped", editor_open((string_address)cut_path) && editor_now()->mapped == 9u << 20);
+                system_call_2(syscall(truncate), (positive)cut_path, 4096);
+                doc_read(&editor_now()->view.doc, 0, head, 4);
+                doc_read(&editor_now()->view.doc, (8u << 20) + 5, tail, 4);
+                check("editor hostile: a mapped file cut short under it reads zeros past the cut, its start as it was, and says it changed",
+                      !memory_compare(head, "aaaa", 4) && !tail[0] && !tail[3] && editor_now()->changed_on_disk);
+                editor_close_tab();
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)cut_path, 0);
+        }
+
         editor.count = 0;
         editor_open(null);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)link_path, 0);

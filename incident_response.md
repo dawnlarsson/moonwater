@@ -41,6 +41,33 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-133: a large file cut short by another program killed the editor and every tab's unsaved work
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Denial of service with data loss (SIGBUS on a truncated file mapping) |
+| Moonwater exposure window | 2026-10-30 16:59 +01:00 (`3f919186`, the editor) to the fix, about 4 days 18 hours |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_terminal` dies with SIGBUS (status 135) at `editor hostile: a mapped file cut short under it reads zeros past the cut, its start as it was, and says it changed` |
+
+**How it was exposed.** A file of 8 MiB or more is mapped, not read, and the document's pieces point into the
+mapping. When any process that can write the file truncates it (its owner, a program rewriting it in place,
+logrotate's copytruncate on a log the person has open), the kernel takes the pages past the new end out of every
+mapping, and the editor's next read of one (a scroll, a search, a save) is SIGBUS. The editor died, with the
+unsaved changes of every tab. The check's own comment already recorded the class: a sibling check truncating a
+shared file killed the arm64 run.
+
+**The fix.** The first mapping installs a SIGBUS handler (SA_SIGINFO): a fault inside a tab's mapping maps
+anonymous zero pages over the rest of that mapping (MAP_FIXED, the compositor's pattern for a client's cut pool in
+wayland_host.c), marks the tab changed on disk and returns, so the read finishes with zeros. A fault anywhere else is
+handed to the handler that was there before. The person sees NULs where the file was cut and the changed-on-disk
+line, and every other tab is untouched.
+
+**The check.** A 9 MiB file is opened (mapped), truncated to 4096 bytes by the check, and read at 8 MiB: the bytes
+must be zeros, the first page as it was, and the tab marked changed. With the handler's installation taken out (the
+mutant) the check process dies by SIGBUS there.
+
 ### MW-2026-114: a Wayland copy ended before its send event went out sent a descriptor number the compositor had closed
 
 | | |

@@ -74,6 +74,52 @@ static fn editor_keys(void)
 }
 
 /*
+        A mapped file cut short under the editor (another program truncating it, a log rotated by copytruncate): the
+        pages past its new end are gone from every mapping of it, and the first read of one was SIGBUS, which ended the
+        editor and every tab's unsaved changes with it. The handler maps zeros over the rest of the mapping the read was
+        in and the read goes on: that tab shows NULs where the file was cut and says it changed on disk. A fault in no
+        tab's mapping goes to the handler there was before (the default: the program ends, as it did).
+*/
+static signal_action editor_bus_was;
+
+static void editor_bus(int number, void address_to info, void address_to context)
+{
+        positive where = *(positive address_to)((p8 address_to)info + 16);
+
+        (void)context;
+        // The tab being opened is the one past the count: its document reads the mapping before it is counted.
+        for (int at = 0; at <= editor.count && at < EDITOR_TABS; at++)
+        {
+                struct editor_tab address_to tab = &editor.tabs[at];
+
+                if (tab->mapped && where - (positive)tab->bytes < tab->mapped)
+                {
+                        positive page = where & ~(positive)4095, past = ((positive)tab->bytes + tab->mapped + 4095) & ~(positive)4095;
+
+                        // PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED
+                        system_call_6(syscall(mmap), page, past - page, 1, 0x32, (positive)-1, 0);
+                        tab->changed_on_disk = true;
+                        return;
+                }
+        }
+        signal_action_change(number, &editor_bus_was, null);
+}
+
+// The handler in place, once: SA_SIGINFO for the address, SA_NODEFER so a second cut tab is caught while in it.
+static fn editor_bus_catch(void)
+{
+        static b32 caught;
+        signal_action wanted;
+
+        if (caught)
+                return;
+        memory_zero(&wanted, sizeof(wanted));
+        wanted.handler = (signal_handler)(address_any)editor_bus;
+        wanted.flags = SA_SIGINFO | SA_NODEFER;
+        caught = signal_action_change(7, &wanted, &editor_bus_was) == 0; // SIGBUS
+}
+
+/*
         The directory path's file is in, held from the open so that a save writes there and only there: a save by path
         went wherever the path led at that moment, so a directory of the path swapped for a link after the open (to
         /etc, by its owner) had the save write through it. With facts, the name in the directory must still be that
@@ -166,7 +212,10 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
                 long mapped = (long)system_call_6(syscall(mmap), 0, (positive)facts.st_size, 1, 2, (positive)handle, 0);
 
                 if (!(mapped < 0 && mapped > -4096))
+                {
                         tab->bytes = (p8 address_to)mapped, tab->length = tab->mapped = (positive)facts.st_size;
+                        editor_bus_catch();
+                }
         }
         else
         {
