@@ -15777,6 +15777,24 @@ static void compositor_table_outputs(void)
 }
 
 /*
+        The window lists' mode, the only writer of the table's list_mode: on makes the compositor render the lists its windows publish, off
+        makes every window paint its own frames. themed counts up, as a theme change does, and each window that has a program is woken,
+        so each repaints in the mode it is in now. Nothing calls it with 1 yet (the renderer, compositor_gpu_list_render, is not there).
+*/
+static void compositor_lists_set(int on)
+{
+        struct windows *table = compositor.table;
+
+        if (!table)
+                return;
+        __atomic_store_n(&table->list_mode, on ? 1u : 0u, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        for (int row = 0; row < WINDOWS; row++)
+                if (table->pid[row])
+                        compositor.woken |= 1u << row;
+}
+
+/*
         The table and its doors, made new: whatever is at the paths is from a
         compositor whose session is over. The table is sparse, so its size is
         the most every window could draw and what it costs is the pages that
@@ -15791,7 +15809,8 @@ static int compositor_table(void)
         // Every window's buffer as large as the largest window may ever be, a row of it stride pixels: for the session,
         // as the table is sealed at its size and mapped by every window.
         unsigned long buffer = compositor_buffer_room();
-        unsigned long bytes = header + buffer * 2 * WINDOWS;
+        // And a window list for every row after the pictures (window.c's WINDOW_LIST_BYTES): sparse, so only what a program writes is there.
+        unsigned long bytes = header + buffer * 2 * WINDOWS + WINDOW_LIST_BYTES * WINDOWS;
         long handle, mapped;
         p8 name[48];
 
@@ -15846,6 +15865,9 @@ static int compositor_table(void)
         compositor.table->refused = compositor.memfd_failed;
         compositor.table->pixels = header;
         compositor.table->buffer = buffer;
+        compositor.table->lists = header + buffer * 2 * WINDOWS;
+        compositor.table->list_bytes = WINDOW_LIST_BYTES;
+        compositor_lists_set(0);
         compositor_table_outputs();
 
         // The door is read here and the wake written, each end kept for the session; S_IFIFO.

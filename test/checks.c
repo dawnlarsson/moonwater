@@ -59337,6 +59337,107 @@ static fn windows_client(void)
 #endif
 
 /*
+        The window lists: a table with a list for every row after its pictures, each row's list at its own place inside the mapping, a
+        table whose lists do not fit or do not follow the pictures refused by windows_take, a reset row with no list state, and a
+        list's header read as window_list_valid reads it (ui/list.h's format): valid when it is one the compositor may render, and
+        refused for each word that makes it another list (a publish in progress, a count past the room, a size that is not the row's,
+        damage past the picture, a lost frame, a half that is not one, a cover offset that is not the layout's, a pitch narrower than
+        the picture, a magic or version that is not the kit's, and no list at all).
+*/
+static unsigned int wl_list[WINDOW_LIST_BYTES / 4];
+
+static void wl_header(unsigned int width, unsigned int height)
+{
+        unsigned int address_to head = wl_list;
+
+        memory_zero(wl_list, sizeof(wl_list));
+        head[UI_DRAW_LIST_MAGIC_AT] = UI_DRAW_LIST_MAGIC, head[UI_DRAW_LIST_VERSION_AT] = UI_DRAW_LIST_VERSION;
+        head[UI_DRAW_LIST_GEN] = 2, head[UI_DRAW_LIST_HALF] = 0, head[UI_DRAW_LIST_COUNT] = 0, head[UI_DRAW_LIST_ROOM] = WINDOW_LIST_ROOM;
+        head[UI_DRAW_LIST_WIDTH] = width, head[UI_DRAW_LIST_HEIGHT] = height, head[UI_DRAW_LIST_PITCH] = width;
+        head[UI_DRAW_LIST_COVER] = (unsigned int)(UI_DRAW_LIST_HEADER + WINDOW_LIST_ROOM * UI_DRAW_LIST_OP), head[UI_DRAW_LIST_COVER_USED] = 0;
+        head[UI_DRAW_LIST_FLAGS] = 0;
+}
+
+static fn windows_lists(void)
+{
+        static struct windows table;
+        unsigned long buffer = 64 * 32 * 4, size = WINDOWS_HEADER + 2 * WINDOWS * buffer + WINDOWS * WINDOW_LIST_BYTES, at;
+        unsigned char address_to list = (unsigned char address_to)wl_list;
+        unsigned int address_to head = wl_list;
+        unsigned int lists_at;
+        int every = 1;
+
+        table.lists = WINDOWS_HEADER + buffer * 2 * WINDOWS, table.list_bytes = WINDOW_LIST_BYTES;
+        check("the lists come after the pictures and end at the mapping", table.lists + WINDOWS * WINDOW_LIST_BYTES == size);
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                unsigned char address_to got = window_list_of(&table, row);
+
+                at = (unsigned long)((char address_to)got - (char address_to)&table);
+                every = every && got && at == table.lists + (unsigned long)row * WINDOW_LIST_BYTES && at + WINDOW_LIST_BYTES <= size;
+        }
+        check("every row's list is its own, inside the mapping, with none shared", every);
+        table.lists = 0;
+        check("a table with no lists has none", !window_list_of(&table, 0));
+        table.lists = WINDOWS_HEADER + buffer * 2 * WINDOWS;
+        table.list_bytes = WINDOW_LIST_BYTES / 2;
+        check("a list of another size is none", !window_list_of(&table, 3));
+        table.list_bytes = WINDOW_LIST_BYTES;
+        check("a row out of range is none", !window_list_of(&table, -1) && !window_list_of(&table, WINDOWS));
+
+        check("the lists fit the mapping", windows_lists_fit(&table, size, buffer));
+        check("a mapping a page short of the lists does not", !windows_lists_fit(&table, size - 4096, buffer));
+        lists_at = table.lists;
+        table.lists += 4096;
+        check("lists that do not follow the pictures do not", !windows_lists_fit(&table, size, buffer));
+        table.lists = lists_at;
+        table.lists = 0;
+        check("a table with no lists is one windows_take takes", windows_lists_fit(&table, size, buffer));
+        table.lists = lists_at;
+
+        table.list_state[5] = 2, table.list_seen[5] = 6;
+        windows_reset_row(&table, 5);
+        check("a reset row has no list state and no generation seen", !table.list_state[5] && !table.list_seen[5]);
+
+        // A header the kit wrote: valid for the picture it is for, and refused for each word that makes it another list.
+        wl_header(240, 160);
+        check("a published list is valid at its picture's size", window_list_valid(list, 240, 160));
+        check("a list of another size is not, whatever the picture", !window_list_valid(list, 240, 159) && !window_list_valid(list, 239, 160));
+        check("no list at all is not", !window_list_valid(null, 240, 160) && !window_list_valid(list, 0, 160));
+        head[UI_DRAW_LIST_GEN] = 3;
+        check("a publish in progress (an odd generation) is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_GEN] = 2;
+        head[UI_DRAW_LIST_COUNT] = WINDOW_LIST_ROOM + 1;
+        check("a count past the room is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_COUNT] = 0;
+        head[UI_DRAW_LIST_DX1] = 241, head[UI_DRAW_LIST_DY1] = 10;
+        check("damage past the picture is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_DX1] = 0, head[UI_DRAW_LIST_DY1] = 0;
+        check("empty damage is valid", window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_FLAGS] = 1;
+        check("a lost frame is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_FLAGS] = 0;
+        head[UI_DRAW_LIST_HALF] = 2;
+        check("a half that is not one is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_HALF] = 0;
+        head[UI_DRAW_LIST_COVER] = 100;
+        check("a cover offset that is not the layout's is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_COVER] = (unsigned int)(UI_DRAW_LIST_HEADER + WINDOW_LIST_ROOM * UI_DRAW_LIST_OP);
+        head[UI_DRAW_LIST_PITCH] = 100;
+        check("a pitch narrower than the picture is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_PITCH] = 240;
+        head[UI_DRAW_LIST_MAGIC_AT] = 0;
+        check("a list without the kit's magic is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_MAGIC_AT] = UI_DRAW_LIST_MAGIC;
+        head[UI_DRAW_LIST_ROOM] = 64;
+        head[UI_DRAW_LIST_COVER] = (unsigned int)(UI_DRAW_LIST_HEADER + 64 * UI_DRAW_LIST_OP);
+        check("a room other than the list's is not", !window_list_valid(list, 240, 160));
+        head[UI_DRAW_LIST_ROOM] = WINDOW_LIST_ROOM;
+        head[UI_DRAW_LIST_COVER] = (unsigned int)(UI_DRAW_LIST_HEADER + WINDOW_LIST_ROOM * UI_DRAW_LIST_OP);
+        check("and the list is valid again once every word is the kit's", window_list_valid(list, 240, 160));
+}
+
+/*
         What windows_take checks in the header a peer may write, and what a row's reset clears. A header the
         compositor could have written is taken; one that is not (pixels off the layout, a buffer that is not whole
         pages or runs past the mapping, a stride narrower than the output, a buffer shorter than the rows used) is
@@ -59629,6 +59730,7 @@ b32 main(void)
         windows_client();
 #endif
         windows_header();
+        windows_lists();
         windows_placement();
         windows_places();
         return test_report(null);

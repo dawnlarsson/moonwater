@@ -873,6 +873,19 @@ struct windows
         */
         unsigned int gpu_drawn, gpu_processor;
         unsigned int gpu_refused[WINDOWS_GPU_REASONS];
+
+        /*
+                The window lists (window_list_of): WINDOWS lists of list_bytes each, after the pictures, row r's at lists + r * list_bytes from
+                the table's start (lists 0: a table with none). list_mode is 1 when the compositor renders the lists its windows publish, 0 when
+                every window paints its own frames; compositor_lists_set is the only writer. Per row, list_state is the compositor's: 0 the
+                program's frames, 1 rendered from the list, 2 refused (the program paints its next frame, and the compositor clears 2 at that
+                frame). list_seen is the compositor's: the generation of the last list it took. list_refused counts the lists it refused.
+        */
+        unsigned long lists, list_bytes;
+        unsigned int list_mode;
+        unsigned int list_state[WINDOWS];
+        unsigned int list_seen[WINDOWS];
+        unsigned int list_refused;
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -897,6 +910,47 @@ struct windows
 // Where the pixels start: the compositor's header, a page-rounded struct windows from the table's start. It is a
 // constant here and not the header's pixels field, which any mapper of the table may write.
 #define WINDOWS_HEADER ((sizeof(struct windows) + 4095) & ~4095ul)
+
+/*
+        A window's list (ui/list.h's format, the GPU's draw list): each row has one, WINDOW_LIST_BYTES after the pictures, memory the
+        pages of which exist only where the program wrote them. WINDOW_LIST_ROOM is the ops a half holds: the kit's recorder and the
+        compositor's reader take the room from the list's header, and both are made with these numbers.
+*/
+#define WINDOW_LIST_BYTES (4ul << 20)
+#define WINDOW_LIST_ROOM 16384u
+
+// Row row's list in the table, as the program and the compositor both reach it, or 0 when the table has none (lists is 0, a list
+// of another size, or a row that is not one).
+static inline unsigned char *window_list_of(const struct windows *table, int row)
+{
+        if (!table || !table->lists || table->list_bytes != WINDOW_LIST_BYTES || row < 0 || row >= WINDOWS)
+                return 0;
+        return (unsigned char *)table + table->lists + (unsigned long)row * table->list_bytes;
+}
+
+/*
+        Whether a list (window_list_of's) may be rendered at width by height: the header is the kit's list, read as ui/list.h reads it
+        (magic, version, a generation even and the same after the read, the halves, the room, the cover bytes inside the list, and no
+        lost flag), its room is WINDOW_LIST_ROOM, its picture is the row's size and its pitch is at least the width, and the damage it
+        names is inside the picture. A list a program wrote is not trusted: each word is read once, by the reader. The ops are read
+        after this, and the reader's ui_draw_list_still says whether they are the generation this answered for.
+*/
+static inline int window_list_valid(unsigned char *list, int width, int height)
+{
+        struct ui_draw_view view;
+
+        if (!list || width <= 0 || height <= 0)
+                return 0;
+        if (ui_draw_list_open(list, WINDOW_LIST_BYTES, &view) != 1 || !ui_draw_list_still(list, &view))
+                return 0;
+        if (view.room != WINDOW_LIST_ROOM || view.width != (unsigned int)width || view.height != (unsigned int)height)
+                return 0;
+        if (view.pitch < (unsigned long)width)
+                return 0;
+        if (view.x1 > view.x0 && view.y1 > view.y0 && (view.x0 < 0 || view.y0 < 0 || view.x1 > width || view.y1 > height))
+                return 0;
+        return 1;
+}
 
 /*
         A language's code as the table carries it: its two or three lower case letters (an ISO 639 code), the first in
@@ -2164,6 +2218,21 @@ static void windows_drain(long handle)
 }
 
 /*
+        Whether the table's lists (if it has any) are where the layout puts them and whole inside the mapping: the lists follow the
+        pictures, each list is WINDOW_LIST_BYTES, and WINDOWS of them fit in size. A table with no lists is fine as it is.
+*/
+static int windows_lists_fit(const struct windows *table, unsigned long size, unsigned long buffer)
+{
+        unsigned long lists = table->lists;
+
+        if (!lists)
+                return 1;
+        if (table->list_bytes != WINDOW_LIST_BYTES || lists != WINDOWS_HEADER + buffer * 2 * WINDOWS || lists > size)
+                return 0;
+        return (size - lists) / WINDOW_LIST_BYTES >= WINDOWS;
+}
+
+/*
         Whether a header describes a table of size bytes that can be drawn through: the pixels where the layout puts
         them, every buffer a whole number of pages and all 2 * WINDOWS of them inside the mapping, and each row of a
         buffer stride pixels long with stride at least the output's width, the rows used fitting in the buffer. The
@@ -2223,6 +2292,9 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         __atomic_store_n(&table->clip_watch[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
+        // A row's list is its new program's from the first frame: the generation the compositor took last is the old program's.
+        __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->list_seen[row], 0u, __ATOMIC_RELEASE);
 }
 
 /*
@@ -2845,7 +2917,7 @@ static long windows_take(struct window_row *own)
         stride = __atomic_load_n(&table->stride, __ATOMIC_ACQUIRE);
         width = __atomic_load_n(&table->output_width, __ATOMIC_ACQUIRE);
         height = __atomic_load_n(&table->output_height, __ATOMIC_ACQUIRE);
-        if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height))
+        if (!windows_fits((unsigned long)size, pixels, buffer, stride, width, height) || !windows_lists_fit(table, (unsigned long)size, buffer))
         {
                 window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
                 return -22; // EINVAL
