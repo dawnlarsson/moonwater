@@ -4180,6 +4180,7 @@ static bool bowl_archive_usable(string_address path, p64 floor)
 }
 
 static b32 bowl_write_pacman(string_address root);
+static b32 bowl_write_multilib(string_address root);
 static b32 bowl_write_apk(string_address root);
 static b32 bowl_write_apt(string_address root);
 static b32 bowl_write_nix(string_address root);
@@ -4197,6 +4198,8 @@ static b32 bowl_configure(string_address root)
                         failed = bowl_write_mirror(root);
                 if (!failed)
                         failed = bowl_write_pacman(root);
+                if (!failed)
+                        failed = bowl_write_multilib(root);
                 bowl_clear_lock(root, "/var/lib/pacman/db.lck");
         }
 
@@ -4358,6 +4361,84 @@ static b32 bowl_write_pacman(string_address root)
         }
 
         return bowl_write_bytes(path, out.bytes, out.used);
+}
+
+/*
+        Steam and the 32-bit libraries it loads are in Arch's [multilib]
+        repository, which pacman reads only when its section is there. The
+        bootstrap's pacman.conf has the section commented out, so on x86-64
+        every Arch bowl gets it as a block of its own at the end of the file,
+        marked. A file that already names [multilib] uncommented, or has the
+        block, is not written again; a file the person edited keeps its
+        edits, since the block is appended to it and nothing is written over.
+        Arm64 and RISC-V Arch ports have no multilib repository: left alone.
+*/
+#define BOWL_MULTILIB_MARK \
+        "# moonwater: 32-bit packages (Steam) from Arch's multilib repository\n"
+#define BOWL_MULTILIB_BLOCK \
+        BOWL_MULTILIB_MARK "[multilib]\nInclude = /etc/pacman.d/mirrorlist\n"
+
+/* Whether a pacman.conf has the section, named and not commented, or the block this writes. */
+static bool bowl_multilib_has(string_address text, positive length)
+{
+        positive at = 0;
+
+        if (string_find(text, BOWL_MULTILIB_MARK))
+                return true;
+        while (at < length)
+        {
+                bool commented = false;
+                positive start = at;
+                positive stop = start + memory_span_without_byte(
+                                            text + start, '\n', length - start);
+                string_address word = bowl_line_word(text + start, address_of commented);
+
+                if (!commented && bowl_section_is(word, "multilib"))
+                        return true;
+                at = stop + (stop < length);
+        }
+        return false;
+}
+
+static b32 bowl_write_multilib(string_address root)
+{
+#if X64
+        p8 path[BOWL_PATH_LIMIT];
+        p8 text[BOWL_TEXT];
+        bipolar got;
+        bipolar handle;
+        positive length;
+
+        if (!bowl_root_path(path, sizeof(path), root, "/etc/pacman.conf"))
+                return bowl_refuse("bowl path is too long\n");
+
+        got = bowl_slurp_in_root(root, "/etc/pacman.conf", text, sizeof(text));
+        return_if(got <= 0, bowl_fail(path, got < 0 ? got : -ERROR_NO_ENTRY));
+        return_if((positive)got >= sizeof(text) - 1, bowl_refuse("pacman.conf is too long\n"));
+        text[got] = end;
+        if (bowl_multilib_has(text, (positive)got))
+                return 0;
+
+        handle = bowl_open_in_root(root, "/etc/pacman.conf", FILE_APPEND | O_CLOEXEC);
+        return_if(handle < 0, bowl_fail(path, handle));
+        if (got > 0 && text[got - 1] != '\n' &&
+            system_write_all((positive)handle, "\n", 1) != 1)
+        {
+                system_close(handle);
+                return bowl_refuse("could not add [multilib] to pacman.conf\n");
+        }
+        length = string_length(BOWL_MULTILIB_BLOCK);
+        if (system_write_all((positive)handle, BOWL_MULTILIB_BLOCK, length) != length)
+        {
+                system_close(handle);
+                return bowl_refuse("could not add [multilib] to pacman.conf\n");
+        }
+        system_close(handle);
+        return 0;
+#else
+        (void)root;
+        return 0;
+#endif
 }
 
 /* ---- Digests: the download a setup pins, and every blob an OCI layout names. ---- */
@@ -8630,6 +8711,9 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                         continue;
 
                 failed = bowl_setup_distro(distro);
+                // A bowl set up before [multilib] was written gets it on its next install.
+                if (!failed && bowl_has(distro->root, "/etc/pacman.conf"))
+                        failed = bowl_write_multilib(distro->root);
                 if (!failed)
                 {
                         // Refused before apk or pacman fills a stick's memory.

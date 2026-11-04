@@ -97555,6 +97555,42 @@ static positive chrome_line(string_address address_to lines, string_address piec
         return 0;
 }
 
+/*
+        The [multilib] section: the bootstrap's pacman.conf has it commented out, and an Arch
+        bowl on x86-64 gets the block once. A file that has the section uncommented, or the
+        block, is not written again; a commented one or another section's name is not the
+        section.
+*/
+static fn multilib_rows(void)
+{
+        static string_address stock = "[options]\nArchitecture = auto\n#[multilib]\n#Include = /etc/pacman.d/mirrorlist\n";
+        static string_address named = "[options]\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n";
+        static string_address other = "[options]\n[multilibx]\n# [multilib]\n";
+        static string_address marked = "[options]\n" BOWL_MULTILIB_BLOCK;
+        static string_address unended = "[options]\nCheckSpace";
+        static string_address ended = "[options]\nCheckSpace\n[multilib]\n";
+        p8 joined[512];
+        positive at = string_length(stock);
+
+        check("A stock pacman.conf, with [multilib] commented out, has no section yet",
+              !bowl_multilib_has(stock, string_length(stock)));
+        check("A section named and not commented is the section, and is not written again",
+              bowl_multilib_has(named, string_length(named)));
+        check("A commented section, or another section's name, is not the section",
+              !bowl_multilib_has(other, string_length(other)));
+        check("The block this writes is recognised, and the marker alone is too",
+              bowl_multilib_has(marked, string_length(marked)) &&
+                  string_find(BOWL_MULTILIB_BLOCK, "[multilib]\n"));
+        memory_copy(joined, stock, at);
+        memory_copy(joined + at, BOWL_MULTILIB_BLOCK, string_length(BOWL_MULTILIB_BLOCK));
+        joined[at + string_length(BOWL_MULTILIB_BLOCK)] = end;
+        check("A file with the block appended to it is not written a second time",
+              bowl_multilib_has(joined, string_length(joined)));
+        check("A file that does not end in a newline is no section, and the section after its newline is",
+              !bowl_multilib_has(unended, string_length(unended)) &&
+                  bowl_multilib_has(ended, string_length(ended)));
+}
+
 static fn chrome_profile(void)
 {
         const struct bowl_profile address_to chrome = bowl_find_profile("chrome");
@@ -99578,6 +99614,7 @@ b32 main(void)
         distros();
         profiles();
         chrome_profile();
+        multilib_rows();
         downloads();
         download_ceiling();
         secret_lines();
