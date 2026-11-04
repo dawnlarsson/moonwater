@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        447 routines (423 public, 24 local), 437 of them on all three and 10 local to one.
+        448 routines (424 public, 24 local), 438 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -156,6 +156,7 @@
           f32_planes_from_f32            public  yes     yes     yes
           f32_planes_from_s16            public  yes     yes     yes
           f32_planes_from_s32            public  yes     yes     yes
+          f32_rows_mix2                  public  yes     yes     yes
           f32_scale_add_peak             public  yes     yes     yes
           f32_scale_peak                 public  yes     yes     yes
           f32_to_bf16                    public  yes     yes     yes
@@ -43901,6 +43902,15 @@ fn f32_pair_to_f32(p8 address_to dst, const f32 address_to left, const f32 addre
 // it, so that every block of eight clamps and stores: AVX2 397.2 (C 821.8), SSE2 569.5.
 READS_WRITES(1) READS_WRITES(2)
 positive f32_pair_clip(f32 address_to left, f32 address_to right, positive count);
+// A block of channels remixed to two: out0[i] and out1[i] are the sums over c < channels of matrix[c] * rows[c][i] and matrix[8 + c] *
+// rows[c][i], in channel order from a first term of +0.0 plus the first product, a product and a sum rounded apart (so the C's bits),
+// where plane c is the count floats at rows + c * stride and matrix is two rows of eight weights. A channel count of 0 is zeros. Only
+// the weights of the channels given are read. Measured on a 9950X (core 2, TSC ticks a call, 256 frames, the C bar -O2 as the service
+// builds it): AVX2 one channel (a mono stream to both) 41.6 (C 641.7; -O3 for x86-64-v3 394.0), three 143.8 (1055.6), six 294.3
+// (1922.8); SSE2 72.1, 261.4, 572.2.
+WRITES(1, 6) WRITES(2, 6)
+fn f32_rows_mix2(f32 address_to out0, f32 address_to out1, const f32 address_to rows, positive stride, const f32 address_to matrix,
+                 positive count, positive channels);
 //      One 8-tap group of the SSE2 body: lo and hi are the byte offsets of its two vectors. rdi.. as the routine's;
 //      r15 and r13 the rows, r12 and rbx the inputs, rbp the byte offset of the turn, xmm8 f, xmm10-13 the lanes.
 #define AUDIO_POLY_SSE2_GROUP(lo, hi)                                                                    \
@@ -44654,6 +44664,32 @@ __asm__(
     ".Laudio_clip_scalar_next:\n   add $4, %rdi\n   add $4, %rsi\n   dec %rdx\n   jnz .Laudio_clip_scalar_loop\n   mov %r10, %rax\n" ASM_RET
     ".Laudio_clip_none:\n" ASM_RET
     ASM_END(f32_pair_clip)
+
+    //      f32_rows_mix2: rdi out0, rsi out1, rdx rows, rcx stride (floats), r8 matrix, r9 count, and on the stack channels. A
+    //      pass a channel over the whole block: the first stores 0 + w * x, each after it adds w * x to what the outputs hold, in
+    //      channel order, a product and a sum rounded apart, so a frame's sum is the C's one chain of adds to the bit while the
+    //      frames of a vector go together (AVX2 eight a turn, SSE2 four, the last few one at a time). The weights of a channel
+    //      are broadcast once a pass.
+    ASM_FUNC(f32_rows_mix2)
+    "mov 8(%rsp), %r10\n   test %r9, %r9\n   jz .Laudio_mix2_none\n   shl $2, %rcx\n   shl $2, %r9\n   mov %r9, %rax\n   and $-32, %rax\n   test %r10, %r10\n   jnz .Laudio_mix2_run\n"
+    "xor %r11d, %r11d\n.Laudio_mix2_zero:\n   movl $0, (%rdi,%r11)\n   movl $0, (%rsi,%r11)\n   add $4, %r11\n   cmp %r9, %r11\n   jb .Laudio_mix2_zero\n" ASM_RET
+    ".Laudio_mix2_run:\n"
+    ASM_NARROW("cpu_has_avx2", ".Laudio_mix2_sse2")
+    "vxorps %xmm5, %xmm5, %xmm5\n   vbroadcastss (%r8), %ymm14\n   vbroadcastss 32(%r8), %ymm15\n   xor %r11d, %r11d\n   test %rax, %rax\n   jz .Laudio_mix2_y_tail1\n"
+    ".balign 64\n.Laudio_mix2_y_first:\n   vmovups (%rdx,%r11), %ymm2\n   vmulps %ymm2, %ymm14, %ymm3\n   vaddps %ymm5, %ymm3, %ymm3\n   vmulps %ymm2, %ymm15, %ymm4\n   vaddps %ymm5, %ymm4, %ymm4\n   vmovups %ymm3, (%rdi,%r11)\n   vmovups %ymm4, (%rsi,%r11)\n   add $32, %r11\n   cmp %rax, %r11\n   jb .Laudio_mix2_y_first\n"
+    ".Laudio_mix2_y_tail1:\n   cmp %r9, %r11\n   jae .Laudio_mix2_y_next\n   vmovss (%rdx,%r11), %xmm2\n   vmovss 0(%r8), %xmm3\n   vmulss %xmm2, %xmm3, %xmm3\n   vaddss %xmm5, %xmm3, %xmm3\n   vmovss 32(%r8), %xmm4\n   vmulss %xmm2, %xmm4, %xmm4\n   vaddss %xmm5, %xmm4, %xmm4\n   vmovss %xmm3, (%rdi,%r11)\n   vmovss %xmm4, (%rsi,%r11)\n   add $4, %r11\n   jmp .Laudio_mix2_y_tail1\n"
+    ".Laudio_mix2_y_next:\n   dec %r10\n   jz .Laudio_mix2_y_done\n   lea (%rdx,%rcx), %rdx\n   add $4, %r8\n   vbroadcastss (%r8), %ymm14\n   vbroadcastss 32(%r8), %ymm15\n   xor %r11d, %r11d\n   test %rax, %rax\n   jz .Laudio_mix2_y_tail\n"
+    ".balign 64\n.Laudio_mix2_y_rest:\n   vmovups (%rdx,%r11), %ymm2\n   vmulps %ymm2, %ymm14, %ymm3\n   vaddps (%rdi,%r11), %ymm3, %ymm3\n   vmulps %ymm2, %ymm15, %ymm4\n   vaddps (%rsi,%r11), %ymm4, %ymm4\n   vmovups %ymm3, (%rdi,%r11)\n   vmovups %ymm4, (%rsi,%r11)\n   add $32, %r11\n   cmp %rax, %r11\n   jb .Laudio_mix2_y_rest\n"
+    ".Laudio_mix2_y_tail:\n   cmp %r9, %r11\n   jae .Laudio_mix2_y_next\n   vmovss (%rdx,%r11), %xmm2\n   vmovss (%r8), %xmm3\n   vmulss %xmm2, %xmm3, %xmm3\n   vaddss (%rdi,%r11), %xmm3, %xmm3\n   vmovss 32(%r8), %xmm4\n   vmulss %xmm2, %xmm4, %xmm4\n   vaddss (%rsi,%r11), %xmm4, %xmm4\n   vmovss %xmm3, (%rdi,%r11)\n   vmovss %xmm4, (%rsi,%r11)\n   add $4, %r11\n   jmp .Laudio_mix2_y_tail\n"
+    ".Laudio_mix2_y_done:\n   vzeroupper\n" ASM_RET
+    ".Laudio_mix2_sse2:\n   mov %r9, %rax\n   and $-16, %rax\n   xorps %xmm5, %xmm5\n   movss (%r8), %xmm14\n   shufps $0, %xmm14, %xmm14\n   movss 32(%r8), %xmm15\n   shufps $0, %xmm15, %xmm15\n   xor %r11d, %r11d\n   test %rax, %rax\n   jz .Laudio_mix2_x_tail1\n"
+    ".balign 64\n.Laudio_mix2_x_first:\n   movups (%rdx,%r11), %xmm2\n   movaps %xmm2, %xmm3\n   mulps %xmm14, %xmm3\n   addps %xmm5, %xmm3\n   mulps %xmm15, %xmm2\n   addps %xmm5, %xmm2\n   movups %xmm3, (%rdi,%r11)\n   movups %xmm2, (%rsi,%r11)\n   add $16, %r11\n   cmp %rax, %r11\n   jb .Laudio_mix2_x_first\n"
+    ".Laudio_mix2_x_tail1:\n   cmp %r9, %r11\n   jae .Laudio_mix2_x_next\n   movss (%rdx,%r11), %xmm2\n   movss 0(%r8), %xmm3\n   mulss %xmm2, %xmm3\n   addss %xmm5, %xmm3\n   movss 32(%r8), %xmm4\n   mulss %xmm2, %xmm4\n   addss %xmm5, %xmm4\n   movss %xmm3, (%rdi,%r11)\n   movss %xmm4, (%rsi,%r11)\n   add $4, %r11\n   jmp .Laudio_mix2_x_tail1\n"
+    ".Laudio_mix2_x_next:\n   dec %r10\n   jz .Laudio_mix2_x_done\n   lea (%rdx,%rcx), %rdx\n   add $4, %r8\n   movss (%r8), %xmm14\n   shufps $0, %xmm14, %xmm14\n   movss 32(%r8), %xmm15\n   shufps $0, %xmm15, %xmm15\n   xor %r11d, %r11d\n   test %rax, %rax\n   jz .Laudio_mix2_x_tail\n"
+    ".balign 64\n.Laudio_mix2_x_rest:\n   movups (%rdx,%r11), %xmm2\n   movaps %xmm2, %xmm3\n   mulps %xmm14, %xmm3\n   movups (%rdi,%r11), %xmm6\n   addps %xmm6, %xmm3\n   mulps %xmm15, %xmm2\n   movups (%rsi,%r11), %xmm7\n   addps %xmm7, %xmm2\n   movups %xmm3, (%rdi,%r11)\n   movups %xmm2, (%rsi,%r11)\n   add $16, %r11\n   cmp %rax, %r11\n   jb .Laudio_mix2_x_rest\n"
+    ".Laudio_mix2_x_tail:\n   cmp %r9, %r11\n   jae .Laudio_mix2_x_next\n   movss (%rdx,%r11), %xmm2\n   movss (%r8), %xmm3\n   mulss %xmm2, %xmm3\n   addss (%rdi,%r11), %xmm3\n   movss 32(%r8), %xmm4\n   mulss %xmm2, %xmm4\n   addss (%rsi,%r11), %xmm4\n   movss %xmm3, (%rdi,%r11)\n   movss %xmm4, (%rsi,%r11)\n   add $4, %r11\n   jmp .Laudio_mix2_x_tail\n"
+    ".Laudio_mix2_x_done:\n.Laudio_mix2_none:\n" ASM_RET
+    ASM_END(f32_rows_mix2)
 );
 #elif ARM64
 __asm__(
@@ -44884,6 +44920,20 @@ __asm__(
     "fmin s0, s0, s28\n   fmax s0, s0, s29\n   fmin s1, s1, s28\n   fmax s1, s1, s29\n   str s0, [x9], #4\n   str s1, [x1], #4\n   subs x2, x2, #1\n   b.ne 4b\n"
     "9:  " ASM_RET
     ASM_END(f32_pair_clip)
+
+    //      f32_rows_mix2: x0 out0, x1 out1, x2 rows, x3 stride, x4 matrix, x5 count, x6 channels. The x86_64 block carries the
+    //      contract. Four frames a turn (ld1r broadcasts the weights), the rest one at a time.
+    ASM_FUNC(f32_rows_mix2)
+    "cbz x5, 9f\n   lsl x3, x3, #2\n   cbnz x6, 1f\n   movi v0.4s, #0\n   mov x9, #0\n"
+    "0:  str s0, [x0, x9]\n   str s0, [x1, x9]\n   add x9, x9, #4\n   cmp x9, x5, lsl #2\n   b.lo 0b\n   b 9f\n"
+    "1:  movi v5.4s, #0\n   mov x10, #1\n"
+    "2:  ld1r {v14.4s}, [x4]\n   add x11, x4, #32\n   ld1r {v15.4s}, [x11]\n   mov x7, x2\n   mov x8, x0\n   mov x9, x1\n   lsr x12, x5, #2\n   cbz x12, 6f\n"
+    "3:  ldr q2, [x7], #16\n   fmul v3.4s, v2.4s, v14.4s\n   fmul v4.4s, v2.4s, v15.4s\n   cbnz x10, 4f\n   ldr q6, [x8]\n   ldr q7, [x9]\n   fadd v3.4s, v3.4s, v6.4s\n   fadd v4.4s, v4.4s, v7.4s\n   b 5f\n4:  fadd v3.4s, v3.4s, v5.4s\n   fadd v4.4s, v4.4s, v5.4s\n5:  str q3, [x8], #16\n   str q4, [x9], #16\n   subs x12, x12, #1\n   b.ne 3b\n"
+    "6:  ands x12, x5, #3\n   b.eq 8f\n"
+    "7:  ldr s2, [x7], #4\n   fmul s3, s2, s14\n   fmul s4, s2, s15\n   cbnz x10, 71f\n   ldr s6, [x8]\n   ldr s7, [x9]\n   fadd s3, s3, s6\n   fadd s4, s4, s7\n   b 72f\n71: fadd s3, s3, s5\n   fadd s4, s4, s5\n72: str s3, [x8], #4\n   str s4, [x9], #4\n   subs x12, x12, #1\n   b.ne 7b\n"
+    "8:  mov x10, #0\n   add x2, x2, x3\n   add x4, x4, #4\n   subs x6, x6, #1\n   b.ne 2b\n"
+    "9:  " ASM_RET
+    ASM_END(f32_rows_mix2)
 );
 #elif RISCV64
 __asm__(
@@ -45167,6 +45217,28 @@ __asm__(
     "slli t1, t0, 2\n   add a3, a3, t1\n   add a1, a1, t1\n   sub a2, a2, t0\n   bnez a2, 21b\n" ASM_RET
 #endif
     ASM_END(f32_pair_clip)
+
+    //      f32_rows_mix2: a0 out0, a1 out1, a2 rows, a3 stride, a4 matrix, a5 count, a6 channels. The x86_64 block carries the
+    //      contract. With V, strips with vfmul.vf and vfadd; without it a frame at a time.
+    ASM_FUNC(f32_rows_mix2)
+    "beqz a5, 9f\n   slli a3, a3, 2\n   bnez a6, 1f\n   mv t0, a0\n   mv t1, a1\n   mv t2, a5\n"
+    "0:  sw zero, 0(t0)\n   sw zero, 0(t1)\n   addi t0, t0, 4\n   addi t1, t1, 4\n   addi t2, t2, -1\n   bnez t2, 0b\n   j 9f\n"
+    "1:  fmv.w.x ft5, zero\n   li t6, 1\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 30f\n   bnez t3, 2f\n"
+    "addi sp, sp, -16\n   sd ra, 8(sp)\n   call cpu_vector_detect\n   ld ra, 8(sp)\n   addi sp, sp, 16\n   srli a3, a3, 2\n   j f32_rows_mix2\n"
+#endif
+    "2:  flw ft0, 0(a4)\n   flw ft1, 32(a4)\n   mv t0, a2\n   mv t1, a0\n   mv t2, a1\n   mv t3, a5\n"
+    "3:  flw ft2, 0(t0)\n   fmul.s ft3, ft2, ft0\n   fmul.s ft4, ft2, ft1\n   bnez t6, 4f\n   flw ft6, 0(t1)\n   flw ft7, 0(t2)\n   fadd.s ft3, ft3, ft6\n   fadd.s ft4, ft4, ft7\n   j 5f\n4:  fadd.s ft3, ft3, ft5\n   fadd.s ft4, ft4, ft5\n5:  fsw ft3, 0(t1)\n   fsw ft4, 0(t2)\n   addi t0, t0, 4\n   addi t1, t1, 4\n   addi t2, t2, 4\n   addi t3, t3, -1\n   bnez t3, 3b\n"
+    "li t6, 0\n   add a2, a2, a3\n   addi a4, a4, 4\n   addi a6, a6, -1\n   bnez a6, 2b\n"
+    "9:  " ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "30: li t6, 1\n"
+    "31: flw ft0, 0(a4)\n   flw ft1, 32(a4)\n   mv t0, a2\n   mv t1, a0\n   mv t2, a1\n   mv t3, a5\n"
+    "32: vsetvli t4, t3, e32, m4, ta, ma\n   vle32.v v8, (t0)\n   vfmul.vf v12, v8, ft0\n   vfmul.vf v16, v8, ft1\n   bnez t6, 33f\n   vle32.v v20, (t1)\n   vle32.v v24, (t2)\n   vfadd.vv v12, v12, v20\n   vfadd.vv v16, v16, v24\n   j 34f\n33: vfadd.vf v12, v12, ft5\n   vfadd.vf v16, v16, ft5\n34: vse32.v v12, (t1)\n   vse32.v v16, (t2)\n   slli t5, t4, 2\n   add t0, t0, t5\n   add t1, t1, t5\n   add t2, t2, t5\n   sub t3, t3, t4\n   bnez t3, 32b\n"
+    "li t6, 0\n   add a2, a2, a3\n   addi a4, a4, 4\n   addi a6, a6, -1\n   bnez a6, 31b\n" ASM_RET
+#endif
+    ASM_END(f32_rows_mix2)
     ".option pop\n"
 );
 #endif

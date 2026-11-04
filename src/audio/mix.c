@@ -110,6 +110,7 @@ void f32_pair_to_s32(unsigned char *dst, const float *left, const float *right, 
 void f32_pair_to_s24_32(unsigned char *dst, const float *left, const float *right, unsigned long count);
 void f32_pair_to_f32(unsigned char *dst, const float *left, const float *right, unsigned long count);
 unsigned long f32_pair_clip(float *left, float *right, unsigned long count);
+void f32_rows_mix2(float *out0, float *out1, const float *rows, unsigned long stride, const float *matrix, unsigned long count, unsigned long channels);
 #endif
 
 /* ---- numbers: sin, sqrt and the Bessel function, in double, with no library ---- */
@@ -537,10 +538,9 @@ AUDIO_API unsigned long audio_ring_put_silence(struct audio_ring *ring, unsigned
         first = ring->size - from;
         if (first > n)
                 first = n;
-        for (unsigned long i = 0; i < first; i++)
-                ring->data[from + i] = ring->silence;
-        for (unsigned long i = first; i < n; i++)
-                ring->data[i - first] = ring->silence;
+        __builtin_memset(ring->data + from, ring->silence, first);
+        if (n > first)
+                __builtin_memset(ring->data, ring->silence, n - first);
         ring->write += n;
         if (ring->write > ring->limit)
                 ring->limit = ring->write;
@@ -795,8 +795,8 @@ AUDIO_API void audio_rs_reset(struct audio_resampler *rs)
 {
         long lead = rs->table->taps / 2 - 1;
 
-        for (long i = 0; i < lead; i++)
-                rs->buf[0][i] = rs->buf[1][i] = 0;
+        __builtin_memset(rs->buf[0], 0, (unsigned long)lead * sizeof(float));
+        __builtin_memset(rs->buf[1], 0, (unsigned long)lead * sizeof(float));
         rs->have = lead;
         rs->pos = 0;
 }
@@ -1095,20 +1095,7 @@ static void audio_voice_pull(struct audio_sink *sink, struct audio_voice *voice,
                         __builtin_memcpy(out1, sink->decoded[1], (unsigned long)n * sizeof(float));
                 }
                 else
-                {
-                        for (long i = 0; i < n; i++)
-                        {
-                                float l = 0, r = 0;
-
-                                for (long c = 0; c < voice->channels; c++)
-                                {
-                                        l += voice->remix[0][c] * sink->decoded[c][i];
-                                        r += voice->remix[1][c] * sink->decoded[c][i];
-                                }
-                                out0[i] = l;
-                                out1[i] = r;
-                        }
-                }
+                        f32_rows_mix2(out0, out1, sink->decoded[0], AUDIO_BLOCK, voice->remix[0], (unsigned long)n, (unsigned long)voice->channels);
                 out0 += n;
                 out1 += n;
                 frames -= n;
@@ -1166,8 +1153,8 @@ AUDIO_API long audio_voice_mix(struct audio_sink *sink, struct audio_voice *voic
 
                         if (zeros > audio_rs_room(rs))
                                 zeros = audio_rs_room(rs);
-                        for (long i = 0; i < zeros; i++)
-                                rs->buf[0][rs->have + i] = rs->buf[1][rs->have + i] = 0;
+                        __builtin_memset(rs->buf[0] + rs->have, 0, (unsigned long)zeros * sizeof(float));
+                        __builtin_memset(rs->buf[1] + rs->have, 0, (unsigned long)zeros * sizeof(float));
                         rs->have += zeros;
                         voice->flushed = 1;
                 }
@@ -1209,9 +1196,9 @@ AUDIO_API void audio_sink_begin(struct audio_sink *sink, long frames)
 {
         if (frames > AUDIO_BLOCK)
                 frames = AUDIO_BLOCK;
-        for (int c = 0; c < 2; c++)
-                for (long i = 0; i < frames; i++)
-                        sink->bus[c][i] = 0;
+        if (frames > 0)
+                for (int c = 0; c < 2; c++)
+                        __builtin_memset(sink->bus[c], 0, (unsigned long)frames * sizeof(float));
 }
 
 AUDIO_API void audio_sink_gain(struct audio_sink *sink, float gain)

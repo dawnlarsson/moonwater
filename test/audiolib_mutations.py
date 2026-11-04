@@ -147,6 +147,23 @@ M = [
     ("riscv64", "encode rv vector: float NaN not put back", "vmerge.vvm v8, v8, v16, v0", "vmerge.vvm v8, v8, v8, v0"),
     ("riscv64", "clip rv vector: left plane stored under the right's mask", "vmv1r.v v0, v1\\n   vse32.v v16, (a3), v0.t", "vmv1r.v v0, v2\\n   vse32.v v16, (a3), v0.t"),
     ("riscv64", "clip rv scalar: the low side not clamped", "flt.s t0, ft0, ft9\\n   beqz t0, 6f\\n   fmv.s ft0, ft9", "flt.s t0, ft0, ft9\\n   beqz t0, 6f"),
+    # ---- f32_rows_mix2 ----
+    ("x86_64", "mix2 avx2: second plane's weight from the first's", "vbroadcastss 32(%r8), %ymm15\\n   xor %r11d, %r11d\\n   test %rax, %rax\\n   jz .Laudio_mix2_y_tail1", "vbroadcastss (%r8), %ymm15\\n   xor %r11d, %r11d\\n   test %rax, %rax\\n   jz .Laudio_mix2_y_tail1"),
+    ("x86_64", "mix2 avx2: later channels not added to the outputs", "vaddps (%rdi,%r11), %ymm3, %ymm3", "vaddps %ymm5, %ymm3, %ymm3"),
+    ("x86_64", "mix2 avx2: the first term not added to zero", "vmulps %ymm2, %ymm14, %ymm3\\n   vaddps %ymm5, %ymm3, %ymm3", "vmulps %ymm2, %ymm14, %ymm3"),
+    ("x86_64", "mix2: stride in floats taken for bytes", "shl $2, %rcx\\n   shl $2, %r9", "shl $2, %r9"),
+    ("x86_64", "mix2: the next channel's row is the same row", "lea (%rdx,%rcx), %rdx\\n   add $4, %r8\\n   vbroadcastss", "lea (%rdx), %rdx\\n   add $4, %r8\\n   vbroadcastss"),
+    ("x86_64", "mix2 avx2: the frames left over past eight lost", "cmp %r9, %r11\\n   jae .Laudio_mix2_y_next\\n   vmovss (%rdx,%r11), %xmm2\\n   vmovss 0(%r8)", "jmp .Laudio_mix2_y_next\\n   vmovss (%rdx,%r11), %xmm2\\n   vmovss 0(%r8)"),
+    ("x86_64", "mix2 sse2: second plane's weight from the first's", "movss 32(%r8), %xmm15\\n   shufps $0, %xmm15, %xmm15\\n   xor %r11d, %r11d\\n   test %rax, %rax\\n   jz .Laudio_mix2_x_tail1", "movss (%r8), %xmm15\\n   shufps $0, %xmm15, %xmm15\\n   xor %r11d, %r11d\\n   test %rax, %rax\\n   jz .Laudio_mix2_x_tail1"),
+    ("x86_64", "mix2 sse2: a channel's pass adds into the first plane twice", "movups (%rsi,%r11), %xmm7\\n   addps %xmm7, %xmm2", "movups (%rdi,%r11), %xmm7\\n   addps %xmm7, %xmm2"),
+    ("arm64", "mix2 neon: second plane's weight from the first's", "ld1r {v15.4s}, [x11]", "ld1r {v15.4s}, [x4]"),
+    ("arm64", "mix2 neon: weights two floats on a channel", "add x4, x4, #4\\n   subs x6, x6, #1", "add x4, x4, #8\\n   subs x6, x6, #1"),
+    ("arm64", "mix2 neon: later channels not added to the outputs", "ldr q6, [x8]\\n   ldr q7, [x9]\\n   fadd v3.4s, v3.4s, v6.4s", "ldr q6, [x8]\\n   ldr q7, [x9]\\n   fadd v3.4s, v3.4s, v5.4s"),
+    ("arm64", "mix2 neon: the frames left over lost", "6:  ands x12, x5, #3\\n   b.eq 8f", "6:  ands x12, x5, #3\\n   b 8f"),
+    ("riscv64", "mix2 rv scalar: second plane's weight from the first's", "2:  flw ft0, 0(a4)\\n   flw ft1, 32(a4)", "2:  flw ft0, 0(a4)\\n   flw ft1, 0(a4)"),
+    ("riscv64", "mix2 rv scalar: the first term not added to zero", "4:  fadd.s ft3, ft3, ft5\\n   fadd.s ft4, ft4, ft5", "4:  fmv.s ft3, ft3\\n   fadd.s ft4, ft4, ft5"),
+    ("riscv64", "mix2 rv vector: the second output loaded from the first", "vle32.v v24, (t2)", "vle32.v v24, (t1)"),
+    ("riscv64", "mix2 rv vector: the first term not added to zero", "33: vfadd.vf v12, v12, ft5\\n   vfadd.vf v16, v16, ft5", "33: vfadd.vf v16, v16, ft5"),
 ]
 
 

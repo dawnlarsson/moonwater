@@ -9589,6 +9589,26 @@ AUDIO_C_DECODE(audio_c_decode, AUDIO_C_EXACT)
         }
 AUDIO_C_CLIP(audio_c_clip, )
 
+// A block of channels to two: one chain of sums a frame in channel order from nothing, each term a product rounded and added rounded.
+#define AUDIO_C_MIX2(name, attributes)                                                                                          \
+        attributes static AUDIO_C_UNUSED void name(float *out0, float *out1, const float *rows, unsigned long stride, const float *matrix, \
+                                                   unsigned long count, unsigned long channels)                                  \
+        {                                                                                                                       \
+                for (unsigned long i = 0; i < count; i++)                                                                       \
+                {                                                                                                               \
+                        float l = 0, r = 0;                                                                                     \
+                                                                                                                                \
+                        for (unsigned long c = 0; c < channels; c++)                                                            \
+                        {                                                                                                       \
+                                l += matrix[c] * rows[c * stride + i];                                                          \
+                                r += matrix[8 + c] * rows[c * stride + i];                                                      \
+                        }                                                                                                       \
+                        out0[i] = l;                                                                                            \
+                        out1[i] = r;                                                                                            \
+                }                                                                                                               \
+        }
+AUDIO_C_MIX2(audio_c_mix2, AUDIO_C_EXACT)
+
 static AUDIO_C_UNUSED int audio_c_round16(float v)
 {
         float r;
@@ -9705,6 +9725,11 @@ void f32_pair_to_f32(unsigned char *dst, const float *left, const float *right, 
 unsigned long f32_pair_clip(float *left, float *right, unsigned long count)
 {
         return audio_c_clip(left, right, count);
+}
+
+void f32_rows_mix2(float *out0, float *out1, const float *rows, unsigned long stride, const float *matrix, unsigned long count, unsigned long channels)
+{
+        audio_c_mix2(out0, out1, rows, stride, matrix, count, channels);
 }
 #endif
 
@@ -166705,6 +166730,57 @@ static void al_encode_tier(string_address tier)
         check("f32_pair_to_s16, _s32, _s24_32, _f32, f32_pair_clip: cases ran", faults[0].cases > 1200 && faults[1].cases > 1200 && faults[2].cases > 1200 && faults[3].cases > 1200 && faults[4].cases > 1200);
 }
 
+/*
+        f32_rows_mix2 against audio_c_mix2, to the bit (a NaN equal to a NaN): 0 to 8 channels, every count to 330 and long ones,
+        rows apart by the count and by up to a hundred floats more, the first row just after a page that faults or the last
+        one ending against it, the outputs against it, weights of every sort (zero, negative, one, tiny, the ones that make a
+        sum round), inputs with NaNs, infinities, denormals and zeros of both signs.
+*/
+static void al_mix2_case(unsigned long long count, unsigned long long channels, int front, int kind, al_encode_faults *faults)
+{
+        static float want0[1300], want1[1300];
+        float matrix[16];
+        unsigned long long stride = count + (al_next() % 3 == 0 ? al_next() % 100 : 0), rows_floats;
+        float *rows, *out0, *out1;
+
+        if (count > 1200 || channels > 8 || stride * channels + 8 > (AL_REGION / 4))
+                return;
+        faults->cases++;
+        rows_floats = stride * (channels ? channels : 1);
+        rows = front ? (float *)al_low[0] + 16 : (float *)al_high[0] - rows_floats + (stride - count);
+        out0 = front ? (float *)al_low[1] + 16 + al_next() % 4 : (float *)al_high[1] - count;
+        out1 = front ? (float *)al_low[2] + 16 + al_next() % 4 : (float *)al_high[2] - count;
+        for (int i = 0; i < 16; i++)
+                matrix[i] = kind == 0 ? al_unit() : kind == 1 ? ((al_next() & 3) == 0 ? 0.0f : (al_next() & 3) == 1 ? 1.0f : al_special(false) * 0.01f) : al_special(true);
+        for (unsigned long long c = 0; c < channels; c++)
+                for (unsigned long long i = 0; i < count; i++)
+                        rows[c * stride + i] = al_special(kind == 2);
+        for (unsigned long long i = 0; i < count; i++)
+                out0[i] = out1[i] = 1234.0f;
+        audio_c_mix2(want0, want1, rows, stride, matrix, count, channels);
+        f32_rows_mix2(out0, out1, rows, stride, matrix, count, channels);
+        for (unsigned long long i = 0; i < count; i++)
+                faults->values += !al_same(out0[i], want0[i]) + !al_same(out1[i], want1[i]);
+}
+
+static void al_mix2_tier(void)
+{
+        al_encode_faults faults = {0, 0, 0};
+        static const unsigned long long longer[] = {400, 511, 512, 513, 1000, 1023, 1024, 1025};
+
+        for (unsigned long long at = 0; at < 331 + sizeof(longer) / sizeof(longer[0]); at++)
+                for (unsigned long long channels = 0; channels <= 8; channels++)
+                {
+                        unsigned long long count = at < 331 ? at : longer[at - 331];
+
+                        if (channels > 2 && count > 40 && count % 5 > 1)
+                                continue;
+                        al_mix2_case(count, channels, (int)((at + channels) & 1), (int)((at + channels) % 3), &faults);
+                }
+        check("f32_rows_mix2: every count, channel count and placement the C's bits", faults.values == 0);
+        check("f32_rows_mix2: cases ran", faults.cases > 1500);
+}
+
 static void al_polyphase_tier(string_address tier, int bits)
 {
         al_faults faults = {0, 0, 0, 0, 0, 0, 0};
@@ -166748,6 +166824,7 @@ b32 main(void)
                         al_scale_tier("avx2");
                         al_decode_tier("avx2");
                         al_encode_tier("avx2");
+                        al_mix2_tier();
                 }
                 cpu_has_fma = 0;
                 if (had2)
@@ -166757,6 +166834,7 @@ b32 main(void)
                 al_scale_tier("sse2");
                 al_decode_tier("sse2");
                 al_encode_tier("sse2");
+                al_mix2_tier();
                 cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
         }
 #elif RISCV64
@@ -166782,6 +166860,7 @@ b32 main(void)
                         al_scale_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                         al_decode_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                         al_encode_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
+                        al_mix2_tier();
                 }
                 al_first = false;
                 cpu_has_vector = vector;
@@ -166791,6 +166870,7 @@ b32 main(void)
         al_scale_tier("neon");
         al_decode_tier("neon");
         al_encode_tier("neon");
+        al_mix2_tier();
 #endif
         return test_report(null);
 }
@@ -179088,6 +179168,17 @@ AUDIO_C_CLIP(al_k_base, __attribute__((noinline, noclone, optimize("O2"))))
 AUDIO_C_ENCODE(al_e_o3, __attribute__((noinline, noclone, optimize("O3"))))
 AUDIO_C_CLIP(al_k_o3, __attribute__((noinline, noclone, optimize("O3"))))
 
+//      The remix to two.
+#if X64
+AUDIO_C_MIX2(al_m_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v3"))))
+#elif RISCV64
+AUDIO_C_MIX2(al_m_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=+v"))))
+#else
+AUDIO_C_MIX2(al_m_wide, __attribute__((noinline, noclone, optimize("O3"))))
+#endif
+AUDIO_C_MIX2(al_m_base, __attribute__((noinline, noclone, optimize("O2"))))
+AUDIO_C_MIX2(al_m_o3, __attribute__((noinline, noclone, optimize("O3"))))
+
 //      The decode loop the same ways.
 #if X64
 AUDIO_C_DECODE(al_d_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v3"))))
@@ -179370,6 +179461,63 @@ static p64 al_encode_run(bool assembly, positive shape, positive reps)
         return get_cpu_time() - start;
 }
 
+/*
+        The remix to two of a voice that is not stereo: 256 frames of mono, of three channels and of 5.1.
+*/
+static const positive al_mix2_channels[] = {1, 3, 6};
+static f32 *al_mix2_rows, *al_mix2_out0, *al_mix2_out1;
+static f32 al_mix2_matrix[16] = {0.7071f, 0.5f, 0.25f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f, 0.7071f, 0.25f, 0.5f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f};
+static p32 al_mix2_bar;
+
+static p64 al_mix2_run(bool assembly, positive shape, positive reps)
+{
+        positive channels = al_mix2_channels[shape];
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+        {
+                if (assembly)
+                        f32_rows_mix2(al_mix2_out0, al_mix2_out1, al_mix2_rows, 512, al_mix2_matrix, 256, channels);
+                else if (al_mix2_bar == 1)
+                        al_m_wide(al_mix2_out0, al_mix2_out1, al_mix2_rows, 512, al_mix2_matrix, 256, channels);
+                else if (al_mix2_bar == 2)
+                        al_m_o3(al_mix2_out0, al_mix2_out1, al_mix2_rows, 512, al_mix2_matrix, 256, channels);
+                else
+                        al_m_base(al_mix2_out0, al_mix2_out1, al_mix2_rows, 512, al_mix2_matrix, 256, channels);
+        }
+        return get_cpu_time() - start;
+}
+
+static fn al_mix2_rows_run(string_address tier, bool wide)
+{
+        for (positive shape = 0; shape < 3; shape++)
+                for (p32 bar = 0; bar < 2; bar++)
+                {
+                        positive reps = (1u << 20) / 256 / al_mix2_channels[shape] + 1, ratios[TRIES];
+                        p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                        al_mix2_bar = bar == 0 ? 0 : wide ? 1 : 2;
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 former, assembly;
+
+                                BENCH_ALTERNATE(trial, former, al_mix2_run(false, shape, reps), assembly, al_mix2_run(true, shape, reps));
+                                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                                best_c = former < best_c ? former : best_c;
+                                best_a = assembly < best_a ? assembly : best_a;
+                        }
+                        order(ratios, TRIES);
+                        string_format(log, "f32_rows_mix2 %p channels of 256 frames, %s against C %s: paired median ASM/C ", al_mix2_channels[shape], tier,
+                                      bar == 0 ? "-O2 as built" : "-O3");
+                        al_hundredths(ratios[TRIES / 2]);
+                        string_format(log, "%%; best ticks a call ASM ");
+                        al_hundredths((positive)(best_a * 100 / reps));
+                        string_format(log, ", C ");
+                        al_hundredths((positive)(best_c * 100 / reps));
+                        log("\n", 1);
+                }
+}
+
 static fn al_encode_rows(string_address tier, bool wide)
 {
         for (positive shape = 0; shape < sizeof(al_encode_shapes) / sizeof(al_encode_shapes[0]); shape++)
@@ -179508,6 +179656,14 @@ b32 main(void)
                 }
         }
         al_scale_bus = memory((4 * 1024 + 64) * 4), al_scale_in = memory((4 * 1024 + 64) * 4);
+        al_mix2_rows = memory(8 * 512 * 4), al_mix2_out0 = memory(1024 * 4), al_mix2_out1 = memory(1024 * 4);
+        if (!al_mix2_rows || !al_mix2_out0 || !al_mix2_out1)
+                return 1;
+        for (positive i = 0; i < 8 * 512; i++)
+        {
+                XORSHIFT64(state);
+                al_mix2_rows[i] = (f32)(int)(state >> 40) / 8388608.0f - 1.0f;
+        }
         al_encode_left = memory(1024 * 4), al_encode_right = memory(1024 * 4), al_encode_keep_left = memory(1024 * 4), al_encode_keep_right = memory(1024 * 4);
         al_encode_out = memory(1024 * 8);
         if (!al_encode_left || !al_encode_right || !al_encode_keep_left || !al_encode_keep_right || !al_encode_out)
@@ -179555,6 +179711,7 @@ b32 main(void)
                 {
                         al_decode_rows(tier == 1 ? "avx2" : "sse2", tier == 1);
                         al_encode_rows(tier == 1 ? "avx2" : "sse2", tier == 1);
+                        al_mix2_rows_run(tier == 1 ? "avx2" : "sse2", tier == 1);
                 }
         }
         cpu_has_avx2 = wide2, cpu_has_fma = fused, cpu_has_avx512 = wide512;
@@ -179572,6 +179729,7 @@ b32 main(void)
                 al_scale_rows(tier == 0 ? "V" : "no V", true, false);
                 al_decode_rows(tier == 0 ? "V" : "no V", true);
                 al_encode_rows(tier == 0 ? "V" : "no V", true);
+                al_mix2_rows_run(tier == 0 ? "V" : "no V", true);
         }
         cpu_has_vector = vector;
 #else
@@ -179579,6 +179737,7 @@ b32 main(void)
         al_scale_rows("neon", true, false);
         al_decode_rows("neon", true);
         al_encode_rows("neon", true);
+        al_mix2_rows_run("neon", true);
 #endif
         log_flush();
         return 0;
