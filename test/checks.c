@@ -150340,6 +150340,75 @@ static fn check_no_hand_typing(void)
         check("fields: no window of Canvas types by hand: every input is the kit's field", read == sizeof(files) / sizeof(files[0]) && !found);
 }
 
+static positive check_hits(const char address_to text, positive size, const char address_to idiom);
+
+/*
+        The kit's standard as a ratchet (memory ui-kit-standard-2026-11-04, section 6): an app reads no touch flag of its own
+        (ui_event_context reads it once), keeps no clock of its own (ui_kit.now), holds no press of a kit widget in its fields
+        and defines no static with a kit's prefix. The apps still do some of these, so each count in ratchet[] is what the file
+        has now: a file may have fewer, and more is refused. Lowering a number is the fix, in the commit that removes the use.
+        Read from the tree the check runs in (the repository's root); not run where the sources are not.
+*/
+static fn check_kit_standard(void)
+{
+        static const char address_to const apps[] = {"src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/editor.c",
+                                                     "src/canvas/ui/terminal.c", "src/canvas/ui/taskbar.c", "src/canvas/ui/battery.c",
+                                                     "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c", "src/canvas/ui/language.c"};
+        static const char address_to const idioms[] = {"WINDOW_KEY_TOUCH", "clock_monotonic_nanoseconds", ".press.down", "static fn ui_",
+                                                       "static void ui_", "static int ui_", "static b32 ui_"};
+        static const struct
+        {
+                const char address_to file;
+                const char address_to idiom;
+                positive most;
+        } ratchet[] = {
+                {"src/canvas/ui/settings.c", "WINDOW_KEY_TOUCH", 3},
+                {"src/canvas/ui/launcher.c", "WINDOW_KEY_TOUCH", 3},
+                {"src/canvas/ui/terminal.c", "WINDOW_KEY_TOUCH", 4},
+                {"src/canvas/ui/settings.c", "clock_monotonic_nanoseconds", 5},
+                {"src/canvas/ui/launcher.c", "clock_monotonic_nanoseconds", 1},
+                {"src/canvas/ui/editor.c", "clock_monotonic_nanoseconds", 1},
+                {"src/canvas/ui/terminal.c", "clock_monotonic_nanoseconds", 18},
+                {"src/canvas/ui/identify.c", "clock_monotonic_nanoseconds", 3},
+                {"src/canvas/ui/mixer.c", "clock_monotonic_nanoseconds", 2},
+                {"src/canvas/ui/settings.c", ".press.down", 2},
+                {"src/canvas/ui/launcher.c", ".press.down", 1},
+        };
+        positive found = 0, read = 0;
+
+        for (positive f = 0; f < sizeof(apps) / sizeof(apps[0]); f++)
+        {
+                positive size = 0, bytes = compositor_map_file((string_address)apps[f], &size);
+                const char address_to text = (const char address_to)bytes;
+
+                if (!bytes)
+                        continue;
+                read++;
+                for (positive i = 0; i < sizeof(idioms) / sizeof(idioms[0]); i++)
+                {
+                        positive hits = check_hits(text, size, idioms[i]), most = 0;
+
+                        for (positive r = 0; r < sizeof(ratchet) / sizeof(ratchet[0]); r++)
+                                if (!string_compare((string_address)ratchet[r].file, (string_address)apps[f]) &&
+                                    !string_compare((string_address)ratchet[r].idiom, (string_address)idioms[i]))
+                                        most = ratchet[r].most;
+                        if (hits > most)
+                        {
+                                found++;
+                                string_format(log, "  kit standard: %s has more of %s than the ratchet allows\n", (string_address)apps[f],
+                                              (string_address)idioms[i]);
+                        }
+                }
+                compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
+        }
+        if (read != sizeof(apps) / sizeof(apps[0]))
+        {
+                string_format(log, "  NOT RUN: the kit's standard is read from the sources, which are not all here\n");
+                return;
+        }
+        check("kit: no app reads a touch flag, keeps a clock, holds a press or names a static with a kit's prefix beyond the ratchet", !found);
+}
+
 // How many times idiom is in the first size bytes of text.
 static positive check_hits(const char address_to text, positive size, const char address_to idiom)
 {
@@ -155340,6 +155409,7 @@ b32 main()
                 check_glass_pieces(program_argument(3));
 #endif
         check_no_hand_typing();
+        check_kit_standard();
         check_one_blink();
 #if MOONWATER_UI_ANY
         language_directory = "languages/";
