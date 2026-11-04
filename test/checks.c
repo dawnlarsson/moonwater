@@ -217521,6 +217521,17 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                 ui_popmenu_add(&app_menu, "Open with", null, UI_MENU_SUBMENU, 5);
                                 ui_popmenu_size(&settings.ui, &app_menu, H);
                                 app_menu.hot = app_group == 1 ? 0 : app_group == 2 ? 5 : -1;
+                                if (app_group == 3)
+                                {
+                                        // A press on the first item, as the menu's press records it: the press, the hot item and the ripple from the press.
+                                        int top = ui_menu_sizes(&settings.ui, app_menu.touch).pad + ui_popmenu_offset(&settings.ui, &app_menu, 0);
+
+                                        ui_press_begin(&app_menu.press, 12, top + 4, 0, app_menu.touch);
+                                        app_menu.hot = 0;
+                                        ui_ripple_go(&app_menu.ripple, ui_qdiv(ui_q(12), ui_q(s) / 100), ui_qdiv(ui_q(4), ui_q(s) / 100),
+                                                     ui_qdiv(ui_q(app_menu.width), ui_q(s) / 100), ui_qdiv(ui_q(ui_popmenu_row(&settings.ui, &app_menu)), ui_q(s) / 100), 0);
+                                        app_menu.ripple_at = 0;
+                                }
                         }
                         else if (which == 5)
                         {
@@ -219374,7 +219385,7 @@ b32 main(void)
                         {
                                 static const int popmenu_scales[4] = {100, 150, 200, 300};
 
-                                for (app_group = 0; app_group < 3; app_group++)
+                                for (app_group = 0; app_group < 4; app_group++)
                                         app_rows(6, big, kops, kbins, kbins + (4 << 20), 4u << 20, popmenu_scales, 4, 0);
                         }
                         {
