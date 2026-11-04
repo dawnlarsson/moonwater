@@ -51182,11 +51182,31 @@ def snapshot():
 def settle():
     """A pair that was killed while it waited leaves taking its code back to a
     process of its own, which can still be mid-write when the next command has
-    ended: the stage it writes through is looked for until it goes (three
-    seconds at most), so a stage that stays is a stage left."""
-    until = time.monotonic() + 3
+    ended: the stage it writes through is looked for until it goes. A writer
+    that is killed while the disk's journal is committing (a box with other
+    lanes running: jbd2_log_wait_commit, in its fsync) dies when the commit
+    is done, which can be many seconds, and its stage goes with it; a minute
+    is waited at most, so a stage that stays is a stage left."""
+    until = time.monotonic() + 60
     while time.monotonic() < until and any(".moonwater-stage-" in path for path in snapshot()):
         time.sleep(0.02)
+
+
+def stuck():
+    """What is still running, and what each is waiting in: the answer to a stage that is left."""
+    found = []
+    me = os.getpid()
+    for name in os.listdir("/proc"):
+        if name.isdigit() and int(name) != me:
+            try:
+                with open("/proc/%s/cmdline" % name, "rb") as handle:
+                    command = handle.read(80).replace(b"\0", b" ").decode("latin-1")
+                with open("/proc/%s/wchan" % name) as handle:
+                    waiting = handle.read(40)
+            except OSError:
+                continue
+            found.append("%s %s [%s]" % (name, command.strip(), waiting))
+    return found
 
 
 def head(path):
@@ -51472,8 +51492,9 @@ def main():
             if any(done.get("waited") for done in runs):
                 settle()
             after = snapshot()
+            left = stuck() if any(".moonwater-stage-" in path for path in after) else []
             strays()
-            results.write(json.dumps({"chain": number, "runs": runs,
+            results.write(json.dumps({"chain": number, "runs": runs, "stuck": left,
                                       "changes": changes(before, after)}) + "\n")
             results.flush()
 
@@ -52032,7 +52053,8 @@ def fuzz_judge(chains, results, user):
 
     def note(kind, chain, run, detail=""):
         words = [bytes.fromhex(a) for a in run["argv"]] if run else []
-        shown = ("moonwater " + fuzz_show(words)) if run else "chain " + str(chain)
+        shown = ("moonwater " + fuzz_show(words)) if run else "chain %d (%s)" % (
+            chain, " ; ".join(fuzz_show(vector[0]) for vector in chains[chain])[:400])
         if len(chains[chain]) > 1:
             shown = "[chain of %d: %s] " % (len(chains[chain]), " ; ".join(
                 fuzz_show(vector[0]) for vector in chains[chain])[:300]) + shown
@@ -52120,8 +52142,8 @@ def fuzz_judge(chains, results, user):
                 continue
             if path in planted and kind != stat.S_IFREG:
                 continue
-            where = lambda detail: note(detail, number, None, "%s (mode %o, %s bytes)" % (
-                path, mode or 0, change.get("size")))
+            where = lambda detail: note(detail, number, None, "%s (mode %o, %s bytes)%s" % (
+                path, mode or 0, change.get("size"), " still running: %s" % result["stuck"] if result.get("stuck") and "stage" in detail else ""))
             if path in FUZZ_EXPECTED:
                 continue
             if "/.moonwater-stage-" in path:
