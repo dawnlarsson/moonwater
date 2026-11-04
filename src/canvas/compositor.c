@@ -995,6 +995,7 @@ enum compositor_list_why
         COMPOSITOR_LIST_TORN,    // the program published a new generation while the ops were read
         COMPOSITOR_LIST_MAPS,    // the cover bytes or the picture could not be mapped for the card
         COMPOSITOR_LIST_JOB,     // the card did not finish the scene
+        COMPOSITOR_LIST_PIXELS,  // not a refusal: a frame the program painted in pixels after one the card drew from its list (a switch between the two)
         COMPOSITOR_LIST_COUNT
 };
 static enum compositor_list_why compositor_list_why;
@@ -12584,6 +12585,11 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
         gen = __atomic_load_n(&((unsigned int *)list)[UI_DRAW_LIST_GEN], __ATOMIC_ACQUIRE);
         if (gen == table->list_seen[row] || !__atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE))
         {
+                if (compositor_listed[row] && __atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE)) // a switch from the card's picture to the program's
+                {
+                        compositor_list_counts[COMPOSITOR_LIST_PIXELS]++;
+                        table->list_why[COMPOSITOR_LIST_PIXELS] = compositor_list_counts[COMPOSITOR_LIST_PIXELS];
+                }
                 compositor_listed[row] = 0; // no new list with this frame, or no list mode: the frame is the program's pixels
                 table->list_seen[row] = gen;
                 if (__atomic_load_n(&table->list_state[row], __ATOMIC_ACQUIRE) == 2)

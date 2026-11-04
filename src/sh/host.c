@@ -22300,9 +22300,9 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          table->list_mode ? (string_address) "on" : (string_address) "off (touch /run/moonwater/lists)");
                 if (table->list_why[0])
                         host_say(log, "  lists drawn     %p frames\n", (positive)table->list_why[0]);
-                for (unsigned int why = 1; why < 9; why++)
+                for (unsigned int why = 1; why < 10; why++)
                         if (table->list_why[why])
-                                host_say(log, "  list refused    %p, %s\n", (positive)table->list_why[why],
+                                host_say(log, why == 9 ? "  list switched   %p, %s\n" : "  list refused    %p, %s\n", (positive)table->list_why[why],
                                          why == 1 ? (string_address) "the header is not valid (size, magic, version)" :
                                          why == 2 ? (string_address) "a partial list after a frame painted in pixels" :
                                          why == 3 ? (string_address) "no card to draw it (off, away, given up, or a job running)" :
@@ -22310,7 +22310,8 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                          why == 5 ? (string_address) "an op is not one a window is made of, or reaches outside" :
                                          why == 6 ? (string_address) "the program published while the ops were read" :
                                          why == 7 ? (string_address) "the cover bytes or the picture could not be mapped" :
-                                                    (string_address) "the card did not finish the scene");
+                                         why == 8 ? (string_address) "the card did not finish the scene" :
+                                                    (string_address) "frames painted in pixels by a window the card drew from its list");
         }
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");

@@ -94,6 +94,7 @@ session()
         # the flicker detector, after the screens above (it leaves the filter focused and its caret blinking): input over the fifo (hover, click,
         # wheel, typing), every distinct screen kept in order; the card session with its lists on and the off session (the processor paints) are the same input and the same reference
         python3 "$(dirname "$fonts")/test/gpu_lists_flicker.py" "$work/$mode.img" "$work/input.fifo" "$work/flicker-$mode" > "$work/flicker-$mode.txt" 2>&1
+        bin/moonwater debug > "$work/$mode.touched.txt" 2>&1 # the lists drawn, refused and switched back to pixels under that input
         kill "$cpid" 2> /dev/null
         wait "$cpid" 2> /dev/null
         return 0
@@ -134,6 +135,9 @@ windows_card=$(grep -c '^  window' "$work/card.canvas.txt" 2> /dev/null)
 if [ "${windows_card:-0}" -ge "$napps_parent" ]; then row ok "the applets are windows of the desktop with the card"; else row FAIL "the applets are windows of the desktop with the card" "$windows_card windows ($(tail -1 "$work/card.session.out" 2> /dev/null))"; fi
 if [ "${lists_card:-0}" -ge "$napps_parent" ]; then row ok "the apps are in list state 1 while the card composes"; else row FAIL "the apps are in list state 1 while the card composes" "lists ${lists_card:-none}"; fi
 if [ "${refused_card:-1}" = 0 ]; then row ok "the compositor refused no list"; else row FAIL "the compositor refused no list" "refused ${refused_card:-none}"; fi
+touched_refused=$(grep -m1 '^  lists .*windows' "$work/card.touched.txt" 2> /dev/null | sed 's/.*, \([0-9]*\) refused.*/\1/')
+touched_switched=$(grep -m1 '^  list switched' "$work/card.touched.txt" 2> /dev/null | sed 's/^  list switched *\([0-9]*\),.*/\1/')
+if [ "${touched_refused:-1}" = 0 ] && [ "${touched_switched:-0}" = 0 ]; then row ok "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels"; else row FAIL "hover, click, wheel and typing: no list refused, no window switched between its list and its pixels" "refused ${touched_refused:-none}, switched ${touched_switched:-0} ($(grep '^  list' "$work/card.touched.txt" 2> /dev/null | tr -s ' ' | tr '\n' ';'))"; fi
 if [ "${lists_off:-1}" = 0 ]; then row ok "with canvas gpu off the apps paint pixels (no list)"; else row FAIL "with canvas gpu off the apps paint pixels (no list)" "lists ${lists_off:-none}"; fi
 
 # the two screens: the same pixels; a difference is written out as PPM for the report
