@@ -370,6 +370,9 @@ struct wayland_surface
         // wp_fifo (a commit waits for the barrier: the next frame latched) and wp_commit_timing (the time the commit is for, in
         // nanoseconds on the monotonic clock, 0 for none): pending, and as the commit took them.
         unsigned char pending_fifo, fifo_wait;
+        // wp_fifo's set_barrier: pending, and as the commit set it, with the frame count it was set on (it clears at the next frame drawn).
+        unsigned char pending_barrier, barrier;
+        long barrier_frame;
         unsigned long pending_timestamp, timestamp;
         // xdg.
         unsigned int xdg_id, role_id;
@@ -515,6 +518,9 @@ struct wayland_client
         struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
         struct wayland_notify notifies[WAYLAND_NOTIFIES];
         long inhibitors;                             // zwp_idle_inhibitor_v1 objects it holds (its objects are scanned only while one is)
+        // A commit held for a fifo barrier (hold_at 0: woken by the frames) or for its time (hold_at, the host's ms), and the surface it is for.
+        unsigned char hold;
+        long hold_surface, hold_at;
         unsigned int relative_id[WAYLAND_RELATIVES];
         unsigned char relatives;
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
@@ -578,6 +584,7 @@ static struct
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
         long input_at;                         // the shim's ms of the last input event the compositor gave it (wayland_input_seen): the idle clock
         long bells, icons;                     // xdg_system_bell rings and xdg-toplevel-icon sets with an icon, over every client (counted; nothing is drawn yet)
+        long frames;                           // frames drawn (wayland_frame): a fifo barrier clears at the next one after its commit
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
         struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
@@ -2358,6 +2365,22 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
 }
 
 /*
+        Whether a commit of s is held now, for wp_fifo or wp_commit_timing: its barrier is set by an earlier commit and no frame has been drawn
+        since that commit (wayland_frame moves the count on), or its time is later than the host's now. A window that is not shown holds
+        nothing, since no frame would come to clear the barrier, and a synchronized subsurface is held by its parent's commit, not its own.
+*/
+static int wayland_hold_wanted(struct wayland_client *c, struct wayland_surface *s)
+{
+        struct wayland_surface *root = wayland_root_of(c, s);
+
+        if (!root || root->row < 0 || (s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_sync))
+                return 0;
+        if (s->pending_fifo && s->barrier && s->barrier_frame == wayland.frames)
+                return 1;
+        return s->pending_timestamp && (unsigned long)wayland.host->now(wayland.host->context) * 1000000ul < s->pending_timestamp;
+}
+
+/*
         A commit. The pending state becomes the shown one: a buffer attached is copied (the damaged rows of it) into the
         surface's window and released at once, a null buffer unmaps the window, and the frame callbacks the client
         asked for are taken, to be answered when the frame is on the screen. A window's first commit has no buffer and
@@ -2367,6 +2390,24 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
 {
         long buffer = -1;
         int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0;
+
+        // wp_fifo and wp_commit_timing: a commit that is held is held as one that waits for its budget is: the client's stream waits
+        // here, and the commit is made again when wayland_resume finds it no longer held. A barrier this commit sets is set once it is
+        // not held (the commit before it may have set one, and the frame that clears it is the next one drawn).
+        if (wayland_hold_wanted(c, s))
+        {
+                c->hold = 1;
+                c->hold_surface = wayland_surface_index(c, s);
+                c->hold_at = s->pending_timestamp ? (long)(s->pending_timestamp / 1000000ul) : 0;
+                c->stalled_fd = -1;
+                return WAYLAND_STALL;
+        }
+        if (s->pending_barrier)
+        {
+                s->barrier = 1;
+                s->barrier_frame = wayland.frames;
+                s->pending_barrier = 0;
+        }
 
         // The alpha multiplier and the tearing hint are the pending state at every commit, with or without a buffer (the
         // protocol's double buffering).
@@ -5409,6 +5450,8 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 s = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_fifo_v1_wait_barrier && s)
                         s->pending_fifo = 1;
+                else if (op == WLQ_wp_fifo_v1_set_barrier && s)
+                        s->pending_barrier = 1;
                 return WAYLAND_OK;
         case WLI_wp_commit_timing_manager_v1:
                 if (op != WLQ_wp_commit_timing_manager_v1_get_timer)
@@ -5425,8 +5468,10 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 {
                         unsigned long seconds = ((unsigned long)a[0].u << 32) | (unsigned long)a[1].u;
 
+                        if (s->pending_timestamp)
+                                return wayland_fail(c, self->id, WLN_wp_commit_timer_v1_error_timestamp_exists, "the commit has a time already");
                         if (a[2].u >= 1000000000ul || seconds > 18000000000ul)
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the timestamp is not a time");
+                                return wayland_fail(c, self->id, WLN_wp_commit_timer_v1_error_invalid_timestamp, "the timestamp is not a time");
                         s->pending_timestamp = seconds * 1000000000ul + (unsigned long)a[2].u;
                         if (!s->pending_timestamp)
                                 s->pending_timestamp = 1;
@@ -6403,6 +6448,8 @@ WAYLAND_API long wayland_stall_due(long slot, long *fd)
         *fd = -1;
         if (!c || c->dead || !c->stalled)
                 return 0;
+        if (c->hold)
+                return c->hold_at; // a timed hold wakes the loop at its time; a barrier's is woken by the frames (wayland_frame_wanted)
         if (c->stalled_fd < 0)
                 return c->budget_at + WAYLAND_BUDGET_MS;
         *fd = c->stalled_fd;
@@ -6421,6 +6468,15 @@ WAYLAND_API int wayland_resume(long slot)
 
         if (!c || c->dead || !c->stalled)
                 return 0;
+        // A commit held for a barrier or a time is made again once wayland_hold_wanted says it is no longer held.
+        if (c->hold)
+        {
+                struct wayland_surface *held = &c->surfaces[c->hold_surface];
+
+                if (held->live && wayland_hold_wanted(c, held))
+                        return 1;
+                c->hold = 0;
+        }
         // A commit that waits for its budget is made in the client's next window of time; one that waits for its GPU, when it is done.
         if (c->stalled_fd < 0 ? !wayland_budget_left(c)
                               : wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
@@ -6622,6 +6678,7 @@ WAYLAND_API void wayland_frame(void)
 
         if (!wayland.host)
                 return;
+        wayland.frames++;
         now = wayland.host->now(wayland.host->context);
         for (long row = 0; row < WAYLAND_ROWS; row++)
         {
@@ -6708,6 +6765,10 @@ WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, un
 /* Whether any callback waits for a frame, so the compositor knows to come back for one. */
 WAYLAND_API long wayland_frame_wanted(void)
 {
+        // A commit held for a barrier is waited for a frame at a time: each frame drawn is the one that clears it.
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+                if (wayland.client[slot] && wayland.client[slot]->stalled && wayland.client[slot]->hold && !wayland.client[slot]->hold_at)
+                        return 1;
         for (long row = 0; wayland.host && row < WAYLAND_ROWS; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;

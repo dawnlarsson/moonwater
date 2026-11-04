@@ -168625,13 +168625,61 @@ static void test_pacing(void)
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 7ul);
         WLCHECK(wayland_row_timestamp(0) == 0, "a timestamp is for the commit after it is set");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        WLCHECK(c->errors == 0 && wayland_row_timestamp(0) == 5000000007ul, "and it is the commit's time, in nanoseconds");
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && wayland_row_timestamp(0) == 0, "a commit for a later time is held until that time");
+        fake.now = 5001;
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && wayland_row_timestamp(0) == 5000000007ul,
+                "and is made at its time, which is the commit's, in nanoseconds");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(wayland_row_timestamp(0) == 0, "and it is for that commit only");
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 1000000000ul);
-        WLCHECK(c->errors == 1, "a second of nanoseconds or more is a protocol error");
+        WLCHECK(c->errors == 1 && c->error_code == WLN_wp_commit_timer_v1_error_invalid_timestamp,
+                "a second of nanoseconds or more is invalid_timestamp");
         wlc_end(c);
         leak_check("pacing");
+        wayland_stop();
+}
+
+/*
+        wp_fifo's barrier: a commit that sets one is made, and the next frame drawn clears it; a commit that waits for it is held (its
+        client's stream waits) until that frame, and is made then. A surface with no window holds nothing, since no frame would come for it.
+*/
+static void test_barrier(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long fifos, fifo, plain, plain_fifo;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        fifos = wl_global(c, s.registry, WLI_wp_fifo_manager_v1, 1);
+        wlc_forget(c);
+        fifo = wlc_id(c, WLI_wp_fifo_v1, 1);
+        wlc_send(c, fifos, WLQ_wp_fifo_manager_v1_get_fifo, fifo, s.surface);
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_set_barrier);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && !wayland_stalled(c->slot) && !wayland_frame_wanted(), "a commit that sets a barrier is made, and nothing waits");
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && wayland_frame_wanted(), "a commit that waits for the barrier is held, and frames are wanted");
+        wayland_frame();
+        WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && wayland_row_fifo(0) == 1,
+                "the next frame clears the barrier, and the held commit is made");
+        WLCHECK(!wayland_frame_wanted(), "and no frame is wanted after it");
+
+        plain = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, plain);
+        plain_fifo = wlc_id(c, WLI_wp_fifo_v1, 1);
+        wlc_send(c, fifos, WLQ_wp_fifo_manager_v1_get_fifo, plain_fifo, plain);
+        wlc_send(c, plain_fifo, WLQ_wp_fifo_v1_set_barrier);
+        wlc_send(c, plain, WLQ_wl_surface_commit);
+        wlc_send(c, plain_fifo, WLQ_wp_fifo_v1_wait_barrier);
+        wlc_send(c, plain, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && !wayland_stalled(c->slot), "a surface with no window holds nothing");
+        wlc_end(c);
+        leak_check("barrier");
         wayland_stop();
 }
 
@@ -172894,6 +172942,7 @@ int main(int argc, char **argv)
         test_icon();
         test_activation();
         test_pacing();
+        test_barrier();
         test_cursor_shape();
         test_pinch();
         test_text();
