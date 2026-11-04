@@ -216794,7 +216794,7 @@ static unsigned int gpu_kit_want[700 * 420];
 static font_engine app_engine;
 static p8 app_atlas[512 * 512];
 static font_face app_face;
-static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS], app_cpu[1680 * 1200], app_dummy[1680 * 1200];
+static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS], app_cpu[1920 * 1200], app_dummy[1920 * 1200];
 static struct windows app_table;
 static struct ui_scene app_scene;
 // The app regions, from the GPU's base at app_at: the picture (16 MiB), the ops (4 MiB), the binning (16 MiB), the text covers (28 MiB).
@@ -216806,8 +216806,12 @@ static struct ui_scene app_scene;
 // The regions are the kit's own (the picture at GPU_DATA with its pitch, the ops, the binning, and the text covers' region the text rows reuse
 // after this). At 100 percent the launcher (560 by 400) fits the kit's 700 by 419 picture; the larger scales need a bigger picture region.
 // fixed_pitch: 0 for the picture's own width as its pitch, else that pitch (the kit's 700 buffer for 100 percent).
-static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at, positive cover_at, positive cover_size, const int *scales, int count,
-                              int fixed_pitch)
+static struct mixer_big app_mixer;
+
+// which: 0 the launcher; 1 the mixer's window; 2 the mixer's tray popup; 3 the mixer's window with the recording page and no microphone.
+// fixed_pitch: 0 for the picture's own width as its pitch, else that pitch.
+static void app_rows(int which, positive pic_at, positive ops_at, positive bins_at, positive cover_at, positive cover_size, const int *scales, int count,
+                     int fixed_pitch)
 {
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         unsigned int address_to pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at);
@@ -216815,7 +216819,7 @@ static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at
 
         if (!bytes || font_load(&app_face, (const p8 address_to)bytes, size, 0) != 0)
         {
-                check("gpu apps: the launcher's face loads", false);
+                check("gpu apps: the app's face loads", false);
                 return;
         }
         font_start(&app_engine, app_atlas, 512, 512);
@@ -216824,41 +216828,64 @@ static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at
                 ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
                 for (int k = 0; k < count; k++)
                 {
-                        int s = scales[k], W = LAUNCHER_WIDTH * s / 100, H = 400 * s / 100, pitch = fixed_pitch ? fixed_pitch : W;
+                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : MIXER_WIDTH) * s / 100;
+                        int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
                         int bad = 0;
+                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : mixer_draw;
 
-                        // The launcher as its window has it: three programs of the desktop listed, the field and the power row.
+                        // The app as its window has it, set up here and not by its start: the scale, the faces, the window's table, the picture's size.
                         memory_zero(&app_table, sizeof(app_table));
                         app_table.stride = (unsigned int)pitch, app_table.output_width = (unsigned int)W, app_table.output_height = (unsigned int)H, app_table.scale = (unsigned int)s;
-                        launcher.own.table = &app_table;
-                        launcher.width = W, launcher.height = H;
-                        launcher.ui.scale = s, launcher.ui.engine = &app_engine, launcher.ui.regular = launcher.ui.bold = &app_face;
-                        launcher.ui.scratch = app_scratch, launcher.ui.scratch_width = 2000, launcher.ui.opaque = 1, launcher.ui.glass = 0;
-                        launcher.entries = 3;
-                        for (int i = 0; i < 3; i++)
-                                launcher.entry[i].kind = LAUNCHER_WINDOW, launcher.entry[i].index = (unsigned short)i;
-                        launcher.focused = 1;
-                        launcher.search.kind = 0;
+                        if (which == 0)
+                        {
+                                // The launcher: three programs of the desktop listed, the field and the power row.
+                                launcher.own.table = &app_table;
+                                launcher.width = W, launcher.height = H;
+                                launcher.ui.scale = s, launcher.ui.engine = &app_engine, launcher.ui.regular = launcher.ui.bold = &app_face;
+                                launcher.ui.scratch = app_scratch, launcher.ui.scratch_width = 2000, launcher.ui.opaque = 1, launcher.ui.glass = 0;
+                                launcher.entries = 3;
+                                for (int i = 0; i < 3; i++)
+                                        launcher.entry[i].kind = LAUNCHER_WINDOW, launcher.entry[i].index = (unsigned short)i;
+                                launcher.focused = 1;
+                                launcher.search.kind = 0;
+                        }
+                        else
+                        {
+                                // The mixer: its window (the strips, the tabs and the message the page gives), its tray popup (-q), or its recording page.
+                                memory_zero(&app_mixer, sizeof(app_mixer));
+                                mixer.own.table = &app_table;
+                                mixer.width = W, mixer.height = H;
+                                mixer.ui.scale = s, mixer.ui.engine = &app_engine, mixer.ui.regular = mixer.ui.bold = &app_face;
+                                mixer.ui.scratch = app_scratch, mixer.ui.scratch_width = 2000, mixer.ui.opaque = 1, mixer.ui.glass = 0;
+                                mixer.big = &app_mixer, mixer.have = 1, mixer.quick = which == 2, mixer.recording = which == 3, mixer.capture_off = 0;
+                                mixer.focused = 1;
+                        }
 
                         memory_zero(app_cpu, sizeof(app_cpu));
-                        launcher_draw(app_cpu);
+                        paint(app_cpu);
 
                         memory_zero(&app_scene, sizeof(app_scene));
                         app_scene.ops = ops, app_scene.room = 1u << 15, app_scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + cover_at);
                         app_scene.size = cover_size, app_scene.at = cover_at;
-                        launcher.ui.scene = &app_scene;
-                        launcher_draw(app_dummy);
-                        launcher.ui.scene = null;
+                        if (which == 0)
+                                launcher.ui.scene = &app_scene;
+                        else
+                                mixer.ui.scene = &app_scene;
+                        paint(app_dummy);
+                        launcher.ui.scene = null, mixer.ui.scene = null;
                         if (app_scene.lost)
                         {
-                                string_format(log, "  known diff: the launcher (%p%%, %p) set lost: a painter that is not recorded (R3 or R4)\n", (positive)s, (positive)mode);
+                                string_format(log, "  known diff: app %p (%p%%, %p) set lost: a painter that is not recorded (R3 or R4)\n", (positive)which, (positive)s,
+                                              (positive)mode);
                                 continue;
                         }
                         for (positive i = 0; i < (positive)pitch * H; i++)
                                 pic[i] = 0x12345678u;
-                        if (!gpu_scene(ops_at, app_scene.count, bins_at, pic_at, (positive)pitch, W, H, 0, 0, W, H))
+                        if (!gpu_scene(ops_at, app_scene.count, bins_at, pic_at, (positive)pitch, (unsigned int)pitch, H, 0, 0, W, H))
                         {
-                                check("gpu apps: the launcher's scene finishes", false);
+                                string_format(log, "  FAIL gpu app %p: the scene at %p%% (%p) does not finish: %p ops\n", (positive)which, (positive)s, (positive)mode,
+                                              (positive)app_scene.count);
+                                check("gpu apps: the scene finishes", false);
                                 return;
                         }
                         for (int y = 0; y < H; y++)
@@ -216866,10 +216893,17 @@ static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at
                                 {
                                         checks++;
                                         if (pic[(positive)y * pitch + x] != app_cpu[(positive)y * pitch + x] && (++failures, ++bad) < 6)
-                                                string_format(log, "  FAIL gpu launcher %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)s, (positive)mode, (positive)x, (positive)y,
-                                                              (positive)pic[(positive)y * pitch + x], (positive)app_cpu[(positive)y * pitch + x]);
+                                                string_format(log, "  FAIL gpu app %p %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)which, (positive)s, (positive)mode,
+                                                              (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)app_cpu[(positive)y * pitch + x]);
                                 }
-                        check("gpu apps: the launcher replays bit for bit", bad == 0);
+                        if (which == 0)
+                                check("gpu apps: the launcher replays bit for bit", bad == 0);
+                        else if (which == 1)
+                                check("gpu apps: the mixer replays bit for bit", bad == 0);
+                        else if (which == 2)
+                                check("gpu apps: the mixer's tray popup replays bit for bit", bad == 0);
+                        else
+                                check("gpu apps: the mixer's recording page replays bit for bit", bad == 0);
                 }
         }
         ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
@@ -217057,7 +217091,7 @@ b32 main(void)
         {
                 static const int hundred[1] = {100};
 
-                app_launcher_rows(pic_at, ops_at, bins_at, bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), 16u << 20, hundred, 1, 700);
+                app_rows(0, pic_at, ops_at, bins_at, bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), 16u << 20, hundred, 1, 700);
         }
 
         // Text: runs painted by ui_run_in on the processor, the same runs recorded (the font engine's coverage, packed to bytes) and drawn by the GPU, a window's
@@ -218318,7 +218352,13 @@ b32 main(void)
                 static const int larger[3] = {150, 200, 300};
                 positive big = bins_at + (8 << 20), kops = big + (positive)7680 * 4320 * 4, kbins = kops + (1 << 20);
 
-                app_launcher_rows(big, kops, kbins, kbins + (4 << 20), 4u << 20, larger, 3, 0);
+                app_rows(0, big, kops, kbins, kbins + (4 << 20), 4u << 20, larger, 3, 0);
+                {
+                        static const int four[4] = {100, 150, 200, 300};
+
+                        app_rows(1, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
+                        app_rows(2, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
+                }
         }
         return test_report(null);
 }
