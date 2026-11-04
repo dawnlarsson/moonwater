@@ -24181,6 +24181,7 @@ static const host_row host_rows[] = {
     {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
     {null, "canvas", "whether Canvas is on, and the screens it draws on", 'b'},
     {null, "@canvas", null, 'r'},
+    {null, "canvas arrange [NAME[@X,Y|@off]...|default]", "where each screen is: names left to right, the first the primary [default]", 'b'},
     {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
     {null, "canvas identify", "show the number of each screen for three seconds", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
