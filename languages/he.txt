@@ -66,6 +66,10 @@ mixer_why_display	fd9f	נבחר: מחובר מסך
 mixer_why_hdmi	f5eb	נבחר: HDMI, מסך לא ידוע
 mixer_why_named	0295	נבחר: הופעל איתו
 mixer_why_nothing	ff66	נבחר: הראשון שקיים
+notices_dismiss	9a10	דחה הכול
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d פעמים, לפני %4$d דקות)
+notices_open	c9cf	פתיחת הודעות המערכת
 settings_already_joined	71fb	כבר מחובר אל %s
 settings_any_text	89dc	כל פקודה, כמילים שאחרי moonwater: הפעולה שלה ואז הארגומנטים
 settings_asks_first	e9bd	ישאל קודם
@@ -265,6 +269,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Network adapters	88ef	מתאמי רשת
 =New USB devices	c15c	התקני USB חדשים
 =Normal	2772	רגיל
+=Notices	8f06	הודעות
 =On-screen keyboard	97f8	מקלדת על המסך
 =Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
 =Other devices	8362	התקנים אחרים

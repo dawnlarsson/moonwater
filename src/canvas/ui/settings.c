@@ -4531,15 +4531,34 @@ static fn settings_language(void)
         ui_page_redraw(&settings.page);
 }
 
+// -n: the start that the notices popup makes (notices.c): Settings opens on its System group, where the kernel's notices are. A Settings
+// already up is lifted and asked for the same page (ui_lift_page), its page hook choosing it.
+static b32 settings_notices_asked;
+static int settings_system_group(void)
+{
+        for (int at = 0; at < SETTINGS_ROWS; at++)
+                if (settings_rows[at].output == SETTINGS_OUT_NOTICES)
+                        return settings_group_of(at);
+        return 0;
+}
+
+static void settings_asked(unsigned int page)
+{
+        settings_group_choose((int)page);
+}
+
 static int settings_open(void)
 {
         struct windows address_to table = settings.own.table;
         unsigned int row = settings.own.row;
 
-        if (!gallery.on && ui_lift_other(&settings.own, (string_address) "settings", false))
+        if (!gallery.on && (settings_notices_asked ? ui_lift_page(&settings.own, (string_address) "settings", (unsigned int)settings_system_group())
+                                                   : ui_lift_other(&settings.own, (string_address) "settings", false)))
                 return 0;
 
         settings_refilter();
+        if (settings_notices_asked)
+                settings.page.chosen = settings_system_group();
         if (gallery.on)
         {
                 int width = ui_px(&settings.ui, GALLERY_W), height = ui_px(&settings.ui, GALLERY_H);
@@ -4672,6 +4691,7 @@ static struct ui_app settings_app = {
         .focused = &settings.focused,
         .ground = &settings.ground,
         .open = settings_open,
+        .page = settings_asked,
         .frame = settings_frame,
         .language = settings_language,
         .event = settings_event,
@@ -4707,6 +4727,9 @@ static b32 settings_main()
                         continue;
                 at++;
         }
+        for (positive at = 1; at < (positive)program_argument_count(); at++)
+                if (string_equals(program_argument(at), (string_address) "-n"))
+                        settings_notices_asked = true;
         // -g: the kit's gallery, on its own paper and not glass, with the mono for its tags and code.
         for (positive at = 1; at < (positive)program_argument_count(); at++)
                 if (string_equals(program_argument(at), (string_address) "-g"))

@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Seçilen: ekran takılı
 mixer_why_hdmi	f5eb	Seçilen: HDMI, ekran belirsiz
 mixer_why_named	0295	Seçilen: bununla başlatıldı
 mixer_why_nothing	ff66	Seçilen: ilk bulunan
+notices_dismiss	9a10	Tümünü kapat
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d kez, %4$d dk önce)
+notices_open	c9cf	Sistem bildirimlerini aç
 settings_already_joined	71fb	%s ağına zaten bağlı
 settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri
 settings_asks_first	e9bd	önce sorar
@@ -264,6 +268,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Network adapters	88ef	Ağ bağdaştırıcıları
 =New USB devices	c15c	Yeni USB aygıtları
 =Normal	2772	Normal
+=Notices	8f06	Bildirimler
 =On-screen keyboard	97f8	Ekran klavyesi
 =Open windows where they were last put	8711	Pencereleri en son bırakıldıkları yerde aç
 =Other devices	8362	Diğer aygıtlar

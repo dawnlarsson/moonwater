@@ -122753,6 +122753,9 @@ static void rtl_keep_add(int x, int y, int w, int h);
 #include "../src/audio/pulse.c"
 #include "../src/canvas/ui/mixer.c"
 #endif
+#if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
+#include "../src/canvas/ui/notices.c"
+#endif
 
 #define SHARED_counted
 #include "checks.c"
@@ -128651,6 +128654,111 @@ static int mic_cell(unsigned int capture, unsigned int muted, unsigned int flags
         view = compositor_taskbar_view();
         return taskbar_slot(&view, TASKBAR_MIC, &x, &y, &w, &h);
 }
+
+/*
+        The notices dot (taskbar.c's cell, compositor.c's watch of the board) and its popup (notices.c): the dot is in the tray while the board
+        holds a notice, the cells after it move over, a look at a board that has not moved answers 0, a press on the dot leaves its rectangle
+        for the popup, and the popup lists the errors first, then the warnings, and then the two rows; Dismiss all takes the kernel notices off.
+*/
+#if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
+#define NOTICES_SHOT_W 480
+#define NOTICES_SHOT_H 240
+static unsigned int notices_shot[NOTICES_SHOT_W * NOTICES_SHOT_H];
+
+// A picture as raw ARGB words, row by row, into a file of the scratch directory: the rig's screenshot (the file is turned to PNG outside).
+static void notices_shot_write(const char *path, const unsigned int *pixels, int width, int height, int pitch)
+{
+    bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+    if (handle < 0)
+        return;
+    for (int y = 0; y < height; y++)
+        system_write_once(handle, pixels + (long)y * pitch, (positive)width * 4);
+    system_close(handle);
+}
+
+static void check_notices_dot(void)
+{
+        struct windows *table;
+        struct taskbar_view view;
+        int x, y, w, h, tx, ty, tw, th, mx, my, mw, mh;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+        compositor.width = 2560, compositor.height = 1440;
+        compositor.scale = 100;
+        compositor.card = -1;
+        compositor.hold = -1;
+        compositor.holds = ~0ul;
+        compositor.told_row = COMPOSITOR_NONE;
+        if (!glass_table_map())
+        {
+                check("notices: the table is made", false);
+                return;
+        }
+        table = compositor.table;
+        taskbar_settings_set("bottom", "primary", "battery none\n");
+        taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+        taskbar_volume_set(0, 0, 0, 0);
+        taskbar_mic_set(0, 0);
+        compositor_notices_look();
+        view = compositor_taskbar_view();
+        check("notices: a board with nothing on it has no dot, and no cell in the tray", !taskbar.notices_item && !taskbar_slot(&view, TASKBAR_NOTICES, &x, &y, &w, &h));
+
+        windows_issue_set(table, "usb", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_KERNEL_USB, 2, 30, "usb 1-1: device descriptor read error");
+        check("notices: a warning on the board is seen by the next look, which changes the tray",
+              compositor_notices_look() == 1 && taskbar.notices_item && taskbar.notices_severity == WINDOWS_ISSUE_WARNING);
+        view = compositor_taskbar_view();
+        check("notices: the dot is a cell of the tray, at its leading end", taskbar_slot(&view, TASKBAR_NOTICES, &x, &y, &w, &h) &&
+              taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && x == tx && w > 0 && h > 0);
+        check("notices: a look at a board that has not moved answers 0", compositor_notices_look() == 0);
+        // The tray grows to the left with the microphone's cell: the dot is then the tray's new leading cell, and the microphone starts after it.
+        taskbar_mic_set(1, 0);
+        view = compositor_taskbar_view();
+        check("notices: the microphone's cell starts after the dot, which is the tray's leading cell", taskbar_slot(&view, TASKBAR_NOTICES, &x, &y, &w, &h) &&
+              taskbar_slot(&view, -2, &tx, &ty, &tw, &th) && taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh) && mx == x + w && x == tx);
+        taskbar_mic_set(0, 0);
+        view = compositor_taskbar_view();
+        taskbar_slot(&view, TASKBAR_NOTICES, &x, &y, &w, &h);
+        check("notices: a press on the dot's centre is the dot", taskbar_hit(&view, x + w / 2, y + h / 2) == TASKBAR_NOTICES);
+        compositor_notices_open(x + w / 2, y + h / 2);
+        check("notices: a press on the dot leaves its rectangle for the popup", table->button_x == x && (int)table->button_w == w && table->button_edge == TASKBAR_BOTTOM);
+        table->button_w = 0;
+
+        windows_issue_set(table, "wifi", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_KERNEL_WIFI, 1, 0, "wlan0: firmware crashed");
+        check("notices: an error turns the dot red", compositor_notices_look() == 1 && taskbar.notices_severity == WINDOWS_ISSUE_ERROR);
+
+        notices.own.table = table;
+        notices_board();
+        // The popup drawn as the app draws it (its glass over a dark ground), and the tray's band with the dot in it, as the rig's shots.
+        ui_popmenu_size(&terminal.ui, &notices.menu, NOTICES_SHOT_H);
+        for (int at = 0; at < NOTICES_SHOT_W * NOTICES_SHOT_H; at++)
+            notices_shot[at] = 0xff202428u;
+        ui_begin(&terminal.ui, notices_shot, NOTICES_SHOT_W, NOTICES_SHOT_W, NOTICES_SHOT_H);
+        ui_popmenu_draw(&terminal.ui, &notices.menu);
+        notices_shot_write("/tmp/notices-menu-480x240.raw", notices_shot, NOTICES_SHOT_W, NOTICES_SHOT_H, NOTICES_SHOT_W);
+        {
+            struct taskbar_view drawn;
+            int rect[4], bx, by, bw, bh;
+
+            drawn = band_view(TASKBAR_BOTTOM, null);
+            taskbar_band(&drawn, &bx, &by, &bw, &bh);
+            taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+            notices_shot_write("/tmp/notices-band-1920x24.raw", band_pixels, BAND_W, COMPOSITOR_PANEL, BAND_W);
+        }
+        check("notices: the popup lists the error first, then the warning, then a rule and the two rows",
+              notices.menu.count == 5 && string_equals((string_address)notices.menu.items[0].keys, (string_address)"Error") &&
+                  string_equals((string_address)notices.menu.items[1].keys, (string_address)"Warning") &&
+                  notices.menu.items[2].flags == UI_MENU_SEPARATOR && notices.menu.items[3].id == NOTICES_ID_OPEN &&
+                  notices.menu.items[4].id == NOTICES_ID_DISMISS);
+
+        notices_dismiss();
+        view = compositor_taskbar_view();
+        check("notices: Dismiss all takes the kernel notices off the board, and the look after it takes the dot away",
+              compositor_notices_look() == 1 && !taskbar.notices_item && !taskbar_slot(&view, TASKBAR_NOTICES, &x, &y, &w, &h));
+}
+#endif
 
 static void check_compositor_volume(void)
 {
@@ -156123,10 +156231,11 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 // The sources an id may be named in, and the ones converted: no English literal is left in them.
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
-    "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c"};
+    "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c",
+    "src/canvas/ui/notices.c"};
 static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
                                                          "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c",
-                                                         "src/canvas/ui/mixer.c"};
+                                                         "src/canvas/ui/mixer.c",   "src/canvas/ui/notices.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -161105,6 +161214,9 @@ b32 main()
 #if MOONWATER_UI_TASKBAR
         check_taskbar_text(program_argument_count() > 3 ? program_argument(3) : null);
         check_compositor_volume(); // after the band's face is loaded: the cell is drawn with it
+#if MOONWATER_UI_NOTICES && MOONWATER_UI_TASKBAR
+        check_notices_dot();
+#endif
 #endif
 #if MOONWATER_UI_SETTINGS
         check_settings(program_argument_count() > 3 ? program_argument(3) : program_argument(1),

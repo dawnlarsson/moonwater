@@ -66,6 +66,10 @@ mixer_why_display	fd9f	مختار: شاشة متصلة
 mixer_why_hdmi	f5eb	مختار: HDMI، الشاشة غير معروفة
 mixer_why_named	0295	مختار: بدأ الخادم به
 mixer_why_nothing	ff66	مختار: أول جهاز متاح
+notices_dismiss	9a10	تجاهل الكل
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d مرة، قبل %4$d دقيقة)
+notices_open	c9cf	فتح إشعارات النظام
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
 settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط
 settings_asks_first	e9bd	يسأل أولا
@@ -265,6 +269,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Network adapters	88ef	محولات الشبكة
 =New USB devices	c15c	أجهزة USB الجديدة
 =Normal	2772	عادي
+=Notices	8f06	الإشعارات
 =On-screen keyboard	97f8	لوحة المفاتيح على الشاشة
 =Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
 =Other devices	8362	أجهزة أخرى

@@ -253,6 +253,14 @@ function desktop_mixer {
   desktop_run /mixer "$@" -f "$desktop_text"
 }
 
+# The notices popup, started by the compositor's saying notices_button (the tray's notices dot pressed): -a opens it beside the dot. It lists
+# what the board holds and starts Settings on its System notices page itself, as the mixer's Mixer row does. A second start finds the first.
+function desktop_notices {
+  desktop_font
+  [ -n "$desktop_text" ] || return
+  desktop_run /notices "$@" -f "$desktop_text"
+}
+
 # The key_ functions, for the compositor to listen for, and the FIFO it names a
 # pressed one on; the listener runs what it names.
 function desktop_keys_list {
@@ -274,6 +282,7 @@ function desktop_keys_answer {
       launcher_button) desktop_asked desktop_launcher -a ;;
       volume_button) desktop_asked desktop_mixer -q -a ;;
       mic_button) desktop_asked desktop_mixer -q -a -i ;;
+      notices_button) desktop_asked desktop_notices -a ;;
       esac
     done < /run/moonwater/keys.fire
   done

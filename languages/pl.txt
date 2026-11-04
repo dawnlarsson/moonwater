@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Wybrane: podłączony ekran
 mixer_why_hdmi	f5eb	Wybrane: HDMI, ekran nieznany
 mixer_why_named	0295	Wybrane: tak uruchomiono
 mixer_why_nothing	ff66	Wybrane: pierwsze dostępne
+notices_dismiss	9a10	Odrzuć wszystkie
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d razy, %4$d min temu)
+notices_open	c9cf	Otwórz powiadomienia systemowe
 settings_already_joined	71fb	już połączono z %s
 settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty
 settings_asks_first	e9bd	pyta najpierw
@@ -264,6 +268,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Network adapters	88ef	Karty sieciowe
 =New USB devices	c15c	Nowe urządzenia USB
 =Normal	2772	Normalnie
+=Notices	8f06	Powiadomienia
 =On-screen keyboard	97f8	Klawiatura ekranowa
 =Open windows where they were last put	8711	Otwieraj okna tam, gdzie je ostatnio zostawiono
 =Other devices	8362	Inne urządzenia

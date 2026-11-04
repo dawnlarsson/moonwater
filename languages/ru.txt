@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Выбрано: подключён дисплей
 mixer_why_hdmi	f5eb	Выбрано: HDMI, дисплей неизвестен
 mixer_why_named	0295	Выбрано: запущен с ним
 mixer_why_nothing	ff66	Выбрано: первый из имеющихся
+notices_dismiss	9a10	Скрыть все
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d раз, %4$d мин назад)
+notices_open	c9cf	Открыть системные уведомления
 settings_already_joined	71fb	уже подключено к %s
 settings_any_text	89dc	любая команда, как слова после moonwater: её глагол, затем аргументы
 settings_asks_first	e9bd	сначала спросит
@@ -264,6 +268,7 @@ ui_field_full	fe02	больше не помещается
 =Network adapters	88ef	Сетевые адаптеры
 =New USB devices	c15c	Новые USB-устройства
 =Normal	2772	Обычный
+=Notices	8f06	Уведомления
 =On-screen keyboard	97f8	Экранная клавиатура
 =Open windows where they were last put	8711	Открывать окна там, где их оставили
 =Other devices	8362	Другие устройства

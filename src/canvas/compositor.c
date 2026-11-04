@@ -15000,6 +15000,29 @@ static void compositor_mic_open(int x, int y)
         compositor_script_say("mic_button");
 }
 
+/*
+        The notices dot follows the board: the board's sequence number is looked at each pass, and the board is copied only when it moved (the
+        feeder publishes once a second while a kernel notice stands, so that is a copy a second and a redraw only when the dot changes). Answers
+        1 when the dot changed, and the tabs are then drawn again.
+*/
+static struct windows_issues compositor_notices_copy;
+static unsigned int compositor_notices_seq;
+static int compositor_notices_look(void)
+{
+        unsigned int seq, count = 0, worst;
+
+        if (!compositor.table)
+                return 0;
+        seq = __atomic_load_n(&compositor.table->issue_seq, __ATOMIC_ACQUIRE);
+        if (seq == compositor_notices_seq || (seq & 1u))
+                return 0;
+        if (!windows_issues_read(compositor.table, &compositor_notices_copy))
+                return 0;
+        compositor_notices_seq = seq;
+        worst = windows_issues_summary(&compositor_notices_copy, &count);
+        return taskbar_notices_set(count > 0, worst);
+}
+
 // What the tray's cells show, told to the band; the band is drawn again when one changed. The microphone's is there while a program records
 // from a microphone, and for a moment after its mute was thrown (to see it thrown).
 static void compositor_volume_show(void)
@@ -15009,6 +15032,16 @@ static void compositor_volume_show(void)
         changed |= taskbar_mic_set(compositor_volume.present && (compositor_volume.recording || compositor_volume.mic_flash_until), compositor_volume.mic_muted);
         if (changed)
                 compositor_tabs_changed();
+}
+
+// The notices dot pressed: the script is told (notices_button) and starts the notices popup beside the dot, which lists the board and starts
+// Settings on its System notices page. A popup already up is put away by the press before this runs, so none is started twice.
+static void compositor_notices_open(int x, int y)
+{
+        if (compositor_row_named("notices") >= 0)
+                return;
+        compositor_button_rect(x, y, TASKBAR_NOTICES, taskbar_notices_anchor);
+        compositor_script_say("notices_button");
 }
 
 // The page looked at: whether there is a server, and the volume and the mute it says (not for a moment after our own change).
@@ -16114,7 +16147,7 @@ static void compositor_button(unsigned int code, int down)
         // The panel's cells (the launcher's button, the microphone, the volume and the tray) take a press by the taskbar's rule
         // (taskbar_cell_press): what it does is the rule's action, and the compositor carries the action out. Each takes its
         // press alone: none of them passes it on to a window.
-        if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == COMPOSITOR_TRAY)
+        if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == TASKBAR_NOTICES || tab == COMPOSITOR_TRAY)
         {
                 switch (taskbar_cell_press(&compositor.cells, tab, code - COMPOSITOR_BTN_LEFT, clock_monotonic_nanoseconds(),
                                            compositor.pointer_x, compositor.pointer_y, compositor.scale))
@@ -16134,6 +16167,7 @@ static void compositor_button(unsigned int code, int down)
                 case TASKBAR_ACT_MIC_OPEN: compositor_mic_open(compositor.pointer_x, compositor.pointer_y); break;
                 case TASKBAR_ACT_MIC_MUTE: compositor_mic_step(); break;
                 case TASKBAR_ACT_SETTINGS: compositor_settings_open(); break;
+                case TASKBAR_ACT_NOTICES_OPEN: compositor_notices_open(compositor.pointer_x, compositor.pointer_y); break;
                 default: break;
                 }
                 return;
@@ -19271,6 +19305,8 @@ static b32 compositor_main()
                 if (compositor_spots_any(1))
                         compositor_spots_tick(clock_monotonic_nanoseconds());
 
+                if (compositor_notices_look() && compositor.band)
+                        compositor_tabs_changed();
                 if (compositor.band && taskbar_tick())
                         compositor_tabs_changed();
                 if (compositor.band && clock_monotonic_nanoseconds() >= compositor_volume.look_at)

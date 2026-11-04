@@ -1315,6 +1315,24 @@ static unsigned int windows_issues_worst(const struct windows_issues *all, const
         return worst;
 }
 
+// The worst severity of every issue on a copy (0 none, WINDOWS_ISSUE_WARNING or WINDOWS_ISSUE_ERROR), and how many there are: what the tray's
+// notices dot says. Kernel notices and the options' issues alike; a dismissed kernel notice is none (windows_kernel_dismiss clears it).
+static unsigned int windows_issues_summary(const struct windows_issues *all, unsigned int *count)
+{
+        unsigned int worst = 0;
+
+        if (count)
+                *count = 0;
+        for (int i = 0; all && i < WINDOWS_ISSUES; i++)
+                if (all->issue[i].used && all->issue[i].key[0])
+                {
+                        worst = all->issue[i].severity > worst ? all->issue[i].severity : worst;
+                        if (count)
+                                (*count)++;
+                }
+        return worst;
+}
+
 // The metrics' rings: the last samples of a path's presents (nanoseconds), and the mean and the worst of them in microseconds. A rate is a count over
 // the nanoseconds it took, per second.
 #define WINDOWS_METRIC_RUN 128

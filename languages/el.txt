@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Επιλογή: συνδέθηκε οθόνη
 mixer_why_hdmi	f5eb	Επιλογή: HDMI, άγνωστη οθόνη
 mixer_why_named	0295	Επιλογή: έναρξη με αυτό
 mixer_why_nothing	ff66	Επιλογή: η πρώτη διαθέσιμη
+notices_dismiss	9a10	Απόρριψη όλων
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d φορές, πριν %4$d λεπτά)
+notices_open	c9cf	Άνοιγμα ειδοποιήσεων συστήματος
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
 settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα
 settings_asks_first	e9bd	ρωτά πρώτα
@@ -264,6 +268,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Network adapters	88ef	Προσαρμογείς δικτύου
 =New USB devices	c15c	Νέες συσκευές USB
 =Normal	2772	Κανονική
+=Notices	8f06	Ειδοποιήσεις
 =On-screen keyboard	97f8	Πληκτρολόγιο οθόνης
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
 =Other devices	8362	Άλλες συσκευές

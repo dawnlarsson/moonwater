@@ -1124,6 +1124,9 @@ static bool floodlight_parent_supervised;
 #if MOONWATER_UI_MIXER
 #include "../canvas/ui/mixer.c"
 #endif
+#if MOONWATER_UI_NOTICES
+#include "../canvas/ui/notices.c"
+#endif
 #if MOONWATER_UI_KEYBOARD
 #include "../canvas/ui/osk.c"
 #endif

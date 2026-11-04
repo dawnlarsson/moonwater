@@ -50,6 +50,8 @@ static struct taskbar_state
         int volume_percent, volume_muted;       // what it says (the master volume, 0 to 100, and whether it is muted)
         int volume_flash;                       // a key or the wheel changed it just now: the cell says the percent, not the speaker
         int mic_item, mic_muted;                // a program records from a microphone (or its mute was just thrown): the tray has a microphone cell, struck when muted
+        int notices_item;                       // the board holds a notice or an issue: the tray starts with a notices dot (at the leading end)
+        unsigned int notices_severity;          // the worst of them: WINDOWS_ISSUE_ERROR (red) or WINDOWS_ISSUE_WARNING (amber)
 } taskbar = {1, 0, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
@@ -137,7 +139,8 @@ static int taskbar_tray(int high)
 {
         if (taskbar.tray_custom)
                 return taskbar_text(high, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
-        return taskbar_text(high, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0));
+        return taskbar_text(high, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0) +
+                                        (taskbar.notices_item ? 1 : 0));
 }
 
 static int taskbar_tab_width(const struct taskbar_layout *lay, int which)
@@ -197,7 +200,7 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
 */
 static int taskbar_along(const struct taskbar_layout *lay, int which, int *along, int *length)
 {
-        int text = taskbar_text(lay->high, 5), at;
+        int text = taskbar_text(lay->high, 5), at, notice = taskbar.notices_item ? text : 0;
 
         if (which >= 0)
         {
@@ -220,23 +223,29 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
         {
                 if (taskbar.tray_custom)
                         return 0;
-                *along = lay->tray_at + (taskbar.battery_item ? text : 0) + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
+                *along = lay->tray_at + notice + (taskbar.battery_item ? text : 0) + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
         }
         else if (which == -4)
         {
                 if (!taskbar.battery_item || taskbar.tray_custom)
                         return 0;
-                *along = lay->tray_at + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
+                *along = lay->tray_at + notice + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
         }
         else if (which == TASKBAR_VOLUME)
         {
                 if (!taskbar.volume_item || taskbar.tray_custom)
                         return 0;
-                *along = lay->tray_at + (taskbar.mic_item ? text : 0), *length = text;
+                *along = lay->tray_at + notice + (taskbar.mic_item ? text : 0), *length = text;
         }
         else if (which == TASKBAR_MIC)
         {
                 if (!taskbar.mic_item || taskbar.tray_custom)
+                        return 0;
+                *along = lay->tray_at + notice, *length = text;
+        }
+        else if (which == TASKBAR_NOTICES)
+        {
+                if (!taskbar.notices_item || taskbar.tray_custom)
                         return 0;
                 *along = lay->tray_at, *length = text;
         }
@@ -289,7 +298,7 @@ static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, in
 {
         int half = reach ? 2 * view->scale / 100 : 0;
 
-        for (int which = TASKBAR_MIC; which < (int)view->count; which++)
+        for (int which = TASKBAR_NOTICES; which < (int)view->count; which++)
         {
                 int x, y, width, height;
 
@@ -858,6 +867,23 @@ static void taskbar_mic_cell(const struct taskbar_view *view, const struct taskb
 }
 
 /*
+        The notices dot: the kit's status dot (ui_kit_dot, the size a badge's dot is) in the badge colour of the worst notice, the error's
+        red or the warning's amber, centred in its cell. It is drawn only while the board holds one (taskbar_notices_set).
+*/
+static void taskbar_notices_cell(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y, int width, int height)
+{
+        struct ui ui;
+        unsigned int colour = taskbar.notices_severity == WINDOWS_ISSUE_ERROR ? ui_role(UI_ERROR) : ui_role(UI_WARNING);
+        int size;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui.scene = view->scene;
+        size = ui_px(&ui, UI_DOT);
+        ui_kit_dot(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, colour | 0xff000000u);
+}
+
+/*
         The band drawn over what is under it: each tab redone made glass with
         its title on it, and the tray made glass with the clock and the
         battery. Only the slots in redo are made again, and only their span
@@ -987,6 +1013,8 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         taskbar_volume_cell(view, &lay, x, y, width, height, ink, ground);
                 if (taskbar_slot(view, TASKBAR_MIC, &x, &y, &width, &height))
                         taskbar_mic_cell(view, &lay, x, y, width, height);
+                if (taskbar_slot(view, TASKBAR_NOTICES, &x, &y, &width, &height))
+                        taskbar_notices_cell(view, &lay, x, y, width, height);
         }
         return 1;
 }
@@ -1144,6 +1172,23 @@ static int taskbar_mic_set(int present, int muted)
         return changed;
 }
 
+/*
+        Whether the board holds a notice or an issue, and the worst of them (WINDOWS_ISSUE_ERROR or WINDOWS_ISSUE_WARNING), for the notices
+        dot: present puts the dot in the tray, absent takes it out. Answers 1 when the tray is to be drawn again for it.
+*/
+static int taskbar_notices_set(int present, unsigned int severity)
+{
+        int changed;
+
+        present = present != 0;
+        severity = present && severity == WINDOWS_ISSUE_ERROR ? WINDOWS_ISSUE_ERROR : present ? WINDOWS_ISSUE_WARNING : 0;
+        changed = present != taskbar.notices_item || severity != taskbar.notices_severity;
+        taskbar.notices_item = present, taskbar.notices_severity = severity;
+        if (changed)
+                taskbar.stale = 1;
+        return changed;
+}
+
 // `taskbar text`: edge turns a side band's letters' tops toward the edge it is on, else toward the middle.
 static void taskbar_text_set(int edge)
 {
@@ -1182,6 +1227,11 @@ static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y
 static int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 {
         return taskbar_cell_anchor(view, TASKBAR_MIC, x, y, width, height);
+}
+
+static int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{
+        return taskbar_cell_anchor(view, TASKBAR_NOTICES, x, y, width, height);
 }
 
 /*

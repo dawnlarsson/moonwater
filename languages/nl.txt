@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Gekozen: scherm aangesloten
 mixer_why_hdmi	f5eb	Gekozen: HDMI, scherm onbekend
 mixer_why_named	0295	Gekozen: zo gestart
 mixer_why_nothing	ff66	Gekozen: de eerste die er is
+notices_dismiss	9a10	Alles negeren
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d keer, %4$d min geleden)
+notices_open	c9cf	Systeemmeldingen openen
 settings_already_joined	71fb	al verbonden met %s
 settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
 settings_asks_first	e9bd	vraagt eerst
@@ -264,6 +268,7 @@ ui_field_full	fe02	meer past er niet in
 =Network adapters	88ef	Netwerkadapters
 =New USB devices	c15c	Nieuwe USB-apparaten
 =Normal	2772	Normaal
+=Notices	8f06	Meldingen
 =On-screen keyboard	97f8	Toetsenbord op het scherm
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
 =Other devices	8362	Andere apparaten

@@ -33,6 +33,9 @@
 // And before it a microphone, a cell of its own while a program records from one: pressed, it opens the recording strips of the mixer, a
 // middle press mutes the microphone (compositor.c).
 #define TASKBAR_MIC (-7)
+// The notices dot at the start of the tray, drawn only while the board holds a notice or an issue (taskbar_notices_set): pressed, it
+// opens the notices popup beside the dot (notices.c), which lists them and starts Settings on its System notices page.
+#define TASKBAR_NOTICES (-8)
 
 // The kept settings the battery is named in (the battery verb keeps "battery NAME" there), and the name of that file in
 // /root, which the compositor reads again when it is written.
@@ -117,6 +120,8 @@ static int taskbar_volume_set(int present, int percent, int muted, int flash);
 static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_mic_set(int present, int muted);
 static int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_notices_set(int present, unsigned int severity);
+static int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 
 #else
 
@@ -162,6 +167,10 @@ static inline int taskbar_mic_set(int present, int muted)
 { (void)present, (void)muted; return 0; }
 static inline int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 { (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_notices_set(int present, unsigned int severity)
+{ (void)present, (void)severity; return 0; }
+static inline int taskbar_notices_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 
 #endif
 
@@ -185,7 +194,8 @@ enum taskbar_cell_act
         TASKBAR_ACT_VOLUME_STEP, // the wheel over the volume cell: a notch is five percent
         TASKBAR_ACT_MIC_OPEN,    // the microphone cell: the recording strips beside it
         TASKBAR_ACT_MIC_MUTE,    // the microphone cell's middle press
-        TASKBAR_ACT_SETTINGS     // the tray: a double press opens the settings
+        TASKBAR_ACT_SETTINGS,    // the tray: a double press opens the settings
+        TASKBAR_ACT_NOTICES_OPEN // the notices dot: the notices popup beside it
 };
 
 struct taskbar_cell_rule
@@ -203,6 +213,7 @@ static const struct taskbar_cell_rule taskbar_cell_rules[] = {
         {TASKBAR_VOLUME, TASKBAR_BUTTON_WHEEL, TASKBAR_ACT_VOLUME_STEP, 0},
         {TASKBAR_MIC, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_MIC_OPEN, 0},
         {TASKBAR_MIC, TASKBAR_BUTTON_MIDDLE, TASKBAR_ACT_MIC_MUTE, 0},
+        {TASKBAR_NOTICES, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_NOTICES_OPEN, 0},
         {TASKBAR_TRAY, TASKBAR_BUTTON_LEFT, TASKBAR_ACT_SETTINGS, 1},
 };
 

@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Vald: en skärm är ansluten
 mixer_why_hdmi	f5eb	Vald: HDMI, skärm okänd
 mixer_why_named	0295	Vald: startad med den
 mixer_why_nothing	ff66	Vald: den första som finns
+notices_dismiss	9a10	Avfärda alla
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d gånger, för %4$d min sedan)
+notices_open	c9cf	Öppna systemmeddelanden
 settings_already_joined	71fb	redan ansluten till %s
 settings_any_text	89dc	valfritt kommando, som orden efter moonwater: verbet och sedan argumenten
 settings_asks_first	e9bd	frågar först
@@ -264,6 +268,7 @@ ui_field_full	fe02	mer ryms inte
 =Network adapters	88ef	Nätverksadaptrar
 =New USB devices	c15c	Nya USB-enheter
 =Normal	2772	Normal
+=Notices	8f06	Meddelanden
 =On-screen keyboard	97f8	Skärmtangentbord
 =Open windows where they were last put	8711	Öppna fönster där de senast lades
 =Other devices	8362	Andra enheter

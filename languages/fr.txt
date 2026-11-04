@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Choisi : un écran y est branché
 mixer_why_hdmi	f5eb	Choisi : HDMI, écran inconnu
 mixer_why_named	0295	Choisi : lancé avec
 mixer_why_nothing	ff66	Choisi : le premier qui existe
+notices_dismiss	9a10	Tout ignorer
+notices_item	56a6	%1$s : %2$s
+notices_item_times	36d7	%1$s : %2$s (%3$d fois, il y a %4$d min)
+notices_open	c9cf	Ouvrir les notifications système
 settings_already_joined	71fb	déjà connecté à %s
 settings_any_text	89dc	n'importe quelle commande, comme les mots après moonwater : son verbe, puis ses arguments
 settings_asks_first	e9bd	demande d'abord
@@ -264,6 +268,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Network adapters	88ef	Adaptateurs réseau
 =New USB devices	c15c	Nouveaux périphériques USB
 =Normal	2772	Normal
+=Notices	8f06	Notifications
 =On-screen keyboard	97f8	Clavier à l'écran
 =Open windows where they were last put	8711	Ouvrir les fenêtres où elles ont été laissées
 =Other devices	8362	Autres périphériques

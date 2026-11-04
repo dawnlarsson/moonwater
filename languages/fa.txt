@@ -66,6 +66,10 @@ mixer_why_display	fd9f	انتخاب: نمایشگر وصل است
 mixer_why_hdmi	f5eb	انتخاب: HDMI، نمایشگر نامعلوم
 mixer_why_named	0295	انتخاب: با آن شروع شد
 mixer_why_nothing	ff66	انتخاب: اولین موجود
+notices_dismiss	9a10	رد کردن همه
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d دقیقه پیش)
+notices_open	c9cf	باز کردن اعلان‌های سیستم
 settings_already_joined	71fb	از قبل به %s متصل است
 settings_any_text	89dc	هر فرمانی، به شکل واژه‌های پس از moonwater: ابتدا فعل، سپس آرگومان‌ها
 settings_asks_first	e9bd	ابتدا می‌پرسد
@@ -265,6 +269,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Network adapters	88ef	آداپتورهای شبکه
 =New USB devices	c15c	دستگاه‌های USB جدید
 =Normal	2772	عادی
+=Notices	8f06	اعلان‌ها
 =On-screen keyboard	97f8	صفحه‌کلید روی صفحه
 =Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
 =Other devices	8362	دستگاه‌های دیگر

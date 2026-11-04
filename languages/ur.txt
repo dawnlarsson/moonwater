@@ -66,6 +66,10 @@ mixer_why_display	fd9f	منتخب: ڈسپلے لگا ہے
 mixer_why_hdmi	f5eb	منتخب: HDMI، ڈسپلے نامعلوم
 mixer_why_named	0295	منتخب: اسی کے ساتھ شروع ہوا
 mixer_why_nothing	ff66	منتخب: پہلا دستیاب
+notices_dismiss	9a10	سب کو مسترد کریں
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d بار، %4$d منٹ پہلے)
+notices_open	c9cf	سسٹم کی اطلاعات کھولیں
 settings_already_joined	71fb	پہلے سے %s سے منسلک ہے
 settings_any_text	89dc	کوئی بھی کمانڈ، moonwater کے بعد آنے والے الفاظ کی صورت میں: پہلے فعل، پھر آرگیومنٹس
 settings_asks_first	e9bd	پہلے پوچھتا ہے
@@ -265,6 +269,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Network adapters	88ef	نیٹ ورک اڈاپٹرز
 =New USB devices	c15c	نئی USB ڈیوائسز
 =Normal	2772	عام
+=Notices	8f06	اطلاعات
 =On-screen keyboard	97f8	اسکرین کی بورڈ
 =Open windows where they were last put	8711	کھڑکیاں وہاں کھولیں جہاں آخری بار رکھی گئیں
 =Other devices	8362	دیگر ڈیوائسز

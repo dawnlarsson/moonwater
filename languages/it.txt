@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Scelto: c'è uno schermo
 mixer_why_hdmi	f5eb	Scelto: HDMI, schermo incerto
 mixer_why_named	0295	Scelto: avviato con esso
 mixer_why_nothing	ff66	Scelto: il primo disponibile
+notices_dismiss	9a10	Ignora tutto
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d volte, %4$d min fa)
+notices_open	c9cf	Apri gli avvisi di sistema
 settings_already_joined	71fb	già connesso a %s
 settings_any_text	89dc	un comando qualsiasi, come le parole dopo moonwater: il verbo e i suoi argomenti
 settings_asks_first	e9bd	chiede prima
@@ -264,6 +268,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Network adapters	88ef	Adattatori di rete
 =New USB devices	c15c	Nuovi dispositivi USB
 =Normal	2772	Normale
+=Notices	8f06	Avvisi
 =On-screen keyboard	97f8	Tastiera a schermo
 =Open windows where they were last put	8711	Apri le finestre dove sono state lasciate
 =Other devices	8362	Altri dispositivi

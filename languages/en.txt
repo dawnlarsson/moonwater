@@ -65,6 +65,10 @@ mixer_why_display	fd9f	Picked: a display is plugged in
 mixer_why_hdmi	f5eb	Picked: HDMI, display unknown
 mixer_why_named	0295	Picked: started with it
 mixer_why_nothing	ff66	Picked: the first one there is
+notices_dismiss	9a10	Dismiss all
+notices_item	56a6	%1$s: %2$s
+notices_item_times	36d7	%1$s: %2$s (%3$d times, %4$d min ago)
+notices_open	c9cf	Open System notices
 settings_already_joined	71fb	already joined to %s
 settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
 settings_asks_first	e9bd	asks first
@@ -264,6 +268,7 @@ ui_field_full	fe02	that is as much as it holds
 =Network adapters	88ef	Network adapters
 =New USB devices	c15c	New USB devices
 =Normal	2772	Normal
+=Notices	8f06	Notices
 =On-screen keyboard	97f8	On-screen keyboard
 =Open windows where they were last put	8711	Open windows where they were last put
 =Other devices	8362	Other devices
