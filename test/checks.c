@@ -143548,8 +143548,8 @@ static fn check_kit_motion(void)
                         struct ui_spring spring;
 
                         ui_spring_go(&spring, s.sx, s.tx);
-                        ui_spring_at(&spring, first);
-                        ui_spring_at(&spring, first + r->t);
+                        (ui_kit.now = (b64)(first), ui_spring_at(&spring));
+                        (ui_kit.now = (b64)(first + r->t), ui_spring_at(&spring));
                         got = spring.value[r->kind == KIT_SPRING_NUDGE];
                         break;
                 }
@@ -143558,7 +143558,7 @@ static fn check_kit_motion(void)
                         struct ui_stretch stretch;
 
                         ui_stretch_go(&stretch, first, (b64)r->b * UI_ONE / 100);
-                        got = ui_stretch_at(&stretch, first + r->t, &live);
+                        got = (ui_kit.now = (b64)(first + r->t), ui_stretch_at(&stretch, &live));
                         break;
                 }
                 case KIT_SQUASH_X: case KIT_SQUASH_Y:
@@ -143570,7 +143570,7 @@ static fn check_kit_motion(void)
 
                         ui_slide_go(&slide, ui_q(r->a), ui_q(r->b), ui_q(100), first);
                         slide.landed = first;
-                        got = r->kind == KIT_SLIDE ? ui_slide_value(&slide, first + r->t, &live) : ui_slide_land(&slide, first + r->t, &live);
+                        got = r->kind == KIT_SLIDE ? (ui_kit.now = (b64)(first + r->t), ui_slide_value(&slide, &live)) : (ui_kit.now = (b64)(first + r->t), ui_slide_land(&slide, &live));
                         break;
                 }
                 default:
@@ -143581,10 +143581,10 @@ static fn check_kit_motion(void)
                         // The outlined button inside its border, 61 by 34, pressed at 9, 7; out 120 ms after the first frame.
                         ui_ripple_go(&ripple, ui_q(9), ui_q(7), ui_q(61), ui_q(34), ui_q(8));
                         ripple.pace = UI_ONE; // the curve at the reference's own pace; the kit's pace (ui_ripple_go) is checked in check_kit_ripple_pace
-                        ui_ripple_at(&ripple, first, &cx, &cy, &radius, &opacity);
+                        (ui_kit.now = (b64)(first), ui_ripple_at(&ripple, &cx, &cy, &radius, &opacity));
                         if (r->t >= 120000000ll)
-                                ui_ripple_exit(&ripple, first + 120000000ll);
-                        if (!ui_ripple_at(&ripple, first + r->t, &cx, &cy, &radius, &opacity))
+                                (ui_kit.now = (b64)(first + 120000000ll), ui_ripple_exit(&ripple));
+                        if (!(ui_kit.now = (b64)(first + r->t), ui_ripple_at(&ripple, &cx, &cy, &radius, &opacity)))
                                 cx = cy = radius = opacity = -UI_ONE;
                         else
                                 radius = ui_qdiv(ui_qmul(radius, ripple.mid), ripple.reach); // the curve at NB's own size; the kit's size covers the clip
@@ -144340,7 +144340,7 @@ static fn check_kit_place(void)
         ui_kit.busy = 0;
         ui_control_draw(&ui, &row);
         first_still = !ui_kit.busy;
-        first_on = ui_tween_at(&row.extent, ui_kit.now, &live) == UI_ONE;
+        first_on = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&row.extent, &live)) == UI_ONE;
 
         memory_zero(&tabs, sizeof(tabs));
         tabs.kind = UI_TABS, tabs.variant = UI_TABS_SEGMENTED, tabs.x = 20, tabs.y = 80, tabs.count = 3;
@@ -144349,7 +144349,7 @@ static fn check_kit_place(void)
         tabs.at = 2;
         ui_kit.busy = 0;
         ui_control_draw(&ui, &tabs);
-        tabs_still = !ui_kit.busy && ui_tween_at(&tabs.pip_x, ui_kit.now, &live) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
+        tabs_still = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&tabs.pip_x, &live)) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
 
         memory_zero(&radios, sizeof(radios));
         radios.kind = UI_RADIOS, radios.x = 20, radios.y = 120, radios.w = 300, radios.h = 48, radios.count = 3;
@@ -144365,7 +144365,7 @@ static fn check_kit_place(void)
         row.on = 0;
         ui_kit.now += 500000000ll, ui_kit.busy = 0;
         ui_control_draw(&ui, &row);
-        forgot_still = !ui_kit.busy && ui_tween_at(&row.extent, ui_kit.now, &live) == 0;
+        forgot_still = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&row.extent, &live)) == 0;
 
         // A change after its first frame is drawn moving; the kit settled under it (a resize), it is at its end at once.
         ui_kit.now += 16666667, ui_kit.busy = 0;
@@ -144377,7 +144377,7 @@ static fn check_kit_place(void)
         ui_kit_settle();
         ui_kit.now += 16666667, ui_kit.busy = 0;
         ui_control_draw(&ui, &row);
-        settled = !ui_kit.busy && ui_tween_at(&row.extent, ui_kit.now, &live) == UI_ONE;
+        settled = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&row.extent, &live)) == UI_ONE;
 
         check("kit place: a switch given its value after it was made is drawn at it on its first frame, nothing moving", first_still && first_on);
         check("kit place: tabs and radios given their chosen item start with the pip on it", tabs_still && radios_still);
@@ -144415,7 +144415,7 @@ static fn check_kit_place(void)
                 ui_kit.now += 16666667, ui_kit.busy = 0;
                 ui_control_draw(&ui, &tabs);
                 ui_control_draw(&ui, &radios);
-                moved_still = !ui_kit.busy && ui_tween_at(&tabs.pip_x, ui_kit.now, &live) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
+                moved_still = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&tabs.pip_x, &live)) == ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
                 check("kit place: a control the layout moves (a resize) is drawn where it is with its pip, nothing animating from its old place",
                       moved_still);
         }
@@ -145284,21 +145284,21 @@ static fn check_kit_place(void)
                 ui.top = 0, ui.bottom = 300;
                 ui_kit.now += 1000000000ll, ui_kit.busy = 0;
                 ui_control_draw(&ui, &column);
-                started = !ui_kit.busy && ui_tween_at(&column.pip_y, ui_kit.now, &live) == ui_q(3 * 34);
+                started = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&column.pip_y, &live)) == ui_q(3 * 34);
                 ui_tabs_choose(&ui, &column, 6);
                 cascade = column.item_dom[3].at && column.item_dom[5].at && column.item_dom[6].at && !column.item_dom[2].at && !column.item_dom[7].at;
                 ui_kit.now += 16666667, ui_kit.busy = 0;
                 ui_control_draw(&ui, &column);
                 ui_kit.now += 150000000ll, ui_kit.busy = 0;
                 ui_control_draw(&ui, &column);
-                halfway = ui_tween_at(&column.pip_y, ui_kit.now, &live);
+                halfway = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&column.pip_y, &live));
                 travels = ui_kit.busy && halfway > ui_q(3 * 34) && halfway < ui_q(6 * 34);
                 for (int frame = 0; frame < 30; frame++)
                 {
                         ui_kit.now += 16666667, ui_kit.busy = 0;
                         ui_control_draw(&ui, &column);
                 }
-                rests = !ui_kit.busy && ui_tween_at(&column.pip_y, ui_kit.now, &live) == ui_q(6 * 34);
+                rests = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&column.pip_y, &live)) == ui_q(6 * 34);
                 hits = ui_control_hit(&ui, &column, 20, 10 + 5 * 34 + 3) == 5 && ui_control_hit(&ui, &column, 200, 30) == -1;
                 check("kit tabs on end: the pip starts on its item, slides along y to another, the items it passes stretch, and it rests",
                       started && cascade && travels && rests && hits);
@@ -145381,10 +145381,10 @@ static fn check_kit_tab_ripple(void)
         ui_tabs_choose(&ui, &tabs, 2);
         for (int frame = 0; frame < 9; frame++)
                 ui_kit.now += 16666667, ui_kit.busy = 0, ui_control_draw(&ui, &tabs);
-        midway = ui_tween_at(&tabs.pip_x, ui_kit.now, &live) > ui_q(ui_tab_left(&ui, &tabs, 0) - tabs.x) &&
-                 ui_tween_at(&tabs.pip_x, ui_kit.now, &live) < ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
-        left = tabs.x + (int)(ui_tween_at(&tabs.pip_x, ui_kit.now, &live) >> UI_Q);
-        right = left + (int)(ui_tween_at(&tabs.pip_w, ui_kit.now, &live) >> UI_Q);
+        midway = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&tabs.pip_x, &live)) > ui_q(ui_tab_left(&ui, &tabs, 0) - tabs.x) &&
+                 (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&tabs.pip_x, &live)) < ui_q(ui_tab_left(&ui, &tabs, 2) - tabs.x);
+        left = tabs.x + (int)((ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&tabs.pip_x, &live)) >> UI_Q);
+        right = left + (int)((ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&tabs.pip_w, &live)) >> UI_Q);
         check_ripple_frame(&ui, &tabs, with, without, 0xff202020u);
         check_ink_diff(with, without, left - 1, 79, right + 2, 113, &ink);
         slid = midway && ink.count > 0 && ink.outside == 0;
@@ -145458,7 +145458,7 @@ static b64 sweep_value(struct ui_tween address_to t)
 {
         b32 live = 0;
 
-        return ui_tween_at(t, ui_kit.now, &live);
+        return (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(t, &live));
 }
 
 /*
@@ -145657,29 +145657,29 @@ static fn check_kit_ripple_pace(void)
               small.pace == UI_Q2(120) && wide.pace >= UI_Q2(159) && wide.pace <= UI_Q2(160) && middle.pace > UI_Q2(130) && middle.pace < UI_Q2(150));
         plain = wide;
         plain.pace = UI_ONE;
-        ui_ripple_at(&wide, first, &cx, &cy, &radius, &opacity);
-        ui_ripple_at(&plain, first, &cx, &cy, &radius, &opacity);
+        (ui_kit.now = (b64)(first), ui_ripple_at(&wide, &cx, &cy, &radius, &opacity));
+        (ui_kit.now = (b64)(first), ui_ripple_at(&plain, &cx, &cy, &radius, &opacity));
         for (int ms = 20; ms <= 340; ms += 20)
         {
                 b64 slow, reference, error;
 
-                ui_ripple_at(&wide, first + (b64)ms * UI_MS * wide.pace / UI_ONE, &cx, &cy, &slow, &opacity);
-                ui_ripple_at(&plain, first + (b64)ms * UI_MS, &cx, &cy, &reference, &opacity);
+                (ui_kit.now = (b64)(first + (b64)ms * UI_MS * wide.pace / UI_ONE), ui_ripple_at(&wide, &cx, &cy, &slow, &opacity));
+                (ui_kit.now = (b64)(first + (b64)ms * UI_MS), ui_ripple_at(&plain, &cx, &cy, &reference, &opacity));
                 error = slow > reference ? slow - reference : reference - slow;
                 worst = error > worst ? error : worst;
         }
         check("kit ripple pace: the same curve in more time: the radius at t times the pace is the reference's at t", worst < ui_q(1) / 1000);
-        ui_ripple_at(&wide, first + 225 * UI_MS, &cx, &cy, &near, &opacity);
-        ui_ripple_at(&plain, first + 225 * UI_MS, &cx, &cy, &far, &opacity);
+        (ui_kit.now = (b64)(first + 225 * UI_MS), ui_ripple_at(&wide, &cx, &cy, &near, &opacity));
+        (ui_kit.now = (b64)(first + 225 * UI_MS), ui_ripple_at(&plain, &cx, &cy, &far, &opacity));
         check("kit ripple pace: on a 600 px row the ripple is still growing at 225 ms (under 90 percent of its size), where the reference's had reached it",
               far >= wide.reach - ui_q(1) / 1000 && near < ui_qmul(wide.reach, UI_Q2(90)));
         // Let go at 100 ms: held until the grown time (the pace's 225 ms) after the press, out in the pace's 150 ms, then gone.
         ui_ripple_go(&middle, ui_q(190), ui_q(20), ui_q(380), ui_q(40), 0);
-        ui_ripple_at(&middle, first, &cx, &cy, &radius, &opacity);
-        ui_ripple_exit(&middle, first + 100 * UI_MS);
-        hold_kept = ui_ripple_at(&middle, first + ui_qmul(225 * UI_MS, middle.pace) - 5 * UI_MS, &cx, &cy, &radius, &opacity) &&
+        (ui_kit.now = (b64)(first), ui_ripple_at(&middle, &cx, &cy, &radius, &opacity));
+        (ui_kit.now = (b64)(first + 100 * UI_MS), ui_ripple_exit(&middle));
+        hold_kept = (ui_kit.now = (b64)(first + ui_qmul(225 * UI_MS, middle.pace) - 5 * UI_MS), ui_ripple_at(&middle, &cx, &cy, &radius, &opacity)) &&
                     opacity == ui_qmul(UI_ONE, UI_Q2(20));
-        gone = !ui_ripple_at(&middle, first + ui_qmul(225 * UI_MS, middle.pace) + ui_qmul(150 * UI_MS, middle.pace) + 5 * UI_MS, &cx, &cy, &radius, &opacity);
+        gone = !(ui_kit.now = (b64)(first + ui_qmul(225 * UI_MS, middle.pace) + ui_qmul(150 * UI_MS, middle.pace) + 5 * UI_MS), ui_ripple_at(&middle, &cx, &cy, &radius, &opacity));
         check("kit ripple pace: a ripple let go early is held to its own grown time, fades over its own 150 ms, and is gone", hold_kept && gone);
 }
 
@@ -145735,14 +145735,14 @@ static fn check_kit_ripple_cover(void)
                                 b64 cx, cy, radius, opacity;
 
                                 ui_ripple_go(&r, x, y, ui_q(boxes[b].w), ui_q(boxes[b].h), ui_q(boxes[b].margin));
-                                ui_ripple_at(&r, first, &cx, &cy, &radius, &opacity);
+                                (ui_kit.now = (b64)(first), ui_ripple_at(&r, &cx, &cy, &radius, &opacity));
                                 for (int ms = 5; ms < 3000; ms += 5)
                                 {
                                         b64 now = first + (b64)ms * UI_MS, far;
 
                                         if (ms == goes[go] || (!goes[go] && ms == 5))
-                                                ui_ripple_exit(&r, now);
-                                        if (!ui_ripple_at(&r, now, &cx, &cy, &radius, &opacity))
+                                                (ui_kit.now = (b64)(now), ui_ripple_exit(&r));
+                                        if (!(ui_kit.now = (b64)(now), ui_ripple_at(&r, &cx, &cy, &radius, &opacity)))
                                                 break;
                                         if (now - first < ui_ripple_ns(&r, 225))
                                                 continue;
@@ -145757,11 +145757,11 @@ static fn check_kit_ripple_cover(void)
                                 b64 cx, cy, radius, opacity;
 
                                 ui_ripple_go(&r, x, y, ui_q(boxes[b].w), ui_q(boxes[b].h), ui_q(boxes[b].margin));
-                                ui_ripple_at(&r, first, &cx, &cy, &radius, &opacity);
-                                ui_ripple_exit(&r, first + 10 * UI_MS);
+                                (ui_kit.now = (b64)(first), ui_ripple_at(&r, &cx, &cy, &radius, &opacity));
+                                (ui_kit.now = (b64)(first + 10 * UI_MS), ui_ripple_exit(&r));
                                 for (int ms = 85; ms < 3000; ms += 5)
                                 {
-                                        if (!ui_ripple_at(&r, first + (b64)ms * UI_MS, &cx, &cy, &radius, &opacity))
+                                        if (!(ui_kit.now = (b64)(first + (b64)ms * UI_MS), ui_ripple_at(&r, &cx, &cy, &radius, &opacity)))
                                                 break;
                                         if (opacity < ui_qmul(UI_ONE, UI_Q2(20)))
                                                 faded_open += ripple_farthest(&box, cx, cy) > radius;
@@ -146678,7 +146678,7 @@ static fn check_kit_spring_fresh(void)
                 spring.speed[0] = 1073741824ll * 2;
                 for (int k = 0; k < 12; k++)
                 {
-                        ui_spring_at(&spring, (b64)k * 16000000ll + 1000000000ll);
+                        (ui_kit.now = (b64)((b64)k * 16000000ll + 1000000000ll), ui_spring_at(&spring));
                         first[f][k] = spring.value[0] ^ spring.value[1] * 3;
                 }
         }
@@ -147307,9 +147307,9 @@ static b32 strips_is(int x, int y, unsigned int role)
 // How far the strips are scrolled after a second: the first look starts a move that was asked for, the second is where it ends.
 static b64 strips_shift_after(struct ui_strips address_to s)
 {
-        ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+        (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
         ui_kit.now += 1000000000ll;
-        return ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+        return (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
 }
 
 // n strips: the device first, the rest "P1", "P2", ... at the percents given, the first of them listed at now.
@@ -148385,11 +148385,11 @@ static fn check_kit_strips(void)
                 bits = ui_strips_event(&ui, s, &press);
                 move.a = 220;
                 ui_strips_event(&ui, s, &move);
-                at = ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+                at = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
                 check("kit strips: a drag of the ground moves them with the hand", (bits & UI_STRIPS_TAKEN) && s->dragging && at == 80);
                 move.a = 900;
                 ui_strips_event(&ui, s, &move);
-                at = ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+                at = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&s->shift, &(b32){0}));
                 ui_strips_event(&ui, s, &release);
                 check("kit strips: held at the start, and the release lets go", at == 0 && !s->dragging);
                 // The keys scroll to the strip they go to.
@@ -149090,8 +149090,8 @@ static b64 turn_sample(int kind, struct ui_control address_to c)
         case 2: return sweep_value(&c->scale);
         case 3: return ui_tween_argb(sweep_value(&c->label_ink));
         case 8: return ui_tween_argb(sweep_value(&c->fill));
-        case 4: return ui_ripple_at(&c->ripple[0], ui_kit.now, &cx, &cy, &radius, &opacity) ? radius : 0;
-        case 5: return ui_slide_value(&c->slide, ui_kit.now, &live);
+        case 4: return (ui_kit.now = (b64)(ui_kit.now), ui_ripple_at(&c->ripple[0], &cx, &cy, &radius, &opacity)) ? radius : 0;
+        case 5: return (ui_kit.now = (b64)(ui_kit.now), ui_slide_value(&c->slide, &live));
         case 6: return sweep_value(&c->pip_x);
         default: return c->squish.x.value[0];
         }
@@ -149330,13 +149330,13 @@ static fn check_kit_controls(void)
                 ui_control_draw(&ui, &slider);
                 ui_kit.now += 400000000ll, ui_kit.busy = 0;
                 ui_control_draw(&ui, &slider);
-                ringed = ui_tween_at(&slider.shadow, ui_kit.now, &live) == UI_Q2(8) && !live;
+                ringed = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&slider.shadow, &live)) == UI_Q2(8) && !live;
                 ui_kit_pointer(&ui, &slider, 1, WINDOW_EVENT_MOTION, 400, 20, false, 0);
                 ui_kit.now += 400000000ll, ui_kit.busy = 0;
                 ui_control_draw(&ui, &slider);
                 ui_kit.now += 400000000ll, ui_kit.busy = 0;
                 ui_control_draw(&ui, &slider);
-                let_go = ui_tween_at(&slider.shadow, ui_kit.now, &live) == 0 && !live;
+                let_go = (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&slider.shadow, &live)) == 0 && !live;
 
                 check("kit slider: hovering the thumb rings it where the hand is, a faint ring", ringed);
                 check("kit slider: leaving the thumb lets the ring go, nothing animating once it has", let_go);

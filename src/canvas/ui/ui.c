@@ -1601,8 +1601,9 @@ static fn ui_spring_stop(struct ui_spring address_to s)
         s->value[0] = s->value[1] = 0;
 }
 
-static b32 ui_spring_at(struct ui_spring address_to s, b64 now)
+static b32 ui_spring_at(struct ui_spring address_to s)
 {
+        b64 now = (b64)ui_kit_time();
         b64 h, j, sine, cosine;
         b32 live = 0;
 
@@ -1645,8 +1646,9 @@ static fn ui_stretch_go(struct ui_stretch address_to s, b64 at, b64 most)
         s->most = most;
 }
 
-static b64 ui_stretch_at(struct ui_stretch address_to s, b64 now, b32 address_to live)
+static b64 ui_stretch_at(struct ui_stretch address_to s, b32 address_to live)
 {
+        b64 now = (b64)ui_kit_time();
         b64 e, p, u;
 
         if (!s->at)
@@ -1765,8 +1767,9 @@ static fn ui_tween_set(struct ui_tween address_to t, b64 value, b64 duration, co
 }
 
 // The value at a frame, taking a change first; live is set while it moves.
-static b64 ui_tween_at(struct ui_tween address_to t, b64 now, b32 address_to live)
+static b64 ui_tween_at(struct ui_tween address_to t, b32 address_to live)
 {
+        b64 now = (b64)ui_kit_time();
         b64 eased = UI_ONE, current;
 
         if (t->start)
@@ -1919,8 +1922,9 @@ static inline b64 ui_ripple_ns(const struct ui_ripple address_to r, b64 ms)
         return ui_qmul(ms * UI_MS, r->pace ? r->pace : UI_ONE);
 }
 
-static fn ui_ripple_exit(struct ui_ripple address_to r, b64 now)
+static fn ui_ripple_exit(struct ui_ripple address_to r)
 {
+        b64 now = (b64)ui_kit_time();
         b64 shown, grown = ui_ripple_ns(r, 225);
 
         if (!r->live || r->exit)
@@ -1932,9 +1936,9 @@ static fn ui_ripple_exit(struct ui_ripple address_to r, b64 now)
 
 // The ripple at a frame: its middle in the clip's own place (x, y from the clip's top left), its radius and its
 // opacity (Q30, the 0.2 of the kit included). False when it is gone.
-static b32 ui_ripple_at(struct ui_ripple address_to r, b64 now, b64 address_to cx, b64 address_to cy, b64 address_to radius,
-                        b64 address_to opacity)
+static b32 ui_ripple_at(struct ui_ripple address_to r, b64 address_to cx, b64 address_to cy, b64 address_to radius, b64 address_to opacity)
 {
+        b64 now = (b64)ui_kit_time();
         b64 h, grow, travel, f, v, a;
 
         if (!r->live)
@@ -1992,8 +1996,9 @@ static fn ui_slide_go(struct ui_slide address_to s, b64 from, b64 to, b64 span, 
 }
 
 // The value the slide has reached at a frame: ease-out cubic of the time.
-static b64 ui_slide_value(const struct ui_slide address_to s, b64 now, b32 address_to live)
+static b64 ui_slide_value(const struct ui_slide address_to s, b32 address_to live)
 {
+        b64 now = (b64)ui_kit_time();
         b64 p = ui_progress(now - s->at, s->duration), u = UI_ONE - p;
 
         if (p < UI_ONE)
@@ -2002,8 +2007,9 @@ static b64 ui_slide_value(const struct ui_slide address_to s, b64 now, b32 addre
 }
 
 // The landing squish at a frame, a scale (UI_ONE at rest).
-static b64 ui_slide_land(struct ui_slide address_to s, b64 now, b32 address_to live)
+static b64 ui_slide_land(struct ui_slide address_to s, b32 address_to live)
 {
+        b64 now = (b64)ui_kit_time();
         b64 e, u;
 
         if (!s->landed)
@@ -2325,7 +2331,7 @@ static fn ui_kit_turn(void)
 
         if (ui_tween_still(&ui_kit.turn))
                 return;
-        p = ui_tween_at(&ui_kit.turn, ui_kit.now, &live);
+        p = ui_tween_at(&ui_kit.turn, &live);
         for (int role = 0; role < UI_ROLES; role++)
                 ui_kit.shown.role[role] = ui_tween_argb(ui_tween_mix(UI_TWEEN_COLOUR, ui_tween_colour(ui_kit.from.role[role]),
                                                                      ui_tween_colour(ui_kit.to.role[role]), p));
@@ -3398,13 +3404,14 @@ static fn ui_squish_release(struct ui_squish address_to q)
                 memory_zero(&q->shown, sizeof(q->shown));
 }
 
-static struct ui_squash ui_squish_at(struct ui_squish address_to q, b64 now)
+static struct ui_squash ui_squish_at(struct ui_squish address_to q)
 {
+        b64 now = (b64)ui_kit_time();
         if (q->holding)
                 return q->shown;
         if (q->x.live | q->y.live)
         {
-                ui_kit.busy |= ui_spring_at(&q->x, now) | ui_spring_at(&q->y, now);
+                ui_kit.busy |= ui_spring_at(&q->x) | ui_spring_at(&q->y);
                 q->shown.sx = q->x.value[0], q->shown.tx = q->x.value[1];
                 q->shown.sy = q->y.value[0], q->shown.ty = q->y.value[1];
         }
@@ -3423,8 +3430,9 @@ struct ui_chase
         b64 from[4], to[4], start;
 };
 
-static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b64 now, b64 address_to out)
+static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b64 address_to out)
 {
+        b64 now = (b64)ui_kit_time();
         b64 p = c->start ? ui_bezier_at(&ui_ease, ui_progress(now - c->start, 100 * UI_MS)) : UI_ONE;
         b32 changed = 0;
 
@@ -3589,7 +3597,7 @@ static fn ui_control_start(struct ui_control address_to c)
 static inline b64 ui_kit_tween(struct ui_tween address_to t)
 {
         b32 live = 0;
-        b64 v = ui_tween_at(t, ui_kit.now, &live);
+        b64 v = ui_tween_at(t, &live);
 
         ui_kit.busy |= live;
         return v;
@@ -3693,7 +3701,7 @@ static fn ui_kit_ripples_on(struct ui address_to ui, struct ui_control address_t
                 const struct ui_box address_to cut = clip;
                 b32 ox = x0, oy = y0;
 
-                if (!ui_ripple_at(&c->ripple[k], ui_kit.now, &cx, &cy, &radius, &opacity))
+                if (!ui_ripple_at(&c->ripple[k], &cx, &cy, &radius, &opacity))
                         continue;
                 ui_kit.busy = 1;
                 // A tab's ripple that rides the indicator is measured from the indicator's own rectangle this frame, and cut to it.
@@ -3741,7 +3749,7 @@ static struct ui_ripple address_to ui_kit_ripple_start(const struct ui address_t
 static fn ui_kit_ripples_exit(struct ui_control address_to c)
 {
         for (int k = 0; k < 3; k++)
-                ui_ripple_exit(&c->ripple[k], ui_kit.now);
+                ui_ripple_exit(&c->ripple[k]);
 }
 
 /*
@@ -3783,11 +3791,11 @@ static fn ui_button_targets(struct ui_control address_to c)
 static fn ui_kit_press_transform(const struct ui address_to ui, struct ui_control address_to c, b32 chased, b64 address_to sx,
                                  b64 address_to sy, b32 address_to tx, b32 address_to ty)
 {
-        struct ui_squash s = ui_squish_at(&c->squish, ui_kit.now);
+        struct ui_squash s = ui_squish_at(&c->squish);
         b64 want[4] = {s.sx, s.sy, s.tx, s.ty}, drawn[4];
 
         if (chased)
-                ui_chase_at(&c->drawn, want, ui_kit.now, drawn);
+                ui_chase_at(&c->drawn, want, drawn);
         else
                 for (int k = 0; k < 4; k++)
                         drawn[k] = want[k];
@@ -3862,8 +3870,8 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         extent = ui_kit_tween(&c->extent);
         scale = ui_kit_tween(&c->scale);
         // --sw-squish: held while dragged, else the spring that let it go.
-        squish = c->moved ? (ui_kit.motion ? 0 : c->bend) : (ui_kit.busy |= ui_spring_at(&c->held_squish, ui_kit.now), c->held_squish.value[0]);
-        dom = ui_stretch_at(&c->dom, ui_kit.now, &live);
+        squish = c->moved ? (ui_kit.motion ? 0 : c->bend) : (ui_kit.busy |= ui_spring_at(&c->held_squish), c->held_squish.value[0]);
+        dom = ui_stretch_at(&c->dom, &live);
         ui_kit.busy |= live;
         ui_kit_press_transform(ui, c, 0, &sx, &sy, &tx, &ty);
 
@@ -3957,7 +3965,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
         for (int item = 0; item < c->count; item++)
         {
                 b32 ry = ui_q8(ui, ui_radio_row_y(c, item)), rh = ui_q8(ui, c->h), oy = ry + rh / 2, rx = ui_q8(ui, c->x), rw = ui_q8(ui, c->w);
-                b64 dom = ui_stretch_at(&c->item_dom[item], ui_kit.now, &live), hover, rest;
+                b64 dom = ui_stretch_at(&c->item_dom[item], &live), hover, rest;
                 b32 origin = c->dom_origin > 0 ? oy - ui_q8(ui, 14) : c->dom_origin < 0 ? oy + ui_q8(ui, 14) : oy;
                 b32 lrow = c->item == item;
                 struct ui_box dot = {cx - ui_q8(ui, 14), oy - ui_q8(ui, 14), cx + ui_q8(ui, 14), oy + ui_q8(ui, 14), ui_q8(ui, 14), ui_q8(ui, 14)};
@@ -4137,7 +4145,7 @@ static fn ui_vslider_draw(struct ui address_to ui, struct ui_control address_to 
 
         if (c->sliding)
         {
-                value = ui_slider_snap(c, ui_slide_value(&c->slide, ui_kit.now, &live));
+                value = ui_slider_snap(c, ui_slide_value(&c->slide, &live));
                 c->value = value;
                 if (!live)
                         c->sliding = 0;
@@ -4200,7 +4208,7 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         // The value: sliding after a click, else where it is; snapped to the step as the input keeps it.
         if (c->sliding)
         {
-                value = ui_slider_snap(c, ui_slide_value(&c->slide, ui_kit.now, &live));
+                value = ui_slider_snap(c, ui_slide_value(&c->slide, &live));
                 c->value = value;
                 if (!live)
                         c->sliding = 0;
@@ -4224,11 +4232,11 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         }
         else if (c->held_squish.live)
         {
-                ui_kit.busy |= ui_spring_at(&c->held_squish, ui_kit.now);
+                ui_kit.busy |= ui_spring_at(&c->held_squish);
                 squish = c->held_squish.value[0];
         }
         else if (c->slide.landed)
-                squish = ui_slide_land(&c->slide, ui_kit.now, &live) - UI_ONE;
+                squish = ui_slide_land(&c->slide, &live) - UI_ONE;
         c->last_frame = ui_kit.now;
         ui_kit.busy |= live;
         ui_kit_press_transform(ui, c, 0, &sx, &sy, &tx, &ty);
@@ -4453,7 +4461,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         for (int item = 0; item < c->count; item++)
         {
                 int x = ui_tab_left(ui, c, item), w = ui_tab_width(ui, c, item), width, baseline;
-                b64 dom = ui_stretch_at(&c->item_dom[item], ui_kit.now, &live);
+                b64 dom = ui_stretch_at(&c->item_dom[item], &live);
                 b32 bx = ui_q8(ui, x), bw = ui_q8(ui, w), anchor = c->dom_origin > 0 ? bx : bx + bw;
                 struct ui_box face = ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2);
                 unsigned int ink, layer;
@@ -4551,7 +4559,7 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
         {
                 int y = c->y + item * c->h;
                 b32 live = 0;
-                b64 dom = ui_stretch_at(&c->item_dom[item], ui_kit.now, &live);
+                b64 dom = ui_stretch_at(&c->item_dom[item], &live);
                 b32 by = ui_span_q8(c, ui_q8(ui, y)), bh = ui_span_q8(c, ui_q8(ui, y + c->h)) - by, anchor = c->dom_origin > 0 ? by : by + bh;
                 struct ui_box face = ui_box_of(ui, ui_q(rx), ui_q(y), ui_q(rw), ui_q(c->h), 0);
 
@@ -6636,7 +6644,7 @@ static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll addre
         }
         if (s->back.live)
         {
-                ui_spring_at(&s->back, now);
+                ui_spring_at(&s->back);
                 // A bounded region's spring holds its position at the end and draws the overscroll (ui_scroll_stretched).
                 if (!s->bounds)
                         s->at = s->aim + (s->back.value[1] >> 22);
@@ -7055,7 +7063,7 @@ static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_t
         b64 cx, cy, radius, opacity;
 
         ui_popmenu_rect(ui, m, y, &rect);
-        if (!ui_ripple_at(&m->ripple, ui_kit.now, &cx, &cy, &radius, &opacity))
+        if (!ui_ripple_at(&m->ripple, &cx, &cy, &radius, &opacity))
                 return;
         m->moving = 1;
         dot.x0 = (b32)(((cx - radius) * ui->scale / 100) >> 22), dot.x1 = (b32)(((cx + radius) * ui->scale / 100) >> 22);
@@ -7292,7 +7300,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         return UI_MENU_NOTHING;
                 // The release chooses an item only where its press went down (the kit's press: a cancel, or no press, is none).
                 clicked = ui_press_end(&m->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
-                ui_ripple_exit(&m->ripple, ui_kit.now);
+                ui_ripple_exit(&m->ripple);
                 if (clicked < 0 || at != clicked || !ui_popmenu_choosable(m, at))
                         return UI_MENU_NOTHING;
                 return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
@@ -8482,7 +8490,7 @@ static int ui_strip_part(const struct ui address_to ui, int strip_left, int offs
 // How far the strips are scrolled now, held to what there is to scroll (the window may have grown, or a strip gone, since it was asked).
 static b64 ui_strips_shift(const struct ui address_to ui, struct ui_strips address_to s)
 {
-        b64 shift = s->ready ? ui_tween_at(&s->shift, ui_kit.now, &(b32){0}) : 0;
+        b64 shift = s->ready ? ui_tween_at(&s->shift, &(b32){0}) : 0;
         int most = ui_strips_most(ui, s);
 
         return shift < 0 ? 0 : shift > most ? most : shift;
@@ -8533,7 +8541,7 @@ static fn ui_strips_place(struct ui address_to ui, struct ui_strips address_to s
 static fn ui_strips_reveal(struct ui address_to ui, struct ui_strips address_to s, int k)
 {
         int near = ui_strip_left(ui, k) - ui_dev(ui, UI_STRIP_PAD), far = ui_strip_left(ui, k) + ui_dev(ui, UI_STRIP_W) + ui_dev(ui, UI_STRIP_PAD);
-        b64 now = ui_tween_at(&s->shift, ui_kit.now, &(b32){0}), want = now;
+        b64 now = ui_tween_at(&s->shift, &(b32){0}), want = now;
         int most = ui_strips_most(ui, s);
 
         if (k == 0)
@@ -8727,7 +8735,7 @@ static p32 ui_strips_wheel(struct ui address_to ui, struct ui_strips address_to 
                 return UI_STRIPS_TAKEN;
         if (sideways)
         {
-                b64 now = ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+                b64 now = ui_tween_at(&s->shift, &(b32){0});
                 int most = ui_strips_most(ui, s);
                 b64 want = now - (b64)(event->b ? -steps : steps) * ui_dev(ui, UI_STRIP_W) * ui_dir();
 
@@ -8780,7 +8788,7 @@ static p32 ui_strips_pointer(struct ui address_to ui, struct ui_strips address_t
                 }
                 else if (ui_strips_most(ui, s) > 0 && x >= s->x && x < s->x + s->w && y >= s->y && y < s->y + s->h)
                 {
-                        s->dragging = 1, s->grab_x = x, s->grab_shift = ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+                        s->dragging = 1, s->grab_x = x, s->grab_shift = ui_tween_at(&s->shift, &(b32){0});
                         bits |= UI_STRIPS_TAKEN;
                 }
         }
