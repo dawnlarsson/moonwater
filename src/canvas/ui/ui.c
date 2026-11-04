@@ -7426,6 +7426,30 @@ static b32 ui_key_modifier(int code)
 }
 
 /*
+        Ctrl with the character a layout gives one of the zoom keys: = and + grow the text, - and _ shrink it, 0 goes back to the
+        default (1, -1, 2; 0 for none). Shift is not looked at, because it is what makes + and _ on the keys that carry them, and
+        a layout that puts the sign on other keys sends its own characters. The text widget's keymap binds the same chords
+        (ctrl+= ctrl++ ctrl+- ctrl+0); this is for an app that has no keymap.
+*/
+static int ui_zoom_key(const struct window_event address_to event)
+{
+        if (event->type != WINDOW_EVENT_KEY || !(event->flags & WINDOW_KEY_DOWN) || !(event->flags & WINDOW_KEY_CONTROL))
+                return 0;
+        switch ((unsigned int)event->b)
+        {
+        case '=':
+        case '+':
+                return 1;
+        case '-':
+        case '_':
+                return -1;
+        case '0':
+                return 2;
+        }
+        return 0;
+}
+
+/*
         A row of buttons that are one thing: the actions at the foot of a window (a launcher's Power off and Restart), the kit's
         outlined buttons at the right of a row of UI_ROW, the first leftmost. The kit does all of it, so an app says only what
         each is, hands the row its events and acts on the one that fired:

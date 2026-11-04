@@ -122103,6 +122103,26 @@ static void check_terminal_select_stale(void)
         pixels a second, 4320 thousandths a 16 ms step, so 40 steps owe 172800 thousandths, which is ten rows of 17000 and 2800 over.
         The first call after the drag starts owes none, and a time before the last step restarts it.
 */
+/*
+        The kit's zoom key (ui_zoom_key): Ctrl with = or + grows, with - or _ shrinks, with 0 resets; without Control, or on a key up,
+        or on another key, it is nothing. The terminal and every app without a keymap read the same chords.
+*/
+static void check_kit_zoom_key(void)
+{
+    struct window_event grow = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, 13, '='};
+    struct window_event plus = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, 12, '+'};
+    struct window_event shrink = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, 12, '-'};
+    struct window_event under = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, 12, '_'};
+    struct window_event reset = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, 11, '0'};
+    struct window_event bare = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 13, '='};
+    struct window_event up = {WINDOW_EVENT_KEY, WINDOW_KEY_CONTROL, 13, '='};
+
+    check("kit: Ctrl+= and Ctrl++ grow, Ctrl+- and Ctrl+_ shrink, Ctrl+0 resets, and no other key or a key up does anything",
+          ui_zoom_key(&grow) == 1 && ui_zoom_key(&plus) == 1 && ui_zoom_key(&shrink) == -1 && ui_zoom_key(&under) == -1 &&
+              ui_zoom_key(&reset) == 2 && ui_zoom_key(&bare) == 0 && ui_zoom_key(&up) == 0);
+    check("kit: a modifier alone is a modifier key, and a letter is not", ui_key_modifier(29) && ui_key_modifier(42) && !ui_key_modifier(30));
+}
+
 static void check_edge_steps(void)
 {
     struct ui_edge edge = {-25, 0, 0};
@@ -156097,6 +156117,7 @@ b32 main()
         check_terminal_select_speed();
         check_terminal_select_stale();
         check_edge_steps();
+        check_kit_zoom_key();
         check_take();
         check_land();
         check_glass();

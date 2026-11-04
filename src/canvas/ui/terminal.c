@@ -2025,31 +2025,6 @@ static void terminal_text_said(b32 reading)
         terminal_said(reading, (string_address)text);
 }
 
-/*
-        Ctrl with the character a layout gives one of the zoom keys: = and + grow the text, - and _ shrink it,
-        0 goes back to the default. Shift is not looked at, because it is what makes + and _ on the keys that
-        carry them, and a layout that puts the sign on other keys sends its own characters.
-*/
-static int terminal_zoom_key(const struct window_event address_to event)
-{
-        if (event->type != WINDOW_EVENT_KEY || !(event->flags & WINDOW_KEY_DOWN) ||
-            !(event->flags & WINDOW_KEY_CONTROL))
-                return 0;
-
-        switch ((unsigned int)event->b)
-        {
-        case '=':
-        case '+':
-                return 1;
-        case '-':
-        case '_':
-                return -1;
-        case '0':
-                return 2;
-        }
-        return 0;
-}
-
 static void terminal_zoom(b32 master, int by)
 {
         unsigned int at = terminal_step_index(terminal.size >> 6), next = at;
@@ -2067,14 +2042,6 @@ static void terminal_zoom(b32 master, int by)
         // This terminal only; the file is where the next one starts.
         terminal_size_write(terminal_steps[next]);
         terminal_text_set(master, terminal_steps[next]);
-}
-
-// A key from the compositor, as the window's key ring would have had it.
-// Control, Shift, Alt, AltGr, the Super keys and Caps Lock, by their evdev codes: keys that type nothing.
-static b32 terminal_modifier_key(int code)
-{
-        return code == 29 || code == 97 || code == 42 || code == 54 || code == 56 || code == 100 || code == 125 ||
-               code == 126 || code == 58;
 }
 
 static void terminal_key(const struct window_event address_to event, struct window_key address_to key)
@@ -2636,7 +2603,7 @@ static b32 terminal_select_key(const struct window_event address_to event, b32 a
                 }
                 return true;
         }
-        if ((flags & WINDOW_KEY_DOWN) && terminal.selecting && !terminal_modifier_key(event->a))
+        if ((flags & WINDOW_KEY_DOWN) && terminal.selecting && !ui_key_modifier(event->a))
         {
                 terminal.selecting = false, terminal.select_touch = false;
                 address_to dirty = true;
@@ -2785,7 +2752,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 terminal_key(event, &key);
                 // Typing is a reason to look at what is being typed; a modifier alone is not typing, and
                 // Control held for a zoom or a copy keeps the place the view was scrolled back to.
-                if ((key.flags & WINDOW_KEY_DOWN) && !terminal_modifier_key(event->a))
+                if ((key.flags & WINDOW_KEY_DOWN) && !ui_key_modifier(event->a))
                 {
                         if (terminal_view_live())
                                 address_to dirty = true;
@@ -3024,7 +2991,7 @@ static fn terminal_exit_said(void)
 static b32 terminal_key_pressed(const struct window_event address_to event)
 {
         return event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && !(event->flags & WINDOW_KEY_REPEAT) &&
-               !terminal_modifier_key(event->a);
+               !ui_key_modifier(event->a);
 }
 
 static b32 klog_drain(b32 far, b32 address_to gone, positive budget);
@@ -3087,7 +3054,7 @@ static void terminal_on_pass(void)
 // leaves on a key, when the shell was a program that was asked for.
 static b32 terminal_on_event(const struct window_event address_to event)
 {
-        int zoom = terminal_zoom_key(event);
+        int zoom = ui_zoom_key(event);
 
         if (zoom)
         {
