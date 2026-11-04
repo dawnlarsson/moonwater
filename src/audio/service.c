@@ -1172,17 +1172,13 @@ static void audio_devices_pass(void)
 
 /* ---- the loop's own numbers ---- */
 
+// The bucket of a time: the bit length of its microseconds (bucket n is under 2^n us), the last bucket for anything longer.
 static void audio_bucket(unsigned long *counts, positive ns)
 {
         positive us = ns / 1000;
-        int at = 0;
+        long at = us ? 64 - bits_leading_zeros(us) : 0; // one bit-scan (lib.c, every machine), not a shift a bit at a time
 
-        while (us && at < 15)
-        {
-                us >>= 1;
-                at++;
-        }
-        counts[at]++;
+        counts[at > 15 ? 15 : at]++;
 }
 
 static void audio_stats_say(const char *why)

@@ -183042,6 +183042,7 @@ static void memory_zero(void *block, unsigned long size) { memset(block, 0, size
 static address_any memory_copy(address_any to, const address_any from, positive size) { return memcpy(to, from, size); }
 static b32 memory_compare(const address_any first, const address_any second, positive size) { return memcmp(first, second, size) != 0; }
 static b32 system_close(int fd) { return close(fd); }
+static b32 bits_leading_zeros(positive value) { return value ? (b32)__builtin_clzll(value) : 64; } // lib.c's, which a hosted build lacks
 static thread sv_thread;
 static thread *thread_start(fn (*entry)(address_any), address_any argument) { (void)entry; (void)argument; return &sv_thread; }
 static void thread_join(thread *handle) { (void)handle; }
@@ -183605,6 +183606,33 @@ static void sv_test_gate(void)
         SVCHECK(sink->volume[0] == 16384 && sink->volume[1] == 16384, "a file changed more than two seconds ago is read (volume %lu)", (unsigned long)sink->volume[0]);
 }
 
+/* ---- the bucket of a time is its bit length in microseconds, the last one for anything longer, and the bench of the old loop ---- */
+static void sv_bucket_loop(unsigned long *counts, positive ns)
+{
+        positive us = ns / 1000;
+        int at = 0;
+
+        while (us && at < 15)
+        {
+                us >>= 1;
+                at++;
+        }
+        counts[at]++;
+}
+
+static void sv_test_bucket(void)
+{
+        static const unsigned long long ns[6] = {0, 1000, 1999, 2000, 1000000000ull, 1ull << 62};
+        static const int want[6] = {0, 1, 1, 2, 15, 15};
+        for (int k = 0; k < 6; k++)
+        {
+                unsigned long counts[16] = {0};
+
+                audio_bucket(counts, ns[k]);
+                SVCHECK(counts[want[k]] == 1, "a time of %llu ns is bucket %d", ns[k], want[k]);
+        }
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -183614,6 +183642,7 @@ static int sv_main_checks(void)
         sv_test_fifo();
         sv_test_table();
         sv_test_job();
+        sv_test_bucket();
         sv_test_socket();
         sv_test_card();
         sv_test_file();
