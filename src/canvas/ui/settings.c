@@ -795,6 +795,11 @@ static char settings_status[SETTINGS_SUB_TEXT], settings_metric_line[SETTINGS_SU
 static unsigned int settings_gpu_status = WINDOWS_GPU_STATUS_NOT, settings_gpu_at, settings_gpu_drawn, settings_gpu_processor;
 static unsigned int settings_gpu_ring_drawn[SETTINGS_GPU_SAMPLES], settings_gpu_ring_processor[SETTINGS_GPU_SAMPLES];
 static unsigned int settings_gpu_shown_total;
+// The status line's key: its status, whether any present was counted, and the card's share of them. The line says counts, and every present moves
+// them, so the page is made again when the key moves, not when a count does (a page made again presents, and the counts would move again).
+static unsigned int settings_gpu_key = 0xffffffffu;
+#define SETTINGS_METRIC_NS 10000000000ll // the metric line makes the page again at most this often (the board's own time)
+static positive settings_metric_at;
 
 // The key a row's issues are filed under: its verb's words, joined with a blank (canvas gpu). The key is empty for a row that has no verb.
 static b32 settings_key_of(int row, char address_to key, positive room)
@@ -866,6 +871,9 @@ static void settings_gpu_sample(void)
                                 (long)drawn, (long)(drawn + processor), (long)(drawn * 100 / (drawn + processor)));
                 break;
         }
+        settings_gpu_key = settings_gpu_status;
+        if (settings_gpu_status == WINDOWS_GPU_STATUS_IN_USE || settings_gpu_status == WINDOWS_GPU_STATUS_PARTLY || settings_gpu_status == WINDOWS_GPU_STATUS_NOT)
+                settings_gpu_key |= settings_gpu_shown_total ? 1u << 8 | (drawn * 100 / settings_gpu_shown_total) << 9 : 0u;
 }
 
 // Adds a line under the row being listed: its text (a message, a detail or a status), at list position count. Returns the count.
@@ -976,7 +984,8 @@ static long settings_board_tick(void)
 {
         positive now = (positive)ui_kit.now;
         struct windows_issues copy;
-        char before[SETTINGS_SUB_TEXT], before_metric[SETTINGS_SUB_TEXT];
+        unsigned int was = settings_gpu_key;
+        char before_metric[SETTINGS_SUB_TEXT];
 
         if (!settings.own.table)
                 return -1;
@@ -985,13 +994,15 @@ static long settings_board_tick(void)
         settings_board_due = now + (positive)SETTINGS_BOARD_NS;
         if (!windows_issues_read(settings.own.table, &copy))
                 return (long)SETTINGS_BOARD_NS;
-        string_copy_bounded((string_address)before, (string_address)settings_status, sizeof(before));
         string_copy_bounded((string_address)before_metric, (string_address)settings_metric_line, sizeof(before_metric));
         settings_gpu_sample();
-        if (memory_compare(&copy, &settings_board, sizeof(copy)) || !string_equals((string_address)before, (string_address)settings_status) ||
-            !string_equals((string_address)before_metric, (string_address)settings_metric_line))
+        // The status line is made again when its key moves (settings_gpu_sample). The metric line is rates of presents, and a page made again presents,
+        // so its own change makes the page again no more often than SETTINGS_METRIC_NS (the line is as of the last time the page was made).
+        if (memory_compare(&copy, &settings_board, sizeof(copy)) || settings_gpu_key != was ||
+            (!string_equals((string_address)before_metric, (string_address)settings_metric_line) && now - settings_metric_at >= (positive)SETTINGS_METRIC_NS))
         {
                 settings_board = copy;
+                settings_metric_at = now;
                 settings_rebuild();
         }
         return (long)SETTINGS_BOARD_NS;
@@ -4308,6 +4319,7 @@ static fn settings_size(unsigned int width, unsigned int height)
 static fn settings_language(void)
 {
         settings_say((string_address) "");
+        settings_gpu_key = 0xffffffffu; // the status line is said again in the new language at the next board tick
         // A language that reads the other way is a page laid out the other way: the column, the bars and the rows' extent are placed again.
         if (settings.width > 0 && settings.height > 0)
                 settings_layout();

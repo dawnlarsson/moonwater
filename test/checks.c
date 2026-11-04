@@ -156647,6 +156647,39 @@ static fn settings_status_check(void)
 
 #if MOONWATER_UI_SETTINGS
 /*
+        The GPU's status line in Settings says counts of presents, and every present moves them: the board is made again when the status or the
+        card's share of the presents moves, not when a count alone does (a page made again presents, and that moves the counts again).
+*/
+static fn settings_board_check(void)
+{
+        struct windows address_to saved = settings.own.table;
+        static struct windows table;
+        unsigned int key;
+
+        memory_zero(&table, sizeof(table));
+        table.gpu_on = 1, table.gpu_able = 1, table.gpu_state = WINDOWS_GPU_UP;
+        settings.own.table = &table;
+        table.gpu_drawn = 50, table.gpu_processor = 0;
+        settings_gpu_sample();
+        key = settings_gpu_key;
+        table.gpu_drawn = 60;
+        settings_gpu_sample();
+        check("settings board: a count that moves alone (all on the card) keeps the status key, so the page is not made again", settings_gpu_key == key && settings_gpu_shown_total == 60);
+        table.gpu_processor = 40;
+        settings_gpu_sample();
+        check("settings board: a share that moves changes the status key", settings_gpu_key != key);
+        table.gpu_on = 0;
+        settings_gpu_sample();
+        key = settings_gpu_key;
+        table.gpu_drawn += 9, table.gpu_processor += 9;
+        settings_gpu_sample();
+        check("settings board: with canvas gpu off, counts moving alone keep the key too", settings_gpu_key == key);
+        settings.own.table = saved;
+}
+#endif
+
+#if MOONWATER_UI_SETTINGS
+/*
         The Display group's words: a screen as the dropdown names it, a scale, a refresh rate, a turn, the screen modes' two words
         and the caption under the map. English is what the window said before the table (written out here), the places of a
         sentence are filled in whatever order a language puts them, and German says them in German.
@@ -156773,6 +156806,7 @@ static fn language_check(void)
 #if MOONWATER_UI_SETTINGS
         settings_words_check();
         settings_status_check();
+        settings_board_check();
         settings_display_check();
 #endif
 }
