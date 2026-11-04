@@ -208022,6 +208022,28 @@ b32 main(void)
                 gpu_map_next = GPU_VA_END + GPU_VA;
                 GPU_HOSTILE("a close button's halo is read from its own window after 2^40 of addresses", far, 256, 1);
                 check("gpu hostile: every map ends at or below 2^40", gpu_maps[gpu_map_count - 1].va + (gpu_maps[gpu_map_count - 1].to - gpu_maps[gpu_map_count - 1].from) <= GPU_VA_END);
+                // Pages the GPU was given in an earlier present that the compositor let go of since (a glass window's backdrop, a band made again at another
+                // size): every job names every map, and the kernel refuses one that names a map whose pages are gone; the scene still runs.
+                {
+                        long gone = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0), reused = system_call_6(syscall(mmap), 0, 2 << 20, 3, 0x22, (positive)-1, 0);
+
+                        if ((gone < 0 && gone > -4096) || (reused < 0 && reused > -4096))
+                                return 1;
+                        for (positive i = 0; i < (1 << 18); i++)
+                                ((unsigned int address_to)reused)[i] = gpu_random() | 0xff000000u;
+                        check("gpu hostile: pages to let go of are mapped", gpu_map((const void address_to)gone, 1 << 20) && gpu_map((const void address_to)reused, 2 << 20));
+                        gpu_trim(); // a present is over
+                        system_call_2(syscall(munmap), (positive)gone, 1 << 20);
+                        GPU_HOSTILE("a scene runs after pages the GPU was given are unmapped", grown, 256, 0);
+                        // The tail of a map's pages let go of and its head a window's picture again (an address used again): the map holds the picture, so the present's
+                        // job reads it and is refused; the map is dropped with it, and the next present maps the picture afresh.
+                        system_call_2(syscall(munmap), (positive)reused + (1 << 20), 1 << 20);
+                        gpu_trim();
+                        f.pixels = (const unsigned int address_to)reused, f.pitch = 256, f.close = 0;
+                        check("gpu hostile: a job that reads a map of pages let go of is not run",
+                              !(compositor_gpu_picture(&f) && compositor_gpu_frames(&f, 1, ground) && gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH)));
+                        GPU_HOSTILE("the present after one that named a map of pages let go of maps them afresh", reused, 256, 0);
+                }
 #undef GPU_HOSTILE
         }
         return test_report(null);

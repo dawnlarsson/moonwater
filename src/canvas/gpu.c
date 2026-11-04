@@ -543,18 +543,35 @@ static positive gpu_va_bytes(const void *pointer, positive bytes)
 #define gpu_va(pointer) gpu_va_bytes(pointer, 1)
 
 // A tick is over: the maps unused for 120 ticks are unmapped and their buffers closed.
+// The map at i let go of: unmapped, its buffer closed, the last map in its place.
+static void gpu_drop(unsigned int i)
+{
+        p64 va[8] = {gpu_maps[i].handle, 2, gpu_maps[i].va, 0, gpu_maps[i].to - gpu_maps[i].from}, close[1] = {gpu_maps[i].handle};
+
+        gpu_io(1u, 8, 64, va);
+        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
+        gpu_maps[i] = gpu_maps[--gpu_map_count];
+}
+
 static void gpu_trim(void)
 {
         gpu_tick++;
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if (gpu_tick - gpu_maps[i].used > 120)
-                {
-                        p64 va[8] = {gpu_maps[i].handle, 2, gpu_maps[i].va, 0, gpu_maps[i].to - gpu_maps[i].from}, close[1] = {gpu_maps[i].handle};
+                        gpu_drop(i--);
+}
 
-                        gpu_io(1u, 8, 64, va);
-                        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
-                        gpu_maps[i--] = gpu_maps[--gpu_map_count];
-                }
+// The maps whose pages are not all there any more (the compositor let go of what one was made over: a glass window's backdrop, a band made again at another size)
+// dropped: the kernel refuses every job that names such a map (EFAULT), and each job names them all. msync with MS_ASYNC writes nothing; it says whether every
+// page of the range is mapped. True when a dropped one was used in this tick, so the job in hand may read its addresses and is not to run.
+static b32 gpu_drop_unmapped(void)
+{
+        b32 used = false;
+
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (system_call_3(syscall(msync), gpu_maps[i].from, gpu_maps[i].to - gpu_maps[i].from, 1) != 0)
+                        used |= gpu_maps[i].used == gpu_tick, gpu_drop(i--);
+        return used;
 }
 
 // A buffer of another node of the card (the scanout's dumb buffer on the display node, by its handle on that node's descriptor), made reachable here: its address, 0 for none.
@@ -618,19 +635,24 @@ static b32 gpu_run(void)
         // the pages of those at the submission, which it does not for a buffer nobody named when the pages under it have moved.
         p64 bos[1 + 8 + 64], boin[3] = {0, 0, 0}, ibc[4] = {0, GPU_VA, sizeof(ib) | 1ull << 32, 0}, chunk[4] = {1 | 8ull << 32, (positive)ibc, 6 | 6ull << 32, (positive)boin},
             list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, 2, (positive)list}, wait[4] = {0, 0, 1, (positive)gpu.ctx << 32};
-        unsigned int named = 0, tries = 0;
+        unsigned int named, tries = 0;
 
-        for (unsigned int i = 0; i < gpu.imports; i++)
-                bos[named++] = gpu.imported[i];
-        for (unsigned int i = 0; i < gpu_map_count; i++)
-                bos[named++] = gpu_maps[i].handle;
-        boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
-        if (!named) // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
-                cs[1] = 1;
         memory_copy(gpu.at, ib, sizeof(ib));
-        while (!gpu_io(3u, 4, 24, cs))
-                if (++tries == 3) // a page moved under the job as it was submitted: asked again
+        for (;;)
+        {
+                named = 0;
+                for (unsigned int i = 0; i < gpu.imports; i++)
+                        bos[named++] = gpu.imported[i];
+                for (unsigned int i = 0; i < gpu_map_count; i++)
+                        bos[named++] = gpu_maps[i].handle;
+                boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
+                cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
+                if (gpu_io(3u, 4, 24, cs))
+                        break;
+                // A page moved under the job as it was submitted, or a map's pages are gone: asked again, without the maps that are, unless the job reads one.
+                if (++tries == 3 || gpu_drop_unmapped())
                         return false;
+        }
         wait[0] = cs[0], wait[1] = clock_monotonic_nanoseconds() + 2000000000ull;
         return gpu_io(3u, 9, 32, wait) && wait[0] == 0;
 }
