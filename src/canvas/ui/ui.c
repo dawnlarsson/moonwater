@@ -9294,6 +9294,8 @@ static b32 ui_finger_dragged(const struct ui_finger address_to f)
         groups and rows; the page lays out, scrolls and draws them.
 */
 
+#define UI_PAGE_WORD 128 // a choice's word on a page's menu (the app's words, as its rows have them)
+
 struct ui_page
 {
         const char address_to title;       // at the top left
@@ -9315,6 +9317,9 @@ struct ui_page
         b32 card;                          // the body is a card, not a list: no row is hit and a press on it is its one target
         int chosen;                        // the column's group chosen (the body's rows are its rows)
         b32 pane;                          // where the keys are: 0 the column of groups, 1 the body
+        int menu_row, menu_x, menu_y;      // the list row whose choice menu is open (-1 none) and where it is placed
+        char menu_word[UI_MENU_ITEMS][UI_PAGE_WORD];   // the menu's words as the app gave them: a choice's value is one of these
+        char menu_mark[UI_MENU_ITEMS][2 * UI_PAGE_WORD]; // the same, its ampersands doubled for the menu
         // The app's: what scrolls in the body (its list's region, or a page of text's), and where a change is drawn again
         // (rows of the window, device pixels).
         struct ui_scroll address_to body;
@@ -9547,6 +9552,79 @@ static fn ui_page_column_press(const struct ui address_to ui, struct ui_page add
         struct ui_control address_to c = &p->column;
 
         ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + group * c->h), ui_dev(ui, c->w), ui_dev(ui, c->h), 8);
+}
+
+/*
+        A choice's menu under a row of the page's list: the items are the words label gives for the row (null past the last),
+        the one equal to current is marked, and the menu is placed at the row, right aligned in the page's margin. The row is
+        revealed first, as a menu is always in sight (not on a card). False, and nothing opened, when the row is not in the list.
+*/
+static b32 ui_page_menu_open(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
+                             struct ui_popup address_to menu, const struct window_row address_to own, int row,
+                             const char address_to (*label)(int row, int k), const char address_to current)
+{
+        struct ui_popmenu address_to m = &menu->menu;
+        struct ui_menu_sizes sizes = ui_menu_sizes(ui, ui_kit_touch);
+        int at = ui_list_at(l, row), current_at = -1, x, y, top;
+
+        if (at < 0 || ui->scale <= 0)
+                return false;
+        l->focus = row;
+        m->count = 0, m->top = 0, m->typed_length = 0;
+        memory_zero(&m->press, sizeof(m->press));
+        m->touch = ui_kit_touch;
+        for (int k = 0; k < UI_MENU_ITEMS; k++)
+        {
+                const char address_to shown = label(row, k);
+                positive out = 0;
+
+                if (!shown)
+                        break;
+                string_copy_bounded((string_address)p->menu_word[k], (string_address)shown, UI_PAGE_WORD);
+                for (positive c = 0; p->menu_word[k][c] && out + 2 < sizeof(p->menu_mark[k]); c++)
+                {
+                        p->menu_mark[k][out++] = p->menu_word[k][c];
+                        if (p->menu_word[k][c] == '&')
+                                p->menu_mark[k][out++] = '&';
+                }
+                p->menu_mark[k][out] = 0;
+                if (string_equals((string_address)p->menu_word[k], (string_address)current))
+                        current_at = k;
+                ui_popmenu_add(m, p->menu_mark[k], null, UI_MENU_RADIO | (current_at == k ? UI_MENU_ON : 0), k);
+        }
+        {
+                struct ui measure = *ui;
+
+                top = ui_list_row_y(l, at);
+                ui_popmenu_size(&measure, m, p->height);
+                x = ui_rtl() ? p->left + ui_px(ui, UI_INSET) : p->right - ui_px(ui, UI_INSET) - m->width;
+                x = x < sizes.margin ? sizes.margin : x;
+                y = top + ui_px(ui, UI_ROW) - ui_px(ui, UI_GAP1);
+        }
+        menu->field = null;
+        p->menu_row = row, p->menu_x = x, p->menu_y = y;
+        if (!p->card)
+                ui_list_reveal(ui, l);
+        ui_popmenu_open(menu, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch);
+        m->hot = current_at >= 0 ? current_at : 0;
+        if (menu->open)
+                ui_popmenu_present(menu);
+        return true;
+}
+
+// The page's choice menu closed: its popup leaves its row, and no row has one open.
+static fn ui_page_menu_close(struct ui_page address_to p, struct ui_popup address_to menu)
+{
+        if (p->menu_row < 0)
+                return;
+        p->menu_row = -1;
+        ui_popmenu_close(menu);
+}
+
+// The word of an item of the open menu, as the row has it (null when none is open or the item is not one of them).
+static const char address_to ui_page_menu_word(const struct ui_page address_to p, int at)
+{
+        return p->menu_row < 0 || at < 0 || at >= UI_MENU_ITEMS ? null : p->menu_word[at];
 }
 
 /*
