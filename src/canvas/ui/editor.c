@@ -779,6 +779,8 @@ static int editor_start(void)
         int screen_x, screen_y, screen_w, screen_h;
 
         windows_output(table, 0, &screen_x, &screen_y, &screen_w, &screen_h);
+        // A pinch on the text zooms it (ui_text_pinch): the window takes the pinch, and is not sent it as a wheel with Ctrl.
+        windows_pinch(&editor.own, true);
         editor.width = screen_w * 3 / 5, editor.height = screen_h * 3 / 4;
         ui_centre(table, editor.own.row, editor.width, editor.height, 0);
         ui_scratch_fit(&editor.ui, (unsigned int)screen_w);

@@ -148223,13 +148223,15 @@ static fn check_kit_anchor_flip(void)
         The touch recogniser (ui/touch.h) fed with recorded point streams: each frame is the slots' ids and points, applied as the
         compositor applies it (begin, its events, then the report with the frame as it then is, its events). The events are written
         as letters: S START, M MOVE, P PRESS, R RELEASE, C CANCEL, X CLOSE, U RESUME, r RIGHT, w WHEEL (its v120 summed apart),
-        H HOLD, E HOLD_END, I IDLE. Each row is one stream and the letters it must give.
+        H HOLD, E HOLD_END, I IDLE, Z PINCH_BEGIN, z PINCH_UPDATE, Y PINCH_END. Each row is one stream and the letters it must give.
+        The pinch's scale and focal point are kept too (pinch_begin, pinch_last, fx, fy: the last event's).
 */
 struct touch_rig
 {
         struct ui_touch t;
         int id[UI_TOUCH_SLOTS], was[UI_TOUCH_SLOTS], x[UI_TOUCH_SLOTS], y[UI_TOUCH_SLOTS];
         int px, py, wheel, sideways, close_on_press, busy, scale;
+        int pinch_begin, pinch_last, fx, fy;
         char log[64];
         int n;
 };
@@ -148255,6 +148257,9 @@ static void touch_rig_apply(struct touch_rig *r, const struct ui_touch_out *out)
                 case UI_TOUCH_HOLD: c = 'H'; break;
                 case UI_TOUCH_HOLD_END: c = 'E'; break;
                 case UI_TOUCH_IDLE: c = 'I'; break;
+                case UI_TOUCH_PINCH_BEGIN: c = 'Z', r->pinch_begin = e->scale, r->pinch_last = e->scale, r->fx = e->x, r->fy = e->y; break;
+                case UI_TOUCH_PINCH_UPDATE: c = 'z', r->pinch_last = e->scale, r->fx = e->x, r->fy = e->y; break;
+                case UI_TOUCH_PINCH_END: c = 'Y', r->fx = e->x, r->fy = e->y; break;
                 }
                 r->log[r->n++] = c;
         }
@@ -148324,6 +148329,18 @@ static void touch_row(const char *what, const struct touch_rig *r, const char *l
         {
                 failures++;
                 string_format(log, "  FAIL %s (got %s, wheel %b)\n", (string_address)what, (string_address)r->log, (bipolar)r->wheel);
+                log_flush();
+        }
+}
+
+// A value the rig keeps (a pinch's scale, its focal point) is right or not, under the same tallies as the letters.
+static void touch_ok(const char *what, int ok)
+{
+        checks++;
+        if (!ok)
+        {
+                failures++;
+                string_format(log, "  FAIL %s\n", (string_address)what);
                 log_flush();
         }
 }
@@ -148429,6 +148446,91 @@ static fn check_kit_touch_gestures(void)
         touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 20000000ll);
         touch_row("kit touch: a second finger after the first has moved is nothing", &r, "SPM", -1);
 
+        // Pinch: the two fingers' span changes past the pinch slop (16 px at 100%), so a pinch begins at 1024 and its update is the
+        // span over the span it began from. Apart from 100 px to 200 px is a pinch out to 2048 (2x), and it is no wheel and no click.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 95, 100), touch_rig_down(&r, 1, 205, 100), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_down(&r, 0, 90, 100), touch_rig_down(&r, 1, 210, 100), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_down(&r, 0, 50, 100), touch_rig_down(&r, 1, 250, 100), touch_rig_frame(&r, t0 + 40000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 50000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 60000000ll);
+        touch_row("kit touch: two fingers apart from 100 to 200 px are a pinch out (begin at 1024, updates to 2048) and no wheel and no right click",
+                  &r, "SPCZzzYI", 0);
+        touch_ok("kit touch: a pinch begins at scale 1024", r.pinch_begin == 1024);
+        touch_ok("kit touch: a pinch out to 2x reports 2048", r.pinch_last == 2048);
+
+        // A pinch in: apart from 200 px to 100 px is a scale of 512, and the middle is the focal point.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 300, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 150, 100), touch_rig_down(&r, 1, 250, 100), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 40000000ll);
+        touch_row("kit touch: two fingers together from 200 px to 100 px are a pinch in (begin, update, end) and no wheel", &r, "SPCZzYI", 0);
+        touch_ok("kit touch: a pinch in to half reports 512, about the middle", r.pinch_last == 512 && r.fx == 200 && r.fy == 100);
+
+        // Parallel movement: both fingers 100 px apart moved down together by 48 px in four steps is the wheel, as before, and no zoom.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 100, 112), touch_rig_down(&r, 1, 200, 112), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_down(&r, 0, 100, 124), touch_rig_down(&r, 1, 200, 124), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_down(&r, 0, 100, 136), touch_rig_down(&r, 1, 200, 136), touch_rig_frame(&r, t0 + 40000000ll);
+        touch_rig_down(&r, 0, 100, 148), touch_rig_down(&r, 1, 200, 148), touch_rig_frame(&r, t0 + 50000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 60000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 70000000ll);
+        touch_row("kit touch: two fingers moved down together are the wheel (120 for 48 px at 100%), and never a pinch", &r, "SPCwwwwI", 120);
+        touch_ok("kit touch: a parallel scroll never reports a pinch", r.pinch_begin == 0 && r.pinch_last == 0);
+
+        // A pinch with the middle moved: the pan is in the focal point, and turns no wheel.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 50, 140), touch_rig_down(&r, 1, 250, 140), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 40000000ll);
+        touch_row("kit touch: a pinch out whose middle moved down 40 px is a pinch and the pan with it, and no wheel", &r, "SPCZzYI", 0);
+        touch_ok("kit touch: the pinch's focal point follows the middle", r.fx == 150 && r.fy == 140 && r.pinch_last == 2048);
+
+        // A wobble under the pinch slop (7 px each finger, a span change of 14) is nothing: the two lifted late are no click.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 93, 100), touch_rig_down(&r, 1, 207, 100), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 500000000ll);
+        touch_row("kit touch: a span change of 14 px is under the pinch slop: no pinch, and the two lifted late are no right click", &r, "SPCI", 0);
+        touch_ok("kit touch: under the slop no pinch is reported", r.pinch_begin == 0);
+
+        // Released and again: the second begin is at 1024 from where the two are now (the consumer keeps the zoom it had).
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 50, 100), touch_rig_down(&r, 1, 250, 100), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_down(&r, 1, 250, 100), touch_rig_frame(&r, t0 + 40000000ll);
+        touch_rig_down(&r, 1, 290, 100), touch_rig_frame(&r, t0 + 50000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 60000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 70000000ll);
+        touch_row("kit touch: a pinch that is released and made again begins at 1024 from the new span (200 to 240 is 1228, no right click)",
+                  &r, "SPCZzYZzYI", 0);
+        touch_ok("kit touch: the resumed pinch reports 1228 from its new begin", r.pinch_last == 1228 && r.pinch_begin == 1024);
+
+        // A drop of the events in a pinch ends it, as a cancel ends a finger down.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 90, 100), touch_rig_down(&r, 1, 210, 100), touch_rig_frame(&r, t0 + 20000000ll);
+        {
+                struct ui_touch_out out;
+
+                ui_touch_drop(&r.t, &out);
+                touch_rig_apply(&r, &out);
+        }
+        touch_row("kit touch: an event drop in a pinch ends the pinch (its end is told)", &r, "SPCZzY", -1);
+
         // The device drops: the drop cancels a finger down, and the reset is nothing.
         touch_rig_reset(&r, 0);
         touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
@@ -148439,6 +148541,110 @@ static fn check_kit_touch_gestures(void)
                 touch_rig_apply(&r, &out);
         }
         touch_row("kit touch: an event drop ends a finger down as a cancel", &r, "SPC", -1);
+}
+
+// A pinch the compositor delivers (compositor_pinch): a window that takes pinches is sent WINDOW_EVENT_PINCH, its begin, update
+// and end, with the focal point in its own pixels; one that does not is sent Ctrl and a wheel of a notch per quarter of scale
+// (three notches for 2x: 1024 to 1280, 1600 and 2000 are passed, 2048 is at most 2000 times 1.25).
+static void check_pinch_delivery(void)
+{
+        struct windows address_to table;
+        unsigned int head, at;
+        int row = 1;
+
+        memory_zero(&compositor, sizeof(compositor));
+        compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = COMPOSITOR_NONE;
+        compositor.touch.pinch_row = COMPOSITOR_NONE;
+        if (!glass_table_map())
+        {
+                touch_ok("pinch delivery: the table is made", false);
+                return;
+        }
+        table = compositor.table;
+        compositor.showing[row] = 1;
+        compositor.x[row] = 10, compositor.y[row] = 20, compositor.w[row] = 200, compositor.h[row] = 100;
+        table->x[row] = 10, table->y[row] = 20, table->width[row] = 200, table->height[row] = 100;
+        compositor.stacked = 1, compositor.stack[0] = row;
+
+        // A window that takes pinches: the begin, an update to 2x about (60, 70) on the desktop, and the end.
+        table->pinch_wanted[row] = 1;
+        head = table->event_head[row];
+        {
+                struct ui_touch_event e;
+
+                e.kind = UI_TOUCH_PINCH_BEGIN, e.x = 50, e.y = 60, e.scale = UI_TOUCH_PINCH_ONE;
+                compositor_pinch(&e);
+                e.kind = UI_TOUCH_PINCH_UPDATE, e.x = 60, e.y = 70, e.scale = 2048;
+                compositor_pinch(&e);
+                e.kind = UI_TOUCH_PINCH_END;
+                compositor_pinch(&e);
+        }
+        at = head % WINDOWS_EVENTS;
+        // The flags carry WINDOW_KEY_TOUCH too (a finger's events do), so the phase is read by its bit.
+        touch_ok("pinch delivery: a window that takes pinches is sent three events, begin then update then end",
+                 table->event_head[row] - head == 3 && table->event_type[row][at] == WINDOW_EVENT_PINCH &&
+                 (table->event_flags[row][at] & WINDOW_PINCH_BEGIN) && table->event_a[row][at] == WINDOW_PINCH_ONE &&
+                 table->event_type[row][(at + 1) % WINDOWS_EVENTS] == WINDOW_EVENT_PINCH &&
+                 table->event_a[row][(at + 1) % WINDOWS_EVENTS] == 2048 &&
+                 !(table->event_flags[row][(at + 1) % WINDOWS_EVENTS] & (WINDOW_PINCH_BEGIN | WINDOW_PINCH_END)) &&
+                 table->event_type[row][(at + 2) % WINDOWS_EVENTS] == WINDOW_EVENT_PINCH &&
+                 (table->event_flags[row][(at + 2) % WINDOWS_EVENTS] & WINDOW_PINCH_END));
+        touch_ok("pinch delivery: the focal point is in the window's own pixels (60 - 10, 70 - 20)",
+                 window_pinch_x(table->event_b[row][(at + 1) % WINDOWS_EVENTS]) == 50 && window_pinch_y(table->event_b[row][(at + 1) % WINDOWS_EVENTS]) == 50);
+        touch_ok("pinch delivery: the pinch's row is let go at the end", compositor.touch.pinch_row == COMPOSITOR_NONE);
+
+        // A window that does not: Ctrl and a wheel, up for the bigger scale, three notches for 2x, and no pinch event.
+        table->pinch_wanted[row] = 0;
+        head = table->event_head[row];
+        {
+                struct ui_touch_event e;
+
+                e.kind = UI_TOUCH_PINCH_BEGIN, e.x = 50, e.y = 60, e.scale = UI_TOUCH_PINCH_ONE;
+                compositor_pinch(&e);
+                e.kind = UI_TOUCH_PINCH_UPDATE, e.x = 60, e.y = 70, e.scale = 2048;
+                compositor_pinch(&e);
+                e.kind = UI_TOUCH_PINCH_END;
+                compositor_pinch(&e);
+        }
+        {
+                int wheels = 0, others = 0, control = 1;
+
+                for (unsigned int k = head; k != table->event_head[row]; k++)
+                {
+                        unsigned int slot = k % WINDOWS_EVENTS;
+
+                        if (table->event_type[row][slot] == WINDOW_EVENT_WHEEL && table->event_a[row][slot] == 120 &&
+                            (table->event_flags[row][slot] & WINDOW_KEY_CONTROL))
+                                wheels++;
+                        else if (table->event_type[row][slot] == WINDOW_EVENT_WHEEL)
+                                control = 0;
+                        else
+                                others++;
+                }
+                touch_ok("pinch delivery: a window that does not take pinches is sent three Ctrl wheel notches up for 2x, and nothing else",
+                         wheels == 3 && others == 0 && control);
+        }
+}
+
+// The pinch as zoom (ui.c's ui_pinch_size and ui_pinch_steps): a 2x pinch is six of the terminal's steps (16 to 32), and the steps
+// keep a quarter of the gap at each edge, so a size that trembles at an edge does not flip.
+static fn check_kit_pinch_zoom(void)
+{
+        static const unsigned int steps[] = {8, 10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48, 56, 64};
+        unsigned int count = sizeof(steps) / sizeof(steps[0]);
+
+        touch_ok("kit pinch: a pinch of 2048 (2x) from 14 is 28, of 512 is 7, of 1024 is 14",
+                 ui_pinch_size(14, 2048) == 28 && ui_pinch_size(14, 512) == 7 && ui_pinch_size(14, 1024) == 14);
+        touch_ok("kit pinch: a 2x pinch out from 16 goes up six terminal steps (16 to 32)", ui_pinch_steps(steps, count, 4, ui_pinch_size(16, 2048)) == 10);
+        touch_ok("kit pinch: a pinch in to 15 (under 2x, clear of the edge at 16) from 32 goes down six terminal steps (32 to 16)",
+                 ui_pinch_steps(steps, count, 10, ui_pinch_size(32, 480)) == 4);
+        touch_ok("kit pinch: the edge between 16 and 18 is 17 with a pixel of gap: at 16 a 17 is kept and an 18 goes up",
+                 ui_pinch_steps(steps, count, 4, 17) == 4 && ui_pinch_steps(steps, count, 4, 18) == 5);
+        touch_ok("kit pinch: at 18 a 16 is kept and a 15 goes down to 16",
+                 ui_pinch_steps(steps, count, 5, 16) == 5 && ui_pinch_steps(steps, count, 5, 15) == 4);
+        touch_ok("kit pinch: a scale of 0 (the fingers together) is the smallest step, and past the largest is the largest",
+                 ui_pinch_steps(steps, count, 4, ui_pinch_size(16, 0)) == 0 && ui_pinch_steps(steps, count, 4, 1000) == count - 1);
 }
 
 // The panel's cells as data (taskbar_cell_rules): what each button does on each cell, and the tray's pair by its timing and place.
@@ -159410,6 +159616,8 @@ b32 main()
         check_kit_double_press();
         check_kit_cell_rules();
         check_kit_touch_gestures();
+        check_kit_pinch_zoom();
+        check_pinch_delivery();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();

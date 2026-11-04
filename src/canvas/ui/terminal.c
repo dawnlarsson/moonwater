@@ -1900,6 +1900,9 @@ static void terminal_open(unsigned int wide, unsigned int high, unsigned int lef
         windows_hover(&terminal.own, false);
         terminal.hovering = false;
 
+        // A pinch zooms the text (terminal_pinch), and is not sent to the program as a wheel with Ctrl.
+        windows_pinch(&terminal.own, true);
+
         // The primary screen is where it opens, its shares of that screen, and no larger than a window may be.
         table = terminal.own.table;
         windows_output(table, 0, &display_x, &display_y, &screen_w, &screen_h);
@@ -2119,6 +2122,23 @@ static void terminal_zoom(b32 master, int by)
         // This terminal only; the file is where the next one starts.
         terminal_size_write(terminal_steps[next]);
         terminal_text_set(master, terminal_steps[next]);
+}
+
+// A pinch zooms this terminal by steps: the size it had when the pinch began, scaled, is the step nearest it, with the edges kept
+// (ui_pinch_steps). It is written the way a zoom key writes it.
+static int terminal_pinch_base;
+
+static void terminal_pinch(const struct window_event address_to event)
+{
+        unsigned int now = terminal.size >> 6, next;
+
+        if (event->flags & WINDOW_PINCH_BEGIN)
+                terminal_pinch_base = (int)now;
+        next = ui_pinch_steps(terminal_steps, TERMINAL_STEPS, terminal_step_index(now), ui_pinch_size(terminal_pinch_base, event->a));
+        if (terminal_steps[next] == now)
+                return;
+        terminal_size_write(terminal_steps[next]);
+        terminal_text_set(terminal.master, terminal_steps[next]);
 }
 
 static void terminal_key(const struct window_event address_to event, struct window_key address_to key)
@@ -3289,6 +3309,12 @@ static b32 terminal_on_event(const struct window_event address_to event)
 {
         int zoom = ui_zoom_key(event);
 
+        if (event->type == WINDOW_EVENT_PINCH)
+        {
+                terminal_pinch(event);
+                terminal.dirty = true;
+                return true;
+        }
         if (zoom)
         {
                 terminal_zoom(terminal.master, zoom);

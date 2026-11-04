@@ -3556,6 +3556,8 @@ struct compositor_touch
         int resumed;             // the press is being made again without the close button (compositor_touch_resume)
         int hold_row;            // the window a long press landed on, which its lift is told, or COMPOSITOR_NONE
         int holding;             // the long press's right button is being sent: its events carry WINDOW_KEY_HOLD
+        int pinch_row;           // the window a pinch began on (its focal point then), which its updates and end go to, or COMPOSITOR_NONE
+        int pinch_level;         // a legacy window's pinch: the scale (1024ths) of the last Ctrl and wheel notch sent
 };
 
 #define COMPOSITOR_EV_KEY 1u
@@ -12382,6 +12384,7 @@ static void compositor_leave(int row)
         table->spoiled_height[row][0] = table->spoiled_height[row][1] = 0;
         table->ground[row] = 0;
         table->hover_off[row] = 0;
+        table->pinch_wanted[row] = 0;
         table->state[row] = 0;
         table->want_width[row] = table->want_height[row] = 0;
         table->shown[row] = 0;
@@ -15361,6 +15364,65 @@ static void compositor_touch_right(void)
         The events of the touch recogniser (ui/touch.h) applied to the windows, the pointer and the buttons: what the fingers mean is
         the kit's, what they do here is the compositor's.
 */
+/*
+        A pinch goes to the window its begin lands on (the window under the focal point then), and its updates and end go to that
+        window, wherever the middle has gone. A window that takes pinches (windows_pinch) is sent WINDOW_EVENT_PINCH; any other is
+        sent Ctrl with a wheel of a notch for each quarter the scale has moved from the last notch (compositor_pinch_legacy), up for
+        a bigger scale, down for a smaller, and no notch under 1/16 of the scale it began at.
+*/
+#define COMPOSITOR_PINCH_LEGACY_LOW 64 // 1024ths: the scale the legacy notches stop at (a sixteenth)
+#define COMPOSITOR_PINCH_LEGACY_STEPS 16 // the most notches one update sends
+
+static void compositor_pinch_legacy(int row, int scale)
+{
+        int steps = 0;
+
+        while (steps++ < COMPOSITOR_PINCH_LEGACY_STEPS && (long)scale * 4 >= (long)compositor.touch.pinch_level * 5 &&
+               compositor.touch.pinch_level < (1 << 20))
+        {
+                compositor.touch.pinch_level = compositor.touch.pinch_level * 5 / 4;
+                compositor_post(row, WINDOW_EVENT_WHEEL, WINDOW_KEY_CONTROL, 120, 0);
+        }
+        while (steps++ < 2 * COMPOSITOR_PINCH_LEGACY_STEPS && (long)scale * 5 <= (long)compositor.touch.pinch_level * 4 &&
+               compositor.touch.pinch_level > COMPOSITOR_PINCH_LEGACY_LOW)
+        {
+                compositor.touch.pinch_level = compositor.touch.pinch_level * 4 / 5;
+                compositor_post(row, WINDOW_EVENT_WHEEL, WINDOW_KEY_CONTROL, -120, 0);
+        }
+}
+
+static void compositor_pinch(const struct ui_touch_event *e)
+{
+        struct compositor_touch *touch = &compositor.touch;
+        int row, x, y;
+        unsigned int flags = 0;
+
+        if (e->kind == UI_TOUCH_PINCH_BEGIN)
+        {
+                touch->pinch_row = compositor_picture_under(e->x, e->y);
+                touch->pinch_level = WINDOW_PINCH_ONE;
+                flags = WINDOW_PINCH_BEGIN;
+        }
+        else if (e->kind == UI_TOUCH_PINCH_END)
+                flags = WINDOW_PINCH_END;
+        row = touch->pinch_row;
+        if (row >= 0 && compositor_visible(row))
+        {
+                // The focal point in the window's own pixels, kept to the packing's room (window_pinch_pack).
+                x = e->x - compositor.x[row], y = e->y - compositor.y[row];
+                x = x < 0 ? 0 : x > 0x7fff ? 0x7fff : x;
+                y = y < 0 ? 0 : y > 0x7fff ? 0x7fff : y;
+                compositor.touching = 1;
+                if (__atomic_load_n(&compositor.table->pinch_wanted[row], __ATOMIC_ACQUIRE))
+                        compositor_post(row, WINDOW_EVENT_PINCH, flags, e->scale, window_pinch_pack(x, y));
+                else if (e->kind == UI_TOUCH_PINCH_UPDATE)
+                        compositor_pinch_legacy(row, e->scale);
+                compositor.touching = 0;
+        }
+        if (e->kind == UI_TOUCH_PINCH_END)
+                touch->pinch_row = COMPOSITOR_NONE;
+}
+
 static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *out, positive now)
 {
         int wheel = 0;
@@ -15436,6 +15498,11 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         break;
                 case UI_TOUCH_IDLE:
                         compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+                        break;
+                case UI_TOUCH_PINCH_BEGIN:
+                case UI_TOUCH_PINCH_UPDATE:
+                case UI_TOUCH_PINCH_END:
+                        compositor_pinch(e);
                         break;
                 }
         }

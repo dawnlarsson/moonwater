@@ -16,6 +16,14 @@
         apply those events, then ui_touch_report with the frame as it now is (the press may have made a drag, or marked a close),
         apply its events. A tick (ui_touch_tick, ui_touch_due) asks for the long press when its time is come. A device that
         drops events or goes away is ui_touch_drop or ui_touch_reset.
+
+        Two fingers are classified by what they do, not by who landed second. Their span (the distance between them) and their
+        middle are followed from the report they became two. A change of the span of UI_TOUCH_PINCH_SLOP touch slops from the
+        span it was measured from begins a pinch (PINCH_BEGIN at scale 1024, then PINCH_UPDATE with the scale: the span over the
+        span it began from, in 1024ths, about the middle). A pinch carries the middle's pan with it and turns no wheel; a pinch
+        ends when a finger lifts (PINCH_END). Two fingers whose span does not change are the wheel from their middle, as before,
+        and a pinch is never a right click (the two were moved). A parallel move with the span under the slop is a wheel, so a
+        scroll never zooms and a pinch never scrolls by accident.
 */
 #include "theme.h"
 
@@ -28,6 +36,8 @@
 #define UI_TOUCH_TAP_NS 400000000ull       // two fingers lifted within this of the second landing, neither moved, are a right click
 #define UI_TOUCH_NOTCH 48                  // the fingers' pixels a notch of the wheel is (120ths), at the scale of 100 percent
 #define UI_TOUCH_EVENTS 12                 // the most events one call answers
+#define UI_TOUCH_PINCH_ONE 1024            // a pinch's scale of 1.0, in 1024ths (the scale is span over the span it began from)
+#define UI_TOUCH_PINCH_SLOP 2              // the span of two fingers must change by this many touch slops to begin a pinch (16 px at 100%)
 
 enum ui_touch_kind
 {
@@ -42,15 +52,19 @@ enum ui_touch_kind
         UI_TOUCH_WHEEL,    // a turn of the wheel at the pointer, v120 in 120ths of a notch, horizontal or vertical
         UI_TOUCH_HOLD,     // a long press: the left press is taken back, the right button goes down held at the pointer
         UI_TOUCH_HOLD_END, // the lift that ends a long press
+        UI_TOUCH_PINCH_BEGIN,  // two fingers changed their span past the pinch slop: a pinch begins at scale 1024 about x, y
+        UI_TOUCH_PINCH_UPDATE, // the pinch's scale (1024ths of the span it began from) and its focal point, x, y (the middle)
+        UI_TOUCH_PINCH_END,    // a finger of the pinch lifted (or the fingers changed): the pinch's last scale
         UI_TOUCH_IDLE     // no finger is down
 };
 
 struct ui_touch_event
 {
         enum ui_touch_kind kind;
-        int x, y;          // START and MOVE: the place
+        int x, y;          // START, MOVE and the pinch's focal point: the place
         int v120;          // WHEEL: the turn
         int horizontal;    // WHEEL: sideways
+        int scale;         // PINCH_*: the scale in 1024ths (UI_TOUCH_PINCH_ONE is 1.0)
 };
 
 struct ui_touch_out
@@ -65,6 +79,8 @@ struct ui_touch
         int moved, two_moved, pending;       // the first finger is past the slop; the two's wheel has turned; a close is pending
         int start_x, start_y, mid_x, mid_y;  // the first finger's landing; the two's middle, where the wheel last counted from
         int left_x, left_y;                  // what the wheel has not yet turned, in 120ths times the pixels of a notch
+        int span_ref, span_now;              // the span the pinch is measured from (set when the two are two, or change their count); the span last told
+        int pinching, pinch_scale;           // a pinch is under way, and the scale it last reported (1024ths)
         b64 start, two_at;                   // when the first finger landed; when the two last were two
 };
 
@@ -98,7 +114,7 @@ static inline void ui_touch_put(struct ui_touch_out *out, enum ui_touch_kind kin
         {
                 struct ui_touch_event *e = &out->event[out->count++];
 
-                e->kind = kind, e->x = x, e->y = y, e->v120 = 0, e->horizontal = 0;
+                e->kind = kind, e->x = x, e->y = y, e->v120 = 0, e->horizontal = 0, e->scale = 0;
         }
 }
 
@@ -108,8 +124,53 @@ static inline void ui_touch_put_wheel(struct ui_touch_out *out, int v120, int ho
         {
                 struct ui_touch_event *e = &out->event[out->count++];
 
-                e->kind = UI_TOUCH_WHEEL, e->x = e->y = 0, e->v120 = v120, e->horizontal = horizontal;
+                e->kind = UI_TOUCH_WHEEL, e->x = e->y = 0, e->v120 = v120, e->horizontal = horizontal, e->scale = 0;
         }
+}
+
+static inline void ui_touch_put_pinch(struct ui_touch_out *out, enum ui_touch_kind kind, int x, int y, int scale)
+{
+        if (out->count < UI_TOUCH_EVENTS)
+        {
+                struct ui_touch_event *e = &out->event[out->count++];
+
+                e->kind = kind, e->x = x, e->y = y, e->v120 = 0, e->horizontal = 0, e->scale = scale;
+        }
+}
+
+// The integer square root (floor), by the bit loop: a finger's span is the root of the squares of its two offsets.
+static inline unsigned long long ui_touch_isqrt(unsigned long long n)
+{
+        unsigned long long root = 0, bit = 1ull << 62;
+
+        while (bit > n)
+                bit >>= 2;
+        for (; bit; bit >>= 2)
+                if (n >= root + bit)
+                        n -= root + bit, root = (root >> 1) + bit;
+                else
+                        root >>= 1;
+        return root;
+}
+
+// The distance between two slots' points, in the desktop's pixels, floored.
+static inline int ui_touch_span(const struct ui_touch_frame *f, int a, int b)
+{
+        long long dx = (long long)f->x[a] - f->x[b], dy = (long long)f->y[a] - f->y[b];
+
+        return (int)ui_touch_isqrt((unsigned long long)(dx * dx + dy * dy));
+}
+
+// A span as a scale of the span it began from, in 1024ths (1024 for a reference of none, which begins nothing).
+static inline int ui_touch_ratio(int span, int ref)
+{
+        return ref > 0 ? (int)((long long)span * UI_TOUCH_PINCH_ONE / ref) : UI_TOUCH_PINCH_ONE;
+}
+
+// Whether a span is at least slop away from the span a pinch is measured from, either way.
+static inline int ui_touch_span_past(int ref, int span, int slop)
+{
+        return span - ref >= slop || ref - span >= slop;
 }
 
 // The fingers down in the frame: how many, and the lowest slot down other than skip (-1 for none).
@@ -140,7 +201,7 @@ static inline void ui_touch_begin(struct ui_touch *t, const struct ui_touch_fram
         if (t->mode != UI_TOUCH_NONE || !ui_touch_fingers(f, -1, &other))
                 return;
         t->mode = UI_TOUCH_ONE, t->first = other;
-        t->moved = t->two_moved = t->pending = 0;
+        t->moved = t->two_moved = t->pending = t->pinching = 0;
         t->start = f->now;
         t->start_x = f->x[other], t->start_y = f->y[other];
         ui_touch_put(out, UI_TOUCH_START, t->start_x, t->start_y);
@@ -185,6 +246,8 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                         t->mid_x = (f->x[other] + f->x[first]) / 2;
                         t->mid_y = (f->y[other] + f->y[first]) / 2;
                         t->left_x = t->left_y = 0;
+                        t->span_ref = t->span_now = ui_touch_span(f, first, other);
+                        t->pinching = 0, t->pinch_scale = UI_TOUCH_PINCH_ONE;
                 }
                 else
                 {
@@ -205,6 +268,8 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
         {
                 if (!count)
                 {
+                        if (t->pinching)
+                                ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale), t->pinching = 0;
                         if (!t->two_moved && f->now - t->two_at <= UI_TOUCH_TAP_NS)
                                 ui_touch_put(out, UI_TOUCH_RIGHT, 0, 0);
                         t->mode = UI_TOUCH_NONE;
@@ -212,16 +277,36 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                 else if (count >= 2)
                 {
                         int one = f->id[t->first] >= 0 ? t->first : other, per = UI_TOUCH_NOTCH * f->scale / 100;
-                        int mid_x, mid_y;
+                        int mid_x, mid_y, span, slop2 = UI_TOUCH_PINCH_SLOP * slop;
 
                         ui_touch_fingers(f, one, &other);
                         mid_x = (f->x[other] + f->x[one]) / 2;
                         mid_y = (f->y[other] + f->y[one]) / 2;
-                        // A finger more or less: the middle is somewhere else, and the wheel counts from it again.
+                        span = ui_touch_span(f, one, other);
+                        // A finger more or less: the middle is somewhere else, the wheel counts from it again, and the span a pinch is
+                        // measured from is the new one (a pinch that was under way is over, and the next begins from here).
                         if (count != t->tcount)
                         {
+                                if (t->pinching)
+                                        ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale);
                                 t->tcount = count;
                                 t->mid_x = mid_x, t->mid_y = mid_y;
+                                t->span_ref = t->span_now = span;
+                                t->pinching = 0, t->pinch_scale = UI_TOUCH_PINCH_ONE;
+                        }
+                        else if (t->pinching || ui_touch_span_past(t->span_ref, span, slop2))
+                        {
+                                // Both at once, or only the span: a pinch, scaled about the middle, which carries the pan with it (the
+                                // wheel is not turned meanwhile). Two fingers that moved apart or together are never a wheel after it.
+                                int scale = ui_touch_ratio(span, t->span_ref);
+
+                                if (!t->pinching)
+                                        t->pinching = 1, t->two_moved = 1, t->pinch_scale = UI_TOUCH_PINCH_ONE,
+                                        ui_touch_put_pinch(out, UI_TOUCH_PINCH_BEGIN, mid_x, mid_y, UI_TOUCH_PINCH_ONE);
+                                t->span_now = span;
+                                t->mid_x = mid_x, t->mid_y = mid_y, t->left_x = t->left_y = 0;
+                                if (scale != t->pinch_scale)
+                                        t->pinch_scale = scale, ui_touch_put_pinch(out, UI_TOUCH_PINCH_UPDATE, mid_x, mid_y, scale);
                         }
                         else if (t->two_moved || ui_touch_past(t->mid_x, t->mid_y, mid_x, mid_y, slop))
                         {
@@ -241,7 +326,12 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                         }
                 }
                 else
+                {
+                        // One finger of the two lifted: the pinch is over (its last scale), and the one left is nothing.
+                        if (t->pinching)
+                                ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale), t->pinching = 0;
                         t->tcount = count;
+                }
         }
         else if (t->mode == UI_TOUCH_HELD && !count)
         {
@@ -289,8 +379,11 @@ static inline void ui_touch_drop(struct ui_touch *t, struct ui_touch_out *out)
         out->count = 0;
         if (t->mode == UI_TOUCH_ONE)
                 ui_touch_put(out, UI_TOUCH_CANCEL, 0, 0);
+        if (t->mode == UI_TOUCH_TWO && t->pinching)
+                ui_touch_put_pinch(out, UI_TOUCH_PINCH_END, t->mid_x, t->mid_y, t->pinch_scale);
         t->mode = UI_TOUCH_NONE;
         t->pending = 0;
+        t->pinching = 0;
 }
 
 // The device is gone: no event, and the gesture is over.
@@ -298,6 +391,7 @@ static inline void ui_touch_reset(struct ui_touch *t)
 {
         t->mode = UI_TOUCH_NONE;
         t->pending = 0;
+        t->pinching = 0;
 }
 
 #endif

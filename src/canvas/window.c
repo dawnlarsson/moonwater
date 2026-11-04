@@ -592,6 +592,29 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
 // (ui_scroll_end: a finger still for UI_HAND_PAUSE_NS before its lift throws nothing), and not after the gap the reports left.
 #define WINDOW_WHEEL_STOP 8192u
 /*
+        A pinch: two fingers that moved apart or together on a touch screen, or a trackpad's two (the kit's recogniser, ui/touch.h).
+        a is the scale in 1024ths of the span the pinch began from (WINDOW_PINCH_ONE is 1.0), b the focal point, the middle of the
+        two, in the window's own pixels (window_pinch_pack). The flags are WINDOW_PINCH_BEGIN, WINDOW_PINCH_END, or neither for an
+        update. A program that has said it takes pinches (windows_pinch) is sent these; any other is sent Ctrl with a wheel of a notch
+        each time the scale has moved a quarter from the last notch sent (the zoom a browser or GTK program takes from a trackpad).
+*/
+#define WINDOW_EVENT_PINCH 6u
+#define WINDOW_PINCH_BEGIN 16384u
+#define WINDOW_PINCH_END 32768u
+#define WINDOW_PINCH_ONE 1024
+static inline int window_pinch_pack(int x, int y)
+{
+        return (int)((unsigned int)x << 16 | ((unsigned int)y & 0xffffu));
+}
+static inline int window_pinch_x(int b)
+{
+        return (int)(((unsigned int)b >> 16) & 0xffffu);
+}
+static inline int window_pinch_y(int b)
+{
+        return (int)((unsigned int)b & 0xffffu);
+}
+/*
         The clipboard's news, a the selection (WINDOWS_CLIP_CLIPBOARD or WINDOWS_CLIP_PRIMARY) and b what happened: another
         window copied (CHANGED: a window that asked to watch hears it, and is told no text), the paste this window asked
         for may be read now (READY: windows_clip_read) or may not (REFUSED: it has not the keys, the person did nothing
@@ -792,6 +815,7 @@ struct windows
         unsigned int window_scale[WINDOWS]; // the compositor's: the percent the window is drawn at, its screen's (0 until known)
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
         unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
+        unsigned int pinch_wanted[WINDOWS]; // the program's: 1 when it takes WINDOW_EVENT_PINCH (windows_pinch); 0 sends a pinch as Ctrl and a wheel
         /*
                 The compositor's, for a window it shows straight from its buffers (scanned out, with no
                 copy): pinned is 1 while it does, and a program then never gives a buffer's pages back,
@@ -2274,6 +2298,7 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->page[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->hover_off[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->pinch_wanted[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][0], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][1], 0, __ATOMIC_RELEASE);
         table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
@@ -3309,6 +3334,15 @@ static void windows_clip_free(unsigned char *bytes, unsigned long length)
 static void windows_hover(const struct window_row *own, unsigned int wanted)
 {
         __atomic_store_n(&own->table->hover_off[own->row], wanted ? 0u : 1u, __ATOMIC_RELEASE);
+}
+
+/*
+        Whether the window takes WINDOW_EVENT_PINCH. One that does not is sent a pinch as Ctrl and a wheel (compositor_pinch_legacy),
+        so a program that handles a wheel with Ctrl zooms with a pinch without knowing one.
+*/
+static void windows_pinch(const struct window_row *own, unsigned int wanted)
+{
+        __atomic_store_n(&own->table->pinch_wanted[own->row], wanted ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
 /*

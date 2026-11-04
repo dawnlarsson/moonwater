@@ -7905,6 +7905,44 @@ static int ui_zoom_key(const struct window_event address_to event)
 }
 
 /*
+        A pinch (WINDOW_EVENT_PINCH, its scale in 1024ths of the span it began from) as a zoom. A widget whose size is any whole number
+        of pixels takes the size the scale asks for (ui_pinch_size: the size the pinch began at, times the scale, to the nearest). One
+        that has steps (the terminal's) takes the step the size is nearest to (ui_pinch_steps), with a quarter of the gap between two
+        steps kept either side of each edge: a finger that trembles at an edge does not flip the step back and forth. A pinch begins
+        from the size the widget has then, so one released and made again goes on from where it was.
+*/
+static int ui_pinch_size(int base, int scale)
+{
+        long long size = ((long long)base * scale + WINDOW_PINCH_ONE / 2) / WINDOW_PINCH_ONE;
+
+        return size < 1 ? 1 : size > 4096 ? 4096 : (int)size;
+}
+
+// The edge between two steps is their middle; the gap kept either side of it is a quarter of their distance, and at least a pixel.
+static int ui_pinch_edge(unsigned int lo, unsigned int hi)
+{
+        return ((int)lo + (int)hi) / 2;
+}
+
+static int ui_pinch_gap(unsigned int lo, unsigned int hi)
+{
+        int gap = ((int)hi - (int)lo) / 4;
+
+        return gap < 1 ? 1 : gap;
+}
+
+// The step (index into steps, count long) a size is at: up across an edge once the size is the gap past it, down once it is the
+// gap short of it, and otherwise the step it was at.
+static unsigned int ui_pinch_steps(const unsigned int *steps, unsigned int count, unsigned int at, int size)
+{
+        while (at + 1 < count && size >= ui_pinch_edge(steps[at], steps[at + 1]) + ui_pinch_gap(steps[at], steps[at + 1]))
+                at++;
+        while (at > 0 && size < ui_pinch_edge(steps[at - 1], steps[at]) - ui_pinch_gap(steps[at - 1], steps[at]))
+                at--;
+        return at;
+}
+
+/*
         A row of buttons that are one thing: the actions at the foot of a window (a launcher's Power off and Restart), the kit's
         outlined buttons at the right of a row of UI_ROW, the first leftmost. The kit does all of it, so an app says only what
         each is, hands the row its events and acts on the one that fired:
@@ -11725,6 +11763,7 @@ struct ui_text
 {
         struct doc doc;
         struct ui_select sel;                   // the selection controller: the drag, the finger, the handles and the bar (ui_select_*)
+        int pinch_on, pinch_base;               // a pinch is zooming this widget (its zoom when it began, ui_text_pinch)
         int mode;
         const struct doc_keymap address_to keymap;
         const struct window_row address_to own; // the window, for the clipboard
@@ -13963,10 +14002,36 @@ static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, i
         return ui_text_inside(t, x, y) || ui_select_reach(ui, ui_text_sel(t), x, y);
 }
 
+/*
+        A pinch on a code widget zooms it (ui_pinch_size, from the zoom it had when the pinch began, over the same range as the zoom
+        keys), and only when the pinch began on the widget's text. A field or an area does not zoom; a pinch on one passes on.
+*/
+static p32 ui_text_pinch(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event)
+{
+        int zoom;
+
+        if (event->flags & WINDOW_PINCH_BEGIN)
+                t->pinch_on = t->mode == UI_TEXT_CODE && ui_text_inside(t, window_pinch_x((int)event->b), window_pinch_y((int)event->b)),
+                t->pinch_base = t->zoom;
+        if (event->flags & WINDOW_PINCH_END)
+                t->pinch_on = 0;
+        if (!t->pinch_on)
+                return 0;
+        zoom = ui_pinch_size(t->size + t->pinch_base, event->a) - t->size;
+        zoom = zoom < -6 ? -6 : zoom > 40 ? 40 : zoom;
+        if (zoom == t->zoom)
+                return 0;
+        t->zoom = zoom;
+        ui_text_metrics(ui, t);
+        return UI_TEXT_MOVED;
+}
+
 // The pointer's presses and drags on a text widget: a finger's are the controller's, and the mouse's clicks, drag, Shift, Alt and the
 // middle and right buttons are here. Answers what changed (UI_TEXT_*), and UI_TEXT_MENU for the right button.
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
+        if (event->type == WINDOW_EVENT_PINCH)
+                return ui_text_pinch(ui, t, event);
         struct ui_select address_to s = ui_text_sel(t);
         b32 well = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0 && t->mode != UI_TEXT_FIELD;
