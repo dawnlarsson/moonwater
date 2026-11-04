@@ -75,7 +75,7 @@ static fn gallery_build(struct window_row address_to own, const char address_to 
 
                 if (!gallery.field[k].doc.selections)
                         ui_field_open(&gallery.field[k], own, "");
-                gallery.field[k].focused = false;
+                ui_field_focus(&gallery.field[k], false);
                 gallery.field[k].most = 63;
                 gallery.field[k].keeps_vertical = true; // Up and Down scroll the page
                 field->items[0] = k ? "moon-1" : "my-kernel";
@@ -232,7 +232,7 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
         // and each takes the pointer on its well, the drag it began and the clipboard's answer to its paste.
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 for (int k = 0; k < 2; k++)
-                        gallery.field[k].focused = ui_text_inside(&gallery.field[k], ui_kit.pointer_x, ui_kit.pointer_y);
+                        ui_field_focus(&gallery.field[k], ui_text_inside(&gallery.field[k], ui_kit.pointer_x, ui_kit.pointer_y));
         for (int k = 0; k < 2; k++)
         {
                 struct ui_text address_to t = &gallery.field[k];
@@ -244,7 +244,7 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
                 if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
                         asks = 0;
                 if (asks & (UI_TEXT_CANCEL | UI_TEXT_SUBMIT))
-                        t->focused = false;
+                        ui_field_focus(t, false);
                 if (asks)
                 {
                         for (int at = 0; at < gallery.count; at++)
@@ -284,7 +284,7 @@ static b32 gallery_event(struct ui address_to ui, int width, int height, struct 
                                 gallery.control[at].y += offset;
                         for (int at = 0; at < gallery.count; at++)
                                 if (gallery.control[at].edit)
-                                        gallery.control[at].edit->focused = gallery.control[at].focused;
+                                        ui_field_focus(gallery.control[at].edit, gallery.control[at].focused);
                         moved = true;
                 }
         }

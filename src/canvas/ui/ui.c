@@ -11236,6 +11236,8 @@ static int ui_app_run(struct ui_app address_to app)
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
         table->glass[row] = app->glass;
+        // No field of this program has the keys yet: a count left by the window that had this row is none of its (ui_field_focus).
+        table->field[row] = 0;
         *app->ground = table->ground[row];
         ui_inks(app->ui, *app->ground ? *app->ground : UI_GLASS_GROUND);
         // A window that is not glass is the kit's surface, and its inks are the surface's.
@@ -11737,6 +11739,8 @@ struct ui_text
         int mode;
         const struct doc_keymap address_to keymap;
         const struct window_row address_to own; // the window, for the clipboard
+        unsigned int counted;                   // the window row (plus one) whose table count of focused fields holds this field, 0 none
+        struct windows address_to counted_table; // the table that count is in (ui_field_focus)
         const char address_to placeholder;
         const char address_to comment;          // a line comment, for the comment command
         b32 focused, read_only, wrap, numbers;
@@ -11829,15 +11833,41 @@ static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_
         undo goes back to it and no further), the caret at its end, the keys in it, its clipboard the window own's.
         Its rules (most, most_said, accept, masked) are the app's to set after; the kit holds every way in to them.
 */
+/*
+        The one place a text field's focus is set, whoever has it: a field's opening and each of its keys, the bar's, a view's, a
+        control's drawn, the settings' and the gallery's. The field takes the keys or gives them up, and its window's count of focused
+        fields (the table's field, window.c) moves with it, so the compositor shows the on-screen keyboard while the count is not 0.
+        A field counts in the row of its owner (own) while it has the keys, and gives the count back when it loses them or its row
+        changes; a field with no row writes nothing.
+*/
+static void ui_field_focus(struct ui_text address_to t, b32 focused)
+{
+        struct windows address_to table = t->own ? t->own->table : null;
+        unsigned int row = table && focused ? t->own->row + 1 : 0;
+
+        if (t->counted && (t->counted != row || t->counted_table != table))
+        {
+                if (t->counted_table->field[t->counted - 1])
+                        t->counted_table->field[t->counted - 1]--;
+                t->counted = 0;
+        }
+        if (row && !t->counted)
+                table->field[row - 1]++, t->counted = row, t->counted_table = table;
+        t->focused = focused;
+}
+
 static b32 ui_field_open(struct ui_text address_to t, const struct window_row address_to own, const char address_to text)
 {
         positive length = text ? string_length((string_address)text) : 0;
 
+        // The open clears the field (ui_text_open zeroes it), so what it counted is given back first.
+        if (t->counted)
+                ui_field_focus(t, false);
         if (!ui_text_open(t, UI_TEXT_FIELD, (const p8 address_to)(text ? text : ""), length, ui_text_keymap()))
                 return false;
         doc_select_set(&t->doc, length, length);
         t->own = own;
-        t->focused = true;
+        ui_field_focus(t, true);
         return true;
 }
 
@@ -11862,11 +11892,12 @@ static fn ui_field_begin(struct ui_text address_to t, const struct window_row ad
         t->owner = owner;
 }
 
-// The field closed: an open passphrase is wiped (ui_text_close) and the field owns nothing; a field not open is left as it is.
+// The field closed: an open passphrase is wiped (ui_text_close), the field gives up the keys (ui_field_focus) and owns nothing.
 static fn ui_field_close(struct ui_text address_to t)
 {
         if (t->open)
                 ui_text_close(t);
+        ui_field_focus(t, false);
         t->open = false;
         t->owner = -1;
 }
@@ -12675,7 +12706,7 @@ static long ui_field_tick(struct ui address_to ui, struct ui_page address_to p, 
         positive now = (positive)ui_kit.now; // the loop's time, as the tick is run (upstream reads it so)
         b32 redraw = false;
 
-        t->focused = focused;
+        ui_field_focus(t, focused);
         if (t->doc.selections)
                 timeout = ui_text_timeout(ui, t, timeout, &redraw);
         if (redraw && (t->sel.bar || t->sel.bar_up || t->sel.over_bottom > t->sel.over_top))
@@ -14186,7 +14217,7 @@ static p32 ui_field_send(struct ui address_to ui, struct ui_text address_to t, s
 */
 static fn ui_text_focus_under(struct ui_text address_to t, b32 window, const struct ui_text address_to above)
 {
-        t->focused = window && !(above && above->focused);
+        ui_field_focus(t, window && !(above && above->focused));
 }
 
 // The keymap's command for a key, whoever has the keys: none for AltGr (it types), and none for a key the map does not bind.
@@ -14272,7 +14303,7 @@ static fn ui_findbar_open(const struct window_row address_to own, struct ui_find
                 ui_text_set(&bar->field, selected, length);
         doc_select_all(&bar->field.doc);
         bar->mode = mode;
-        bar->field.focused = true;
+        ui_field_focus(&bar->field, true);
         ui_findbar_keys(bar, view, window);
 }
 
@@ -14310,7 +14341,7 @@ static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_t
                 doc_goto_line(&view->doc, line ? line - 1 : 0);
                 ui_text_reveal(ui, view);
                 bar->mode = UI_FINDBAR_CLOSED;
-                bar->field.focused = false;
+                ui_field_focus(&bar->field, false);
                 ui_findbar_keys(bar, view, window);
                 return UI_FINDBAR_SAID_NONE;
         }
@@ -14362,7 +14393,7 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
         if (bar->mode == UI_FINDBAR_CLOSED || (event->type == WINDOW_EVENT_KEY ? !bar->field.focused : event->type == WINDOW_EVENT_WHEEL))
                 return said;
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
-                bar->field.focused = ui_text_reach(ui, &bar->field, ui_kit.pointer_x, ui_kit.pointer_y);
+                ui_field_focus(&bar->field, ui_text_reach(ui, &bar->field, ui_kit.pointer_x, ui_kit.pointer_y));
         asks = ui_field_send(ui, &bar->field, menu, event);
         // A press outside the bar is the view's: the bar's answer to it (commit or cancel) changes nothing.
         if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
@@ -14374,7 +14405,7 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
         else if (asks & UI_TEXT_CANCEL)
         {
                 bar->mode = UI_FINDBAR_CLOSED;
-                bar->field.focused = false;
+                ui_field_focus(&bar->field, false);
         }
         else if (!asks && event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
         {
@@ -14906,7 +14937,7 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
         // The keys coming to it wake the caret, which then blinks a while.
         if (c->focused && !t->focused)
                 ui_text_wake(t);
-        t->focused = c->focused;
+        ui_field_focus(t, c->focused);
         t->placeholder = c->items[0];
         ui_text_draw(ui, t, left, top, right - left, bottom - top, ui->glass ? 0 : ui_role(UI_SURFACE) & 0xffffffu);
         // The hand reaches it anywhere in its well, its padding as well as its text.

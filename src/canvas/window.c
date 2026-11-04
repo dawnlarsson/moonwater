@@ -888,6 +888,9 @@ struct windows
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
         unsigned int window_scale[WINDOWS]; // the compositor's: the percent the window is drawn at, its screen's (0 until known)
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
+        // The program's, read by the compositor: how many of the window's text fields have the keys (ui.c's ui_field_focus moves
+        // it with each field's focus; the program zeroes it when it starts). The on-screen keyboard shows while the focus's is not 0.
+        unsigned int field[WINDOWS];
         // The keyboard's key requests (WINDOWS_OSK entries a row, the program's head and the compositor's tail, see WINDOWS_KEYBOARD).
         unsigned int osk_head[WINDOWS], osk_tail[WINDOWS];
         int osk_code[WINDOWS][WINDOWS_OSK], osk_character[WINDOWS][WINDOWS_OSK];

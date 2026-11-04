@@ -3319,7 +3319,8 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
         t->masked = masked;
         // The field has the keys from its first character, and a passphrase or a network's, device's or command's is a command:
         // a press outside it cancels (the kit's rule), where a plain value is kept.
-        t->focused = true, t->cancels = settings_item(row) != null;
+        ui_field_focus(t, true);
+        t->cancels = settings_item(row) != null;
         t->most =row >= (int)SETTINGS_LIST ? SETTINGS_ITEM_LABEL - 1
                   : row >= SETTINGS_ANY || (settings_rows[row].flags & SETTINGS_SPLIT) ? SETTINGS_TYPED - 1
                                                                                         : SETTINGS_VALUE - 1;
@@ -3553,7 +3554,7 @@ static fn settings_type(const struct window_event address_to event)
 {
         if (event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD)
                 ui_confirm_drop(&settings.confirm);
-        settings.edit.focused = true;
+        ui_field_focus(&settings.edit, true);
         settings_edit_asked(ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, 0, 0));
 }
 
@@ -3623,7 +3624,7 @@ static p32 settings_filter_key(const struct window_event address_to event)
         struct ui_text address_to field = settings_filter_field();
         p32 asks;
 
-        field->focused = true;
+        ui_field_focus(field, true);
         asks = ui_field_event(&settings.ui, field, &settings.popup, event, 0, 0);
         settings_filter_asked(asks);
         return asks;
