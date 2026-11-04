@@ -9877,7 +9877,7 @@ static fn ui_buffers_start(struct ui_buffers address_to b)
         changed and nothing was shown: showing the picture again is a knock, a take and a present for no pixel.
 */
 static b32 ui_buffers_present(struct ui_buffers address_to b, const struct window_row address_to own, int width, int height,
-                              void (*paint)(unsigned int address_to pixels, int top, int bottom))
+                              void (*paint)(unsigned int address_to pixels, int top, int bottom), void (*before)(void))
 {
         struct windows address_to table = own->table;
         unsigned int row = own->row;
@@ -9920,6 +9920,9 @@ static b32 ui_buffers_present(struct ui_buffers address_to b, const struct windo
                 table->damage_width[row] = (unsigned int)width;
                 table->damage_height[row] = drawn_bottom - drawn_top;
         }
+        // The app's knock that comes with its picture (before, optional): its size and damage are set, and the buffer is not shown yet.
+        if (before)
+                before();
         windows_show(own, (unsigned int)slot);
         b->shown = slot;
         return true;

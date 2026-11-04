@@ -134140,13 +134140,13 @@ static fn check_launcher_anchor(void)
         check("launcher beside the button: it asks for its place and size as a placement, counted from its screen's top left", kept);
 
         // Moved again with a new height only above a bottom panel, and only once shown.
-        launcher.shown = -1;
+        launcher.buffers.shown = -1;
         launcher.height = 0;
         string_copy_bounded((string_address)launcher.text, (string_address) "zzzz", sizeof(launcher.text));
         launcher.moved = false;
         launcher_changed();
         kept = !launcher.moved;
-        launcher.shown = 0;
+        launcher.buffers.shown = 0;
         launcher.text[0] = 0;
         launcher_changed();
         kept &= launcher.moved;

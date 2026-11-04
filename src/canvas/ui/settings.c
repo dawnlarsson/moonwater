@@ -4585,7 +4585,7 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
 */
 static b32 settings_frame(void)
 {
-        if (!ui_buffers_present(&settings.buffers, &settings.own, settings.width, settings.height, settings_draw_rows))
+        if (!ui_buffers_present(&settings.buffers, &settings.own, settings.width, settings.height, settings_draw_rows, null))
                 return false;
         settings.dirty = false;
         return true;

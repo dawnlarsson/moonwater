@@ -160,7 +160,8 @@ static struct
         positive named_count, named_length, named_names;
         char named_text[LAUNCHER_TEXT];
 
-        int width, height, shown;
+        int width, height;
+        struct ui_buffers buffers; // the bar's two buffers (the kit's): its picture is drawn whole each frame
         unsigned int ground;
         int pointer_x, pointer_y;
         b32 focused, had_focus, dirty;
@@ -696,7 +697,7 @@ static fn launcher_changed(void)
         most = launcher_most_height();
         launcher.height = height > most ? most : height;
         // A bar above a bottom panel keeps its bottom where it is, so it is put again with the picture of its new height.
-        launcher.moved |= launcher.anchor.anchored && launcher.shown >= 0 && launcher.anchor.edge == TASKBAR_BOTTOM && launcher.height != was;
+        launcher.moved |= launcher.anchor.anchored && launcher.buffers.shown >= 0 && launcher.anchor.edge == TASKBAR_BOTTOM && launcher.height != was;
         launcher.dirty = true;
 }
 
@@ -985,29 +986,33 @@ static fn launcher_draw(unsigned int address_to pixels)
         ui_text_overlay(ui, launcher_field());
 }
 
-// One picture, into the buffer the compositor is not reading; false when there is none yet.
-static b32 launcher_frame(void)
+// The bar's picture, drawn whole into the buffer the kit gives (every frame is due whole: the bar has no rows to draw apart).
+static fn launcher_paint(unsigned int address_to pixels, int top, int bottom)
+{
+        (void)top, (void)bottom;
+        launcher_draw(pixels);
+}
+
+// A new height of a bar that keeps its bottom: its place, asked with the picture it is for, in one knock (before the buffer is shown).
+static fn launcher_placed(void)
 {
         struct windows address_to table = launcher.own.table;
         unsigned int row = launcher.own.row;
-        int slot = launcher.shown < 0 ? 0 : 1 - launcher.shown;
 
-        if (launcher.shown >= 0 && !windows_ready(&launcher.own))
-                return false;
-
-        launcher_draw(windows_buffer(table, row, (unsigned int)slot));
-        table->width[row] = (unsigned int)launcher.width;
-        table->height[row] = (unsigned int)launcher.height;
-        table->damage_width[row] = 0;
-        // A new height of a bar that keeps its bottom: its place, asked with the picture it is for, in one knock.
         if (launcher.moved)
         {
                 ui_anchor_set(&launcher.anchor, table, row, launcher.width, launcher.height);
                 __atomic_add_fetch(&table->moved[row], 1u, __ATOMIC_RELEASE);
                 launcher.moved = false;
         }
-        windows_show(&launcher.own, (unsigned int)slot);
-        launcher.shown = slot;
+}
+
+// One picture, into the buffer the compositor is not reading; false when there is none yet.
+static b32 launcher_frame(void)
+{
+        ui_buffers_all(&launcher.buffers);
+        if (!ui_buffers_present(&launcher.buffers, &launcher.own, launcher.width, launcher.height, launcher_paint, launcher_placed))
+                return false;
         launcher.dirty = false;
         return true;
 }
@@ -1139,7 +1144,7 @@ static b32 launcher_main()
         string_address regular = (string_address) UI_FONT_REGULAR;
 
         memory_zero(&launcher, sizeof(launcher));
-        launcher.shown = -1;
+        ui_buffers_start(&launcher.buffers);
 
         for (positive at = 1; at < (positive)program_argument_count(); at++)
         {
