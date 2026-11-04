@@ -41,6 +41,39 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-122: the lift of a long press went to the next program in a closed window's row
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Stale index after free (a row number kept past its window): input delivered to another window, and a clipboard gesture with it |
+| Attacker | a program that opens a window when another closes, under a finger held on a touch screen (timing, no privilege beyond being a window) |
+| Moonwater exposure window | from `fcfac726` (2026-11-01 23:59 +01:00, the long press) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_leave`) |
+
+**What it was.** A finger held still on a touch screen is a long press: `compositor_touch_tick` takes back the left press,
+sends the right button, and keeps the row under the finger in `compositor.touch.hold_row`; the lift that ends the press
+is a left release (WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD) posted to that row. `compositor_leave`, which frees a row when its
+program has gone, cleared every other row the hand keeps (the press, the drag, the resize, the close button under a
+finger, the buttons held) but not this one. Rows are taken lowest first, so the next window opened is in the row that was
+just freed: a window that closed under a held finger had the lift posted into the next program's ring, a release of a
+press it never had. And `compositor_post` takes every button event as a gesture of the person's on the row
+(`compositor_clip_gesture`), which is what lets a window copy and, holding the keys, paste for 1.5 s: a window opened
+with the keys (MOONWATER_ASKED) at that moment could read the clipboard with nobody having touched it.
+
+**The fix.** `compositor_leave` lets `touch.hold_row` go with the row, as it does `touch.closing`: the lift then goes
+nowhere.
+
+**Tests that fail without it.** `CHECK_terminal` `check_compositor_touch_hold_gone`: a long press held on the window in
+row 1, the window closed and a new one shown in row 1, the finger lifted: nothing is posted to row 1, and row 1 has no
+gesture. Without the line both rows are red (2 failures, gcc).
+
+**Still open.** The clipboard's gesture rule takes any button event the compositor posts, including the releases it makes
+up itself (a cancel, a long press's right click); every one of those follows a real press on the same window, so none
+other than this one was found to reach a window the person did not touch.
+
+
+
 ### MW-2026-161: Control-Alt-Backspace as Canvas went off could hang the canvas thread and every later Canvas request
 
 | | |

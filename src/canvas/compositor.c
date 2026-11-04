@@ -11729,6 +11729,9 @@ static void compositor_leave(int row)
         if (compositor.lit_row == row)
                 compositor.lit_row = COMPOSITOR_NONE, compositor.lit_edges = compositor.lit_held = 0;
         compositor.touch.closing = compositor.touch.closing == row ? COMPOSITOR_NONE : compositor.touch.closing;
+        // The window a long press landed on (compositor_touch_tick) gone: the lift that ends the press goes nowhere, not to the
+        // next program in the row, which never had the finger and would be given a press of the person's for the clipboard.
+        compositor.touch.hold_row = compositor.touch.hold_row == row ? COMPOSITOR_NONE : compositor.touch.hold_row;
         // A button held over the window that went is let go nowhere: the row is the next program's, which never had
         // the press (compositor_release).
         for (unsigned int index = 0; index < 8; index++)

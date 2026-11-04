@@ -128184,6 +128184,66 @@ static void check_compositor_least_scale(void)
 }
 
 /*
+        A long press on a touch screen lands on the window under the finger (compositor_touch_tick keeps its row), and the
+        lift that ends it is a release posted to that row. The row was not let go when its window went, so a window that
+        closed under a held finger had the lift posted to whatever program took the row next: a release it never had the
+        press of, and, as every button event is, a gesture of the person's on it, which lets a row copy and paste for a
+        moment (compositor_clip_gesture). Now the hold goes with its window, and the lift goes nowhere.
+*/
+static void check_compositor_touch_hold_gone(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    unsigned int head;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("touch hold gone: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->motion = 1;
+    table->focus = WINDOWS;
+    compositor.touchscreen[0] = 1;
+    compositor.screen_touch[0] = (struct compositor_touch_screen){0};
+    compositor.screen_touch[0].slots = 1;
+    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
+    table->x[1] = table->y[1] = 20;
+    life_paint(1, 100, 80, GLASS_SIDE);
+
+    // Held on the window in row 1, as compositor_touch_tick leaves a long press; then the window goes and the next program takes row 1.
+    compositor.touch.mode = COMPOSITOR_TOUCH_HELD;
+    compositor.touch.device = 0;
+    compositor.touch.first = 0;
+    compositor.touch.hold_row = 1;
+    life_close(1);
+    table->x[1] = table->y[1] = 20;
+    life_paint(1, 100, 80, GLASS_SIDE);
+    table->event_tail[1] = head = table->event_head[1];
+    compositor_clip.gesture[1] = 0;
+
+    // The finger lifts.
+    compositor_touch_report(0, clock_monotonic_nanoseconds());
+    check("touch hold gone: the lift of a press held on a window that went is posted to no program in its row",
+          table->event_head[1] == head && compositor.touch.mode == COMPOSITOR_TOUCH_NONE);
+    check("touch hold gone: and the next program in the row is given no gesture of the person's for the clipboard",
+          compositor_clip.gesture[1] == 0);
+    life_close(1);
+    compositor.touchscreen[0] = 0;
+}
+
+/*
         The same sweep across the seam of two screens, A (320 by 192) and B (256 by 240) side by side: a window that
         straddles the seam is drawn on both, one put past B's edge is kept on B, and one put off both is brought back on.
 */
@@ -156802,6 +156862,7 @@ b32 main()
         check_compositor_lifecycle_seam();
         check_compositor_lifecycle_more();
         check_compositor_least_scale();
+        check_compositor_touch_hold_gone();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();
