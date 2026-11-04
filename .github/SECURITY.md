@@ -265,7 +265,17 @@ attacker gets its invariants here once there is a lane that proves them.
   locked tier sets Yama 3 and `modules_disabled`, both until the next boot;
   the reference tier keeps the kernel's own). They were the network
   watcher's, written a moment after boot by whichever process was that, and not
-  at all where it never started. `protected_regular` and `protected_fifos` bind
+  at all where it never started. The desktop image also writes
+  `vm.max_map_count` 1048576 (the kernel's is 65530; games and Proton map more),
+  on every tier but the hardened and locked ones, which keep 65530: a count of
+  mappings, not memory, and a tier that runs no games does not raise it.
+- **Game controllers** (`CONFIG_INPUT_UINPUT`, `CONFIG_INPUT_JOYDEV`, in
+  kernel/profile/desktop). `/dev/uinput` lets a program put events into the
+  machine and a `/dev/input/js*` node reads a pad, so both are on for the
+  desktop and off in `sec_hardened`, `sec_locked` and the server profile (each
+  says so with `#> overrides`). Both nodes are made by devtmpfs at mode 0600,
+  owned by root, which nothing in the image changes; a process that is not
+  root cannot open them. `protected_regular` and `protected_fifos` bind
   root as well: its `>file` onto a file another user made in a sticky `/tmp`
   fails, which is the attack they close; the boot, install and desktop lanes
   run with them on. `kptr_restrict` 1 and `dmesg_restrict` 1 leave root's
@@ -901,9 +911,12 @@ What a tier's image is expected to say once it has booted is a table in
 `lane_tier` (`test/run`), and `MOONWATER_IMAGE=dist/bootx64.efi
 MOONWATER_TIER=hardened sh test/run tier` reads it back from a guest: the
 sysctls init wrote, the mount flags, the lockdown line, the W+X page-table
-check and the IOMMU's strict mode. `sh test/run switches` is the composition
-half (what each tier and region names, and that a region keeps to its own
-level).
+check, the IOMMU's strict mode, `/dev/uinput`'s mode and `vm.max_map_count`.
+`sh test/run switches` is the composition half (what each tier and region
+names, that a region keeps to its own level, and the final value of the game
+controller switches and the Canvas define in each image). `sh test/run input`
+boots the desktop image and makes a virtual pad through `/dev/uinput`, reads
+a press back from its joystick node and makes a DRM sync object.
 
 What `sec_hardened` (`STRICT_TIGHT`) refuses where the default does what GNU
 coreutils does:

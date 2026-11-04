@@ -174,7 +174,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists wifi fuzz msan proof mutation ring0 tier scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="gpulists wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland audio dbus issues"
 
@@ -288,7 +288,8 @@ describe()
         mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
         ring0)    echo "a hostile program's ioctls, images and root requests against a booted kernel, and what its sanitizers say" ;;
         sound)    echo "the sound server heard: the image booted with an Intel HDA card whose output is a wav file, a second of 440 Hz played through moonwater audio test, and the tone measured in the file (a codec starts muted; a server that leaves it so plays into silence) (NOT RUN without qemu-system-x86_64, python3, a wav audio backend or an image)" ;;
-        tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for (MOONWATER_TIER names the tier)" ;;
+        tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for, /dev/uinput's mode and vm.max_map_count (MOONWATER_TIER names the tier)" ;;
+        input)    echo "the desktop image's game controllers, booted: a virtual pad made through /dev/uinput, its /dev/input/js node found and a press read back from it, a DRM sync object on the render node, and the node modes and vm.max_map_count (NOT RUN without qemu-system-x86_64, cc, an image or a box whose drm headers are installed)" ;;
         scale)    echo "every tool against the host's own from a kilobyte to a gigabyte and from one entry to a million: a loss, a cliff, a refusal or a super-linear step fails (NOT RUN off Linux or without the host tools)" ;;
         esac
 }
@@ -332,7 +333,7 @@ seam_apart()
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
         desktop) echo "desktop chrome gpulists" ;;
-        image) echo "ring0 tier usb firewall sound" ;;
+        image) echo "ring0 tier input usb firewall sound" ;;
         engine) echo "gate" ;;
         *) ;;
         esac
@@ -14158,6 +14159,72 @@ same 'a region alone: KFENCE' 1 "$(grep -c '^CONFIG_KFENCE=y' "$work/tier-art/.c
 same 'a region alone: no IBT' 0 "$(grep -c '^CONFIG_X86_KERNEL_IBT=y' "$work/tier-art/.config")"
 same 'baseline once' 1 "$(grep -c '^Adding profile: sec_baseline$' "$work/tier.log")"
 
+#       The game controller switches and the desktop's Canvas, as each image
+#       the build names composes them: the final value of CONFIG_INPUT_UINPUT
+#       and CONFIG_INPUT_JOYDEV, which a later profile can turn off, and
+#       whether the shell's header says the image has Canvas (SHELL_NO_CANVAS
+#       is absent on a desktop, and sets the desktop's sysctls and nothing
+#       else). The desktop, workstation and reference images have both; the
+#       hardened and locked tiers and the server image have neither, and say
+#       so with #> overrides. A profile that moves one of these without
+#       saying so is a "Profiles disagree" report and a red row here.
+group game
+game_profiles()
+{
+        game_name=$1
+        shift
+        mkdir -p "$work/game-$game_name" || return 1
+        build_tool config --set artifacts="$work/game-$game_name" any general gpu \
+                guests latency prod arch/x64 debug_none limbo desktop "$@" \
+                > "$work/game-$game_name.log" 2>&1 || return 1
+        [ "$(grep -c 'Profiles disagree' "$work/game-$game_name.log")" = 0 ]
+}
+#       The last line that sets the switch is the one that holds: a composed
+#       .config keeps every profile's line in the order they were named, and
+#       the kernel takes the last.
+game_value()
+{
+        game_last=$(grep -E "^(CONFIG_$1=|# CONFIG_$1 is not set)" "$2" | tail -n 1)
+        case $game_last in
+        "CONFIG_$1=y") echo y ;;
+        "CONFIG_$1=n" | "# CONFIG_$1 is not set") echo n ;;
+        "") echo absent ;;
+        *) echo other ;;
+        esac
+}
+game_check()
+{
+        game_name=$1
+        game_want=$2
+        shift 2
+        if game_profiles "$game_name" "$@"; then
+                same "$game_name: uinput" "$game_want" \
+                        "$(game_value INPUT_UINPUT "$work/game-$game_name/.config")"
+                same "$game_name: joydev" "$game_want" \
+                        "$(game_value INPUT_JOYDEV "$work/game-$game_name/.config")"
+                #       uinput is a member of the input menu: without the menu
+                #       the kernel drops it from the build (the build's own
+                #       configuration check names it), so the menu is asked for
+                #       wherever uinput is.
+                if [ "$game_want" = y ]; then
+                        same "$game_name: input menu for uinput" y \
+                                "$(game_value INPUT_MISC "$work/game-$game_name/.config")"
+                fi
+                build_tool config-header "$work/game-$game_name/.config" \
+                        "$work/game-$game_name.h" > /dev/null 2>&1
+                same "$game_name: Canvas in the header" "$game_canvas" \
+                        "$(grep -c '^#define SHELL_NO_CANVAS 1$' "$work/game-$game_name.h")"
+        else
+                lost "$game_name composes" "$(tail -3 "$work/game-$game_name.log" | tr '\n' ' ')"
+        fi
+}
+game_canvas=0 game_check default y wifi sec_default serial
+game_canvas=0 game_check workstation y wifi sec_workstation serial
+game_canvas=0 game_check reference y wifi sec_reference serial
+game_canvas=0 game_check hardened n wifi sec_hardened serial
+game_canvas=0 game_check locked n serial sec_locked
+game_canvas=1 game_check server n serial server
+
 group utility
 printf '%s\n' 'CONFIG_MOONWATER_CORE=y' '# CONFIG_MOONWATER_SHELL is not set' \
         '# CONFIG_MOONWATER_TOOL_TAC is not set' > "$work/switch-utility.config"
@@ -15688,11 +15755,11 @@ fi
 #       answer is the tier's and not the topology's. The locked tier also
 #       asks for page table isolation whatever the processor says.
 case $tier in
-reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on ;;
-default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on ;;
-workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on ;;
-hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on ;;
-locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 want_init=1-1 want_shuf=y want_smt=forceoff ;;
+reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=600 ;;
+default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=600 ;;
+workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=1048576 want_uinput=600 ;;
+hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=65530 want_uinput=none ;;
+locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 want_init=1-1 want_shuf=y want_smt=forceoff want_max=65530 want_uinput=none ;;
 esac
 
 work=$(mktemp -d)
@@ -15713,6 +15780,8 @@ printf 'lock-%s-end\n' "$(has 'Kernel is locked down')" | tr a-z A-Z
 printf 'wx-%s-end\n' "$(has 'Checked W+X mappings: passed')" | tr a-z A-Z
 printf 'iommu-%s-end\n' "$(has 'strict mode (set via kernel command line)')" | tr a-z A-Z
 printf 'dev-%s-%s-end\n' "$(stat -c %a /dev/spark)" "$(stat -c %a /dev/kmsg)" | tr a-z A-Z
+printf 'uinput-%s-end\n' "$(stat -c %a /dev/uinput 2> /dev/null || echo none)" | tr a-z A-Z
+printf 'mmap-%s-end\n' "$(cat /proc/sys/vm/max_map_count)" | tr a-z A-Z
 printf 'init-%s-%s-end\n' "$(has 'heap alloc:on')" "$(has 'heap free:on')" | tr a-z A-Z
 printf 'shuf-%s-end\n' "$(cat /sys/module/page_alloc/parameters/shuffle 2> /dev/null)" | tr a-z A-Z
 printf 'smt-%s-end\n' "$(cat /sys/devices/system/cpu/smt/control 2> /dev/null)" | tr a-z A-Z
@@ -15766,12 +15835,169 @@ says transcript "$tier: lockdown"                  "$(rv "lock-$want_lock-end")"
 says transcript "$tier: W+X check"                 "$(rv "wx-$want_wx-end")"
 says transcript "$tier: strict IOMMU"              "$(rv "iommu-$want_iommu-end")"
 says transcript "$tier: /dev/spark and /dev/kmsg modes" "$(rv "dev-666-644-end")"
+says transcript "$tier: /dev/uinput mode (none: no game controllers)" "$(rv "uinput-$want_uinput-end")"
+says transcript "$tier: vm.max_map_count (the desktop's count)" "$(rv "mmap-$want_max-end")"
 says transcript "$tier: memory zeroed on alloc and free" "$(rv "init-$want_init-end")"
 says transcript "$tier: the page allocator's shuffle" "$(rv "shuf-$want_shuf-end")"
 says transcript "$tier: the second thread of a core" "$(rv "smt-$want_smt-end")"
 [ "$tier" != locked ] || says transcript "$tier: page table isolation on any processor" "$(rv "pti-1-end")"
 never transcript "$tier: no kernel panic" 'Kernel panic'
 never transcript "$tier: nothing warned" 'cut here'
+
+counted
+)
+
+#
+#       The game controllers and the render node, in a booted desktop image.
+#
+#           MOONWATER_IMAGE=dist/bootx64.efi sh test/run input
+#
+#       profile/desktop turns on CONFIG_INPUT_UINPUT and CONFIG_INPUT_JOYDEV,
+#       and the desktop's init raises vm.max_map_count (system.c's desktop
+#       defaults). input_probe (test/input_probe.c, built by gcc and by clang
+#       and run as root from a stick) makes a virtual pad through /dev/uinput,
+#       waits for the joystick node joydev makes for it, presses its button
+#       and reads the press back from that node. Then it makes and destroys a
+#       DRM sync object on the render node: the guest has one because the
+#       machine has a virtio GPU, and the kernel advertises DRIVER_SYNCOBJ
+#       there. The probe reports the mode of each node it opened, and the
+#       lane reads the number from init's sysctl. The tier lane says the
+#       hardened and locked images have no /dev/uinput at all.
+#
+#       The probe's drm numbers are checked against the box's own drm.h: a
+#       change to the uapi, or a typo here, is a red row.
+#
+lane_input()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+case $image in
+*riscv64.efi|*aa64.efi) echo "  input        NOT RUN -- the devices it reads are x86-64's"; exit 2 ;;
+esac
+for need in qemu-system-x86_64 timeout cc; do
+        if ! command -v "$need" > /dev/null 2>&1; then
+                echo "  input        NOT RUN -- no $need"
+                exit 2
+        fi
+done
+if [ ! -f "$image" ]; then
+        echo "  input        NOT RUN -- no image at $image"
+        exit 2
+fi
+if [ ! -f /usr/include/drm/drm.h ]; then
+        echo "  input        NOT RUN -- no /usr/include/drm/drm.h to check the numbers against"
+        exit 2
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+
+counting input 12 40
+
+mkdir -p "$work/stick" || exit 1
+for compiler in cc clang; do
+        if ! command -v "$compiler" > /dev/null 2>&1; then
+                lost "input_probe with $compiler" "no $compiler on this machine"
+                continue
+        fi
+        if [ "$compiler" = cc ]; then probe=input_probe; else probe=input_probe_clang; fi
+        if "$compiler" -O2 -Wall -Wextra -Werror -static -o "$work/stick/$probe" test/input_probe.c \
+                > "$work/cc.log" 2>&1; then
+                won
+        else
+                lost "input_probe builds with $compiler" "$(tail -3 "$work/cc.log" | tr '\n' ' ')"
+        fi
+done
+
+#       The numbers the probe uses, as the box's own drm.h spells them.
+printf '%s\n' '#include <stdio.h>' '#include <sys/ioctl.h>' '#include <drm/drm.h>' \
+        'int main(void) { printf("%lx %lx\n", (unsigned long)DRM_IOCTL_SYNCOBJ_CREATE,' \
+        '        (unsigned long)DRM_IOCTL_SYNCOBJ_DESTROY); return 0; }' > "$work/drmnum.c"
+if cc -w -o "$work/drmnum" "$work/drmnum.c" > /dev/null 2>&1; then
+        same 'syncobj ioctls are drm.h'"'"'s' 'c00864bf c00864c0' "$("$work/drmnum")"
+else
+        lost 'syncobj ioctls are drm.h'"'"'s' 'drmnum did not build'
+fi
+
+#       The script rides the stick and is run by sh, so nothing typed is
+#       what the transcript shows as an answer.
+{
+        echo 'echo input-start'
+        echo 'echo input-mmap $(cat /proc/sys/vm/max_map_count)'
+        echo 'cp /mnt/stick/input_probe /tmp/input_probe && chmod 755 /tmp/input_probe'
+        echo '/tmp/input_probe; echo input-probe-exit $?'
+        echo 'cp /mnt/stick/input_probe_clang /tmp/input_probe_clang 2> /dev/null && chmod 755 /tmp/input_probe_clang'
+        echo '[ -x /tmp/input_probe_clang ] && /tmp/input_probe_clang; echo input-clang-exit $?'
+        echo 'echo input-uinput-mode $(stat -c %a /dev/uinput)'
+        echo 'echo input-end'
+} > "$work/stick/input.sh"
+{
+        echo "the console eats the front of the first line"
+        echo 'for i in $(seq 80); do [ -b /dev/sda1 ] && break; sleep 0.25; done'
+        echo 'mkdir -p /mnt/stick && mount -r -t vfat /dev/sda1 /mnt/stick'
+        echo 'sh /mnt/stick/input.sh'
+        echo 'poweroff'
+} > "$work/commands"
+
+#       The commands go in once the prompt is on the line, through a FIFO, as
+#       the tier lane's do, and the guest gets a virtio GPU so that it has a
+#       render node to make a sync object on. loglevel=4 keeps the kernel's
+#       info lines (the input core names each pad it registers) off the console
+#       the probe answers on: one landed inside a line of the probe's and cut it.
+set -- -cpu Nehalem
+[ -w /dev/kvm ] && set -- -enable-kvm -cpu host
+rm -f "$work/serial.in"
+mkfifo "$work/serial.in" || exit 1
+timeout 400 qemu-system-x86_64 -m 2G -smp 2 "$@" -kernel "$image" \
+        -no-reboot -display none -serial stdio -nic none \
+        -device virtio-gpu-pci \
+        -device qemu-xhci,id=xhci \
+        -drive "if=none,id=stick,format=raw,file=fat:ro:$work/stick,readonly=on" \
+        -device usb-storage,bus=xhci.0,drive=stick,removable=on \
+        -append "console=ttyS0 loglevel=4 drm_client_lib.active= moonwater.desktop=none" \
+        < "$work/serial.in" > "$work/transcript" 2>&1 &
+booting=$!
+exec 9> "$work/serial.in"
+waited=0
+until grep -q -F ' $ ' "$work/transcript" 2> /dev/null; do
+        kill -0 "$booting" 2> /dev/null || break
+        [ "$waited" -lt 180 ] || break
+        sleep 1
+        waited=$((waited + 1))
+done
+cat "$work/commands" >&9
+exec 9>&-
+wait "$booting" 2> /dev/null || true
+[ -n "${MOONWATER_INPUT_TRANSCRIPT:-}" ] && cp "$work/transcript" "$MOONWATER_INPUT_TRANSCRIPT"
+tr -d '\r' < "$work/transcript" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' > "$work/said"
+mv "$work/said" "$work/transcript"
+
+says transcript 'the script ran'                       'input-start'
+says transcript 'vm.max_map_count is the desktop'      'input-mmap 1048576'
+says transcript 'uinput device opened'                 'uinput open ok'
+says transcript 'uinput key bits'                      'uinput key bits ok'
+says transcript 'uinput axis bits'                     'uinput axis bits ok'
+says transcript 'uinput device written'               'uinput device written ok'
+says transcript 'uinput device created'               'uinput device created ok'
+says transcript 'joystick node appears'               'joystick node appears ok'
+says transcript 'joystick node opened'                'joystick node opened ok'
+says transcript 'button press sent'                   'button press sent ok'
+says transcript 'button press read from the node'     'button 0 pressed'
+says transcript 'button press read back ok'           'button press read back ok'
+says transcript 'render node opened'                  'render node opened ok'
+says transcript 'syncobj created on the render node'  'syncobj created ok'
+says transcript 'syncobj handle issued'               'syncobj handle 1'
+says transcript 'syncobj destroyed'                   'syncobj destroyed ok'
+says transcript 'probe passed (gcc)'                  'probe passed'
+says transcript 'gcc probe exit 0'                    'input-probe-exit 0'
+if command -v clang > /dev/null 2>&1; then
+        says transcript 'clang probe exit 0'          'input-clang-exit 0'
+fi
+says transcript 'the uinput node is root only'       'input-uinput-mode 600'
+says transcript 'the joystick node is root only'     'joystick mode 600'
+never transcript 'no kernel panic'                    'Kernel panic'
+never transcript 'nothing warned'                     'cut here'
+says transcript 'the machine came back'               'input-end'
 
 counted
 )
