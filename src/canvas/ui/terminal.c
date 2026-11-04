@@ -2424,9 +2424,7 @@ static void terminal_copy(unsigned int which)
         p8 address_to text;
         positive room, length = terminal_select_text(&text, &room);
 
-        if (length)
-                windows_clip_offer(&terminal.own, which, text, length);
-        array_store_release(text, room, length);
+        ui_clip_offer(&terminal.own, which, text, room, length);
 }
 
 /*
@@ -2578,31 +2576,20 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
 */
 static b32 terminal_select_key(const struct window_event address_to event, b32 address_to dirty)
 {
-        unsigned int flags = event->flags, chord = flags & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
-        unsigned int letter = (unsigned int)event->b < 32 && event->b ? ((unsigned int)event->b | 0x60) : (unsigned int)event->b | 0x20;
+        int clip = ui_clip_chord(event);
 
-        if (event->type != WINDOW_EVENT_KEY)
-                return false;
-        if (chord == (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL) && (letter == 'c' || letter == 'v'))
+        if (clip)
         {
-                if ((flags & WINDOW_KEY_DOWN) && letter == 'c')
-                        terminal_copy(WINDOWS_CLIP_CLIPBOARD);
-                if ((flags & WINDOW_KEY_DOWN) && letter == 'v')
-                        windows_clip_ask(&terminal.own, WINDOWS_CLIP_CLIPBOARD);
-                return true;
-        }
-        if (event->a == 110 && (chord == WINDOW_KEY_CONTROL || chord == WINDOW_KEY_SHIFT))
-        {
-                if (flags & WINDOW_KEY_DOWN)
+                if (event->flags & WINDOW_KEY_DOWN)
                 {
-                        if (chord == WINDOW_KEY_CONTROL)
+                        if (clip == UI_CLIP_COPY)
                                 terminal_copy(WINDOWS_CLIP_CLIPBOARD);
                         else
                                 windows_clip_ask(&terminal.own, WINDOWS_CLIP_CLIPBOARD);
                 }
                 return true;
         }
-        if ((flags & WINDOW_KEY_DOWN) && terminal.selecting && !ui_key_modifier(event->a))
+        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && terminal.selecting && !ui_key_modifier(event->a))
         {
                 terminal.selecting = false, terminal.select_touch = false;
                 address_to dirty = true;
@@ -2610,25 +2597,20 @@ static b32 terminal_select_key(const struct window_event address_to event, b32 a
         return false;
 }
 
-// The clipboard's answer: a paste that may be read is pasted; a copy taken lets its memfd go.
+// The clipboard's answer: a paste that may be read is pasted, the terminal's own (a block turned, a cursor hidden as a key's paste is).
 static b32 terminal_clip_event(b32 master, const struct window_event address_to event)
 {
-        if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
-                windows_clip_done((unsigned int)event->a);
-        if (event->b == WINDOWS_CLIP_READY)
-        {
-                p8 address_to bytes;
-                unsigned long length;
+        p8 address_to bytes;
+        unsigned long length;
 
-                if (windows_clip_read(&terminal.own, (unsigned int)event->a, &bytes, &length) > 0)
-                {
-                        // As a key does: the block is a cell turned round in the ring, and the line the paste writes
-                        // over it was turned back by the next hide, a block left on the cell where the paste began.
-                        cursor_hide();
-                        term_paste(bytes, length);
-                        windows_clip_free(bytes, length);
-                        return term_send(master);
-                }
+        if (ui_clip_read(&terminal.own, event, true, &bytes, &length))
+        {
+                // As a key does: the block is a cell turned round in the ring, and the line the paste writes
+                // over it was turned back by the next hide, a block left on the cell where the paste began.
+                cursor_hide();
+                term_paste(bytes, length);
+                windows_clip_free(bytes, length);
+                return term_send(master);
         }
         return true;
 }

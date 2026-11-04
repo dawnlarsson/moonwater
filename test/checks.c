@@ -122123,6 +122123,29 @@ static void check_kit_zoom_key(void)
     check("kit: a modifier alone is a modifier key, and a letter is not", ui_key_modifier(29) && ui_key_modifier(42) && !ui_key_modifier(30));
 }
 
+/*
+        The kit's clipboard keys (ui_clip_chord): Ctrl+Shift+C and Ctrl+Insert copy, Ctrl+Shift+V and Shift+Insert paste; Ctrl+C is the
+        control code the terminal sends, so it is no chord. The clipboard's answer (ui_clip_read) reads a READY paste only when the app
+        asked for one, and a REFUSED answer is never read.
+*/
+static void check_kit_clip_chord(void)
+{
+    struct window_event copy = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, 46, 'C'};
+    struct window_event paste = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, 47, 'V'};
+    struct window_event insert_copy = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, 110, 0};
+    struct window_event insert_paste = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT, 110, 0};
+    struct window_event control_c = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_KEY_CONTROL, 46, 'c'};
+    struct window_event answer = {WINDOW_EVENT_CLIP, 0, 3, WINDOWS_CLIP_REFUSED};
+    unsigned char *bytes = null;
+    unsigned long length = 0;
+
+    check("kit: Ctrl+Shift+C and Ctrl+Insert copy, Ctrl+Shift+V and Shift+Insert paste, and Ctrl+C is no chord",
+          ui_clip_chord(&copy) == UI_CLIP_COPY && ui_clip_chord(&insert_copy) == UI_CLIP_COPY && ui_clip_chord(&paste) == UI_CLIP_PASTE &&
+              ui_clip_chord(&insert_paste) == UI_CLIP_PASTE && ui_clip_chord(&control_c) == UI_CLIP_NONE);
+    check("kit: a refused paste is never read: the clipboard's answer asks for nothing and holds no bytes",
+          !ui_clip_read(null, &answer, true, &bytes, &length) && bytes == null && length == 0);
+}
+
 static void check_edge_steps(void)
 {
     struct ui_edge edge = {-25, 0, 0};
@@ -156230,6 +156253,7 @@ b32 main()
         check_terminal_select_stale();
         check_edge_steps();
         check_kit_zoom_key();
+        check_kit_clip_chord();
         check_take();
         check_land();
         check_glass();

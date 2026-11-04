@@ -11365,6 +11365,46 @@ static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t
         return timeout;
 }
 
+/*
+        The clipboard, for every app. ui_clip_offer offers text the app made (room is its capacity, as array_store_release takes it) to
+        a selection of the clipboard and gives its buffer back; nothing is offered for no text or no window. ui_clip_read is the
+        clipboard's answer: a copy taken or declined is let go of, and a READY answer to a paste the app asked for (asked) is read into
+        bytes, which the caller frees (windows_clip_free). ui_clip_chord is the clipboard's keys: Ctrl+Shift+C and Ctrl+Insert copy,
+        Ctrl+Shift+V and Shift+Insert paste (UI_CLIP_COPY or UI_CLIP_PASTE, UI_CLIP_NONE for any other key or a key that is not one).
+*/
+#define UI_CLIP_NONE 0
+#define UI_CLIP_COPY 1
+#define UI_CLIP_PASTE 2
+
+static void ui_clip_offer(const struct window_row address_to own, unsigned int which, p8 address_to text, positive room, positive length)
+{
+        if (length && own)
+                windows_clip_offer(own, which, text, length);
+        array_store_release(text, room, length);
+}
+
+static b32 ui_clip_read(const struct window_row address_to own, const struct window_event address_to event, b32 asked, p8 address_to address_to bytes,
+                        unsigned long address_to length)
+{
+        if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
+                windows_clip_done((unsigned int)event->a);
+        return asked && event->b == WINDOWS_CLIP_READY && own && windows_clip_read(own, (unsigned int)event->a, bytes, length) > 0;
+}
+
+static int ui_clip_chord(const struct window_event address_to event)
+{
+        unsigned int chord = event->flags & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
+        unsigned int letter = (unsigned int)event->b < 32 && event->b ? ((unsigned int)event->b | 0x60) : (unsigned int)event->b | 0x20;
+
+        if (event->type != WINDOW_EVENT_KEY)
+                return UI_CLIP_NONE;
+        if (chord == (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL) && (letter == 'c' || letter == 'v'))
+                return letter == 'c' ? UI_CLIP_COPY : UI_CLIP_PASTE;
+        if (event->a == 110 && (chord == WINDOW_KEY_CONTROL || chord == WINDOW_KEY_SHIFT))
+                return chord == WINDOW_KEY_CONTROL ? UI_CLIP_COPY : UI_CLIP_PASTE;
+        return UI_CLIP_NONE;
+}
+
 // A selection's text to a selection of the clipboard; never a masked field's.
 static fn ui_text_copy(struct ui_text address_to t, unsigned int which)
 {
@@ -11374,9 +11414,7 @@ static fn ui_text_copy(struct ui_text address_to t, unsigned int which)
         if (t->masked)
                 return;
         length = doc_copy_text(&t->doc, &text, &room);
-        if (length && t->own)
-                windows_clip_offer(t->own, which, text, length);
-        array_store_release(text, room, length);
+        ui_clip_offer(t->own, which, text, room, length);
 }
 
 // The clipboard asked for a paste into the widget: its answer is the widget's, not another's of the same window.
@@ -11446,23 +11484,19 @@ static p32 ui_text_paste(struct ui_text address_to t, const p8 address_to bytes,
 // What the clipboard said: the paste this widget asked for, when it may be read.
 static p32 ui_text_clip(struct ui_text address_to t, const struct window_event address_to event)
 {
-        if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
-                windows_clip_done((unsigned int)event->a);
-        if ((event->b == WINDOWS_CLIP_READY || event->b == WINDOWS_CLIP_REFUSED) && t->pasting)
-        {
-                p8 address_to bytes;
-                unsigned long length;
-                p32 asks = 0;
+        b32 asked = t->pasting && (event->b == WINDOWS_CLIP_READY || event->b == WINDOWS_CLIP_REFUSED);
+        p8 address_to bytes;
+        unsigned long length;
+        p32 asks = 0;
 
+        if (asked)
                 t->pasting = false;
-                if (event->b == WINDOWS_CLIP_READY && t->own && windows_clip_read(t->own, (unsigned int)event->a, &bytes, &length) > 0)
-                {
-                        asks = ui_text_paste(t, bytes, length);
-                        windows_clip_free(bytes, length);
-                }
-                return asks;
+        if (ui_clip_read(t->own, event, asked, &bytes, &length))
+        {
+                asks = ui_text_paste(t, bytes, length);
+                windows_clip_free(bytes, length);
         }
-        return 0;
+        return asks;
 }
 
 /*
