@@ -209399,6 +209399,45 @@ b32 main(void)
                 else
                         string_format(log, "  gpu scanout: no amdgpu display node, skipped\n");
         }
+
+        // A window dragged larger, a row a present, in presents the GPU does not draw (none of them has damage, as a present of a landing, scaled, has
+        // none the GPU draws): compositor_gpu_present maps the picture at each new size, a hundred maps and more than the 64 there are room for, and then
+        // composes the window at its last size into a headless scanout, which must be compositor_draw's.
+        {
+                enum { SW = 696, SH = 419 };
+                long tall = system_call_6(syscall(mmap), 0, 2 << 20, 3, 0x22, (positive)-1, 0), screen = system_call_6(syscall(mmap), 0, (positive)SW * SH * 4, 3, 0x22, (positive)-1, 0);
+                struct compositor_target reference = {gpu_kit_want, PP, SW, SH, 0, 0, SW, SH, 0, 0, 0};
+                struct compositor_frame f;
+                positive wrong = 0;
+                int drew;
+
+                if ((tall < 0 && tall > -4096) || (screen < 0 && screen > -4096))
+                        return 1;
+                for (positive i = 0; i < (2 << 18); i++)
+                        ((unsigned int address_to)tall)[i] = gpu_random() | 0xff000000u;
+                memory_zero(&compositor_gscene, sizeof(compositor_gscene));
+                compositor_gscene.ops = (unsigned int address_to)((p8 address_to)gpu.at + COMPOSITOR_GPU_OPS_AT), compositor_gscene.room = (1 << 20) / 32;
+                compositor_gscene.tables = (unsigned char address_to)gpu.at + COMPOSITOR_GPU_TABLES_AT, compositor_gscene.tables_at = COMPOSITOR_GPU_TABLES_AT;
+                compositor_gscene.tables_size = 1 << 20;
+                compositor_gpu_state.up = 1, compositor_gpu_state.force = 1, compositor_gpu_state.dead = 0, compositor_gpu = 1, compositor.card = -1;
+                compositor.width = SW, compositor.height = SH, compositor.scanout = (unsigned int address_to)screen, compositor.scanout_pitch = SW * 4;
+                compositor.scanout_bytes = (positive)SW * SH * 4, compositor.cursor.drawn = 0, compositor.damages = 0;
+                memory_zero(&f, sizeof(f));
+                f.x = 40, f.y = 40, f.width = 200, f.scale = 100, f.pitch = 1024, f.pixels = (const unsigned int address_to)tall;
+                for (f.height = 200; f.height < 300; f.height++)
+                        compositor_gpu_present(&f, 1);
+                compositor.damages = 1, compositor.damage[0][0] = 0, compositor.damage[0][1] = 0, compositor.damage[0][2] = SW, compositor.damage[0][3] = SH;
+                drew = compositor_gpu_present(&f, 1);
+                memory_fill_u32_rect(gpu_kit_want, PP, SW, SH, compositor_ground);
+                compositor_draw(&reference, &f);
+                for (positive y = 0; drew && y < SH; y++)
+                        for (positive x = 0; x < SW; x++)
+                                wrong += ((unsigned int address_to)screen)[y * SW + x] != gpu_kit_want[y * PP + x];
+                if (!drew || wrong)
+                        string_format(log, "  gpu presents: %s, %p pixels wrong, %p maps held\n", drew ? (string_address) "drawn" : (string_address) "not drawn", wrong, (positive)gpu_map_count);
+                check("gpu presents: a window grown through a hundred maps is composed by the GPU at its last size", drew && !wrong);
+                compositor.damages = 0, compositor_gpu_state.up = 0;
+        }
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */

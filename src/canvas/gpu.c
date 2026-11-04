@@ -514,14 +514,31 @@ static positive gpu_place(positive bytes)
         return at + bytes <= GPU_VA_END ? at : 0;
 }
 
+// The map at i let go of: unmapped, its buffer closed, the last map in its place.
+static void gpu_drop(unsigned int i)
+{
+        p64 va[8] = {gpu_maps[i].handle, 2, gpu_maps[i].va, 0, gpu_maps[i].to - gpu_maps[i].from}, close[1] = {gpu_maps[i].handle};
+
+        gpu_io(1u, 8, 64, va);
+        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
+        gpu_maps[i] = gpu_maps[--gpu_map_count];
+}
+
+// With every map held, the one used longest ago goes first (a window dragged larger makes a map at each size, faster than gpu_trim lets them go), unless all
+// are this tick's.
 static b32 gpu_map(const void *addr, positive size)
 {
-        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at = gpu_place(to - from);
-        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | 14ull << 32, at, 0, to - from};
+        positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
+        p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | 14ull << 32, 0, 0, to - from};
+        unsigned int old = 0;
 
-        if (!at || gpu_map_count == 64 || !gpu_io(3u, 0x11, 24, up))
+        for (unsigned int i = 1; gpu_map_count == 64 && i < 64; i++)
+                old = gpu_tick - gpu_maps[i].used > gpu_tick - gpu_maps[old].used ? i : old;
+        if (gpu_map_count == 64 && gpu_maps[old].used != gpu_tick)
+                gpu_drop(old);
+        if (gpu_map_count == 64 || !(at = gpu_place(to - from)) || !gpu_io(3u, 0x11, 24, up))
                 return false;
-        va[0] = up[2] >> 32;
+        va[0] = up[2] >> 32, va[2] = at;
         if (!gpu_io(1u, 8, 64, va))
                 return false;
         gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at;
@@ -542,17 +559,7 @@ static positive gpu_va_bytes(const void *pointer, positive bytes)
 }
 #define gpu_va(pointer) gpu_va_bytes(pointer, 1)
 
-// A tick is over: the maps unused for 120 ticks are unmapped and their buffers closed.
-// The map at i let go of: unmapped, its buffer closed, the last map in its place.
-static void gpu_drop(unsigned int i)
-{
-        p64 va[8] = {gpu_maps[i].handle, 2, gpu_maps[i].va, 0, gpu_maps[i].to - gpu_maps[i].from}, close[1] = {gpu_maps[i].handle};
-
-        gpu_io(1u, 8, 64, va);
-        system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
-        gpu_maps[i] = gpu_maps[--gpu_map_count];
-}
-
+// A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers closed.
 static void gpu_trim(void)
 {
         gpu_tick++;

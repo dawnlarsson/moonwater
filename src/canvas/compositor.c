@@ -7016,7 +7016,12 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         if (!compositor_gpu || compositor_gpu_state.dead || (compositor.card < 0 && !compositor_gpu_state.force) ||
             compositor_spots_any(0) || (compositor.width & 3) || (compositor.scanout_pitch & 15))
                 return 0;
-        if (!compositor_gpu_up() || !(out = compositor_gpu_output()))
+        if (!compositor_gpu_up())
+                return 0;
+        // A present is a tick of the maps' (gpu_trim) whether the GPU draws it or not: a run of presents the processor draws (a window landing, scaled) made
+        // maps of the pictures and let none go, and once all were held the GPU drew nothing again.
+        gpu_trim();
+        if (!(out = compositor_gpu_output()))
                 return 0;
         g->width = (unsigned int)compositor.width, g->height = (unsigned int)compositor.height;
         for (unsigned int k = 0; k < count; k++)
@@ -7045,7 +7050,6 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
         compositor_gpu_state.failures = 0;
-        gpu_trim();
         return 1;
 }
 
