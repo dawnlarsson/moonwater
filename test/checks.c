@@ -57459,6 +57459,50 @@ static fn lock_pool(bool emulated)
                 parallel_reset(0);
         }
 
+        //      Back to back runs of every count the callers use. Each run wakes
+        //      only as many workers as its count can use, so a count is a
+        //      different wake every time: every index must run once per
+        //      parallel_for, and every ordered run must call the sink once per
+        //      job, in order.
+        {
+                static const positive stress_counts[] = {2, 3, 4, 5, 8, 9, 16, 33, 64};
+                positive stress_round;
+                bool stress_exact = true;
+
+                parallel_reset(8);
+
+                for (stress_round = 0; stress_round < 4000; stress_round++)
+                {
+                        positive count = stress_counts[stress_round % (sizeof(stress_counts) / sizeof(stress_counts[0]))];
+                        positive each;
+
+                        pool_stop_index = positive_max;
+
+                        for (each = 0; each < count; each++)
+                                pool_ran[each] = 0;
+
+                        if (!parallel_for(pool_count_job, null, count, PARALLEL_SPREAD))
+                                stress_exact = false;
+
+                        for (each = 0; each < count; each++)
+                                stress_exact = stress_exact && pool_ran[each] == 1;
+
+                        if (stress_round % 16 == 0)
+                        {
+                                pool_fresh_stream(address_of stream);
+
+                                if (!parallel_ordered(pool_emit_job, pool_sink, address_of stream,
+                                                      count, PARALLEL_SPREAD))
+                                        stress_exact = false;
+
+                                stress_exact = stress_exact && stream.calls == count && stream.wrong == 0;
+                        }
+                }
+
+                check("back to back runs of 2 to 64 jobs run every index once, and ordered runs answer every sink call in order",
+                      stress_exact);
+        }
+
         //      Stopping, at width 8.
         parallel_reset(8);
         pool_stop_index = 300;
@@ -209045,6 +209089,25 @@ static positive pool_bench_clock(void)
         return when[0] * 1000000000ull + when[1];
 }
 
+static volatile positive pool_tiny_sum = 0;
+
+//      A job with almost no work, so a small run's time is the run itself.
+static fn pool_tiny_job(address_any context, positive index)
+{
+        (void)context;
+        atomic_add(address_of pool_tiny_sum, index + 1);
+}
+
+//      Voluntary plus involuntary switches of every thread of this process
+//      (RUSAGE_SELF sums the threads, the exited ones included).
+static positive pool_bench_switches(void)
+{
+        positive usage[18] = {0};
+
+        system_call_2(syscall(getrusage), 0, (positive)usage);
+        return usage[16] + usage[17];
+}
+
 b32 main(void)
 {
         positive limit;
@@ -209102,6 +209165,49 @@ b32 main(void)
 
                 if (width == limit)
                         break;
+        }
+
+        //      Small runs at the counts callers use: the compositor's bands
+        //      are at most eight, and the terminal's are at most its own
+        //      bands. Best of three, 2000 runs each, time per run and the
+        //      switches the process makes per run.
+        {
+                static const positive small_counts[] = {1, 2, 4, 8, 64};
+                positive kind;
+
+                parallel_reset(limit);
+
+                for (kind = 0; kind < sizeof(small_counts) / sizeof(small_counts[0]); kind++)
+                {
+                        positive best = positive_max;
+                        positive best_switches = 0;
+                        positive round2;
+
+                        for (round2 = 0; round2 < 3; round2++)
+                        {
+                                positive runs = 2000;
+                                positive k;
+                                positive switches_before = pool_bench_switches();
+                                positive started = pool_bench_clock();
+                                positive spent;
+                                positive switches;
+
+                                for (k = 0; k < runs; k++)
+                                        parallel_for(pool_tiny_job, null, small_counts[kind], PARALLEL_SPREAD);
+
+                                spent = pool_bench_clock() - started;
+                                switches = pool_bench_switches() - switches_before;
+
+                                if (spent / runs < best)
+                                {
+                                        best = spent / runs;
+                                        best_switches = switches / runs;
+                                }
+                        }
+
+                        string_format(log, "  small run: count %p  %p ns per run  %p switches per run (width %p)\n",
+                                      small_counts[kind], best, best_switches, limit);
+                }
         }
 
         parallel_reset(0);

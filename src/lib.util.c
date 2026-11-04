@@ -10360,12 +10360,23 @@ static bool parallel_inline_wanted(positive count, positive bytes)
                thread_self()->run || parallel_width() == 1;
 }
 
-static fn parallel_publish(parallel_run address_to run)
+/*
+        Wakes at most wake sleepers, not every one. A sleeper re-reads the
+        generation before it sleeps, so a worker awake at the publish takes
+        the run, and a sleeper that is not woken stays asleep until a later
+        wake reaches it. A run is always finished by the caller alone (its
+        claims are a compare-and-swap on next, and the withdraw waits only for
+        busy), so the count is a choice of speed, never a condition of
+        progress.
+*/
+#define PARALLEL_WAKE_ALL (1 << 30)
+
+static fn parallel_publish(parallel_run address_to run, positive wake)
 {
         thread_self()->run = run;
         atomic_exchange(address_of parallel_pool.run, run);
         atomic_inc(address_of parallel_pool.generation);
-        thread_wake(address_of parallel_pool.generation, 1 << 30);
+        thread_wake(address_of parallel_pool.generation, (b32)wake);
 }
 
 static fn parallel_withdraw(void)
@@ -10404,7 +10415,11 @@ pub bool parallel_for(parallel_job job, address_any context, positive count,
                 return !run.stop;
         }
 
-        parallel_publish(address_of run);
+        //      The caller claims beside its helpers, so count - 1 helpers can
+        //      each take a job, and no more than the pool has.
+        parallel_publish(address_of run,
+                         count - 1 < parallel_pool.workers ? count - 1
+                                                           : parallel_pool.workers);
         parallel_participate(address_of run);
         parallel_withdraw();
 
@@ -10456,7 +10471,7 @@ pub bool parallel_ordered(parallel_emit_job job, parallel_sink sink,
         if (!run.ring)
                 return false;
 
-        parallel_publish(address_of run);
+        parallel_publish(address_of run, PARALLEL_WAKE_ALL);
 
         while (emitted < count)
         {
@@ -11594,7 +11609,7 @@ static fn parallel_tree_publish_maybe(parallel_tree_run address_to run,
         address_to published = true;
 
         if (run->seats > 0 && parallel_ready())
-                parallel_publish(address_of run->base);
+                parallel_publish(address_of run->base, PARALLEL_WAKE_ALL);
 }
 
 //      The emitter's wait for a node to reach a state, running what it can.
