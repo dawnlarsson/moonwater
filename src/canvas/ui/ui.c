@@ -11904,6 +11904,8 @@ static fn ui_field_close(struct ui_text address_to t)
 
 static fn ui_text_close(struct ui_text address_to t)
 {
+        // A text that goes has no keys, and the count of its focused fields is given back (ui_field_focus).
+        ui_field_focus(t, false);
         if (t->masked && t->doc.added)
                 memory_zero(t->doc.added, t->doc.added_room);
         memory_zero(t->preedit, sizeof(t->preedit));
