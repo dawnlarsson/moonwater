@@ -143540,6 +143540,136 @@ static fn check_kit_hand(void)
 }
 
 /*
+        A wheel's notches near an end of a list move it as far as they move it anywhere, and the end only stops it. A stream of
+        plain notches (a mouse's, or a Mac's trackpad as the machine's tablet gives it: one notch to an event, 8 to 50 ms apart,
+        no pixels and no release) is given to a list with its end a few rows off, and to a list so long that its end is out of
+        reach. Where the long list takes the stream to is where the notches ask to go; the near list takes it there or to its end.
+        The wheel took the region in hand when the glide's AIM passed the end, which is a long way before the content did (the aim
+        runs up to twelve rows ahead of the content): the glide stopped where the hand took it, and the hand's release, which
+        reads a speed off the notches as if they were a finger, threw the content to the end when a second notch had come. So
+        three notches at 8 ms from 500 took it to 540, two to 700, four to 800.
+
+          the end       when the notches carry past the end (anywhere else they would go 40 px beyond it), the content is at the end
+          the reach     it is never farther than the long list took it, nor farther than the end
+          the count     one more notch never ends the content nearer to the end
+          the residue   after a stretch has sprung home, a stream back from the end goes as it does from an end that was never pulled
+*/
+struct wheel_note
+{
+        long us;
+        int a;
+};
+
+// A region of the given length scrolled to start and given the notes at their times, frames a display period (16,667 us) apart on
+// the kit's clock, until it rests; where it rests. Notes after time zero; the wheel's clock is the kit's.
+static int wheel_stream(int content, int start, const struct wheel_note address_to notes, int count)
+{
+        struct ui ui = terminal.ui;
+        struct ui_scroll s;
+        long us, next_frame = 0, last = 0;
+        int next = 0;
+
+        ui.scale = 100;
+        memory_zero(&s, sizeof(s));
+        s.x = 100, s.y = 10, s.height = 200, s.content = content, s.view = 200, s.bounds = 1, s.scale = 100;
+        ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.wheel_clock = 0;
+        ui_scroll_set(&s, start);
+        for (int k = 0; k < count; k++)
+                last = notes[k].us > last ? notes[k].us : last;
+        for (us = 0; us < last + 8000000; us += 1000)
+        {
+                while (next < count && notes[next].us <= us)
+                {
+                        struct window_event turn = {WINDOW_EVENT_WHEEL, 0, notes[next].a, 0};
+
+                        ui_kit.now = 9000000000ll + notes[next].us * 1000, ui_kit.wheel_clock = ui_kit.now;
+                        ui_wheel_turn(&ui, &s, &turn);
+                        next++;
+                }
+                if (us >= next_frame)
+                {
+                        ui_kit.now = 9000000000ll + us * 1000, ui_kit.wheel_clock = ui_kit.now, ui_kit.busy = 0;
+                        ui_scroll_glide(&ui, &s);
+                        next_frame += 16667;
+                        if (next == count && us > last + 500000 && !s.gliding && !s.back.live && !s.dragging && !s.hand)
+                                break;
+                }
+        }
+        ui_kit.wheel_clock = 0;
+        return s.scroll;
+}
+
+static fn check_kit_wheel_near_end(void)
+{
+        static const long gaps[] = {8, 16, 33, 50, 100, 200}; // ms between notches
+        static const int off[] = {0, 20, 60, 100, 200, 300, 400, 500}; // px from the end the content starts at
+        struct wheel_note notes[40];
+        const int near_content = 1000, most = 800, far_content = 100000, far_start = 50000;
+        int ends_ok = 0, ends_bad = 0, reach_bad = 0, count_bad = 0, residue_bad = 0, runs = 0, worst_end = 0, worst_reach = 0;
+
+        for (int dir = -1; dir <= 1; dir += 2) // -1: notches down (the scroll grows), 1: up
+                for (positive g = 0; g < sizeof(gaps) / sizeof(gaps[0]); g++)
+                        for (positive o = 0; o < sizeof(off) / sizeof(off[0]); o++)
+                        {
+                                int start = dir < 0 ? most - off[o] : off[o], to = dir < 0 ? most : 0, behind = 0;
+
+                                for (int count = 1; count <= 10; count++)
+                                {
+                                        int far_final, near_final, carried, gone, still, missing;
+
+                                        for (int k = 0; k < count; k++)
+                                                notes[k].us = 100000 + k * gaps[g] * 1000, notes[k].a = 120 * dir;
+                                        far_final = wheel_stream(far_content, far_start, notes, count);
+                                        near_final = wheel_stream(near_content, start, notes, count);
+                                        carried = (far_final - far_start) * -dir; // how far the notches carry it, toward the end (0 or more)
+                                        gone = (near_final - start) * -dir;       // how far they carried it here
+                                        still = (to - near_final) * -dir;         // what is left to the end
+                                        missing = carried - (dir < 0 ? most - start : start);
+                                        runs++;
+                                        if (missing >= 40 && still > 1)
+                                                ends_bad++, worst_end = still > worst_end ? still : worst_end;
+                                        else if (missing >= 40)
+                                                ends_ok++;
+                                        if (gone > carried + 2 || gone < 0)
+                                                reach_bad++, worst_reach = gone - carried > worst_reach ? gone - carried : worst_reach;
+                                        if (count > 1 && gone < behind - 1)
+                                                count_bad++;
+                                        behind = gone;
+                                }
+                        }
+        // The residue: ten notches down at 33 ms into the end and a stretch springing home, then n notches up at 100 ms.
+        for (int count = 1; count <= 8; count++)
+        {
+                struct wheel_note both[40];
+                int pulls = 10, fresh, after;
+
+                for (int k = 0; k < count; k++)
+                        notes[k].us = 100000 + k * 100000, notes[k].a = 120;
+                fresh = wheel_stream(near_content, most, notes, count);
+                for (int k = 0; k < pulls; k++)
+                        both[k].us = 100000 + k * 33000, both[k].a = -120;
+                for (int k = 0; k < count; k++)
+                        both[pulls + k].us = 2000000 + k * 100000, both[pulls + k].a = 120;
+                after = wheel_stream(near_content, most - 60, both, pulls + count);
+                residue_bad += after - fresh > 1 || fresh - after > 1;
+        }
+        for (int count = 1; count <= 6; count++)
+        {
+                for (int k = 0; k < count; k++)
+                        notes[k].us = 100000 + k * 8000, notes[k].a = -120;
+                string_format(log, "  kit wheel near an end: from 500, %p notches 8 ms apart rest at %b (a list with no end near takes them %b px)\n", (positive)count,
+                              (bipolar)wheel_stream(near_content, 500, notes, count), (bipolar)(wheel_stream(far_content, far_start, notes, count) - far_start));
+        }
+        string_format(log, "  kit wheel near an end: %p runs; %p carry to the end, %p stop short of it (up to %b px); %p go farther than the notches carry them (by %b px at most); %p go less far with one more notch; %p reverse streams differ after a stretch\n",
+                      (positive)runs, (positive)ends_ok, (positive)ends_bad, (bipolar)worst_end, (positive)reach_bad, (bipolar)worst_reach, (positive)count_bad, (positive)residue_bad);
+        check("kit wheel near an end: notches that carry past the end leave the content at the end, not short of it", ends_bad == 0 && ends_ok > 100);
+        check("kit wheel near an end: the content goes no farther than the notches carry it anywhere (and never against them)", reach_bad == 0);
+        check("kit wheel near an end: one more notch never leaves the content farther from the end", count_bad == 0);
+        check("kit wheel near an end: a stream back from the end goes as it does from an end that was never pulled, after the stretch has sprung home",
+              residue_bad == 0);
+}
+
+/*
         The kit's row of buttons (ui_buttons), which a window's foot is made of: the buttons at the right of a row, the first
         leftmost; an action that says what it does takes the kit's press again to confirm, from the keys and from the pointer, and a
         held key's repeats are no press; the keys are one focus along the row that Shift-Tab gives it and the ends and Up give back;
@@ -152224,6 +152354,7 @@ b32 main()
         check_kit_finger_pull();
         check_kit_confirm_repeat();
         check_kit_hand();
+        check_kit_wheel_near_end();
         check_terminal_wheel_curve();
         check_kit_turn();
         check_kit_tab_ripple();

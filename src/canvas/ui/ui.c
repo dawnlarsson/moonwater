@@ -5454,6 +5454,7 @@ struct ui_scroll
         int edge, scale;
         b64 notch;                 // when the region last took a notch of the wheel, ns (ui_wheel_rate)
         b32 hand;                  // a notch past an end or a precise input has the region in hand (ui_scroll_hand)
+        b32 precise;               // the hand is a trackpad's: its release throws on its speed. A wheel's notches are no finger, and throw nothing
         struct ui_drag hand_drag;  // the hand's reports, fitted for the release's speed (ui_scroll_release)
 };
 
@@ -5962,12 +5963,13 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
 }
 
 // The hand let go (no report for UI_HAND_GAP_NS): its release is the fit over its last reports, from the last of them, and the
-// region goes on as a finger's release does.
+// region goes on as a finger's release does. A trackpad's hand is a finger, and throws on that speed; a wheel's notches are not
+// (they are a distance each, not a place the finger is at), and a stretch they pulled springs home and a region inside its ends stops.
 static void ui_scroll_release(struct ui_scroll address_to s)
 {
         positive last = s->hand_drag.samples > 0 ? s->hand_drag.when[s->hand_drag.samples - 1] : 0;
         long speed = last ? ui_drag_velocity(&s->hand_drag, last) : 0;
-        b32 thrown = speed >= UI_DRAG_THROW || speed <= -UI_DRAG_THROW;
+        b32 thrown = s->precise && (speed >= UI_DRAG_THROW || speed <= -UI_DRAG_THROW);
 
         s->hand = 0;
         ui_scroll_let_go(s, thrown, speed);
@@ -5982,8 +5984,13 @@ static void ui_scroll_hand(struct ui_scroll address_to s, b64 move, positive now
 
         if (!s->dragging || !s->hand)
         {
+                // A stretch being sprung home is taken where it is (ui_scroll_stop put the position there): a pull that came while
+                // the last one was going home goes on from it, and does not start again from the end.
+                b32 sprung = s->bounds && s->back.live;
+
                 ui_scroll_stop(s);
-                ui_scroll_rest(s);
+                if (!sprung)
+                        ui_scroll_rest(s);
                 s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0, s->flung = 0;
                 s->hand = 1;
                 ui_drag_start(&s->hand_drag, (int)(s->at >> 8), now);
@@ -6003,6 +6010,7 @@ static b32 ui_scroll_precise(const struct ui address_to ui, struct ui_scroll add
         if (!q)
                 return false;
         s->notch = now;
+        s->precise = 1;
         ui_scroll_hand(s, -(b64)q, now);
         return s->scroll != before || s->bounds;
 }
@@ -6118,8 +6126,12 @@ static b64 ui_wheel_rate(const struct ui_scroll address_to s, b64 now)
 // A turn of the wheel, in the 120ths of a notch the compositor sends: what is under a step is kept for the next turn.
 // A notch is a row (a unit, where there are them), and its distance is added to the glide's speed as well as its aim, at the
 // wheel's rate (ui_wheel_rate). With the wheel smooth off (ui_kit.wheel_off) a notch is one row at once: no glide, no rate.
-// A notch past an end of a bounded region takes the region in hand (ui_scroll_hand), one for one, so the overscroll grows with
-// the notches from the first pixel past the end and is let go with the release's speed; nothing runs to the end first.
+// A notch that carries the content itself past an end of a bounded region (from where it is drawn, by its own distance) takes the
+// region in hand (ui_scroll_hand), one for one, so the overscroll grows with the notches from the first pixel past the end and
+// springs home on the release; nothing runs to the end first. Where the content is still short of the end the notch is a glide's as
+// anywhere else, its aim held at the end (ui_scroll_fit): the aim of a spin runs up to twelve rows ahead of the content, and a hand
+// taken when the AIM passed the end stopped the glide where the hand found it (three notches from 500 took the content to 540,
+// two to 700) and read its release as a finger's (a fourth took it to the end).
 static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll address_to s, int delta)
 {
         long total = (long)s->wheel + (long)delta * (s->unit > 0 ? 1 : UI_ROW * ui->scale / 100);
@@ -6132,18 +6144,32 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
         now = ui_wheel_clock();
         rate = ui_kit.wheel_off ? 256 : ui_wheel_rate(s, now);
         s->notch = now;
-        base = s->gliding || s->back.live ? s->aim : s->dragging ? s->at : (b64)s->scroll << 8;
-        aim = base - (b64)steps * unit * UI_SCROLL_SCALE * rate / 256;
         most = ui_scroll_most256(s);
-        if (s->bounds && most && !ui_kit.wheel_off && (s->hand || aim < 0 || aim > most))
+        pos = s->gliding || s->back.live || s->dragging ? s->at : (b64)s->scroll << 8;
+        if (s->bounds && most && !ui_kit.wheel_off)
         {
                 // The hand moves one notch's distance at the wheel's unit, with no acceleration: a notch past an end is a pull, not a spin.
-                ui_scroll_hand(s, -(b64)steps * unit * UI_SCROLL_SCALE, now);
-                ui_scroll_show(s);
-                return true;
+                b64 move = -(b64)steps * unit * UI_SCROLL_SCALE;
+
+                if ((s->hand && s->dragging && (s->at < 0 || s->at > most)) || pos + move < 0 || pos + move > most)
+                {
+                        s->precise = 0;
+                        ui_scroll_hand(s, move, now);
+                        ui_scroll_show(s);
+                        return true;
+                }
+                if (s->hand)
+                {
+                        // The notches took the content back inside its ends: the hand lets go of it where it is, as a stop and not a throw,
+                        // and this notch is the glide's.
+                        s->hand = 0;
+                        ui_scroll_let_go(s, 0, 0);
+                        pos = s->gliding || s->back.live || s->dragging ? s->at : (b64)s->scroll << 8;
+                }
         }
+        base = s->gliding || s->back.live ? s->aim : s->dragging ? s->at : (b64)s->scroll << 8;
+        aim = base - (b64)steps * unit * UI_SCROLL_SCALE * rate / 256;
         // The travel is capped where the region is drawn: a spin's aim is at most UI_WHEEL_REACH units past it.
-        pos = s->gliding || s->back.live || s->dragging ? s->at : (b64)s->scroll << 8;
         reach = (b64)UI_WHEEL_REACH * (s->unit > 0 ? s->unit : UI_ROW * ui->scale / 100) * UI_SCROLL_SCALE;
         aim = aim < pos - reach ? pos - reach : aim > pos + reach ? pos + reach : aim;
         aim = ui_scroll_fit(s, aim);
