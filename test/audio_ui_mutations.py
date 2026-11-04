@@ -144,6 +144,7 @@ M = [
     (X, "the off message missing", "ui_strips_message(ui, strips, WORDS(mixer_off), false);", "(void)strips;"),
     # ---- the terminal's kit: its faces are the grid's, so the actions bar's labels measure and draw ----
     (TM, "terminal overlay's kit is the whole window (a knob hung below the last line writes past the picture)", "        kit.width = (int)terminal.width - (int)terminal.pad;\n        kit.height = kit.bottom = (int)terminal.height - (int)terminal.pad_y;\n", ""),
+    (TM, "terminal's long press selects nothing (the paired rows: a long press on charlie)", "        if (event->a == UI_POINTER_RIGHT && (event->flags & WINDOW_KEY_HOLD))\n", "        if (0 && event->a == UI_POINTER_RIGHT && (event->flags & WINDOW_KEY_HOLD))\n"),
     (TM, "terminal kit has no faces (the bar's labels fault)", "        terminal.ui.regular = terminal.plain[0];\n        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];\n", ""),
 ]
 
