@@ -217222,6 +217222,11 @@ b32 main(void)
                                                 f->close = 0;
                                 }
                         }
+                        // a frame with a line and no picture (a grid's border): it draws its line and corners only, its radius no past its line (the
+                        // processor reads a picture for a round corner's contents, so a frame with a bigger radius has none drawn at all)
+                        for (int k = 0; k < count; k++)
+                                if (!frames[k].builtin && gpu_random() % 8 == 0)
+                                        frames[k].pixels = 0, frames[k].close = 0, frames[k].radius = frames[k].line;
                         // the marks and the snap preview as the present has them: a shared edge's mark over some windows, and on some rounds the preview lifted
                         // into a frame of no area after the tabs (zero size, the rest of its fields as compositor_preview_lift leaves them).
                         // A round with a tint compares the channels only: compositor_mix leaves a pixel mixed at cover 0 with its top byte clear, where
@@ -217250,6 +217255,17 @@ b32 main(void)
                                 lifted->preview_line = gpu_random() % 3 ? (int)(gpu_random() % 6) : 0;
                                 lifted->preview_edge = gpu_random();
                         }
+                        // the fingers' marks: on some rounds, a few at random places, alphas and scales (compositor_spots_draw after the tints)
+                        compositor.scale = round % 3 == 0 ? 150 : 100;
+                        compositor.spots_shown = round % 2 ? (unsigned int)(gpu_random() & 7) | 1u : 0;
+                        for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                        {
+                                compositor.spot[slot].on = gpu_random() % 3 != 0;
+                                compositor.spot[slot].x = (int)(gpu_random() % 720) - 12, compositor.spot[slot].y = (int)(gpu_random() % (PH + 24)) - 12;
+                                compositor.spot[slot].alpha = gpu_random() % 4 ? gpu_random() % 256 : 255;
+                        }
+                        if (compositor.spots_shown)
+                                frame_mask = 0x00ffffffu;
                         memory_fill_u32_rect(gpu_kit_want, PP, 696, PH, ground);
                         for (int k = 0; k < count; k++)
                                 compositor_draw(&reference, &frames[k]);
@@ -217261,9 +217277,11 @@ b32 main(void)
                                         radii[k] = compositor_radius(&frames[k]);
                                 compositor_preview_draw(&reference, frames, (unsigned int)count, radii);
                         }
+                        compositor_spots_draw(&reference);
                         for (positive i = 0; i < (positive)PP * PH; i++)
                                 pic[i] = 0;
                         check("gpu frames: the frames are drawn by the GPU", compositor_gpu_frames(frames, (unsigned int)count, ground));
+                        check("gpu frames: the fingers' marks are drawn by the GPU, after the scene", compositor_gpu_spots());
                         // the pointer the scene carries, over everything, on two rounds in three
                         if (round % 3)
                         {
@@ -217308,6 +217326,8 @@ b32 main(void)
                         }
                 }
         }
+
+        compositor.spots_shown = 0, compositor.scale = 100;
 
         // 8K: a window's clear and 159 boxes of the sizes cards and buttons have, the radii a card has, a third of them translucent;
         // the scene on the GPU against ui_kit_fill laid the same way, the whole picture compared once, then each timed, best of 5.

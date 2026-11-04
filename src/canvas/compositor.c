@@ -998,7 +998,6 @@ enum compositor_gpu_why
         COMPOSITOR_GPU_WHY_NO_CARD,   // no card the kernels are for, or the GPU did not start
         COMPOSITOR_GPU_WHY_UNTRUSTED, // a card whose self-test drew wrong
         COMPOSITOR_GPU_WHY_DEAD,      // given up after hangs (until canvas gpu is turned off and on)
-        COMPOSITOR_GPU_WHY_SPOTS,     // finger spots are on the screen
         COMPOSITOR_GPU_WHY_ALIGN,     // a width that is not a multiple of 4, or a pitch that is not 16 bytes
         COMPOSITOR_GPU_WHY_BUSY,      // a job given up on may still be running
         COMPOSITOR_GPU_WHY_OUTPUT,    // the scanout is not one the card can draw into
@@ -1135,6 +1134,11 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
 
         if (!compositor_close_box(f, &bx, &by, &side))
                 return true;
+        if (!f->builtin && !f->pixels) // a close button is drawn over a picture, and a frame with none has no pixels under it
+        {
+                compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
+                return false;
+        }
         if (bx < 0 || by < 0 || bx + side > (int)compositor_gscene.width || by + side > (int)compositor_gscene.height || side > 255 || f->pitch > 65535)
         {
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
@@ -1192,6 +1196,8 @@ static void compositor_gpu_lit(const struct compositor_frame *f, int ox, int oy,
 // What is inside a frame's line, in a rectangle of it: the picture's pixels copied, or the tab's one ink.
 static void compositor_gpu_contents(const struct compositor_frame *f, unsigned int tab, int x0, int y0, int x1, int y1)
 {
+        if (!f->builtin && !f->pixels) // no picture: nothing inside the line (compositor_contents)
+                return;
         if (f->builtin)
                 compositor_gpu_rect(0, x0, y0, x1, y1, tab, 0, 0, 0);
         else
@@ -1207,7 +1213,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
         // A frame of no area has no picture to read (a snap preview's lifted frame is one: its tint is in compositor_gpu_frames).
-        if (!f->builtin && w > 0 && h > 0 && (!f->pixels || !compositor_gpu_va(f)))
+        if (!f->builtin && f->pixels && w > 0 && h > 0 && !compositor_gpu_va(f))
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (compositor_scaled(f))
                 return g->why = COMPOSITOR_GPU_WHY_SCALED, false;
@@ -1215,6 +1221,10 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox, ri = r > b ? r - b : 0;
+        // A round corner's contents read a picture; a frame with none and a round corner that reaches its contents has nothing to read here (the
+        // processor reads no picture for it either): it is refused, not read at address 0.
+        if (!f->builtin && !f->pixels && ri > 0)
+                return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (b)
         {
                 compositor_gpu_rect(0, ox + r, oy, ox + ow - r, oy + b, f->edge, 0, 0, 0);
@@ -7250,7 +7260,9 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
 
         if (f->builtin || f->width <= 0 || f->height <= 0) // no area: no picture to map
                 return 1;
-        if (!f->pixels || f->pitch >= 1ull << 29)
+        if (!f->pixels) // a frame with no picture is its line and corners only (a grid's border), and nothing to map
+                return 1;
+        if (f->pitch >= 1ull << 29)
                 return 0;
         // The kernels reach a picture's pixels by a 32-bit signed offset from the first they are given (gpu.asm's image, mix, close and turn ops):
         // a picture of 2 GiB or more would wrap to bytes before it, so it is the processor's.
@@ -7270,6 +7282,66 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
         return compositor_gpu_va(f) || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
 }
 
+#ifdef MOONWATER_GPU_C
+/*
+        A finger's mark as records (compositor_spot_draw): the inner fill's mix of the line's ink over the disc, then the edge's, each cover a table of the
+        disc's square (2 radius by 2 radius bytes, rows from its top; the four quarters are the one quarter mirrored, as the processor reads them). Made once
+        for a radius, ring and alpha. Its place from the buffer's start, 0 for none. edge 0 is the fill's cover, 1 the edge's.
+*/
+static unsigned int compositor_gpu_spot_table(int radius, int ring, unsigned int alpha, int edge)
+{
+        int inner = radius - ring, size = 2 * radius;
+        unsigned char *table;
+        unsigned int at = compositor_gpu_slot(radius, ring, 16 + edge, (int)alpha, (unsigned int)(size * size), &table);
+        const unsigned char *outer_mask, *inner_mask;
+        unsigned int fill = COMPOSITOR_SPOT_FILL * alpha / 255, ring_cover = COMPOSITOR_SPOT_RING * alpha / 255;
+
+        if (!table)
+                return at;
+        outer_mask = compositor_corner_mask(radius), inner_mask = compositor_corner_mask(inner);
+        for (int row = 0; row < size; row++)
+                for (int col = 0; col < size; col++)
+                {
+                        int my = row < radius ? row : size - 1 - row, mx = col < radius ? col : size - 1 - col;
+                        unsigned int out = outer_mask[my * radius + mx];
+                        unsigned int in = mx >= ring && my >= ring ? inner_mask[(my - ring) * inner + (mx - ring)] : 0;
+                        unsigned int cover = 0;
+
+                        if (out)
+                                cover = edge ? (out > in ? (out - in) * ring_cover / 255 : 0) : (in ? in * fill / 255 : 0);
+                        table[row * size + col] = (unsigned char)cover;
+                }
+        return at;
+}
+
+// The fingers' marks over the scene, in slot order (compositor_spots_draw): each live mark that has area as two records, after the frames and before the
+// pointer. False (and the reason) when the pool is full.
+static b32 compositor_gpu_spots(void)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        int radius = compositor_spot_radius(compositor.scale), ring = compositor_px1(compositor.scale), inner = radius - ring;
+
+        if (!compositor.spots_shown)
+                return true;
+        for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+        {
+                unsigned int alpha = compositor.spot[slot].alpha, fill_at, edge_at;
+                int cx = compositor.spot[slot].x, cy = compositor.spot[slot].y;
+
+                if (!compositor.spot[slot].on || !alpha || inner < 1)
+                        continue;
+                if (g->count + 8 > g->room - 400)
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                fill_at = compositor_gpu_spot_table(radius, ring, alpha, 0), edge_at = compositor_gpu_spot_table(radius, ring, alpha, 1);
+                if (!fill_at || !edge_at)
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                compositor_gpu_rect(5, cx - radius, cy - radius, cx + radius, cy + radius, COMPOSITOR_INK_LINE_HELD, 0, fill_at, (unsigned int)(2 * radius));
+                compositor_gpu_rect(5, cx - radius, cy - radius, cx + radius, cy + radius, COMPOSITOR_INK_LINE_HELD, 0, edge_at, (unsigned int)(2 * radius));
+        }
+        return true;
+}
+#endif
+
 // The present's damage drawn by the GPU: why it is not, or COMPOSITOR_GPU_WHY_DRAWN when it is.
 static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame *frames, unsigned int count)
 {
@@ -7283,8 +7355,6 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
         if (compositor.card < 0 && !compositor_gpu_state.force)
                 return COMPOSITOR_GPU_WHY_HEADLESS;
-        if (compositor_spots_any(0))
-                return COMPOSITOR_GPU_WHY_SPOTS;
         if ((compositor.width & 3) || (compositor.scanout_pitch & 15))
                 return COMPOSITOR_GPU_WHY_ALIGN;
         if (!compositor_gpu_up())
@@ -7301,6 +7371,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 if (!compositor_gpu_picture(&frames[k]))
                         return COMPOSITOR_GPU_WHY_PICTURE;
         if (!compositor_gpu_frames(frames, count, compositor_ground))
+                return g->why;
+        if (!compositor_gpu_spots()) // the fingers' marks over the scene, and the pointer over them
                 return g->why;
         if (compositor.cursor.drawn)
                 compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape, compositor.cursor.drawn_scale, compositor_cursor_ink(0, 0),
