@@ -1,3 +1,2 @@
 # __builtin_ names outside src/lib.c and src/lib.util.c, per file: a file may not have more than this,
 # and the aim is none. Lower it with python3 test/function_audit.py --builtins.
-src/sh/text.c 5

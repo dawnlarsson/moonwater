@@ -2857,11 +2857,8 @@ static bool big_multiply_ntt(p64 address_to r, const p64 address_to a, positive 
 #endif
 
 typedef p64 big_v8 __attribute__((vector_size(64)));
-typedef long long big_v8i __attribute__((vector_size(64)));
-typedef int big_v16 __attribute__((vector_size(64)));
 typedef int big_v8s __attribute__((vector_size(32)));
 typedef p64 big_v8u __attribute__((vector_size(64), aligned(8), may_alias));
-typedef p32 big_v8su __attribute__((vector_size(32), aligned(4), may_alias));
 
 typedef struct
 {
@@ -2877,17 +2874,10 @@ static const big_nttv_prime big_nttv_primes[3] = {
 #define BIG_V8(...) ((big_v8){__VA_ARGS__})
 #define BIG_V8_ALL(x) BIG_V8(x, x, x, x, x, x, x, x)
 
-//      The two compilers name vpmuludq and vpermt2q's builtins differently,
-//      and neither takes the other's.
+// The low 32 bits of each lane times the other's, as 64 bit products.
 static inline big_v8 big_v8_multiply32(big_v8 a, big_v8 b)
 {
-#if defined(__GNUC__) && !defined(__clang__)
-        return (big_v8)__builtin_ia32_pmuludq512_mask((big_v16)a, (big_v16)b,
-                                                     (big_v8i){0, 0, 0, 0, 0, 0, 0, 0},
-                                                     (unsigned char)255);
-#else
-        return (big_v8)__builtin_ia32_pmuludq512((big_v16)a, (big_v16)b);
-#endif
+        return lanes8_multiply_low32(a, b);
 }
 
 static inline big_v8 big_v8_minimum(big_v8 x, big_v8 y)
@@ -2935,18 +2925,13 @@ static inline void big_v8_store(p64 address_to at, big_v8 value)
 // a's and b's lanes as vpermt2q takes them: 0 to 7 from a and 8 to 15 from b.
 static inline big_v8 big_v8_permute(big_v8 a, big_v8 b, big_v8 index)
 {
-#if defined(__GNUC__) && !defined(__clang__)
-        return (big_v8)__builtin_ia32_vpermt2varq512_mask((big_v8i)index, (big_v8i)a, (big_v8i)b,
-                                                         (unsigned char)255);
-#else
-        return (big_v8)__builtin_ia32_vpermi2varq512((big_v8i)a, (big_v8i)index, (big_v8i)b);
-#endif
+        return lanes8_permute(a, b, index);
 }
 
 // Eight pieces of 32 bits of a limb array, from the piece at, as lanes.
 static inline big_v8 big_v8_pieces(const p64 address_to limbs, positive at)
 {
-        return __builtin_convertvector(*(const big_v8su address_to)((const p32 address_to)limbs + at), big_v8);
+        return lanes8_load_pieces((const p32 address_to)limbs + at);
 }
 
 typedef struct

@@ -37658,4 +37658,48 @@ NO_STACK_PROTECTOR b32 main(void)
 #endif
 #endif // LIB_SKIP_UMBRELLA
 
+#if X64 && !defined(KERNEL_MODE)
+/*
+        Eight 64 bit lanes: the primitives of the AVX-512 transform in text.c
+        (its big products), the products of the low halves, a permute of two
+        registers by an index, and eight 32 bit pieces read zero extended.
+        Each is one instruction on AVX-512F. The compilers spell those
+        builtins differently and take nothing of each other's, so this file
+        is where they are named, and the callers use the names below.
+*/
+typedef p64 lanes8_word __attribute__((vector_size(64)));
+typedef long long lanes8_index __attribute__((vector_size(64)));
+typedef int lanes8_ints __attribute__((vector_size(64)));
+typedef p32 lanes8_pieces __attribute__((vector_size(32), aligned(4), may_alias));
+
+// The low 32 bits of each lane times the other's, as 64 bit products: vpmuludq.
+static inline __attribute__((target("avx512f"))) lanes8_word lanes8_multiply_low32(lanes8_word a, lanes8_word b)
+{
+#if defined(__GNUC__) && !defined(__clang__)
+        return (lanes8_word)__builtin_ia32_pmuludq512_mask((lanes8_ints)a, (lanes8_ints)b,
+                                                           (lanes8_index){0, 0, 0, 0, 0, 0, 0, 0},
+                                                           (unsigned char)255);
+#else
+        return (lanes8_word)__builtin_ia32_pmuludq512((lanes8_ints)a, (lanes8_ints)b);
+#endif
+}
+
+// Lane k of the result is lane index[k] of a, or of b when index[k] is 8 to 15: vpermt2q.
+static inline __attribute__((target("avx512f"))) lanes8_word lanes8_permute(lanes8_word a, lanes8_word b, lanes8_word index)
+{
+#if defined(__GNUC__) && !defined(__clang__)
+        return (lanes8_word)__builtin_ia32_vpermt2varq512_mask((lanes8_index)index, (lanes8_index)a, (lanes8_index)b,
+                                                               (unsigned char)255);
+#else
+        return (lanes8_word)__builtin_ia32_vpermi2varq512((lanes8_index)a, (lanes8_index)index, (lanes8_index)b);
+#endif
+}
+
+// Eight 32 bit pieces from p as lanes, zero extended: vpmovzxdq.
+static inline __attribute__((target("avx512f"))) lanes8_word lanes8_load_pieces(const p32 *p)
+{
+        return __builtin_convertvector(*(const lanes8_pieces *)p, lanes8_word);
+}
+#endif // X64 && !KERNEL_MODE
+
 #endif // STANDARD_MODERN_C_LIB_UTIL
