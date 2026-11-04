@@ -238,6 +238,7 @@ struct pulse_host
 struct pulse_props
 {
         int count;
+        unsigned version;               // bumped by every change of the entries: a reader that keeps a value's text checks it (the state page does)
         struct
         {
                 char key[PULSE_KEY];
@@ -642,6 +643,8 @@ static int pulse_props_set(struct pulse_props *props, const char *key, const uns
 {
         long k = pulse_len(key);
 
+        props->version++;
+
         if (!pulse_key_ok(key, k) || length < 0 || length > PULSE_VALUE)
                 return 0;
         for (int i = 0; i < props->count; i++)
@@ -662,6 +665,7 @@ static int pulse_props_set(struct pulse_props *props, const char *key, const uns
 
 static void pulse_props_remove(struct pulse_props *props, const char *key)
 {
+        props->version++;
         for (int i = 0; i < props->count; i++)
                 if (pulse_equal(props->entry[i].key, key))
                 {
@@ -674,6 +678,7 @@ static void pulse_props_remove(struct pulse_props *props, const char *key)
 // PulseAudio's three ways to update a list: 0 replaces it, 1 adds what is not there, 2 adds and replaces.
 static void pulse_props_update(struct pulse_props *to, const struct pulse_props *from, unsigned long mode)
 {
+        to->version++;
         if (mode == 0)
                 to->count = 0;
         for (int i = 0; i < from->count; i++)

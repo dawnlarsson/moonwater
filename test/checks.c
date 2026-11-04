@@ -182993,6 +182993,9 @@ int main(void)
 #include <fcntl.h>
 #include <math.h>
 #include <sched.h>
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -183401,6 +183404,189 @@ static void sv_test_page(void)
         audio_service.page_path = "/tmp/unused";
 }
 
+/* ---- bench: the ticks of the state page writer and of the settings look, on a pinned core (`service-check bench CPU`) ---- */
+static unsigned long long sv_now(void)
+{
+#if defined(__x86_64__)
+        return __rdtsc();
+#else
+        struct timespec at;
+
+        clock_gettime(CLOCK_MONOTONIC, &at);
+        return (unsigned long long)at.tv_sec * 1000000000ull + (unsigned long long)at.tv_nsec;
+#endif
+}
+
+static int sv_cmp_ull(const void *a, const void *b)
+{
+        unsigned long long x = *(const unsigned long long *)a, y = *(const unsigned long long *)b;
+
+        return x < y ? -1 : x > y;
+}
+
+// Sixteen programs, each with one stream that has a name and a media name, as a desktop has them.
+static void sv_bench_streams(int streams)
+{
+        for (int i = 0; i < streams; i++)
+        {
+                long slot = pulse_client_open(&audio_service.pulse, 1000 + i, 2000 + i);
+                struct pulse_client *c;
+                struct pulse_stream *s;
+
+                if (slot < 0)
+                        continue;
+                c = audio_service.pulse.client[slot];
+                pulse_props_set(&c->props, "application.name", (const unsigned char *)"Bench program", 13);
+                pulse_props_set(&c->props, "application.icon_name", (const unsigned char *)"audio-x-generic", 15);
+                /* the properties a real program sends with its connection (a dozen: the lookups of the page scan them all) */
+                pulse_props_set(&c->props, "application.process.binary", (const unsigned char *)"/usr/bin/bench-program", 22);
+                pulse_props_set(&c->props, "application.process.id", (const unsigned char *)"4242", 4);
+                pulse_props_set(&c->props, "application.process.user", (const unsigned char *)"dawn", 4);
+                pulse_props_set(&c->props, "application.process.host", (const unsigned char *)"moonwater", 9);
+                pulse_props_set(&c->props, "application.language", (const unsigned char *)"en_US.UTF-8", 11);
+                pulse_props_set(&c->props, "application.version", (const unsigned char *)"1.2.3", 5);
+                pulse_props_set(&c->props, "application.process.machine_id", (const unsigned char *)"0123456789abcdef0123456789abcdef", 32);
+                pulse_props_set(&c->props, "window.x11.display", (const unsigned char *)":0", 2);
+                pulse_props_set(&c->props, "media.software", (const unsigned char *)"Bench program 1.2", 17);
+                pulse_props_set(&c->props, "native-protocol.version", (const unsigned char *)"32", 2);
+                pulse_props_set(&c->props, "module-stream-restore.id", (const unsigned char *)"sink-input-by-application-name:Bench program", 43);
+                pulse_props_set(&c->props, "media.role", (const unsigned char *)"music", 5);
+                s = audio_service.pulse.stream + i;
+                s->used = 1;
+                s->client = slot;
+                s->index = (unsigned long)i + 1;
+                s->map_channels = 2;
+                s->volume[0] = s->volume[1] = 65536;
+                pulse_props_set(&s->props, "media.name", (const unsigned char *)"A track of the bench", 20);
+                pulse_props_set(&s->props, "event.id", (const unsigned char *)"none", 4);
+                pulse_props_set(&s->props, "stream.is-live", (const unsigned char *)"false", 5);
+                pulse_props_set(&s->props, "media.title", (const unsigned char *)"A title of the bench that is a little longer", 42);
+        }
+}
+
+static void sv_bench(int cpu)
+{
+        enum { PASSES = 4001 };
+        static unsigned long long samples[PASSES];
+        cpu_set_t set;
+        int streams = 16;
+
+        CPU_ZERO(&set);
+        CPU_SET(cpu, &set);
+        sched_setaffinity(0, sizeof set, &set);
+        sv_setup();
+        audio_service.page_path = sv_dir;
+        {
+                char path[300];
+
+                sv_path(path, sizeof path, "state");
+                audio_service.page_path = path;
+                audio_page_open();
+        }
+        sv_bench_streams(streams);
+        /* playing: every stream's peak moves on every pass, as a stream that plays does */
+        for (int i = 0; i < PASSES; i++)
+        {
+                for (int k = 0; k < streams; k++)
+                        audio_service.pulse.stream[k].voice.peak[0] = (float)((i + k) & 1023) / 2048.0f;
+                samples[i] = sv_now();
+                audio_page_write();
+                samples[i] = sv_now() - samples[i];
+        }
+        qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+        printf("page writer, %d streams, all peaks moving: median %llu, p90 %llu, min %llu (ticks per pass)\n", streams,
+               samples[PASSES / 2], samples[PASSES * 9 / 10], samples[0]);
+        /* nothing changes: the same page again and again */
+        for (int k = 0; k < streams; k++)
+                audio_service.pulse.stream[k].voice.peak[0] = 0;
+        audio_page_write();
+        for (int i = 0; i < PASSES; i++)
+        {
+                samples[i] = sv_now();
+                audio_page_write();
+                samples[i] = sv_now() - samples[i];
+        }
+        qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+        printf("page writer, %d streams, nothing changed: median %llu, p90 %llu, min %llu (ticks per pass)\n", streams,
+               samples[PASSES / 2], samples[PASSES * 9 / 10], samples[0]);
+        /* no stream at all: the fixed part of a pass */
+        for (int k = 0; k < streams; k++)
+                audio_service.pulse.stream[k].used = 0;
+        audio_page_write();
+        for (int i = 0; i < PASSES; i++)
+        {
+                for (int k = 0; k < streams; k++)
+                        audio_service.pulse.stream[k].voice.peak[0] = 0;
+                samples[i] = sv_now();
+                audio_page_write();
+                samples[i] = sv_now() - samples[i];
+        }
+        qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+        printf("page writer, no stream: median %llu, p90 %llu, min %llu (ticks per pass)\n", samples[PASSES / 2], samples[PASSES * 9 / 10], samples[0]);
+        /* the settings look, with every file there and unchanged */
+        sv_write_file("audio.volume", "50\n");
+        sv_write_file("audio.mute", "off\n");
+        sv_write_file("audio.device", "default\n");
+        sv_write_file("audio.capture", "on\n");
+        sv_write_file("audio.source", "default\n");
+        sv_write_file("audio.source.volume", "100\n");
+        sv_write_file("audio.source.mute", "off\n");
+        usleep(2500000); /* the files are older than the look's two seconds of trust: an unchanged file costs a stat, and no read */
+        audio_settings_read(1);
+        for (int i = 0; i < PASSES; i++)
+        {
+                samples[i] = sv_now();
+                audio_settings_read(0);
+                samples[i] = sv_now() - samples[i];
+        }
+        qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+        printf("settings look, every file there and unchanged: median %llu, p90 %llu, min %llu (ticks per look)\n", samples[PASSES / 2],
+               samples[PASSES * 9 / 10], samples[0]);
+}
+
+/* ---- the state page writer: nothing that did not change is written, a moved peak is one row, a stream that goes is a cleared place ---- */
+static void sv_test_page_rows(void)
+{
+        char path[300];
+        struct audio_state copy;
+        unsigned int seq;
+
+        sv_setup();
+        sv_path(path, sizeof path, "state-rows");
+        audio_service.page_path = path;
+        audio_page_open();
+        if (!audio_service.page)
+        {
+                SVCHECK(0, "the page for the rows is mapped");
+                return;
+        }
+        sv_bench_streams(2);
+        for (int k = 0; k < 2; k++)
+                audio_service.pulse.stream[k].voice.peak[0] = 0;
+        audio_page_write();
+        seq = audio_service.page->seq;
+        SVCHECK(audio_state_read(audio_service.page, &copy) && copy.streams == 2, "the first write holds both streams");
+        audio_page_write();
+        SVCHECK(audio_service.page->seq == seq, "a pass that changes nothing writes nothing (sequence %u, was %u)", audio_service.page->seq, seq);
+        audio_service.pulse.stream[1].voice.peak[0] = 0.5f;
+        audio_page_write();
+        SVCHECK(audio_service.page->seq == seq + 2, "a moved peak is one write (sequence %u, was %u)", audio_service.page->seq, seq);
+        SVCHECK(audio_state_read(audio_service.page, &copy) && copy.stream[1].peak_left == 16383 && copy.stream[0].peak_left == 0,
+                "the moved peak is on its row and no other (%u, %u)", copy.stream[1].peak_left, copy.stream[0].peak_left);
+        /* a program renames itself and a stream changes its title: the page shows the new texts, not the ones it kept */
+        pulse_props_set(&audio_service.pulse.client[audio_service.pulse.stream[0].client]->props, "application.name", (const unsigned char *)"Renamed program", 15);
+        pulse_props_set(&audio_service.pulse.stream[1].props, "media.name", (const unsigned char *)"A new title", 11);
+        audio_page_write();
+        SVCHECK(audio_state_read(audio_service.page, &copy) && strcmp(copy.stream[0].app, "Renamed program") == 0 && strcmp(copy.stream[1].media, "A new title") == 0,
+                "a changed name and title are shown (%s, %s)", copy.stream[0].app, copy.stream[1].media);
+        audio_service.pulse.stream[1].used = 0;
+        audio_page_write();
+        SVCHECK(audio_state_read(audio_service.page, &copy) && copy.streams == 1 && copy.stream[1].index == 0xffffffffu && copy.stream[1].app[0] == 0,
+                "a stream that is gone is a free place, cleared (count %u, index %u)", copy.streams, copy.stream[1].index);
+        SVCHECK(!(audio_service.page->seq & 1u), "the sequence is even after the last write");
+        audio_service.page_path = "/tmp/unused";
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -183413,14 +183599,18 @@ static int sv_main_checks(void)
         sv_test_card();
         sv_test_file();
         sv_test_page();
+        sv_test_page_rows();
         printf("CHECK_audio_service: %u checks, %u failures\n", sv_checks, sv_failures);
         return sv_failures != 0;
 }
 
 int main(int argc, char **argv)
 {
-        (void)argc;
-        (void)argv;
+        if (argc > 1 && strcmp(argv[1], "bench") == 0)
+        {
+                sv_bench(argc > 2 ? atoi(argv[2]) : 8);
+                return 0;
+        }
         return sv_main_checks();
 }
 #endif /* CHECK_audio_service */

@@ -344,6 +344,9 @@ M = [
     ("service", 'the rest of a short card write is dropped', '                        if (audio_service.block_left > 0)\n                                return; // the card is full: the rest waits for the next wake', '                        audio_service.block_left = 0;'),
     ("service", 'an output file that cannot be written is kept', '                        audio_service.file = -1;\n                        return;', '                        return;'),
     ("service", "the state page's sequence steps by four", '__atomic_store_n(&page->seq, seq + 2, __ATOMIC_RELEASE);', '__atomic_store_n(&page->seq, seq + 4, __ATOMIC_RELEASE);'),
+    ("service", 'the page is written when nothing changed', '        if (!audio_service.page_whole && __builtin_memcmp(', '        if (0 && __builtin_memcmp('),
+    ("service", 'a text is kept though the program renamed itself (the cache ignores versions)', '!k->valid || k->owner != c->index || k->owner_version != c->props.version || k->of != own_index || k->of_version != own->version', '!k->valid || k->owner != c->index || k->of != own_index'),
+    ("service", 'a stream that is gone keeps its row', '        for (long i = streams; i < (long)build.streams; i++)', '        for (long i = streams; i < (long)streams; i++)'),
     ("service", "the capture thread keeps the real-time policy", "        audio_call(syscall(sched_setscheduler), 0, 0, (positive)&ordinary, 0, 0, 0); // pid 0: this thread", "        (void)ordinary;"),
     ("service", 'a settings FIFO is waited for (no O_NONBLOCK)', '0x80000 | 0x20000 | 0x800, 0, 0, 0);', '0x80000 | 0x20000, 0, 0, 0);'),
 ]

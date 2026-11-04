@@ -104,6 +104,16 @@ static struct
         const char *settings;           // where /root/audio.* are
         int page_fd;
         struct audio_state *page;
+        int page_whole;                 // the next write copies the whole page: a page that was just mapped may hold what an earlier server wrote
+        // The texts a stream and a record show, kept while the programs' properties are as they were (their version and their connection's):
+        // the page is written every 16 ms, and cleaning three texts a stream each time was most of its cost.
+        struct audio_text_cache
+        {
+                int valid;
+                unsigned long owner, of;
+                unsigned owner_version, of_version;
+                char app[48], media[48], icon[32];
+        } text[PULSE_STREAMS], record_text[PULSE_RECORDS];
         positive state_at, settings_at, devices_at, save_at, dirty_since;
         int dirty;                      // a volume, a mute or a program's volume changed and is to be kept
         unsigned long applied_volume;   // what the settings files last said (or the server last wrote), so its own write is not read as a change
@@ -886,18 +896,54 @@ static void audio_host_changed(void *context, int what, long sink)
                 audio_service.dirty_since = clock_monotonic_nanoseconds();
 }
 
-// The page: the sink's state, the devices and every stream, copied under the sequence number.
+// The page: the sink's state, the devices and every stream, under the sequence number. The writer keeps two copies: build, the page as
+// this pass sees it, and held, the page as the last write left it. A pass that changes nothing writes nothing (the sequence number stays);
+// a pass that changes something copies the pieces of the page that differ from held, inside the sequence number, and no others. The rows
+// past a list's count are free places: a place that was used and is not any more is cleared once, when the count goes down.
+// The three texts of a row: kept from the last write while the connection and the properties are the same (a change of either is a new
+// version, and a new connection or stream is a new index), else cleaned again. The texts are what pulse_props_text makes of them.
+static void audio_page_text(struct audio_text_cache *k, const struct pulse_client *c, const struct pulse_props *own, unsigned long own_index,
+                            struct audio_state_stream *out)
+{
+        if (!k->valid || k->owner != c->index || k->owner_version != c->props.version || k->of != own_index || k->of_version != own->version)
+        {
+                pulse_props_text(&c->props, "application.name", k->app, sizeof(k->app));
+                pulse_props_text(own, "media.name", k->media, sizeof(k->media));
+                pulse_props_text(&c->props, "application.icon_name", k->icon, sizeof(k->icon));
+                k->valid = 1;
+                k->owner = c->index;
+                k->owner_version = c->props.version;
+                k->of = own_index;
+                k->of_version = own->version;
+        }
+        __builtin_memcpy(out->app, k->app, sizeof(out->app));
+        __builtin_memcpy(out->media, k->media, sizeof(out->media));
+        __builtin_memcpy(out->icon, k->icon, sizeof(out->icon));
+}
+
+#define AUDIO_PAGE_PIECE 64 // the page is compared and copied in pieces this long
+
 static void audio_page_write(void)
 {
         struct audio_state *page = audio_service.page;
         struct pulse *p = &audio_service.pulse;
-        struct pulse_sink *sink = p->sink + audio_service.sink;
-        struct audio_state build;
+        struct pulse_sink *sink;
+        static struct audio_state build, held;
+        static int primed;
+        long streams = 0, records = 0, devices = 0, inputs = 0, off;
         unsigned int seq;
 
         if (!page || audio_service.sink < 0) // no sink (the sink could not be made): nothing to show, and no sink to index
                 return;
-        __builtin_memset(&build, 0, sizeof(build));
+        sink = p->sink + audio_service.sink;
+        if (!primed)
+        {
+                for (int i = 0; i < AUDIO_STATE_STREAMS; i++)
+                        build.stream[i].index = 0xffffffffu;
+                for (int i = 0; i < AUDIO_STATE_RECORDS; i++)
+                        build.record[i].index = 0xffffffffu;
+                primed = 1;
+        }
         build.magic = AUDIO_STATE_MAGIC;
         build.version = AUDIO_STATE_VERSION;
         build.bytes = sizeof(build);
@@ -913,15 +959,16 @@ static void audio_page_write(void)
         build.latency_us = (unsigned int)(sink->delay_frames * 1000000l / (sink->rate ? sink->rate : 1));
         audio_copy_text(build.device, sizeof(build.device), audio_service.active_description);
         audio_copy_text(build.name, sizeof(build.name), audio_service.active_name);
-        build.devices = (unsigned int)audio_service.device_count;
         for (int i = 0; i < audio_service.device_count; i++)
         {
                 build.device_list[i] = audio_service.devices[i];
                 if (audio_text_equal(build.device_list[i].name, audio_service.active_name))
                         build.device_list[i].flags |= AUDIO_STATE_DEVICE_ACTIVE;
         }
-        for (int i = 0; i < AUDIO_STATE_STREAMS; i++)
-                build.stream[i].index = 0xffffffffu;
+        for (long i = audio_service.device_count; i < (long)build.devices; i++)
+                __builtin_memset(build.device_list + i, 0, sizeof(build.device_list[0]));
+        devices = audio_service.device_count;
+        build.devices = (unsigned int)devices;
         for (int i = 0; i < PULSE_STREAMS; i++)
         {
                 struct pulse_stream *s = p->stream + i;
@@ -929,9 +976,9 @@ static void audio_page_write(void)
                 struct audio_state_stream *out;
                 unsigned long sum = 0;
 
-                if (!s->used || s->dying || s->client < 0 || !(c = p->client[s->client]) || build.streams >= AUDIO_STATE_STREAMS)
+                if (!s->used || s->dying || s->client < 0 || !(c = p->client[s->client]) || streams >= AUDIO_STATE_STREAMS)
                         continue;
-                out = build.stream + build.streams++;
+                out = build.stream + streams++;
                 out->index = (unsigned int)s->index;
                 out->client = (unsigned int)c->index;
                 for (long k = 0; k < s->map_channels; k++)
@@ -943,10 +990,14 @@ static void audio_page_write(void)
                 s->voice.peak[0] = s->voice.peak[1] = 0;
                 out->pid = (int)c->pid;
                 out->uid = (unsigned int)c->uid;
-                pulse_props_text(&c->props, "application.name", out->app, sizeof(out->app));
-                pulse_props_text(&s->props, "media.name", out->media, sizeof(out->media));
-                pulse_props_text(&c->props, "application.icon_name", out->icon, sizeof(out->icon));
+                audio_page_text(audio_service.text + i, c, &s->props, s->index, out);
         }
+        for (long i = streams; i < (long)build.streams; i++)
+        {
+                __builtin_memset(build.stream + i, 0, sizeof(build.stream[0]));
+                build.stream[i].index = 0xffffffffu;
+        }
+        build.streams = (unsigned int)streams;
         // The output: a card or a clock, and what the card's mixer was found to be.
         build.output_state = audio_service.pcm.fd >= 0 ? AUDIO_STATE_OUT_CARD : AUDIO_STATE_OUT_CLOCK;
         build.output_why = audio_service.why;
@@ -973,16 +1024,17 @@ static void audio_page_write(void)
                         audio_copy_text(build.input, sizeof(build.input), in->description);
                         audio_copy_text(build.input_name, sizeof(build.input_name), in->name);
                 }
-                for (long i = 0; i < PULSE_SOURCES && build.inputs < AUDIO_STATE_INPUTS; i++)
+                for (long i = 0; i < PULSE_SOURCES && inputs < AUDIO_STATE_INPUTS; i++)
                         if (p->source[i].used)
                         {
-                                audio_copy_text(build.input_list[build.inputs].name, sizeof(build.input_list[0].name), p->source[i].name);
-                                audio_copy_text(build.input_list[build.inputs].description, sizeof(build.input_list[0].description), p->source[i].description);
-                                build.input_list[build.inputs].flags = (i == p->default_source ? AUDIO_STATE_DEVICE_ACTIVE : 0) | (p->source[i].capture ? 0 : AUDIO_STATE_DEVICE_MONITOR);
-                                build.inputs++;
+                                audio_copy_text(build.input_list[inputs].name, sizeof(build.input_list[0].name), p->source[i].name);
+                                audio_copy_text(build.input_list[inputs].description, sizeof(build.input_list[0].description), p->source[i].description);
+                                build.input_list[inputs].flags = (i == p->default_source ? AUDIO_STATE_DEVICE_ACTIVE : 0) | (p->source[i].capture ? 0 : AUDIO_STATE_DEVICE_MONITOR);
+                                inputs++;
                         }
-                for (int i = 0; i < AUDIO_STATE_RECORDS; i++)
-                        build.record[i].index = 0xffffffffu;
+                for (long i = inputs; i < (long)build.inputs; i++)
+                        __builtin_memset(build.input_list + i, 0, sizeof(build.input_list[0]));
+                build.inputs = (unsigned int)inputs;
                 for (int i = 0; i < PULSE_RECORDS; i++)
                 {
                         struct pulse_record *r = p->record + i;
@@ -990,9 +1042,9 @@ static void audio_page_write(void)
                         struct audio_state_stream *out;
                         unsigned long sum = 0;
 
-                        if (!r->used || r->client < 0 || !(c = p->client[r->client]) || build.records >= AUDIO_STATE_RECORDS)
+                        if (!r->used || r->client < 0 || !(c = p->client[r->client]) || records >= AUDIO_STATE_RECORDS)
                                 continue;
-                        out = build.record + build.records++;
+                        out = build.record + records++;
                         out->index = (unsigned int)r->index;
                         out->client = (unsigned int)c->index;
                         for (long k = 0; k < r->map_channels; k++)
@@ -1004,17 +1056,34 @@ static void audio_page_write(void)
                         r->peak[0] = r->peak[1] = 0;
                         out->pid = (int)c->pid;
                         out->uid = (unsigned int)c->uid;
-                        pulse_props_text(&c->props, "application.name", out->app, sizeof(out->app));
-                        pulse_props_text(&r->props, "media.name", out->media, sizeof(out->media));
-                        pulse_props_text(&c->props, "application.icon_name", out->icon, sizeof(out->icon));
+                        audio_page_text(audio_service.record_text + i, c, &r->props, r->index, out);
                 }
+                for (long i = records; i < (long)build.records; i++)
+                {
+                        __builtin_memset(build.record + i, 0, sizeof(build.record[0]));
+                        build.record[i].index = 0xffffffffu;
+                }
+                build.records = (unsigned int)records;
         }
+        // Nothing differs from what the page holds: nothing is written, and the sequence number is the same as it was.
+        if (!audio_service.page_whole && __builtin_memcmp((char *)&build + 16, (char *)&held + 16, sizeof(build) - 16) == 0)
+                return;
         seq = __atomic_load_n(&page->seq, __ATOMIC_RELAXED);
         __atomic_store_n(&page->seq, seq + 1, __ATOMIC_RELAXED); // odd: being written
         // A release store orders what is before it, not what follows: the copy's stores could be moved above the odd mark (or land before it
         // on arm64), and a reader that copied a torn page would find the same even number at both ends. The fence keeps them after it.
         __atomic_thread_fence(__ATOMIC_RELEASE);
-        __builtin_memcpy((char *)page + 16, (char *)&build + 16, sizeof(build) - 16);
+        for (off = 16; off < (long)sizeof(build); off += AUDIO_PAGE_PIECE)
+        {
+                long length = (long)sizeof(build) - off < AUDIO_PAGE_PIECE ? (long)sizeof(build) - off : AUDIO_PAGE_PIECE;
+
+                if (audio_service.page_whole || __builtin_memcmp((char *)&build + off, (char *)&held + off, length))
+                {
+                        __builtin_memcpy((char *)page + off, (char *)&build + off, length);
+                        __builtin_memcpy((char *)&held + off, (char *)&build + off, length);
+                }
+        }
+        audio_service.page_whole = 0;
         page->magic = build.magic;
         page->version = build.version;
         page->bytes = build.bytes;
@@ -1023,6 +1092,7 @@ static void audio_page_write(void)
 
 static void audio_page_open(void)
 {
+        audio_service.page_whole = 1;
         long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0x2 | 0x40 | 0x80000, 0600, 0, 0), got;
 
         if (fd < 0)
