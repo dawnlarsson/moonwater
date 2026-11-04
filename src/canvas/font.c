@@ -337,6 +337,8 @@
 //      The kerning memo's sets of FONT_WAYS: a frame's pairs are a few hundred,
 //      and a direct-mapped table lost some of them to collisions every frame.
 #define FONT_KERN_SETS 512
+//      The lookup indices the kern feature's walk at load reads at most, and the kern table's subtables a pair walks.
+#define FONT_KERN_READS 4096
 //      The cache's direct-mapped memo of the slots it found last: 256 ways of 24 bytes.
 #define FONT_CACHED 256
 #define FONT_RECENT 256
@@ -724,7 +726,12 @@ static fn font_kern_lookups(font_face address_to face, positive gpos)
         positive scripts = gpos + font_u16(face, gpos + 4);
         positive features = gpos + font_u16(face, gpos + 6);
         positive langsys = 0;
-        p32 count = font_u16(face, scripts);
+        p32 count = font_u16(face, scripts), reads = FONT_KERN_READS;
+
+        //      Capped as the shaping plan caps its own walks (font_language, font_plan_table): a default language of
+        //      65535 features, every one the kern feature, of 65535 lookups each was 4.3 billion reads in font_load,
+        //      seconds to minutes for a file of 300 KB, and a desktop that never came up on it.
+        count = count > 1024 ? 1024 : count;
 
         face->lookup_list = gpos + font_u16(face, gpos + 8);
 
@@ -746,7 +753,8 @@ static fn font_kern_lookups(font_face address_to face, positive gpos)
 
         p32 wanted = langsys ? font_u16(face, langsys + 4) : font_u16(face, features);
 
-        for (p32 i = 0; i < wanted; i++)
+        wanted = wanted > 4096 ? 4096 : wanted;
+        for (p32 i = 0; i < wanted && reads; i++)
         {
                 p32 feature = langsys ? font_u16(face, langsys + 6 + 2 * (positive)i) : i;
                 positive record = features + 2 + 6 * (positive)feature;
@@ -757,7 +765,7 @@ static fn font_kern_lookups(font_face address_to face, positive gpos)
                 positive table = features + font_u16(face, record + 4);
                 p32 lookups = font_u16(face, table + 2);
 
-                for (p32 k = 0; k < lookups; k++)
+                for (p32 k = 0; k < lookups && reads; k++, reads--)
                 {
                         p32 lookup = font_u16(face, table + 4 + 2 * (positive)k), seen = 0;
 
@@ -1159,7 +1167,7 @@ static b32 font_kerning_units(const font_face address_to face, p32 left, p32 rig
         {
                 positive at = face->kern + 4;
 
-                for (p32 t = font_u16(face, face->kern + 2); t && at < face->size; t--)
+                for (p32 t = font_u16(face, face->kern + 2), walked = 0; t && at < face->size && walked < FONT_SUBTABLES; t--, walked++)
                 {
                         p32 length = font_u16(face, at + 2);
 

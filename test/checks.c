@@ -117880,6 +117880,82 @@ static __attribute__((noinline)) fn font_check_scribble(void)
                 junk[at] = at % 4 < 2 ? (b64)((p64)1 << 63) : (b64)(~(p64)0 >> 1);
 }
 
+/*
+        Kerning's walks are bounded by work, not by what the file claims. A GPOS whose default language lists 65535
+        features, every one the kern feature, of 65535 lookups each was 4.3 billion reads in font_load (seconds for a
+        file of 300 KB; the fuzzer met 2.8 s); a kern table that claims 65535 subtables of six bytes was walked to its
+        end for every pair. The faces are the test fonts with one table pointed at a copy built after them.
+*/
+static p8 kern_hostile[8192 + (400u << 10)];
+
+static fn kern_put16(p8 address_to at, p32 value)
+{
+        at[0] = (p8)(value >> 8), at[1] = (p8)value;
+}
+
+//      The directory record of tag in a test font, pointed at length bytes at offset.
+static fn kern_point(p8 address_to font, p32 tag, positive offset, positive length)
+{
+        positive tables = (positive)font[4] << 8 | font[5];
+
+        for (positive i = 0; i < tables; i++)
+        {
+                p8 address_to record = font + 12 + 16 * i;
+
+                if (((p32)record[0] << 24 | (p32)record[1] << 16 | (p32)record[2] << 8 | record[3]) == tag)
+                {
+                        kern_put16(record + 8, (p32)(offset >> 16)), kern_put16(record + 10, (p32)offset & 0xffff);
+                        kern_put16(record + 12, (p32)(length >> 16)), kern_put16(record + 14, (p32)length & 0xffff);
+                }
+        }
+}
+
+static fn check_kern_walks(void)
+{
+        positive base = (font_one_size + 3) & ~(positive)3, started, took;
+        p8 address_to g = kern_hostile + base;
+        font_face face;
+        b32 loaded;
+
+        memory_zero(kern_hostile, sizeof(kern_hostile));
+        memory_copy(kern_hostile, font_one, font_one_size);
+        //      GPOS 1.0: the script list at 65000, the feature list at 10, the lookup list at 10.
+        kern_put16(g, 1), kern_put16(g + 2, 0), kern_put16(g + 4, 65000), kern_put16(g + 6, 10), kern_put16(g + 8, 10);
+        //      One feature, kern, its table at 18: 65535 lookups (lookup 0, but where the script list lies over them).
+        kern_put16(g + 10, 1), memory_copy(g + 12, "kern", 4), kern_put16(g + 16, 8);
+        kern_put16(g + 18, 0), kern_put16(g + 20, 0xffff);
+        //      DFLT, its script at 130000, whose default language is at 132000: 65535 features, every one feature 0.
+        kern_put16(g + 65000, 1), memory_copy(g + 65002, "DFLT", 4), kern_put16(g + 65006, 65000);
+        kern_put16(g + 130000, 2000), kern_put16(g + 130002, 0);
+        kern_put16(g + 132000, 0), kern_put16(g + 132002, 0xffff), kern_put16(g + 132004, 0xffff);
+        kern_point(kern_hostile, FONT_TAG('G', 'P', 'O', 'S'), base, 132006 + 2 * 65535);
+        started = clock_monotonic_nanoseconds();
+        loaded = font_load(&face, kern_hostile, base + 132006 + 2 * 65535, 0) == 0;
+        took = clock_monotonic_nanoseconds() - started;
+        string_format(log, "  kerning: a GPOS of 65535 kern features of 65535 lookups loaded in %p us\n", took / 1000);
+        check("kerning: a GPOS of 65535 kern features of 65535 lookups each loads in well under 50 ms",
+              loaded && took < 50000000 && face.lookup_count >= 1);
+        font_kerning(&face, 1, 1, 13 * 64);
+
+        //      The kern table: 65535 subtables of six bytes, none of them horizontal kerning, walked for every pair.
+        base = (font_two_size + 3) & ~(positive)3;
+        g = kern_hostile + base;
+        memory_zero(kern_hostile, sizeof(kern_hostile));
+        memory_copy(kern_hostile, font_two, font_two_size);
+        kern_put16(g, 0), kern_put16(g + 2, 0xffff);
+        for (positive t = 0; t < 0xffff; t++)
+                kern_put16(g + 4 + 6 * t, 0), kern_put16(g + 6 + 6 * t, 6), kern_put16(g + 8 + 6 * t, 2);
+        kern_point(kern_hostile, FONT_TAG('k', 'e', 'r', 'n'), base, 4 + 6 * 0xffff);
+        loaded = font_load(&face, kern_hostile, base + 4 + 6 * 0xffff, 0) == 0;
+        started = clock_monotonic_nanoseconds();
+        for (p32 pair = 0; pair < 20000 && loaded; pair++)
+                font_kerning(&face, pair & 7, pair >> 3 & 7, 13 * 64);
+        took = clock_monotonic_nanoseconds() - started;
+        string_format(log, "  kerning: 20000 pairs through a kern table of 65535 subtables in %p us\n", took / 1000);
+        check("kerning: a kern table of 65535 subtables walks a ceiling of them a pair, 20000 pairs in well under a quarter second",
+              loaded && face.kern && !face.lookup_count && took < 250000000);
+}
+
 //      The dot pass alone, in a frame of its own at the depth the scribble wrote.
 static __attribute__((noinline)) fn font_check_dots(font_engine address_to e, const b64 address_to sizes, const p32 address_to inner)
 {
@@ -117952,6 +118028,7 @@ static fn check_hostile_arithmetic(void)
                 font_cell(&engine, chain, 1, 'A', 2, &grid, 64 * 64, 0, &target, 0, 0, 0xffffff, 0x101820);
                 check("arithmetic: an advance past 16384 px is held there too", font_advance(&wide, font_glyph(&wide, 'M'), 16383 * 64) == 1 << 30);
         }
+        check_kern_walks();
 }
 
 /*

@@ -41,6 +41,29 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-136: a font of a few hundred kilobytes held font_load for seconds, and a kern table every pair
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Denial of service: work a font file chooses, without a ceiling |
+| Moonwater exposure window | 2026-10-09 17:38 +02:00 (`697155d9a`, the text engine) to the fix, about 26 days |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_font`, `kerning: a GPOS of 65535 kern features of 65535 lookups each loads in well under 50 ms` (4.2 s without the ceiling, 5 us with it) and `kerning: a kern table of 65535 subtables walks a ceiling of them a pair, 20000 pairs in well under a quarter second` (2.5 s against 10 ms) |
+
+**How it was exposed.** `font_load` collects the kern feature's lookups from GPOS (`font_kern_lookups`) by walking
+the default language's feature indices, and each kern feature's lookup indices, as far as the 16-bit counts say,
+where the shaping plan caps the same walks (1024 scripts, 4096 features, 128 steps). A GPOS of 263 KB whose default
+language names one kern feature 65535 times, of 65535 lookups, is 4.3 billion reads at load: 4.2 seconds on the box,
+minutes with the lookups all distinct. The font a person sets for the desktop (/root/font) is loaded by the
+compositor and every app as they start, so a downloaded font set there kept the desktop from coming up. The kern
+table's walk (`font_kerning_units`, for a face whose GPOS kerns nothing) went through as many subtables as the table
+claims, 65535 six-byte ones for every pair laid. Found by this pass's font fuzzer (a mutated case of 2.8 s).
+
+**The fix.** The walk at load reads at most 4096 lookup indices (FONT_KERN_READS), 1024 scripts and 4096 features,
+as the plan does; the kern table's walk stops at 256 subtables (FONT_SUBTABLES, the GPOS walk's ceiling). No real
+face is near either.
+
 ### MW-2026-135: a font's metrics past 16384 px wrapped in 32 bits
 
 | | |
