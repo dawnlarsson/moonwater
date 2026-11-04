@@ -295,6 +295,14 @@ cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fused_residual_add_f32',
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'f32_to_bf16 bf16_to_f32',
       'paired timing against the definition in C at -O3 for the same instruction '
       'set, in L1, L2 and L3, every x86-64 body including AVX512_BF16')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'f32_scale_peak f32_scale_add_peak',
+      'paired timing against the gain loop of the mixing core as the service builds it (-O2, the baseline) and at -O3 for the tier '
+      'and at 512 bits, over 256 floats added, 256 stored, 512, 64 and 16 added and 256 added four bytes off a line, with AVX-512, '
+      'AVX2 and SSE2; V and without on riscv64, NEON on arm64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'f32_planes_from_s16 f32_planes_from_s32 f32_planes_from_f32',
+      'paired timing against the mixing core\'s decode loop as the service builds it (-O2, the baseline) and at -O3 for the tier, '
+      'over 256 frames of stereo, mono and six channels and 16 frames of stereo in each format, from a source a few bytes off a '
+      'line, with AVX2 and SSE2; V and without on riscv64, NEON on arm64')
 cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'resample_polyphase2_f32',
       'paired timing against the mixing core\'s C loop as the service is built (-O2, the baseline) and at -O3 for the tier, '
       'at 44.1, 22.05, 96 and 192 kHz into 48 kHz (64 to 256 taps, 256 frames a call) and 16 frames, three tables rotating '

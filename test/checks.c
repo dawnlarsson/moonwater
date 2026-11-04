@@ -9498,12 +9498,105 @@ static p32 net_filter_run(const net_filter address_to filter, p32 arch,
         }
 AUDIO_C_POLYPHASE2(audio_c_polyphase2, )
 
+// A gain held over a block: y = x * gain rounded, then added to dst (add) or stored, the product and the sum rounded apart on
+// every machine (a compiler may not fuse them: the library's routines do not), and the greatest |y| the block had, a NaN left out.
+#if defined(__GNUC__) && !defined(__clang__)
+#define AUDIO_C_EXACT __attribute__((optimize("fp-contract=off")))
+#else
+#define AUDIO_C_EXACT
+#endif
+#define AUDIO_C_SCALE(name, attributes)                                                                                    \
+        attributes static AUDIO_C_UNUSED float name(float *dst, const float *x, unsigned long count, float gain, int add)    \
+        {                                                                                                                   \
+                float peak = 0;                                                                                             \
+                                                                                                                            \
+                for (unsigned long i = 0; i < count; i++)                                                                   \
+                {                                                                                                           \
+                        float y = x[i] * gain, a = y < 0 ? -y : y;                                                          \
+                                                                                                                            \
+                        peak = a > peak ? a : peak;                                                                         \
+                        dst[i] = add ? dst[i] + y : y;                                                                      \
+                }                                                                                                           \
+                return peak;                                                                                                \
+        }
+AUDIO_C_SCALE(audio_c_scale, AUDIO_C_EXACT)
+
+// A program's float is not trusted: a NaN is nothing, the rest is held to 16.
+static AUDIO_C_UNUSED float audio_c_sane(float x)
+{
+        x = x > 16.0f ? 16.0f : x;
+        x = x < -16.0f ? -16.0f : x;
+        return x == x ? x : 0.0f;
+}
+
+// Interleaved frames of one of three formats (0 signed 16 bit, 1 signed 32 bit, 2 float, all little endian) to a plane a channel.
+#define AUDIO_C_DECODE(name, attributes)                                                                                         \
+        attributes static AUDIO_C_UNUSED void name(int format, const unsigned char *src, unsigned long frames, unsigned long channels, \
+                                                   float *const *planes)                                                         \
+        {                                                                                                                        \
+                unsigned long bytes = format == 0 ? 2 : 4, stride = bytes * channels;                                            \
+                                                                                                                                 \
+                for (unsigned long c = 0; c < channels; c++)                                                                     \
+                        for (unsigned long i = 0; i < frames; i++)                                                               \
+                        {                                                                                                        \
+                                const unsigned char *p = src + c * bytes + i * stride;                                           \
+                                                                                                                                 \
+                                if (format == 0)                                                                                 \
+                                {                                                                                                \
+                                        short x;                                                                                 \
+                                                                                                                                 \
+                                        __builtin_memcpy(&x, p, 2);                                                              \
+                                        planes[c][i] = (float)x * (1.0f / 32768.0f);                                             \
+                                }                                                                                                \
+                                else if (format == 1)                                                                            \
+                                {                                                                                                \
+                                        int x;                                                                                   \
+                                                                                                                                 \
+                                        __builtin_memcpy(&x, p, 4);                                                              \
+                                        planes[c][i] = (float)x * (1.0f / 2147483648.0f);                                        \
+                                }                                                                                                \
+                                else                                                                                             \
+                                {                                                                                                \
+                                        float x;                                                                                 \
+                                                                                                                                 \
+                                        __builtin_memcpy(&x, p, 4);                                                              \
+                                        planes[c][i] = audio_c_sane(x);                                                          \
+                                }                                                                                                \
+                        }                                                                                                        \
+        }
+AUDIO_C_DECODE(audio_c_decode, AUDIO_C_EXACT)
+
 //      A hosted check has no library: it takes this C for the routines of the library's names, which mix.c calls.
 #ifdef AUDIO_C_AS_LIBRARY
 void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
                              unsigned long phases, unsigned long pos, unsigned long step, unsigned long count)
 {
         audio_c_polyphase2(out0, out1, x0, x1, table, taps, phases, pos, step, count);
+}
+
+float f32_scale_peak(float *dst, const float *x, unsigned long count, float gain)
+{
+        return audio_c_scale(dst, x, count, gain, 0);
+}
+
+float f32_scale_add_peak(float *dst, const float *x, unsigned long count, float gain)
+{
+        return audio_c_scale(dst, x, count, gain, 1);
+}
+
+void f32_planes_from_s16(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels)
+{
+        audio_c_decode(0, src, frames, channels, planes);
+}
+
+void f32_planes_from_s32(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels)
+{
+        audio_c_decode(1, src, frames, channels, planes);
+}
+
+void f32_planes_from_f32(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels)
+{
+        audio_c_decode(2, src, frames, channels, planes);
 }
 #endif
 
@@ -166034,6 +166127,298 @@ static double al_engine(long rin, long rout)
         return audio_sqrt(error / (double)counted);
 }
 
+/*
+        f32_scale_peak and f32_scale_add_peak against audio_c_scale, to the bit: the output of every element, and the peak
+        (a NaN equal to a NaN, the machine's payload being its own). Every count to 520 and a few long ones, the two arrays
+        against a page that faults or just after one, either at any of seventeen float offsets, in place, with the
+        values that break a vector's maximum or a sum (zeros of both signs, infinities, NaNs, denormals, the largest
+        float) in the data and as the gain; then the cases that are exact whatever the order: gains of a power of two.
+*/
+typedef struct
+{
+        unsigned long long cases, values, peaks, outside, kept;
+} al_scale_faults;
+
+static bool al_same(float got, float want)
+{
+        return want != want ? got != got : al_bits(got) == al_bits(want);
+}
+
+static float al_special(bool specials)
+{
+        static const unsigned pattern[] = {0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc12345, 0x00000001, 0x807fffff,
+                                           0x7f7fffff, 0x3f800000, 0xbf800000, 0x00800000};
+        unsigned long long r = al_next();
+
+        if (specials && (r & 7) == 0)
+        {
+                unsigned bits = pattern[(r >> 8) % 12];
+                float value;
+
+                __builtin_memcpy(&value, &bits, 4);
+                return value;
+        }
+        return al_unit() * (float)(1u << (r >> 20 & 7));
+}
+
+static void al_scale_case(unsigned long long count, int add, int front, int inplace, unsigned dst_off, unsigned x_off, bool specials, float gain,
+                          al_scale_faults *faults)
+{
+        static float want[8192], from[8192];
+        float *dst, *x;
+        float peak, peak_want;
+
+        if (count + 40 > 8192)
+                return;
+        faults->cases++;
+        dst = front ? (float *)al_low[0] + 16 + dst_off : (float *)al_high[0] - count;
+        x = inplace ? dst : front ? (float *)al_low[1] + 16 + x_off : (float *)al_high[1] - count;
+        for (int i = 0; i < 16; i++)
+        {
+                dst[i - 16] = (float)0x1234 + (float)i;
+                if (front)
+                        dst[count + i] = (float)0x4321 + (float)i;
+        }
+        for (unsigned long long i = 0; i < count; i++)
+        {
+                dst[i] = al_special(specials);
+                want[i] = dst[i];
+                if (!inplace)
+                {
+                        x[i] = al_special(specials);
+                        from[i] = x[i];
+                }
+        }
+        peak_want = audio_c_scale(want, inplace ? want : from, count, gain, add);
+        peak = add ? f32_scale_add_peak(dst, x, count, gain) : f32_scale_peak(dst, x, count, gain);
+        faults->peaks += !al_same(peak, peak_want);
+        for (unsigned long long i = 0; i < count; i++)
+        {
+                faults->values += !al_same(dst[i], want[i]);
+                if (!inplace)
+                        faults->kept += al_bits(x[i]) != al_bits(from[i]);
+        }
+        for (int i = 0; i < 16; i++)
+        {
+                faults->outside += al_bits(dst[i - 16]) != al_bits((float)0x1234 + (float)i);
+                if (front)
+                        faults->outside += al_bits(dst[count + i]) != al_bits((float)0x4321 + (float)i);
+        }
+}
+
+/*
+        A NaN that comes after the greatest value in the same lane of a vector, at every distance a body's turns make (4, 8, 16, 32,
+        64 floats on), must leave the peak as it was: the maximum drops a NaN lane's samples and not its past.
+*/
+static void al_scale_planted(unsigned long long count, unsigned long long first, unsigned long long second, int add, int front, al_scale_faults *faults)
+{
+        static float want[1100], from[1100];
+        float *dst = front ? (float *)al_low[0] + 16 : (float *)al_high[0] - count, *x = front ? (float *)al_low[1] + 16 : (float *)al_high[1] - count;
+        float peak, peak_want;
+        unsigned nan = 0x7fc00000;
+
+        faults->cases++;
+        for (unsigned long long i = 0; i < count; i++)
+        {
+                x[i] = (i & 1) ? 0.0f : -0.0f;
+                dst[i] = 1.0f;
+        }
+        x[first] = 1.5f;
+        __builtin_memcpy(&x[second], &nan, 4);
+        for (unsigned long long i = 0; i < count; i++)
+        {
+                from[i] = x[i];
+                want[i] = dst[i];
+        }
+        peak_want = audio_c_scale(want, from, count, 1.0f, add);
+        peak = add ? f32_scale_add_peak(dst, x, count, 1.0f) : f32_scale_peak(dst, x, count, 1.0f);
+        faults->peaks += !al_same(peak, peak_want) || peak != 1.5f;
+        for (unsigned long long i = 0; i < count; i++)
+                faults->values += !al_same(dst[i], want[i]);
+}
+
+static void al_scale_walk(al_scale_faults *faults)
+{
+        static const unsigned long long distances[] = {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129};
+        static const unsigned long long longer[] = {600, 777, 1000, 1023, 1024, 1025, 2047, 4095, 4096, 4097};
+
+        for (int add = 0; add < 2; add++)
+                for (unsigned long long at = 0; at < 521 + sizeof(longer) / sizeof(longer[0]); at++)
+                {
+                        unsigned long long count = at <= 520 ? at : longer[at - 521];
+
+                        for (int place = 0; place < 4; place++)
+                        {
+                                bool specials = (at + (unsigned long long)place) % 3 == 0;
+                                float gain = (at + (unsigned long long)place) % 5 == 0 ? al_special(true) : place == 3 ? 0.125f : al_unit() * 3.0f;
+
+                                al_scale_case(count, add, place & 1, place == 2, (unsigned)(al_next() % 17), (unsigned)(al_next() % 17), specials, gain, faults);
+                        }
+                }
+        for (int add = 0; add < 2; add++)
+                for (unsigned long long count = 5; count < 1100; count += count < 140 ? 1 : 43)
+                        for (unsigned long long d = 0; d < sizeof(distances) / sizeof(distances[0]); d++)
+                                for (unsigned long long first = 0; first < 6; first++)
+                                        if (first + distances[d] < count)
+                                                al_scale_planted(count, first, first + distances[d], add, (int)((count + d) & 1), faults);
+        //      Powers of two and small integers: every product and sum exact, so any order of sums is right.
+        for (int round = 0; round < 40; round++)
+                al_scale_case(1 + al_next() % 300, round & 1, (round >> 1) & 1, 0, (unsigned)(al_next() % 17), (unsigned)(al_next() % 17), false, (float)(1 << (round % 6)) / 4.0f,
+                              faults);
+}
+
+static void al_scale_tier(string_address tier)
+{
+        al_scale_faults faults = {0, 0, 0, 0, 0};
+
+        string_format(log, "  %s\n", tier);
+        al_scale_walk(&faults);
+        check("f32_scale_peak, f32_scale_add_peak: every count and placement, each element the C's to the bit", faults.values == 0);
+        check("f32_scale_peak, f32_scale_add_peak: the peak the C's, a NaN left out", faults.peaks == 0);
+        check("f32_scale_peak, f32_scale_add_peak: sentinels before and after dst untouched, nothing written past count (the guard page)", faults.outside == 0);
+        check("f32_scale_peak, f32_scale_add_peak: x unchanged", faults.kept == 0);
+        check("f32_scale_peak, f32_scale_add_peak: cases ran", faults.cases > 4000);
+}
+
+/*
+        f32_planes_from_s16, _s32 and _f32 against audio_c_decode, to the bit: 1 to 8 channels, every frame count to 330
+        and a few long ones, the source and every plane against a page that faults or just after one, the source at
+        any of four byte offsets (a program's bytes are not aligned), every one of the 65536 sixteen-bit samples, 32-bit
+        samples at the edges of their rounding to a float and floats that are NaNs of both signs, infinities, denormals,
+        zeros of both signs, 16 and -16 and a step either side of them; planes untouched before and after their frames.
+*/
+typedef struct
+{
+        unsigned long long cases, values, outside;
+} al_decode_faults;
+
+static unsigned al_decode_special(void)
+{
+        static const unsigned pattern[] = {0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc12345, 0x7f800001, 0x00000001,
+                                           0x807fffff, 0x7f7fffff, 0x3f800000, 0xbf800000, 0x41800000, 0x41800001, 0x4180ffff, 0xc1800000,
+                                           0xc1800001, 0x417fffff, 0xc17fffff, 0x7fffffff, 0x80800000};
+        return pattern[al_next() % 21];
+}
+
+static void al_decode_case(int format, unsigned long long frames, unsigned long long channels, int front, unsigned offset, int kind, al_decode_faults *faults)
+{
+        static float want[8][1600];
+        unsigned long long bytes = format == 0 ? 2 : 4, total = frames * channels * bytes;
+        unsigned char *src = front ? al_low[0] + offset : al_high[0] - total;
+        float *planes[8], *wants[8], *base[8];
+
+        if (frames > 1600 || channels > 8 || total + 8 > AL_REGION)
+                return;
+        faults->cases++;
+        //      The planes in regions 1 to 4, a plane to a stretch of 2000 floats of a region: the first four at the start of the
+        //      page that faults after their region's last (or just after the one before it), the rest 2000 floats on.
+        for (unsigned long long c = 0; c < channels; c++)
+        {
+                base[c] = front ? (float *)al_low[1 + c % 4] + 16 + 2000 * (c / 4) : (float *)al_high[1 + c % 4] - frames - 2000 * (c / 4);
+                planes[c] = base[c];
+                wants[c] = want[c];
+                for (int i = 1; i <= 8; i++)
+                        base[c][-i] = (float)0x555 + (float)i;
+                if (front)
+                        for (int i = 0; i < 8; i++)
+                                base[c][frames + i] = (float)0x777 + (float)i;
+        }
+        for (unsigned long long i = 0; i < total; i += 4)
+        {
+                unsigned long long r = al_next();
+                unsigned word = (unsigned)r;
+
+                if (kind == 1 && (r >> 40) % 3 == 0)
+                        word = al_decode_special();
+                else if (kind == 2)
+                {
+                        //      near the rounding edges of a float: 24 bits and a few more
+                        word = (unsigned)(r >> 33) << (unsigned)(r >> 59 & 7) | (unsigned)(r >> 20 & 7);
+                        if (r >> 63)
+                                word = -word;
+                }
+                else if (format == 2 && kind == 0)
+                {
+                        float value = al_unit() * (float)(1u << (r >> 59 & 7));
+
+                        __builtin_memcpy(&word, &value, 4);
+                }
+                for (unsigned long long k = 0; k < 4 && i + k < total; k++)
+                        src[i + k] = (unsigned char)(word >> (8 * k));
+        }
+        audio_c_decode(format, src, frames, channels, wants);
+        switch (format)
+        {
+        case 0:
+                f32_planes_from_s16(planes, src, frames, channels);
+                break;
+        case 1:
+                f32_planes_from_s32(planes, src, frames, channels);
+                break;
+        default:
+                f32_planes_from_f32(planes, src, frames, channels);
+                break;
+        }
+        for (unsigned long long c = 0; c < channels; c++)
+        {
+                for (unsigned long long i = 0; i < frames; i++)
+                        faults->values += al_bits(planes[c][i]) != al_bits(want[c][i]);
+                for (int i = 1; i <= 8; i++)
+                        faults->outside += al_bits(base[c][-i]) != al_bits((float)0x555 + (float)i);
+                if (front)
+                        for (int i = 0; i < 8; i++)
+                                faults->outside += al_bits(base[c][frames + i]) != al_bits((float)0x777 + (float)i);
+        }
+}
+
+static void al_decode_tier(string_address tier)
+{
+        al_decode_faults faults[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+        static const unsigned long long longer[] = {400, 511, 512, 513, 1000, 1023, 1024, 1025};
+
+        string_format(log, "  %s\n", tier);
+        for (int format = 0; format < 3; format++)
+        {
+                for (unsigned long long frames = 0; frames < 331 + sizeof(longer) / sizeof(longer[0]); frames++)
+                        for (unsigned long long channels = 1; channels <= 8; channels++)
+                        {
+                                unsigned long long count = frames < 331 ? frames : longer[frames - 331];
+
+                                //      Mono and stereo at every count; the other counts of channels at the counts that end a turn.
+                                if (channels > 2 && count % 7 > 1 && count > 40)
+                                        continue;
+                                al_decode_case(format, count, channels, (int)((count + channels) & 1), (unsigned)(al_next() % 4), (int)((count + channels) % 3), &faults[format]);
+                        }
+                //      Every sixteen-bit sample, in a stereo pair of each and in a mono run.
+                if (format == 0)
+                {
+                        unsigned char *src = al_high[0] - 65536 * 4;
+                        float *left = (float *)al_high[1] - 65536, *right = (float *)al_high[2] - 65536, *planes[2] = {left, right};
+
+                        for (unsigned long long v = 0; v < 65536; v++)
+                        {
+                                src[4 * v] = (unsigned char)v, src[4 * v + 1] = (unsigned char)(v >> 8);
+                                src[4 * v + 2] = (unsigned char)~v, src[4 * v + 3] = (unsigned char)(~v >> 8);
+                        }
+                        f32_planes_from_s16(planes, src, 65536, 2);
+                        for (unsigned long long v = 0; v < 65536; v++)
+                        {
+                                float a = (float)(short)v * (1.0f / 32768.0f), b = (float)(short)~v * (1.0f / 32768.0f);
+
+                                faults[0].values += al_bits(left[v]) != al_bits(a) || al_bits(right[v]) != al_bits(b);
+                        }
+                        f32_planes_from_s16(planes, src, 65536, 1);
+                        for (unsigned long long v = 0; v < 65536; v++)
+                                faults[0].values += al_bits(left[v]) != al_bits((float)(short)(src[2 * v] | src[2 * v + 1] << 8) * (1.0f / 32768.0f));
+                }
+        }
+        check("f32_planes_from_s16: every frame count and channel count, every plane the C's to the bit, every 16-bit sample", faults[0].values == 0);
+        check("f32_planes_from_s32: every frame count and channel count, every plane the C's to the bit", faults[1].values == 0);
+        check("f32_planes_from_f32: every frame count and channel count, every plane the C's to the bit (NaNs, infinities, denormals, zeros of both signs, the edges of 16)", faults[2].values == 0);
+        check("f32_planes_from_s16, _s32, _f32: nothing written before or past the planes' frames (the guard page), nothing read past the samples", faults[0].outside + faults[1].outside + faults[2].outside == 0);
+        check("f32_planes_from_s16, _s32, _f32: cases ran", faults[0].cases > 1000 && faults[1].cases > 1000 && faults[2].cases > 1000);
+}
+
 static void al_polyphase_tier(string_address tier, int bits)
 {
         al_faults faults = {0, 0, 0, 0, 0, 0, 0};
@@ -166063,15 +166448,27 @@ b32 main(void)
         {
                 p8 had2 = cpu_has_avx2, hadfma = cpu_has_fma, had512 = cpu_has_avx512;
 
-                //      The floor is the C's to the bit; AVX2 with FMA is to the bound.
-                if (had2 && hadfma)
-                        al_polyphase_tier(had512 ? "avx512 machine (the AVX2 body)" : "avx2 fma", 0);
+                //      The resampler's floor is the C's to the bit and its AVX2 with FMA is to the bound; the scale routines
+                //      are the C's to the bit on all three of theirs, AVX-512 (the one a machine that has it takes), AVX2 and SSE2.
+                if (had512)
+                {
+                        cpu_has_avx512 = 1;
+                        al_scale_tier("avx512");
+                }
                 cpu_has_avx512 = 0;
+                if (had2 && hadfma)
+                {
+                        al_polyphase_tier("avx2 fma", 0);
+                        al_scale_tier("avx2");
+                        al_decode_tier("avx2");
+                }
                 cpu_has_fma = 0;
                 if (had2)
                         al_polyphase_tier("avx2 without fma (sse2)", 1);
                 cpu_has_avx2 = 0;
                 al_polyphase_tier("sse2", 1);
+                al_scale_tier("sse2");
+                al_decode_tier("sse2");
                 cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
         }
 #elif RISCV64
@@ -166094,12 +166491,16 @@ b32 main(void)
                         cpu_has_vector = tier ? 1 : vector;
                         al_first = tier == 0;
                         al_polyphase_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first", 0);
+                        al_scale_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
+                        al_decode_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                 }
                 al_first = false;
                 cpu_has_vector = vector;
         }
 #else
         al_polyphase_tier("neon", 0);
+        al_scale_tier("neon");
+        al_decode_tier("neon");
 #endif
         return test_report(null);
 }
@@ -166792,6 +167193,8 @@ static void au_test_mix_remix(void)
         audio_voice_close(au_voice);
 }
 
+static void au_dc_level(struct audio_voice *voice, long frames, float level);
+
 // Peaks are the greatest sample after the gain; the sink's after the master; clips count frames.
 static void au_test_peaks(void)
 {
@@ -166825,6 +167228,17 @@ static void au_test_peaks(void)
                 (double)au_voice->peak[1], (double)peak_l, (double)peak_r);
         AUCHECK(au_sink.peak[0] == peak_l * 0.5f && au_sink.peak[1] == peak_r * 0.5f, "sink peaks %g %g", (double)au_sink.peak[0], (double)au_sink.peak[1]);
         AUCHECK(au_sink.clips == 0, "nothing clipped (the right channel peaks at %g)", (double)(peak_r * 0.5f));
+        audio_voice_close(au_voice);
+
+        // The held part of a block is the library's loop; a ramp is this file's, and its peak is of the magnitude too: a negative
+        // level climbing from nothing over 64 of the 96 frames of its ramp peaks at the level at the last of them.
+        audio_sink_open(&au_sink, 48000, 2);
+        audio_voice_open(au_voice, AUDIO_FORMAT_F32LE, 2, 48000, 0, 48000, au_memory[0], sizeof(au_memory[0]));
+        au_dc_level(au_voice, 128, -0.5f);
+        audio_sink_begin(&au_sink, 64);
+        audio_voice_mix(&au_sink, au_voice, 64, 0);
+        AUCHECK(fabsf(au_voice->peak[0] - 0.5f * (64.0f / 96.0f)) < 1e-4f && fabsf(au_voice->peak[1] - 0.5f * (64.0f / 96.0f)) < 1e-4f,
+                "the peak of a ramp of a negative level is of its magnitude: %g %g", (double)au_voice->peak[0], (double)au_voice->peak[1]);
         audio_voice_close(au_voice);
 }
 
@@ -178354,6 +178768,31 @@ AUDIO_C_POLYPHASE2(al_c_wide, __attribute__((noinline, noclone, optimize("O3")))
 AUDIO_C_POLYPHASE2(al_c_base, __attribute__((noinline, noclone, optimize("O2"))))
 AUDIO_C_POLYPHASE2(al_c_o3, __attribute__((noinline, noclone, optimize("O3"))))
 
+//      The gain loop the same three ways.
+#if X64
+AUDIO_C_SCALE(al_s_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v3"))))
+AUDIO_C_SCALE(al_s_zmm, __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v4,prefer-vector-width=512"))))
+#elif RISCV64
+AUDIO_C_SCALE(al_s_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=+v"))))
+AUDIO_C_SCALE(al_s_zmm, __attribute__((noinline, noclone, optimize("O3"), target("arch=+v"))))
+#else
+AUDIO_C_SCALE(al_s_wide, __attribute__((noinline, noclone, optimize("O3"))))
+AUDIO_C_SCALE(al_s_zmm, __attribute__((noinline, noclone, optimize("O3"))))
+#endif
+AUDIO_C_SCALE(al_s_base, __attribute__((noinline, noclone, optimize("O2"))))
+AUDIO_C_SCALE(al_s_o3, __attribute__((noinline, noclone, optimize("O3"))))
+
+//      The decode loop the same ways.
+#if X64
+AUDIO_C_DECODE(al_d_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=x86-64-v3"))))
+#elif RISCV64
+AUDIO_C_DECODE(al_d_wide, __attribute__((noinline, noclone, optimize("O3"), target("arch=+v"))))
+#else
+AUDIO_C_DECODE(al_d_wide, __attribute__((noinline, noclone, optimize("O3"))))
+#endif
+AUDIO_C_DECODE(al_d_base, __attribute__((noinline, noclone, optimize("O2"))))
+AUDIO_C_DECODE(al_d_o3, __attribute__((noinline, noclone, optimize("O3"))))
+
 typedef struct
 {
         string_address name;
@@ -178403,6 +178842,50 @@ static fn al_hundredths(positive value)
         positive_to_padded(log, value % 100, 2, '0', 0);
 }
 
+/*
+        The gain loop: a block of 256 floats added to a bus (what a voice does twice a period), 512 of them, 64, and 16, and 256
+        stored (the master gain), on arrays on a cache line and, for the last row, four bytes off one.
+*/
+typedef struct
+{
+        string_address name;
+        positive count, add, offset;
+} al_scale_shape;
+
+static const al_scale_shape al_scale_shapes[] = {
+    {"256 floats added", 256, 1, 0},  {"256 floats stored", 256, 0, 0}, {"512 floats added", 512, 1, 0},
+    {"64 floats added", 64, 1, 0},    {"16 floats added", 16, 1, 0},     {"256 floats added, 4 bytes off a line", 256, 1, 1},
+};
+static f32 *al_scale_bus, *al_scale_in;
+static p32 al_scale_bar; // 0 the C as built, 1 -O3 for the tier, 2 -O3 for the baseline, 3 -O3 at 512 bits
+
+static volatile f32 al_scale_sink;
+
+static p64 al_scale_run(bool assembly, positive shape, positive reps)
+{
+        const al_scale_shape *s = al_scale_shapes + shape;
+        p64 start = get_cpu_time();
+        f32 peak = 0;
+
+        for (positive r = 0; r < reps; r++)
+        {
+                f32 *dst = al_scale_bus + s->offset + (r & 3) * 1024, *x = al_scale_in + s->offset + (r & 3) * 1024;
+
+                if (assembly)
+                        peak += s->add ? f32_scale_add_peak(dst, x, s->count, 0.999f) : f32_scale_peak(dst, x, s->count, 0.999f);
+                else if (al_scale_bar == 1)
+                        peak += al_s_wide(dst, x, s->count, 0.999f, (int)s->add);
+                else if (al_scale_bar == 2)
+                        peak += al_s_o3(dst, x, s->count, 0.999f, (int)s->add);
+                else if (al_scale_bar == 3)
+                        peak += al_s_zmm(dst, x, s->count, 0.999f, (int)s->add);
+                else
+                        peak += al_s_base(dst, x, s->count, 0.999f, (int)s->add);
+        }
+        al_scale_sink = peak;
+        return get_cpu_time() - start;
+}
+
 //      One shape on the tier set now, against the bar set now.
 static fn al_shapes_run(string_address tier)
 {
@@ -178434,16 +178917,132 @@ static fn al_shapes_run(string_address tier)
                 }
 }
 
+/*
+        The decode: 256 frames of stereo, of mono and of six channels (the voice's block, a period), and 16 frames of stereo, in
+        each of the three formats, from a source at 4096 bytes on and so off a line by a few bytes (a ring's bytes are where
+        the program's last write ended).
+*/
+typedef struct
+{
+        string_address name;
+        positive format, frames, channels;
+} al_decode_shape;
+
+static const al_decode_shape al_decode_shapes[] = {
+    {"s16 stereo 256 frames", 0, 256, 2}, {"s16 mono 256 frames", 0, 256, 1}, {"s16 six channels 256 frames", 0, 256, 6}, {"s16 stereo 16 frames", 0, 16, 2},
+    {"s32 stereo 256 frames", 1, 256, 2}, {"s32 mono 256 frames", 1, 256, 1}, {"s32 six channels 256 frames", 1, 256, 6}, {"s32 stereo 16 frames", 1, 16, 2},
+    {"f32 stereo 256 frames", 2, 256, 2}, {"f32 mono 256 frames", 2, 256, 1}, {"f32 six channels 256 frames", 2, 256, 6}, {"f32 stereo 16 frames", 2, 16, 2},
+};
+static p8 *al_decode_in;
+static f32 *al_decode_out[8];
+static p32 al_decode_bar; // 0 the C as built, 1 -O3 for the tier, 2 -O3 for the baseline
+
+static p64 al_decode_run(bool assembly, positive shape, positive reps)
+{
+        const al_decode_shape *s = al_decode_shapes + shape;
+        p64 start = get_cpu_time();
+
+        for (positive r = 0; r < reps; r++)
+        {
+                const p8 *src = al_decode_in + (r & 3) * 8192 + 4 * (r & 1);
+
+                if (assembly)
+                {
+                        if (s->format == 0)
+                                f32_planes_from_s16(al_decode_out, src, s->frames, s->channels);
+                        else if (s->format == 1)
+                                f32_planes_from_s32(al_decode_out, src, s->frames, s->channels);
+                        else
+                                f32_planes_from_f32(al_decode_out, src, s->frames, s->channels);
+                }
+                else if (al_decode_bar == 1)
+                        al_d_wide((int)s->format, src, s->frames, s->channels, al_decode_out);
+                else if (al_decode_bar == 2)
+                        al_d_o3((int)s->format, src, s->frames, s->channels, al_decode_out);
+                else
+                        al_d_base((int)s->format, src, s->frames, s->channels, al_decode_out);
+        }
+        return get_cpu_time() - start;
+}
+
+static fn al_decode_rows(string_address tier, bool wide)
+{
+        for (positive shape = 0; shape < sizeof(al_decode_shapes) / sizeof(al_decode_shapes[0]); shape++)
+                for (p32 bar = 0; bar < 2; bar++)
+                {
+                        positive reps = (1u << 22) / (al_decode_shapes[shape].frames * al_decode_shapes[shape].channels) + 1, ratios[TRIES];
+                        p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                        al_decode_bar = bar == 0 ? 0 : wide ? 1 : 2;
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 former, assembly;
+
+                                BENCH_ALTERNATE(trial, former, al_decode_run(false, shape, reps), assembly, al_decode_run(true, shape, reps));
+                                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                                best_c = former < best_c ? former : best_c;
+                                best_a = assembly < best_a ? assembly : best_a;
+                        }
+                        order(ratios, TRIES);
+                        string_format(log, "f32_planes_from_%s %s, %s against C %s: paired median ASM/C ",
+                                      al_decode_shapes[shape].format == 0 ? "s16" : al_decode_shapes[shape].format == 1 ? "s32" : "f32", al_decode_shapes[shape].name,
+                                      tier, bar == 0 ? "-O2 as built" : "-O3");
+                        al_hundredths(ratios[TRIES / 2]);
+                        string_format(log, "%%; best ticks a call ASM ");
+                        al_hundredths((positive)(best_a * 100 / reps));
+                        string_format(log, ", C ");
+                        al_hundredths((positive)(best_c * 100 / reps));
+                        log("\n", 1);
+                }
+}
+
+//      The gain loop's rows on the tier set now. bars: the C as built, -O3 for the tier (x86-64-v3, V), and, on a machine
+//      with AVX-512 on its AVX-512 tier, -O3 at 512 bits.
+static p8 al_has512;
+
+static fn al_scale_rows(string_address tier, bool wide, bool has512_tier)
+{
+        for (positive shape = 0; shape < sizeof(al_scale_shapes) / sizeof(al_scale_shapes[0]); shape++)
+                for (p32 bar = 0; bar < 3; bar++)
+                {
+                        positive reps = (1u << 24) / al_scale_shapes[shape].count + 1, ratios[TRIES];
+                        p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                        if (bar == 2 && !has512_tier)
+                                continue;
+                        al_scale_bar = bar == 0 ? 0 : bar == 1 ? (wide ? 1 : 2) : 3;
+                        for (positive trial = 0; trial < TRIES; trial++)
+                        {
+                                p64 former, assembly;
+
+                                BENCH_ALTERNATE(trial, former, al_scale_run(false, shape, reps), assembly, al_scale_run(true, shape, reps));
+                                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                                best_c = former < best_c ? former : best_c;
+                                best_a = assembly < best_a ? assembly : best_a;
+                        }
+                        order(ratios, TRIES);
+                        string_format(log, "f32_scale%s_peak %s, %s against C %s: paired median ASM/C ", al_scale_shapes[shape].add ? "_add" : "",
+                                      al_scale_shapes[shape].name, tier, bar == 0 ? "-O2 as built" : bar == 1 ? "-O3" : "-O3 at 512 bits");
+                        al_hundredths(ratios[TRIES / 2]);
+                        string_format(log, "%%; best ticks a call ASM ");
+                        al_hundredths((positive)(best_a * 100 / reps));
+                        string_format(log, ", C ");
+                        al_hundredths((positive)(best_c * 100 / reps));
+                        log("\n", 1);
+                }
+}
+
 #if X64
 static fn al_force(p32 tier)
 {
         static p8 wide2 = 3, fused;
 
         if (wide2 == 3)
-                wide2 = cpu_has_avx2, fused = cpu_has_fma;
-        cpu_has_avx2 = tier == 0 ? wide2 : 0;
-        cpu_has_fma = tier == 0 ? fused : 0;
-        al_wide = tier == 0;
+                wide2 = cpu_has_avx2, fused = cpu_has_fma, al_has512 = cpu_has_avx512;
+        cpu_has_avx2 = tier <= 1 ? wide2 : 0;
+        cpu_has_fma = tier <= 1 ? fused : 0;
+        cpu_has_avx512 = tier == 0 ? al_has512 : 0;
+        al_wide = tier <= 1;
 }
 #else
 static fn al_force(p32 tier)
@@ -178459,12 +179058,12 @@ static fn al_force(p32 tier)
                 al_bar = bar;                                                                            \
                 al_run(assembly, shape, (1u << 24) / al_shapes[shape].count);                             \
         }
-AL_NAMED(poly_44k_ymm, 0, 0, true, 0)
-AL_NAMED(poly_44k_ymm_c, 0, 0, false, 0)
-AL_NAMED(poly_44k_xmm, 0, 1, true, 0)
-AL_NAMED(poly_44k_xmm_c, 0, 1, false, 0)
-AL_NAMED(poly_96k_ymm, 2, 0, true, 0)
-AL_NAMED(poly_96k_ymm_c, 2, 0, false, 0)
+AL_NAMED(poly_44k_ymm, 0, 1, true, 0)
+AL_NAMED(poly_44k_ymm_c, 0, 1, false, 0)
+AL_NAMED(poly_44k_xmm, 0, 2, true, 0)
+AL_NAMED(poly_44k_xmm_c, 0, 2, false, 0)
+AL_NAMED(poly_96k_ymm, 2, 1, true, 0)
+AL_NAMED(poly_96k_ymm_c, 2, 1, false, 0)
 
 static fn al_named_nothing(void)
 {
@@ -178504,18 +179103,44 @@ b32 main(void)
                         al_in[v][1][i] = (f32)(int)(state >> 20 & 0xffffff) / 8388608.0f - 1.0f;
                 }
         }
+        al_scale_bus = memory((4 * 1024 + 64) * 4), al_scale_in = memory((4 * 1024 + 64) * 4);
+        al_decode_in = memory(4 * 8192 + 64);
+        if (!al_scale_bus || !al_scale_in || !al_decode_in)
+                return 1;
+        for (positive i = 0; i < 4 * 8192; i++)
+        {
+                XORSHIFT64(state);
+                al_decode_in[i] = (p8)(state >> 24);
+        }
+        for (positive c = 0; c < 8; c++)
+        {
+                al_decode_out[c] = memory(4096 * 4);
+                if (!al_decode_out[c])
+                        return 1;
+        }
+        for (positive i = 0; i < 4 * 1024 + 64; i++)
+        {
+                XORSHIFT64(state);
+                al_scale_in[i] = (f32)(int)(state >> 40) / 8388608.0f - 1.0f;
+                al_scale_bus[i] = (f32)(int)(state >> 16 & 0xffffff) / 8388608.0f - 1.0f;
+        }
         BENCH_RUN_NAMED(al_named);
 #if X64
-        p8 wide2 = cpu_has_avx2, fused = cpu_has_fma;
+        p8 wide2 = cpu_has_avx2, fused = cpu_has_fma, wide512 = cpu_has_avx512;
 
-        for (p32 tier = 0; tier < 2; tier++)
+        al_has512 = wide512;
+        for (p32 tier = 0; tier < 3; tier++)
         {
-                if (tier == 0 && !(wide2 && fused))
+                if ((tier == 0 && !wide512) || (tier == 1 && !(wide2 && fused)))
                         continue;
                 al_force(tier);
-                al_shapes_run(tier == 0 ? "avx2 fma" : "sse2");
+                if (tier)
+                        al_shapes_run(tier == 1 ? "avx2 fma" : "sse2");
+                al_scale_rows(tier == 0 ? "avx512" : tier == 1 ? "avx2" : "sse2", tier <= 1, tier == 0);
+                if (tier)
+                        al_decode_rows(tier == 1 ? "avx2" : "sse2", tier == 1);
         }
-        cpu_has_avx2 = wide2, cpu_has_fma = fused;
+        cpu_has_avx2 = wide2, cpu_has_fma = fused, cpu_has_avx512 = wide512;
 #elif RISCV64
         cpu_has_vector = 0;
         resample_polyphase2_f32(al_out[0], al_out[1], al_in[0][0], al_in[0][1], al_table[0], 64, 1, 0, 0, 1);
@@ -178527,10 +179152,14 @@ b32 main(void)
                 if (tier == 0 && vector != 2)
                         continue;
                 al_shapes_run(tier == 0 ? "V" : "no V");
+                al_scale_rows(tier == 0 ? "V" : "no V", true, false);
+                al_decode_rows(tier == 0 ? "V" : "no V", true);
         }
         cpu_has_vector = vector;
 #else
         al_shapes_run("neon");
+        al_scale_rows("neon", true, false);
+        al_decode_rows("neon", true);
 #endif
         log_flush();
         return 0;

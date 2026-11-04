@@ -370,6 +370,12 @@ cover('folds_already', 'width', 'memory_fill_u32_rect',
 cover('folds_already', 'count', 'memory_over_tone_u32',
       'the kit hands it a run of a line or a row of a box: its length is the '
       'layout at run time, and the tone is the theme, so no literal reaches it')
+cover('folds_already', 'count', 'f32_scale_peak f32_scale_add_peak',
+      'the mixing core hands it what is left of a block after a gain\'s ramp, 16 to 512 floats set by the period and the ramp at '
+      'run time; a literal count would remove one compare from a loop of dozens of vector turns')
+cover('folds_already', 'frames', 'f32_planes_from_s16 f32_planes_from_s32 f32_planes_from_f32',
+      'the mixing core hands it the frames a block asks for (up to 512, set by the period and the ring) and the stream\'s channel count, '
+      'which the program chose at run time; a literal count would remove a compare or two from a loop of dozens of vector turns')
 cover('folds_already', 'count', 'resample_polyphase2_f32',
       'the mixing core hands it the frames a period asks for (the sink\'s block, 16 to 512) and the table\'s taps and phases, '
       'which the two sample rates of a stream set at run time; a literal count would remove one compare from a stream of '

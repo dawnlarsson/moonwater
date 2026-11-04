@@ -100,6 +100,11 @@
 #ifndef STANDARD_MODERN_C
 void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
                              unsigned long phases, unsigned long pos, unsigned long step, unsigned long count);
+float f32_scale_peak(float *dst, const float *x, unsigned long count, float gain);
+float f32_scale_add_peak(float *dst, const float *x, unsigned long count, float gain);
+void f32_planes_from_s16(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels);
+void f32_planes_from_s32(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels);
+void f32_planes_from_f32(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels);
 #endif
 
 /* ---- numbers: sin, sqrt and the Bessel function, in double, with no library ---- */
@@ -247,6 +252,18 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
 {
         long bytes = audio_format_bytes(format), stride = bytes * channels;
 
+        // The three formats nearly every program plays in are the library's (assembly, a plane a channel in one pass); the rest
+        // (8 bits, the laws, the other widths, the byte-swapped ones) are loops here.
+        if (frames > 0 && channels > 0 && (format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_F32LE))
+        {
+                if (format == AUDIO_FORMAT_S16LE)
+                        f32_planes_from_s16(dst, src, (unsigned long)frames, (unsigned long)channels);
+                else if (format == AUDIO_FORMAT_S32LE)
+                        f32_planes_from_s32(dst, src, (unsigned long)frames, (unsigned long)channels);
+                else
+                        f32_planes_from_f32(dst, src, (unsigned long)frames, (unsigned long)channels);
+                return;
+        }
         for (long c = 0; c < channels; c++)
         {
                 const unsigned char *p = src + c * bytes;
@@ -266,20 +283,10 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
                         for (long i = 0; i < frames; i++)
                                 d[i] = audio_law[1][p[i * stride]];
                         break;
-                case AUDIO_FORMAT_S16LE:
-                        for (long i = 0; i < frames; i++)
-                        {
-                                short x;
-
-                                __builtin_memcpy(&x, p + i * stride, 2);
-                                d[i] = (float)x * (1.0f / 32768.0f);
-                        }
-                        break;
                 case AUDIO_FORMAT_S16BE:
                         for (long i = 0; i < frames; i++)
                                 d[i] = (float)(short)((p[i * stride] << 8) | p[i * stride + 1]) * (1.0f / 32768.0f);
                         break;
-                case AUDIO_FORMAT_F32LE:
                 case AUDIO_FORMAT_F32BE:
                         for (long i = 0; i < frames; i++)
                         {
@@ -287,22 +294,18 @@ AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, 
                                 float x;
 
                                 __builtin_memcpy(&bits, p + i * stride, 4);
-                                if (format == AUDIO_FORMAT_F32BE)
-                                        bits = audio_swap32(bits);
+                                bits = audio_swap32(bits);
                                 __builtin_memcpy(&x, &bits, 4);
                                 d[i] = audio_sane(x);
                         }
                         break;
-                case AUDIO_FORMAT_S32LE:
                 case AUDIO_FORMAT_S32BE:
                         for (long i = 0; i < frames; i++)
                         {
                                 unsigned int bits;
 
                                 __builtin_memcpy(&bits, p + i * stride, 4);
-                                if (format == AUDIO_FORMAT_S32BE)
-                                        bits = audio_swap32(bits);
-                                d[i] = (float)(int)bits * (1.0f / 2147483648.0f);
+                                d[i] = (float)(int)audio_swap32(bits) * (1.0f / 2147483648.0f);
                         }
                         break;
                 case AUDIO_FORMAT_S24LE:
@@ -1022,22 +1025,13 @@ static inline __attribute__((always_inline)) void audio_gain_run(float *dst, con
                         dst[i] = add ? dst[i] + y : y;
                 }
         }
-        if (add)
-                for (; i < n; i++)
-                {
-                        float y = x[i] * g, a = y < 0 ? -y : y;
+        // Held at its gain: a multiply and a sum rounded apart, and the greatest sample, in the library's loop.
+        if (i < n)
+        {
+                float held = add ? f32_scale_add_peak(dst + i, x + i, (unsigned long)(n - i), g) : f32_scale_peak(dst + i, x + i, (unsigned long)(n - i), g);
 
-                        pk = a > pk ? a : pk;
-                        dst[i] += y;
-                }
-        else
-                for (; i < n; i++)
-                {
-                        float y = x[i] * g, a = y < 0 ? -y : y;
-
-                        pk = a > pk ? a : pk;
-                        dst[i] = y;
-                }
+                pk = held > pk ? held : pk;
+        }
         *now = g;
         *peak = pk;
 }
