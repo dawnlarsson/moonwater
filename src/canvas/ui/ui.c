@@ -6584,8 +6584,9 @@ static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int hei
 // The hand's move, in 256ths of a device pixel (positive: the content moves down the region). It takes the region from where it is
 // drawn: a glide or a spring is stopped there, and a region at rest starts from its place. Its reports are fitted for the release,
 // and the region may be held past its ends by UI_SCROLL_VIEW_PAST views (the stretch draws how far, through ui_scroll_pull).
-static void ui_scroll_hand(struct ui_scroll address_to s, b64 move, positive now)
+static void ui_scroll_hand(struct ui_scroll address_to s, b64 move)
 {
+        positive now = (positive)ui_kit_clock();
         b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
 
         if (!s->dragging || !s->hand)
@@ -6619,7 +6620,7 @@ static b32 ui_scroll_precise(const struct ui address_to ui, struct ui_scroll add
         s->notch = now;
         s->precise = 1;
         s->absorb = 0;
-        ui_scroll_hand(s, -(b64)q, now);
+        ui_scroll_hand(s, -(b64)q);
         return s->scroll != before || s->bounds;
 }
 
@@ -6720,8 +6721,9 @@ static b64 ui_wheel_clock(void)
 #define UI_WHEEL_REACH 12  // units a spin may carry the aim past where the region is drawn
 #define UI_WHEEL_RUN 60    // rows a second the glide of a spin may run at most
 
-static b64 ui_wheel_rate(const struct ui_scroll address_to s, b64 now)
+static b64 ui_wheel_rate(const struct ui_scroll address_to s)
 {
+        b64 now = (b64)ui_kit_clock();
         b64 gap = s->notch && now > s->notch ? now - s->notch : UI_WHEEL_SLOW_NS;
 
         if (gap >= UI_WHEEL_SLOW_NS)
@@ -6750,7 +6752,7 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
         if (!steps)
                 return false;
         now = ui_wheel_clock();
-        rate = ui_kit.wheel_off ? 256 : ui_wheel_rate(s, now);
+        rate = ui_kit.wheel_off ? 256 : ui_wheel_rate(s);
         last = s->notch;
         s->notch = now;
         most = ui_scroll_most256(s);
@@ -6779,7 +6781,7 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
                 if (past)
                 {
                         s->precise = 0;
-                        ui_scroll_hand(s, move, now);
+                        ui_scroll_hand(s, move);
                         ui_scroll_show(s);
                         return true;
                 }
