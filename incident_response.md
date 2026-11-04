@@ -41,6 +41,24 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-135: a font's metrics past 16384 px wrapped in 32 bits
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 (hardening: wrong sizes and a signed overflow, no memory written) |
+| Class | Integer truncation and signed overflow on metrics a font file chooses |
+| Moonwater exposure window | 2026-10-09 17:38 +02:00 (`697155d9a`, the text engine) to the fix, about 26 days |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_font`, `arithmetic: a cell as wide as an advance of 65535 units in an em of 16 is held at 16384 px, not wrapped` and `arithmetic: an advance past 16384 px is held there too` |
+
+**What it was.** `font_fixed` turns font units into 16.16 pixels as units * size * 1024 / units per em, worked in 64
+bits and handed back in 32. A file may say an em is 16 units and an advance 65535 (both pass the load), which is
+2^34 at the terminal's 64 px and 2^42 at the largest size: the result wrapped, so the terminal's cell from such a face
+was one pixel wide at some sizes and negative at others, and `font_cell_find` then shifted a cell width of up to two
+such cells left by 16 in 32 bits, a signed overflow. No array was indexed by the wrapped values (the atlas and the
+cell drawing clip and check their sizes), so this is wrong sizes from a hostile font, not memory corruption. The
+value is now held at 16384 px either way (2^30 in 16.16, which leaves room to add a few) and the shift is in 64 bits.
+
 ### MW-2026-134: the text engine's dot pass did arithmetic on stack words it never wrote
 
 | | |

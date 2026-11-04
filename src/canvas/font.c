@@ -699,9 +699,15 @@ static inline b64 font_divide(b64 value, b64 denominator)
         return value >= 0 ? (value + half) / denominator : -((half - value) / denominator);
 }
 
+//      Held to 16384 px either way: a hostile advance of 65535 units in an em of 16 is 2^42 at 16383 px and wrapped
+//      in 32 bits (a terminal's cell of a negative width), and a cell width that large shifted to 16.16 overflowed.
+#define FONT_FIXED_MOST ((b64)1 << 30)
+
 static inline b32 font_fixed(const font_face address_to face, b64 units, p32 size)
 {
-        return (b32)font_divide(units * size * 1024, face->units);
+        b64 value = font_divide(units * size * 1024, face->units);
+
+        return (b32)(value > FONT_FIXED_MOST ? FONT_FIXED_MOST : value < -FONT_FIXED_MOST ? -FONT_FIXED_MOST : value);
 }
 
 /*
@@ -9302,7 +9308,7 @@ font_cell_find(font_engine address_to e, const font_face address_to const addres
         {
                 font_find(e, faces, count, code, &face, &glyph);
 
-                b32 eighth = font_eighths(((width << 16) - font_advance(faces[face], glyph, size)) / 2);
+                b32 eighth = font_eighths((((b64)width << 16) - font_advance(faces[face], glyph, size)) / 2);
                 p32 style = font_style(e, size, flags);
 
                 //      A cell's pen is a whole pixel, so its stems can be too.

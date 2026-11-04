@@ -117935,6 +117935,23 @@ static fn check_hostile_arithmetic(void)
         }
         check("arithmetic: a dotted letter hinted over a stack of extremes is drawn (no difference of words never written)",
               drawn == 0 && box.width > 0);
+
+        //      A face whose M is 65535 units wide in an em of 16 (the advance a cell is cut from): at 64 px that is
+        //      262140 px, 2^34 in 16.16, which was wrapped in 32 bits to a cell of one pixel (and of a negative width at
+        //      other sizes); it is held at 16384 px, and a cell two of them wide is drawn without a shift past 32 bits.
+        {
+                font_face wide = face;
+                font_metrics grid;
+                const font_face address_to chain[1] = {&wide};
+                font_target target = {canvas, 96, 96, 96};
+
+                wide.units = 16, wide.em_advance = 0xffff;
+                grid = font_metrics_at(&wide, 64 * 64);
+                check("arithmetic: a cell as wide as an advance of 65535 units in an em of 16 is held at 16384 px, not wrapped",
+                      grid.cell_width == 16384 && font_metrics_at(&wide, 16383 * 64).cell_width == 16384);
+                font_cell(&engine, chain, 1, 'A', 2, &grid, 64 * 64, 0, &target, 0, 0, 0xffffff, 0x101820);
+                check("arithmetic: an advance past 16384 px is held there too", font_advance(&wide, font_glyph(&wide, 'M'), 16383 * 64) == 1 << 30);
+        }
 }
 
 /*
