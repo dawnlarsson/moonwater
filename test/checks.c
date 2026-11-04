@@ -126921,15 +126921,22 @@ static long mixer_timeout; // the wait the last answer was asked to be waited fo
 static unsigned char mixer_reply[32];
 static long mixer_reply_have, mixer_reply_at;
 
+// The clock of the fake connection stands still, so a call's budget is the whole of its timeout on every wait it makes.
+static long mixer_fake_now(void *context)
+{
+        (void)context;
+        return 0;
+}
+
 // What the mixer sends is read back as the engine reads it: the command, the tag, and the fields of the five that change a volume or a mute.
-static long mixer_fake_send(void *context, const unsigned char *bytes, long count)
+static long mixer_fake_send(void *context, const unsigned char *bytes, long count, long timeout_ms)
 {
         const unsigned char *payload = bytes + 20;
         struct mixer_sent *sent = &mixer_log[mixer_logged < 16 ? mixer_logged : 15];
         long at = 10;
         unsigned long command = pulse_be32(payload + 1), tag = pulse_be32(payload + 6);
 
-        (void)context, (void)count;
+        (void)context, (void)count, (void)timeout_ms;
         if (mixer_fail_send)
                 return -1;
         memory_zero(sent, sizeof(*sent));
@@ -127150,7 +127157,7 @@ static void check_compositor_volume(void)
         {
                 char at_text[16];
 
-                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
                 compositor_ctl.open = 1;
                 compositor_ctl_again = 0; // the keys before this one tried a socket that is not there, and none is tried for two seconds after
                 mixer_logged = 0, mixer_fail_send = 0;
@@ -127174,7 +127181,7 @@ static void check_compositor_volume(void)
                 check("volume: a socket that fails is let go and the files are written all the same", !compositor_ctl.open && string_equals((string_address)at_text, (string_address) "90\n") &&
                                                                                                           compositor_volume.percent == 90 && compositor_ctl_again > clock_monotonic_nanoseconds());
                 mixer_fail_send = 0;
-                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
                 compositor_key(0, CK_KEY_VOLUME_DOWN, 1, 0);
                 volume_file(compositor_volume_path[1], at_text, sizeof(at_text));
                 check("volume: and none is tried again before its time, while the files go on", mixer_logged == 0 && !compositor_ctl.open && string_equals((string_address)at_text, (string_address) "85\n"));
@@ -127184,7 +127191,7 @@ static void check_compositor_volume(void)
                                                                                                                          compositor_ctl_again > clock_monotonic_nanoseconds() &&
                                                                                                                          compositor_volume.percent == 80);
                 // and a page with no sink name (a server that is starting) is told nothing
-                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
                 compositor_ctl.open = 1;
                 compositor_volume.copy.name[0] = 0;
                 compositor_key(0, CK_KEY_VOLUME_UP, 1, 0);
@@ -145916,7 +145923,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         mixer_poll(mixer_t0 + 64000000ll);
 
         // What a change sends: the device's volume and mute for the sink by its name, a program's for each of its streams, once for a number of events.
-        mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+        mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
         mixer.big->ctl.open = 1;
         mixer.connected = true;
         ctl_keep_channels(&mixer.big->ctl, 7, 2), ctl_keep_channels(&mixer.big->ctl, 9, 2), ctl_keep_channels(&mixer.big->ctl, 12, 2);
@@ -145972,7 +145979,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         mixer_flush();
         check("mixer: with no server to connect to it waits, and still keeps it", !mixer.connected && mixer.big->send[0] == 1);
         mixer_fail_send = 0;
-        mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+        mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
         mixer.big->ctl.open = 1;
         mixer.connected = true;
         mixer_flush();
@@ -177293,8 +177300,16 @@ static unsigned char pt_ctl_bytes[PULSE_OUT];
 static long pt_ctl_have, pt_ctl_at, pt_ctl_sends, pt_ctl_deaf, pt_ctl_fail_send, pt_ctl_stale, pt_ctl_timeout;
 
 // What the client sends goes to the engine as the bytes a connection would carry.
-static long pt_ctl_send(void *context, const unsigned char *bytes, long count)
+// The clock stands still here too: a call's budget is its whole timeout on every wait, as the transport was asked before.
+static long pt_ctl_now(void *context)
 {
+        (void)context;
+        return 0;
+}
+
+static long pt_ctl_send(void *context, const unsigned char *bytes, long count, long timeout_ms)
+{
+        (void)timeout_ms;
         (void)context;
         pt_ctl_sends++;
         if (pt_ctl_fail_send)
@@ -177349,7 +177364,7 @@ static long pt_ctl_join(long uid)
         pt_ctl_slot = slot;
         pt_ctl_have = pt_ctl_at = pt_ctl_sends = pt_ctl_deaf = pt_ctl_fail_send = pt_ctl_stale = 0;
         memset(&pt_ctl, 0, sizeof(pt_ctl));
-        pt_ctl.transport = (struct ctl_transport){0, pt_ctl_send, pt_ctl_receive};
+        pt_ctl.transport = (struct ctl_transport){0, pt_ctl_send, pt_ctl_receive, pt_ctl_now};
         return ctl_start(&pt_ctl) == 0 ? slot : -1;
 }
 
@@ -177479,7 +177494,7 @@ static void pt_test_control_client(void)
         pt_ctl_have = pt_ctl_at = 0;
         pt_ctl_deaf = 1;
         memset(&pt_ctl, 0, sizeof(pt_ctl));
-        pt_ctl.transport = (struct ctl_transport){0, pt_ctl_send, pt_ctl_receive};
+        pt_ctl.transport = (struct ctl_transport){0, pt_ctl_send, pt_ctl_receive, pt_ctl_now};
         PTCHECK(ctl_start(&pt_ctl) == CTL_FAILED && !ctl_ready(&pt_ctl), "a handshake with no answer fails");
         pt_ctl_deaf = 0;
         pulse_client_close(&pt_engine, person);
@@ -177629,6 +177644,344 @@ int main(void)
         return pt_failures ? 1 : 0;
 }
 #endif /* CHECK_audio_pulse */
+
+#ifdef CHECK_audio_control
+/*
+        CHECK_audio_control: the control client (src/audio/control.c) over its real Unix socket, against servers of its own
+        that are forked here (CHECK_audio_pulse runs the client against the engine through a fake transport; this one takes
+        the system's transport). A process has two connections at once (the compositor's and the mixer's, both in the one
+        translation unit of src/sh/shell.c), and each must reach its own server. A server that dribbles its answer a byte
+        at a time, one that talks on with stray frames, and one that never answers must each cost a call its budget (the
+        timeout the caller set, 60 ms here) and no more: a call is a deadline, not a wait per part of an answer.
+
+            cc -std=gnu11 -O2 -Wall -Wextra -Wno-comment -D_GNU_SOURCE -DCHECK_audio_control test/checks.c
+*/
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+typedef unsigned long long positive;
+
+// The freestanding build's system_call_6 answers a negative errno; the libc's syscall() answers -1 and sets errno.
+static long system_call_6(positive number, positive a, positive b, positive c, positive d, positive e, positive f)
+{
+        long got = syscall((long)number, a, b, c, d, e, f);
+
+        return got < 0 ? -errno : got;
+}
+#define syscall(name) SYS_##name
+
+#include "../src/audio/control.c"
+
+static unsigned cck_checks, cck_failures;
+
+#define CCKCHECK(condition, ...)                                                                                      \
+        do                                                                                                            \
+        {                                                                                                             \
+                cck_checks++;                                                                                         \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        cck_failures++;                                                                               \
+                        printf("  FAIL: ");                                                                           \
+                        printf(__VA_ARGS__);                                                                          \
+                        printf(" (line %d)\n", __LINE__);                                                             \
+                }                                                                                                     \
+        } while (0)
+
+enum { CCK_NORMAL, CCK_DRIBBLE, CCK_CHATTY, CCK_STALL };
+
+// What a forked server saw, counted by the server into a shared page and read by the check.
+struct cck_log
+{
+        volatile long requests;
+        volatile unsigned long command, index, tag;
+};
+
+static double cck_now_ms(void)
+{
+        struct timespec at;
+
+        clock_gettime(CLOCK_MONOTONIC, &at);
+        return (double)at.tv_sec * 1000.0 + (double)at.tv_nsec / 1e6;
+}
+
+static unsigned long cck_get(const unsigned char *p)
+{
+        return (unsigned long)p[0] << 24 | (unsigned long)p[1] << 16 | (unsigned long)p[2] << 8 | (unsigned long)p[3];
+}
+
+static void cck_put(unsigned char *to, unsigned long v)
+{
+        to[0] = (unsigned char)(v >> 24), to[1] = (unsigned char)(v >> 16), to[2] = (unsigned char)(v >> 8), to[3] = (unsigned char)v;
+}
+
+static int cck_read_full(int fd, unsigned char *bytes, long count)
+{
+        long done = 0;
+
+        while (done < count)
+        {
+                ssize_t got = read(fd, bytes + done, (size_t)(count - done));
+
+                if (got < 0 && errno == EINTR)
+                        continue;
+                if (got <= 0)
+                        return -1;
+                done += got;
+        }
+        return 0;
+}
+
+static void cck_write_full(int fd, const unsigned char *bytes, long count)
+{
+        while (count > 0)
+        {
+                ssize_t put = write(fd, bytes, (size_t)count);
+
+                if (put < 0 && errno == EINTR)
+                        continue;
+                if (put <= 0)
+                        return;
+                bytes += put;
+                count -= put;
+        }
+}
+
+// A reply on a channel with its tag, and extra bytes of filler after the tag: the frame's descriptor is made here.
+static long cck_frame(unsigned char *out, unsigned long channel, unsigned long tag, long extra)
+{
+        long size = 10 + extra;
+
+        cck_put(out, (unsigned long)size);
+        cck_put(out + 4, channel);
+        memset(out + 8, 0, 12);
+        out[20] = 'L';
+        cck_put(out + 21, 2); // PULSE REPLY
+        out[25] = 'L';
+        cck_put(out + 26, tag);
+        memset(out + 30, 0, (size_t)extra);
+        return 20 + size;
+}
+
+static void cck_serve(int listener, int mode, struct cck_log *log)
+{
+        unsigned char head[20], request[512], frame[256];
+        int conn = accept(listener, 0, 0);
+
+        if (conn < 0)
+                _exit(1);
+        for (;;)
+        {
+                long size, length;
+
+                if (cck_read_full(conn, head, 20) < 0)
+                        break;
+                size = (long)cck_get(head);
+                if (size < 10 || size > (long)sizeof(request) || cck_read_full(conn, request, size) < 0)
+                        break;
+                log->requests++;
+                log->command = cck_get(request + 1);
+                log->tag = cck_get(request + 6);
+                log->index = size >= 15 ? cck_get(request + 11) : 0;
+                if (log->requests <= 2 || mode == CCK_NORMAL)
+                {
+                        length = cck_frame(frame, 0xffffffffu, log->tag, 0);
+                        cck_write_full(conn, frame, length);
+                        continue;
+                }
+                if (mode == CCK_STALL)
+                        sleep(60);
+                if (mode == CCK_CHATTY)
+                        for (int stray = 0; stray < 100; stray++)
+                        {
+                                length = cck_frame(frame, 0, log->tag + 1000, 0);
+                                cck_write_full(conn, frame, length);
+                                usleep(8000);
+                        }
+                if (mode == CCK_DRIBBLE)
+                {
+                        length = cck_frame(frame, 0xffffffffu, log->tag, 10);
+                        for (long at = 0; at < length; at++)
+                        {
+                                cck_write_full(conn, frame + at, 1);
+                                usleep(8000);
+                        }
+                        continue;
+                }
+                length = cck_frame(frame, 0xffffffffu, log->tag, 0);
+                cck_write_full(conn, frame, length);
+        }
+        _exit(0);
+}
+
+// A server of its own on path, its listening socket made before the fork (a connect after the fork cannot be refused).
+static pid_t cck_spawn(const char *path, int mode, struct cck_log **log)
+{
+        struct sockaddr_un address;
+        int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+        pid_t pid;
+
+        *log = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (listener < 0 || *log == MAP_FAILED)
+                return -1;
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+        unlink(path);
+        if (bind(listener, (struct sockaddr *)&address, sizeof(address)) < 0 || listen(listener, 4) < 0)
+                return -1;
+        memset(*log, 0, 4096);
+        pid = fork();
+        if (pid == 0)
+        {
+                cck_serve(listener, mode, *log);
+                _exit(0);
+        }
+        close(listener);
+        return pid;
+}
+
+static void cck_stop(pid_t pid, struct ctl *c)
+{
+        ctl_disconnect(c);
+        if (pid > 0)
+        {
+                kill(pid, SIGKILL);
+                waitpid(pid, 0, 0);
+        }
+}
+
+// Two connections in one process, each to its own server: the requests of each reach that server and no other.
+static void cck_test_two_connections(const char *dir)
+{
+        char path_a[108], path_b[108], path_c[108];
+        struct cck_log *log_a, *log_b, *log_c = 0;
+        pid_t pid_a, pid_b, pid_c = -1;
+        static struct ctl a, b;
+        long before_a, before_b;
+        int old_fd;
+
+        snprintf(path_a, sizeof(path_a), "%s/a", dir);
+        snprintf(path_b, sizeof(path_b), "%s/b", dir);
+        pid_a = cck_spawn(path_a, CCK_NORMAL, &log_a);
+        pid_b = cck_spawn(path_b, CCK_NORMAL, &log_b);
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        CCKCHECK(pid_a > 0 && pid_b > 0, "the two servers are made");
+        CCKCHECK(ctl_connect(&a, path_a) == 0 && ctl_connect(&b, path_b) == 0, "two connections are made, the second while the first is open");
+        before_a = log_a->requests;
+        before_b = log_b->requests;
+        CCKCHECK(ctl_set_sink_volume(&a, "null", 0x8000) == 0, "the first connection's volume is taken");
+        CCKCHECK(log_a->requests == before_a + 1 && log_b->requests == before_b, "and it reaches its own server (A %ld, B %ld)",
+                 log_a->requests - before_a, log_b->requests - before_b);
+        before_a = log_a->requests;
+        before_b = log_b->requests;
+        CCKCHECK(ctl_set_sink_volume(&b, "null", 0x4000) == 0, "the second connection's volume is taken");
+        CCKCHECK(log_b->requests == before_b + 1 && log_a->requests == before_a, "and it reaches its own server (A %ld, B %ld)",
+                 log_a->requests - before_a, log_b->requests - before_b);
+        // The first connection made again, to a server of its own: the socket it replaces is closed, and the second is not touched.
+        snprintf(path_c, sizeof(path_c), "%s/c", dir);
+        pid_c = cck_spawn(path_c, CCK_NORMAL, &log_c);
+        old_fd = a.socket.fd;
+        CCKCHECK(pid_c > 0 && ctl_connect(&a, path_c) == 0, "the first connection is made again, to another server");
+        CCKCHECK(fcntl(old_fd, F_GETFD) == -1 && errno == EBADF, "and the socket it replaces is closed");
+        CCKCHECK(ctl_set_sink_volume(&a, "null", 0x1000) == 0 && log_c->requests == 3, "its volume reaches the new server (%ld requests)", log_c->requests);
+        CCKCHECK(ctl_set_sink_volume(&b, "null", 0x3000) == 0, "the second connection is still taken");
+        ctl_disconnect(&a);
+        CCKCHECK(ctl_set_sink_volume(&b, "null", 0x2000) == 0, "closing the first leaves the second connected");
+        cck_stop(pid_c, &a);
+        cck_stop(pid_b, &b);
+        cck_stop(pid_a, &a);
+}
+
+// A server whose answer holds the call: the call fails within its budget (60 ms) and not after the server's whole answer.
+static void cck_test_held(const char *dir, int mode, const char *name)
+{
+        char path[108];
+        struct cck_log *log;
+        pid_t pid;
+        static struct ctl c;
+        double began;
+        long got;
+
+        snprintf(path, sizeof(path), "%s/%s", dir, name);
+        pid = cck_spawn(path, mode, &log);
+        memset(&c, 0, sizeof(c));
+        CCKCHECK(pid > 0 && ctl_connect(&c, path) == 0, "%s: connected", name);
+        c.timeout_ms = 60;
+        began = cck_now_ms();
+        got = ctl_set_sink_volume(&c, "null", 0x8000);
+        CCKCHECK(got == CTL_FAILED, "%s: the call fails (%ld)", name, got);
+        CCKCHECK(cck_now_ms() - began < 200.0, "%s: the call costs its budget and no more (%.0f ms, budget 60)", name, cck_now_ms() - began);
+        CCKCHECK(!ctl_ready(&c), "%s: a call that ran out is a lost connection", name);
+        cck_stop(pid, &c);
+}
+
+// A normal answer with a budget set: the volume is taken at once.
+static void cck_test_normal(const char *dir)
+{
+        char path[108];
+        struct cck_log *log;
+        pid_t pid;
+        static struct ctl c;
+        double began;
+        long got;
+
+        snprintf(path, sizeof(path), "%s/n", dir);
+        pid = cck_spawn(path, CCK_NORMAL, &log);
+        memset(&c, 0, sizeof(c));
+        CCKCHECK(pid > 0 && ctl_connect(&c, path) == 0, "normal: connected");
+        c.timeout_ms = 60;
+        began = cck_now_ms();
+        got = ctl_set_sink_volume(&c, "null", 0x8000);
+        CCKCHECK(got == 0 && log->command == CTL_COMMAND_SET_SINK_VOLUME && log->index == CTL_NONE, "normal: the volume is taken (%ld)", got);
+        CCKCHECK(cck_now_ms() - began < 60.0, "normal: an answer that comes is not waited for (%.1f ms)", cck_now_ms() - began);
+        cck_stop(pid, &c);
+}
+
+// The rest of the client, referenced here so that a build with -Werror finds no unused function: each of them is checked
+// over the engine by CHECK_audio_pulse, and this check is about the socket under them.
+static const void *cck_rest[] = {(void *)ctl_get_input, (void *)ctl_set_input_volume, (void *)ctl_set_output_volume, (void *)ctl_set_input_mute,
+                                 (void *)ctl_set_output_mute, (void *)ctl_kill_input, (void *)ctl_set_sink_mute,
+                                 (void *)ctl_set_source_volume, (void *)ctl_set_source_mute};
+
+int main(void)
+{
+        char dir[96], tmp[64] = "/tmp";
+        const char *env = getenv("TMPDIR");
+
+        if (env && strlen(env) < 40)
+                snprintf(tmp, sizeof(tmp), "%s", env);
+        snprintf(dir, sizeof(dir), "%s/alsa-control-XXXXXX", tmp);
+        if (!mkdtemp(dir))
+        {
+                printf("CHECK_audio_control: no directory for the sockets\n");
+                return 1;
+        }
+        if (!cck_rest[0])
+                return 1;
+        cck_test_two_connections(dir);
+        cck_test_normal(dir);
+        cck_test_held(dir, CCK_DRIBBLE, "d");
+        cck_test_held(dir, CCK_CHATTY, "c");
+        cck_test_held(dir, CCK_STALL, "s");
+        printf("CHECK_audio_control: %u checks, %u failures\n", cck_checks, cck_failures);
+        return cck_failures ? 1 : 0;
+}
+#endif /* CHECK_audio_control */
 
 
 #ifdef CHECK_stdio_buffer

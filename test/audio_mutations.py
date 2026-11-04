@@ -14,7 +14,10 @@ import concurrent.futures, os, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c'), 'pulse': os.path.join(root, 'src/audio/pulse.c'),
-           'control': os.path.join(root, 'src/audio/control.c'), 'bowl': os.path.join(root, 'src/bowl.c')}
+           'control': os.path.join(root, 'src/audio/control.c'), 'socket': os.path.join(root, 'src/audio/control.c'), 'bowl': os.path.join(root, 'src/bowl.c')}
+# 'socket' is control.c's own socket transport, built into CHECK_audio_control (which takes the system's socket, not the engine's).
+target_file = {'socket': 'control'}
+check_of = {'control': 'pulse', 'socket': 'control'}
 checks = os.path.join(root, 'test/checks.c')
 work = tempfile.mkdtemp(prefix='audio-mutations-')
 only = sys.argv[1:]
@@ -237,6 +240,13 @@ M = [
     ("control", "a record stream's wrong count not mended", 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != CTL_INVALID)', 'if (channels && (got = ctl_volume_once(c, CTL_COMMAND_SET_SOURCE_OUTPUT_VOLUME, index, volume, channels)) != 12345)'),
     ("control", "a record stream's refusal for its count taken for one for access", '                if (got == CTL_INVALID)\n                        continue;', '                if (got < 0)\n                        continue;'),
     ("control", "the stream killed is another", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index);", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index + 1);"),
+    # ---- control.c's socket and budget (CHECK_audio_control: the system's socket, to forked servers) ----
+    ("socket", "one socket shared by every connection", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n        c->socket.fd = (int)fd;\n        c->socket.linked = 1;\n        c->transport = (struct ctl_transport){&c->socket,", "        static struct ctl_socket shared;\n        ctl_disconnect(c);\n        shared.fd = (int)fd;\n        shared.linked = 1;\n        c->transport = (struct ctl_transport){&shared,"),
+    ("socket", "a reconnect leaks the socket it replaces", "        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket\n", ""),
+    ("socket", "a receive waits per part again", "if (ctl_wait_until(s, 1, until) <= 0)", "if (ctl_wait(s->fd, 1, timeout_ms) <= 0)"),
+    ("socket", "a send waits per part again", "if (ctl_wait_until(s, 0, until) <= 0)", "if (ctl_wait(s->fd, 0, timeout_ms) <= 0)"),
+    ("socket", "every part of an answer given the whole timeout", "c->transport.receive(c->transport.context, frame, 20, ctl_left(c)) < 0", "c->transport.receive(c->transport.context, frame, 20, c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS) < 0"),
+    ("socket", "a call's budget never begun", "        c->deadline = c->transport.now(c->transport.context) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);", "        (void)0;"),
 ]
 
 sources = {k: open(v).read() for k, v in engines.items()}
@@ -272,9 +282,9 @@ def run(index):
     os.symlink(checks, d + "/test/checks.c")
     for k, v in engines.items():
         shutil.copy(v, d + "/src/audio/" + k + ".c")
-    open(d + "/src/audio/" + which + ".c", "w").write(src.replace(old, new) if name.startswith("peak") else src.replace(old, new, 1))
+    open(d + "/src/audio/" + target_file.get(which, which) + ".c", "w").write(src.replace(old, new) if name.startswith("peak") else src.replace(old, new, 1))
     exe = d + "/check"
-    cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_audio_" + ("pulse" if which == "control" else which), d + "/test/checks.c", "-o", exe, "-lm"],
+    cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_audio_" + check_of.get(which, which), d + "/test/checks.c", "-o", exe, "-lm"],
                         capture_output=True, text=True, errors="replace")
     if cc.returncode:
         return (name, "BUILD ERROR", cc.stderr[:200])

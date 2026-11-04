@@ -267,14 +267,16 @@ static long ctl_r_cvolume(struct ctl_r *r, unsigned long *first)
 #define CTL_INVALID (-4) // the server did not understand what was asked
 
 /*
-        The two things a connection is. send puts all count bytes on it or fails (a negative number); receive takes exactly
-        count bytes, waiting at most timeout_ms for each part of them, and fails (a negative number) when it cannot.
+        What a connection is. send puts all count bytes on it, and receive takes exactly count bytes; each has timeout_ms in
+        total, not per part (a call is given a budget and every wait of it is for what is left), and either fails (a negative
+        number) when it cannot, the budget running out included. now is the time in milliseconds on a clock that does not go back.
 */
 struct ctl_transport
 {
         void *context;
-        long (*send)(void *context, const unsigned char *bytes, long count);
+        long (*send)(void *context, const unsigned char *bytes, long count, long timeout_ms);
         long (*receive)(void *context, unsigned char *bytes, long count, long timeout_ms);
+        long (*now)(void *context);
 };
 
 struct ctl_input
@@ -285,16 +287,43 @@ struct ctl_input
         int muted;
 };
 
+// A connection's socket: its own, so two connections in one process (the compositor's and the mixer's) never share one.
+struct ctl_socket
+{
+        int fd;
+        int linked;                   // the descriptor is this connection's and is closed when it is let go
+};
+
 struct ctl
 {
         struct ctl_transport transport;
-        long timeout_ms;              // how long an answer is waited for (CTL_TIMEOUT_MS when 0); set before the connection is made
+        struct ctl_socket socket;
+        long timeout_ms;              // how long a call may take, from its start (CTL_TIMEOUT_MS when 0); set before the connection is made
+        long deadline;                // the transport's time the call in hand must be done by
         int open;                     // the handshake is done
         unsigned long tag;
         struct { unsigned long index; long channels; } kept[CTL_CACHE];
         int kept_next;
         unsigned char frame[CTL_FRAME + 20];
 };
+
+/*
+        A call's budget: the connection's timeout (CTL_TIMEOUT_MS when 0) from the moment the call begins, and what of it is
+        left. Every wait of a call is for what is left, so a server that answers a byte at a time, or with stray frames that
+        never end, costs the call its budget and no more. Only a call that is made of its own sets the budget: the calls it
+        makes in turn (the probe of a record stream's count, the stream's count asked before its volume) share it.
+*/
+static void ctl_budget(struct ctl *c)
+{
+        c->deadline = c->transport.now(c->transport.context) + (c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS);
+}
+
+static long ctl_left(struct ctl *c)
+{
+        long left = c->deadline - c->transport.now(c->transport.context);
+
+        return left > 0 ? left : 0;
+}
 
 /*
         One request and its answer. The request's payload is in c->frame at 20 on (its descriptor is made here), length bytes;
@@ -307,12 +336,11 @@ static long ctl_exchange(struct ctl *c, long length)
 {
         unsigned char *frame = c->frame;
         unsigned long tag = c->tag;
-        long wait = c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS;
 
         ctl_put_be(frame, (unsigned long)length);
         ctl_put_be(frame + 4, CTL_NONE); // a command is on the channel -1
         ctl_put_be(frame + 8, 0), ctl_put_be(frame + 12, 0), ctl_put_be(frame + 16, 0);
-        if (c->transport.send(c->transport.context, frame, 20 + length) < 0)
+        if (c->transport.send(c->transport.context, frame, 20 + length, ctl_left(c)) < 0)
         {
                 c->open = 0;
                 return CTL_FAILED;
@@ -322,12 +350,12 @@ static long ctl_exchange(struct ctl *c, long length)
         {
                 unsigned long size, channel, command, answered;
 
-                if (c->transport.receive(c->transport.context, frame, 20, wait) < 0)
+                if (c->transport.receive(c->transport.context, frame, 20, ctl_left(c)) < 0)
                         break;
                 size = ctl_be(frame), channel = ctl_be(frame + 4);
                 if (size > CTL_FRAME)
                         break;
-                if (size && c->transport.receive(c->transport.context, frame + 20, (long)size, wait) < 0)
+                if (size && c->transport.receive(c->transport.context, frame + 20, (long)size, ctl_left(c)) < 0)
                         break;
                 if (channel != CTL_NONE || size < 10)
                         continue;
@@ -375,6 +403,7 @@ static long ctl_start(struct ctl *c)
                 c->kept[i].index = CTL_NONE;
         for (int i = 0; i < 256; i++)
                 cookie[i] = 0;
+        ctl_budget(c);
         ctl_begin(c, &w, CTL_COMMAND_AUTH);
         ctl_w_u32(&w, CTL_VERSION);
         ctl_w_byte(&w, 'x');
@@ -434,7 +463,7 @@ static void ctl_keep_channels(struct ctl *c, unsigned long index, long channels)
         What the server says of a stream: its channel count (kept for the volume calls), the first channel's volume and the mute.
         0, or CTL_NOENTITY for a stream that is gone, CTL_ACCESS for one that is not ours to see, CTL_FAILED.
 */
-static long ctl_get_input(struct ctl *c, unsigned long index, struct ctl_input *into)
+static long ctl_get_input_now(struct ctl *c, unsigned long index, struct ctl_input *into)
 {
         struct ctl_w w;
         struct ctl_r r;
@@ -472,6 +501,12 @@ static long ctl_get_input(struct ctl *c, unsigned long index, struct ctl_input *
         return 0;
 }
 
+static long ctl_get_input(struct ctl *c, unsigned long index, struct ctl_input *into)
+{
+        ctl_budget(c);
+        return ctl_get_input_now(c, index, into);
+}
+
 static long ctl_volume_once(struct ctl *c, unsigned long command, unsigned long index, unsigned long volume, long channels)
 {
         struct ctl_w w;
@@ -498,6 +533,7 @@ static long ctl_set_input_volume(struct ctl *c, unsigned long index, unsigned lo
         long channels = ctl_kept_channels(c, index), got;
         struct ctl_input info;
 
+        ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         volume = volume > CTL_VOLUME_MAX ? CTL_VOLUME_MAX : volume;
@@ -508,7 +544,7 @@ static long ctl_set_input_volume(struct ctl *c, unsigned long index, unsigned lo
                         return got < 0 ? got : 0;
         }
         // Not known, or refused for its count: asked again, and sent once more.
-        if ((got = ctl_get_input(c, index, &info)) < 0)
+        if ((got = ctl_get_input_now(c, index, &info)) < 0)
                 return got;
         got = ctl_volume_once(c, CTL_COMMAND_SET_SINK_INPUT_VOLUME, index, volume, info.channels);
         return got < 0 ? got : 0;
@@ -526,6 +562,7 @@ static long ctl_set_output_volume(struct ctl *c, unsigned long index, unsigned l
         static const signed char guess[] = {2, 1, 4, 6, 8};
         long channels = ctl_kept_channels(c, index + CTL_RECORD_KEY), got = CTL_INVALID;
 
+        ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         volume = volume > CTL_VOLUME_MAX ? CTL_VOLUME_MAX : volume;
@@ -551,6 +588,7 @@ static long ctl_stream_mute(struct ctl *c, unsigned long command, unsigned long 
         struct ctl_w w;
         long got;
 
+        ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         ctl_begin(c, &w, command);
@@ -579,6 +617,7 @@ static long ctl_kill_input(struct ctl *c, unsigned long index)
         struct ctl_w w;
         long got;
 
+        ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);
@@ -600,6 +639,7 @@ static long ctl_device_volume(struct ctl *c, unsigned long command, const char *
         unsigned long both[2];
         long got;
 
+        ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         both[0] = both[1] = volume > CTL_VOLUME_MAX ? CTL_VOLUME_MAX : volume;
@@ -618,6 +658,7 @@ static long ctl_device_mute(struct ctl *c, unsigned long command, const char *na
         struct ctl_w w;
         long got;
 
+        ctl_budget(c);
         if (!c->open)
                 return CTL_FAILED;
         ctl_begin(c, &w, command);
@@ -659,14 +700,19 @@ struct ctl_pollfd
         short events, returned;
 };
 
-struct ctl_socket
-{
-        int fd;
-};
-
 static long ctl_call(positive number, positive a, positive b, positive c, positive d, positive e, positive f)
 {
         return (long)system_call_6(number, a, b, c, d, e, f);
+}
+
+// The clock of the transport: CLOCK_MONOTONIC in milliseconds.
+static long ctl_socket_now(void *context)
+{
+        long at[2] = {0, 0};
+
+        (void)context;
+        ctl_call(syscall(clock_gettime), 1, (positive)at, 0, 0, 0, 0);
+        return at[0] * 1000 + at[1] / 1000000;
 }
 
 // Waits until the socket may be read (readable) or written, at most timeout_ms: 1 when it may, 0 when not in time, -1 when it is broken.
@@ -684,18 +730,27 @@ static long ctl_wait(int fd, int readable, long timeout_ms)
         return (watch.returned & want) ? 1 : -1;
 }
 
-static long ctl_socket_send(void *context, const unsigned char *bytes, long count)
+// Waits until the socket may be read (readable) or written, for what is left of the budget that ends at until: 1 when it may, else 0 or -1.
+static long ctl_wait_until(struct ctl_socket *s, int readable, long until)
+{
+        long left = until - ctl_socket_now(s);
+
+        return left > 0 ? ctl_wait(s->fd, readable, left) : 0;
+}
+
+// Puts all count bytes on the connection within timeout_ms in total, or fails (a negative number).
+static long ctl_socket_send(void *context, const unsigned char *bytes, long count, long timeout_ms)
 {
         struct ctl_socket *s = context;
-        long done = 0;
+        long done = 0, until = ctl_socket_now(s) + timeout_ms;
 
         while (done < count)
         {
                 long got = ctl_call(syscall(sendto), (positive)s->fd, (positive)(bytes + done), (positive)(count - done), 0x4000, 0, 0); // MSG_NOSIGNAL
 
-                if (got == -11) // EAGAIN: the server's socket is full; waited for a moment
+                if (got == -11) // EAGAIN: the server's socket is full; waited for, within the budget
                 {
-                        if (ctl_wait(s->fd, 0, CTL_TIMEOUT_MS) <= 0)
+                        if (ctl_wait_until(s, 0, until) <= 0)
                                 return -1;
                         continue;
                 }
@@ -706,10 +761,11 @@ static long ctl_socket_send(void *context, const unsigned char *bytes, long coun
         return 0;
 }
 
+// Takes exactly count bytes from the connection within timeout_ms in total, or fails (a negative number).
 static long ctl_socket_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
 {
         struct ctl_socket *s = context;
-        long done = 0;
+        long done = 0, until = ctl_socket_now(s) + timeout_ms;
 
         while (done < count)
         {
@@ -717,7 +773,7 @@ static long ctl_socket_receive(void *context, unsigned char *bytes, long count, 
 
                 if (got == -11)
                 {
-                        if (ctl_wait(s->fd, 1, timeout_ms) <= 0)
+                        if (ctl_wait_until(s, 1, until) <= 0)
                                 return -1;
                         continue;
                 }
@@ -728,7 +784,14 @@ static long ctl_socket_receive(void *context, unsigned char *bytes, long count, 
         return 0;
 }
 
-static struct ctl_socket ctl_the_socket = {-1};
+static void ctl_disconnect(struct ctl *c)
+{
+        if (c->socket.linked)
+                ctl_call(syscall(close), (positive)c->socket.fd, 0, 0, 0, 0, 0);
+        c->socket.linked = 0;
+        c->socket.fd = -1;
+        c->open = 0;
+}
 
 // A connection to the server at path, the handshake done. 0, or CTL_FAILED (no socket there, nobody listening, no answer).
 static long ctl_connect(struct ctl *c, const char *path)
@@ -752,23 +815,16 @@ static long ctl_connect(struct ctl *c, const char *path)
                 ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
                 return CTL_FAILED;
         }
-        ctl_the_socket.fd = (int)fd;
-        c->transport = (struct ctl_transport){&ctl_the_socket, ctl_socket_send, ctl_socket_receive};
+        ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket
+        c->socket.fd = (int)fd;
+        c->socket.linked = 1;
+        c->transport = (struct ctl_transport){&c->socket, ctl_socket_send, ctl_socket_receive, ctl_socket_now};
         if (ctl_start(c) < 0)
         {
-                ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
-                ctl_the_socket.fd = -1;
+                ctl_disconnect(c);
                 return CTL_FAILED;
         }
         return 0;
-}
-
-static void ctl_disconnect(struct ctl *c)
-{
-        if (ctl_the_socket.fd >= 0)
-                ctl_call(syscall(close), (positive)ctl_the_socket.fd, 0, 0, 0, 0, 0);
-        ctl_the_socket.fd = -1;
-        c->open = 0;
 }
 #endif // CTL_NO_SYSTEM
 
