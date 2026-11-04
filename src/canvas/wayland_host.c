@@ -65,6 +65,7 @@ static struct
         int keymap[16];
         unsigned long keymap_size[16];
         unsigned int layout_told;
+        unsigned long screens_told; // the screens the clients were last told, as compositor_wl_screens_digest says them
         // The clipboard's transfers. A pull is a copy's source being read: its pipe's read end (in), the end it was handed (out)
         // until it has been sent, and the sealed file the text is gathered in (keep). A push is a paste: the compositor's text
         // (in, a descriptor of its own for the file, so a newer copy cannot change it half way) written to the client's (out).
@@ -795,6 +796,7 @@ static int compositor_wl_row_facts(void *context, int row, struct wayland_facts 
         facts->closing = (compositor.state[row] & WINDOW_CLOSING) != 0;
         facts->x = compositor.x[row];
         facts->y = compositor.y[row];
+        facts->scale = compositor_row_scale(row);
         return 0;
 }
 
@@ -832,6 +834,30 @@ static long compositor_wl_screens(void *context, struct wayland_screen *screens,
                 }
         }
         return count;
+}
+
+/*
+        What the screens are, as one number: their rectangles, scales, rates and names, in order. A scale, a mode, a place or a
+        turn that changes any of it changes this, and the clients are told the screens again (compositor_wl_wake).
+*/
+static unsigned long compositor_wl_screens_digest(void)
+{
+        struct wayland_screen screens[WAYLAND_SCREENS];
+        long count = compositor_wl_screens(0, screens, WAYLAND_SCREENS);
+        unsigned long hash = 14695981039346656037ul;
+
+        for (long at = 0; at < count; at++)
+        {
+                const long values[] = {screens[at].x, screens[at].y, screens[at].width, screens[at].height, screens[at].scale,
+                                       screens[at].refresh, screens[at].physical_width, screens[at].physical_height};
+
+                for (unsigned long each = 0; each < sizeof values / sizeof values[0]; each++)
+                        hash = (hash ^ (unsigned long)values[each]) * 1099511628211ul;
+                for (long letter = 0; letter < 16 && screens[at].name[letter]; letter++)
+                        hash = (hash ^ (unsigned char)screens[at].name[letter]) * 1099511628211ul;
+                hash = (hash ^ 0x100) * 1099511628211ul;
+        }
+        return hash ^ (unsigned long)count;
 }
 
 static long compositor_wl_now(void *context)
@@ -1551,6 +1577,7 @@ static void compositor_wl_start(void)
         for (long at = 0; at < 16; at++)
                 compositor_wl.keymap[at] = -1;
         compositor_wl.layout_told = compositor.keymap.layout;
+        compositor_wl.screens_told = compositor_wl_screens_digest();
         if (wayland_start(&compositor_wl_host) < 0)
         {
                 system_close(compositor_wl.listen);
@@ -1963,6 +1990,14 @@ static void compositor_wl_wake(void)
         if (!compositor_wl.started)
                 return;
         wayland_stats_get(&stats);
+        // The screens: a scale, a mode, a place or a turn is told to every client whole, and each window the scale of its screen.
+        if (compositor_wl_screens_digest() != compositor_wl.screens_told)
+        {
+                compositor_wl.screens_told = compositor_wl_screens_digest();
+                wayland_screens_changed();
+        }
+        if (stats.rows > 0)
+                wayland_scales_sweep();
         if (stats.rows > 0 || stats.clients > 0)
         {
                 int want = compositor_wl_pointer_row(), keys = compositor_wl_key_row();

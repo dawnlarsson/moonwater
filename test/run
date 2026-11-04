@@ -6509,11 +6509,26 @@ lane_wayland()
                                 wayland-scanner client-header "$wayland_games_dir/pointer-constraints/pointer-constraints-unstable-v1.xml" "$work/client/pointer-constraints-client.h" &&
                                 wayland-scanner private-code "$wayland_games_dir/pointer-constraints/pointer-constraints-unstable-v1.xml" "$work/client/pointer-constraints-code.c" || wayland_games=
                 fi
+                #       The scale protocols (the client's -S): wl_output and xdg-output are followed, and the viewporter and fractional scale
+                #       when the surface is drawn at the scale the compositor prefers.
+                wayland_scale=
+                wayland_scale_code=
+                wayland_scale_dir=$(pkg-config --variable=pkgdatadir wayland-protocols 2> /dev/null)
+                if [ -r "$wayland_scale_dir/stable/viewporter/viewporter.xml" ] && [ -r "$wayland_scale_dir/staging/fractional-scale/fractional-scale-v1.xml" ] &&
+                        [ -r "$wayland_scale_dir/unstable/xdg-output/xdg-output-unstable-v1.xml" ]; then
+                        wayland_scale="-DHAVE_SCALE"
+                        for wayland_scale_xml in stable/viewporter/viewporter staging/fractional-scale/fractional-scale-v1 unstable/xdg-output/xdg-output-unstable-v1; do
+                                wayland_scale_name=${wayland_scale_xml##*/}
+                                wayland-scanner client-header "$wayland_scale_dir/$wayland_scale_xml.xml" "$work/client/$wayland_scale_name-client.h" &&
+                                        wayland-scanner private-code "$wayland_scale_dir/$wayland_scale_xml.xml" "$work/client/$wayland_scale_name-code.c" &&
+                                        wayland_scale_code="$wayland_scale_code $work/client/$wayland_scale_name-code.c" || wayland_scale=
+                        done
+                fi
                 # shellcheck disable=SC2046
                 wayland_row client-build sh -c "wayland-scanner client-header '$wayland_xml' '$work/client/xdg-shell-client.h' &&
                         wayland-scanner private-code '$wayland_xml' '$work/client/xdg-shell-code.c' &&
-                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb $wayland_dmabuf $wayland_games test/wayland_shm.c '$work/client/xdg-shell-code.c' \
-                        ${wayland_dmabuf:+$wayland_dmabuf_code} ${wayland_games:+$wayland_games_code} \
+                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -I'$work/client' $wayland_xkb $wayland_dmabuf $wayland_games $wayland_scale test/wayland_shm.c '$work/client/xdg-shell-code.c' \
+                        ${wayland_dmabuf:+$wayland_dmabuf_code} ${wayland_games:+$wayland_games_code} ${wayland_scale:+$wayland_scale_code} \
                         $(pkg-config --cflags --libs wayland-client) $wayland_dmabuf_libs -o '$work/client/wayland-shm'"
                 if [ -x "$work/client/wayland-shm" ] && freestanding programs/shell.c "$work/shell-wayland" "" -DCONFIG_MOONWATER_WAYLAND; then
                         wayland_e2e=0

@@ -205,6 +205,7 @@ struct wayland_facts
         long states;        // WAYLAND_STATE_*
         long closing;       // the compositor asked the window to go
         long x, y;          // where the window is
+        long scale;         // the percent the screen it is mostly on is drawn at (0 for the host that does not say: 100)
 };
 
 struct wayland_screen
@@ -309,9 +310,16 @@ struct wayland_surface
         // The callbacks a commit took, waiting for the frame.
         unsigned int ready[WAYLAND_CALLBACKS];
         unsigned char readies;
-        // What is shown.
-        long scale, transform;
+        // What is shown. scale is the buffer scale, and scale120 what a unit of the surface is in pixels, in 120ths (wp_fractional_scale's
+        // unit): 120 times the buffer scale, or, where a viewport gives the surface a size, the buffer's pixels over that size.
+        long scale, scale120, transform;
         long width, height;              // the shown buffer, in pixels
+        // The viewport (wp_viewporter): its object, and the pending destination (0 for none) and source in 1/256ths of a pixel
+        // (source_width 0 for none). The fractional scale object, and the scale it was last told, in 120ths, and the whole
+        // number a client without one was told (preferred_buffer_scale).
+        unsigned int viewport_id, fractional_id;
+        long dest_width, dest_height, source_x, source_y, source_width, source_height;
+        long told120, told_whole, told_unit;
         // xdg.
         unsigned int xdg_id, role_id;
         unsigned int serial[WAYLAND_SERIALS];
@@ -463,6 +471,7 @@ static struct
         const struct wayland_host *host;
         struct wayland_client *client[WAYLAND_CLIENTS];
         long row_client[WAYLAND_ROWS], row_surface[WAYLAND_ROWS];
+        long row_percent[WAYLAND_ROWS];  // the percent the window of the row was last told its scale for (0 before the first)
         struct wayland_screen screen[WAYLAND_SCREENS];
         long screens;
         long clients, objects, surfaces, pools, buffers, fds, rows;
@@ -752,6 +761,49 @@ static inline long wayland_max(long a, long b)
         return a > b ? a : b;
 }
 
+/*
+        Scale. A screen is drawn at a percent (25 to 800); a surface's unit is that many pixels in 100ths. wp_fractional_scale
+        says it in 120ths (150 percent is 180), which is the unit a surface's scale is kept in here: a whole buffer scale of
+        n is 120n, so what a client that knows only whole scales does is the same arithmetic, exact. There is no scaler: a
+        buffer is shown pixel for pixel, so a client that follows the scale it is told (a buffer of the size times the scale,
+        and a viewport whose destination is the size) is shown at the size the compositor means, and one that does not is
+        shown at the size it drew.
+*/
+#define WAYLAND_UNIT 120
+#define WAYLAND_SCALE_LEAST 30   // 25 percent
+#define WAYLAND_SCALE_MOST 960   // 800 percent
+
+// A percent in 120ths, and the whole scale a client that knows no other is told (the percent rounded up, at least one).
+static inline long wayland_percent120(long percent)
+{
+        return (wayland_max(25, wayland_min(percent, 800)) * WAYLAND_UNIT + 50) / 100;
+}
+
+static inline long wayland_percent_whole(long percent)
+{
+        return wayland_max(1, (wayland_min(percent, 800) + 99) / 100);
+}
+
+// Units to pixels at a scale in 120ths, rounded to the nearest (a half away from zero), exact at a whole scale.
+static inline long wayland_pixels(long units, long scale120)
+{
+        long v = units * scale120;
+
+        return v >= 0 ? (v + WAYLAND_UNIT / 2) / WAYLAND_UNIT : -((-v + WAYLAND_UNIT / 2) / WAYLAND_UNIT);
+}
+
+// Pixels to units, as the 24.8 fixed number an event carries.
+static inline unsigned long wayland_units_fixed(long pixels, long scale120)
+{
+        return (unsigned long)(pixels * 256 * WAYLAND_UNIT / (scale120 > 0 ? scale120 : WAYLAND_UNIT));
+}
+
+// Pixels to whole units, rounded down: the size a window of so many pixels is, to the client.
+static inline long wayland_units(long pixels, long scale120)
+{
+        return pixels * WAYLAND_UNIT / (scale120 > 0 ? scale120 : WAYLAND_UNIT);
+}
+
 /* ---- the host, and the records a client's block holds ---- */
 
 static struct wayland_surface *wayland_surface_of(struct wayland_client *c, long slot)
@@ -819,6 +871,8 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_zwp_idle_inhibit_manager_v1, 1},
     {WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1},
     {WLI_wp_tearing_control_manager_v1, 1},
+    {WLI_wp_viewporter, 1},
+    {WLI_wp_fractional_scale_manager_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -879,7 +933,7 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         if (o->version >= 2)
         {
                 e = wayland_begin(c, o->id, WLE_wl_output_scale);
-                wayland_word(&e, (unsigned long)wayland_max(1, (screen->scale + 99) / 100));
+                wayland_word(&e, (unsigned long)wayland_percent_whole(screen->scale));
                 wayland_end(&e);
         }
         if (o->version >= 4)
@@ -898,24 +952,28 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         }
 }
 
-/* The xdg_output of an output: its place and size in the desktop's logical pixels, and done. */
+/*
+        The xdg_output of an output: its place and size in logical pixels, which are the screen's at its scale (a screen at 150
+        percent is 2560 by 1440 of 3840 by 2160), and done, which from version 3 is the wl_output's (the caller sends it after
+        the properties of the wl_output, so that the two are one atomic change).
+*/
 static void wayland_xdg_output_send(struct wayland_client *c, long slot, long output)
 {
         const struct wayland_screen *screen;
         struct wayland_event e;
-        long scale;
+        long scale120;
 
         if (output >= wayland.screens)
                 return;
         screen = &wayland.screen[output];
-        scale = wayland_max(25, screen->scale);
+        scale120 = wayland_percent120(screen->scale);
         e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_position);
-        wayland_word(&e, (unsigned long)(screen->x * 100 / scale));
-        wayland_word(&e, (unsigned long)(screen->y * 100 / scale));
+        wayland_word(&e, (unsigned long)wayland_units(screen->x, scale120));
+        wayland_word(&e, (unsigned long)wayland_units(screen->y, scale120));
         wayland_end(&e);
         e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_size);
-        wayland_word(&e, (unsigned long)(screen->width * 100 / scale));
-        wayland_word(&e, (unsigned long)(screen->height * 100 / scale));
+        wayland_word(&e, (unsigned long)wayland_units(screen->width, scale120));
+        wayland_word(&e, (unsigned long)wayland_units(screen->height, scale120));
         wayland_end(&e);
         if (c->objects[slot].version >= 2)
         {
@@ -926,8 +984,23 @@ static void wayland_xdg_output_send(struct wayland_client *c, long slot, long ou
                 wayland_string(&e, screen->name);
                 wayland_end(&e);
         }
-        e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_done);
-        wayland_end(&e);
+        if (c->objects[slot].version < 3)
+        {
+                e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_done);
+                wayland_end(&e);
+        }
+}
+
+/*
+        The scale a surface's sizes are in, in 120ths: the one it was told when it follows the fractional scale, else the
+        whole scale it was told, which is what a client that knows no other draws at. A surface told nothing yet is in
+        what it shows.
+*/
+static long wayland_surface_unit(const struct wayland_surface *s)
+{
+        if (s->told120 <= 0)
+                return s->scale120 > 0 ? s->scale120 : WAYLAND_UNIT;
+        return s->fractional_id ? s->told120 : WAYLAND_UNIT * s->told_whole;
 }
 
 /* ---- the windows ---- */
@@ -948,6 +1021,8 @@ static void wayland_decoration_send(struct wayland_client *c, struct wayland_sur
         wayland_end(&e);
 }
 
+static long wayland_screen_at(long x, long y);
+
 /*
         A surface's window, in the order a client expects it: the toplevel's size and states, the decoration's mode,
         then the xdg_surface's serial. The serial is the one the client must acknowledge; a client that has
@@ -956,7 +1031,7 @@ static void wayland_decoration_send(struct wayland_client *c, struct wayland_sur
 */
 static void wayland_configure(struct wayland_client *c, struct wayland_surface *s, long initial)
 {
-        struct wayland_facts facts = {0, 0, 0, 0, 0, 0};
+        struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
         struct wayland_event e;
         unsigned long states[16];
         long count = 0, slot, bounds_w = 0, bounds_h = 0;
@@ -993,8 +1068,10 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         return;
                 if (initial && wayland.screens)
                 {
-                        bounds_w = wayland.screen[0].width * 100 / wayland_max(25, wayland.screen[0].scale);
-                        bounds_h = wayland.screen[0].height * 100 / wayland_max(25, wayland.screen[0].scale);
+                        const struct wayland_screen *own = &wayland.screen[wayland_screen_at(facts.x, facts.y)];
+
+                        bounds_w = wayland_units(own->width, wayland_surface_unit(s));
+                        bounds_h = wayland_units(own->height, wayland_surface_unit(s));
                 }
                 if (initial && c->objects[slot].version >= 5)
                 {
@@ -1014,13 +1091,14 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                 }
                 wayland_decoration_send(c, s);
                 e = wayland_begin(c, c->objects[slot].id, WLE_xdg_toplevel_configure);
-                wayland_word(&e, (unsigned long)(facts.width > 0 ? facts.width : 0));
-                wayland_word(&e, (unsigned long)(facts.height > 0 ? facts.height : 0));
+                wayland_word(&e, (unsigned long)(facts.width > 0 ? wayland_max(1, wayland_units(facts.width, wayland_surface_unit(s))) : 0));
+                wayland_word(&e, (unsigned long)(facts.height > 0 ? wayland_max(1, wayland_units(facts.height, wayland_surface_unit(s))) : 0));
                 wayland_words(&e, states, count);
                 wayland_end(&e);
                 s->told_width = facts.width;
                 s->told_height = facts.height;
                 s->told_states = facts.states;
+                s->told_unit = wayland_surface_unit(s);
                 s->told = 1;
         }
         serial = wayland_serial(c);
@@ -1036,13 +1114,14 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
 
 /* A row given up, whatever its window was. */
 static void wayland_constraints_update(void);
-static void wayland_relative_send(struct wayland_client *c, long scale, long dx, long dy, long udx, long udy, long micro);
+static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro);
 
 static void wayland_row_release(struct wayland_client *c, struct wayland_surface *s)
 {
         if (s->row < 0)
                 return;
         wayland.row_client[s->row] = wayland.row_surface[s->row] = -1;
+        wayland.row_percent[s->row] = 0;
         if (wayland.pointer_row == s->row)
                 wayland.pointer_row = -1;
         if (wayland.keyboard_row == s->row)
@@ -1099,7 +1178,7 @@ static struct wayland_surface *wayland_root_of(struct wayland_client *c, struct 
 // A subsurface's place in its window's picture, in pixels: the sum of the places up the chain, at the root's scale.
 static void wayland_sub_offset(struct wayland_client *c, struct wayland_surface *s, long *x, long *y)
 {
-        long dx = 0, dy = 0, scale = wayland_root_of(c, s)->scale;
+        long dx = 0, dy = 0, scale = wayland_root_of(c, s)->scale120;
 
         for (long hops = 0; s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_parent && hops < WAYLAND_SURFACES; hops++)
         {
@@ -1107,8 +1186,8 @@ static void wayland_sub_offset(struct wayland_client *c, struct wayland_surface 
                 dy += s->sub_y;
                 s = &c->surfaces[s->sub_parent - 1];
         }
-        *x = dx * (scale > 0 ? scale : 1);
-        *y = dy * (scale > 0 ? scale : 1);
+        *x = wayland_pixels(dx, scale > 0 ? scale : WAYLAND_UNIT);
+        *y = wayland_pixels(dy, scale > 0 ? scale : WAYLAND_UNIT);
 }
 
 // Whether a subsurface is synchronized: itself, or any surface above it that is a subsurface.
@@ -1177,13 +1256,13 @@ static long wayland_next_child(struct wayland_client *c, long parent, long above
 
 /*
         The part of a window's surfaces that is the window, in the root's pixels (which may be above and to the left of it, where
-        a subsurface hangs past its edge): the geometry the toolkit set (in surface units, so times the scale), which is how it
+        a subsurface hangs past its edge): the geometry the toolkit set (in surface units, so at the scale), which is how it
         leaves out the shadow and the margins it draws round itself, taken from the bounding box of the root's picture
         (width by height pixels) and the subsurfaces; or all of the box when no geometry was set or none of it lies in the box.
         The row is this: what the person sees and points at begins at its corner, and what is outside it is not shown. A
         subsurface that is a window's title bar or border, outside the root, is in it when the geometry says so.
 */
-static void wayland_window_rect(struct wayland_client *c, const struct wayland_surface *root, long width, long height, long scale,
+static void wayland_window_rect(struct wayland_client *c, const struct wayland_surface *root, long width, long height, long scale120,
                                 long *x, long *y, long *w, long *h)
 {
         long x1 = 0, y1 = 0, x2 = width, y2 = height;
@@ -1203,11 +1282,12 @@ static void wayland_window_rect(struct wayland_client *c, const struct wayland_s
                 x2 = wayland_max(x2, ox + child->width);
                 y2 = wayland_max(y2, oy + child->height);
         }
-        if (root->geometry_set && scale >= 1)
+        if (root->geometry_set && scale120 >= WAYLAND_SCALE_LEAST)
         {
-                long gx1 = wayland_max(root->geometry_x * scale, x1), gy1 = wayland_max(root->geometry_y * scale, y1);
-                long gx2 = wayland_min((root->geometry_x + root->geometry_width) * scale, x2);
-                long gy2 = wayland_min((root->geometry_y + root->geometry_height) * scale, y2);
+                long gx1 = wayland_max(wayland_pixels(root->geometry_x, scale120), x1);
+                long gy1 = wayland_max(wayland_pixels(root->geometry_y, scale120), y1);
+                long gx2 = wayland_min(wayland_pixels(root->geometry_x + root->geometry_width, scale120), x2);
+                long gy2 = wayland_min(wayland_pixels(root->geometry_y + root->geometry_height, scale120), y2);
 
                 if (gx2 > gx1 && gy2 > gy1)
                 {
@@ -1231,7 +1311,7 @@ static void wayland_row_take(struct wayland_client *c, struct wayland_surface *r
 
         if (root->row < 0)
                 return;
-        wayland_window_rect(c, root, root->width, root->height, root->scale, &wx, &wy, &ww, &wh);
+        wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
         none.pixels = 0;
         none.stride = 0;
         none.width = none.height = 0;
@@ -1259,7 +1339,7 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
                 return;
         b = &c->buffers[child->held - 1];
         wayland_sub_offset(c, child, &ox, &oy);
-        wayland_window_rect(c, root, root->width, root->height, root->scale, &wx, &wy, &ww, &wh);
+        wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
         picture.pixels = (const unsigned char *)c->pools[b->pool].at + b->offset;
         picture.stride = b->stride;
         picture.width = b->width;
@@ -1319,12 +1399,51 @@ static void wayland_relay(struct wayland_client *c, struct wayland_surface *root
         if (!(root->flags & WAYLAND_SURFACE_MAPPED))
                 return;
         // What is laid now is the window as it is now: the next picture of the root is drawn whole only if that changes.
-        wayland_window_rect(c, root, root->width, root->height, root->scale, &root->window_x, &root->window_y, &root->window_w, &root->window_h);
+        wayland_window_rect(c, root, root->width, root->height, root->scale120, &root->window_x, &root->window_y, &root->window_w, &root->window_h);
         root->need_full = 0;
         if (root->held)
                 wayland_child_copy(c, root, 0);
         wayland_flatten(c, wayland_surface_index(c, root), 0);
         wayland_row_take(c, root);
+}
+
+// Whether a surface has a viewport that says something: a destination or a source.
+static inline int wayland_viewport_used(const struct wayland_surface *s)
+{
+        return s->dest_width > 0 || s->source_width > 0;
+}
+
+/*
+        The scale a buffer is shown at, in 120ths. A surface with no viewport has its buffer scale, a whole number. With a
+        destination, the unit is the buffer's pixels (the source's, when it has one) over the destination: and the scale the
+        surface was told, where the buffer is the size that scale gives the destination to a pixel (a size that is not a whole
+        number of pixels is rounded by the client, and a surface of a few units would otherwise be off by a good part).
+*/
+static long wayland_commit_scale(const struct wayland_surface *s, const struct wayland_buffer *b)
+{
+        long pixels = s->source_width > 0 ? (s->source_width * s->pending_scale + 255) / 256 : b->width, scale;
+        long told = s->told120 > 0 ? wayland_pixels(s->dest_width, s->told120) : 0;
+
+        if (s->dest_width <= 0)
+                return WAYLAND_UNIT * s->pending_scale;
+        if (told > 0 && wayland_max(pixels, told) - wayland_min(pixels, told) <= 1)
+                return s->told120;
+        scale = (pixels * WAYLAND_UNIT + s->dest_width / 2) / s->dest_width;
+        return wayland_max(WAYLAND_SCALE_LEAST, wayland_min(scale, WAYLAND_SCALE_MOST));
+}
+
+/*
+        A viewport's state against the buffer it is about to show: the source inside the buffer, and without a destination a
+        source of whole units. 0 when it is right, else the viewport error.
+*/
+static long wayland_viewport_error(const struct wayland_surface *s, const struct wayland_buffer *b)
+{
+        if (s->source_width > 0 && ((s->source_x + s->source_width) * s->pending_scale > b->width * 256 ||
+                                    (s->source_y + s->source_height) * s->pending_scale > b->height * 256))
+                return WLN_wp_viewport_error_out_of_buffer;
+        if (s->source_width > 0 && s->dest_width <= 0 && ((s->source_width & 255) || (s->source_height & 255)))
+                return WLN_wp_viewport_error_bad_size;
+        return 0;
 }
 
 /*
@@ -1352,16 +1471,17 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         if (s->attach_made && s->attached)
         {
                 buffer = wayland_find(c, s->attached, WLI_wl_buffer);
-                if (buffer >= 0 && (c->buffers[c->objects[buffer].link].width % s->pending_scale ||
-                                    c->buffers[c->objects[buffer].link].height % s->pending_scale))
+                if (buffer >= 0 && ((!wayland_viewport_used(s) && (c->buffers[c->objects[buffer].link].width % s->pending_scale ||
+                                                                  c->buffers[c->objects[buffer].link].height % s->pending_scale)) ||
+                                    wayland_viewport_error(s, &c->buffers[c->objects[buffer].link])))
                         buffer = -1;
         }
         if (buffer >= 0)
         {
                 struct wayland_buffer *b = &c->buffers[c->objects[buffer].link];
-                long ox, oy;
+                long ox, oy, scale120 = wayland_commit_scale(s, b);
                 int full = s->held == 0 || s->width != b->width || s->height != b->height || s->damage_full || !s->damages ||
-                           s->pending_scale != s->scale;
+                           scale120 != s->scale120;
 
                 wayland_unhold(c, s);
                 b->held++;
@@ -1369,6 +1489,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                 s->width = b->width;
                 s->height = b->height;
                 s->scale = s->pending_scale;
+                s->scale120 = scale120;
                 wayland_sub_offset(c, s, &ox, &oy);
                 if (root->need_full)
                         wayland_relay(c, root);
@@ -1404,10 +1525,10 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
 
                                 if (!s->damage_kind[at])
                                 {
-                                        r.x *= s->scale;
-                                        r.y *= s->scale;
-                                        r.width *= s->scale;
-                                        r.height *= s->scale;
+                                        r.x = wayland_pixels(r.x, s->scale120);
+                                        r.y = wayland_pixels(r.y, s->scale120);
+                                        r.width = wayland_pixels(r.width, s->scale120);
+                                        r.height = wayland_pixels(r.height, s->scale120);
                                 }
                                 r.x += ox;
                                 r.y += oy;
@@ -1679,6 +1800,35 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
 }
 
 /* wl_compositor: a surface with no role, and a region, which a surface's regions name and which has no effect here. */
+/*
+        A surface is told the scale of the screen it is on: its fractional scale, when it asked for one, and the whole scale
+        (wl_surface.preferred_buffer_scale, from version 6) when that changed. Said again only when the percent is another
+        one, so it can be called for every window each pass.
+*/
+static void wayland_scale_tell(struct wayland_client *c, struct wayland_surface *s, long percent)
+{
+        long scale120 = wayland_percent120(percent), whole = wayland_percent_whole(percent), slot;
+        struct wayland_event e;
+
+        if (s->told120 == scale120 && s->told_whole == whole)
+                return;
+        if (s->fractional_id && s->told120 != scale120)
+        {
+                e = wayland_begin(c, s->fractional_id, WLE_wp_fractional_scale_v1_preferred_scale);
+                wayland_word(&e, (unsigned long)scale120);
+                wayland_end(&e);
+        }
+        slot = wayland_find(c, s->id, WLI_wl_surface);
+        if (slot >= 0 && c->objects[slot].version >= 6 && s->told_whole != whole)
+        {
+                e = wayland_begin(c, s->id, WLE_wl_surface_preferred_buffer_scale);
+                wayland_word(&e, (unsigned long)whole);
+                wayland_end(&e);
+        }
+        s->told120 = scale120;
+        s->told_whole = whole;
+}
+
 static int wayland_compositor_request(struct wayland_client *c, long op, struct wayland_arg *a)
 {
         long slot, screen_scale = wayland.screens ? wayland.screen[0].scale : 100;
@@ -1702,16 +1852,15 @@ static int wayland_compositor_request(struct wayland_client *c, long op, struct 
         s->id = c->objects[a[0].slot].id;
         s->row = -1;
         s->scale = s->pending_scale = 1;
+        s->scale120 = WAYLAND_UNIT;
         c->objects[a[0].slot].link = (short)slot;
         c->objects[a[0].slot].aux = (unsigned short)s->gen;
         wayland.surfaces++;
+        wayland_scale_tell(c, s, screen_scale);
         if (c->objects[a[0].slot].version >= 6)
         {
-                struct wayland_event e = wayland_begin(c, s->id, WLE_wl_surface_preferred_buffer_scale);
+                struct wayland_event e = wayland_begin(c, s->id, WLE_wl_surface_preferred_buffer_transform);
 
-                wayland_word(&e, (unsigned long)wayland_max(1, (screen_scale + 99) / 100));
-                wayland_end(&e);
-                e = wayland_begin(c, s->id, WLE_wl_surface_preferred_buffer_transform);
                 wayland_word(&e, WLN_wl_output_transform_normal);
                 wayland_end(&e);
         }
@@ -1828,7 +1977,7 @@ static void wayland_surface_screens(struct wayland_client *c, struct wayland_sur
         copied into it. A popup whose parent is not shown has nothing to be shown over, and is not shown.
 */
 static int wayland_show(struct wayland_client *c, struct wayland_object *self, struct wayland_surface *s,
-                        struct wayland_buffer *b, long scale)
+                        struct wayland_buffer *b, long scale120)
 {
         struct wayland_pool *p = &c->pools[b->pool];
         struct wayland_picture picture;
@@ -1838,7 +1987,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         if (first)
         {
                 int parent = -1;
-                struct wayland_facts facts = {0, 0, 0, 0, 0, 0};
+                struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
 
                 if (s->role == WAYLAND_ROLE_POPUP)
                 {
@@ -1872,7 +2021,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         picture.height = b->height;
         picture.format = b->format;
         picture.damages = 0;
-        wayland_window_rect(c, s, b->width, b->height, scale, &wx, &wy, &ww, &wh);
+        wayland_window_rect(c, s, b->width, b->height, scale120, &wx, &wy, &ww, &wh);
         picture.dest_x = -wx;
         picture.dest_y = -wy;
         picture.row_width = ww;
@@ -1880,7 +2029,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         picture.blend = 0;
         picture.sync_fd = p->dmabuf ? p->fd : -1;
         picture.last = !wayland_has_children(c, wayland_surface_index(c, s));
-        picture.full = first || s->width != b->width || s->height != b->height || s->damage_full || scale != s->scale || !s->damages ||
+        picture.full = first || s->width != b->width || s->height != b->height || s->damage_full || scale120 != s->scale120 || !s->damages ||
                        s->need_full || wx != s->window_x || wy != s->window_y || ww != s->window_w || wh != s->window_h;
         s->window_x = wx;
         s->window_y = wy;
@@ -1894,10 +2043,10 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
 
                 if (!s->damage_kind[at])
                 {
-                        r.x *= scale;
-                        r.y *= scale;
-                        r.width *= scale;
-                        r.height *= scale;
+                        r.x = wayland_pixels(r.x, scale120);
+                        r.y = wayland_pixels(r.y, scale120);
+                        r.width = wayland_pixels(r.width, scale120);
+                        r.height = wayland_pixels(r.height, scale120);
                 }
                 x2 = wayland_min(r.x + r.width, b->width);
                 y2 = wayland_min(r.y + r.height, b->height);
@@ -1953,7 +2102,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
 */
 static int wayland_commit(struct wayland_client *c, struct wayland_object *self, struct wayland_surface *s)
 {
-        long buffer = -1, scale = s->pending_scale;
+        long buffer = -1;
         int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0;
 
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
@@ -2002,14 +2151,20 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         else if (buffer >= 0)
         {
                 struct wayland_buffer *b = &c->buffers[c->objects[buffer].link];
+                long scale120 = wayland_commit_scale(s, b), error = wayland_viewport_error(s, b);
 
-                if (b->width % scale || b->height % scale)
+                if (error)
+                        return wayland_fail(c, s->viewport_id, error, error == WLN_wp_viewport_error_out_of_buffer
+                                                                          ? "the source is not inside the buffer"
+                                                                          : "the source is not whole units and there is no destination");
+                if (!wayland_viewport_used(s) && (b->width % s->pending_scale || b->height % s->pending_scale))
                         return wayland_fail(c, self->id, WLN_wl_surface_error_invalid_size, "the buffer is not a whole number of the scale");
-                if (xdg && wayland_show(c, self, s, b, scale) < 0)
+                if (xdg && wayland_show(c, self, s, b, scale120) < 0)
                         return WAYLAND_DEAD;
                 s->width = b->width;
                 s->height = b->height;
-                s->scale = scale;
+                s->scale = s->pending_scale;
+                s->scale120 = scale120;
                 s->transform = s->pending_transform;
                 if (xdg && s->row >= 0 && wayland_has_children(c, wayland_surface_index(c, s)))
                 {
@@ -2486,30 +2641,32 @@ static void wayland_popup_configure(struct wayland_client *c, struct wayland_sur
 {
         struct wayland_screen *screens = wayland.screen;
         struct wayland_rect screen = {0, 0, 1 << 20, 1 << 20};
-        struct wayland_facts facts = {0, 0, 0, 0, 0, 0};
-        long origin_x = 0, origin_y = 0, x, y, w, h, slot;
+        struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
+        long origin_x = 0, origin_y = 0, x, y, w, h, slot, unit = parent ? wayland_surface_unit(parent) : WAYLAND_UNIT;
         struct wayland_event e;
         unsigned long serial;
 
+        // The positioner is in the parent's units, and so is the place it gives: the window's place and the screens' are
+        // taken to them, and the popup's place goes to the compositor in pixels.
         if (parent && parent->row >= 0 && wayland.host->row_facts(wayland.host->context, parent->row, &facts) >= 0)
         {
-                origin_x = facts.x;
-                origin_y = facts.y;
+                origin_x = wayland_units(facts.x, unit);
+                origin_y = wayland_units(facts.y, unit);
         }
         for (long at = 0; at < wayland.screens; at++)
-                if (origin_x + p->anchor_x >= screens[at].x && origin_x + p->anchor_x < screens[at].x + screens[at].width &&
-                    origin_y + p->anchor_y >= screens[at].y && origin_y + p->anchor_y < screens[at].y + screens[at].height)
-                {
-                        screen.x = screens[at].x;
-                        screen.y = screens[at].y;
-                        screen.width = screens[at].width;
-                        screen.height = screens[at].height;
-                }
+        {
+                struct wayland_rect each = {wayland_units(screens[at].x, unit), wayland_units(screens[at].y, unit),
+                                            wayland_units(screens[at].width, unit), wayland_units(screens[at].height, unit)};
+
+                if (origin_x + p->anchor_x >= each.x && origin_x + p->anchor_x < each.x + each.width &&
+                    origin_y + p->anchor_y >= each.y && origin_y + p->anchor_y < each.y + each.height)
+                        screen = each;
+        }
         wayland_popup_place(p, origin_x, origin_y, &screen, &x, &y, &w, &h);
-        s->popup_x = x;
-        s->popup_y = y;
-        s->popup_width = w;
-        s->popup_height = h;
+        s->popup_x = wayland_pixels(x, unit);
+        s->popup_y = wayland_pixels(y, unit);
+        s->popup_width = wayland_pixels(w, unit);
+        s->popup_height = wayland_pixels(h, unit);
         slot = wayland_find(c, s->role_id, WLI_xdg_popup);
         if (slot < 0 || s->serials >= WAYLAND_SERIALS)
                 return;
@@ -2875,6 +3032,12 @@ static int wayland_output_manager_request(struct wayland_client *c, struct wayla
 
                 c->objects[slot].aux = c->objects[a[1].slot].aux;
                 wayland_xdg_output_send(c, slot, c->objects[slot].aux);
+                if (c->objects[slot].version >= 3 && c->objects[a[1].slot].version >= 2)
+                {
+                        struct wayland_event e = wayland_begin(c, c->objects[a[1].slot].id, WLE_wl_output_done);
+
+                        wayland_end(&e);
+                }
         }
         (void)self;
         return WAYLAND_OK;
@@ -2935,9 +3098,9 @@ static int wayland_decoration_request(struct wayland_client *c, struct wayland_o
         A client's pointers, keyboards and touches are lists of ids kept as they are made and released, so an event
         finds them without a walk of the whole object table.
 */
-static unsigned long wayland_fixed(long pixels, long scale)
+static unsigned long wayland_fixed(long pixels, long scale120)
 {
-        return (unsigned long)(pixels * 256 / (scale > 0 ? scale : 1));
+        return wayland_units_fixed(pixels, scale120);
 }
 
 /* The surface and client of a row, or 0. */
@@ -3024,7 +3187,7 @@ static struct wayland_surface *wayland_pick(struct wayland_client *c, struct way
         struct wayland_surface *best = root;
         long best_rank = -1, bx = 0, by = 0, wx, wy, ww, wh;
 
-        wayland_window_rect(c, root, root->width, root->height, root->scale, &wx, &wy, &ww, &wh);
+        wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
         x += wx;
         y += wy;
 
@@ -3061,8 +3224,8 @@ static void wayland_pointer_enter_one(struct wayland_client *c, long slot, struc
 
         wayland_word(&e, serial);
         wayland_word(&e, s->id);
-        wayland_word(&e, wayland_fixed(sx, s->scale));
-        wayland_word(&e, wayland_fixed(sy, s->scale));
+        wayland_word(&e, wayland_fixed(sx, s->scale120));
+        wayland_word(&e, wayland_fixed(sy, s->scale120));
         wayland_end(&e);
         wayland_pointer_frame(c, slot);
 }
@@ -3140,13 +3303,13 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
                 struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_motion);
 
                 wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, wayland_fixed(sx, s->scale));
-                wayland_word(&e, wayland_fixed(sy, s->scale));
+                wayland_word(&e, wayland_fixed(sx, s->scale120));
+                wayland_word(&e, wayland_fixed(sy, s->scale120));
                 wayland_end(&e);
                 wayland_pointer_frame(c, slots[at]);
         }
         // The places the hand moved, to the client's relative pointers: as moved, the same accelerated or not.
-        wayland_relative_send(c, s->scale, x - old_x, y - old_y, x - old_x, y - old_y, time * 1000);
+        wayland_relative_send(c, s->scale120, x - old_x, y - old_y, x - old_x, y - old_y, time * 1000);
 }
 
 /* A button of the pointer, by its Linux code, pressed or let go. A press is the serial a client may name to ask for a move. */
@@ -3882,6 +4045,106 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
         not exist is the client's error) and no more; a toolkit that is told it is offered shapes does not load a theme and make
         a surface for each, which is what offering them is for. Tablets are not offered, so there is no tool to name.
 */
+/*
+        wp_viewporter: a viewport is a surface's destination size and source rectangle, pending state a commit applies. There is
+        no scaler, so a destination that is not the buffer's size in the surface's scale shows the buffer as it is drawn; what
+        the destination gives is the surface's size in its own units (the scale of a window that follows the fractional scale
+        is the buffer's pixels over the destination). Every number is a client's: it is checked as the protocol says, and a
+        size that is not a pixel count the shim could hold is a bad value.
+*/
+static int wayland_viewport_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_surface *s;
+
+        if (self->iface == WLI_wp_viewporter)
+        {
+                if (op == WLQ_wp_viewporter_destroy)
+                        return WAYLAND_OK;
+                s = wayland_surface_of(c, a[1].slot);
+                if (!s)
+                        return WAYLAND_OK;
+                if (s->viewport_id)
+                        return wayland_fail(c, self->id, WLN_wp_viewporter_error_viewport_exists, "the surface has a viewport");
+                s->viewport_id = c->objects[a[0].slot].id;
+                c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
+                c->objects[a[0].slot].aux = (unsigned short)s->gen;
+                return WAYLAND_OK;
+        }
+        s = wayland_surface_of(c, self - c->objects);
+        if (op == WLQ_wp_viewport_destroy)
+        {
+                if (s)
+                {
+                        s->viewport_id = 0;
+                        s->dest_width = s->dest_height = s->source_width = s->source_height = 0;
+                }
+                return WAYLAND_OK;
+        }
+        if (!s)
+                return wayland_fail(c, self->id, WLN_wp_viewport_error_no_surface, "the surface is gone");
+        if (op == WLQ_wp_viewport_set_source)
+        {
+                if (a[0].i == -256 && a[1].i == -256 && a[2].i == -256 && a[3].i == -256)
+                {
+                        s->source_width = s->source_height = 0;
+                        return WAYLAND_OK;
+                }
+                if (a[0].i < 0 || a[1].i < 0 || a[2].i <= 0 || a[3].i <= 0)
+                        return wayland_fail(c, self->id, WLN_wp_viewport_error_bad_value, "the source is negative or empty");
+                s->source_x = a[0].i;
+                s->source_y = a[1].i;
+                s->source_width = a[2].i;
+                s->source_height = a[3].i;
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_wp_viewport_set_destination)
+        {
+                if (a[0].i == -1 && a[1].i == -1)
+                {
+                        s->dest_width = s->dest_height = 0;
+                        return WAYLAND_OK;
+                }
+                if (a[0].i <= 0 || a[1].i <= 0)
+                        return wayland_fail(c, self->id, WLN_wp_viewport_error_bad_value, "the destination is empty");
+                s->dest_width = wayland_min(a[0].i, WAYLAND_DIMENSION);
+                s->dest_height = wayland_min(a[1].i, WAYLAND_DIMENSION);
+        }
+        return WAYLAND_OK;
+}
+
+/* wp_fractional_scale: the scale of the screen the surface is on, in 120ths, said when it is made and whenever it changes. */
+static int wayland_fractional_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_surface *s;
+
+        if (self->iface == WLI_wp_fractional_scale_v1)
+        {
+                s = wayland_surface_of(c, self - c->objects);
+                if (s && op == WLQ_wp_fractional_scale_v1_destroy)
+                        s->fractional_id = 0;
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_wp_fractional_scale_manager_v1_destroy)
+                return WAYLAND_OK;
+        s = wayland_surface_of(c, a[1].slot);
+        if (!s)
+                return WAYLAND_OK;
+        if (s->fractional_id)
+                return wayland_fail(c, self->id, WLN_wp_fractional_scale_manager_v1_error_fractional_scale_exists,
+                                    "the surface has a fractional scale");
+        s->fractional_id = c->objects[a[0].slot].id;
+        c->objects[a[0].slot].link = (short)wayland_surface_index(c, s);
+        c->objects[a[0].slot].aux = (unsigned short)s->gen;
+        {
+                // Said at once, in what it was told before it asked: the preferred scale is the first event of the object.
+                struct wayland_event e = wayland_begin(c, s->fractional_id, WLE_wp_fractional_scale_v1_preferred_scale);
+
+                wayland_word(&e, (unsigned long)(s->told120 > 0 ? s->told120 : WAYLAND_UNIT));
+                wayland_end(&e);
+        }
+        return WAYLAND_OK;
+}
+
 static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         if (self->iface == WLI_wp_cursor_shape_manager_v1)
@@ -4267,7 +4530,7 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
 */
 
 // Relative motion to the relative pointers of a client, in the surface's units: the places of the hand, accelerated or not.
-static void wayland_relative_send(struct wayland_client *c, long scale, long dx, long dy, long udx, long udy, long micro)
+static void wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro)
 {
         for (long at = 0; at < c->relatives; at++)
         {
@@ -4279,10 +4542,10 @@ static void wayland_relative_send(struct wayland_client *c, long scale, long dx,
                 e = wayland_begin(c, c->relative_id[at], WLE_zwp_relative_pointer_v1_relative_motion);
                 wayland_word(&e, (unsigned long)micro >> 32);
                 wayland_word(&e, (unsigned long)micro & 0xffffffffUL);
-                wayland_word(&e, wayland_fixed(dx, scale));
-                wayland_word(&e, wayland_fixed(dy, scale));
-                wayland_word(&e, wayland_fixed(udx, scale));
-                wayland_word(&e, wayland_fixed(udy, scale));
+                wayland_word(&e, wayland_fixed(dx, scale120));
+                wayland_word(&e, wayland_fixed(dy, scale120));
+                wayland_word(&e, wayland_fixed(udx, scale120));
+                wayland_word(&e, wayland_fixed(udy, scale120));
                 wayland_end(&e);
         }
 }
@@ -4295,7 +4558,7 @@ WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long micro
 
         if (!wayland.host || !s || row != wayland.hold_row || wayland.hold_mode != 1)
                 return;
-        wayland_relative_send(c, s->scale, dx, dy, dx, dy, micro);
+        wayland_relative_send(c, s->scale120, dx, dy, dx, dy, micro);
 }
 
 static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)
@@ -4719,6 +4982,14 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wp_cursor_shape_device_v1:
                         status = wayland_cursor_shape_request(c, o, op, a);
                         break;
+                case WLI_wp_viewporter:
+                case WLI_wp_viewport:
+                        status = wayland_viewport_request(c, o, op, a);
+                        break;
+                case WLI_wp_fractional_scale_manager_v1:
+                case WLI_wp_fractional_scale_v1:
+                        status = wayland_fractional_request(c, o, op, a);
+                        break;
                 case WLI_wl_data_device_manager:
                 case WLI_wl_data_device:
                 case WLI_wl_data_source:
@@ -5085,7 +5356,12 @@ WAYLAND_API void wayland_sent(long slot, long count)
         c->out_fd_count = 0;
 }
 
-/* The compositor's screens, changed: each output a client bound is told, and so is each xdg_output. */
+/*
+        The compositor's screens, changed (a scale, a mode, a place, a turn): every client is told the whole of each screen it
+        bound, in the order a client waits for it. The xdg_output's logical position and size first, then the wl_output's
+        geometry, mode, scale, name, description and done, which from version 3 applies the xdg_output's too; so a client
+        sees the screen change once, all of it or none.
+*/
 WAYLAND_API void wayland_screens_changed(void)
 {
         if (!wayland.host)
@@ -5098,12 +5374,44 @@ WAYLAND_API void wayland_screens_changed(void)
                 struct wayland_client *c = wayland.client[slot];
 
                 for (long at = 0; c && at < WAYLAND_OBJECTS; at++)
-                {
+                        if (c->objects[at].iface == WLI_zxdg_output_v1)
+                                wayland_xdg_output_send(c, at, c->objects[at].aux);
+                for (long at = 0; c && at < WAYLAND_OBJECTS; at++)
                         if (c->objects[at].iface == WLI_wl_output)
                                 wayland_output_send(c, at);
-                        else if (c->objects[at].iface == WLI_zxdg_output_v1)
-                                wayland_xdg_output_send(c, at, c->objects[at].aux);
-                }
+        }
+}
+
+/*
+        Every window is told the scale of the screen it is on, when that is another than it was told: the surfaces of the
+        window (its subsurfaces too) their fractional scale and whole scale, and a toplevel the size the compositor asks of
+        it in the new unit. A window that moved to another screen is told so (enter and leave). Once a pass, for each row a
+        client holds; a row whose percent is what it was told costs a look at its facts.
+*/
+WAYLAND_API void wayland_scales_sweep(void)
+{
+        if (!wayland.host)
+                return;
+        for (long row = 0; row < WAYLAND_ROWS; row++)
+        {
+                struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
+                struct wayland_surface *root = c ? &c->surfaces[wayland.row_surface[row]] : 0;
+                struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
+                long percent;
+
+                if (!root || !root->live || root->row != row || wayland.host->row_facts(wayland.host->context, (int)row, &facts) < 0)
+                        continue;
+                wayland_surface_screens(c, root, wayland_screen_at(facts.x, facts.y));
+                percent = facts.scale > 0 ? facts.scale : 100;
+                if (wayland.row_percent[row] == percent)
+                        continue;
+                wayland.row_percent[row] = percent;
+                for (long at = 0; at < WAYLAND_SURFACES; at++)
+                        if (c->surfaces[at].live && wayland_root_of(c, &c->surfaces[at]) == root)
+                                wayland_scale_tell(c, &c->surfaces[at], percent);
+                if (root->role == WAYLAND_ROLE_TOPLEVEL && root->told && wayland_surface_unit(root) != root->told_unit &&
+                    (facts.width > 0 || facts.height > 0))
+                        wayland_configure(c, root, 0);
         }
 }
 

@@ -3570,6 +3570,8 @@ static struct
         int under_rect[2][4];
         int door[WINDOWS], wake[WINDOWS];
         unsigned int woken;  // the rows to knock on at the end of the pass, a bit each
+        unsigned int fit;    // the rows whose next picture of another size is asked to fit its screen (a scale was taken), a bit each
+        positive fit_until;  // and until when (compositor_scale_fit)
         unsigned int seen[WINDOWS];     // the frame last taken
         // A window's solid runs (compositor_runs_note): its picture's, mapped when first read, the picture they are of (the tag of
         // its frame and buffer), how many presents composed that picture, and what became of the read: 0 not read, 1 read and used
@@ -7968,6 +7970,8 @@ static void compositor_damage_space(void)
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
 
+static void compositor_scale_fit(void);
+
 /*
         The scale each screen's displays line asks, taken by the screens as they are driven. A scale is no mode and no
         place, so when it is all that changed the screens are not taken again (compositor_space_take): no scanout and
@@ -7999,6 +8003,7 @@ static int compositor_scales_take(void)
         compositor_cursor_move();
         compositor_space_carry((const int (*)[4])was, (const char (*)[WINDOWS_OUTPUT_NAME])names, compositor.outputs);
         compositor_band_room();
+        compositor_scale_fit();
         compositor_tabs_changed();
         compositor_damage(0, 0, compositor.width, compositor.height);
         return 1;
@@ -9788,6 +9793,46 @@ static void compositor_want(int row, int width, int height)
 }
 
 /*
+        A window whose size is more than the room of its screen is asked for the room (the band left out), as a window the
+        hand stretched past the edge is.
+*/
+static void compositor_fit_row(int row)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int room[4], on, width, height;
+
+        if (!compositor.showing[row] || compositor.arranged[row] != COMPOSITOR_FLOATING)
+                return;
+        on = compositor_screen_owner(screens, count, compositor.x[row], compositor.y[row], (int)compositor.w[row],
+                                     (int)compositor.h[row]);
+        compositor_room(screens[on], room);
+        width = (int)compositor.w[row] > room[2] ? room[2] : (int)compositor.w[row];
+        height = (int)compositor.h[row] > room[3] ? room[3] : (int)compositor.h[row];
+        if (width != (int)compositor.w[row] || height != (int)compositor.h[row])
+                compositor_want(row, width, height);
+}
+
+/*
+        A scale taken: a window that keeps its size in its own units is larger in pixels at a larger scale. One that is past
+        the room of its screen now is asked to fit it; and every window that floats is asked to fit with its next picture of
+        another size, which is the one it draws at the new scale (for the next three seconds, then it is what it draws).
+        A window that fills a room was laid again with the rooms.
+*/
+static void compositor_scale_fit(void)
+{
+        compositor.fit = 0;
+        for (int row = 0; row < WINDOWS; row++)
+        {
+                if (!compositor.showing[row] || compositor.arranged[row] != COMPOSITOR_FLOATING)
+                        continue;
+                compositor.fit |= 1u << row;
+                compositor_fit_row(row);
+        }
+        compositor.fit_until = clock_monotonic_nanoseconds() + 3000000000ull;
+}
+
+/*
         A shared edge: windows that meet along one line, a divider (compositor_divider_of). A press anywhere along it, from
         one end of the line to the other (compositor_shared_at), takes all of them: compositor_shared_begin takes hold of
         each, and compositor_shared_move grows one side as the other shrinks, so they go on meeting. A corner of a window
@@ -11476,6 +11521,13 @@ static void compositor_take(int row)
                         y = compositor.far_y[row] - (int)height;
                 compositor_place(row, x, y);
                 damage[2] = 0;
+                // The picture a scale taken made: if it is past the room it is asked to fit it.
+                if (compositor.fit & (1u << row))
+                {
+                        compositor.fit &= ~(1u << row);
+                        if (clock_monotonic_nanoseconds() < compositor.fit_until)
+                                compositor_fit_row(row);
+                }
         }
         if (width != compositor.w[row] || height != compositor.h[row])
         {
@@ -14807,11 +14859,48 @@ static void compositor_say(string_address what, bipolar value)
 
 static void compositor_screens_say(void);
 
+/*
+        With no card the one screen is named Canvas (what the shim says it is called) and its displays line can ask for a
+        scale, which is taken as a card's screen takes one: the desktop's scale, the table's, the bands and every pixel. A
+        screen with no line is drawn at the scale the program was started with (-s).
+*/
+#define COMPOSITOR_HEADLESS_NAME "Canvas"
+
+static void compositor_headless_scale(void)
+{
+        static int started;
+        const struct windows_display *display;
+        int scale;
+
+        if (!started)
+                started = compositor.scale;
+        compositor_displays_read(0);
+        display = windows_display_of(compositor_display, compositor_displays, COMPOSITOR_HEADLESS_NAME,
+                                     windows_name_length(COMPOSITOR_HEADLESS_NAME));
+        scale = display && display->scale ? (int)display->scale : started;
+        if (scale == compositor.scale)
+                return;
+        compositor.scale = scale;
+        if (compositor.table)
+                compositor.table->scale = (unsigned int)scale;
+        compositor.cursor.plane_scale = 0;
+        compositor_cursor_move();
+        compositor_band_room();
+        compositor_scale_fit();
+        compositor_tabs_changed();
+        compositor_damage(0, 0, compositor.width, compositor.height);
+}
+
 // The screens taken again (a screen came or went, the arrangement changed), and said in the log when they changed.
 static void compositor_space_retake(void)
 {
         unsigned int layout = compositor.layout;
-        b32 status = compositor.card >= 0 ? compositor_space_take(0) : 0;
+        b32 status = 0;
+
+        if (compositor.card >= 0)
+                status = compositor_space_take(0);
+        else
+                compositor_headless_scale();
 
         if (status < 0)
                 compositor_say("the screens could not be taken again, error", status);
@@ -15227,6 +15316,8 @@ static b32 compositor_main()
                         compositor_hand_back();
                 return 1;
         }
+        if (headless)
+                compositor_headless_scale();
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_start();
 #endif

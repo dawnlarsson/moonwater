@@ -158866,7 +158866,7 @@ struct fake_row
         int used, kind, parent;
         long x, y, width, height;
         long picture_w, picture_h, pictures;
-        long states, closing, width_asked, height_asked;
+        long states, closing, width_asked, height_asked, scale;
         char title[128];
         unsigned pixels[FAKE_W * FAKE_H];
         long did[16];
@@ -159081,6 +159081,7 @@ static int fake_row_facts(void *context, int row, struct wayland_facts *facts)
         facts->closing = r->closing;
         facts->x = r->x;
         facts->y = r->y;
+        facts->scale = r->scale ? r->scale : fake.screen.scale;
         return 0;
 }
 
@@ -163133,6 +163134,323 @@ static void test_games(void)
         wayland_stop();
 }
 
+
+/*
+        The scale, from the screen to the surface. The screen changed is told whole and in order. A surface is told the scale of
+        the screen it is on, as a fractional scale and as a whole one, whenever either is another; a window follows what it
+        is told in the size it is asked for and in the places of the pointer it is sent; and a viewport is judged as the
+        protocol says, every number the client's.
+*/
+static long event_at(struct wlc *c, long iface, long opcode, long from)
+{
+        for (long at = from; at < c->events; at++)
+                if (c->ev[at].iface == iface && c->ev[at].opcode == opcode)
+                        return at;
+        return -1;
+}
+
+/* A toplevel made and acknowledged with no buffer: with a fractional scale and a viewport when the globals are given. */
+struct scale_window
+{
+        struct session s;
+        unsigned long manager, viewporter, fractional, viewport;
+        long whole, preferred; // what the surface was told as it was made: the whole scale, and the fractional one (0 for none told)
+};
+
+static void scale_open(struct scale_window *w, int fractional, int viewport)
+{
+        struct wlc *c;
+        struct wl_event_seen *configure, *told;
+
+        memset(w, 0, sizeof *w);
+        session_open(&w->s);
+        c = w->s.c;
+        w->manager = wl_global(c, w->s.registry, WLI_wp_fractional_scale_manager_v1, 1);
+        w->viewporter = wl_global(c, w->s.registry, WLI_wp_viewporter, 1);
+        w->s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, w->s.compositor, WLQ_wl_compositor_create_surface, w->s.surface);
+        told = wlc_take(c, WLI_wl_surface, WLE_wl_surface_preferred_buffer_scale);
+        w->whole = told ? (long)told->u[0] : 0;
+        if (fractional)
+        {
+                w->fractional = wlc_id(c, WLI_wp_fractional_scale_v1, 1);
+                wlc_send(c, w->manager, WLQ_wp_fractional_scale_manager_v1_get_fractional_scale, w->fractional, w->s.surface);
+                told = wlc_take(c, WLI_wp_fractional_scale_v1, WLE_wp_fractional_scale_v1_preferred_scale);
+                w->preferred = told ? (long)told->u[0] : 0;
+        }
+        if (viewport)
+        {
+                w->viewport = wlc_id(c, WLI_wp_viewport, 1);
+                wlc_send(c, w->viewporter, WLQ_wp_viewporter_get_viewport, w->viewport, w->s.surface);
+        }
+        w->s.xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, w->s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, w->s.xdg, w->s.surface);
+        w->s.toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, w->s.xdg, WLQ_xdg_surface_get_toplevel, w->s.toplevel);
+        wlc_send(c, w->s.surface, WLQ_wl_surface_commit);
+        configure = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        if (configure)
+                wlc_send(c, w->s.xdg, WLQ_xdg_surface_ack_configure, (long)configure->u[0]);
+}
+
+/* A buffer of width by height shown as the window's picture. */
+static void scale_show(struct scale_window *w, long width, long height)
+{
+        unsigned long buffer = wl_buffer_of(&w->s, width, height, 0xff336699, WLN_wl_shm_format_xrgb8888);
+
+        wlc_send(w->s.c, w->s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(w->s.c, w->s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, width, height);
+        wlc_send(w->s.c, w->s.surface, WLQ_wl_surface_commit);
+}
+
+static void test_scale(void)
+{
+        struct scale_window w;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long xdg_manager, xdg_output, pointer;
+        long a, b, d, f, g, h;
+
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* the screen, changed: told whole, in the order a client applies it */
+        scale_open(&w, 0, 0);
+        c = w.s.c;
+        xdg_manager = wl_global(c, w.s.registry, WLI_zxdg_output_manager_v1, 3);
+        WLCHECK(w.manager && w.viewporter && xdg_manager, "the fractional scale, the viewporter and xdg-output are offered");
+        xdg_output = wlc_id(c, WLI_zxdg_output_v1, 3);
+        wlc_forget(c);
+        wlc_send(c, xdg_manager, WLQ_zxdg_output_manager_v1_get_xdg_output, xdg_output, w.s.output);
+        a = event_at(c, WLI_zxdg_output_v1, WLE_zxdg_output_v1_logical_size, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[0] == 1280 && c->ev[a].u[1] == 720 &&
+                    wlc_count(c, WLI_zxdg_output_v1, WLE_zxdg_output_v1_done) == 0 &&
+                    wlc_count(c, WLI_wl_output, WLE_wl_output_done) == 1,
+                "an xdg_output of version 3 says the logical size and its change is the wl_output's done, not its own");
+        wlc_forget(c);
+        fake.screen.scale = 150;
+        wayland_screens_changed();
+        wlc_pump(c);
+        a = event_at(c, WLI_zxdg_output_v1, WLE_zxdg_output_v1_logical_position, 0);
+        b = event_at(c, WLI_zxdg_output_v1, WLE_zxdg_output_v1_logical_size, 0);
+        d = event_at(c, WLI_wl_output, WLE_wl_output_geometry, 0);
+        f = event_at(c, WLI_wl_output, WLE_wl_output_mode, 0);
+        g = event_at(c, WLI_wl_output, WLE_wl_output_scale, 0);
+        h = event_at(c, WLI_wl_output, WLE_wl_output_done, 0);
+        WLCHECK(a >= 0 && a < b && b < d && d < f && f < g && g < h,
+                "the screen changed is told whole: the xdg_output's position and size, then the wl_output's geometry, mode, scale and done");
+        WLCHECK(b >= 0 && c->ev[b].u[0] == 853 && c->ev[b].u[1] == 480 && g >= 0 && c->ev[g].u[0] == 2,
+                "at 150 percent the logical size is 853 by 480 and the whole scale is 2");
+        WLCHECK(wlc_count(c, WLI_zxdg_output_v1, WLE_zxdg_output_v1_done) == 0 && wlc_count(c, WLI_wl_output, WLE_wl_output_name) == 1,
+                "and the name comes once, with no xdg_output done");
+        fake.screen.scale = 125;
+        wlc_forget(c);
+        wayland_screens_changed();
+        wlc_pump(c);
+        b = event_at(c, WLI_zxdg_output_v1, WLE_zxdg_output_v1_logical_size, 0);
+        g = event_at(c, WLI_wl_output, WLE_wl_output_scale, 0);
+        WLCHECK(b >= 0 && c->ev[b].u[0] == 1024 && c->ev[b].u[1] == 576 && g >= 0 && c->ev[g].u[0] == 2,
+                "at 125 percent it is 1024 by 576 and the whole scale 2 (the next whole one up)");
+        wlc_end(c);
+
+        /* a window that follows the fractional scale, on a screen at 150 percent */
+        fake.screen.scale = 150;
+        wayland_screens_changed();
+        wlc_forget(w.s.c);
+        scale_open(&w, 1, 1);
+        c = w.s.c;
+        WLCHECK(w.whole == 2, "a surface made at 150 percent is told the whole scale 2");
+        WLCHECK(w.preferred == 180, "and its fractional scale is 180 as the object is made");
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, 21L, 16L);
+        scale_show(&w, 32, 24);
+        WLCHECK(c->errors == 0 && fake.row[0].used && fake.row[0].picture_w == 32 && fake.row[0].picture_h == 24,
+                "a buffer of 32 by 24 with a destination of 21 by 16 is shown as it is, pixel for pixel (%s)", c->error_text);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, w.s.seat, WLQ_wl_seat_get_pointer, pointer);
+        wlc_forget(c);
+        wayland_pointer_to(0, 30, 24);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+        WLCHECK(e && e->u[2] == 20 * 256 && e->u[3] == 16 * 256, "30 by 24 pixels at 1.5 pixels a unit is 20 by 16 units to the client");
+
+        /* a popup of that window: the positioner is in the window's units, so the place told is, and the compositor's is in pixels */
+        {
+                unsigned long positioner = wlc_id(c, WLI_xdg_positioner, 6), popup_surface = wlc_id(c, WLI_wl_surface, 6);
+                unsigned long popup_xdg = wlc_id(c, WLI_xdg_surface, 6), popup = wlc_id(c, WLI_xdg_popup, 6);
+                struct wl_event_seen *conf;
+                unsigned pixels[40 * 30];
+                long fd;
+                unsigned long pool = wlc_id(c, WLI_wl_shm_pool, 1), popup_buffer = wlc_id(c, WLI_wl_buffer, 1);
+
+                wlc_send(c, w.s.wm_base, WLQ_xdg_wm_base_create_positioner, positioner);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_size, 40L, 30L);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_anchor_rect, 4L, 5L, 10L, 8L);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_anchor, (long)WLN_xdg_positioner_anchor_bottom_left);
+                wlc_send(c, positioner, WLQ_xdg_positioner_set_gravity, (long)WLN_xdg_positioner_gravity_bottom_right);
+                wlc_send(c, w.s.compositor, WLQ_wl_compositor_create_surface, popup_surface);
+                wlc_send(c, w.s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, popup_xdg, popup_surface);
+                wlc_forget(c);
+                wlc_send(c, popup_xdg, WLQ_xdg_surface_get_popup, popup, w.s.xdg, positioner);
+                e = wlc_take(c, WLI_xdg_popup, WLE_xdg_popup_configure);
+                WLCHECK(e && e->u[0] == 4 && e->u[1] == 13 && e->u[2] == 40 && e->u[3] == 30,
+                        "a popup is told its place in the units of its parent: 4, 13, 40 by 30 as it asked");
+                conf = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+                for (int at = 0; at < 40 * 30; at++)
+                        pixels[at] = 0xffabcdef;
+                fd = wl_file(sizeof pixels, 0);
+                wl_file_put(fd, 0, pixels, sizeof pixels);
+                wlc_send(c, w.s.shm, WLQ_wl_shm_create_pool, pool, fd, (long)sizeof pixels);
+                close((int)fd);
+                wlc_send(c, pool, WLQ_wl_shm_pool_create_buffer, popup_buffer, 0L, 40L, 30L, 160L, (long)WLN_wl_shm_format_xrgb8888);
+                wlc_send(c, popup_xdg, WLQ_xdg_surface_ack_configure, conf ? (long)conf->u[0] : 0L);
+                wlc_send(c, popup_surface, WLQ_wl_surface_attach, popup_buffer, 0L, 0L);
+                wlc_send(c, popup_surface, WLQ_wl_surface_commit);
+                WLCHECK(c->errors == 0 && fake.row[1].used && fake.row[1].x == 6 && fake.row[1].y == 20,
+                        "and is put at 6, 20 pixels, which are 4, 13 units at 1.5 (%ld %ld; %s)", fake.row[1].x, fake.row[1].y, c->error_text);
+                wlc_send(c, popup, WLQ_xdg_popup_destroy);
+        }
+
+        /* the screen goes to 200 percent: the window's surface is told its fractional scale (the whole one is still 2), then its size */
+        fake.row[0].width_asked = 960;
+        fake.row[0].height_asked = 540;
+        fake.screen.scale = 200;
+        wlc_forget(c);
+        wayland_screens_changed();
+        wayland_scales_sweep();
+        wlc_pump(c);
+        a = event_at(c, WLI_wp_fractional_scale_v1, WLE_wp_fractional_scale_v1_preferred_scale, 0);
+        b = event_at(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[0] == 240 && wlc_count(c, WLI_wl_surface, WLE_wl_surface_preferred_buffer_scale) == 0,
+                "at 200 percent the fractional scale is 240 and the whole scale, still 2, is not said again");
+        WLCHECK(b > a && c->ev[b].u[0] == 480 && c->ev[b].u[1] == 270,
+                "after it the window is asked for the same 960 by 540 pixels in the new unit: 480 by 270");
+        e = 0;
+        wlc_forget(c);
+        wayland_scales_sweep();
+        wlc_pump(c);
+        WLCHECK(c->events == 0, "a scale told is not told again (%ld events)", c->events);
+
+        /* back at 100 percent: both scales change; the fractional one is exact for the presets below one too */
+        fake.screen.scale = 100;
+        wayland_screens_changed();
+        wayland_scales_sweep();
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wp_fractional_scale_v1, WLE_wp_fractional_scale_v1_preferred_scale);
+        WLCHECK(e && e->u[0] == 120, "at 100 percent the fractional scale is 120");
+        e = wlc_take(c, WLI_wl_surface, WLE_wl_surface_preferred_buffer_scale);
+        WLCHECK(e && e->u[0] == 1, "and the whole scale is 1");
+        fake.screen.scale = 75;
+        wlc_forget(c);
+        wayland_screens_changed();
+        wayland_scales_sweep();
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wp_fractional_scale_v1, WLE_wp_fractional_scale_v1_preferred_scale);
+        WLCHECK(e && e->u[0] == 90 && wlc_count(c, WLI_wl_surface, WLE_wl_surface_preferred_buffer_scale) == 0,
+                "at 75 percent it is 90, and the whole scale stays 1");
+        /* a window that moved to another screen is told that screen's scale */
+        fake.row[0].scale = 200;
+        wlc_forget(c);
+        wayland_scales_sweep();
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wp_fractional_scale_v1, WLE_wp_fractional_scale_v1_preferred_scale);
+        WLCHECK(e && e->u[0] == 240, "a window whose screen has another scale than the first is told its own (240)");
+        wlc_end(c);
+
+        /* a client that knows whole scales only: told 2 at 150 percent, its pixels are twice its units */
+        fake.screen.scale = 150;
+        fake.row[0].scale = 0;
+        wayland_screens_changed();
+        scale_open(&w, 0, 0);
+        c = w.s.c;
+        WLCHECK(w.whole == 2, "a client with no fractional scale is told the whole scale 2");
+        wlc_send(c, w.s.surface, WLQ_wl_surface_set_buffer_scale, 2L);
+        scale_show(&w, 64, 48);
+        WLCHECK(c->errors == 0 && fake.row[0].picture_w == 64, "it draws 64 by 48 pixels for 32 by 24 units (%s)", c->error_text);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_send(c, w.s.seat, WLQ_wl_seat_get_pointer, pointer);
+        wlc_forget(c);
+        wayland_pointer_to(0, 30, 24);
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_pointer, WLE_wl_pointer_enter);
+        WLCHECK(e && e->u[2] == 15 * 256 && e->u[3] == 12 * 256, "and 30 by 24 pixels is 15 by 12 units to it");
+        fake.row[0].width_asked = 960;
+        fake.row[0].height_asked = 540;
+        fake.screen.scale = 100;
+        wlc_forget(c);
+        wayland_screens_changed();
+        wayland_scales_sweep();
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_surface, WLE_wl_surface_preferred_buffer_scale);
+        WLCHECK(e && e->u[0] == 1, "back at 100 percent it is told 1");
+        e = wlc_take(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure);
+        WLCHECK(e && e->u[0] == 960 && e->u[1] == 540, "and asked for 960 by 540 units, which are pixels again");
+        wlc_end(c);
+        leak_check("scale");
+        wayland_stop();
+
+        /* the viewport, judged as the protocol says */
+        wl_reset();
+        wayland_start(&fake_host);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewporter, WLQ_wp_viewporter_get_viewport, wlc_id(c, WLI_wp_viewport, 1), w.s.surface);
+        WLCHECK(refused_with(c, WLN_wp_viewporter_error_viewport_exists), "a surface has one viewport");
+        wlc_end(c);
+        scale_open(&w, 1, 0);
+        c = w.s.c;
+        wlc_send(c, w.manager, WLQ_wp_fractional_scale_manager_v1_get_fractional_scale, wlc_id(c, WLI_wp_fractional_scale_v1, 1), w.s.surface);
+        WLCHECK(refused_with(c, WLN_wp_fractional_scale_manager_v1_error_fractional_scale_exists), "a surface has one fractional scale");
+        wlc_end(c);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, 0L, 5L);
+        WLCHECK(refused_with(c, WLN_wp_viewport_error_bad_value), "a destination of no width is refused");
+        wlc_end(c);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, -1L, 5L);
+        WLCHECK(refused_with(c, WLN_wp_viewport_error_bad_value), "and so is one of -1 by 5");
+        wlc_end(c);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, -1L, -1L);
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_source, -256L, -256L, -256L, -256L);
+        WLCHECK(c->errors == 0, "a destination and a source of -1 are the unset ones");
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_source, 0L, 0L, 0L, 5L * 256);
+        WLCHECK(refused_with(c, WLN_wp_viewport_error_bad_value), "a source with no width is refused");
+        wlc_end(c);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_source, 0L, 0L, 40L * 256, 10L * 256);
+        scale_show(&w, 32, 24);
+        WLCHECK(refused_with(c, WLN_wp_viewport_error_out_of_buffer), "a source outside the buffer is refused at the commit");
+        wlc_end(c);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_source, 0L, 0L, 128L, 128L);
+        scale_show(&w, 32, 24);
+        WLCHECK(refused_with(c, WLN_wp_viewport_error_bad_size), "a source of half a unit and no destination is refused at the commit");
+        wlc_end(c);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, 21L, 16L);
+        wlc_send(c, w.viewport, WLQ_wp_viewport_destroy);
+        scale_show(&w, 33, 25);
+        WLCHECK(c->errors == 0 && fake.row[0].picture_w == 33, "a viewport let go leaves the surface as it was: 33 by 25, no scale of 33 asked (%s)", c->error_text);
+        wlc_end(c);
+        scale_open(&w, 0, 1);
+        c = w.s.c;
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, 11L, 7L);
+        scale_show(&w, 33, 25);
+        WLCHECK(c->errors == 0, "with a destination a buffer need not be a whole number of the scale (%s)", c->error_text);
+        wlc_send(c, w.s.surface, WLQ_wl_surface_destroy);
+        wlc_send(c, w.viewport, WLQ_wp_viewport_set_destination, 3L, 3L);
+        WLCHECK(refused_with(c, WLN_wp_viewport_error_no_surface), "a viewport whose surface is gone is refused");
+        wlc_end(c);
+        leak_check("viewport");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -163154,6 +163472,7 @@ int main(int argc, char **argv)
         test_cursor();
         test_dmabuf();
         test_games();
+        test_scale();
         test_tree_fuzz(rounds);
         test_clipboard();
         test_clip_fuzz(rounds);

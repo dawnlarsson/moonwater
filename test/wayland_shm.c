@@ -7,11 +7,14 @@
             wayland-scanner private-code  XDG.xml xdg-shell-code.c
             cc -std=gnu11 -Wall -Wextra -I. test/wayland_shm.c xdg-shell-code.c -lwayland-client -o wayland-shm
 
-        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-L] [-C TEXT] [-P] [-q] [-v]
+        wayland-shm [-n FRAMES] [-w WIDTH] [-h HEIGHT] [-t TITLE] [-a APP_ID] [-s] [-m] [-f] [-d] [-u] [-b] [-L] [-S] [-C TEXT] [-P] [-q] [-v]
         -n frames to draw before it exits (default 60), -w and -h the size it asks to be, -s keep still (draw once, then
         only on a configure), -m ask to be maximized, -f fullscreen, -d damage only the rectangle that changes, -u a subsurface of 64 by 48 in 0xff10ff20 at (10, 20),
         -L lock the pointer and say each relative motion (built with -DHAVE_GAMES: the relative pointer and pointer constraints
-        protocols), -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
+        protocols), -S follow the scale as a toolkit does (built with -DHAVE_SCALE: wl_output, xdg-output, the fractional scale
+        and viewporter protocols): the size is logical, the buffer is the size times the preferred scale with a viewport whose
+        destination is the size, and a line says each output event, preferred scale and configure, and each draw (-I with it:
+        a client that knows whole scales only, with no fractional scale or viewport), -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
         there are none, -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
         -q quiet,
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
@@ -34,6 +37,11 @@
 #ifdef HAVE_GAMES
 #include "pointer-constraints-client.h"
 #include "relative-pointer-client.h"
+#endif
+#ifdef HAVE_SCALE
+#include "fractional-scale-v1-client.h"
+#include "viewporter-client.h"
+#include "xdg-output-unstable-v1-client.h"
 #endif
 #ifdef HAVE_DMABUF
 #include <gbm.h>
@@ -66,7 +74,17 @@ static struct wl_subcompositor *subcompositor;
 static struct zwp_linux_dmabuf_v1 *dmabuf_global;
 static struct gbm_device *gbm;
 #endif
-static int use_dmabuf, use_lock;
+static int use_dmabuf, use_lock, follow, only_whole;
+#ifdef HAVE_SCALE
+static struct wl_output *outputs[8];
+static int output_count;
+static struct zxdg_output_manager_v1 *xdg_output_manager;
+static struct wp_viewporter *viewporter;
+static struct wp_viewport *viewport;
+static struct wp_fractional_scale_manager_v1 *fractional_manager;
+static long scale120 = 120; // what the surface is told to draw at, in 120ths; the whole scale when there is no fractional one
+static int logical_w, logical_h, drawn_w, drawn_h, asked_w, asked_h; // asked: the size -w and -h say, in units
+#endif
 #ifdef HAVE_GAMES
 static struct zwp_relative_pointer_manager_v1 *relative_manager;
 static struct zwp_pointer_constraints_v1 *constraints_global;
@@ -171,6 +189,7 @@ static int make_shm_buffer(struct buffer *b, int w, int h)
         b->data = mmap(0, (size_t)size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (b->data == MAP_FAILED)
                 return -1;
+        b->size = (size_t)size;
         pool = wl_shm_create_pool(shm, fd, size);
         b->buffer = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_XRGB8888);
         wl_buffer_add_listener(b->buffer, &buffer_listener, b);
@@ -214,6 +233,9 @@ static void paint(struct buffer *b, int step)
 }
 
 static void redraw(void);
+#ifdef HAVE_SCALE
+static void redraw_scaled(void);
+#endif
 
 static void frame_done(void *data, struct wl_callback *callback, uint32_t time)
 {
@@ -234,6 +256,13 @@ static void redraw(void)
 {
         struct buffer *b = !buffers[0].busy ? &buffers[0] : !buffers[1].busy ? &buffers[1] : 0;
 
+#ifdef HAVE_SCALE
+        if (follow)
+        {
+                redraw_scaled();
+                return;
+        }
+#endif
         if (!b || !ready)
                 return;
         paint(b, frames);
@@ -247,6 +276,148 @@ static void redraw(void)
         b->busy = 1;
         wl_surface_commit(surface);
 }
+
+#ifdef HAVE_SCALE
+/*
+        A toolkit's way: the size is logical; the buffer is that times the scale the compositor prefers (a whole scale of the
+        surface, or the fractional one in 120ths with a viewport whose destination is the logical size), drawn again whenever the
+        scale or the size changes. A line says what it drew.
+*/
+static void redraw_scaled(void)
+{
+        int lw = logical_w ? logical_w : asked_w, lh = logical_h ? logical_h : asked_h;
+        long s120 = viewport ? scale120 : 120L * (scale > 0 ? scale : 1);
+        int bw = (int)((lw * s120 + 60) / 120), bh = (int)((lh * s120 + 60) / 120);
+        struct buffer *b;
+
+        if (!ready)
+                return;
+        if (bw != drawn_w || bh != drawn_h)
+        {
+                for (int at = 0; at < 2; at++)
+                {
+                        if (buffers[at].buffer)
+                                wl_buffer_destroy(buffers[at].buffer);
+                        if (buffers[at].data)
+                                munmap(buffers[at].data, buffers[at].size);
+                        if (make_buffer(&buffers[at], bw, bh) < 0)
+                        {
+                                fprintf(stderr, "wayland-shm: no buffers\n");
+                                exit(2);
+                        }
+                }
+                drawn_w = bw;
+                drawn_h = bh;
+        }
+        b = !buffers[0].busy ? &buffers[0] : !buffers[1].busy ? &buffers[1] : 0;
+        if (!b)
+                return;
+        width = bw;
+        height = bh;
+        paint(b, frames);
+        // Three marks of a colour of their own, 16 pixels in from three corners, for a test to find the window on the screen by.
+        if (bw > 40 && bh > 40)
+        {
+                ((unsigned *)b->data)[16 * b->stride + 16] = 0xff0a0b0cu;
+                ((unsigned *)b->data)[(bh - 17) * b->stride + (bw - 17)] = 0xff0c0b0au;
+                ((unsigned *)b->data)[16 * b->stride + (bw - 17)] = 0xff0b0c0au;
+        }
+        if (viewport)
+                wp_viewport_set_destination(viewport, lw, lh);
+        else
+                wl_surface_set_buffer_scale(surface, scale > 0 ? scale : 1);
+        wl_surface_attach(surface, b->buffer, 0, 0);
+        wl_surface_damage_buffer(surface, 0, 0, bw, bh);
+        frame_callback = wl_surface_frame(surface);
+        wl_callback_add_listener(frame_callback, &frame_listener, 0);
+        b->busy = 1;
+        wl_surface_commit(surface);
+        printf("draw %d %d %d %d %ld\n", lw, lh, bw, bh, s120);
+        fflush(stdout);
+}
+
+static void fractional_preferred(void *d, struct wp_fractional_scale_v1 *f, uint32_t value)
+{
+        (void)d;
+        (void)f;
+        scale120 = (long)value;
+        printf("preferred_scale %u\n", value);
+        fflush(stdout);
+        redraw_scaled();
+}
+
+static const struct wp_fractional_scale_v1_listener fractional_listener = {fractional_preferred};
+
+static void output_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph, int32_t sub, const char *make,
+                            const char *model, int32_t transform)
+{
+        (void)d; (void)o; (void)pw; (void)ph; (void)sub; (void)make; (void)model; (void)transform;
+        printf("output geometry %d %d\n", x, y), fflush(stdout);
+}
+
+static void output_mode(void *d, struct wl_output *o, uint32_t flags, int32_t w, int32_t h, int32_t refresh)
+{
+        (void)d; (void)o; (void)flags; (void)refresh;
+        printf("output mode %d %d\n", w, h), fflush(stdout);
+}
+
+static void output_done(void *d, struct wl_output *o)
+{
+        (void)d; (void)o;
+        printf("output done\n"), fflush(stdout);
+}
+
+static void output_scale(void *d, struct wl_output *o, int32_t factor)
+{
+        (void)d; (void)o;
+        printf("output scale %d\n", factor), fflush(stdout);
+}
+
+static void output_name(void *d, struct wl_output *o, const char *name)
+{
+        (void)d; (void)o;
+        printf("output name %s\n", name), fflush(stdout);
+}
+
+static void output_description(void *d, struct wl_output *o, const char *text)
+{
+        (void)d; (void)o; (void)text;
+}
+
+static const struct wl_output_listener output_listener = {output_geometry, output_mode, output_done, output_scale, output_name,
+                                                          output_description};
+
+static void xdg_output_position(void *d, struct zxdg_output_v1 *o, int32_t x, int32_t y)
+{
+        (void)d; (void)o;
+        printf("xdg_output position %d %d\n", x, y), fflush(stdout);
+}
+
+static void xdg_output_size(void *d, struct zxdg_output_v1 *o, int32_t w, int32_t h)
+{
+        (void)d; (void)o;
+        printf("xdg_output size %d %d\n", w, h), fflush(stdout);
+}
+
+static void xdg_output_done(void *d, struct zxdg_output_v1 *o)
+{
+        (void)d; (void)o;
+        printf("xdg_output done\n"), fflush(stdout);
+}
+
+static void xdg_output_name(void *d, struct zxdg_output_v1 *o, const char *name)
+{
+        (void)d; (void)o; (void)name;
+}
+
+static void xdg_output_description(void *d, struct zxdg_output_v1 *o, const char *text)
+{
+        (void)d; (void)o; (void)text;
+}
+
+static const struct zxdg_output_v1_listener xdg_output_listener = {xdg_output_position, xdg_output_size, xdg_output_done,
+                                                                    xdg_output_name, xdg_output_description};
+#endif
 
 static void ping(void *data, struct xdg_wm_base *base, uint32_t serial)
 {
@@ -266,6 +437,10 @@ static void surface_configure(void *data, struct xdg_surface *xs, uint32_t seria
                 ready = 1;
                 redraw();
         }
+#ifdef HAVE_SCALE
+        else if (follow)
+                redraw_scaled();
+#endif
 }
 
 static const struct xdg_surface_listener surface_listener = {surface_configure};
@@ -276,6 +451,18 @@ static void toplevel_configure(void *data, struct xdg_toplevel *t, int32_t w, in
         (void)t;
         (void)states;
         configures++;
+#ifdef HAVE_SCALE
+        if (follow)
+        {
+                printf("configure %d %d\n", w, h);
+                fflush(stdout);
+                if (w > 0 && h > 0)
+                {
+                        logical_w = w;
+                        logical_h = h;
+                }
+        }
+#endif
         if (w > 0 && h > 0 && (w != width || h != height))
         {
                 say("configured to", (long)w * 10000 + h);
@@ -327,6 +514,15 @@ static void surface_scale(void *data, struct wl_surface *s, int32_t factor)
         (void)data;
         (void)s;
         scale = factor;
+#ifdef HAVE_SCALE
+        if (follow)
+        {
+                printf("preferred_buffer_scale %d\n", factor);
+                fflush(stdout);
+                if (ready && !viewport)
+                        redraw_scaled();
+        }
+#endif
 }
 
 static void surface_transform(void *data, struct wl_surface *s, uint32_t transform)
@@ -716,6 +912,21 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
                 data_manager = wl_registry_bind(registry, name, &wl_data_device_manager_interface, version < 3 ? version : 3);
         else if (!strcmp(interface, wl_seat_interface.name))
                 seat = wl_registry_bind(registry, name, &wl_seat_interface, version < 9 ? version : 9);
+#ifdef HAVE_SCALE
+        else if (follow && !strcmp(interface, wl_output_interface.name) && output_count < 8)
+        {
+                struct wl_output *o = wl_registry_bind(registry, name, &wl_output_interface, version < 4 ? version : 4);
+
+                wl_output_add_listener(o, &output_listener, 0);
+                outputs[output_count++] = o;
+        }
+        else if (follow && !strcmp(interface, zxdg_output_manager_v1_interface.name))
+                xdg_output_manager = wl_registry_bind(registry, name, &zxdg_output_manager_v1_interface, version < 3 ? version : 3);
+        else if (follow && !only_whole && !strcmp(interface, wp_viewporter_interface.name))
+                viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
+        else if (follow && !only_whole && !strcmp(interface, wp_fractional_scale_manager_v1_interface.name))
+                fractional_manager = wl_registry_bind(registry, name, &wp_fractional_scale_manager_v1_interface, 1);
+#endif
 }
 
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name)
@@ -732,7 +943,7 @@ int main(int argc, char **argv)
         struct wl_registry *registry;
         int option;
 
-        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubLC:Pqv")) != -1)
+        while ((option = getopt(argc, argv, "n:w:h:t:a:smfdubLSIC:Pqv")) != -1)
                 switch (option)
                 {
                 case 'n': frames_wanted = atoi(optarg); break;
@@ -747,6 +958,8 @@ int main(int argc, char **argv)
                 case 'u': child_wanted = 1; break;
                 case 'b': use_dmabuf = 1; break;
                 case 'L': use_lock = 1; break;
+                case 'S': follow = 1; break;
+                case 'I': only_whole = 1; break;
                 case 'C': copy_text = optarg; break;
                 case 'P': paste_wanted = 1; break;
                 case 'q': quiet = 1; break;
@@ -798,6 +1011,28 @@ int main(int argc, char **argv)
         }
         surface = wl_compositor_create_surface(compositor);
         wl_surface_add_listener(surface, &wl_surface_listener, 0);
+#ifdef HAVE_SCALE
+        asked_w = width;
+        asked_h = height;
+        if (follow)
+        {
+                if (xdg_output_manager)
+                        for (int at = 0; at < output_count; at++)
+                                zxdg_output_v1_add_listener(zxdg_output_manager_v1_get_xdg_output(xdg_output_manager, outputs[at]),
+                                                            &xdg_output_listener, 0);
+                if (viewporter)
+                        viewport = wp_viewporter_get_viewport(viewporter, surface);
+                if (fractional_manager)
+                        wp_fractional_scale_v1_add_listener(wp_fractional_scale_manager_v1_get_fractional_scale(fractional_manager, surface),
+                                                            &fractional_listener, 0);
+        }
+#else
+        if (follow)
+        {
+                fprintf(stderr, "wayland-shm: built without the scale protocols\n");
+                return 2;
+        }
+#endif
         xdg_surface = xdg_wm_base_get_xdg_surface(wm_base, surface);
         xdg_surface_add_listener(xdg_surface, &surface_listener, 0);
         toplevel = xdg_surface_get_toplevel(xdg_surface);

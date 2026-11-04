@@ -19,6 +19,8 @@ failures=0
 mkdir -p "$work/bin"
 ln -sf "$compositor" "$work/bin/compositor"
 mount -t tmpfs tmpfs /run
+# The compositor watches /root for the settings; a private one is the screen's scale to change (the rows of wayland_scale.py).
+mount -t tmpfs tmpfs /root
 mkdir -p /run/moonwater
 export WAYLAND_DISPLAY=/run/moonwater/wayland-0 XDG_RUNTIME_DIR=/run
 
@@ -421,6 +423,23 @@ if [ -n "$input" ]; then
         extra=
         stop
         start
+fi
+
+# The screen's scale changed while clients run, end to end (they follow it as toolkits do: wl_output, xdg-output, the fractional
+# scale and the viewporter, and as a client that knows whole scales only).
+"$client" -S -n 1 -s -q > /dev/null 2>&1
+if [ "$?" != 2 ]; then
+        stop
+        extra=
+        if start; then
+                python3 "$(dirname "$0")/wayland_scale.py" "$client" "$work/scan.img" "$work" > "$work/scale.out" 2>&1
+                result=$?
+                cut -c1-600 "$work/scale.out"
+                failures=$((failures + result))
+                alive || row FAIL "the compositor survives the screen's scale changing under clients" "$(tail -3 "$work/compositor.log")"
+        else
+                row FAIL "the compositor starts for the scale rows" "$(tail -3 "$work/compositor.log")"
+        fi
 fi
 
 # The compositor ends when asked, and takes its socket with it.
