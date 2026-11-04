@@ -169882,6 +169882,54 @@ static void db_test_pending(void)
                 DBCHECK(!dbus.pending[k].used, "no call waits when everyone is gone");
 }
 
+static long db_room_lines, db_room_longest;
+
+static void db_room_trace(void *context, const char *line)
+{
+        long n = (long)strlen(line);
+
+        (void)context;
+        db_room_lines++;
+        db_room_longest = n > db_room_longest ? n : db_room_longest;
+}
+
+/*
+        The trace (sessionbus -t) puts a line for each message routed into 400 bytes, the parts of the message and its
+        first two string arguments: what a client sends that fills it is cut, and the line ends inside them. (Before, a
+        message whose path, interface, member and destination filled the line had the bracket of its arguments and the
+        line's end written after it, one byte past the buffer on the stack, two in all.)
+*/
+static void db_test_trace_room(void)
+{
+        static const struct dbus_host traced = {0, db_alloc, db_release, db_now, db_random, db_room_trace};
+        char path[260], member[256], interface[256], argument[200];
+        long slot;
+
+        db_reset();
+        dbus_stop();
+        dbus_start(&traced);
+        db_room_lines = db_room_longest = 0;
+        slot = db_connect(1000);
+        db_hello(slot);
+        db_drain(slot);
+        path[0] = '/';
+        memset(path + 1, 'p', 250);
+        path[251] = 0;
+        memset(member, 'm', 250);
+        member[250] = 0;
+        memcpy(interface, "org.", 4);
+        memset(interface + 4, 'i', 240);
+        interface[244] = 0;
+        memset(argument, 'a', 50); // short enough to be shown
+        argument[50] = 0;
+        db_call(slot, "org.example.Nobody", path, interface, member, "ss", argument, argument);
+        DBCHECK(db_room_lines == 1 && db_room_longest <= 399, "the trace's line is cut inside its 400 bytes, the bracket and the end in them (%ld long, %ld lines)",
+                db_room_longest, db_room_lines);
+        DBCHECK(!dbus_dead(slot), "and the call is answered as any is");
+        dbus_drop(slot);
+        db_reset();
+}
+
 static void db_test_caps(void)
 {
         long slots[DBUS_CLIENTS + 2], made = 0, per_uid = 0;
@@ -172068,6 +172116,7 @@ int main(int argc, char **argv)
         db_test_methods();
         db_test_read_all();
         db_test_trace();
+        db_test_trace_room();
         db_test_fuzz(rounds);
         db_test_structured(grammar);
         db_test_grammar_fuzz(grammar);

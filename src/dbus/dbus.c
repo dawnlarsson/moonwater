@@ -1908,10 +1908,12 @@ static void dbus_trace(struct dbus_client *from, const struct dbus_message *m)
 
                 if (dbus_arg_string(m, 1, second, sizeof second) >= 0)
                         more[2] = ", ", more[3] = second;
+                // the bracket that closes them and the line's end are kept room for, whatever filled the line before
                 for (long k = 0; more[k]; k++)
                         for (long c = 0; more[k][c] && n < (long)sizeof line - 2; c++)
                                 line[n++] = more[k][c];
-                line[n++] = ']';
+                if (n < (long)sizeof line - 1)
+                        line[n++] = ']';
         }
         line[n] = 0;
         // what a client wrote goes to the log, and so to a terminal: a byte a terminal acts on is shown as ?

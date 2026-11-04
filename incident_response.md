@@ -41,6 +41,28 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-152: the session bus's trace wrote two bytes past its line on the stack
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Stack buffer overflow by two bytes (a `]` and a NUL), in a root process, from what any client sends; only with `-t` |
+| Attacker | (a) any local program on `/run/moonwater/bus`, while the bus runs with `-t` (a debugging trace: `TRIAL_BUS_ARGS=-t` in the trials; the machine script starts it without) |
+| Moonwater exposure window | 2026-11-04 02:33 +01:00 (`0fc46fa3`) to the commit that adds this entry; no exposure as the machine starts it |
+| Fixed by | the commit that adds this entry (`src/dbus/dbus.c` `dbus_trace`) |
+
+**What it was.** `dbus_trace` builds `char line[400]` from a message's kind, sender, destination, path, interface,
+member, error and signature (copied while `n < 399`), then, when the first argument is a string of less than 80 bytes,
+` [`, the arguments and `]` (copied while `n < 398`), and ends the line. A client's call whose path, interface and member
+(up to 255 bytes each) filled the line left `n` at 399: the `]` went to `line[399]` and the NUL to `line[400]`, past the
+buffer. UBSan: `index 400 out of bounds for type 'char[400]'`.
+
+**The fix.** The `]` is written only while there is room for it and the NUL.
+
+**Tests that fail without it.** CHECK_dbus `db_test_trace`: a bus with a trace host, a call with a 251-byte path, a
+244-byte interface, a 250-byte member and two 50-byte string arguments; the line must be at most 399 long (it was 400,
+and UBSan stops at the write). The mutant that writes the `]` unguarded is red.
+
 ### MW-2026-162: on the locked tier the ext4 readdir ports allocated with flags taken from the wrong register
 
 | | |
