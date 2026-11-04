@@ -137,6 +137,23 @@ int main(int argc, char **argv)
         int as_user = 0;
         int with_input = 1;
 
+        if (argc > 1 && strcmp(argv[1], "--who") == 0) {
+                gid_t list[32];
+                int count = getgroups(32, list);
+
+                printf("who uid %u gid %u groups", (unsigned)getuid(), (unsigned)getgid());
+                for (int at = 0; at < count; at++)
+                        printf(" %u", (unsigned)list[at]);
+                printf("\n");
+                {
+                        int fd = open("/dev/dri/renderD128", O_RDWR);
+                        printf("who render %s errno %d\n", fd >= 0 ? "opened" : "refused",
+                               fd >= 0 ? 0 : errno);
+                        if (fd >= 0)
+                                close(fd);
+                }
+                return 0;
+        }
         if (argc > 1 && strcmp(argv[1], "--bowl-user") == 0)
                 as_user = 1;
         else if (argc > 1 && strcmp(argv[1], "--bowl-user-no-input") == 0) {

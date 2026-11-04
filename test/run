@@ -16073,6 +16073,10 @@ fi
         echo '/tmp/input_probe; echo input-probe-exit $?'
         echo 'cp /mnt/stick/input_probe_clang /tmp/input_probe_clang 2> /dev/null && chmod 755 /tmp/input_probe_clang'
         echo '[ -x /tmp/input_probe_clang ] && /tmp/input_probe_clang; echo input-clang-exit $?'
+        echo 'mkdir -p /tmp/bwroot/bin /tmp/bwroot/etc /tmp/bwroot/tmp /tmp/bwroot/dev /tmp/bwroot/proc /tmp/bwroot/sys /tmp/bwroot/run /tmp/bwroot/var /tmp/bwroot/usr /tmp/bwroot/lib'
+        echo 'cp /tmp/input_probe /tmp/bwroot/bin/probe'
+        echo 'echo input-real-bowl-start'
+        echo 'bowl /tmp/bwroot /bin/probe > /tmp/bowl.out 2>&1; cat /tmp/bowl.out; echo input-real-bowl-exit $?'
         echo 'echo input-bowl-start'
         echo '/tmp/input_probe --bowl-user; echo input-bowl-exit $?'
         echo '/tmp/input_probe --bowl-user-no-input > /tmp/input_denied 2>&1; echo input-denied-exit $?'
@@ -16146,6 +16150,14 @@ fi
 #       The bowl user's run alone: the root run prints the same lines, so the
 #       rows read only what sits between the run's two markers.
 sed -n '/^input-bowl-start/,/^input-bowl-exit/p' "$work/transcript" > "$work/bowl"
+#       And a bowl's own launch (bowl ROOT PROGRAM, the default view), which is
+#       the path a program in a bowl takes: its user is the bowl's, and the
+#       probe runs in it unchanged.
+sed -n '/^input-real-bowl-start/,/^input-real-bowl-exit/p' "$work/transcript" > "$work/real-bowl"
+says real-bowl 'a bowl launch creates a virtual pad'  'uinput device created ok'
+says real-bowl 'a bowl launch finds js0 and reads it' 'button press read back ok'
+says real-bowl 'a bowl launch passes the probe'       'probe passed'
+says real-bowl 'a bowl launch exits 0'                'input-real-bowl-exit 0'
 says bowl 'the bowl user runs as uid 1000'            'running as uid 1000 gid 1000'
 says bowl 'a bowl user creates a virtual pad'         'uinput device created ok'
 says bowl 'a bowl user finds the joystick node'       'joystick node appears ok'
