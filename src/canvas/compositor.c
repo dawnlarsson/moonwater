@@ -9156,9 +9156,15 @@ static void compositor_taskbar_settings_read(void)
         compositor_word(SETTING_TASKBAR_POSITION_PATH, position, sizeof(position));
         compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
         compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
+        compositor_text(SETTING_TASKBAR_TRAY_PATH, tray, sizeof(tray));
+        // The standard tray in 12 hours is a format of its own; a format of the person's own says its hours itself.
+        compositor_word(SETTING_CLOCK_FORMAT_PATH, text, sizeof(text));
+        if (string_equals((string_address)text, (string_address) "12h") &&
+            (!tray[0] || tray[0] == '\n' || string_equals((string_address)tray, (string_address) "default") ||
+             string_equals((string_address)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD)))
+                string_copy_bounded((p8 *)tray, (string_address)SETTING_TASKBAR_TRAY_STANDARD_12H, sizeof(tray));
         compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
         compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
-        compositor_text(SETTING_TASKBAR_TRAY_PATH, tray, sizeof(tray));
         compositor_word(SETTING_TASKBAR_LAUNCHER_PATH, launcher, sizeof(launcher));
         compositor_bands_where(was);
         compositor_tabs_changed();

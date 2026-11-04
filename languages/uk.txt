@@ -143,6 +143,8 @@ tray_pm	f466	пп
 ui_confirm_again	b3ff	натисніть ще раз для підтвердження: 
 ui_field_digits	f52b	число складається з цифр
 ui_field_full	fe02	більше не вміщається
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Колір акценту (rrggbb або reset)
 =Airplane mode	3b8a	Режим польоту
@@ -167,6 +169,7 @@ ui_field_full	fe02	більше не вміщається
 =Clipboard history (copies kept)	7423	Історія буфера обміну (збережених копій)
 =Clipboard limit (MiB)	a505	Ліміт буфера обміну (MiB)
 =Clock (Enter sets it now)	575e	Годинник (Enter встановлює зараз)
+=Clock format	70d0	Формат часу
 =Cursor look	34ce	Вигляд вказівника
 =Cursor size	65d4	Розмір вказівника
 =Display	d9b5	Екран

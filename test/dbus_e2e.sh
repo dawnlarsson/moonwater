@@ -34,6 +34,8 @@ row ok "the session bus listens on /run/moonwater/bus"
 mode=$(stat -c %a /run/moonwater/bus)
 [ "$mode" = 666 ] && row ok "and is open to every user, as the Wayland socket is" || row FAIL "and is open to every user" "mode $mode"
 
+[ "$(cat /run/moonwater/color-scheme 2> /dev/null)" = dark ] && row ok "the bus keeps the scheme of the moment in a file beside its socket: dark" ||
+        row FAIL "the bus keeps the scheme of the moment in a file beside its socket" "$(cat /run/moonwater/color-scheme 2>&1)"
 if command -v busctl > /dev/null 2>&1; then
         out=$(busctl --address="$address" call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Settings ReadOne ss org.freedesktop.appearance color-scheme 2>&1)
         [ "$out" = "v u 1" ] && row ok "sd-bus (busctl) reads the color-scheme: v u 1" || row FAIL "sd-bus (busctl) reads the color-scheme" "$out"
@@ -67,6 +69,7 @@ if command -v gdbus > /dev/null 2>&1; then
         sleep 1
         echo light > /root/canvas.theme
         sleep 2
+        [ "$(cat /run/moonwater/color-scheme 2> /dev/null)" = light ] && row ok "and the file says light once the theme is" || row FAIL "and the file says light once the theme is" "$(cat /run/moonwater/color-scheme 2>&1)"
         kill $mpid 2> /dev/null
         wait $mpid 2> /dev/null
         if grep -q "SettingChanged.*color-scheme.*uint32 2" "$work/monitor.out"; then

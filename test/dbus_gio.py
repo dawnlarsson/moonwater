@@ -143,6 +143,22 @@ for _ in range(100):
         break
 row(any(s[1] == "enable-animations" and s[2] is False for s in seen), "motion reduced is enable-animations false", str(seen))
 
+seen.clear()
+setting("canvas.cursor.size", "3")
+for _ in range(100):
+    pump(50)
+    if seen:
+        break
+row(any(s[1] == "cursor-size" and s[2] == 72 for s in seen), "a pointer size of 3 is a cursor-size of 72 to the programs that draw their own", str(seen))
+
+seen.clear()
+setting("time.format", "12h")
+for _ in range(100):
+    pump(50)
+    if seen:
+        break
+row(any(s[1] == "clock-format" and s[2] == "12h" for s in seen), "the clock read in 12 hours is clock-format 12h to a GNOME program", str(seen))
+
 # two programs: one owns a name and answers, the other calls it by the name
 methods = Gio.DBusNodeInfo.new_for_xml(
     "<node><interface name='org.example.Server'><method name='Echo'><arg type='s' direction='in'/><arg type='s' direction='out'/></method>"

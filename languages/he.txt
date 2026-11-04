@@ -144,6 +144,8 @@ tray_pm	f466	אחה״צ
 ui_confirm_again	b3ff	לחץ שוב לאישור: 
 ui_field_digits	f52b	מספר הוא ספרות
 ui_field_full	fe02	זה המקסימום שהוא מכיל
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	צבע הדגשה
 =Accent colour (rrggbb or reset)	53aa	צבע הדגשה (rrggbb או reset)
 =Airplane mode	3b8a	מצב טיסה
@@ -168,6 +170,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Clipboard history (copies kept)	7423	היסטוריית לוח הגזירים (עותקים שנשמרו)
 =Clipboard limit (MiB)	a505	מגבלת לוח הגזירים (MiB)
 =Clock (Enter sets it now)	575e	שעון (Enter קובע אותו עכשיו)
+=Clock format	70d0	תבנית שעה
 =Cursor look	34ce	מראה המצביע
 =Cursor size	65d4	גודל המצביע
 =Display	d9b5	מסך

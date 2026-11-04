@@ -112,6 +112,9 @@
 // standard format is drawn as the tray always was: the battery's cell, then the clock's.
 #define SETTING_TASKBAR_TRAY_PATH "/root/taskbar.tray"
 #define SETTING_TASKBAR_TRAY_STANDARD "{battery}  {time.24h.hour}:{time.24h.min}"
+// What the standard tray says when the clock is read in 12 hours (`time format 12h`): the hour as a 12 hour clock shows it, the minute, and am or pm.
+#define SETTING_TASKBAR_TRAY_STANDARD_12H "{battery}  {time.12h.hour}:{time.24h.min} {time.ampm}"
+#define SETTING_CLOCK_FORMAT_PATH "/root/time.format"
 #define SETTING_TRAY_MOST 96 // bytes of a format
 #define SETTING_THEME_PATH "/root/canvas.theme"
 // The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
@@ -363,6 +366,12 @@ static const struct settings_row settings_rows[] = {
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
     {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0, null,
      .usage = "timezone [ZONE|list]", .help = "IANA name, country, +1 or POSIX; manual"},
+    //  The hours a clock is read in: the tray's (when its format is the standard one) and, to a bowl's GNOME programs, the
+    //  portal's clock-format. A tray format of the person's own says its hours itself.
+    SETTING_PLAIN_ROW(null, "Clock format", SETTINGS_CHOICE, 0, ("time", "format"), "format ", "24h 12h",
+                      .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_CLOCK_FORMAT_PATH, .standard = "24h", .need = "how Canvas draws",
+                      .refusal = "clock format is 24h or 12h, not %s\n", .usage = "time format [24h|12h]",
+                      .help = "the hours the clock is read in, on the tray and in GNOME programs [24h]"),
     {null, "Clock (Enter sets it now)", SETTINGS_ACTION, 0, SETTINGS_LINE | SETTINGS_TICK, {"time"}, "local ", null, {"time", "sync"}, null, 0,
      null, .usage = "time [sync]", .help = "the clock; sync sets it and the zone now"},
     {null, "Time server (auto for the pool)", SETTINGS_FIELD, 0, 0, {"ntp", "server"}, "ntp server ", null, {"ntp", "server"}, null, 0, null,

@@ -143,6 +143,8 @@ tray_pm	f466	ПП
 ui_confirm_again	b3ff	нажмите ещё раз для подтверждения: 
 ui_field_digits	f52b	число состоит из цифр
 ui_field_full	fe02	больше не помещается
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Цвет акцента (rrggbb или reset)
 =Airplane mode	3b8a	Режим полёта
@@ -167,6 +169,7 @@ ui_field_full	fe02	больше не помещается
 =Clipboard history (copies kept)	7423	История буфера обмена (хранимых копий)
 =Clipboard limit (MiB)	a505	Предел буфера обмена (MiB)
 =Clock (Enter sets it now)	575e	Часы (Enter устанавливает сейчас)
+=Clock format	70d0	Формат времени
 =Cursor look	34ce	Вид указателя
 =Cursor size	65d4	Размер указателя
 =Display	d9b5	Экран

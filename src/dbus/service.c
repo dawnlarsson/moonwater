@@ -6,11 +6,16 @@
         reads is whatever a bowl's program sends, and the compositor holds the card and every input device; and a text
         console, or a compositor that has just crashed, still has a bus and a portal.
 
+        Beside the socket it keeps one small file, color-scheme, which says dark or light: what a launcher that starts a
+        program in the scheme of the moment reads (a GTK 3 program takes GTK_THEME=Adwaita:dark; the portal is for
+        programs that ask, and GTK 3 does not), the same word the portal gives, the clock's turn of auto included.
+
         What it serves, from which setting:
           org.freedesktop.appearance color-scheme    canvas theme (auto by the clock: light from 7 to 19)   1 dark, 2 light
           org.freedesktop.appearance accent-color    canvas theme accent, when one is kept (else out of range = none)
           org.freedesktop.appearance contrast        0 (no setting yet)
-          org.gnome.desktop.interface color-scheme, gtk-theme, enable-animations (canvas motion), text-scaling-factor (1.0)
+          org.gnome.desktop.interface color-scheme, gtk-theme, enable-animations (canvas motion), text-scaling-factor (1.0),
+                                      cursor-size (canvas cursor size: 24 pixels a step, 24 for auto)
         and a change of any is told to the programs that listen (SettingChanged) within the time the loop takes to wake: at
         once for a file written, within 20 s for the clock turning auto from dark to light.
 */
@@ -129,6 +134,37 @@ static unsigned long sessionbus_bits(double value)
         return both.bits;
 }
 
+// The word dark or light in color-scheme beside the socket, written whole under a name of its own and moved in, when it changed.
+static void sessionbus_scheme_file(long dark)
+{
+        static long written = -1;
+        char path[128], temporary[132];
+        positive length = 0, slash = 0;
+        bipolar handle;
+
+        if (written == dark)
+                return;
+        for (; sessionbus.path[length] && length < 100; length++)
+                if (sessionbus.path[length] == '/')
+                        slash = length + 1;
+        for (positive k = 0; k < slash; k++)
+                path[k] = sessionbus.path[k];
+        for (positive k = 0; "color-scheme"[k]; k++)
+                path[slash + k] = "color-scheme"[k];
+        path[slash + 12] = 0;
+        for (positive k = 0; k < slash + 13; k++)
+                temporary[k] = path[k];
+        temporary[slash + 12] = '.';
+        temporary[slash + 13] = 0;
+        handle = system_open_at_mode(AT_FDCWD, (string_address)temporary, FILE_WRITE | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (handle < 0)
+                return;
+        sessionbus_call(syscall(write), (positive)handle, (positive)(dark ? "dark\n" : "light\n"), dark ? 5 : 6, 0, 0, 0);
+        system_close(handle);
+        if (sessionbus_call(syscall(renameat), (positive)AT_FDCWD, (positive)temporary, (positive)AT_FDCWD, (positive)path, 0, 0) >= 0)
+                written = dark;
+}
+
 // The portal's settings from the files, set (and so told) where they changed.
 static void sessionbus_settings(void)
 {
@@ -160,6 +196,7 @@ static void sessionbus_settings(void)
         colour[0] = sessionbus_bits(accent < 0 ? -1.0 : (double)((accent >> 16) & 255) / 255.0);
         colour[1] = sessionbus_bits(accent < 0 ? -1.0 : (double)((accent >> 8) & 255) / 255.0);
         colour[2] = sessionbus_bits(accent < 0 ? -1.0 : (double)(accent & 255) / 255.0);
+        sessionbus_scheme_file(dark);
         dbus_setting_set("org.freedesktop.appearance", "color-scheme", 'u', dark ? 1 : 2, 0, 0);
         dbus_setting_set("org.freedesktop.appearance", "accent-color", 'c', 0, colour, 0);
         dbus_setting_set("org.freedesktop.appearance", "contrast", 'u', 0, 0, 0);
@@ -168,6 +205,11 @@ static void sessionbus_settings(void)
         sessionbus_word(SETTING_MOTION_PATH, word, sizeof word);
         dbus_setting_set("org.gnome.desktop.interface", "enable-animations", 'b', !string_equals((string_address)word, (string_address) "reduced"), 0, 0);
         dbus_setting_set("org.gnome.desktop.interface", "text-scaling-factor", 'd', 0, scale, 0);
+        sessionbus_word(SETTING_CLOCK_FORMAT_PATH, word, sizeof word);
+        dbus_setting_set("org.gnome.desktop.interface", "clock-format", 's', 0, 0, string_equals((string_address)word, (string_address) "12h") ? "12h" : "24h");
+        // The pointer is the compositor's; this is the size a program that draws one of its own (a drag, a popup) takes.
+        sessionbus_word(SETTING_CURSOR_SIZE_PATH, word, sizeof word);
+        dbus_setting_set("org.gnome.desktop.interface", "cursor-size", 'i', word[0] >= '1' && word[0] <= '4' && !word[1] ? 24 * (word[0] - '0') : 24, 0, 0);
         sessionbus.dirty = 0;
         sessionbus.last_settings = sessionbus_now(0);
 }

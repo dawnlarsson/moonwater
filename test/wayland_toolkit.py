@@ -4,6 +4,7 @@ A toolkit program on the shim whose colours follow the machine's theme while it 
 portal's platform theme), read off the screen it draws on.
 
     python3 wayland_toolkit.py luminance SCAN WIDTH HEIGHT SETTINGS_DIRECTORY [SECONDS [dark|light]]
+    python3 wayland_toolkit.py start SCAN WIDTH HEIGHT SECONDS dark|light
 
 SCAN is the headless compositor's screen file, WIDTH by HEIGHT. The theme (SETTINGS_DIRECTORY/canvas.theme) is set to dark,
 light, dark and light again, and each time the mean brightness of the window on the screen is read once the program has had
@@ -68,8 +69,20 @@ def luminance(scan, width, height, root, seconds, first="dark"):
             row(value is not None and value > 160, "with the theme light the window is light: mean brightness %s" % (None if value is None else round(value)), str(box))
 
 
+def start(scan, width, height, seconds, want):
+    """A program started in a scheme draws in it: the window is dark or light as the program was told at its start."""
+    time.sleep(seconds)
+    value, box = brightness(scan, width, height)
+    if want == "dark":
+        row(value is not None and value < 90, "a program started with the desktop dark draws dark: mean brightness %s" % (None if value is None else round(value)), str(box))
+    else:
+        row(value is not None and value > 160, "a program started with the desktop light draws light: mean brightness %s" % (None if value is None else round(value)), str(box))
+
+
 if __name__ == "__main__":
-    if sys.argv[1] == "luminance":
+    if sys.argv[1] == "start":
+        start(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), float(sys.argv[5]), sys.argv[6])
+    elif sys.argv[1] == "luminance":
         luminance(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], float(sys.argv[6]) if len(sys.argv) > 6 else 4.0,
                   sys.argv[7] if len(sys.argv) > 7 else "dark")
     else:

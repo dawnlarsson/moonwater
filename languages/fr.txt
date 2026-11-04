@@ -143,6 +143,8 @@ tray_pm	f466	PM
 ui_confirm_again	b3ff	appuyez de nouveau pour confirmer : 
 ui_field_digits	f52b	un nombre s'écrit en chiffres
 ui_field_full	fe02	c'est tout ce que ce champ peut contenir
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Couleur d'accent (rrggbb ou reset)
 =Airplane mode	3b8a	Mode avion
@@ -167,6 +169,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Clipboard history (copies kept)	7423	Historique du presse-papiers (copies gardées)
 =Clipboard limit (MiB)	a505	Limite du presse-papiers (MiB)
 =Clock (Enter sets it now)	575e	Horloge (Enter la règle maintenant)
+=Clock format	70d0	Format de l'heure
 =Cursor look	34ce	Apparence du pointeur
 =Cursor size	65d4	Taille du pointeur
 =Display	d9b5	Écran

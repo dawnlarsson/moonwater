@@ -96,6 +96,7 @@ moonwater taskbar text [center|edge]   on a left or right taskbar, which way the
 moonwater taskbar tray [FORMAT|default]  what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]
 moonwater ntp [on|off]                 set the clock from the network [on]
 moonwater time [sync]                  the clock; sync sets it and the zone now
+moonwater time format [24h|12h]        the hours the clock is read in, on the tray and in GNOME programs [24h]
 moonwater ntp server [NAME|auto]       who is asked first: a name or address [auto]
 moonwater ntp sampling [on|off]        keep the lowest-delay sample of five [on]
 moonwater ntp nts [on|off|only]        authenticated time (RFC 8915) first; only refuses plain [on]

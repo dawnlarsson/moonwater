@@ -29,6 +29,7 @@ mount -t tmpfs tmpfs /root
 mkdir -p /run/moonwater /run/user/0
 chmod 700 /run/user/0
 [ -z "$TRIAL_DISPLAYS" ] || echo "$TRIAL_DISPLAYS" > /root/canvas.displays
+[ -z "$TRIAL_THEME" ] || echo "$TRIAL_THEME" > /root/canvas.theme
 "$dir/bin/compositor" -H "$size" "$dir/$name.scan" $TRIAL_COMPOSITOR_ARGS > "$dir/$name.compositor" 2>&1 &
 cpid=$!
 # TRIAL_BUS=1 also runs the session bus (src/dbus), where the program in the root finds its settings: its address is in the program's

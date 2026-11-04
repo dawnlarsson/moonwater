@@ -143,6 +143,8 @@ tray_pm	f466	PM
 ui_confirm_again	b3ff	press again to confirm: 
 ui_field_digits	f52b	a number is digits
 ui_field_full	fe02	that is as much as it holds
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accent colour (rrggbb or reset)
 =Airplane mode	3b8a	Airplane mode
@@ -167,6 +169,7 @@ ui_field_full	fe02	that is as much as it holds
 =Clipboard history (copies kept)	7423	Clipboard history (copies kept)
 =Clipboard limit (MiB)	a505	Clipboard limit (MiB)
 =Clock (Enter sets it now)	575e	Clock (Enter sets it now)
+=Clock format	70d0	Clock format
 =Cursor look	34ce	Cursor look
 =Cursor size	65d4	Cursor size
 =Display	d9b5	Display

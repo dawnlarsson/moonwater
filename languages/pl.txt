@@ -143,6 +143,8 @@ tray_pm	f466	PM
 ui_confirm_again	b3ff	naciśnij ponownie, aby potwierdzić: 
 ui_field_digits	f52b	liczba składa się z cyfr
 ui_field_full	fe02	więcej się nie zmieści
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Akcent
 =Accent colour (rrggbb or reset)	53aa	Kolor akcentu (rrggbb lub reset)
 =Airplane mode	3b8a	Tryb samolotowy
@@ -167,6 +169,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Clipboard history (copies kept)	7423	Historia schowka (zachowane kopie)
 =Clipboard limit (MiB)	a505	Limit schowka (MiB)
 =Clock (Enter sets it now)	575e	Zegar (Enter ustawia go teraz)
+=Clock format	70d0	Format czasu
 =Cursor look	34ce	Wygląd wskaźnika
 =Cursor size	65d4	Rozmiar wskaźnika
 =Display	d9b5	Ekran

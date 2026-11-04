@@ -143,6 +143,8 @@ tray_pm	f466	p.m.
 ui_confirm_again	b3ff	druk nogmaals om te bevestigen: 
 ui_field_digits	f52b	een getal bestaat uit cijfers
 ui_field_full	fe02	meer past er niet in
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accentkleur (rrggbb of reset)
 =Airplane mode	3b8a	Vliegtuigmodus
@@ -167,6 +169,7 @@ ui_field_full	fe02	meer past er niet in
 =Clipboard history (copies kept)	7423	Klembordgeschiedenis (bewaarde kopieën)
 =Clipboard limit (MiB)	a505	Klembordlimiet (MiB)
 =Clock (Enter sets it now)	575e	Klok (Enter stelt hem nu in)
+=Clock format	70d0	Tijdnotatie
 =Cursor look	34ce	Uiterlijk van de aanwijzer
 =Cursor size	65d4	Grootte van de aanwijzer
 =Display	d9b5	Scherm

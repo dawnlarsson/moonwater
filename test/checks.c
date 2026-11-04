@@ -96930,6 +96930,11 @@ static fn chrome_profile(void)
                   chrome_count(refusal, "echo ") == 1);
         check("The launcher names the shim's socket as an absolute path and marks the launch as the person's",
               exported && exported < exec && strstr(chrome->session[exported - 1], "MOONWATER_ASKED=1"));
+        positive themed = chrome_line(chrome ? chrome->session : null, "GTK_THEME=Adwaita:dark");
+
+        check("The launcher gives GTK 3 the dark theme when the desktop is dark, before it starts the browser, and not over the person's own",
+              themed && themed < exec && strstr(chrome->session[themed - 1], "-n \"$GTK_THEME\"") &&
+                  strstr(chrome->session[themed - 1], "/run/moonwater/color-scheme") && strstr(chrome->session[themed - 1], "!= dark"));
         check("The launcher starts the browser with no capabilities of its namespace, which bubblewrap under GTK's file chooser refuses",
               exported && exported < exec && strstr(chrome->session[exported - 1], "BOWL_CAPABILITIES=none"));
 
@@ -96937,6 +96942,32 @@ static fn chrome_profile(void)
         static string_address cleared[] = {"HOME=/root", "BOWL_CAPABILITIES=none", null};
         static string_address longer[] = {"BOWL_CAPABILITIES=nonesuch", null};
         static string_address plain[] = {"HOME=/root", null};
+        {
+                static const struct
+                {
+                        const char *file;
+                        const char *want; // null for none offered
+                } languages[] = {{"de\n", "LANGUAGE=de"}, {"sv", "LANGUAGE=sv"}, {"uk ", "LANGUAGE=uk"}, {"en\n", null}, {"\n", null}, {"", null},
+                                 {"d", null}, {"DE", null}, {"d1", null}, {"deu", null}, {"german", null}, {"\xff\xff", null}};
+                char path[] = "/tmp/language-check-XXXXXX";
+                int handle = mkstemp(path);
+                bool right = handle >= 0;
+
+                for (unsigned each = 0; right && each < sizeof(languages) / sizeof(languages[0]); each++)
+                {
+                        string_address offered;
+
+                        right &= ftruncate(handle, 0) == 0 && lseek(handle, 0, SEEK_SET) == 0 &&
+                                 write(handle, languages[each].file, strlen(languages[each].file)) == (ssize_t)strlen(languages[each].file);
+                        offered = bowl_language_offered((string_address)path);
+                        right &= languages[each].want ? offered && !strcmp((const char *)offered, languages[each].want) : !offered;
+                }
+                right &= !bowl_language_offered((string_address) "/tmp/language-check-missing-file");
+                if (handle >= 0)
+                        unlink(path), close(handle);
+                check("A bowl's program is offered the language the person chose, as LANGUAGE and a code of two letters, and English or nothing or a word that is no code offers none",
+                      right);
+        }
         check("A program is given its capabilities unless the environment it is started with says none",
               bowl_capabilities_wanted(null) && bowl_capabilities_wanted(plain) && bowl_capabilities_wanted(kept) &&
                   bowl_capabilities_wanted(longer) && !bowl_capabilities_wanted(cleared));
@@ -162161,7 +162192,17 @@ static void test_seat(void)
         WLCHECK(e && e->u[0] == WLN_wl_keyboard_keymap_format_xkb_v1 && e->u[1] == 16 && c->fds_seen == 1, "a keyboard is sent its keymap with a descriptor");
         e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_repeat_info);
         WLCHECK(e && e->u[0] == 25 && e->u[1] == 600, "and how fast a held key repeats");
+        /* the settings change it: the keyboard is told the new rate and delay, and not its keymap again */
+        wlc_forget(c);
+        fake.rate = 40;
+        fake.delay = 180;
+        wayland_repeat_changed();
+        wlc_pump(c);
+        e = wlc_take(c, WLI_wl_keyboard, WLE_wl_keyboard_repeat_info);
+        WLCHECK(e && e->u[0] == 40 && e->u[1] == 180 && wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_keymap) == 0 && c->malformed == 0,
+                "a change of the key repeat is told to a keyboard as it is (40 a second after 180 ms), with no keymap");
         wlc_end(c);
+        fake.rate = fake.delay = 0;
 
         /* version 3 knows no repeat_info, and the shim does not send what the version has not got */
         session_open(&t.s);
@@ -162169,6 +162210,10 @@ static void test_seat(void)
         t.keyboard = wlc_id(c, WLI_wl_keyboard, 3);
         wlc_send(c, wl_global(c, t.s.registry, WLI_wl_seat, 3), WLQ_wl_seat_get_keyboard, t.keyboard);
         WLCHECK(wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_repeat_info) == 0 && c->malformed == 0, "a version 3 keyboard has no repeat_info");
+        /* and a version 3 keyboard is told nothing of the repeat when it changes */
+        wlc_forget(c);
+        wayland_repeat_changed();
+        WLCHECK(wlc_pump(c) == 0 || wlc_count(c, WLI_wl_keyboard, WLE_wl_keyboard_repeat_info) == 0, "a version 3 keyboard is sent no repeat_info when it changes");
         wlc_end(c);
 
         seated_open(&t, 9, 9);

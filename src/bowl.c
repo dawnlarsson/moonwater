@@ -2016,7 +2016,7 @@ static b32 bowl_env_named(string_address entry, string_address name)
 #define BOWL_USER_ID_TEXT "1000"
 #define BOWL_USER_NAME "user"
 #define BOWL_ENV_ROOM 512
-#define BOWL_ENV_DEFAULTS 11
+#define BOWL_ENV_DEFAULTS 12
 
 static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20]
     __attribute__((section(".bss.hot")));
@@ -2639,12 +2639,45 @@ static bool bowl_session_bus_offered(void)
         return system_access_at(AT_FDCWD, (string_address)BOWL_SESSION_BUS_SOCKET, 0) >= 0;
 }
 
+/*
+        The language the person chose for the desktop (`moonwater language`, a code of two letters in /root/language), for the
+        programs of a bowl to start in: LANGUAGE=de, which is the variable a browser takes its interface language from and a
+        gettext program takes its messages from, and which LANG (always C.UTF-8 here, since a bowl has no locales of the
+        languages) would not say. English is what a program does with none, so it is not set; a program that has LANGUAGE
+        is not asked again. A change reaches a program as it starts: none of them reads it while it runs.
+*/
+#define BOWL_LANGUAGE_PATH "/root/language"
+#define BOWL_LANGUAGE_VARIABLE "LANGUAGE"
+
+static p8 bowl_language_assignment[sizeof(BOWL_LANGUAGE_VARIABLE "=") + 2];
+
+// The assignment for the language the file at path keeps, or null when it keeps none (or English, or a word that is no code).
+static string_address bowl_language_offered(string_address path)
+{
+        p8 word[16];
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC), got = 0;
+
+        if (handle < 0)
+                return null;
+        got = system_read_once(handle, word, sizeof(word) - 1);
+        system_close(handle);
+        if (got < 2 || (got > 2 && word[2] != '\n' && word[2] != ' ') || word[0] < 'a' || word[0] > 'z' || word[1] < 'a' || word[1] > 'z' ||
+            (word[0] == 'e' && word[1] == 'n'))
+                return null;
+        memory_copy(bowl_language_assignment, BOWL_LANGUAGE_VARIABLE "=", sizeof(BOWL_LANGUAGE_VARIABLE "=") - 1);
+        bowl_language_assignment[sizeof(BOWL_LANGUAGE_VARIABLE "=") - 1] = word[0];
+        bowl_language_assignment[sizeof(BOWL_LANGUAGE_VARIABLE "=")] = word[1];
+        bowl_language_assignment[sizeof(BOWL_LANGUAGE_VARIABLE "=") + 1] = end;
+        return bowl_language_assignment;
+}
+
 static string_address address_to bowl_environment(
     string_address address_to inherited)
 {
         static string_address mixed[BOWL_ENV_ROOM];
         bool have[BOWL_VARS] = {false};
-        bool have_bus = false, offer_bus = bowl_session_bus_offered();
+        bool have_bus = false, have_language = false, offer_bus = bowl_session_bus_offered();
+        string_address language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
         positive n = 0;
         b32 skipped = false;
 
@@ -2665,6 +2698,8 @@ static string_address address_to bowl_environment(
                         have[bowl_variables[which].counts_as] = true;
                 if (bowl_env_named(inherited[at], BOWL_SESSION_BUS_VARIABLE))
                         have_bus = true;
+                if (bowl_env_named(inherited[at], BOWL_LANGUAGE_VARIABLE))
+                        have_language = true;
 
                 /*  Out of room. Handing back the block as it
                     arrived is only safe while nothing has been
@@ -2690,6 +2725,7 @@ static string_address address_to bowl_environment(
                 for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
                         missing += !have[at];
                 missing += offer_bus && !have_bus;
+                missing += language && !have_language;
                 if (!skipped && !missing)
                         return inherited;
                 if (n + BOWL_ENV_DEFAULTS >= BOWL_ENV_ROOM)
@@ -2706,6 +2742,8 @@ static string_address address_to bowl_environment(
                         mixed[n++] = (string_address)bowl_variables[at].fallback;
         if (offer_bus && !have_bus)
                 mixed[n++] = (string_address)BOWL_SESSION_BUS_VARIABLE "=unix:path=" BOWL_SESSION_BUS_SOCKET;
+        if (language && !have_language)
+                mixed[n++] = language;
         mixed[n] = null;
         return mixed;
 }
@@ -7987,6 +8025,9 @@ static string_address bowl_chrome_session[] = {
     // GTK's settings (the file dialog's, GTK 3 inside the browser) go to memory: the session bus is Moonwater's, which has the
     // portal's Settings and no dconf, and a dconf backend would warn at every write.
     "export GSETTINGS_BACKEND=memory",
+    // GTK 3 (the file dialog in the browser) does not ask the portal what the scheme is: it is told at the start, by the theme
+    // of the moment (the bus keeps it in color-scheme), unless the person has named one.
+    "[ -n \"$GTK_THEME\" ] || [ \"$(cat /run/moonwater/color-scheme 2>/dev/null)\" != dark ] || export GTK_THEME=Adwaita:dark",
     "for node in /dev/dri/renderD*; do [ -c \"$node\" ] && chown 0:"
     BOWL_GROUP_RENDER_TEXT " \"$node\" && chmod 0660 \"$node\"; done 2>/dev/null",
     "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium "

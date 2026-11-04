@@ -143,6 +143,8 @@ tray_pm	f466	ÖS
 ui_confirm_again	b3ff	onaylamak için tekrar basın: 
 ui_field_digits	f52b	bir sayı rakamlardan oluşur
 ui_field_full	fe02	daha fazlası sığmaz
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Vurgu
 =Accent colour (rrggbb or reset)	53aa	Vurgu rengi (rrggbb veya reset)
 =Airplane mode	3b8a	Uçak modu
@@ -167,6 +169,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Clipboard history (copies kept)	7423	Pano geçmişi (saklanan kopyalar)
 =Clipboard limit (MiB)	a505	Pano sınırı (MiB)
 =Clock (Enter sets it now)	575e	Saat (Enter şimdi ayarlar)
+=Clock format	70d0	Saat biçimi
 =Cursor look	34ce	İşaretçi görünümü
 =Cursor size	65d4	İşaretçi boyutu
 =Display	d9b5	Ekran

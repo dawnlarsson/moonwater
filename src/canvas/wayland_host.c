@@ -66,6 +66,7 @@ static struct
         unsigned long keymap_size[16];
         unsigned int layout_told;
         unsigned long screens_told; // the screens the clients were last told, as compositor_wl_screens_digest says them
+        long repeat_told[2];        // and the key repeat they were last told: its rate and its delay
         // The clipboard's transfers. A pull is a copy's source being read: its pipe's read end (in), the end it was handed (out)
         // until it has been sent, and the sealed file the text is gathered in (keep). A push is a paste: the compositor's text
         // (in, a descriptor of its own for the file, so a newer copy cannot change it half way) written to the client's (out).
@@ -1578,6 +1579,7 @@ static void compositor_wl_start(void)
                 compositor_wl.keymap[at] = -1;
         compositor_wl.layout_told = compositor.keymap.layout;
         compositor_wl.screens_told = compositor_wl_screens_digest();
+        compositor_wl_repeat(0, &compositor_wl.repeat_told[0], &compositor_wl.repeat_told[1]);
         if (wayland_start(&compositor_wl_host) < 0)
         {
                 system_close(compositor_wl.listen);
@@ -2006,6 +2008,17 @@ static void compositor_wl_wake(void)
                 {
                         compositor_wl.layout_told = compositor.keymap.layout;
                         wayland_keymap_changed();
+                }
+                {
+                        long rate, delay;
+
+                        compositor_wl_repeat(0, &rate, &delay);
+                        if (rate != compositor_wl.repeat_told[0] || delay != compositor_wl.repeat_told[1])
+                        {
+                                compositor_wl.repeat_told[0] = rate;
+                                compositor_wl.repeat_told[1] = delay;
+                                wayland_repeat_changed();
+                        }
                 }
                 if (want != wayland.pointer_row)
                         wayland_pointer_to(want, want >= 0 ? compositor.pointer_x - compositor.x[want] : 0,

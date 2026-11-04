@@ -144,6 +144,8 @@ tray_pm	f466	ب.ظ
 ui_confirm_again	b3ff	دوباره فشار دهید: 
 ui_field_digits	f52b	عدد از رقم‌ها تشکیل می‌شود
 ui_field_full	fe02	بیش از این جا ندارد
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	رنگ تأکید
 =Accent colour (rrggbb or reset)	53aa	رنگ تأکید (rrggbb یا reset)
 =Airplane mode	3b8a	حالت هواپیما
@@ -168,6 +170,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Clipboard history (copies kept)	7423	تاریخچه کلیپ‌بورد (کپی‌های نگه‌داشته‌شده)
 =Clipboard limit (MiB)	a505	حد کلیپ‌بورد (MiB)
 =Clock (Enter sets it now)	575e	ساعت (Enter همین حالا آن را تنظیم می‌کند)
+=Clock format	70d0	قالب زمان
 =Cursor look	34ce	ظاهر نشانگر
 =Cursor size	65d4	اندازه نشانگر
 =Display	d9b5	نمایشگر

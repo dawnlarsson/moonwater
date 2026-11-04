@@ -143,6 +143,8 @@ tray_pm	f466	PM
 ui_confirm_again	b3ff	premi di nuovo per confermare: 
 ui_field_digits	f52b	un numero è fatto di cifre
 ui_field_full	fe02	non ce ne sta di più
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Accento
 =Accent colour (rrggbb or reset)	53aa	Colore di accento (rrggbb o reset)
 =Airplane mode	3b8a	Modalità aereo
@@ -167,6 +169,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Clipboard history (copies kept)	7423	Cronologia degli appunti (copie conservate)
 =Clipboard limit (MiB)	a505	Limite degli appunti (MiB)
 =Clock (Enter sets it now)	575e	Orologio (Enter lo imposta ora)
+=Clock format	70d0	Formato dell'ora
 =Cursor look	34ce	Aspetto del puntatore
 =Cursor size	65d4	Dimensione del puntatore
 =Display	d9b5	Schermo

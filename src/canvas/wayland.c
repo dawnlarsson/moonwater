@@ -3400,6 +3400,21 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
         (void)s;
 }
 
+/* How fast a held key repeats, to one keyboard (from version 4): the rate a second and the delay in milliseconds. */
+static void wayland_keyboard_repeat(struct wayland_client *c, long slot)
+{
+        struct wayland_event e;
+        long rate = 25, delay = 600;
+
+        if (c->objects[slot].version < 4)
+                return;
+        wayland.host->repeat(wayland.host->context, &rate, &delay);
+        e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_repeat_info);
+        wayland_word(&e, (unsigned long)rate);
+        wayland_word(&e, (unsigned long)delay);
+        wayland_end(&e);
+}
+
 /* The keymap to one keyboard: a descriptor beside the event, and how fast a held key repeats. */
 static void wayland_keyboard_keymap(struct wayland_client *c, long slot)
 {
@@ -3420,16 +3435,7 @@ static void wayland_keyboard_keymap(struct wayland_client *c, long slot)
                 wayland_word(&e, 0);
         }
         wayland_end(&e);
-        if (c->objects[slot].version >= 4)
-        {
-                long rate = 25, delay = 600;
-
-                wayland.host->repeat(wayland.host->context, &rate, &delay);
-                e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_repeat_info);
-                wayland_word(&e, (unsigned long)rate);
-                wayland_word(&e, (unsigned long)delay);
-                wayland_end(&e);
-        }
+        wayland_keyboard_repeat(c, slot);
 }
 
 /*
@@ -3578,6 +3584,21 @@ WAYLAND_API void wayland_key(long row, long code, long pressed)
                 }
         }
         (void)s;
+}
+
+/* The repeat rate or delay changed (the settings): each keyboard is told, and nothing else of it. */
+WAYLAND_API void wayland_repeat_changed(void)
+{
+        if (!wayland.host)
+                return;
+        for (long client = 0; client < WAYLAND_CLIENTS; client++)
+        {
+                struct wayland_client *c = wayland.client[client];
+                long slots[WAYLAND_SEATS], count = c ? wayland_seats(c, WLI_wl_keyboard, slots) : 0;
+
+                for (long at = 0; at < count; at++)
+                        wayland_keyboard_repeat(c, slots[at]);
+        }
 }
 
 /* The keymap changed (a layout was set): each keyboard is sent the new one, and the modifiers. */

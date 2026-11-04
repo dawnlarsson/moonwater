@@ -143,6 +143,8 @@ tray_pm	f466	μμ
 ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
 ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
 ui_field_full	fe02	δεν χωράει περισσότερο
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Έμφαση
 =Accent colour (rrggbb or reset)	53aa	Χρώμα έμφασης (rrggbb ή reset)
 =Airplane mode	3b8a	Λειτουργία πτήσης
@@ -167,6 +169,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Clipboard history (copies kept)	7423	Ιστορικό προχείρου (αντίγραφα που κρατούνται)
 =Clipboard limit (MiB)	a505	Όριο προχείρου (MiB)
 =Clock (Enter sets it now)	575e	Ρολόι (το Enter το ρυθμίζει τώρα)
+=Clock format	70d0	Μορφή ώρας
 =Cursor look	34ce	Εμφάνιση δείκτη
 =Cursor size	65d4	Μέγεθος δείκτη
 =Display	d9b5	Οθόνη

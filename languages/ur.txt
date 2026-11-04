@@ -144,6 +144,8 @@ tray_pm	f466	ش
 ui_confirm_again	b3ff	دوبارہ دبائیں: 
 ui_field_digits	f52b	نمبر ہندسوں پر مشتمل ہوتا ہے
 ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	نمایاں رنگ
 =Accent colour (rrggbb or reset)	53aa	نمایاں رنگ (rrggbb یا reset)
 =Airplane mode	3b8a	ہوائی جہاز موڈ
@@ -168,6 +170,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Clipboard history (copies kept)	7423	کلپ بورڈ کی تاریخ (محفوظ کی گئی کاپیاں)
 =Clipboard limit (MiB)	a505	کلپ بورڈ کی حد (MiB)
 =Clock (Enter sets it now)	575e	گھڑی (Enter اسے ابھی سیٹ کرتا ہے)
+=Clock format	70d0	وقت کی شکل
 =Cursor look	34ce	پوائنٹر کی شکل
 =Cursor size	65d4	پوائنٹر کا سائز
 =Display	d9b5	اسکرین

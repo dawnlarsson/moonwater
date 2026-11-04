@@ -143,6 +143,8 @@ tray_pm	f466	PM
 ui_confirm_again	b3ff	pressione novamente para confirmar: 
 ui_field_digits	f52b	um número é feito de dígitos
 ui_field_full	fe02	não cabe mais que isso
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Destaque
 =Accent colour (rrggbb or reset)	53aa	Cor de destaque (rrggbb ou reset)
 =Airplane mode	3b8a	Modo avião
@@ -167,6 +169,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Clipboard history (copies kept)	7423	Histórico da área de transferência (cópias mantidas)
 =Clipboard limit (MiB)	a505	Limite da área de transferência (MiB)
 =Clock (Enter sets it now)	575e	Relógio (Enter ajusta agora)
+=Clock format	70d0	Formato da hora
 =Cursor look	34ce	Aparência do ponteiro
 =Cursor size	65d4	Tamanho do ponteiro
 =Display	d9b5	Tela

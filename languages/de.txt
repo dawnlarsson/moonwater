@@ -143,6 +143,8 @@ tray_pm	f466	PM
 ui_confirm_again	b3ff	zur Bestätigung erneut drücken: 
 ui_field_digits	f52b	eine Zahl besteht aus Ziffern
 ui_field_full	fe02	mehr passt nicht hinein
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	Akzent
 =Accent colour (rrggbb or reset)	53aa	Akzentfarbe (rrggbb oder reset)
 =Airplane mode	3b8a	Flugmodus
@@ -167,6 +169,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Clipboard history (copies kept)	7423	Verlauf der Zwischenablage (gemerkte Kopien)
 =Clipboard limit (MiB)	a505	Grenze der Zwischenablage (MiB)
 =Clock (Enter sets it now)	575e	Uhr (Enter stellt sie jetzt)
+=Clock format	70d0	Uhrzeitformat
 =Cursor look	34ce	Aussehen des Mauszeigers
 =Cursor size	65d4	Größe des Mauszeigers
 =Display	d9b5	Anzeige

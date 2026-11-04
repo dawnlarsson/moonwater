@@ -144,6 +144,8 @@ tray_pm	f466	م
 ui_confirm_again	b3ff	اضغط مرة أخرى للتأكيد: 
 ui_field_digits	f52b	العدد يتكون من أرقام
 ui_field_full	fe02	هذا أقصى ما يتسع له
+=12h	da26	12h
+=24h	f841	24h
 =Accent	ccd7	لون التمييز
 =Accent colour (rrggbb or reset)	53aa	لون التمييز (rrggbb أو reset)
 =Airplane mode	3b8a	وضع الطيران
@@ -168,6 +170,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Clipboard history (copies kept)	7423	سجل الحافظة (النسخ المحفوظة)
 =Clipboard limit (MiB)	a505	حد الحافظة (MiB)
 =Clock (Enter sets it now)	575e	الساعة (Enter يضبطها الآن)
+=Clock format	70d0	تنسيق الوقت
 =Cursor look	34ce	شكل المؤشر
 =Cursor size	65d4	حجم المؤشر
 =Display	d9b5	الشاشة
