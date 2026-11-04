@@ -217166,7 +217166,7 @@ static void gpu_bench_sort(positive *took, int n)
 static font_engine app_engine;
 static p8 app_atlas[512 * 512];
 static font_face app_face;
-static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS], app_cpu[2200 * 1600], app_dummy[2200 * 1600];
+static unsigned int app_scratch[2000 * UI_SCRATCH_ROWS], app_cpu[2400 * 2400], app_dummy[2400 * 2400];
 static struct windows app_table;
 static struct ui_scene app_scene;
 // The app regions, from the GPU's base at app_at: the picture (16 MiB), the ops (4 MiB), the binning (16 MiB), the text covers (28 MiB).
@@ -217184,6 +217184,13 @@ static int app_group; // which Settings page (its group) app 4 paints
 static void app_settings_paint(unsigned int address_to pixels)
 {
         settings_draw_rows(pixels, 0, 0);
+}
+
+// The gallery showcase: the page drawn into the picture (gallery_draw paints the paper and every control; the picture is begun here).
+static void app_gallery_paint(unsigned int address_to pixels)
+{
+        ui_begin(&settings.ui, pixels, settings.own.table->stride, settings.width, settings.height);
+        gallery_draw(&settings.ui);
 }
 
 // which: 0 the launcher; 1 the mixer's window; 2 the mixer's tray popup; 3 the mixer's window with the recording page and no microphone.
@@ -217206,10 +217213,10 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                 ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
                 for (int k = 0; k < count; k++)
                 {
-                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : MIXER_WIDTH) * s / 100;
-                        int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
+                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : MIXER_WIDTH) * s / 100;
+                        int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
                         int bad = 0;
-                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : mixer_draw;
+                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : mixer_draw;
 
                         // The app as its window has it, set up here and not by its start: the scale, the faces, the window's table, the picture's size.
                         memory_zero(&app_table, sizeof(app_table));
@@ -217227,9 +217234,19 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                 launcher.focused = 1;
                                 launcher.search.kind = 0;
                         }
+                        else if (which == 5)
+                        {
+                                // The gallery showcase: the window's table and size, the faces, and gallery.on (its page instead of the settings').
+                                settings.own.table = &app_table;
+                                settings.width = W, settings.height = H;
+                                settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
+                                settings.ui.scratch = app_scratch, settings.ui.scratch_width = 2000, settings.ui.opaque = 1, settings.ui.glass = 0;
+                                gallery.on = 1;
+                        }
                         else if (which == 4)
                         {
                                 // Settings: its window, the group chosen, its layout as the window lays it out (the list and the page).
+                                gallery.on = 0;
                                 settings.own.table = &app_table;
                                 settings.width = W, settings.height = H;
                                 settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
@@ -217262,7 +217279,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         app_scene.size = cover_size, app_scene.at = cover_at;
                         if (which == 0)
                                 launcher.ui.scene = &app_scene;
-                        else if (which == 4)
+                        else if (which == 4 || which == 5)
                                 settings.ui.scene = &app_scene;
                         else
                                 mixer.ui.scene = &app_scene;
@@ -217291,7 +217308,9 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                                 string_format(log, "  FAIL gpu app %p %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)which, (positive)s, (positive)mode,
                                                               (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)app_cpu[(positive)y * pitch + x]);
                                 }
-                        if (which == 4)
+                        if (which == 5)
+                                check("gpu apps: the gallery showcase replays bit for bit", bad == 0);
+                        else if (which == 4)
                                 check("gpu apps: the settings page replays bit for bit", bad == 0);
                         else if (which == 0)
                                 check("gpu apps: the launcher replays bit for bit", bad == 0);
@@ -218760,6 +218779,11 @@ b32 main(void)
                         app_rows(3, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                         for (app_group = 0; app_group < 4; app_group++)
                                 app_rows(4, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
+                        {
+                                static const int two[2] = {100, 150};
+
+                                app_rows(5, big, kops, kbins, kbins + (4 << 20), 4u << 20, two, 2, 0);
+                        }
                 }
         }
 
