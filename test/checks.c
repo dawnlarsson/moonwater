@@ -167372,6 +167372,60 @@ static void test_hints(void)
         wayland_stop();
 }
 
+/*
+        The inhibitors and the tearing hint, kept for the compositor: an idle inhibitor is counted while it lives, and let go by its
+        destroy or by its client's going; a keyboard shortcuts inhibitor is read per window; a tearing hint is shown from the commit
+        after it is set (asynchronous, or back to vsync on destroy).
+*/
+static void test_inhibit_state(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long idle, shortcuts, tearing, inhibitor, other, control;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        idle = wl_global(c, s.registry, WLI_zwp_idle_inhibit_manager_v1, 1);
+        shortcuts = wl_global(c, s.registry, WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, 1);
+        tearing = wl_global(c, s.registry, WLI_wp_tearing_control_manager_v1, 1);
+        wlc_forget(c);
+
+        inhibitor = wlc_id(c, WLI_zwp_idle_inhibitor_v1, 1);
+        wlc_send(c, idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, inhibitor, s.surface);
+        WLCHECK(c->errors == 0 && wayland_idle_inhibited() == 1, "an idle inhibitor is held while it lives");
+        other = wlc_id(c, WLI_zwp_idle_inhibitor_v1, 1);
+        wlc_send(c, idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, other, s.surface);
+        WLCHECK(wayland_idle_inhibited() == 1, "a second inhibitor is counted, and the answer is still that one is held");
+        wlc_send(c, inhibitor, WLQ_zwp_idle_inhibitor_v1_destroy);
+        wlc_send(c, other, WLQ_zwp_idle_inhibitor_v1_destroy);
+        WLCHECK(wayland_idle_inhibited() == 0, "and none held once they are destroyed");
+        inhibitor = wlc_id(c, WLI_zwp_idle_inhibitor_v1, 1);
+        wlc_send(c, idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, inhibitor, s.surface);
+        WLCHECK(wayland_idle_inhibited() == 1, "a new one is counted again");
+
+        other = wlc_id(c, WLI_zwp_keyboard_shortcuts_inhibitor_v1, 1);
+        wlc_send(c, shortcuts, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, other, s.surface, s.seat);
+        WLCHECK(wayland_row_shortcuts(0) == 1, "a window with a shortcuts inhibitor says so");
+
+        control = wlc_id(c, WLI_wp_tearing_control_v1, 1);
+        wlc_send(c, tearing, WLQ_wp_tearing_control_manager_v1_get_tearing_control, control, s.surface);
+        wlc_send(c, control, WLQ_wp_tearing_control_v1_set_presentation_hint, (unsigned long)WLN_wp_tearing_control_v1_presentation_hint_async);
+        WLCHECK(wayland_row_async(0) == 0, "a tearing hint is shown from the commit after it is set");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_row_async(0) == 1, "and is asynchronous from it");
+        wlc_send(c, control, WLQ_wp_tearing_control_v1_destroy);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wayland_row_async(0) == 0, "and back to vsync once destroyed");
+
+        /* a client going lets go of the inhibitor it held */
+        wlc_end(c);
+        WLCHECK(wayland_idle_inhibited() == 0, "a client that goes lets go of the inhibitors it held");
+        wayland_stop();
+}
+
 static void test_presentation(void)
 {
         struct session s;
@@ -171119,6 +171173,7 @@ int main(int argc, char **argv)
         test_touch();
         test_axis_stop();
         test_hints();
+        test_inhibit_state();
         test_text();
         test_popups();
         test_surface_rules();

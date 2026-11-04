@@ -343,6 +343,8 @@ struct wayland_surface
         // pending multiplier, 0xffffffff for opaque, which a commit shows as alpha), and an xdg_dialog's modal state.
         unsigned int content, alpha, pending_alpha;
         unsigned char modal;
+        // wp_tearing_control's presentation hint, asynchronous (tearing allowed) or not, pending and as the commit shows it.
+        unsigned char pending_async, async_hint;
         // xdg.
         unsigned int xdg_id, role_id;
         unsigned int serial[WAYLAND_SERIALS];
@@ -524,6 +526,7 @@ static struct
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
+        long idle_inhibitors;                  // idle inhibitors held by every client (each counted once, while it lives)
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
 } wayland;
 
@@ -1750,6 +1753,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
         s->damage_full = 0;
         s->transform = s->pending_transform;
         s->alpha = s->pending_alpha;
+        s->async_hint = s->pending_async;
         for (long at = 0; at < s->callbacks; at++)
                 if (s->readies < WAYLAND_CALLBACKS)
                         s->ready[s->readies++] = s->callback[at];
@@ -2295,8 +2299,10 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         long buffer = -1;
         int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0;
 
-        // The alpha multiplier is the pending state at every commit, with or without a buffer (the protocol's double buffering).
+        // The alpha multiplier and the tearing hint are the pending state at every commit, with or without a buffer (the
+        // protocol's double buffering).
         s->alpha = s->pending_alpha;
+        s->async_hint = s->pending_async;
 
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time.
         if (!wayland_budget_left(c))
@@ -5316,14 +5322,35 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 }
                 return WAYLAND_OK;
         case WLI_wp_tearing_control_v1:
+                surface = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_tearing_control_v1_destroy)
                 {
-                        surface = wayland_surface_of(c, self - c->objects);
                         if (surface)
                                 surface->tearing = 0;
+                        if (surface)
+                                surface->pending_async = 0;
                 }
                 else if (a[0].u > WLN_wp_tearing_control_v1_presentation_hint_async)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "no such presentation hint");
+                else if (surface)
+                        surface->pending_async = a[0].u == WLN_wp_tearing_control_v1_presentation_hint_async;
+                return WAYLAND_OK;
+        case WLI_zwp_idle_inhibit_manager_v1:
+                if (op != WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor)
+                        return WAYLAND_OK;
+                surface = wayland_surface_of(c, a[1].slot);
+                if (!surface)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                // Counted while the inhibitor lives: flag 2 says this one is counted (and is let go with its client or its destroy).
+                c->objects[a[0].slot].flags |= 2;
+                wayland.idle_inhibitors++;
+                return WAYLAND_OK;
+        case WLI_zwp_idle_inhibitor_v1:
+                if (self->flags & 2)
+                {
+                        self->flags &= (unsigned short)~2;
+                        wayland.idle_inhibitors--;
+                }
                 return WAYLAND_OK;
         default:
                 return WAYLAND_OK;
@@ -5691,6 +5718,13 @@ WAYLAND_API void wayland_drop(long slot)
         if (!c)
                 return;
         wayland_touch_forget(slot);
+        // The idle inhibitors this client held are let go with it.
+        for (long at = 0; at < WAYLAND_OBJECTS; at++)
+                if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && (c->objects[at].flags & 2))
+                {
+                        c->objects[at].flags &= (unsigned short)~2;
+                        wayland.idle_inhibitors--;
+                }
         for (long at = 0; at < WAYLAND_SURFACES; at++)
                 if (c->surfaces[at].live)
                 {
@@ -6243,6 +6277,32 @@ WAYLAND_API long wayland_row_content(long row)
         struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
 
         return s ? (long)s->content : WLN_wp_content_type_v1_type_none;
+}
+
+/* Whether a window has a keyboard shortcuts inhibitor, and whether its tearing hint is asynchronous (allowed to tear). */
+WAYLAND_API long wayland_row_shortcuts(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->shortcuts : 0;
+}
+
+WAYLAND_API long wayland_row_async(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->async_hint : 0;
+}
+
+/*
+        Whether any client holds an idle inhibitor. The compositor has no idle timer to hold back yet: when one exists it must not
+        blank or suspend the screen while this is 1.
+*/
+WAYLAND_API long wayland_idle_inhibited(void)
+{
+        return wayland.idle_inhibitors > 0;
 }
 
 WAYLAND_API long wayland_row_modal(long row)
