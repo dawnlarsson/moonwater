@@ -113,7 +113,10 @@ def source_digest():
 
 
 BUILTIN_RATCHET = ROOT / 'test/builtin_ratchet'
-BUILTIN_HOME = ('src/lib.c', 'src/lib.util.c')
+# The library's own files. kernel/patch/fold-x86.h is the kernel's: it is injected into the Linux tree, which never includes
+# src/lib.c, so the fold of the kernel's memory routines (constant-size routing included) is written there, once, as the library
+# is written in lib.util.c.
+BUILTIN_HOME = ('src/lib.c', 'src/lib.util.c', 'kernel/patch/fold-x86.h')
 
 
 def builtin_counts():
