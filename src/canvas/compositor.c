@@ -8810,11 +8810,18 @@ static void compositor_wake_pass(positive now)
                 compositor.wake_at = now + COMPOSITOR_WAKE_SECOND_NS;
 }
 
+/*
+        How a file of /root (and the compositor's own of /run) is opened to be read: not through a link, which only root
+        could plant there but which would have the root compositor read whatever it names, and without waiting, which a
+        FIFO in a file's place would have it do for ever, the desktop with it. A file that is either is not there.
+*/
+#define COMPOSITOR_SETTING_OPEN (FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)
+
 // The layout the machine keeps, which `moonwater keyboard` writes; a machine that has not kept one has the US.
 static void compositor_layout_read(void)
 {
         char name[8] = {0};
-        bipolar handle = system_open_at(AT_FDCWD, (string_address) "/root/keyboard", FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, (string_address) "/root/keyboard", COMPOSITOR_SETTING_OPEN);
         int layout = -1;
 
         if (handle >= 0)
@@ -8838,7 +8845,7 @@ static void compositor_layout_read(void)
 // A file's text, as far as room holds it, newlines and all: "" when the file is not there.
 static void compositor_text(const char *path, char *text, unsigned int room)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, COMPOSITOR_SETTING_OPEN);
         bipolar got = 0;
 
         if (handle >= 0)
@@ -8852,7 +8859,7 @@ static void compositor_text(const char *path, char *text, unsigned int room)
 // The word kept in a file of /root, cut at its first space or line end: empty when there is none.
 static void compositor_word(const char *path, char *word, unsigned int room)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, COMPOSITOR_SETTING_OPEN);
         bipolar got = 0, at = 0;
 
         if (handle >= 0)
@@ -12493,6 +12500,7 @@ static void compositor_hold_drop(positive now)
 #define COMPOSITOR_KEYS 32
 #define COMPOSITOR_KEYS_FILE "/run/moonwater/keys"
 #define COMPOSITOR_KEYS_FIRE "/run/moonwater/keys.fire"
+static const char *compositor_keys_fire = COMPOSITOR_KEYS_FIRE; // and a check's own
 
 static const struct
 {
@@ -12544,7 +12552,7 @@ static unsigned int compositor_key_word(const char *word, unsigned int length, u
 static void compositor_keys_read(void)
 {
         static char text[4096];
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FILE, FILE_READ | O_CLOEXEC);
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FILE, COMPOSITOR_SETTING_OPEN);
         bipolar got = handle < 0 ? 0 : system_read_once(handle, text, sizeof(text) - 1);
         unsigned int at = 0;
 
@@ -12605,7 +12613,8 @@ static void compositor_keys_read(void)
 // starts a program for (tray_double, launcher_button). A script that does not listen hears nothing.
 static void compositor_script_say(const char *name)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FIRE, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+        // Not through a link: the FIFO is the machine script's, and a link in its place would have this write into what it names.
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         char line[34];
         positive length = string_length((string_address)name);
 
@@ -12679,7 +12688,7 @@ static int compositor_volume_map(void)
 
         if (compositor_volume.page)
                 return 1;
-        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)compositor_volume_path[0], 0x80000, 0, 0, 0);
+        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)compositor_volume_path[0], COMPOSITOR_SETTING_OPEN, 0, 0, 0);
         if (fd < 0)
                 return 0;
         size = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);

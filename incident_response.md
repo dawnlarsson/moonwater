@@ -41,6 +41,33 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-125: the compositor's reads of /root followed links and waited on FIFOs
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 (hardening: root-only) |
+| Class | Link following and a blocking open in a root process (CWE-59, CWE-833 class) |
+| Attacker | root, or whatever can write /root and /run/moonwater (nothing else can) |
+| Moonwater exposure window | from `c793b422` (2026-10-11 19:16 +02:00, the compositor) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `COMPOSITOR_SETTING_OPEN`, `compositor_script_say`) |
+
+**What it was.** The compositor reads its settings from files of /root (`compositor_word`, `compositor_text`, the
+keyboard's layout), the keys list and the sound server's page from /run, and writes chords into the machine script's FIFO
+`/run/moonwater/keys.fire`. Every one was opened through a link, and the reads with a blocking open: a FIFO with no writer
+put in a setting's place held the compositor in the open for ever (no frame, no input), and a link in keys.fire's place had
+the chord written into whatever file it named.
+
+**The fix.** Those reads are opened `O_NOFOLLOW | O_NONBLOCK` (`COMPOSITOR_SETTING_OPEN`): a link or a FIFO is no file
+there, and is read as nothing. keys.fire is opened `O_NOFOLLOW` beside the `O_NONBLOCK` it had. The files the compositor
+writes (places, the volume) were already `O_NOFOLLOW` and renamed into place.
+
+**Tests that fail without it.** `CHECK_terminal` `check_compositor_setting_opens`: a link in a setting's place is not read
+through (as a word or a file's text), a FIFO in its place is read at once as nothing (in a child the check waits two seconds
+for), and a link in keys.fire's place is not written through. Without `O_NOFOLLOW` two rows are red, without `O_NONBLOCK`
+one (gcc).
+
+**Still open.** The fonts the compositor maps (`-f` and the fallbacks) may be links on purpose and are opened as before.
+
 ### MW-2026-124: the compositor read the card's connector list past what the kernel wrote
 
 | | |

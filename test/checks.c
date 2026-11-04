@@ -129001,6 +129001,77 @@ static void check_compositor_card_lists(void)
 }
 
 /*
+        The compositor's reads of /root (a setting's word, a file's text) and its write of keys.fire are opened not through a
+        link and without waiting: a link in a setting's place had the root compositor read whatever it named, a FIFO with no
+        writer in its place held the compositor in the open for ever (the desktop with it), and a link in keys.fire's place had
+        the chord written into what it named. A link or a FIFO is no file: nothing is read and nothing written.
+*/
+static void check_compositor_setting_opens(void)
+{
+    static const char file[] = "compositor-setting-file.tmp", link[] = "compositor-setting-link.tmp", fifo[] = "compositor-setting-fifo.tmp";
+    static const char target[] = "compositor-fire-file.tmp", fire[] = "compositor-fire-link.tmp";
+    char word[16], text[64], plain[16];
+    bipolar handle, child = -1, waited = 0;
+    positive status = 0, written = 1;
+
+    for (unsigned int at = 0; at < 5; at++)
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)(const char *[]){file, link, fifo, target, fire}[at], 0);
+    handle = system_open_at_mode(AT_FDCWD, (string_address)file, FILE_READ_WRITE | FILE_CREATE | O_CLOEXEC, 0600);
+    if (handle >= 0)
+        system_write_once(handle, "off\n", 4), system_close(handle);
+    handle = system_open_at_mode(AT_FDCWD, (string_address)target, FILE_READ_WRITE | FILE_CREATE | O_CLOEXEC, 0600);
+    if (handle >= 0)
+        system_close(handle);
+    system_call_3(syscall(symlinkat), (positive)file, (positive)AT_FDCWD, (positive)link);
+    system_call_3(syscall(symlinkat), (positive)target, (positive)AT_FDCWD, (positive)fire);
+    system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)fifo, 0010600, 0);
+
+    compositor_word(file, plain, sizeof(plain));
+    compositor_word(link, word, sizeof(word));
+    compositor_text(link, text, sizeof(text));
+    check("setting opens: a link in a setting's place is not read through, as a word or a file's text",
+          !memory_compare(plain, "off", 4) && !word[0] && !text[0]);
+
+    // A FIFO with no writer, in a child the check waits two seconds for.
+    child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0);
+    if (child == 0)
+    {
+        compositor_word(fifo, word, sizeof(word));
+        system_call_1(syscall(exit_group), word[0] ? 3 : 0);
+    }
+    for (int tries = 0; child > 0 && tries < 200 && waited != child; tries++)
+    {
+        timespec nap = {0, 10000000};
+
+        waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 1, 0);
+        if (waited != child)
+            system_call_2(syscall(nanosleep), (positive)&nap, 0);
+    }
+    if (child > 0 && waited != child)
+    {
+        system_call_2(syscall(kill), (positive)child, 9);
+        system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+    }
+    check("setting opens: a FIFO in a setting's place is read at once as nothing, and the compositor is not held",
+          child > 0 && waited == child && (status & 0xffff) == 0);
+
+    // keys.fire a link to a file: the chord is written into nothing.
+    compositor_keys_fire = fire;
+    compositor_script_say("key_super_l");
+    compositor_keys_fire = COMPOSITOR_KEYS_FIRE;
+    handle = system_open_at(AT_FDCWD, (string_address)target, FILE_READ | O_CLOEXEC);
+    if (handle >= 0)
+    {
+        written = (positive)compositor_call(syscall(lseek), (positive)handle, 0, 2, 0, 0, 0);
+        system_close(handle);
+    }
+    check("setting opens: a link in keys.fire's place is not written through", handle >= 0 && written == 0);
+
+    for (unsigned int at = 0; at < 5; at++)
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)(const char *[]){file, link, fifo, target, fire}[at], 0);
+}
+
+/*
         A monitor's name from its EDID, whatever its length: the blob was asked for at 256 bytes, and the kernel copies a blob
         only when the length asked is its own, so a monitor with no extension (128) or with two or more (384 and up) had no
         name. Every length of whole blocks up to a base block and 255 extensions is read; one that is not whole blocks, or
@@ -158397,6 +158468,7 @@ b32 main()
         check_compositor_card_lists();
         check_compositor_card_turn();
         check_compositor_card_edid();
+        check_compositor_setting_opens();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();
