@@ -7453,6 +7453,8 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
         end the GPU's compose until the setting is turned off and on again (compositor_gpu_settings). Headless it is for -G.
 */
 static int compositor_gpu; // GPU rendering as the setting has it (below)
+static positive compositor_slept_clock(void); // the boot clock's lead over the monotonic clock (the wake check, below)
+static void compositor_gpu_restart_check(void); // started again after a sleep (below)
 static void compositor_say(string_address what, bipolar value);
 #define COMPOSITOR_GPU_OPS_AT GPU_DATA
 #define COMPOSITOR_GPU_TABLES_AT (GPU_DATA + (1 << 20))
@@ -7466,6 +7468,8 @@ static struct
         unsigned int cool_steps;   // how many cool-downs in a row: each one longer, up to sixty-four seconds
         positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer)
         positive turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS]; // the same for the buffers Canvas turns screens in
+        b32 restart_due;     // the card is started again before the next present draws on it (the machine slept: compositor_gpu_resumed)
+        positive slept_seen; // the boot clock's lead over the monotonic clock at the last look (compositor_gpu_slept)
 } compositor_gpu_state;
 
 // The presents the card drew and the processor drew, and the reasons the card was refused (moonwater canvas says them, from the table). A reason
@@ -7842,6 +7846,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
 
         if (!compositor_gpu)
                 return COMPOSITOR_GPU_WHY_OFF;
+        compositor_gpu_restart_check(); // a machine that slept, or a gap between presents that is one, starts the card again before this present
         if (compositor_gpu_state.dead && !compositor_gpu_state.up && compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_NO_CARD)
         {
                 static b64 first, next;
@@ -8041,6 +8046,35 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         }
         compositor_gpu_refuse(why, 1);
         return 0;
+}
+
+// The machine slept, or the card was found lost: it is started again before the next present draws on it (compositor_gpu_restart_check).
+static void compositor_gpu_resumed(void)
+{
+        compositor_gpu_state.restart_due = 1;
+}
+
+// Whether the machine slept since the last look. The boot clock runs through a sleep and the monotonic clock does not, so the boot clock's lead over the
+// monotonic one grows by the length of the sleep: gap is that lead now, seen the lead at the last look (kept). The first look only takes it.
+#define COMPOSITOR_GPU_SLEPT_NS 3000000000ull
+static b32 compositor_gpu_slept(positive gap, positive *seen)
+{
+        b32 slept = *seen && gap > *seen + COMPOSITOR_GPU_SLEPT_NS;
+
+        *seen = gap;
+        return slept;
+}
+
+// The card is started again (compositor_gpu_recover: the maps let go, a new context, the self-test) when the machine slept, by the wake check's flag or by a
+// lead that grew between two looks (presents). Only a card that is up is started again; the flag waits for it otherwise.
+static void compositor_gpu_restart_check(void)
+{
+        if (compositor_gpu_slept(compositor_slept_clock(), &compositor_gpu_state.slept_seen))
+                compositor_gpu_state.restart_due = 1;
+        if (!compositor_gpu_state.restart_due || !compositor_gpu_state.up || compositor_gpu_state.dead)
+                return;
+        compositor_gpu_state.restart_due = 0;
+        compositor_gpu_recover();
 }
 
 /*
@@ -9991,6 +10025,9 @@ static void compositor_wake_check(positive now)
         if (asleep > compositor.asleep + COMPOSITOR_SLEPT_NS)
         {
                 compositor_resume(0);
+#ifdef MOONWATER_GPU_C
+                compositor_gpu_resumed();
+#endif
                 compositor.wake_stage = 1;
                 compositor.wake_at = now + COMPOSITOR_WAKE_FIRST_NS;
         }

@@ -220637,6 +220637,27 @@ static void gpu_node_rows(void)
         check("late probe: not due before the sixty seconds are up", !compositor_gpu_late_due(100000000000ull, &first, &next) && compositor_gpu_late_due(140000000000ull, &first, &next));
 }
 
+/*
+        The sleep: a boot clock that ran on past the monotonic clock by more than three seconds since the last look is a sleep, and the card is started
+        again before the next present (compositor_gpu_restart_check). Last in main: the restart replaces the card's buffer.
+*/
+static void gpu_resume_rows(void)
+{
+        positive seen = 0;
+        unsigned int before;
+
+        check("resume: the first look only takes the gap", !compositor_gpu_slept(100000000ull, &seen) && seen == 100000000ull);
+        check("resume: a gap that grew by more than three seconds is a sleep", compositor_gpu_slept(10000000000ull, &seen) && seen == 10000000000ull);
+        check("resume: a gap that grew by less is no sleep", !compositor_gpu_slept(10500000000ull, &seen));
+        compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0, compositor_gpu_state.restart_due = 0;
+        before = gpu_recovered;
+        compositor_gpu_restart_check();
+        check("resume: no flag and no sleep, the card is not started again", gpu_recovered == before && compositor_gpu_state.up);
+        compositor_gpu_resumed();
+        compositor_gpu_restart_check();
+        check("resume: the flag restarts the card before the next present (counted, flag cleared)", gpu_recovered == before + 1 && !compositor_gpu_state.restart_due && compositor_gpu_state.up);
+}
+
 static void gpu_loss_rows(void)
 {
         positive base = gpu.size - (1 << 19), ops_at = base, bins_at = base + 4096, d_at = base + 8192;
@@ -222592,6 +222613,7 @@ b32 main(void)
                         gpu_drop(0);
         }
         gpu_loss_rows();
+        gpu_resume_rows();
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */
