@@ -169677,7 +169677,8 @@ static void au_test_ring(void)
                                 unsigned long fill = end - read, drop = n < fill ? n : fill;
 
                                 // What is read is what the model says.
-                                audio_ring_copy_out(&ring, read, chunk, drop < sizeof(chunk) ? drop : sizeof(chunk));
+                                for (unsigned long i = 0; i < drop && i < sizeof(chunk); i++)
+                                        chunk[i] = ring.data[(read + i) % ring.size];
                                 for (unsigned long i = 0; i < drop && i < sizeof(chunk); i++)
                                         AUCHECK(chunk[i] == model[(read + i) % sizeof(model)], "the byte at %lu", read + i);
                                 audio_ring_drop(&ring, drop);

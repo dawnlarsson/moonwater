@@ -507,18 +507,6 @@ AUDIO_API unsigned long audio_ring_room(const struct audio_ring *ring)
         return ring->size - (ring->write - ring->read);
 }
 
-// n bytes at the stream's byte count at, whole, to dst (at is in [read, limit - n]).
-AUDIO_API void audio_ring_copy_out(const struct audio_ring *ring, unsigned long at, unsigned char *dst, unsigned long n)
-{
-        unsigned long from = at % ring->size, first = ring->size - from;
-
-        if (first > n)
-                first = n;
-        __builtin_memcpy(dst, ring->data + from, first);
-        if (n > first)
-                __builtin_memcpy(dst + first, ring->data, n - first);
-}
-
 // Bytes to the cursor, as many as fit and whole frames; answers how many went in.
 AUDIO_API unsigned long audio_ring_put(struct audio_ring *ring, const unsigned char *src, unsigned long n)
 {
