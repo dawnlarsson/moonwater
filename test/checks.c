@@ -161979,6 +161979,50 @@ static fn te_clipboard(positive rounds)
                         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
                 }
         }
+        /*
+                A copy that names a descriptor which is no file to read: a FIFO its program holds open for reading with no
+                writer, which the compositor's open for reading (through /proc) waits on for ever, and the desktop with it. (An
+                anonymous pipe's end is opened again at once: the kernel waits for a writer only for a FIFO with a name.)
+                Offered in a child the check waits two seconds for: declined at once, and the compositor not held.
+        */
+        {
+                static const char fifo[] = "text-engine-clip-fifo.tmp";
+                int ends[2] = {-1, -1};
+                positive status = 0;
+                bipolar child = -1, waited = 0;
+
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)fifo, 0);
+                if (system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)fifo, 0010600, 0) == 0)
+                        ends[0] = (int)system_open_at(AT_FDCWD, (string_address)fifo, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)fifo, 0);
+                if (ends[0] >= 0)
+                {
+                        child = (bipolar)system_call_5(syscall(clone), 17, 0, 0, 0, 0);
+                        if (child == 0)
+                        {
+                                compositor_clip.gesture[3] = 0;
+                                compositor_clip_gesture(3);
+                                te_clip_offer(3, WINDOWS_CLIP_CLIPBOARD, ends[0]);
+                                system_call_1(syscall(exit_group), te_clip_event(3, &which) == WINDOWS_CLIP_DECLINED ? 0 : 3);
+                        }
+                        for (int tries = 0; child > 0 && tries < 200 && waited != child; tries++)
+                        {
+                                timespec nap = {0, 10000000};
+
+                                waited = (bipolar)system_call_4(syscall(wait4), (positive)child, (positive)&status, 1, 0);
+                                if (waited != child)
+                                        system_call_2(syscall(nanosleep), (positive)&nap, 0);
+                        }
+                        if (child > 0 && waited != child)
+                        {
+                                system_call_2(syscall(kill), (positive)child, 9);
+                                system_call_4(syscall(wait4), (positive)child, (positive)&status, 0, 0);
+                        }
+                        system_close(ends[0]);
+                }
+                te_check(child > 0 && waited == child && (status & 0xffff) == 0,
+                         "a FIFO with no writer offered as a copy is declined at once, and the compositor is not held", status);
+        }
         // A window gone leaves its copy, owned by nobody; off empties everything and refuses.
         compositor_clip_leave(0);
         te_check(te_clip_table.clip_owner[0] == -1 && te_clip_table.clip_length[0] == sizeof(hello) - 1, "a copy outlives its window", 0);

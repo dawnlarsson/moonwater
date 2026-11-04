@@ -12017,13 +12017,37 @@ static void compositor_clip_settings(void)
 static int compositor_clip_open(unsigned int pid, int fd, unsigned int address_to length)
 {
         char path[48];
-        long opened, size, seals, mapped;
+        unsigned char info[256];
+        long held, opened, size, seals, mapped;
+        unsigned int mode;
         int text;
 
         if (!pid || fd < 0)
                 return -1;
+        /*
+                The descriptor is whichever the row names, so it is anything its program holds: the read end of a pipe or a
+                FIFO, whose open for reading waits for a writer for ever and the desktop with it; a terminal, which a session
+                leader's open takes for its own; a device, whose open is its driver's to act on. Its file is taken first by
+                O_PATH, which opens nothing, and only a regular file (a memfd is one) is opened, through that hold, so the
+                file opened is the one looked at whatever the program does to its descriptor in between.
+        */
         windows_proc_fd(path, pid, (unsigned int)fd);
-        opened = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        held = (long)system_open_at(AT_FDCWD, (string_address)path, O_PATH | O_CLOEXEC);
+        if (held < 0)
+                return -1;
+        // struct statx: stx_mode at 28 (u16); STATX_TYPE of the descriptor itself (AT_EMPTY_PATH).
+        memory_zero(info, sizeof(info));
+        mode = compositor_call(syscall(statx), (positive)held, (positive) "", 0x1000, 1, (positive)info, 0) < 0
+                   ? 0
+                   : (unsigned int)info[28] | (unsigned int)info[29] << 8;
+        if ((mode & 0170000) == 0100000)
+        {
+                windows_proc_fd(path, (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (unsigned int)held);
+                opened = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+        }
+        else
+                opened = -1;
+        system_close((bipolar)held);
         if (opened < 0)
                 return -1;
         seals = compositor_call(syscall(fcntl), (positive)opened, COMPOSITOR_F_GET_SEALS, 0, 0, 0, 0);

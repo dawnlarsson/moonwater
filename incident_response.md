@@ -41,6 +41,38 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-123: a copy naming a FIFO held the compositor in its open
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Denial of service by a blocking open in the root compositor; a confused-deputy open of whatever a program names (CWE-367 class: the open is of what the row says, not of what was checked) |
+| Attacker | a window's program (root today, as every table writer is: MW-2026-050), after a press of the person's on its window; and `moonwater clipboard set`'s fields in the header, which any table writer can fill |
+| Moonwater exposure window | from `76914efe` (2026-10-30 16:03 +01:00, the clipboard) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_clip_open`) |
+
+**What it was.** A copy is a sealed memfd the program names in its row (`clip_offer_fd`, with its pid), and the compositor
+opens it again through `/proc/PID/fd/N` to check and keep it. It opened whatever the descriptor was with a blocking read
+open: a FIFO the program holds open for reading with no writer made that open wait for a writer for ever, and the
+compositor with it -- no frame, no input, no pointer, the whole desktop stopped until a writer came (the kernel's Ctrl-Alt-
+Backspace is the only way out). A terminal opened so would become the compositor's controlling terminal if it had none (no
+O_NOCTTY), and a device's open is its driver's to act on (a watchdog's open arms it). The checks after the open (seals,
+size, UTF-8) came too late for any of that.
+
+**The fix.** The descriptor's file is taken with `O_PATH`, which opens nothing; `statx` on that hold must say a regular
+file (a memfd is one); only then is it opened, through the hold's own `/proc/self/fd` entry (so the file opened is the one
+looked at, whatever the program does to its descriptor meanwhile), and with `O_NONBLOCK | O_NOCTTY`. The seal, size and
+text checks follow as before. A copy is rare (a gesture), so the two calls more cost nothing that is measured.
+
+**Tests that fail without it.** `CHECK_text_engine`, section `clipboard`: a FIFO opened for reading with no writer offered
+as a copy, in a child the check waits two seconds for: declined at once and the compositor not held. With the old open the
+child is still in the open after two seconds and is killed (status 9, 1 failure). An anonymous pipe's end does not show it:
+the kernel waits for a writer only on a FIFO with a name, which is why the row makes one.
+
+**Still open.** A regular file on a FUSE mount is still opened (its open is the FUSE daemon's, which may wait); the table
+is root's, so only root can name one. The program side's paste (`windows_clip_fetch`) opens `/proc/clip_pid/fd/900` with
+`clip_pid` read from the shared table, which any table writer may rewrite: by design while the table is root's.
+
 ### MW-2026-122: the lift of a long press went to the next program in a closed window's row
 
 | | |
