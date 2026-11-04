@@ -59326,7 +59326,7 @@ static bipolar net_test_socket_receive(b32 handle, address_any data,
         if (net_recv_eagain_count)
         {
                 net_recv_eagain_count--;
-                return -EAGAIN;
+                return AUDIO_EAGAIN;
         }
         if (net_recv_interruptions)
         {
@@ -59511,7 +59511,7 @@ static bipolar net_test_random_fill(address_any into, positive length, positive 
         if (net_random_refuse)
         {
                 net_random_refuse--;
-                return -EAGAIN;
+                return AUDIO_EAGAIN;
         }
         return system_random_fill(into, length, flags);
 }
@@ -164422,6 +164422,1215 @@ int main(void)
         return au_failures ? 1 : 0;
 }
 #endif /* CHECK_audio_mix */
+
+#ifdef CHECK_audio_alsa
+/*
+        CHECK_audio_alsa: the sound card layer (src/audio/alsa.c) against the kernel's header where the header is here, a
+        card of the check's own behind the five kernel calls (several kinds of card: what each takes, what the file
+        picks, and every way a card goes wrong: an underrun, a suspend, a card pulled out, a driver that refuses), and
+        on a Linux machine with the snd-aloop module, the real thing: a sine mixed by the mixing core, written to a
+        loopback card and read back from the other side of it, bit for bit.
+
+            cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_audio_alsa test/checks.c -lm
+
+        A machine with the module: sudo modprobe snd-aloop index=7 pcm_substreams=2; the check finds the card by its
+        name and says plainly when it is not there.
+*/
+#include <errno.h>
+#include <fcntl.h>
+#include <math.h>
+#include <poll.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#ifdef __linux__
+#include <sound/asound.h>
+#define AL_HEADER 1
+#endif
+#ifndef EBADFD
+#define EBADFD 77
+#endif
+#ifndef ESTRPIPE
+#define ESTRPIPE 86
+#endif
+
+#include "../src/audio/mix.c"
+
+static long audio_sys_open(const char *path, int flags);
+static long audio_sys_close(int fd);
+static long audio_sys_ioctl(int fd, unsigned long request, void *argument);
+static long audio_sys_read(int fd, void *buffer, unsigned long bytes);
+static long audio_sys_write(int fd, const void *buffer, unsigned long bytes);
+
+#include "../src/audio/alsa.c"
+
+static unsigned al_checks, al_failures;
+
+#define ALCHECK(condition, ...)                                                                                       \
+        do                                                                                                            \
+        {                                                                                                             \
+                al_checks++;                                                                                          \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        al_failures++;                                                                                \
+                        if (al_failures < 60)                                                                         \
+                        {                                                                                             \
+                                printf("  FAIL: ");                                                                   \
+                                printf(__VA_ARGS__);                                                                  \
+                                printf(" (line %d)\n", __LINE__);                                                     \
+                        }                                                                                             \
+                }                                                                                                     \
+        } while (0)
+
+static unsigned long long al_state = 0x2545f4914f6cdd1dull;
+
+static unsigned long al_rand(void)
+{
+        al_state ^= al_state >> 12;
+        al_state ^= al_state << 25;
+        al_state ^= al_state >> 27;
+        return (unsigned long)(al_state * 0x2545f4914f6cdd1dull >> 11);
+}
+
+/* ---- the kernel's header against this file's layout ---- */
+
+static void al_test_layout(void)
+{
+#ifdef AL_HEADER
+        ALCHECK(sizeof(struct audio_alsa_hw) == sizeof(struct snd_pcm_hw_params), "hw_params size");
+        ALCHECK(sizeof(struct audio_alsa_sw) == sizeof(struct snd_pcm_sw_params), "sw_params size");
+        ALCHECK(sizeof(struct audio_alsa_sync) == sizeof(struct snd_pcm_sync_ptr), "sync_ptr size");
+        ALCHECK(sizeof(struct audio_alsa_xfer) == sizeof(struct snd_xferi), "xferi size");
+        ALCHECK(sizeof(struct audio_alsa_pcm_info) == sizeof(struct snd_pcm_info), "pcm_info size");
+        ALCHECK(sizeof(struct audio_alsa_card_info) == sizeof(struct snd_ctl_card_info), "card_info size");
+        ALCHECK(sizeof(struct audio_alsa_mask) == sizeof(struct snd_mask) && sizeof(struct audio_alsa_interval) == sizeof(struct snd_interval), "mask and interval");
+        ALCHECK(offsetof(struct audio_alsa_hw, masks) == offsetof(struct snd_pcm_hw_params, masks), "masks at");
+        ALCHECK(offsetof(struct audio_alsa_hw, intervals) == offsetof(struct snd_pcm_hw_params, intervals), "intervals at");
+        ALCHECK(offsetof(struct audio_alsa_hw, rmask) == offsetof(struct snd_pcm_hw_params, rmask), "rmask at");
+        ALCHECK(offsetof(struct audio_alsa_hw, cmask) == offsetof(struct snd_pcm_hw_params, cmask), "cmask at");
+        ALCHECK(offsetof(struct audio_alsa_hw, info) == offsetof(struct snd_pcm_hw_params, info), "info at");
+        ALCHECK(offsetof(struct audio_alsa_hw, fifo_size) == offsetof(struct snd_pcm_hw_params, fifo_size), "fifo_size at");
+        ALCHECK(offsetof(struct audio_alsa_sw, avail_min) == offsetof(struct snd_pcm_sw_params, avail_min), "avail_min at");
+        ALCHECK(offsetof(struct audio_alsa_sw, start_threshold) == offsetof(struct snd_pcm_sw_params, start_threshold), "start_threshold at");
+        ALCHECK(offsetof(struct audio_alsa_sw, stop_threshold) == offsetof(struct snd_pcm_sw_params, stop_threshold), "stop_threshold at");
+        ALCHECK(offsetof(struct audio_alsa_sw, boundary) == offsetof(struct snd_pcm_sw_params, boundary), "boundary at");
+        ALCHECK(offsetof(struct audio_alsa_sw, proto) == offsetof(struct snd_pcm_sw_params, proto), "proto at");
+        ALCHECK(offsetof(struct audio_alsa_sw, tstamp_type) == offsetof(struct snd_pcm_sw_params, tstamp_type), "tstamp_type at");
+        ALCHECK(offsetof(struct audio_alsa_sync, s) == offsetof(struct snd_pcm_sync_ptr, s) && offsetof(struct audio_alsa_sync, c) == offsetof(struct snd_pcm_sync_ptr, c), "sync_ptr union places");
+        ALCHECK(offsetof(struct audio_alsa_status, hw_ptr) == offsetof(struct snd_pcm_mmap_status, hw_ptr), "status hw_ptr at");
+        ALCHECK(offsetof(struct audio_alsa_status, suspended_state) == offsetof(struct snd_pcm_mmap_status, suspended_state), "status suspended at");
+        ALCHECK(offsetof(struct audio_alsa_pcm_info, subdevices_count) == offsetof(struct snd_pcm_info, subdevices_count), "pcm_info subdevices at");
+        ALCHECK(offsetof(struct audio_alsa_pcm_info, name) == offsetof(struct snd_pcm_info, name), "pcm_info name at");
+        ALCHECK(offsetof(struct audio_alsa_card_info, longname) == offsetof(struct snd_ctl_card_info, longname), "card_info longname at");
+        ALCHECK(offsetof(struct audio_alsa_card_info, components) == offsetof(struct snd_ctl_card_info, components), "card_info components at");
+        ALCHECK(AUDIO_ALSA_HW_REFINE == SNDRV_PCM_IOCTL_HW_REFINE, "HW_REFINE %lx against %lx", (unsigned long)AUDIO_ALSA_HW_REFINE, (unsigned long)SNDRV_PCM_IOCTL_HW_REFINE);
+        ALCHECK(AUDIO_ALSA_HW_PARAMS == SNDRV_PCM_IOCTL_HW_PARAMS, "HW_PARAMS");
+        ALCHECK(AUDIO_ALSA_SW_PARAMS == SNDRV_PCM_IOCTL_SW_PARAMS, "SW_PARAMS");
+        ALCHECK(AUDIO_ALSA_DELAY == SNDRV_PCM_IOCTL_DELAY, "DELAY");
+        ALCHECK(AUDIO_ALSA_SYNC_PTR == SNDRV_PCM_IOCTL_SYNC_PTR, "SYNC_PTR");
+        ALCHECK(AUDIO_ALSA_PREPARE == SNDRV_PCM_IOCTL_PREPARE, "PREPARE");
+        ALCHECK(AUDIO_ALSA_START == SNDRV_PCM_IOCTL_START, "START");
+        ALCHECK(AUDIO_ALSA_DROP == SNDRV_PCM_IOCTL_DROP, "DROP");
+        ALCHECK(AUDIO_ALSA_RESUME == SNDRV_PCM_IOCTL_RESUME, "RESUME");
+        ALCHECK(AUDIO_ALSA_CARD_INFO == SNDRV_CTL_IOCTL_CARD_INFO, "CARD_INFO");
+        ALCHECK(AUDIO_ALSA_PCM_NEXT_DEVICE == SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE, "PCM_NEXT_DEVICE");
+        ALCHECK(AUDIO_ALSA_PCM_INFO == SNDRV_CTL_IOCTL_PCM_INFO, "PCM_INFO");
+        ALCHECK(AUDIO_ALSA_PCM_PREFER_SUBDEVICE == SNDRV_CTL_IOCTL_PCM_PREFER_SUBDEVICE, "PCM_PREFER_SUBDEVICE");
+        ALCHECK(AUDIO_ALSA_ACCESS_RW_INTERLEAVED == SNDRV_PCM_ACCESS_RW_INTERLEAVED, "access");
+        ALCHECK(AUDIO_ALSA_FORMAT_S16_LE == SNDRV_PCM_FORMAT_S16_LE && AUDIO_ALSA_FORMAT_S24_LE == SNDRV_PCM_FORMAT_S24_LE &&
+                    AUDIO_ALSA_FORMAT_S32_LE == SNDRV_PCM_FORMAT_S32_LE && AUDIO_ALSA_FORMAT_S24_3LE == SNDRV_PCM_FORMAT_S24_3LE &&
+                    AUDIO_ALSA_FORMAT_FLOAT_LE == SNDRV_PCM_FORMAT_FLOAT_LE,
+                "formats");
+        ALCHECK(AUDIO_ALSA_STATE_PREPARED == SNDRV_PCM_STATE_PREPARED && AUDIO_ALSA_STATE_RUNNING == SNDRV_PCM_STATE_RUNNING &&
+                    AUDIO_ALSA_STATE_XRUN == SNDRV_PCM_STATE_XRUN && AUDIO_ALSA_STATE_SUSPENDED == SNDRV_PCM_STATE_SUSPENDED &&
+                    AUDIO_ALSA_STATE_DISCONNECTED == SNDRV_PCM_STATE_DISCONNECTED,
+                "states");
+        ALCHECK(AUDIO_ALSA_SYNC_HWSYNC == SNDRV_PCM_SYNC_PTR_HWSYNC && AUDIO_ALSA_SYNC_APPL == SNDRV_PCM_SYNC_PTR_APPL &&
+                    AUDIO_ALSA_SYNC_AVAIL_MIN == SNDRV_PCM_SYNC_PTR_AVAIL_MIN,
+                "sync_ptr flags");
+        ALCHECK(AUDIO_ALSA_VERSION == SNDRV_PCM_VERSION, "protocol version");
+        ALCHECK(AUDIO_ALSA_ACCESS == SNDRV_PCM_HW_PARAM_ACCESS && AUDIO_ALSA_FORMAT == SNDRV_PCM_HW_PARAM_FORMAT &&
+                    AUDIO_ALSA_SUBFORMAT == SNDRV_PCM_HW_PARAM_SUBFORMAT && AUDIO_ALSA_FIRST_INTERVAL == SNDRV_PCM_HW_PARAM_FIRST_INTERVAL &&
+                    AUDIO_ALSA_CHANNELS == SNDRV_PCM_HW_PARAM_CHANNELS && AUDIO_ALSA_RATE == SNDRV_PCM_HW_PARAM_RATE &&
+                    AUDIO_ALSA_PERIOD_TIME == SNDRV_PCM_HW_PARAM_PERIOD_TIME && AUDIO_ALSA_PERIOD_SIZE == SNDRV_PCM_HW_PARAM_PERIOD_SIZE &&
+                    AUDIO_ALSA_PERIODS == SNDRV_PCM_HW_PARAM_PERIODS && AUDIO_ALSA_BUFFER_SIZE == SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+                "parameter numbers");
+#else
+        printf("  layout: NOT RUN (no <sound/asound.h> here)\n");
+#endif
+}
+
+/* ---- a card of the check's own behind the five calls ---- */
+
+struct al_model
+{
+        const char *name;
+        unsigned long long formats;      // bit n is format n
+        unsigned cmin, cmax;
+        unsigned rates[8];               // zero ends the list
+        unsigned pmin, pmax, pstep;      // period sizes
+        unsigned bmin, bmax;             // buffer sizes
+        unsigned periods_min;
+        int rw;                          // takes the read/write access
+};
+
+#define F(n) (1ull << (n))
+static const struct al_model al_models[] = {
+    {"hda", F(2) | F(6) | F(10), 2, 2, {44100, 48000, 96000, 192000, 0}, 32, 16384, 1, 64, 65536, 2, 1},
+    {"usb", F(32), 2, 2, {44100, 48000, 96000, 0}, 48, 4800, 48, 96, 96000, 2, 1},
+    {"hdmi", F(2) | F(10), 2, 8, {32000, 44100, 48000, 88200, 96000, 176400, 192000, 0}, 64, 8192, 1, 128, 65536, 2, 1},
+    {"surround", F(2), 6, 6, {96000, 0}, 64, 8192, 1, 128, 65536, 2, 1},
+    {"norw", F(10), 2, 2, {48000, 0}, 64, 8192, 1, 128, 65536, 2, 0},
+    {"odd", F(2), 2, 2, {12345, 0}, 64, 8192, 1, 128, 65536, 2, 1},
+    {"tiny", F(2), 2, 2, {48000, 0}, 256, 512, 1, 512, 512, 2, 1},
+    {"floaty", F(14), 2, 2, {48000, 0}, 64, 8192, 1, 128, 65536, 2, 1},
+};
+
+#define AL_FDS 16
+#define AL_BASE 100
+
+static struct al_pcm_fake
+{
+        int used, control, card, device, stream;
+        const struct al_model *model;
+        int state, configured;
+        unsigned format, channels, rate;
+        long period, buffer, boundary;
+        long hw, appl;                   // in [0, boundary)
+        long avail_min, start_threshold;
+        long hw_delay;
+        long played_total, written_total; // frames, for the reference
+        unsigned char written[1 << 16];
+        long written_bytes;
+        int wanted_subdevice;
+} al_fds[AL_FDS];
+
+static int al_use_real;
+static int al_opens, al_closes;
+static int al_model_of_card[AUDIO_ALSA_CARDS];
+static int al_card_present[AUDIO_ALSA_CARDS];
+static long al_next_errno; // an errno the next write answers, once
+static long al_small_boundary;
+
+struct al_card_fake
+{
+        const char *id, *name, *longname;
+        int devices, device[4], playback[4], capture[4];
+        const char *device_name[4];
+        int info_fails;
+};
+static struct al_card_fake al_cards[AUDIO_ALSA_CARDS];
+
+static long al_fake_open(const char *path, int flags)
+{
+        int card = -1, device = 0, stream = 0, control = 0, at;
+        const char *p = path;
+
+        (void)flags;
+        if (strncmp(p, "/dev/snd/controlC", 17) == 0)
+        {
+                control = 1;
+                p += 17;
+        }
+        else if (strncmp(p, "/dev/snd/pcmC", 13) == 0)
+                p += 13;
+        else
+                return -ENOENT;
+        card = 0;
+        for (; *p >= '0' && *p <= '9'; p++)
+                card = card * 10 + (*p - '0');
+        if (!control)
+        {
+                if (*p++ != 'D')
+                        return -ENOENT;
+                for (; *p >= '0' && *p <= '9'; p++)
+                        device = device * 10 + (*p - '0');
+                stream = *p == 'c';
+        }
+        if (card >= AUDIO_ALSA_CARDS || !al_card_present[card])
+                return -ENOENT;
+        for (at = 0; at < AL_FDS; at++)
+                if (!al_fds[at].used)
+                        break;
+        if (at == AL_FDS)
+                return -EMFILE;
+        memset(al_fds + at, 0, sizeof(al_fds[0]));
+        al_fds[at].used = 1;
+        al_fds[at].control = control;
+        al_fds[at].card = card;
+        al_fds[at].device = device;
+        al_fds[at].stream = stream;
+        al_fds[at].model = al_models + al_model_of_card[card];
+        al_fds[at].wanted_subdevice = -1;
+        al_opens++;
+        return AL_BASE + at;
+}
+
+static struct al_pcm_fake *al_fd(int fd)
+{
+        return fd >= AL_BASE && fd < AL_BASE + AL_FDS && al_fds[fd - AL_BASE].used ? al_fds + (fd - AL_BASE) : 0;
+}
+
+// Narrows an interval by another; empty when nothing is left.
+static int al_narrow(struct audio_alsa_interval *iv, unsigned min, unsigned max)
+{
+        if (iv->min < min)
+                iv->min = min;
+        if (iv->max > max)
+                iv->max = max;
+        if (iv->min > iv->max)
+        {
+                iv->flags |= 8;
+                return 0;
+        }
+        return 1;
+}
+
+// iv is the intervals by the number of the parameter (the kernel's array starts at the eighth).
+static int al_refine_inner(struct al_pcm_fake *pcm, struct audio_alsa_hw *hw, struct audio_alsa_interval *iv, int choose)
+{
+        const struct al_model *m = pcm->model;
+        int rate_ok = 0;
+
+        if (!m->rw)
+                hw->masks[AUDIO_ALSA_ACCESS].bits[0] &= ~(1u << AUDIO_ALSA_ACCESS_RW_INTERLEAVED);
+        if (!audio_alsa_has(&hw->masks[AUDIO_ALSA_ACCESS], AUDIO_ALSA_ACCESS_RW_INTERLEAVED))
+                return -EINVAL;
+        for (int w = 0; w < 8; w++)
+        {
+                unsigned long long bits = w < 2 ? (m->formats >> (32 * w)) & 0xffffffffull : 0;
+
+                hw->masks[AUDIO_ALSA_FORMAT].bits[w] &= (unsigned)bits;
+        }
+        {
+                int any = 0;
+
+                for (int w = 0; w < 8; w++)
+                        any |= hw->masks[AUDIO_ALSA_FORMAT].bits[w] != 0;
+                if (!any)
+                        return -EINVAL;
+        }
+        if (!al_narrow(&iv[AUDIO_ALSA_CHANNELS], m->cmin, m->cmax))
+                return -EINVAL;
+        if (iv[AUDIO_ALSA_RATE].min == iv[AUDIO_ALSA_RATE].max)
+        {
+                for (int r = 0; m->rates[r]; r++)
+                        rate_ok |= m->rates[r] == iv[AUDIO_ALSA_RATE].min;
+                if (!rate_ok)
+                        return -EINVAL;
+        }
+        else
+        {
+                unsigned low = ~0u, high = 0;
+
+                for (int r = 0; m->rates[r]; r++)
+                {
+                        if (m->rates[r] < low)
+                                low = m->rates[r];
+                        if (m->rates[r] > high)
+                                high = m->rates[r];
+                }
+                if (!al_narrow(&iv[AUDIO_ALSA_RATE], low, high))
+                        return -EINVAL;
+        }
+        // Period time bounds the period size once the rate is known.
+        if (iv[AUDIO_ALSA_RATE].min == iv[AUDIO_ALSA_RATE].max && (iv[AUDIO_ALSA_PERIOD_TIME].min || iv[AUDIO_ALSA_PERIOD_TIME].max != ~0u))
+        {
+                unsigned long long rate = iv[AUDIO_ALSA_RATE].min;
+                unsigned min = (unsigned)((iv[AUDIO_ALSA_PERIOD_TIME].min * rate + 999999) / 1000000);
+                unsigned max = iv[AUDIO_ALSA_PERIOD_TIME].max == ~0u ? ~0u : (unsigned)(iv[AUDIO_ALSA_PERIOD_TIME].max * rate / 1000000);
+
+                if (!al_narrow(&iv[AUDIO_ALSA_PERIOD_SIZE], min, max))
+                        return -EINVAL;
+        }
+        if (!al_narrow(&iv[AUDIO_ALSA_PERIOD_SIZE], m->pmin, m->pmax) || !al_narrow(&iv[AUDIO_ALSA_BUFFER_SIZE], m->bmin, m->bmax))
+                return -EINVAL;
+        // The step: a minimum is rounded up to it, and a single value must be on it.
+        {
+                struct audio_alsa_interval *ps = &iv[AUDIO_ALSA_PERIOD_SIZE];
+
+                if (ps->min % m->pstep)
+                        ps->min += m->pstep - ps->min % m->pstep;
+                if (ps->max != ~0u)
+                        ps->max -= ps->max % m->pstep;
+                if (ps->min > ps->max)
+                        return -EINVAL;
+        }
+        if (!al_narrow(&iv[AUDIO_ALSA_PERIODS], m->periods_min, 1024))
+                return -EINVAL;
+        // buffer = periods * period
+        if (iv[AUDIO_ALSA_PERIOD_SIZE].min == iv[AUDIO_ALSA_PERIOD_SIZE].max)
+        {
+                unsigned long long period = iv[AUDIO_ALSA_PERIOD_SIZE].min;
+
+                if (!al_narrow(&iv[AUDIO_ALSA_BUFFER_SIZE], (unsigned)(period * iv[AUDIO_ALSA_PERIODS].min), ~0u))
+                        return -EINVAL;
+                if (iv[AUDIO_ALSA_BUFFER_SIZE].min == iv[AUDIO_ALSA_BUFFER_SIZE].max && iv[AUDIO_ALSA_BUFFER_SIZE].min % period)
+                        return -EINVAL;
+        }
+        if (!choose)
+                return 0;
+        // The driver's choice: the least of whatever is open.
+        {
+                unsigned period, buffer;
+
+                period = iv[AUDIO_ALSA_PERIOD_SIZE].min;
+                buffer = iv[AUDIO_ALSA_BUFFER_SIZE].min;
+                if (buffer < period * iv[AUDIO_ALSA_PERIODS].min)
+                        buffer = period * iv[AUDIO_ALSA_PERIODS].min;
+                if (buffer % period)
+                        buffer += period - buffer % period;
+                if (buffer > iv[AUDIO_ALSA_BUFFER_SIZE].max)
+                        return -EINVAL;
+                iv[AUDIO_ALSA_PERIOD_SIZE].min = iv[AUDIO_ALSA_PERIOD_SIZE].max = period;
+                iv[AUDIO_ALSA_BUFFER_SIZE].min = iv[AUDIO_ALSA_BUFFER_SIZE].max = buffer;
+                iv[AUDIO_ALSA_RATE].max = iv[AUDIO_ALSA_RATE].min;
+                iv[AUDIO_ALSA_CHANNELS].max = iv[AUDIO_ALSA_CHANNELS].min;
+                pcm->period = period;
+                pcm->buffer = buffer;
+                pcm->rate = iv[AUDIO_ALSA_RATE].min;
+                pcm->channels = iv[AUDIO_ALSA_CHANNELS].min;
+                for (int bit = 0; bit < 64; bit++)
+                        if (audio_alsa_has(&hw->masks[AUDIO_ALSA_FORMAT], (unsigned)bit))
+                        {
+                                pcm->format = (unsigned)bit;
+                                break;
+                        }
+        }
+        return 0;
+}
+
+static int al_refine(struct al_pcm_fake *pcm, struct audio_alsa_hw *hw, int choose)
+{
+        struct audio_alsa_interval iv[AUDIO_ALSA_FIRST_INTERVAL + 12];
+        int result;
+
+        memset(iv, 0, sizeof(iv));
+        memcpy(iv + AUDIO_ALSA_FIRST_INTERVAL, hw->intervals, sizeof(hw->intervals));
+        result = al_refine_inner(pcm, hw, iv, choose);
+        memcpy(hw->intervals, iv + AUDIO_ALSA_FIRST_INTERVAL, sizeof(hw->intervals));
+        return result;
+}
+
+static long al_fake_ioctl(int fd, unsigned long request, void *argument)
+{
+        struct al_pcm_fake *pcm = al_fd(fd);
+
+        if (!pcm)
+                return -EBADF;
+        if (pcm->control)
+        {
+                struct al_card_fake *card = &al_cards[pcm->card];
+
+                if (request == AUDIO_ALSA_CARD_INFO)
+                {
+                        struct audio_alsa_card_info *info = argument;
+
+                        if (card->info_fails)
+                                return -EIO;
+                        memset(info, 0, sizeof(*info));
+                        info->card = pcm->card;
+                        // No end byte on purpose: a driver's name is bounded by the array, not by a zero.
+                        memcpy(info->id, card->id, strnlen(card->id, sizeof(info->id)));
+                        memcpy(info->name, card->name, strnlen(card->name, sizeof(info->name)));
+                        memcpy(info->longname, card->longname, strnlen(card->longname, sizeof(info->longname)));
+                        return 0;
+                }
+                if (request == AUDIO_ALSA_PCM_NEXT_DEVICE)
+                {
+                        int *device = argument, next = -1;
+
+                        for (int d = 0; d < card->devices; d++)
+                                if (card->device[d] > *device && (next < 0 || card->device[d] < next))
+                                        next = card->device[d];
+                        *device = next;
+                        return 0;
+                }
+                if (request == AUDIO_ALSA_PCM_INFO)
+                {
+                        struct audio_alsa_pcm_info *info = argument;
+
+                        for (int d = 0; d < card->devices; d++)
+                                if ((unsigned)card->device[d] == info->device && (info->stream ? card->capture[d] : card->playback[d]))
+                                {
+                                        memset(info->name, 0, sizeof(info->name));
+                                        memcpy(info->name, card->device_name[d], strnlen(card->device_name[d], sizeof(info->name)));
+                                        return 0;
+                                }
+                        return -ENOENT;
+                }
+                if (request == AUDIO_ALSA_PCM_PREFER_SUBDEVICE)
+                        return 0;
+                return -ENOTTY;
+        }
+        if (request == AUDIO_ALSA_HW_REFINE || request == AUDIO_ALSA_HW_PARAMS)
+        {
+                struct audio_alsa_hw *hw = argument;
+                int result = al_refine(pcm, hw, request == AUDIO_ALSA_HW_PARAMS);
+
+                if (result < 0)
+                        return result;
+                if (request == AUDIO_ALSA_HW_PARAMS)
+                        pcm->configured = 1;
+                return 0;
+        }
+        if (!pcm->configured)
+                return -EBADFD;
+        if (request == AUDIO_ALSA_SW_PARAMS)
+        {
+                struct audio_alsa_sw *sw = argument;
+                long boundary = pcm->buffer;
+
+                if (sw->avail_min == 0 || sw->start_threshold > (unsigned long)pcm->buffer || sw->proto == 0)
+                        return -EINVAL;
+                // The kernel's boundary: the buffer doubled while it stays small enough for a long (a test may ask for a small one, so the pointers wrap).
+                if (al_small_boundary)
+                        boundary = pcm->buffer * al_small_boundary;
+                else
+                        while (boundary * 2 <= (long)(0x7fffffffl - pcm->buffer))
+                                boundary *= 2;
+                pcm->boundary = boundary;
+                sw->boundary = (unsigned long)boundary;
+                pcm->avail_min = (long)sw->avail_min;
+                pcm->start_threshold = (long)sw->start_threshold;
+                return 0;
+        }
+        if (request == AUDIO_ALSA_PREPARE)
+        {
+                if (pcm->state == AUDIO_ALSA_STATE_DISCONNECTED)
+                        return -ENODEV;
+                pcm->state = AUDIO_ALSA_STATE_PREPARED;
+                pcm->hw = pcm->appl = 0;
+                return 0;
+        }
+        if (request == AUDIO_ALSA_START)
+        {
+                pcm->state = AUDIO_ALSA_STATE_RUNNING;
+                return 0;
+        }
+        if (request == AUDIO_ALSA_DROP)
+        {
+                if (pcm->state != AUDIO_ALSA_STATE_DISCONNECTED)
+                        pcm->state = 1;
+                return 0;
+        }
+        if (request == AUDIO_ALSA_RESUME)
+        {
+                if (pcm->state == AUDIO_ALSA_STATE_SUSPENDED)
+                        pcm->state = AUDIO_ALSA_STATE_PREPARED;
+                return 0;
+        }
+        if (request == AUDIO_ALSA_DELAY)
+        {
+                long fill = pcm->appl - pcm->hw;
+
+                if (fill < 0)
+                        fill += pcm->boundary;
+                *(long *)argument = fill + pcm->hw_delay;
+                return 0;
+        }
+        if (request == AUDIO_ALSA_SYNC_PTR)
+        {
+                struct audio_alsa_sync *sync = argument;
+
+                if (pcm->state == AUDIO_ALSA_STATE_DISCONNECTED)
+                        return -ENODEV;
+                // As the kernel does: without the flag the application pointer in the call is the one that is SET.
+                if (!(sync->flags & AUDIO_ALSA_SYNC_APPL))
+                        pcm->appl = (long)sync->c.control.appl_ptr;
+                if (!(sync->flags & AUDIO_ALSA_SYNC_AVAIL_MIN))
+                        pcm->avail_min = (long)sync->c.control.avail_min;
+                sync->s.status.state = pcm->state;
+                sync->s.status.hw_ptr = (unsigned long)pcm->hw;
+                sync->c.control.appl_ptr = (unsigned long)pcm->appl;
+                sync->c.control.avail_min = (unsigned long)pcm->avail_min;
+                return 0;
+        }
+        return -ENOTTY;
+}
+
+// The hardware plays (or captures) frames: its pointer moves, and an emptied buffer is an underrun.
+static void al_hardware(int fd, long frames)
+{
+        struct al_pcm_fake *pcm = al_fd(fd);
+
+        if (!pcm || pcm->state != AUDIO_ALSA_STATE_RUNNING)
+                return;
+        if (pcm->stream == 1)
+        {
+                long held = pcm->hw - pcm->appl;
+
+                if (held < 0)
+                        held += pcm->boundary;
+                if (held + frames > pcm->buffer)
+                {
+                        pcm->state = AUDIO_ALSA_STATE_XRUN;
+                        return;
+                }
+        }
+        if (pcm->stream == 0)
+        {
+                long fill = pcm->appl - pcm->hw;
+
+                if (fill < 0)
+                        fill += pcm->boundary;
+                if (frames > fill)
+                {
+                        pcm->played_total += fill;
+                        pcm->hw = pcm->appl;
+                        pcm->state = AUDIO_ALSA_STATE_XRUN;
+                        return;
+                }
+                pcm->played_total += frames;
+        }
+        pcm->hw = (pcm->hw + frames) % pcm->boundary;
+}
+
+static long al_fake_write(int fd, const void *buffer, unsigned long bytes)
+{
+        struct al_pcm_fake *pcm = al_fd(fd);
+        long frame, frames, room, fill;
+
+        if (!pcm || !pcm->configured)
+                return -EBADFD;
+        if (al_next_errno)
+        {
+                long e = al_next_errno;
+
+                al_next_errno = 0;
+                if (e == -ENODEV)
+                        pcm->state = AUDIO_ALSA_STATE_DISCONNECTED;
+                if (e == -ESTRPIPE)
+                        pcm->state = AUDIO_ALSA_STATE_SUSPENDED;
+                return e;
+        }
+        if (pcm->state == AUDIO_ALSA_STATE_DISCONNECTED)
+                return -ENODEV;
+        if (pcm->state == AUDIO_ALSA_STATE_XRUN)
+                return -EPIPE;
+        if (pcm->state == AUDIO_ALSA_STATE_SUSPENDED)
+                return -ESTRPIPE;
+        if (pcm->state != AUDIO_ALSA_STATE_PREPARED && pcm->state != AUDIO_ALSA_STATE_RUNNING)
+                return -EBADFD;
+        frame = (pcm->format == 2 ? 2 : pcm->format == 32 ? 3 : 4) * (long)pcm->channels;
+        frames = (long)bytes / frame;
+        fill = pcm->appl - pcm->hw;
+        if (fill < 0)
+                fill += pcm->boundary;
+        room = pcm->buffer - fill;
+        if (frames > room)
+                frames = room;
+        if (frames <= 0)
+                return AUDIO_EAGAIN;
+        if ((unsigned long)(pcm->written_bytes + frames * frame) <= sizeof(pcm->written))
+                memcpy(pcm->written + pcm->written_bytes, buffer, (unsigned long)(frames * frame));
+        pcm->written_bytes += frames * frame;
+        pcm->appl = (pcm->appl + frames) % pcm->boundary;
+        pcm->written_total += frames;
+        if (pcm->state == AUDIO_ALSA_STATE_PREPARED && fill + frames >= pcm->start_threshold)
+                pcm->state = AUDIO_ALSA_STATE_RUNNING;
+        return frames * frame;
+}
+
+static long audio_sys_open(const char *path, int flags)
+{
+        if (al_use_real)
+        {
+                int fd = open(path, flags);
+
+                return fd < 0 ? -errno : fd;
+        }
+        return al_fake_open(path, flags);
+}
+
+static long audio_sys_close(int fd)
+{
+        if (al_use_real)
+                return close(fd) < 0 ? -errno : 0;
+        if (!al_fd(fd))
+                return -EBADF;
+        al_fds[fd - AL_BASE].used = 0;
+        al_closes++;
+        return 0;
+}
+
+static long audio_sys_ioctl(int fd, unsigned long request, void *argument)
+{
+        if (al_use_real)
+        {
+                int result = ioctl(fd, request, argument);
+
+                return result < 0 ? -errno : result;
+        }
+        return al_fake_ioctl(fd, request, argument);
+}
+
+static long audio_sys_read(int fd, void *buffer, unsigned long bytes)
+{
+        if (al_use_real)
+        {
+                long result = read(fd, buffer, bytes);
+
+                return result < 0 ? -errno : result;
+        }
+        {
+                struct al_pcm_fake *pcm = al_fd(fd);
+                long frame, frames, avail;
+
+                if (!pcm || !pcm->configured)
+                        return -EBADFD;
+                if (pcm->state == AUDIO_ALSA_STATE_XRUN)
+                        return -EPIPE;
+                frame = (pcm->format == 2 ? 2 : pcm->format == 32 ? 3 : 4) * (long)pcm->channels;
+                frames = (long)bytes / frame;
+                avail = pcm->hw - pcm->appl;
+                if (avail < 0)
+                        avail += pcm->boundary;
+                if (frames > avail)
+                        frames = avail;
+                if (frames <= 0)
+                        return AUDIO_EAGAIN;
+                memset(buffer, 0, (unsigned long)(frames * frame));
+                pcm->appl = (pcm->appl + frames) % pcm->boundary;
+                return frames * frame;
+        }
+}
+
+static long audio_sys_write(int fd, const void *buffer, unsigned long bytes)
+{
+        if (al_use_real)
+        {
+                long result = write(fd, buffer, bytes);
+
+                return result < 0 ? -errno : result;
+        }
+        return al_fake_write(fd, buffer, bytes);
+}
+
+static void al_reset(void)
+{
+        memset(al_fds, 0, sizeof(al_fds));
+        memset(al_card_present, 0, sizeof(al_card_present));
+        memset(al_cards, 0, sizeof(al_cards));
+        al_opens = al_closes = 0;
+        al_next_errno = 0;
+        al_small_boundary = 0;
+}
+
+// What each kind of card is given, and what the file picks of it.
+static void al_test_negotiation(void)
+{
+        static const struct
+        {
+                int model;
+                long rate, period_at_48000;
+                long format, channels, rate_got, period, buffer, target, avail_min;
+                int opens;
+        } cases[] = {
+            // hda: 32 bits, a pair, 48000, a period of 256 and a buffer of four
+            {0, 48000, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 512, 1},
+            {0, 44100, 256, AUDIO_FORMAT_S32LE, 2, 44100, 235, 940, 705, 470, 1},
+            {0, 192000, 256, AUDIO_FORMAT_S32LE, 2, 192000, 1024, 4096, 3072, 2048, 1},
+            // a rate the card has not got: the first of the usual that it takes
+            {0, 22050, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 512, 1},
+            // usb: 24 bits in three bytes, and a period on the millisecond: 256 is not on it, 288 is the least above
+            {1, 48000, 256, AUDIO_FORMAT_S24LE, 2, 48000, 288, 1152, 864, 576, 1},
+            // hdmi: a pair of eight channels, 32 bits
+            {2, 48000, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 512, 1},
+            // a card of six channels only, at 96000 only: the pair goes to the first two
+            {3, 48000, 256, AUDIO_FORMAT_S16LE, 6, 96000, 512, 2048, 1536, 1024, 1},
+            // a buffer no larger than two periods
+            {6, 48000, 256, AUDIO_FORMAT_S16LE, 2, 48000, 256, 512, 512, 256, 1},
+            // a card that takes only floats
+            {7, 48000, 256, AUDIO_FORMAT_F32LE, 2, 48000, 256, 1024, 768, 512, 1},
+        };
+
+        for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
+        {
+                struct audio_pcm pcm;
+                long result;
+
+                al_reset();
+                al_card_present[0] = 1;
+                al_model_of_card[0] = cases[c].model;
+                result = audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, cases[c].rate, cases[c].period_at_48000, -1);
+                ALCHECK(result == 0, "%s at %ld: open said %ld", al_models[cases[c].model].name, cases[c].rate, result);
+                if (result)
+                        continue;
+                ALCHECK(pcm.format == cases[c].format && pcm.channels == cases[c].channels && pcm.rate == cases[c].rate_got, "%s at %ld: format %ld channels %ld rate %ld, wanted %ld %ld %ld",
+                        al_models[cases[c].model].name, cases[c].rate, pcm.format, pcm.channels, pcm.rate, cases[c].format, cases[c].channels, cases[c].rate_got);
+                ALCHECK(pcm.period == cases[c].period && pcm.buffer == cases[c].buffer, "%s at %ld: period %ld buffer %ld, wanted %ld %ld", al_models[cases[c].model].name,
+                        cases[c].rate, pcm.period, pcm.buffer, cases[c].period, cases[c].buffer);
+                ALCHECK(pcm.target == cases[c].target, "%s: target %ld, wanted %ld", al_models[cases[c].model].name, pcm.target, cases[c].target);
+                ALCHECK(al_fds[0].avail_min == cases[c].avail_min && al_fds[0].start_threshold == cases[c].target, "%s: avail_min %ld start %ld", al_models[cases[c].model].name,
+                        al_fds[0].avail_min, al_fds[0].start_threshold);
+                ALCHECK(pcm.boundary >= pcm.buffer && pcm.boundary % pcm.buffer == 0, "%s: boundary %ld", al_models[cases[c].model].name, pcm.boundary);
+                ALCHECK(pcm.frame_bytes == audio_format_bytes(pcm.format) * pcm.channels, "%s: frame bytes %ld", al_models[cases[c].model].name, pcm.frame_bytes);
+                audio_pcm_close(&pcm);
+                ALCHECK(al_opens == al_closes && pcm.fd == -1, "%s: every open is closed", al_models[cases[c].model].name);
+        }
+        // Cards that cannot be used: refused, nothing left open.
+        for (int model = 4; model <= 5; model++)
+        {
+                struct audio_pcm pcm;
+                long result;
+
+                al_reset();
+                al_card_present[0] = 1;
+                al_model_of_card[0] = model;
+                result = audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1);
+                ALCHECK(result < 0 && pcm.fd == -1 && al_opens == al_closes, "%s is refused (%ld) and leaves nothing open (%d opened, %d closed)", al_models[model].name, result, al_opens, al_closes);
+        }
+        {
+                struct audio_pcm pcm;
+
+                al_reset();
+                ALCHECK(audio_pcm_open(&pcm, 3, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1) < 0, "a card that is not there is refused");
+                ALCHECK(audio_pcm_open(&pcm, -1, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1) < 0 && audio_pcm_open(&pcm, 99, 0, 0, 48000, 256, -1) < 0 &&
+                            audio_pcm_open(&pcm, 0, -1, 0, 48000, 256, -1) < 0 && audio_pcm_open(&pcm, 0, 0, 0, 0, 256, -1) < 0 && audio_pcm_open(&pcm, 0, 0, 0, 48000, 0, -1) < 0,
+                        "numbers out of bounds are refused");
+        }
+}
+
+// The room in the buffer against a count kept apart, across the wrap of the pointers; and every way a card goes wrong.
+static void al_test_flow(void)
+{
+        struct audio_pcm pcm;
+        static unsigned char frames[4096 * 8];
+        long written = 0, played = 0;
+
+        al_reset();
+        al_card_present[0] = 1;
+        al_model_of_card[0] = 0;
+        al_small_boundary = 4;
+        ALCHECK(audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1) == 0, "hda opens");
+        ALCHECK(pcm.boundary == 4 * pcm.buffer, "the boundary asked for is the one the driver gave: %ld", pcm.boundary);
+        ALCHECK(audio_pcm_avail(&pcm) == pcm.buffer, "an empty buffer has all its room: %ld", audio_pcm_avail(&pcm));
+        for (long step = 0; step < 200000; step++)
+        {
+                long fill = written - played, avail = audio_pcm_avail(&pcm), n;
+
+                if (avail != pcm.buffer - fill)
+                {
+                        ALCHECK(0, "step %ld: room %ld, %ld expected (written %ld played %ld)", step, avail, pcm.buffer - fill, written, played);
+                        break;
+                }
+                if (al_rand() % 3)
+                {
+                        n = (long)(al_rand() % (unsigned long)(pcm.period + 1));
+                        if (n > avail)
+                                n = avail;
+                        if (n > 0)
+                        {
+                                long took = audio_pcm_write(&pcm, frames, n);
+
+                                if (took != n)
+                                {
+                                        ALCHECK(0, "step %ld: wrote %ld of %ld", step, took, n);
+                                        break;
+                                }
+                                written += n;
+                        }
+                }
+                else
+                {
+                        // The hardware plays some, never more than there is (an underrun is its own test).
+                        n = (long)(al_rand() % (unsigned long)(pcm.period + 1));
+                        if (n > fill)
+                                n = fill;
+                        if (n > 0 && al_fds[0].state == AUDIO_ALSA_STATE_RUNNING)
+                        {
+                                al_hardware(AL_BASE, n);
+                                played += n;
+                        }
+                }
+        }
+        ALCHECK(written > 1000000, "the pointers wrapped many times: %ld frames", written);
+        ALCHECK(al_fds[0].played_total == played && al_fds[0].written_total == written, "the card's own counts agree");
+        {
+                long delay = audio_pcm_delay(&pcm);
+
+                ALCHECK(delay == written - played, "the delay is the frames in the card: %ld against %ld", delay, written - played);
+        }
+        // Underrun: the hardware runs past what was written.
+        {
+                long avail;
+
+                al_hardware(AL_BASE, 100000);
+                avail = audio_pcm_avail(&pcm);
+                ALCHECK(avail == AUDIO_EPIPE, "an emptied buffer is an underrun: %ld", avail);
+                ALCHECK(audio_pcm_write(&pcm, frames, 10) == AUDIO_EPIPE, "and a write says so");
+                ALCHECK(audio_pcm_recover(&pcm, AUDIO_EPIPE) == 0 && pcm.xruns == 1, "recovering counts it");
+                ALCHECK(audio_pcm_avail(&pcm) == pcm.buffer && al_fds[0].state == AUDIO_ALSA_STATE_PREPARED, "and leaves the card ready, empty");
+                ALCHECK(audio_pcm_write(&pcm, frames, pcm.target) == pcm.target && al_fds[0].state == AUDIO_ALSA_STATE_RUNNING, "filled to its target it runs");
+        }
+        // Suspend: resumed and prepared.
+        {
+                al_fds[0].state = AUDIO_ALSA_STATE_SUSPENDED;
+                ALCHECK(audio_pcm_avail(&pcm) == AUDIO_ESTRPIPE, "a suspend is reported");
+                ALCHECK(audio_pcm_recover(&pcm, AUDIO_ESTRPIPE) == 0 && pcm.resumes == 1 && al_fds[0].state == AUDIO_ALSA_STATE_PREPARED, "and recovered");
+        }
+        // Other errors are not recovered.
+        ALCHECK(audio_pcm_recover(&pcm, AUDIO_EINVAL) == AUDIO_EINVAL && audio_pcm_recover(&pcm, AUDIO_EAGAIN) == AUDIO_EAGAIN, "an error that is not an underrun is the caller's");
+        // A full buffer is EAGAIN, not an error.
+        {
+                long first = audio_pcm_write(&pcm, frames, 4096), second = audio_pcm_write(&pcm, frames, 10);
+
+                ALCHECK(first == pcm.buffer && second == AUDIO_EAGAIN, "a full buffer takes what fits (%ld) and then says to wait (%ld)", first, second);
+        }
+        // The card pulled out: refused from then on, broken.
+        {
+                al_fds[0].state = AUDIO_ALSA_STATE_DISCONNECTED;
+                ALCHECK(audio_pcm_avail(&pcm) == AUDIO_ENODEV && pcm.broken, "a card that is gone is reported and marked");
+                ALCHECK(audio_pcm_write(&pcm, frames, 10) == AUDIO_ENODEV && audio_pcm_recover(&pcm, AUDIO_ENODEV) == AUDIO_ENODEV, "and stays gone");
+        }
+        audio_pcm_close(&pcm);
+        ALCHECK(al_opens == al_closes, "closed");
+        // A card pulled out between the state and the write: the write's own ENODEV marks it.
+        al_reset();
+        al_card_present[0] = 1;
+        al_model_of_card[0] = 0;
+        audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, -1);
+        al_next_errno = -ENODEV;
+        ALCHECK(audio_pcm_write(&pcm, frames, 10) == AUDIO_ENODEV && pcm.broken, "a write that finds the card gone marks it");
+        audio_pcm_close(&pcm);
+        // A capture buffer across the wrap: the data to read is the hardware's pointer less the application's, and it is the hardware's that wraps first.
+        al_reset();
+        al_card_present[0] = 1;
+        al_model_of_card[0] = 0;
+        al_small_boundary = 4;
+        ALCHECK(audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_CAPTURE, 48000, 256, -1) == 0, "a capture PCM opens");
+        {
+                long came = 0, taken = 0, wrapped = 0;
+
+                for (long step = 0; step < 100000; step++)
+                {
+                        long avail = audio_pcm_avail(&pcm), n;
+
+                        if (avail != came - taken)
+                        {
+                                ALCHECK(0, "capture step %ld: %ld to read, %ld expected", step, avail, came - taken);
+                                break;
+                        }
+                        if (al_rand() % 2)
+                        {
+                                n = (long)(al_rand() % 200);
+                                if (n > pcm.buffer - avail)
+                                        n = pcm.buffer - avail;
+                                al_hardware(AL_BASE, n);
+                                came += n;
+                        }
+                        else
+                        {
+                                n = (long)(al_rand() % 200);
+                                if (n > avail)
+                                        n = avail;
+                                if (n > 0 && audio_pcm_read(&pcm, frames, n) != n)
+                                {
+                                        ALCHECK(0, "capture step %ld: read of %ld", step, n);
+                                        break;
+                                }
+                                taken += n;
+                        }
+                        wrapped += al_fds[0].hw < al_fds[0].appl;
+                }
+                ALCHECK(came > 1000000 && wrapped > 1000, "the capture pointers wrapped: %ld frames, %ld steps with the hardware's behind", came, wrapped);
+                al_hardware(AL_BASE, pcm.buffer + 1);
+                ALCHECK(audio_pcm_avail(&pcm) == AUDIO_EPIPE, "an overrun is reported like an underrun");
+                ALCHECK(audio_pcm_recover(&pcm, AUDIO_EPIPE) == 0 && pcm.xruns == 1 && al_fds[0].state == AUDIO_ALSA_STATE_RUNNING, "and recovered, running again");
+        }
+        audio_pcm_close(&pcm);
+        // The delay of a capture is not asked; a capture PCM counts overruns the same way.
+        al_reset();
+        al_card_present[0] = 1;
+        al_model_of_card[0] = 0;
+        ALCHECK(audio_pcm_open(&pcm, 0, 0, AUDIO_ALSA_CAPTURE, 48000, 256, -1) == 0 && al_fds[0].state == AUDIO_ALSA_STATE_RUNNING, "a capture PCM starts running at once");
+        ALCHECK(audio_pcm_avail(&pcm) == 0, "and has nothing to read");
+        al_hardware(AL_BASE, 300);
+        ALCHECK(audio_pcm_avail(&pcm) == 300, "300 frames came in");
+        audio_pcm_close(&pcm);
+}
+
+// The cards that are there, with the names a driver gives, which are bytes and not text.
+static void al_test_scan(void)
+{
+        static struct audio_card cards[8];
+        long found;
+
+        al_reset();
+        al_card_present[0] = al_card_present[1] = al_card_present[2] = al_card_present[5] = al_card_present[6] = 1;
+        al_cards[0] = (struct al_card_fake){"Generic", "HD-Audio Generic", "HD-Audio Generic at 0xf6588000 irq 165", 2, {0, 3}, {1, 1}, {1, 0}, {"ALC892 Analog", "HDMI 0"}, 0};
+        al_cards[1] = (struct al_card_fake){"Audio", "USB Audio", "Generic USB Audio at usb-0000:12:00.0-6, high speed", 1, {0}, {1}, {1}, {"USB Audio"}, 0};
+        // A name with controls in it, one with no end inside its array, and a card whose info call fails.
+        al_cards[2] = (struct al_card_fake){"E\x1b[31mvil\x07", "NoEndNoEndNoEndNoEndNoEndNoEndNoEndNoEndNoEnd", "Long\nname\ttab", 1, {2}, {1}, {0}, {"Capture only?"}, 0};
+        al_cards[5] = (struct al_card_fake){"Broken", "Broken", "Broken", 1, {0}, {1}, {0}, {"x"}, 1};
+        al_cards[6] = (struct al_card_fake){"None", "No devices", "No devices at all", 0, {0}, {0}, {0}, {""}, 0};
+        found = audio_cards_scan(cards, 8);
+        ALCHECK(found == 4, "four cards answer: %ld", found);
+        ALCHECK(cards[0].number == 0 && !strcmp(cards[0].id, "Generic") && !strcmp(cards[0].name, "HD-Audio Generic") && cards[0].devices == 2, "card 0: %s %s", cards[0].id, cards[0].name);
+        ALCHECK(cards[0].device[0].device == 0 && cards[0].device[0].playback && cards[0].device[0].capture && !strcmp(cards[0].device[0].name, "ALC892 Analog"), "card 0 device 0");
+        ALCHECK(cards[0].device[1].device == 3 && cards[0].device[1].playback && !cards[0].device[1].capture && !strcmp(cards[0].device[1].name, "HDMI 0"), "card 0 device 3");
+        ALCHECK(cards[1].number == 1 && !strcmp(cards[1].name, "USB Audio") && cards[1].devices == 1, "card 1");
+        ALCHECK(cards[2].number == 2 && !strcmp(cards[2].id, "E?[31mvil?") && !strchr(cards[2].longname, '\n') && !strchr(cards[2].longname, '\t'), "card 2's name is text: %s / %s", cards[2].id,
+                cards[2].longname);
+        ALCHECK(strlen(cards[2].name) == 32, "a name without an end is bounded to its array: %zu", strlen(cards[2].name));
+        ALCHECK(cards[3].number == 6 && cards[3].devices == 0, "a card with no devices is listed with none: %ld", cards[3].number);
+        ALCHECK(audio_cards_scan(cards, 2) == 2, "no more cards than the room");
+        ALCHECK(al_opens == al_closes, "every control file closed");
+        // The path of a device.
+        {
+                char path[40];
+
+                audio_alsa_path(path, 0, 0, 0, 0);
+                ALCHECK(!strcmp(path, "/dev/snd/pcmC0D0p"), "%s", path);
+                audio_alsa_path(path, 12, 34, 1, 0);
+                ALCHECK(!strcmp(path, "/dev/snd/pcmC12D34c"), "%s", path);
+                audio_alsa_path(path, 7, 0, 0, 1);
+                ALCHECK(!strcmp(path, "/dev/snd/controlC7"), "%s", path);
+        }
+}
+
+/* ---- a real card: the loopback ---- */
+
+static __attribute__((unused)) double al_now(void)
+{
+        struct timespec at;
+
+        clock_gettime(CLOCK_MONOTONIC, &at);
+        return (double)at.tv_sec + (double)at.tv_nsec * 1e-9;
+}
+
+// A sine mixed by the mixing core, written to the loopback's playback side as the service will, and read from its capture side.
+static void al_test_loopback(void)
+{
+#ifdef __linux__
+        static struct audio_card cards[AUDIO_ALSA_CARDS];
+        static struct audio_voice voice;
+        static struct audio_sink sink;
+        static unsigned char ring[1 << 16], out[AUDIO_BLOCK * 8 * 4], captured[48000 * 4 * 2 * 6];
+        static short source[48000 * 2 * 2];
+        struct audio_pcm playback, capture;
+        long found, card = -1, result, captured_bytes = 0, produced = 0, wakes = 0, sent_frames = 0;
+        double begin, worst_pass = 0, last_wake = 0, worst_gap = 0, sum_gap = 0;
+        long frames = 48000 + 4800;
+
+        al_use_real = 1;
+        found = audio_cards_scan(cards, AUDIO_ALSA_CARDS);
+        for (long i = 0; i < found; i++)
+                if (!strcmp(cards[i].id, "Loopback"))
+                        card = cards[i].number;
+        if (card < 0)
+        {
+                printf("  loopback: NOT RUN (no snd-aloop card here: sudo modprobe snd-aloop index=7 pcm_substreams=2)\n");
+                al_use_real = 0;
+                return;
+        }
+        result = audio_pcm_open(&playback, card, 0, AUDIO_ALSA_PLAYBACK, 48000, 256, 1);
+        if (result < 0)
+        {
+                printf("  loopback: NOT RUN (the loopback's playback side did not open: %ld)\n", result);
+                al_use_real = 0;
+                return;
+        }
+        result = audio_pcm_open(&capture, card, 1, AUDIO_ALSA_CAPTURE, 48000, 256, 1);
+        ALCHECK(result == 0, "the capture side opens: %ld", result);
+        if (result < 0)
+        {
+                audio_pcm_close(&playback);
+                al_use_real = 0;
+                return;
+        }
+        printf("  loopback: card %ld, %ld Hz, format %ld, %ld channels, period %ld, buffer %ld, target %ld\n", card, playback.rate, playback.format, playback.channels, playback.period,
+               playback.buffer, playback.target);
+        ALCHECK(playback.rate == capture.rate && playback.format == capture.format && playback.channels == capture.channels, "both sides run the same way");
+        ALCHECK(playback.rate == 48000 && playback.format == AUDIO_FORMAT_S32LE && playback.channels == 2, "the card is run at 48000, 32 bits, a pair");
+
+        for (long i = 0; i < frames; i++)
+        {
+                source[i * 2] = (short)rint(20000.0 * sin(2 * M_PI * 997.0 * (double)i / 48000.0));
+                source[i * 2 + 1] = (short)rint(12000.0 * sin(2 * M_PI * 1500.0 * (double)i / 48000.0) + 6000.0 * sin(2 * M_PI * 220.0 * (double)i / 48000.0));
+        }
+        audio_sink_open(&sink, playback.rate, playback.channels);
+        result = audio_voice_open(&voice, AUDIO_FORMAT_S16LE, 2, 48000, 0, playback.rate, ring, sizeof(ring));
+        ALCHECK(result == 0, "the voice opens: %ld", result);
+        voice.now[0] = voice.now[1] = voice.target[0] = voice.target[1] = 1.0f;
+
+        // Prefill silence to the target, then a loop as the service has: wait for room, mix what is wanted, write, read the other side.
+        {
+                static unsigned char silence[4096 * 8];
+
+                audio_pcm_write(&playback, silence, playback.target);
+        }
+        begin = al_now();
+        while (sent_frames < frames + 2000 && al_now() - begin < 5.0)
+        {
+                struct pollfd fd = {playback.fd, POLLOUT, 0};
+                double woke, pass_begin;
+                long avail, fill, want;
+
+                poll(&fd, 1, 100);
+                woke = al_now();
+                pass_begin = woke;
+                if (last_wake)
+                {
+                        double gap = woke - last_wake;
+
+                        sum_gap += gap;
+                        worst_gap = gap > worst_gap ? gap : worst_gap;
+                }
+                last_wake = woke;
+                wakes++;
+                avail = audio_pcm_avail(&playback);
+                if (avail < 0)
+                {
+                        audio_pcm_recover(&playback, avail);
+                        continue;
+                }
+                fill = playback.buffer - avail;
+                want = playback.target - fill;
+                if (getenv("AUDIO_DEBUG") && wakes < 25)
+                {
+                        struct audio_alsa_sync sync;
+
+                        memset(&sync, 0, sizeof(sync));
+                        sync.flags = 7;
+                        audio_sys_ioctl(playback.fd, AUDIO_ALSA_SYNC_PTR, &sync);
+                        printf("    raw: state %d hw %lu appl %lu boundary %ld\n", sync.s.status.state, sync.s.status.hw_ptr, sync.c.control.appl_ptr, playback.boundary);
+                }
+                if (getenv("AUDIO_DEBUG") && wakes < 25)
+                        printf("    wake %ld at %.4f: avail %ld fill %ld want %ld revents %x delay %ld sent %ld\n", wakes, woke - begin, avail, fill, want, fd.revents, audio_pcm_delay(&playback), sent_frames);
+                while (want > 0)
+                {
+                        long n = want < AUDIO_BLOCK ? want : AUDIO_BLOCK, left = frames - produced, give;
+
+                        // The program writes a little ahead of what is played, as a program does.
+                        if (left > 0)
+                        {
+                                give = left < 480 ? left : 480;
+                                if (audio_ring_fill(&voice.ring) / 4 < (unsigned long)n + 480)
+                                {
+                                        audio_ring_put(&voice.ring, (const unsigned char *)(source + produced * 2), (unsigned long)give * 4);
+                                        produced += give;
+                                }
+                        }
+                        audio_sink_begin(&sink, n);
+                        audio_voice_mix(&sink, &voice, n, 0);
+                        audio_sink_end(&sink, out, (long)playback.format, playback.channels, n);
+                        result = audio_pcm_write(&playback, out, n);
+                        if (result < 0)
+                                break;
+                        sent_frames += result;
+                        want -= result;
+                }
+                {
+                        double pass = al_now() - pass_begin;
+
+                        worst_pass = pass > worst_pass ? pass : worst_pass;
+                }
+                for (;;)
+                {
+                        long got = audio_pcm_avail(&capture);
+
+                        if (got <= 0)
+                                break;
+                        if (got > 4096)
+                                got = 4096;
+                        if (got > (long)(sizeof(captured) - (unsigned long)captured_bytes) / capture.frame_bytes)
+                                got = (long)(sizeof(captured) - (unsigned long)captured_bytes) / capture.frame_bytes;
+                        if (got <= 0)
+                                break;
+                        result = audio_pcm_read(&capture, captured + captured_bytes, got);
+                        if (result <= 0)
+                                break;
+                        captured_bytes += result * capture.frame_bytes;
+                        if (captured_bytes > (long)sizeof(captured) - 4096 * 8)
+                                break;
+                }
+        }
+        // Let the rest come over.
+        for (int i = 0; i < 40; i++)
+        {
+                long got = audio_pcm_avail(&capture);
+
+                if (got > (long)(sizeof(captured) - (unsigned long)captured_bytes) / capture.frame_bytes)
+                        got = (long)(sizeof(captured) - (unsigned long)captured_bytes) / capture.frame_bytes;
+                if (got > 0)
+                {
+                        result = audio_pcm_read(&capture, captured + captured_bytes, got);
+                        if (result > 0)
+                                captured_bytes += result * capture.frame_bytes;
+                }
+                usleep(2000);
+        }
+        // The sine is somewhere in what came out: find its first frame (after the fade-in ramps, the silence before it is zeros) and compare 40000 frames, bit for bit.
+        {
+                long at = -1, matched = 0, compared = 0, bad = 0, ramp_end = 96;
+                int *words = (int *)captured;
+
+                for (long i = 0; i < captured_bytes / 8; i++)
+                        if (words[i * 2] != 0 || words[i * 2 + 1] != 0)
+                        {
+                                at = i;
+                                break;
+                        }
+                ALCHECK(at >= 0, "the loopback gave back sound (%ld bytes)", captured_bytes);
+                if (at >= 0)
+                {
+                        // The first frame of the voice is the first non-zero frame less the fade-in's first frames, which are nearly zero: look for where the sample index starts.
+                        for (long shift = 0; shift < 200 && !matched; shift++)
+                        {
+                                long i = at - shift;
+                                long probe = 3000;
+                                int ok = i >= 0;
+
+                                for (long k = ramp_end + 100; ok && k < ramp_end + 100 + probe; k++)
+                                        ok = words[(i + k) * 2] == (int)source[k * 2] * 65536 && words[(i + k) * 2 + 1] == (int)source[k * 2 + 1] * 65536;
+                                if (ok)
+                                        matched = shift + 1;
+                        }
+                        ALCHECK(matched, "the first frames of the sine are found in what the loopback gave");
+                        if (matched)
+                        {
+                                long i0 = at - (matched - 1);
+
+                                for (long k = ramp_end + 100; k < frames - 400 && (i0 + k) * 8 + 8 <= captured_bytes; k++)
+                                {
+                                        compared++;
+                                        if (words[(i0 + k) * 2] != (int)source[k * 2] * 65536 || words[(i0 + k) * 2 + 1] != (int)source[k * 2 + 1] * 65536)
+                                                bad++;
+                                }
+                                ALCHECK(compared > 40000 && bad == 0, "%ld of %ld frames differ from the sine that was mixed", bad, compared);
+                                printf("  loopback: %ld frames compared with the sine, %ld differ\n", compared, bad);
+                        }
+                }
+        }
+        printf("  loopback: %ld wakes, the period asked for is %.2f ms, wake gaps mean %.2f ms worst %.2f ms, the worst pass (mix and write) %.3f ms, underruns %lu\n", wakes,
+               (double)playback.period * 1000.0 / (double)playback.rate, wakes > 1 ? sum_gap / (double)(wakes - 1) * 1000.0 : 0.0, worst_gap * 1000.0, worst_pass * 1000.0, playback.xruns);
+        ALCHECK(playback.xruns == 0, "no underrun in a second of sound: %lu", playback.xruns);
+        audio_voice_close(&voice);
+        audio_pcm_close(&capture);
+        audio_pcm_close(&playback);
+        al_use_real = 0;
+#else
+        printf("  loopback: NOT RUN (not Linux)\n");
+#endif
+}
+
+int main(void)
+{
+        al_test_layout();
+        al_test_negotiation();
+        al_test_flow();
+        al_test_scan();
+        al_test_loopback();
+        printf("CHECK_audio_alsa: %u checks, %u failures\n", al_checks, al_failures);
+        return al_failures ? 1 : 0;
+}
+#endif /* CHECK_audio_alsa */
 
 
 #ifdef CHECK_stdio_buffer
