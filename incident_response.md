@@ -944,6 +944,48 @@ nothing here. A session already open when a member is forgotten ends within a
 second (`link_sessions_granted`), as for a peer removed by name. The mutation
 lane has not been run on `link_group_held`.
 
+### MW-2026-090: the GPU's compose read a grown window's rows from the addresses after its old map, another window's pixels
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Out-of-bounds read by a device (CWE-125) through a range check made on one byte (CWE-1284): the compositor validated the whole picture against a map, then took the address from the first map that held the picture's first byte |
+| Attacker | (1) any program with a window: a kit program, or a Wayland client, whose buffer size sets the window's |
+| Reachable | `compositor_gpu_present` (compositor.c) for every present the GPU composes (`canvas gpu on`, the standard, on a gfx10.3 card); the records built by `compositor_gpu_rect` (pictures and the corners' picture ink) and `compositor_gpu_buttons` (the close halo) |
+| Moonwater exposure window | 2026-11-04 01:11 +01:00 (`c456b98f`, the GPU compose wired into the present) to the fixing commit, the same day |
+| Fixed by | this commit (`src/canvas/compositor.c`, `src/canvas/gpu.c`) |
+
+**What it was.** The GPU reads a window's picture through a userptr map of the
+compositor's pages (`gpu_map`), each map at its own GPU address, handed out one
+after another (`gpu_map_next`), so the address after a map's end is the next
+map's: another window's pixels, a tab's, the imported scanout. A map is made
+for the pages a picture spans when it is first drawn. When the window grows,
+`compositor_gpu_picture` finds no map holding the larger picture and makes a
+second one, but the records took the address from `gpu_va(frame->pixels)`,
+which asks for one byte and answers the first map holding it: the old, smaller
+one. The card then read the rows below the old size from the next map's
+addresses and drew them into the window. Any window that grows (a drag of its
+edge, a Wayland client attaching a taller buffer) did it in normal use; a
+program that wants another window's pixels on its own window only has to grow
+after that window was mapped. The pixels went to the screen, not back to the
+program (Canvas has no screen copy a client can ask for), so what leaked is
+what the person sees: another window's contents, the root terminal's among
+them, shown inside the attacker's frame. With no map after the old one the
+card read unmapped addresses (page faults, black rows).
+
+**Fix.** The records' address is `compositor_gpu_va(frame)`: the map that holds
+the whole picture, the same range `compositor_gpu_picture` validated, so every
+record (it is cut to the frame's rectangle) reads inside one map;
+`compositor_gpu_frame` refuses a frame with no such map or no area.
+`gpu_va_bytes` compares without a sum that could wrap.
+
+**Tests that fail without it.** `CHECK_gpu_kit`, "Hostile pictures": a picture
+mapped for its first 16 rows, another window's pages mapped after it, then the
+picture grown to 300 rows and drawn by the GPU against `compositor_draw`. On
+the code before the fix: 56,800 pixels wrong (rows 16 to 299), every one of
+them the other window's pattern. With the fix: 0. The mutant is the old line
+(`gpu_va(frame->pixels)` in `compositor_gpu_rect`).
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was

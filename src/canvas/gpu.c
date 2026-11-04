@@ -488,8 +488,9 @@ static b32 gpu_start(positive bytes)
 }
 
 // Pages of the processor's (a window's picture: a memfd's, mapped shared) the GPU can reach, as userptr buffers at addresses of their own: gpu_map widens
-// [addr, addr + size) to pages and maps them; gpu_va answers the GPU's address of a pointer that is inside one that holds bytes from it, 0 for none, and marks
-// the map as used in this tick; gpu_trim lets go of the maps that were not used in the last few ticks (one tick a frame).
+// [addr, addr + size) to pages and maps them; gpu_va_bytes answers the GPU's address of a pointer that is inside one that holds bytes from it, 0 for none, and marks
+// the map as used in this tick (a reader of more than a byte asks for all it reads: a map that holds the first is not one that holds the rest); gpu_trim lets go
+// of the maps that were not used in the last few ticks (one tick a frame).
 static struct { positive from, to, va; unsigned int handle, used; } gpu_maps[64];
 static unsigned int gpu_map_count, gpu_tick;
 static positive gpu_map_next = 0x2000000000ull;
@@ -513,7 +514,7 @@ static b32 gpu_map(const void *addr, positive size)
 static positive gpu_va_bytes(const void *pointer, positive bytes)
 {
         for (unsigned int i = 0; i < gpu_map_count; i++)
-                if ((positive)pointer >= gpu_maps[i].from && (positive)pointer + bytes <= gpu_maps[i].to)
+                if ((positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to && bytes <= gpu_maps[i].to - (positive)pointer) // no sum to wrap
                 {
                         gpu_maps[i].used = gpu_tick;
                         return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;

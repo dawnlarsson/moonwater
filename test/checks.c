@@ -206365,6 +206365,50 @@ b32 main(void)
                         memory_copy(f, save, 32);
                 }
         }
+
+        // Hostile pictures: what a window's program sets (its picture's size, and so which of the processor's pages the GPU is given) against what the GPU may
+        // read. Each frame is drawn by the GPU from compositor_gpu_frames after compositor_gpu_picture (the present's order) and by compositor_draw on the processor.
+        {
+                positive tables_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20) + (6 << 20);
+                struct compositor_target reference = {gpu_kit_want, PP, 696, PH, 0, 0, 696, PH, 0, 0, 0};
+                long grown = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0), other = system_call_6(syscall(mmap), 0, 1 << 20, 3, 0x22, (positive)-1, 0);
+                struct compositor_frame f;
+                unsigned int ground = 0xff102030u;
+                positive hostile_bad, leaked;
+                b32 refused;
+
+                if ((grown < 0 && grown > -4096) || (other < 0 && other > -4096))
+                        return 1;
+                memory_zero(&compositor_gscene, sizeof(compositor_gscene));
+                compositor_gscene.ops = ops, compositor_gscene.room = 4096, compositor_gscene.width = 696, compositor_gscene.height = PH;
+                compositor_gscene.tables = (unsigned char address_to)((p8 address_to)gpu.at + tables_at), compositor_gscene.tables_at = (unsigned int)tables_at;
+                compositor_gscene.tables_size = 1 << 20;
+                for (positive i = 0; i < (1 << 18); i++)
+                        ((unsigned int address_to)grown)[i] = gpu_random() | 0xff000000u, ((unsigned int address_to)other)[i] = 0xff5a5a5au;
+#define GPU_HOSTILE(what, pixels_at, pitch_of, close_of)                                                                                                                     \
+        memory_zero(&f, sizeof(f));                                                                                                                                         \
+        f.x = 40, f.y = 40, f.width = 200, f.height = 300, f.scale = 100, f.pitch = (pitch_of), f.pixels = (const unsigned int address_to)(pixels_at), f.close = (close_of);     \
+        f.close_mean = 0x406080u;                                                                                                                                         \
+        memory_fill_u32_rect(gpu_kit_want, PP, 696, PH, ground);                                                                                                            \
+        compositor_draw(&reference, &f);                                                                                                                                    \
+        memory_zero(pic, (positive)PP * PH * 4);                                                                                                                            \
+        refused = !compositor_gpu_picture(&f) || !compositor_gpu_frames(&f, 1, ground) || !gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH); \
+        hostile_bad = leaked = 0;                                                                                                                                           \
+        for (positive y = 0; !refused && y < (positive)PH; y++)                                                                                                             \
+                for (positive x = 0; x < 696; x++)                                                                                                                          \
+                        if (pic[y * PP + x] != gpu_kit_want[y * PP + x])                                                                                                    \
+                                hostile_bad++, leaked += pic[y * PP + x] == 0xff5a5a5au;                                                                                    \
+        if (refused || hostile_bad)                                                                                                                                         \
+                string_format(log, "  gpu hostile: %s: %s%p pixels wrong, %p of them another window's\n", (string_address)(what), refused ? (string_address) "refused, " : (string_address) "", \
+                              hostile_bad, leaked);                                                                                                                         \
+        check("gpu hostile: " what, !refused && !hostile_bad)
+                // A window grown past the pages first mapped for it: the first map holds the picture's first byte and not its rows below; another window's
+                // pages were mapped after it, so the addresses past its end are that window's.
+                check("gpu hostile: the picture's first rows are mapped", gpu_map((const void address_to)grown, 4 * 256 * 16));
+                check("gpu hostile: another window's pages are mapped after them", gpu_map((const void address_to)other, 1 << 20));
+                GPU_HOSTILE("a window grown past its first map is read from its own pages", grown, 256, 0);
+#undef GPU_HOSTILE
+        }
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */

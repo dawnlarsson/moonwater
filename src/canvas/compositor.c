@@ -986,6 +986,9 @@ static void compositor_draw(const struct compositor_target *t, const struct comp
         (the panel, a picture scaled, a line lit, a close button, a preview) makes the whole answer none, and the frames are drawn by the processor.
 */
 #define COMPOSITOR_GPU_TABLES 128
+// A frame's picture's address for the GPU: in the map that holds all of it, 0 for none. A map that holds only its first byte (made when the window was
+// smaller) would have the card read its rows below from the addresses after that map's end, which are another buffer's: another window's pixels.
+#define compositor_gpu_va(f) gpu_va_bytes((f)->pixels, 4 * ((f)->pitch * (positive)((f)->height - 1) + (positive)(f)->width))
 struct compositor_gscene
 {
         unsigned int *ops;                  // the records, in the GPU's buffer
@@ -1078,7 +1081,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
         op[5] = colour, op[6] = op[7] = 0;
         if (frame)
         {
-                positive at = gpu_va(frame->pixels) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
+                positive at = compositor_gpu_va(frame) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
 
                 if (kind == 4)
                         op[5] = (unsigned int)at, op[6] = (unsigned int)(at >> 32), op[7] = (unsigned int)frame->pitch;
@@ -1107,7 +1110,7 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
         halo = compositor_gpu_close_table(side, half, 0), cross = compositor_gpu_close_table(side, half, 1);
         if (!halo || !cross)
                 return false;
-        at = gpu_va(f->pixels) + 4ull * ((positive)(by - f->y) * f->pitch + (positive)(bx - f->x));
+        at = compositor_gpu_va(f) + 4ull * ((positive)(by - f->y) * f->pitch + (positive)(bx - f->x));
         op[0] = 6u | (unsigned int)side << 8 | (unsigned int)f->pitch << 16, op[1] = (unsigned int)bx, op[2] = (unsigned int)by, op[3] = (unsigned int)(bx + side);
         op[4] = (unsigned int)(by + side), op[5] = halo, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32) | tone << 8;
         compositor_gscene.count++;
@@ -1155,7 +1158,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
 
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
-        if ((!f->builtin && (!f->pixels || !gpu_va(f->pixels))) || compositor_scaled(f) || f->preview[0] || f->preview[1] || f->preview[2] ||
+        if ((!f->builtin && (!f->pixels || w <= 0 || h <= 0 || !compositor_gpu_va(f))) || compositor_scaled(f) || f->preview[0] || f->preview[1] || f->preview[2] ||
             f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || g->count + 40 > g->room - 400)
                 return false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
@@ -6995,14 +6998,11 @@ static positive compositor_gpu_output(void)
 // A frame's picture, wholly, reachable by the GPU: mapped the first time it is asked for.
 static int compositor_gpu_picture(const struct compositor_frame *f)
 {
-        positive bytes;
-
         if (f->builtin)
                 return 1;
         if (!f->pixels || f->width <= 0 || f->height <= 0)
                 return 0;
-        bytes = 4 * (f->pitch * (positive)(f->height - 1) + (positive)f->width);
-        return gpu_va_bytes(f->pixels, bytes) || (gpu_map(f->pixels, bytes) && gpu_va_bytes(f->pixels, bytes));
+        return compositor_gpu_va(f) || (gpu_map(f->pixels, 4 * (f->pitch * (positive)(f->height - 1) + (positive)f->width)) && compositor_gpu_va(f));
 }
 
 // The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it.
