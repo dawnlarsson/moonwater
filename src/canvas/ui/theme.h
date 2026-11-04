@@ -79,7 +79,7 @@
 #define UI_CLOSE 14
 #define UI_CLOSE_IN 5
 #define UI_CLOSE_BOTTOM (UI_CLOSE + UI_CLOSE_IN)
-#define UI_TARGET 44 // a finger's least target in logical pixels: about 9 mm at the 96 to 120 dpi of most screens
+#define UI_TARGET 48 // a finger's least target in logical pixels, 48 dp as Material has it (Android), scaled with the display; iOS's is 44 pt
 
 /*
         A finger's target, the one rule: a finger on a touch screen is wider than a pointer and shakes as it lands, so what it

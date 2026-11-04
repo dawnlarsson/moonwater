@@ -127321,7 +127321,7 @@ static void check_compositor_glass_popup(void)
         middle button, and two too far apart do nothing.
 */
 /*
-        A tab's finger reach: under a finger a tab answers UI_TARGET (44 logical px) past its inner edge, toward the middle of its
+        A tab's finger reach: under a finger a tab answers UI_TARGET (48 logical px) past its inner edge, toward the middle of its
         screen (the old reach was 20 px, so a point 30 px out missed it). The points are the tab's inner edge plus 20, 30 and 50 px,
         along the band toward the middle: 20 and 30 px land on the tab and 50 px does not.
 */
@@ -127370,7 +127370,7 @@ static void check_compositor_tab_reach(void)
     at50 = compositor_band_hit(sx + sw / 2, sy - 50);
     compositor.touching = 0;
     check("tab reach: the fixture's band is at the bottom, so its tab reaches up toward the middle", dir);
-    check("tab reach: a finger 20 and 30 px above a tab on the bottom band is on that tab (UI_TARGET reach, 44 px)",
+    check("tab reach: a finger 20 and 30 px above a tab on the bottom band is on that tab (UI_TARGET reach, 48 px)",
           hit != TASKBAR_HIT_NONE && at20 == hit && at30 == hit);
     check("tab reach: a finger 50 px above it is not on that tab", at50 != hit);
 }
@@ -134280,7 +134280,7 @@ static void check_compositor_touch(void)
 
         for (unsigned int at = 0; at < array_count(scales); at++)
         {
-            int s = scales[at], least = UI_TARGET * s / 100, line = s / 100 > 1 ? s / 100 : 1, grip = 6 * s / 100 + line;
+            int s = scales[at], least = COMPOSITOR_FINGER_TARGET * s / 100, line = s / 100 > 1 ? s / 100 : 1, grip = 6 * s / 100 + line;
             int in = 2 * s / 100, before = (least - (grip + in)) / 2;
 
             compositor.scale = s;
@@ -156596,7 +156596,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                 static struct windows table;
                 static struct window_row own;
                 own.table = &table, own.row = 0, own.door = -1;
-                field_ok = UI_FIELD_H == UI_TARGET && UI_TARGET == 44;
+                field_ok = UI_FIELD_H == UI_TARGET && UI_TARGET == 48;
                 ui_field_open(&plain, &own, "");
                 ui_field_open(&secret, &own, "");
                 secret.masked = 1, secret.command = 1;
