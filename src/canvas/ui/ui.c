@@ -10756,17 +10756,30 @@ static positive ui_text_tick(struct ui_text address_to t, positive now, b32 addr
 
 static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text address_to t, positive now, b32 address_to redraw);
 static positive ui_text_bar_tick(struct ui_text address_to t, positive now, b32 address_to redraw);
+static b32 ui_text_fling(struct ui_text address_to t, positive now);
 
 /*
-        The widget's next frame as a loop's timeout: its blink, its selection's scroll (ui_text_autoscroll, a drag held past an
-        edge) and the actions bar's coming and going (ui_text_bar_tick), each folded into the timeout the loop sleeps (-1 for
-        none, as the tick answers it), with the redraw they asked for.
+        The widget's next frame as a loop's timeout: its throw (a finger's flick, ui_text_fling, for a field as for a code view),
+        its blink, its selection's scroll (ui_text_autoscroll, a drag held past an edge) and the actions bar's coming and going
+        (ui_text_bar_tick), each folded into the timeout the loop sleeps (-1 for none, as the tick answers it), with the redraw
+        they asked for. A throw's step that moves the lines asks for the picture, the last one too (the bar's own return is its tick's).
         Every app's tick asks this for its field, and none of them keeps its own deadline.
 */
 static long ui_text_timeout(struct ui address_to ui, struct ui_text address_to t, long timeout, positive now, b32 address_to redraw)
 {
-        positive due = ui_text_tick(t, now, redraw), scroll = ui_text_autoscroll(ui, t, now, redraw), bar = ui_text_bar_tick(t, now, redraw);
+        positive due, scroll, bar;
 
+        if (t->kinetic.flying)
+        {
+                p64 was = t->top_line;
+                b32 flying = ui_text_fling(t, now);
+
+                if (t->top_line != was)
+                        *redraw = true;
+                if (flying && (timeout < 0 || (long)UI_DRAG_FRAME_NS < timeout))
+                        timeout = UI_DRAG_FRAME_NS;
+        }
+        due = ui_text_tick(t, now, redraw), scroll = ui_text_autoscroll(ui, t, now, redraw), bar = ui_text_bar_tick(t, now, redraw);
         if (due && (timeout < 0 || (long)(due - now) < timeout))
                 timeout = (long)(due - now);
         if (scroll && (timeout < 0 || (long)(scroll - now) < timeout))

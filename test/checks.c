@@ -131473,6 +131473,77 @@ static void check_code_finger(struct ui address_to wui)
     ui_text_close(&view);
 }
 
+/*
+        A finger flicked along a field and lifted: the throw is the kit's, and the app's ticks (ui_text_timeout, all the app
+        asks) spend it. A field's throw nothing ticked stayed set, and kinetic.flying with it held back the actions bar.
+*/
+static void check_field_flick(struct ui address_to wui)
+{
+    static struct ui_text field;
+    struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+    struct window_event move = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+    struct window_event up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0};
+    int x = SCROLL_FIELD_LEFT + 40, y = SCROLL_FIELD_TOP + SCROLL_FIELD_HEIGHT / 2;
+    positive now = 2000000000ull;
+    b32 redraw = false, thrown;
+
+    ui_field_open(&field, null, "alpha beta gamma");
+    ui_text_draw(wui, &field, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
+    ui_kit.now = now;
+    ui_field_event(wui, &field, null, &press, x, y);
+    for (int step = 1; step <= 10; step++)
+    {
+        ui_kit.now = now += 16000000ull;
+        ui_field_event(wui, &field, null, &move, x, y - 40 * step);
+    }
+    ui_kit.now = now += 16000000ull;
+    ui_field_event(wui, &field, null, &up, x, y - 400);
+    thrown = field.kinetic.flying;
+    for (int step = 1; step <= 150; step++)
+        ui_text_timeout(wui, &field, -1, now += 16000000ull, &redraw);
+    check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !field.kinetic.flying);
+    ui_text_close(&field);
+}
+
+/*
+        The throw's last step moves the lines it still owes, and a tick that moves the view asks for the picture, the one that
+        stops the throw too: the view is never left a step behind its own scroll.
+*/
+static void check_throw_last_step(struct ui address_to wui)
+{
+    static struct ui_text view;
+    struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0};
+    struct window_event move = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0};
+    struct window_event up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, 0x110, 0};
+    int x = SCROLL_CODE_LEFT + 40, y = SCROLL_CODE_TOP + SCROLL_CODE_HEIGHT / 2;
+    positive now = 3000000000ull;
+    b32 moved_unasked = false, moved = false;
+
+    scroll_setup(0);
+    scroll_code(wui, &view, 0);
+    ui_kit.now = now;
+    ui_text_event(wui, &view, &press, x, y);
+    for (int step = 1; step <= 10; step++)
+    {
+        ui_kit.now = now += 16000000ull;
+        ui_text_event(wui, &view, &move, x, y - 40 * step);
+    }
+    ui_kit.now = now += 16000000ull;
+    ui_text_event(wui, &view, &up, x, y - 400);
+    for (int step = 1; step <= 300 && view.kinetic.flying; step++)
+    {
+        p64 was = view.top_line;
+        b32 redraw = false;
+
+        ui_text_timeout(wui, &view, -1, now += 16000000ull, &redraw);
+        if (view.top_line != was)
+            moved = true, moved_unasked |= !redraw;
+    }
+    check("code view throw: it moves the lines, and each tick that moves them asks for the picture, the one that stops it too",
+          moved && !moved_unasked && !view.kinetic.flying);
+    ui_text_close(&view);
+}
+
 static void check_field_drag_drawn(struct ui address_to wui)
 {
     static struct ui_text view;
@@ -150054,6 +150125,8 @@ static fn field_check(struct ui address_to wui)
         check_flick_lift();
         check_flick_retract();
         check_field_drag_drawn(wui);
+        check_field_flick(wui);
+        check_throw_last_step(wui);
         caret_fade_check();
         check_code_finger(wui);
         switch_cancel_check(wui);

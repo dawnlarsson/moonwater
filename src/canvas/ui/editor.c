@@ -773,16 +773,11 @@ static long editor_tick(long timeout, long address_to other)
 {
         positive now = clock_monotonic_nanoseconds();
         b32 redraw = false;
-        struct ui_text address_to view = editor.find.focused ? &editor.find : &editor_now()->view;
 
         (void)other;
-        if (editor_now()->view.kinetic.flying && ui_text_fling(&editor_now()->view, now))
-                redraw = true, timeout = UI_DRAG_FRAME_NS;
-        timeout = ui_text_timeout(&editor.ui, view, timeout, now, &redraw);
-        // The code view's drag past its edges scrolls it, and the find bar's past its sides scrolls the bar (ui_text_timeout).
-        if (view != &editor_now()->view)
-                timeout = ui_text_timeout(&editor.ui, &editor_now()->view, timeout, now, &redraw);
-        if (editor.finding && view != &editor.find)
+        // The code view's frames and, while the find bar is open or has the keys, the bar's (ui_text_timeout: its throw, its blink, its drag).
+        timeout = ui_text_timeout(&editor.ui, &editor_now()->view, timeout, now, &redraw);
+        if (editor.finding || editor.find.focused)
                 timeout = ui_text_timeout(&editor.ui, &editor.find, timeout, now, &redraw);
         if (redraw)
                 editor.dirty = true;
