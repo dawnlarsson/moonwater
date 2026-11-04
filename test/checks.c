@@ -174032,6 +174032,105 @@ static void al_test_mixer(void)
         (void)c;
 }
 
+/* ---- what is plugged in ---- */
+
+static void al_jack(const char *name, unsigned iface, long value)
+{
+        al_ctl_add((struct al_ctl){.name = name, .iface = iface, .type = 1, .access = AUDIO_CTL_ACCESS_READ, .count = 1, .value = {value}});
+}
+
+static void al_jacks_card(void)
+{
+        memset(al_ctls, 0, sizeof(al_ctls));
+        al_ctl_count = 0;
+        al_reset();
+        al_card_present[0] = 1;
+        al_cards[0] = (struct al_card_fake){"Generic", "HD-Audio Generic", "HD-Audio Generic", 1, {0}, {1}, {0}, {"ALC Analog"}, 0};
+}
+
+static void al_test_jacks(void)
+{
+        struct audio_jacks jacks;
+
+        // A desktop's codec with nothing in its jacks: the inputs (Mic, Line, Front Mic) have something and are not the question.
+        al_jacks_card();
+        al_jack("Headphone Jack", 0, 0);
+        al_jack("Line Out Jack", 0, 0);
+        al_jack("Mic Jack", 0, 1);
+        al_jack("Line Jack", 0, 1);
+        al_jack("Front Mic Jack", 0, 1);
+        al_jack("Headphone Mic Jack", 0, 1); // a microphone on a headphone socket is an input
+        al_jack("Headphone Jack", 2, 1); // a control of another interface by the same name says nothing
+        al_jack("Line Out Jack", 3, 1);  // and so does a PCM's
+        ALCHECK(audio_jacks_read(0, &jacks) == 0, "the jacks of a card are read");
+        ALCHECK(jacks.output_jacks == 2 && jacks.output_plugged == 0 && !jacks.always && !jacks.hdmi_known && !jacks.hdmi_plugged, "two output jacks, nothing in them: %d %d", jacks.output_jacks, jacks.output_plugged);
+        ALCHECK(audio_output_rank(&jacks, 0, 0, 0) == 3, "an analog output with nothing in its jacks is 3: %d", audio_output_rank(&jacks, 0, 0, 0));
+        ALCHECK(audio_output_rank(&jacks, 0, 0, 1) == 6, "a USB card is heard whatever its card says: %d", audio_output_rank(&jacks, 0, 0, 1));
+        // Something goes into the Line Out: heard.
+        al_ctls[1].value[0] = 1;
+        ALCHECK(audio_jacks_read(0, &jacks) == 0 && jacks.output_jacks == 2 && jacks.output_plugged == 1, "one output jack has something in it: %d", jacks.output_plugged);
+        ALCHECK(audio_output_rank(&jacks, 0, 0, 0) == 6, "an analog output with something in a jack is 6: %d", audio_output_rank(&jacks, 0, 0, 0));
+        // The headphones alone, with a location in the name.
+        al_jacks_card();
+        al_jack("Front Headphone Jack", 0, 1);
+        al_jack("Rear Line Out Jack", 0, 0);
+        ALCHECK(audio_jacks_read(0, &jacks) == 0 && jacks.output_jacks == 2 && jacks.output_plugged == 1, "a jack with a place in its name is an output jack: %d %d", jacks.output_jacks, jacks.output_plugged);
+        // An internal speaker: a pin that cannot tell, or a Speaker output on the mixer, is there whatever the jacks say.
+        al_jacks_card();
+        al_jack("Line Out Jack", 0, 0);
+        al_jack("Speaker Phantom Jack", 0, 1);
+        ALCHECK(audio_jacks_read(0, &jacks) == 0 && jacks.always == 1 && jacks.output_jacks == 1 && jacks.output_plugged == 0, "a phantom jack is an output that is always there, and is not counted as a jack: %d %d %d", jacks.always, jacks.output_jacks, jacks.output_plugged);
+        ALCHECK(audio_output_rank(&jacks, 0, 0, 0) == 6, "so the card is heard: %d", audio_output_rank(&jacks, 0, 0, 0));
+        al_jacks_card();
+        al_jack("Line Out Jack", 0, 0);
+        al_ctl_add((struct al_ctl){.name = "Speaker Playback Switch", .iface = 2, .type = 1, .access = AUDIO_CTL_ACCESS_READ | AUDIO_CTL_ACCESS_WRITE, .count = 2});
+        ALCHECK(audio_jacks_read(0, &jacks) == 0 && jacks.always == 1 && audio_output_rank(&jacks, 0, 0, 0) == 6, "a Speaker switch on the mixer is an output that is always there: %d", jacks.always);
+        al_jacks_card();
+        al_jack("Line Out Jack", 0, 0);
+        al_ctl_add((struct al_ctl){.name = "Bass Speaker Playback Volume", .iface = 2, .type = 2, .access = AUDIO_CTL_ACCESS_READ | AUDIO_CTL_ACCESS_WRITE, .count = 2, .min = 0, .max = 10});
+        ALCHECK(audio_jacks_read(0, &jacks) == 0 && jacks.always == 1, "and so is a Speaker volume: %d", jacks.always);
+        al_jacks_card();
+        al_jack("Line Out Jack", 0, 0);
+        al_ctl_add((struct al_ctl){.name = "Headphone Playback Switch", .iface = 2, .type = 1, .access = AUDIO_CTL_ACCESS_READ | AUDIO_CTL_ACCESS_WRITE, .count = 2});
+        ALCHECK(audio_jacks_read(0, &jacks) == 0 && jacks.always == 0, "an output of the mixer that is not a speaker is not always there: %d", jacks.always);
+        // An HDMI card: the pins that have a display, the ones that have none, the ones that cannot say, and names that are not pins.
+        al_jacks_card();
+        al_jack("HDMI/DP,pcm=3 Jack", 0, 1);
+        al_jack("HDMI/DP,pcm=7 Jack", 0, 0);
+        al_jack("HDMI/DP,pcm=8 Jack", 0, 1);
+        al_jack("HDMI/DP,pcm=9 Jack", 0, 0);
+        al_jack("HDMI/DP,pcm=64 Jack", 0, 1);
+        al_jack("HDMI/DP,pcm= Jack", 0, 1);
+        al_jack("HDMI/DP,pcm=3x Jack", 0, 1);
+        al_jack("HDMI/DP,pcm=63 Jack", 0, 1);
+        ALCHECK(audio_jacks_read(0, &jacks) == 0, "an HDMI card is read");
+        ALCHECK(jacks.hdmi_known == ((1ull << 3) | (1ull << 7) | (1ull << 8) | (1ull << 9) | (1ull << 63)), "the pins with a jack: %llx", jacks.hdmi_known);
+        ALCHECK(jacks.hdmi_plugged == ((1ull << 3) | (1ull << 8) | (1ull << 63)), "and the ones with a display in them: %llx", jacks.hdmi_plugged);
+        ALCHECK(jacks.output_jacks == 0 && !jacks.always, "an HDMI pin is not an analog output jack");
+        ALCHECK(audio_output_rank(&jacks, 1, 3, 0) == 5 && audio_output_rank(&jacks, 1, 8, 0) == 5 && audio_output_rank(&jacks, 1, 63, 0) == 5, "a pin with a display is 5: %d %d", audio_output_rank(&jacks, 1, 3, 0),
+                audio_output_rank(&jacks, 1, 8, 0));
+        ALCHECK(audio_output_rank(&jacks, 1, 7, 0) == 2 && audio_output_rank(&jacks, 1, 9, 0) == 2, "a pin with none is 2: %d %d", audio_output_rank(&jacks, 1, 7, 0), audio_output_rank(&jacks, 1, 9, 0));
+        ALCHECK(audio_output_rank(&jacks, 1, 5, 0) == 4 && audio_output_rank(&jacks, 1, 64, 0) == 4 && audio_output_rank(&jacks, 1, -1, 0) == 4, "a pin that cannot say is 4: %d %d %d", audio_output_rank(&jacks, 1, 5, 0),
+                audio_output_rank(&jacks, 1, 64, 0), audio_output_rank(&jacks, 1, -1, 0));
+        // The order of it all: a speaker or something in a jack, then a display, then a pin that cannot say, then a card with nothing in it, then a pin with no display.
+        {
+                struct audio_jacks bare;
+                struct audio_jacks empty_analog = {.output_jacks = 2};
+
+                memset(&bare, 0, sizeof(bare));
+                ALCHECK(audio_output_rank(&bare, 0, 0, 0) == 6 && audio_output_rank(&bare, 1, 3, 0) == 4, "a card that has no jacks to ask is an analog output that can be heard and a pin that cannot say: %d %d",
+                        audio_output_rank(&bare, 0, 0, 0), audio_output_rank(&bare, 1, 3, 0));
+                ALCHECK(audio_output_rank(&empty_analog, 0, 0, 0) < audio_output_rank(&jacks, 1, 3, 0) && audio_output_rank(&jacks, 1, 3, 0) < audio_output_rank(&bare, 0, 0, 0) &&
+                            audio_output_rank(&jacks, 1, 7, 0) < audio_output_rank(&empty_analog, 0, 0, 0) && audio_output_rank(&bare, 1, 3, 0) < audio_output_rank(&jacks, 1, 3, 0) &&
+                            audio_output_rank(&bare, 1, 3, 0) > audio_output_rank(&empty_analog, 0, 0, 0),
+                        "the order: analog that can be heard, a display, a pin that cannot say, analog with nothing in it, a pin with no display");
+        }
+        // A card that is gone: an error, and the jacks as they were zeroed; every control file closed.
+        al_card_present[0] = 0;
+        ALCHECK(audio_jacks_read(0, &jacks) < 0 && !jacks.hdmi_known && !jacks.output_jacks, "a card that is gone is an error");
+        ALCHECK(al_opens == al_closes, "every control file closed after the jacks");
+}
+
 /* ---- a real card: the loopback ---- */
 
 static __attribute__((unused)) double al_now(void)
@@ -174265,6 +174364,7 @@ int main(void)
         al_test_flow();
         al_test_scan();
         al_test_mixer();
+        al_test_jacks();
         al_test_loopback();
         printf("CHECK_audio_alsa: %u checks, %u failures\n", al_checks, al_failures);
         return al_failures ? 1 : 0;

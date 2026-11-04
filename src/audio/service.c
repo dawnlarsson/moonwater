@@ -138,6 +138,7 @@ static struct
         } job;
         int wake[2];
         struct audio_mixer_report hw;   // what was found and done to the output card's mixer when it was opened
+        unsigned int pick_why, why;     // why the card last looked at is the best, and why the one open plays (AUDIO_STATE_WHY_*)
         int hw_done, leave_mixer, test; // the report is of this open; -M leaves the mixer as the card has it; -t is the tone
         int input_internal;             // set while the service itself changes the sources, so the host's notice of it is not taken for the person's choice
         char wanted_source[PULSE_NAME]; // the person's choice of default source, "" for the best there is
@@ -328,48 +329,76 @@ static int audio_is_hdmi(const char *label)
         return 0;
 }
 
+// A USB card is named by where it is plugged in ("... at usb-0000:12:00.0-6, high speed"): it is there because someone plugged it in.
+static int audio_is_usb(const char *longname)
+{
+        for (long k = 0; longname[k]; k++)
+                if (longname[k] == 'u' && longname[k + 1] == 's' && longname[k + 2] == 'b' && longname[k + 3] == '-')
+                        return 1;
+        return 0;
+}
+
 /*
         Looks at the cards: the list of playback devices is made (what the page shows, and what a choice may name), and
-        one is picked: the one the person chose by name, else the one -d names, else the first that is not an HDMI one,
-        else the first. 0 when there is none.
+        one is picked: the one the person chose by name, else the one -d names, else the best placed to be heard by what the
+        cards say is plugged in (alsa.c, audio_output_rank: an analog or USB output that can be heard, then an HDMI or
+        DisplayPort output with a display in it, then one that cannot say, then analog with nothing in any jack, then a pin
+        with no display), the first of them. The devices with nothing plugged in are marked, and the reason for the pick is
+        kept for the page. 0 when there is none.
 */
 static int audio_card_pick(long *card_out, long *device_out, char *name, long name_room, char *description, long description_room)
 {
         static struct audio_card cards[AUDIO_ALSA_CARDS];
         long found = audio_cards_scan(cards, AUDIO_ALSA_CARDS), best = -1, best_device = -1, best_rank = 0;
+        unsigned int best_why = 0;
 
         audio_service.device_count = 0;
         for (long i = 0; i < found; i++)
+        {
+                struct audio_jacks jacks;
+                int usb = audio_is_usb(cards[i].longname), looked = 0;
+
                 for (long d = 0; d < cards[i].devices; d++)
                 {
                         char listed[PULSE_NAME];
-                        long rank;
+                        long rank, automatic;
+                        unsigned int why;
                         int at = audio_service.device_count;
 
                         if (!cards[i].device[d].playback)
                                 continue;
+                        if (!looked)
+                        {
+                                audio_jacks_read(cards[i].number, &jacks);
+                                looked = 1;
+                        }
+                        automatic = audio_output_rank(&jacks, audio_is_hdmi(cards[i].device[d].name), cards[i].device[d].device, usb);
+                        why = automatic == 6 ? AUDIO_STATE_WHY_ANALOG : automatic == 5 ? AUDIO_STATE_WHY_DISPLAY : automatic == 4 ? AUDIO_STATE_WHY_HDMI : AUDIO_STATE_WHY_NOTHING;
                         audio_sink_name(listed, sizeof(listed), cards + i, cards[i].device[d].device);
                         if (at < AUDIO_STATE_DEVICES)
                         {
                                 audio_copy_text(audio_service.devices[at].name, sizeof(audio_service.devices[at].name), listed);
                                 audio_describe(audio_service.devices[at].description, sizeof(audio_service.devices[at].description), cards[i].name, cards[i].device[d].name);
-                                audio_service.devices[at].flags = 0;
+                                audio_service.devices[at].flags = automatic <= 3 ? AUDIO_STATE_DEVICE_UNPLUGGED : 0;
                                 audio_service.device_count++;
                         }
-                        rank = audio_is_hdmi(cards[i].device[d].name) ? 1 : 2;
+                        rank = automatic;
                         if (audio_service.card >= 0 && cards[i].number == audio_service.card && (audio_service.device < 0 || cards[i].device[d].device == audio_service.device))
-                                rank = 90;
+                                rank = 90, why = AUDIO_STATE_WHY_NAMED;
                         if (audio_service.wanted_device[0] && audio_text_equal(audio_service.wanted_device, listed))
-                                rank = 100;
+                                rank = 100, why = AUDIO_STATE_WHY_CHOSEN;
                         if (rank > best_rank || (rank == best_rank && rank >= 90 && best < 0))
                         {
                                 best_rank = rank;
                                 best = i;
                                 best_device = d;
+                                best_why = why;
                         }
                 }
+        }
         if (best < 0)
                 return 0;
+        audio_service.pick_why = best_why;
         // A choice of the person's that is not there (the card is unplugged) is not a reason for no sound: the first is used.
         *card_out = cards[best].number;
         *device_out = cards[best].device[best_device].device;
@@ -411,6 +440,7 @@ static int audio_output_open(long asked_rate)
                 if (result == 0)
                 {
                         audio_service.pcm = pcm;
+                        audio_service.why = audio_service.pick_why;
                         audio_service.rate = pcm.rate;
                         audio_copy_text(audio_service.active_name, sizeof(audio_service.active_name), name);
                         audio_copy_text(audio_service.active_description, sizeof(audio_service.active_description), description);
@@ -445,6 +475,7 @@ static int audio_output_open(long asked_rate)
         }
         audio_service.pcm.fd = -1;
         audio_service.hw_done = 0;
+        audio_service.why = 0;
         audio_service.rate = asked_rate;
         audio_copy_text(audio_service.active_name, sizeof(audio_service.active_name), "auto_null");
         audio_copy_text(audio_service.active_description, sizeof(audio_service.active_description), "Dummy Output");
@@ -918,6 +949,7 @@ static void audio_page_write(void)
         }
         // The output: a card or a clock, and what the card's mixer was found to be.
         build.output_state = audio_service.pcm.fd >= 0 ? AUDIO_STATE_OUT_CARD : AUDIO_STATE_OUT_CLOCK;
+        build.output_why = audio_service.why;
         if (audio_service.hw_done)
         {
                 build.hw_controls = (unsigned int)audio_service.hw.output;
@@ -1852,6 +1884,14 @@ static b32 audio_test(void)
                         log_flush();
                         return 1;
                 }
+                for (unsigned int at = 0; at < page.devices && at < AUDIO_STATE_DEVICES; at++)
+                        if ((page.device_list[at].flags & AUDIO_STATE_DEVICE_ACTIVE) && (page.device_list[at].flags & AUDIO_STATE_DEVICE_UNPLUGGED))
+                        {
+                                string_format(log, "audio: the tone was played on %s, but its card says nothing is plugged into it (no speakers or headphones in the jack, no display on the output): plug something in, or play on another output with `moonwater audio device`.\n",
+                                              (string_address)page.device);
+                                log_flush();
+                                return 1;
+                        }
                 if (page.muted || page.volume == 0)
                 {
                         string_format(log, "audio: the tone was played on %s, but its volume is %s: nothing can be heard until `moonwater audio %s`.\n", (string_address)page.device,

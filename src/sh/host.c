@@ -21569,9 +21569,19 @@ static b32 locale_audio_status(string_address address_to arguments)
                 host_say(log, "  the card's own mixer was set for sound when it was opened (%p of its %p output controls were off)\n", (positive)state->hw_changed, (positive)state->hw_controls);
         if (state->muted || !state->volume)
                 host_say(log, "  nothing is heard while the volume is %s: `moonwater audio %s`\n", state->muted ? (string_address) "muted" : (string_address) "0", state->muted ? (string_address) "mute off" : (string_address) "volume 100");
+        if (!(state->output_state & AUDIO_STATE_OUT_CLOCK) && state->output_why)
+        {
+                static const char address_to const why[] = {"", "you chose it", "the server was started with it", "it is a speaker, a USB card, or an analog output with something plugged in or none that could tell",
+                                                           "a display is plugged into it and nothing is plugged into the analog jacks", "it is an HDMI or DisplayPort output that cannot say whether a display is plugged in",
+                                                           "nothing is plugged in anywhere, so it is the first output there is"};
+
+                if (state->output_why < sizeof(why) / sizeof(why[0]))
+                        host_say(log, "  picked because %s\n", (string_address)why[state->output_why]);
+        }
         for (positive at = 0; at < state->devices && at < AUDIO_STATE_DEVICES; at++)
-                host_say(log, "  %s %s  %s\n", (state->device_list[at].flags & AUDIO_STATE_DEVICE_ACTIVE) ? (string_address) "*" : (string_address) " ",
-                         (string_address)state->device_list[at].name, (string_address)state->device_list[at].description);
+                host_say(log, "  %s %s  %s%s\n", (state->device_list[at].flags & AUDIO_STATE_DEVICE_ACTIVE) ? (string_address) "*" : (string_address) " ",
+                         (string_address)state->device_list[at].name, (string_address)state->device_list[at].description,
+                         (state->device_list[at].flags & AUDIO_STATE_DEVICE_UNPLUGGED) ? (string_address) "  (nothing is plugged in)" : (string_address) "");
         for (positive at = 0; at < AUDIO_STATE_STREAMS; at++)
         {
                 const struct audio_state_stream address_to stream = &state->stream[at];

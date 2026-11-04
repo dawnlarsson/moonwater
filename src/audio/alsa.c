@@ -815,6 +815,7 @@ _Static_assert(sizeof(struct audio_ctl_value) == 1224, "snd_ctl_elem_value");
 #define AUDIO_CTL_ELEM_WRITE AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x13, sizeof(struct audio_ctl_value))
 #define AUDIO_CTL_TLV_READ AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x1a, 8)
 
+#define AUDIO_CTL_IFACE_CARD 0
 #define AUDIO_CTL_IFACE_MIXER 2
 #define AUDIO_CTL_TYPE_BOOLEAN 1
 #define AUDIO_CTL_TYPE_INTEGER 2
@@ -1092,6 +1093,152 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
         }
         audio_sys_close((int)fd);
         return 0;
+}
+
+/* ---- what is plugged in ---- */
+
+/*
+        A card says what is in its jacks: controls of the card itself (interface 0) named "<pin> Jack", booleans that are 1
+        while something is plugged in. An HDMI or DisplayPort pin is "HDMI/DP,pcm=<device> Jack" (1 while a display is
+        there), an analog output's has Headphone, Line Out or Speaker in its name ("Headphone Jack", "Front Headphone Jack",
+        "Line Out Jack"), the inputs have Mic or Line In ("Mic Jack", "Line Jack") and are not the question. A pin that cannot
+        tell is "... Phantom Jack", which is there as an internal speaker is (a Speaker output on the mixer): an output that
+        is always there. The kernel keeps the answer from the last event of the pin, so asking costs no wake of the codec and
+        may be asked again every few seconds.
+*/
+struct audio_jacks
+{
+        unsigned long long hdmi_known, hdmi_plugged; // by PCM device number under 64: the pin has a jack control, and a display is in it
+        int output_jacks, output_plugged;            // the analog outputs' jacks the card has, and how many have something in them
+        int always;                                  // an output that is always there: an internal speaker, or a pin that cannot tell
+};
+
+// The number after "HDMI/DP,pcm=" in a control's name, or -1 when the name is not of that form.
+static long audio_jack_pcm(const unsigned char *name)
+{
+        static const char prefix[] = "HDMI/DP,pcm=";
+        long at = 0, number = 0;
+
+        for (; prefix[at]; at++)
+                if (name[at] != (unsigned char)prefix[at])
+                        return -1;
+        if (name[at] < '0' || name[at] > '9')
+                return -1;
+        for (; name[at] >= '0' && name[at] <= '9' && number < 1000; at++)
+                number = number * 10 + (name[at] - '0');
+        return name[at] == ' ' ? number : -1;
+}
+
+// Is the text somewhere in the name (a name is 44 bytes at most).
+static int audio_mixer_has(const unsigned char *name, const char *text)
+{
+        for (long from = 0; from < 44 && name[from]; from++)
+        {
+                long k = 0;
+
+                while (text[k] && from + k < 44 && name[from + k] == (unsigned char)text[k])
+                        k++;
+                if (!text[k])
+                        return 1;
+        }
+        return 0;
+}
+
+/*
+        What the card says is in its jacks, into jacks. Answers 0, or a negative errno when the card's control file will
+        not open or be listed (the jacks are then as they were zeroed: nothing known, which ranks as can't tell).
+*/
+AUDIO_API long audio_jacks_read(long card, struct audio_jacks *jacks)
+{
+        struct audio_ctl_id ids[AUDIO_MIXER_MAX];
+        struct audio_ctl_list list;
+        char path[40];
+        long fd, result;
+
+        __builtin_memset(jacks, 0, sizeof(*jacks));
+        audio_alsa_path(path, card, 0, 0, 1);
+        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
+        if (fd < 0)
+                return fd;
+        __builtin_memset(&list, 0, sizeof(list));
+        list.space = AUDIO_MIXER_MAX;
+        list.pids = ids;
+        result = audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_LIST, &list);
+        if (result < 0)
+        {
+                audio_sys_close((int)fd);
+                return result;
+        }
+        for (unsigned int k = 0; k < list.used && k < AUDIO_MIXER_MAX; k++)
+        {
+                struct audio_ctl_value now;
+                long before, pcm;
+
+                if (ids[k].iface == AUDIO_CTL_IFACE_MIXER)
+                {
+                        // An internal speaker is an output of the mixer with no jack to tell: there as long as the machine is.
+                        if ((audio_mixer_ends(ids[k].name, " Playback Switch", &before) || audio_mixer_ends(ids[k].name, " Playback Volume", &before)) && audio_mixer_has(ids[k].name, "Speaker"))
+                                jacks->always = 1;
+                        continue;
+                }
+                if (ids[k].iface != AUDIO_CTL_IFACE_CARD || !audio_mixer_ends(ids[k].name, " Jack", &before) || audio_mixer_has(ids[k].name, "Mic"))
+                        continue;
+                pcm = audio_jack_pcm(ids[k].name);
+                if (pcm < 0)
+                {
+                        if (!audio_mixer_has(ids[k].name, "Headphone") && !audio_mixer_has(ids[k].name, "Line Out") && !audio_mixer_has(ids[k].name, "Speaker"))
+                                continue;
+                        if (audio_mixer_has(ids[k].name, "Phantom"))
+                        {
+                                jacks->always = 1;
+                                continue;
+                        }
+                }
+                __builtin_memset(&now, 0, sizeof(now));
+                now.id = ids[k];
+                if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_READ, &now) < 0)
+                        continue;
+                if (pcm >= 0)
+                {
+                        if (pcm < 64)
+                        {
+                                jacks->hdmi_known |= 1ull << pcm;
+                                if (now.value.integer[0])
+                                        jacks->hdmi_plugged |= 1ull << pcm;
+                        }
+                        continue;
+                }
+                jacks->output_jacks++;
+                if (now.value.integer[0])
+                        jacks->output_plugged++;
+        }
+        audio_sys_close((int)fd);
+        return 0;
+}
+
+/*
+        How well a playback device is placed to be heard when nobody chose one, by what its card says is plugged in:
+        6 an analog or USB output that can be heard (a USB card is there because it was plugged in; an analog output has an
+          internal speaker, or something in a jack, or has no jack that could tell),
+        5 an HDMI or DisplayPort output with a display in it,
+        4 one whose pin cannot tell,
+        3 an analog output with nothing in any jack,
+        2 an HDMI or DisplayPort output with no display.
+        The better rank is the one played on; ties go to the first. Plugged-in analog outranks a display as sound servers
+        have it (the speakers or headphones that were put in are what was meant), and a display outranks a jack with nothing
+        in it (a desktop with its sound from the monitor).
+*/
+AUDIO_API int audio_output_rank(const struct audio_jacks *jacks, int hdmi, long device, int usb)
+{
+        if (hdmi)
+        {
+                if (device < 0 || device >= 64 || !((jacks->hdmi_known >> device) & 1))
+                        return 4;
+                return (jacks->hdmi_plugged >> device) & 1 ? 5 : 2;
+        }
+        if (usb || jacks->always || !jacks->output_jacks || jacks->output_plugged)
+                return 6;
+        return 3;
 }
 
 #endif // AUDIO_ALSA_INCLUDED

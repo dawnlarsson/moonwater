@@ -50,6 +50,15 @@
 
 #define AUDIO_STATE_DEVICE_ACTIVE 1u
 #define AUDIO_STATE_DEVICE_MONITOR 2u // an input: the monitor of a sink (what the machine plays), not a microphone
+#define AUDIO_STATE_DEVICE_UNPLUGGED 4u // an output whose card says nothing is plugged in (no speakers in its jack, no display on its pin)
+
+// Why the output is the one that plays (output_why).
+#define AUDIO_STATE_WHY_CHOSEN 1u // the person chose it (moonwater audio device)
+#define AUDIO_STATE_WHY_NAMED 2u  // the server was started with -d
+#define AUDIO_STATE_WHY_ANALOG 3u // an analog or USB output that can be heard: a speaker, something in a jack, a USB card, or no jack that could tell
+#define AUDIO_STATE_WHY_DISPLAY 4u // a display is plugged into it and nothing is in the analog jacks
+#define AUDIO_STATE_WHY_HDMI 5u   // an HDMI or DisplayPort output whose pin cannot say whether a display is there
+#define AUDIO_STATE_WHY_NOTHING 6u // nothing is plugged in anywhere: the first output there is
 
 struct audio_state_stream
 {
@@ -103,6 +112,7 @@ struct audio_state
         unsigned int hw_changed;       // and wrote, because they were not as a sound needs them
         unsigned int hw_off;           // and found still off after (the card would not take them)
         char hw_note[48];              // the first of those, as the card names it
+        unsigned int output_why;       // AUDIO_STATE_WHY_*: why this output plays
 };
 
 _Static_assert(sizeof(struct audio_state) <= AUDIO_STATE_BYTES, "the state page fits its file");

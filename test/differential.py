@@ -47558,8 +47558,8 @@ def harness_moonwater_cli(argv):
               any("input mute off" in line for line in bare) and any("source default" in line for line in bare),
               "bare audio says the recording rows too", repr(bare))
 
-        def audio_page(volume, muted, device, name, cards, programs, capture=1, source=(b"", b"", 0, 0), sources=(), records=(), output=1, mixer=(0, 0, 0), note=b""):
-            body = struct.pack("<4I", 0x5341574d, 3, 4, 10840)
+        def audio_page(volume, muted, device, name, cards, programs, capture=1, source=(b"", b"", 0, 0), sources=(), records=(), output=1, mixer=(0, 0, 0), note=b"", why=0):
+            body = struct.pack("<4I", 0x5341574d, 3, 4, 10844)
             body += struct.pack("<11I", volume, muted, 0, 0, 0, 0, 48000, 256, 5000, len(programs), len(cards))
             body += device.ljust(96, b"\0") + name.ljust(64, b"\0")
             for at in range(8):
@@ -47588,8 +47588,8 @@ def harness_moonwater_cli(argv):
                     body += struct.pack("<6I", 0xffffffff, 0, 0, 0, 0, 0) + struct.pack("<iI", 0, 0) + b"\0" * 128
             # The output's own state (version 3): a card or a clock (1, 2), what the server did to the card's mixer (4 set, 8 a switch would
             # not stay on, 16 no controls), the controls looked at, written and still off, and the first of those still off.
-            body += struct.pack("<4I", output, mixer[0], mixer[1], mixer[2]) + note.ljust(48, b"\0")
-            assert len(body) == 10840
+            body += struct.pack("<4I", output, mixer[0], mixer[1], mixer[2]) + note.ljust(48, b"\0") + struct.pack("<I", why)
+            assert len(body) == 10844
             return body
 
         (sandbox / "run/moonwater/pulse").mkdir(parents=True, exist_ok=True)
@@ -47663,6 +47663,15 @@ def harness_moonwater_cli(argv):
         bare = answers(lines)["audio"]["out"]
         check(finished and any("nothing is heard while the volume is muted" in line and "moonwater audio mute off" in line for line in bare),
               "a mute is said to be why nothing is heard, with the word that mends it", repr(bare))
+        # Why the output was picked, and the devices with nothing plugged in (flag 4 of a card, which audio_page's tuples carry as the third word).
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(
+            52429, 0, b"HDMI 0", b"alsa_output.pci.hdmi", [(b"alsa_output.pci.analog", b"Line Out", 4), (b"alsa_output.pci.hdmi", b"HDMI 0", 1)], [], output=1, why=4))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("picked because a display is plugged into it and nothing is plugged into the analog jacks" in line for line in bare) and
+              any("alsa_output.pci.analog  Line Out  (nothing is plugged in)" in line for line in bare) and
+              any("* alsa_output.pci.hdmi  HDMI 0" in line for line in bare) and not any("HDMI 0  (nothing" in line for line in bare),
+              "bare audio says why the output was picked, and marks the outputs with nothing plugged in", repr(bare))
         # moonwater audio test is a client of the server: with none to answer it says so, and fails.
         lines, finished = session(say("audio test"))
         got_test = answers(lines)["audio test"]
