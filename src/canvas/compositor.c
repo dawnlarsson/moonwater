@@ -11976,16 +11976,16 @@ static struct
         int history[COMPOSITOR_CLIP_HISTORY];
 } compositor_clip = {.door = -1, .fd = {-1, -1}};
 
-// The window a row belongs to: itself, or the window at the root of its popups.
+/*
+        The window a row belongs to: itself, or the window at the root of its popups, as the compositor took them with their
+        first pictures (compositor_popup_parent). The table's popup_parent is the program's to write at any time: a row that
+        wrote the focused window's there after it showed was that window's to paste for, though it is no popup of it.
+*/
+static int compositor_popup_root(int row);
+
 static int compositor_clip_root(int row)
 {
-        for (int hops = 0; hops < WINDOWS && row >= 0 && compositor.table->popup_parent[row]; hops++)
-        {
-                unsigned int parent = compositor.table->popup_parent[row];
-
-                row = parent >= 1 && parent <= WINDOWS ? (int)parent - 1 : -1;
-        }
-        return row;
+        return row >= 0 && row < WINDOWS ? compositor_popup_root(row) : -1;
 }
 
 // A key or a button the person pressed on a row: the row and the window it belongs to may paste for a while.

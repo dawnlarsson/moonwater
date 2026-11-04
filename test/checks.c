@@ -163583,6 +163583,13 @@ static fn te_clipboard(positive rounds)
         compositor_clip_gesture(2);
         te_clip_ask(2, WINDOWS_CLIP_CLIPBOARD);
         te_check(te_clip_event(2, &which) == WINDOWS_CLIP_REFUSED, "a window without the keys is refused", 0);
+        // One that says in the table it is a popup of the window with the keys, which the compositor never took it for, too.
+        te_clip_table.popup_parent[2] = 1 + 1;
+        compositor_clip_gesture(2);
+        te_clip_ask(2, WINDOWS_CLIP_CLIPBOARD);
+        te_check(te_clip_event(2, &which) == WINDOWS_CLIP_REFUSED,
+                 "a window that writes the focused window as its popup parent, and is none, is refused", 0);
+        te_clip_table.popup_parent[2] = 0;
         compositor_clip.gesture[1] = 0;
         te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
         te_check(te_clip_event(1, &which) == WINDOWS_CLIP_REFUSED, "a paste with nobody at the keys is refused", 0);

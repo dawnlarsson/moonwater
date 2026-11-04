@@ -41,6 +41,30 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-127: a window could make itself a popup of the focused window for the clipboard
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 (hardening: every table writer is root today, MW-2026-050) |
+| Class | Authorization decided from a field the requester writes (CWE-639 class): the clipboard's owner of a popup |
+| Attacker | a window's program; reachable by a non-root program only if the table is ever opened to one |
+| Moonwater exposure window | from `76914efe` (2026-10-30 16:03 +01:00, the clipboard) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_clip_root`) |
+
+**What it was.** A paste is answered READY only to the window with the keys, or to a popup of it, after a press of the
+person's on that row. Which window a popup belongs to was read from the row's `popup_parent` in the table, which its program
+writes at any time; the compositor's own record of a popup's window (`compositor_popup_parent`) is taken once, with the
+first picture. A window that wrote the focused window's row there after it showed was taken for that window's popup: a
+press on it (which does not give it the keys) let it paste what the person copied in the focused window.
+
+**The fix.** `compositor_clip_root` walks the compositor's own record (`compositor_popup_root`), which the Wayland shim's
+paste uses too; a real popup's answer is the same.
+
+**Tests that fail without it.** `CHECK_text_engine` section `clipboard`: a window that writes the focused window as its
+popup parent, and is none, is refused a paste after its own press. With the old walk it is READY (1 failure, gcc).
+
+**Still open.** Nothing in the clipboard's rules; the shared table's other per-row trust is the design (MW-2026-050).
+
 ### MW-2026-126: the compositor relied on the Wayland shim to ignore SIGPIPE
 
 | | |
