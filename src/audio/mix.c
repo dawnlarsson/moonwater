@@ -105,6 +105,11 @@ float f32_scale_add_peak(float *dst, const float *x, unsigned long count, float 
 void f32_planes_from_s16(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels);
 void f32_planes_from_s32(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels);
 void f32_planes_from_f32(float *const *planes, const unsigned char *src, unsigned long frames, unsigned long channels);
+void f32_pair_to_s16(unsigned char *dst, const float *left, const float *right, unsigned long count);
+void f32_pair_to_s32(unsigned char *dst, const float *left, const float *right, unsigned long count);
+void f32_pair_to_s24_32(unsigned char *dst, const float *left, const float *right, unsigned long count);
+void f32_pair_to_f32(unsigned char *dst, const float *left, const float *right, unsigned long count);
+unsigned long f32_pair_clip(float *left, float *right, unsigned long count);
 #endif
 
 /* ---- numbers: sin, sqrt and the Bessel function, in double, with no library ---- */
@@ -354,6 +359,8 @@ static inline int audio_round16(float v)
         float r;
         int bits;
 
+        if (v != v)
+                return 0;
         v *= 32768.0f;
         v = v > 32767.0f ? 32767.0f : v;
         v = v < -32768.0f ? -32768.0f : v;
@@ -367,6 +374,8 @@ static inline int audio_round_wide(float v, double scale, double high)
         double d = (double)v * scale, r;
         long long bits;
 
+        if (v != v)
+                return 0;
         d = d > high ? high : d;
         d = d < -high - 1.0 ? -high - 1.0 : d;
         r = d + 6755399441055744.0; // 1.5 * 2^52
@@ -382,6 +391,19 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
 {
         long bytes = audio_format_bytes(format);
 
+        // A card of two channels, which is what is asked for whenever it can be, in the formats it is asked in: the library's.
+        if (channels == 2 && frames > 0 && (format == AUDIO_FORMAT_S16LE || format == AUDIO_FORMAT_S32LE || format == AUDIO_FORMAT_S24_32LE || format == AUDIO_FORMAT_F32LE))
+        {
+                if (format == AUDIO_FORMAT_S16LE)
+                        f32_pair_to_s16(dst, left, right, (unsigned long)frames);
+                else if (format == AUDIO_FORMAT_S32LE)
+                        f32_pair_to_s32(dst, left, right, (unsigned long)frames);
+                else if (format == AUDIO_FORMAT_S24_32LE)
+                        f32_pair_to_s24_32(dst, left, right, (unsigned long)frames);
+                else
+                        f32_pair_to_f32(dst, left, right, (unsigned long)frames);
+                return frames * 2 * bytes;
+        }
         for (long i = 0; i < frames; i++)
         {
                 for (long c = 0; c < channels; c++)
@@ -1215,17 +1237,8 @@ AUDIO_API long audio_sink_end(struct audio_sink *sink, unsigned char *dst, long 
                 if (c)
                         sink->master_now = now;
         }
-        for (long i = 0; i < frames; i++)
-        {
-                float l = sink->mix[0][i], r = sink->mix[1][i];
-
-                if (l > 1.0f || l < -1.0f || r > 1.0f || r < -1.0f)
-                {
-                        sink->clips++;
-                        sink->mix[0][i] = l > 1.0f ? 1.0f : l < -1.0f ? -1.0f : l;
-                        sink->mix[1][i] = r > 1.0f ? 1.0f : r < -1.0f ? -1.0f : r;
-                }
-        }
+        if (frames > 0)
+                sink->clips += f32_pair_clip(sink->mix[0], sink->mix[1], (unsigned long)frames);
         return audio_encode(format, dst, frames, channels, sink->mix[0], sink->mix[1]);
 }
 

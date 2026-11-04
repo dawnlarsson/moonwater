@@ -25,7 +25,7 @@ M = [
     ("mix", "output channels swapped", "c == 0 ? left[i] : c == 1 ? right[i] : 0.0f", "c == 0 ? right[i] : c == 1 ? left[i] : 0.0f"),
     ("mix", "LFE mixed in", "case AUDIO_POSITION_LFE:\n                        break;", "case AUDIO_POSITION_LFE:\n                        side = 2;\n                        break;"),
     ("mix", "table rows not normalised", "row[k] = (float)((double)row[k] / sum);", "row[k] = row[k];"),
-    ("mix", "clips not counted", "sink->clips++;", ""),
+    ("mix", "clips not counted", "sink->clips += f32_pair_clip(sink->mix[0], sink->mix[1], (unsigned long)frames);", "(void)f32_pair_clip(sink->mix[0], sink->mix[1], (unsigned long)frames);"),
     ("mix", "24-bit scale wrong", "d[i] = (float)x * (1.0f / 8388608.0f);\n                        }\n                        break;\n                case AUDIO_FORMAT_S24BE:", "d[i] = (float)x * (1.0f / 4194304.0f);\n                        }\n                        break;\n                case AUDIO_FORMAT_S24BE:"),
     ("mix", "no fade when data runs out", "held = played < AUDIO_RAMP ? played : AUDIO_RAMP;", "held = 0;"),
     ("mix", "master gain ignored", "&now, sink->master_target, audio_slope(master, sink->master_target)", "&now, 1.0f, audio_slope(master, 1.0f)"),

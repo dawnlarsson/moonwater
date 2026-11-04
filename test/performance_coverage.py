@@ -303,6 +303,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'f32_planes_from_s16 f
       'paired timing against the mixing core\'s decode loop as the service builds it (-O2, the baseline) and at -O3 for the tier, '
       'over 256 frames of stereo, mono and six channels and 16 frames of stereo in each format, from a source a few bytes off a '
       'line, with AVX2 and SSE2; V and without on riscv64, NEON on arm64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'f32_pair_to_s16 f32_pair_to_s32 f32_pair_to_s24_32 f32_pair_to_f32 f32_pair_clip',
+      'paired timing against the mixing core\'s encode loop and clip loop as the service builds it (-O2, the baseline) and at -O3 for '
+      'the tier, over 256 frames into each format, 16 frames of 16 bit, and the clip over 256 frames with none past full scale and '
+      'with one in eight past it, with AVX2 and SSE2; V and without on riscv64, NEON on arm64')
 cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'resample_polyphase2_f32',
       'paired timing against the mixing core\'s C loop as the service is built (-O2, the baseline) and at -O3 for the tier, '
       'at 44.1, 22.05, 96 and 192 kHz into 48 kHz (64 to 256 taps, 256 frames a call) and 16 frames, three tables rotating '

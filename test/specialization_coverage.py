@@ -376,6 +376,9 @@ cover('folds_already', 'count', 'f32_scale_peak f32_scale_add_peak',
 cover('folds_already', 'frames', 'f32_planes_from_s16 f32_planes_from_s32 f32_planes_from_f32',
       'the mixing core hands it the frames a block asks for (up to 512, set by the period and the ring) and the stream\'s channel count, '
       'which the program chose at run time; a literal count would remove a compare or two from a loop of dozens of vector turns')
+cover('folds_already', 'count', 'f32_pair_to_s16 f32_pair_to_s32 f32_pair_to_s24_32 f32_pair_to_f32 f32_pair_clip',
+      'the sink hands them the frames of its period (16 to 512), which the card\'s period and the service\'s set at run time; '
+      'a literal count would remove one compare from a loop of dozens of vector turns')
 cover('folds_already', 'count', 'resample_polyphase2_f32',
       'the mixing core hands it the frames a period asks for (the sink\'s block, 16 to 512) and the table\'s taps and phases, '
       'which the two sample rates of a stream set at run time; a literal count would remove one compare from a stream of '
