@@ -33,6 +33,7 @@ static struct taskbar_state
 {
         int stale;                              // the band is drawn whole at the next present
         unsigned int minute;                    // the minute the tray shows
+        unsigned int language;                  // the language the tray's words were last taken in (taskbar_tick)
         unsigned int position_default;          // where the band sits when no setting keeps one (-t: top)
         unsigned int position;                  // where it sits now
         int all;                                // `taskbar display all`: a band on every screen, each its own windows
@@ -49,7 +50,7 @@ static struct taskbar_state
         int volume_percent, volume_muted;       // what it says (the master volume, 0 to 100, and whether it is muted)
         int volume_flash;                       // a key or the wheel changed it just now: the cell says the percent, not the speaker
         int mic_item, mic_muted;                // a program records from a microphone (or its mute was just thrown): the tray has a microphone cell, struck when muted
-} taskbar = {1, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
+} taskbar = {1, 0, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
 #define TASKBAR_TAB_CHUNK 256
@@ -991,12 +992,11 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 static int taskbar_tick(void)
 {
         unsigned int now = taskbar_minute_now(), language_now = compositor.table ? compositor.table->language : 0;
-        static unsigned int language_was;
 
         // A language taken is the tray's words in it (a weekday, a month, AM and PM) at once, and not at the minute's end.
-        if (now == taskbar.minute && language_now == language_was)
+        if (now == taskbar.minute && language_now == taskbar.language)
                 return 0;
-        language_was = language_now;
+        taskbar.language = language_now;
         taskbar.minute = now;
         taskbar_battery_refresh();
         taskbar_tray_render();
