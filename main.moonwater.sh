@@ -238,8 +238,8 @@ function desktop_settings {
 }
 
 # The mixer. The compositor's saying volume_button (the tray's volume cell pressed) starts its popup, -q, beside the cell, -a: the
-# device's volume and mute and a row that starts the whole mixer. A mixer that is already open is lifted by its own second start,
-# which finds it and ends.
+# device's volume and mute and a row that starts the whole mixer. mic_button (the tray's microphone cell, there while a program records)
+# starts the same popup with -i, the recording strips. A mixer that is already open is lifted by its own second start, which finds it and ends.
 function desktop_mixer {
   desktop_font
   [ -n "$desktop_text" ] || return
@@ -266,6 +266,7 @@ function desktop_keys_answer {
       tray_double) desktop_asked desktop_settings ;;
       launcher_button) desktop_asked desktop_launcher -a ;;
       volume_button) desktop_asked desktop_mixer -q -a ;;
+      mic_button) desktop_asked desktop_mixer -q -a -i ;;
       esac
     done < /run/moonwater/keys.fire
   done

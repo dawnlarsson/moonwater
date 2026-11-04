@@ -48,6 +48,7 @@ static struct taskbar_state
         int volume_item;                        // the sound server is there: the tray has a volume cell before the battery's
         int volume_percent, volume_muted;       // what it says (the master volume, 0 to 100, and whether it is muted)
         int volume_flash;                       // a key or the wheel changed it just now: the cell says the percent, not the speaker
+        int mic_item, mic_muted;                // a program records from a microphone (or its mute was just thrown): the tray has a microphone cell, struck when muted
 } taskbar = {1, 0, TASKBAR_BOTTOM, TASKBAR_BOTTOM, 0, {0}, 0, 0, 0};
 
 // A tab's glass is tinted a chunk at a time into this, and grained over no picture at all.
@@ -135,7 +136,7 @@ static int taskbar_tray(int high)
 {
         if (taskbar.tray_custom)
                 return taskbar_text(high, taskbar.tray_chars > 0 ? taskbar.tray_chars : 1);
-        return taskbar_text(high, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0));
+        return taskbar_text(high, 5) * (1 + (taskbar.battery_item ? 1 : 0) + (taskbar.volume_item ? 1 : 0) + (taskbar.mic_item ? 1 : 0));
 }
 
 static int taskbar_tab_width(const struct taskbar_layout *lay, int which)
@@ -184,12 +185,14 @@ static void taskbar_layout(const struct taskbar_view *view, struct taskbar_layou
 
 /*
         Where a slot is along the edge: its start and length. Slot -2 is the
-        tray as a whole, -3 the clock, -4 the battery and TASKBAR_VOLUME (-6) the
-        volume item (all three inside the tray, the volume first), and
+        tray as a whole, -3 the clock, -4 the battery, TASKBAR_VOLUME (-6) the
+        volume item and TASKBAR_MIC (-7) the microphone's (all inside the tray, the
+        microphone first, then the volume), and
         TASKBAR_LAUNCHER (-5) the launcher button, a gap in from the leading
         end. Answers 0 for a slot that has none: a tab past the count or too
         narrow for one, the battery when none is shown, the volume when the
-        sound server is not there, or the button when the band has none.
+        sound server is not there, the microphone when nothing records, or the
+        button when the band has none.
 */
 static int taskbar_along(const struct taskbar_layout *lay, int which, int *along, int *length)
 {
@@ -216,17 +219,23 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
         {
                 if (taskbar.tray_custom)
                         return 0;
-                *along = lay->tray_at + (taskbar.battery_item ? text : 0) + (taskbar.volume_item ? text : 0), *length = text;
+                *along = lay->tray_at + (taskbar.battery_item ? text : 0) + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
         }
         else if (which == -4)
         {
                 if (!taskbar.battery_item || taskbar.tray_custom)
                         return 0;
-                *along = lay->tray_at + (taskbar.volume_item ? text : 0), *length = text;
+                *along = lay->tray_at + (taskbar.volume_item ? text : 0) + (taskbar.mic_item ? text : 0), *length = text;
         }
         else if (which == TASKBAR_VOLUME)
         {
                 if (!taskbar.volume_item || taskbar.tray_custom)
+                        return 0;
+                *along = lay->tray_at + (taskbar.mic_item ? text : 0), *length = text;
+        }
+        else if (which == TASKBAR_MIC)
+        {
+                if (!taskbar.mic_item || taskbar.tray_custom)
                         return 0;
                 *along = lay->tray_at, *length = text;
         }
@@ -279,7 +288,7 @@ static int taskbar_hit_reach(const struct taskbar_view *view, int px, int py, in
 {
         int half = reach ? 2 * view->scale / 100 : 0;
 
-        for (int which = TASKBAR_VOLUME; which < (int)view->count; which++)
+        for (int which = TASKBAR_MIC; which < (int)view->count; which++)
         {
                 int x, y, width, height;
 
@@ -882,6 +891,20 @@ static void taskbar_volume_cell(const struct taskbar_view *view, const struct ta
 }
 
 /*
+        The microphone cell: the microphone (ui_microphone, in the band's own pixels) in the error colour, so that a program recording is
+        never silent in the tray, and struck when the microphone is muted.
+*/
+static void taskbar_mic_cell(const struct taskbar_view *view, const struct taskbar_layout *lay, int x, int y, int width, int height)
+{
+        struct ui ui;
+        int size = (width < height ? width : height) * 70 / 100;
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)lay->bw, ui.width = lay->bw, ui.height = lay->bh, ui.top = 0, ui.bottom = lay->bh, ui.scale = view->scale;
+        ui_microphone(&ui, x - lay->bx + (width - size) / 2, y - lay->by + (height - size) / 2, size, taskbar.mic_muted, ui_role(UI_ERROR) | 0xff000000u);
+}
+
+/*
         The band drawn over what is under it: each tab redone made glass with
         its title on it, and the tray made glass with the clock and the
         battery. Only the slots in redo are made again, and only their span
@@ -1009,6 +1032,8 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 }
                 if (taskbar_slot(view, TASKBAR_VOLUME, &x, &y, &width, &height))
                         taskbar_volume_cell(view, &lay, x, y, width, height, ink, ground);
+                if (taskbar_slot(view, TASKBAR_MIC, &x, &y, &width, &height))
+                        taskbar_mic_cell(view, &lay, x, y, width, height);
         }
         return 1;
 }
@@ -1151,6 +1176,22 @@ static int taskbar_volume_set(int present, int percent, int muted, int flash)
         return changed;
 }
 
+/*
+        Whether a program records from a microphone (or the microphone's mute was just thrown), for the microphone cell: present when
+        the cell is there, and whether the microphone is muted. Answers 1 when the tray is to be drawn again for it.
+*/
+static int taskbar_mic_set(int present, int muted)
+{
+        int changed;
+
+        present = present != 0, muted = muted != 0;
+        changed = present != taskbar.mic_item || (present && muted != taskbar.mic_muted);
+        taskbar.mic_item = present, taskbar.mic_muted = muted;
+        if (changed)
+                taskbar.stale = 1;
+        return changed;
+}
+
 // `taskbar text`: edge turns a side band's letters' tops toward the edge it is on, else toward the middle.
 static void taskbar_text_set(int edge)
 {
@@ -1165,20 +1206,30 @@ static void taskbar_launcher_set(int on)
         taskbar.stale = 1;
 }
 
-// The same for the volume cell: where the popup opens beside, the cell's length along the edge and the band's whole thickness across it.
-static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+// The same for a cell of the tray: where a popup opens beside, the cell's length along the edge and the band's whole thickness across it.
+static int taskbar_cell_anchor(const struct taskbar_view *view, int which, int *x, int *y, int *width, int *height)
 {
         struct taskbar_layout lay;
         int along, length;
 
         taskbar_layout(view, &lay);
-        if (!taskbar_along(&lay, TASKBAR_VOLUME, &along, &length))
+        if (!taskbar_along(&lay, which, &along, &length))
                 return 0;
         if (lay.vertical)
                 *x = lay.bx, *y = along, *width = lay.bw, *height = length;
         else
                 *x = along, *y = lay.by, *width = length, *height = lay.bh;
         return 1;
+}
+
+static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{
+        return taskbar_cell_anchor(view, TASKBAR_VOLUME, x, y, width, height);
+}
+
+static int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{
+        return taskbar_cell_anchor(view, TASKBAR_MIC, x, y, width, height);
 }
 
 /*

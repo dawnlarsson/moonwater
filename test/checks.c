@@ -126981,6 +126981,45 @@ static int volume_file(const char address_to path, char address_to into, positiv
         return into[0] != 0;
 }
 
+// A page with a microphone and, when flags is not 0, one program recording from it in a stream with those flags; capture says whether recording is allowed and muted whether the microphone is.
+static fn mic_put_page(unsigned int capture, unsigned int muted, unsigned int flags)
+{
+        static struct audio_state page;
+        bipolar handle;
+
+        memory_zero(&page, sizeof(page));
+        page.magic = AUDIO_STATE_MAGIC, page.version = AUDIO_STATE_VERSION, page.bytes = sizeof(page), page.seq = 2;
+        page.volume = 52429;
+        string_copy_bounded((string_address)page.name, (string_address) "alsa_output.test", sizeof(page.name));
+        string_copy_bounded((string_address)page.input, (string_address) "Test microphone", sizeof(page.input));
+        string_copy_bounded((string_address)page.input_name, (string_address) "alsa_input.test", sizeof(page.input_name));
+        page.capture = capture, page.input_muted = muted, page.input_volume = 65536;
+        for (int k = 0; k < AUDIO_STATE_RECORDS; k++)
+                page.record[k].index = 0xffffffffu;
+        if (flags)
+                page.record[1] = (struct audio_state_stream){3, 8, 65536, flags, 0, 0, 200, 1000, "Chromium", "Meet", ""};
+        handle = system_open_at_mode(AT_FDCWD, (string_address) "/tmp/mw-volume-state", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (handle >= 0)
+        {
+                system_write_once(handle, &page, sizeof(page));
+                system_close(handle);
+        }
+}
+
+// The page put and looked at (nothing held back), and whether the tray has a microphone cell then.
+static int mic_cell(unsigned int capture, unsigned int muted, unsigned int flags)
+{
+        struct taskbar_view view;
+        int x, y, w, h;
+
+        mic_put_page(capture, muted, flags);
+        compositor_volume_unmap();
+        compositor_volume.hold_until = 0, compositor_volume.mic_flash_until = 0;
+        compositor_volume_look(clock_monotonic_nanoseconds());
+        view = compositor_taskbar_view();
+        return taskbar_slot(&view, TASKBAR_MIC, &x, &y, &w, &h);
+}
+
 static void check_compositor_volume(void)
 {
         static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -127242,6 +127281,142 @@ static void check_compositor_volume(void)
         compositor.pointer_x = cx + cw / 2, compositor.pointer_y = cy + ch / 2;
         compositor_wheel(120, 1);
         check("volume: and nor is one turned sideways", compositor_volume.percent == 80);
+
+        // The microphone: a cell in the tray, before the volume's, while a program records from one (not one that records what plays, nor a paused
+        // one, nor with recording turned off); the microphone key and a middle press throw its mute, over the socket and in the file.
+        {
+                static unsigned int mic_lit[sizeof(band_pixels) / sizeof(unsigned int)];
+                static const char *const titles[3] = {"a", "b", "c"};
+                struct windows address_to table = compositor.table;
+                int mx, my, mw, mh, vx, vy, vw, vh, ax, ay, aw, ah, counts[2], rect[4];
+
+                compositor_volume_path[4] = "/tmp/mw-mic.mute";
+                system_remove_at(AT_FDCWD, (string_address)compositor_volume_path[4], 0);
+                taskbar_settings_set("bottom", "primary", "battery none\n");
+                taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+                check("mic: with no program recording there is no cell", !mic_cell(1, 0, 0) && compositor_volume.present && !compositor_volume.recording);
+                check("mic: a program that records what plays is none", !mic_cell(1, 0, AUDIO_STATE_PLAYING | AUDIO_STATE_MONITOR));
+                check("mic: nor is a paused one", !mic_cell(1, 0, AUDIO_STATE_PLAYING | AUDIO_STATE_CORKED));
+                check("mic: nor one when recording is turned off", !mic_cell(0, 0, AUDIO_STATE_PLAYING));
+                check("mic: one that records from a microphone puts the cell in the tray", mic_cell(1, 0, AUDIO_STATE_PLAYING) && compositor_volume.recording == 1 && taskbar.mic_item);
+                view = compositor_taskbar_view();
+                taskbar_slot(&view, -2, &x, &y, &w, &h);
+                taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh);
+                taskbar_slot(&view, TASKBAR_VOLUME, &vx, &vy, &vw, &vh);
+                taskbar_slot(&view, -3, &bx, &by, &bw, &bh);
+                check("mic: the cell is at the start of the tray, the volume's after it and the clock's after that, the tray two cells longer than without them",
+                      mx == x && vx == mx + mw && bx == vx + vw && w == before + mw + vw && taskbar_hit(&view, mx + mw / 2, my + mh / 2) == TASKBAR_MIC &&
+                          taskbar_hit(&view, vx + vw / 2, vy + vh / 2) == TASKBAR_VOLUME);
+                taskbar_settings_set("left", "primary", "battery none\n");
+                view = compositor_taskbar_view();
+                taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh);
+                taskbar_slot(&view, TASKBAR_VOLUME, &vx, &vy, &vw, &vh);
+                check("mic: on a side band the cell is above the volume's", my + mh == vy && mx == vx);
+                taskbar_settings_set("bottom", "primary", "battery none\n");
+                taskbar_tray_set("{time.24h.hour}:{time.24h.min}");
+                view = compositor_taskbar_view();
+                check("mic: a tray of the person's own format has none", !taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh));
+                taskbar_tray_set(SETTING_TASKBAR_TRAY_STANDARD);
+                check("mic: and when the server goes the cell goes with it", mic_cell(1, 0, AUDIO_STATE_PLAYING) && (volume_put_page(52429, 0, 0), compositor_volume_unmap(), compositor_volume.hold_until = 0,
+                                                                                                                        compositor_volume_look(clock_monotonic_nanoseconds()), !taskbar.mic_item));
+
+                // The cell drawn: the microphone in it, struck when the microphone is muted.
+                mic_cell(1, 0, AUDIO_STATE_PLAYING);
+                for (int variant = 0; variant < 2; variant++)
+                {
+                        struct taskbar_view drawn;
+                        int tx, ty, tw, th, dx, dy, dw, dh, count = 0;
+
+                        taskbar_mic_set(1, variant);
+                        drawn = band_view(TASKBAR_BOTTOM, titles);
+                        taskbar_band(&drawn, &dx, &dy, &dw, &dh);
+                        taskbar_draw(&drawn, 1ul << WINDOWS, band_glass, null, rect);
+                        memory_copy(mic_lit, band_pixels, sizeof(band_pixels));
+                        taskbar_slot(&drawn, -2, &tx, &ty, &tw, &th);
+                        taskbar_slot(&drawn, TASKBAR_MIC, &mx, &my, &mw, &mh);
+                        band_glass(null, rect[0], rect[1], rect[2], rect[3]);
+                        taskbar_glass_tab(&drawn, rect[0], rect[1], rect[2], dx, dy, dw, tx, ty, tw, th, -2, 0);
+                        for (int y2 = my - dy; y2 < my - dy + mh; y2++)
+                                for (int x2 = mx - dx; x2 < mx - dx + mw; x2++)
+                                        count += look_luma(mic_lit[y2 * dw + x2]) != look_luma(band_pixels[y2 * dw + x2]);
+                        counts[variant] = count;
+                }
+                check("mic: the microphone is drawn in the cell, and muted a diagonal more", counts[0] > 20 && counts[1] > counts[0] + 4);
+                taskbar_mic_set(1, 0);
+
+                // Pressed: the table holds the cell's rectangle for the popup, which a popup that is up does not ask for again.
+                mic_cell(1, 0, AUDIO_STATE_PLAYING);
+                view = compositor_taskbar_view();
+                taskbar_slot(&view, TASKBAR_MIC, &mx, &my, &mw, &mh);
+                taskbar_mic_anchor(&view, &ax, &ay, &aw, &ah);
+                table->button_w = 0, table->button_h = 0;
+                compositor_mic_open(mx + mw / 2, my + mh / 2);
+                check("mic: a press on the cell leaves its rectangle, the edge and the screen for the popup",
+                      table->button_x == ax && table->button_y == ay && (int)table->button_w == aw && (int)table->button_h == ah && table->button_edge == TASKBAR_BOTTOM &&
+                          table->button_screen == 0 && aw == mw && ah == 24 && ax == mx);
+                table->button_w = 0;
+                compositor.showing[5] = 1;
+                string_copy_bounded((string_address)table->name[5], (string_address) "mixer-quick", WINDOWS_NAME);
+                compositor_mic_open(mx + mw / 2, my + mh / 2);
+                check("mic: and with a popup up it asks for no other", table->button_w == 0);
+                compositor.showing[5] = 0;
+                table->name[5][0] = 0;
+
+                // The key: the mute thrown and written whole; a held key is one press; with no microphone, or no server, nothing.
+                mic_cell(1, 0, AUDIO_STATE_PLAYING);
+                compositor_key(0, CK_KEY_MICMUTE, 1, 0);
+                check("mic: the microphone key throws the mute on, written as on and a newline, and the cell is struck",
+                      volume_file(compositor_volume_path[4], text, sizeof(text)) && string_equals((string_address)text, (string_address) "on\n") && compositor_volume.mic_muted && taskbar.mic_muted);
+                compositor_key(0, CK_KEY_MICMUTE, 2, 0);
+                check("mic: and a held key is one press", compositor_volume.mic_muted);
+                compositor_key(0, CK_KEY_MICMUTE, 1, 0);
+                volume_file(compositor_volume_path[4], text, sizeof(text));
+                check("mic: pressed again it throws it off", string_equals((string_address)text, (string_address) "off\n") && !compositor_volume.mic_muted);
+                mic_cell(1, 1, AUDIO_STATE_PLAYING);
+                compositor_mic_step();
+                volume_file(compositor_volume_path[4], text, sizeof(text));
+                check("mic: a muted microphone is unmuted by the same (a middle press is the same step)", string_equals((string_address)text, (string_address) "off\n") && !compositor_volume.mic_muted);
+                check("mic: without a program recording the cell is there for a moment to see it thrown, and goes",
+                      !mic_cell(1, 0, 0) && (compositor_mic_step(), taskbar.mic_item && taskbar.mic_muted && compositor_volume.mic_flash_until > clock_monotonic_nanoseconds()) &&
+                          (compositor_volume.hold_until = 0, compositor_volume_look(clock_monotonic_nanoseconds() + 2 * COMPOSITOR_VOLUME_FLASH_NS), !taskbar.mic_item));
+                mic_put_page(1, 0, AUDIO_STATE_PLAYING);
+                compositor_volume_unmap();
+                compositor_volume.hold_until = 0;
+                compositor_volume_look(clock_monotonic_nanoseconds());
+                compositor_volume.copy.input_name[0] = 0;
+                compositor_volume.hold_until = clock_monotonic_nanoseconds() + 10 * COMPOSITOR_VOLUME_HOLD_NS; // the page is not read again
+                system_remove_at(AT_FDCWD, (string_address)compositor_volume_path[4], 0);
+                compositor_key(0, CK_KEY_MICMUTE, 1, 0);
+                check("mic: with no microphone named the key does nothing", !volume_file(compositor_volume_path[4], text, sizeof(text)));
+#if MOONWATER_UI_MIXER
+                // Told to the server over its socket, by the source's name, before the file.
+                mic_cell(1, 0, AUDIO_STATE_PLAYING);
+                compositor_ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
+                compositor_ctl.open = 1;
+                compositor_ctl_again = 0;
+                mixer_logged = 0, mixer_fail_send = 0;
+                compositor_key(0, CK_KEY_MICMUTE, 1, 0);
+                check("mic: the key is told to the server as the request that mutes the source, by its name, with the file the same",
+                      mixer_logged == 1 && mixer_log[0].command == CTL_COMMAND_SET_SOURCE_MUTE && mixer_log[0].mute == 1 && string_equals((string_address)mixer_log[0].text, (string_address) "alsa_input.test") &&
+                          volume_file(compositor_volume_path[4], text, sizeof(text)) && string_equals((string_address)text, (string_address) "on\n"));
+                check("mic: waiting for the server at most as long as the volume's", mixer_timeout == COMPOSITOR_VOLUME_WAIT_MS);
+                mixer_fail_send = 1;
+                compositor_key(0, CK_KEY_MICMUTE, 1, 0);
+                volume_file(compositor_volume_path[4], text, sizeof(text));
+                check("mic: a socket that fails is let go and the file is written all the same", !compositor_ctl.open && string_equals((string_address)text, (string_address) "off\n") &&
+                                                                                                    compositor_ctl_again > clock_monotonic_nanoseconds());
+                mixer_fail_send = 0;
+                compositor_ctl.open = 0;
+                compositor_ctl_again = ~(positive)0;
+#endif
+                system_remove_at(AT_FDCWD, (string_address)compositor_volume_path[4], 0);
+                compositor_volume_path[4] = SETTING_AUDIO_SOURCE_MUTE_PATH;
+                taskbar_mic_set(0, 0);
+                volume_put_page(52429, 0, AUDIO_STATE_MAGIC);
+                compositor_volume_unmap();
+                compositor_volume.hold_until = 0;
+                compositor_volume_look(clock_monotonic_nanoseconds());
+        }
 
         // The server goes: the cell goes with it, and the keys have nothing to turn.
         volume_put_page(52429, 0, 0);
@@ -146330,7 +146505,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
                 mixer_poll(mixer_t0 + 900000000ll);
-                mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+                mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
                 mixer.big->ctl.open = 1;
                 mixer.connected = true;
                 mixer.capture_path = capture_path;

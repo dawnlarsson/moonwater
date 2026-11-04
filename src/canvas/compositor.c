@@ -1971,6 +1971,7 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
 #define CK_KEY_MUTE 113
 #define CK_KEY_VOLUME_DOWN 114
 #define CK_KEY_VOLUME_UP 115
+#define CK_KEY_MICMUTE 248
 #define CK_KEY_UP 103
 #define CK_KEY_LEFT 105
 #define CK_KEY_RIGHT 106
@@ -12552,7 +12553,7 @@ static void compositor_key_fire(unsigned int which)
 #define COMPOSITOR_VOLUME_STALE_NS 4000000000ull // a page that has not moved for this long is looked for again by its name
 
 // The page, the two files and the socket, which a check points at files of its own.
-static const char *compositor_volume_path[4] = {AUDIO_STATE_PATH, SETTING_AUDIO_VOLUME_PATH, SETTING_AUDIO_MUTE_PATH, CTL_SOCKET};
+static const char *compositor_volume_path[5] = {AUDIO_STATE_PATH, SETTING_AUDIO_VOLUME_PATH, SETTING_AUDIO_MUTE_PATH, CTL_SOCKET, SETTING_AUDIO_SOURCE_MUTE_PATH};
 
 // The connection to the server's socket (src/audio/control.c), made at the first change and kept; one that failed is tried again later.
 static struct ctl compositor_ctl;
@@ -12562,9 +12563,10 @@ static struct
 {
         const volatile struct audio_state *page;
         struct audio_state copy;
-        positive look_at, flash_until, hold_until, seen_at;
+        positive look_at, flash_until, hold_until, seen_at, mic_flash_until;
         unsigned int seen_seq;
         int percent, muted, present;
+        int recording, mic_muted; // programs that record from a microphone (not what plays), and whether the microphone is muted
 } compositor_volume;
 
 static void compositor_volume_unmap(void)
@@ -12652,10 +12654,23 @@ static void compositor_volume_open(int x, int y)
         compositor_script_say("volume_button");
 }
 
-// What the tray's cell shows, told to the band; the band is drawn again when it changed.
+// The microphone cell pressed: the same popup form of the mixer (mic_button, which adds -i) with the recording strips in it, beside the cell.
+static void compositor_mic_open(int x, int y)
+{
+        if (compositor_quick_row() >= 0)
+                return;
+        compositor_button_rect(x, y, TASKBAR_MIC, taskbar_mic_anchor);
+        compositor_script_say("mic_button");
+}
+
+// What the tray's cells show, told to the band; the band is drawn again when one changed. The microphone's is there while a program records
+// from a microphone, and for a moment after its mute was thrown (to see it thrown).
 static void compositor_volume_show(void)
 {
-        if (taskbar_volume_set(compositor_volume.present, compositor_volume.percent, compositor_volume.muted, compositor_volume.flash_until != 0))
+        int changed = taskbar_volume_set(compositor_volume.present, compositor_volume.percent, compositor_volume.muted, compositor_volume.flash_until != 0);
+
+        changed |= taskbar_mic_set(compositor_volume.present && (compositor_volume.recording || compositor_volume.mic_flash_until), compositor_volume.mic_muted);
+        if (changed)
                 compositor_tabs_changed();
 }
 
@@ -12666,10 +12681,12 @@ static void compositor_volume_look(positive now)
 
         if (compositor_volume.flash_until && now >= compositor_volume.flash_until)
                 compositor_volume.flash_until = 0;
+        if (compositor_volume.mic_flash_until && now >= compositor_volume.mic_flash_until)
+                compositor_volume.mic_flash_until = 0;
         if (now >= compositor_volume.hold_until)
         {
                 if (!compositor_volume_map() || !audio_state_read(compositor_volume.page, copy))
-                        compositor_volume.present = 0;
+                        compositor_volume.present = 0, compositor_volume.recording = 0;
                 else
                 {
                         unsigned long percent = ((unsigned long)copy->volume * 100 + 32768) / 65536;
@@ -12677,6 +12694,12 @@ static void compositor_volume_look(positive now)
                         compositor_volume.present = 1;
                         compositor_volume.percent = percent > 100 ? 100 : (int)percent;
                         compositor_volume.muted = copy->muted != 0;
+                        // A program that records from a microphone: a record stream that is not paused and does not record what plays, while recording is allowed.
+                        compositor_volume.recording = 0;
+                        for (unsigned int k = 0; k < AUDIO_STATE_RECORDS; k++)
+                                compositor_volume.recording += copy->capture && copy->record[k].index != 0xffffffffu && !(copy->record[k].flags & (AUDIO_STATE_MONITOR | AUDIO_STATE_CORKED)) &&
+                                                               (copy->record[k].flags & AUDIO_STATE_PLAYING);
+                        compositor_volume.mic_muted = copy->input_muted != 0;
                         if (copy->seq != compositor_volume.seen_seq)
                                 compositor_volume.seen_seq = copy->seq, compositor_volume.seen_at = now;
                         // A server that was started again has a page of its own: this one is let go when it stands still.
@@ -12690,6 +12713,8 @@ static void compositor_volume_look(positive now)
         compositor_volume.look_at = now + (compositor_volume.present ? COMPOSITOR_VOLUME_LOOK_NS : COMPOSITOR_VOLUME_FIND_NS);
         if (compositor_volume.flash_until && compositor_volume.flash_until < compositor_volume.look_at)
                 compositor_volume.look_at = compositor_volume.flash_until;
+        if (compositor_volume.mic_flash_until && compositor_volume.mic_flash_until < compositor_volume.look_at)
+                compositor_volume.look_at = compositor_volume.mic_flash_until;
         compositor_volume_show();
 }
 
@@ -12719,6 +12744,32 @@ static void compositor_volume_write(const char *path, const char *text)
         server's answer is short (COMPOSITOR_VOLUME_WAIT_MS), and a server that does not answer is let go and tried again in two seconds;
         the files are written all the same, so the person's volume is kept whatever the socket did.
 */
+// The connection to the server's socket, made at the first change and kept: false when there is none (and none is tried again for two seconds).
+static int compositor_ctl_ready(positive now)
+{
+        compositor_ctl.timeout_ms = COMPOSITOR_VOLUME_WAIT_MS;
+        if (compositor_ctl.open)
+                return 1;
+        if (now < compositor_ctl_again)
+                return 0;
+        if (ctl_connect(&compositor_ctl, compositor_volume_path[3]) < 0)
+        {
+                compositor_ctl_again = now + COMPOSITOR_VOLUME_AGAIN_NS;
+                return 0;
+        }
+        return 1;
+}
+
+// What the server answered: a connection that failed is let go and tried again later.
+static void compositor_ctl_answered(long answer, positive now)
+{
+        if (answer == CTL_FAILED)
+        {
+                ctl_disconnect(&compositor_ctl);
+                compositor_ctl_again = now + COMPOSITOR_VOLUME_AGAIN_NS;
+        }
+}
+
 static void compositor_volume_tell(int volume, int mute)
 {
         positive now = clock_monotonic_nanoseconds();
@@ -12727,26 +12778,13 @@ static void compositor_volume_tell(int volume, int mute)
 
         if (!compositor_volume.present || !sink[0])
                 return;
-        compositor_ctl.timeout_ms = COMPOSITOR_VOLUME_WAIT_MS;
-        if (!compositor_ctl.open)
-        {
-                if (now < compositor_ctl_again)
-                        return;
-                if (ctl_connect(&compositor_ctl, compositor_volume_path[3]) < 0)
-                {
-                        compositor_ctl_again = now + COMPOSITOR_VOLUME_AGAIN_NS;
-                        return;
-                }
-        }
+        if (!compositor_ctl_ready(now))
+                return;
         if (volume >= 0)
                 answer = ctl_set_sink_volume(&compositor_ctl, sink, (unsigned long)volume * 65536 / 100);
         if (answer >= 0 && mute >= 0)
                 answer = ctl_set_sink_mute(&compositor_ctl, sink, mute);
-        if (answer == CTL_FAILED)
-        {
-                ctl_disconnect(&compositor_ctl);
-                compositor_ctl_again = now + COMPOSITOR_VOLUME_AGAIN_NS;
-        }
+        compositor_ctl_answered(answer, now);
 }
 
 /*
@@ -12796,10 +12834,40 @@ static void compositor_volume_step(int step, int toggle)
         compositor_volume_show();
 }
 
-// A volume key: five percent a press, the mute thrown by its own key; a held key repeats the steps and not the mute.
+/*
+        The microphone's mute thrown (the microphone key, a middle press on its cell): told to the server over its socket by the source's
+        name as the volume's is, and kept in /root/audio.source.mute for the next boot. The cell is shown for a moment, struck or not,
+        whether or not a program records, to see it thrown. Nothing without a server or a microphone.
+*/
+static void compositor_mic_step(void)
+{
+        positive now = clock_monotonic_nanoseconds();
+        const char *source = compositor_volume.copy.input_name;
+        int muted;
+
+        compositor_volume_look(now);
+        if (!compositor_volume.present || !source[0])
+                return;
+        muted = !compositor_volume.mic_muted;
+        if (compositor_ctl_ready(now))
+                compositor_ctl_answered(ctl_set_source_mute(&compositor_ctl, source, muted), now);
+        compositor_volume_write(compositor_volume_path[4], muted ? "on\n" : "off\n");
+        compositor_volume.mic_muted = muted;
+        compositor_volume.mic_flash_until = now + COMPOSITOR_VOLUME_FLASH_NS;
+        compositor_volume.hold_until = now + COMPOSITOR_VOLUME_HOLD_NS;
+        compositor_volume.look_at = compositor_volume.mic_flash_until;
+        compositor_volume_show();
+}
+
+// A volume key: five percent a press, the mute thrown by its own key; a held key repeats the steps and not the mute. The microphone's key is a mute alone.
 static void compositor_volume_key(unsigned int code, int value)
 {
-        if (code == CK_KEY_MUTE)
+        if (code == CK_KEY_MICMUTE)
+        {
+                if (value == 1)
+                        compositor_mic_step();
+        }
+        else if (code == CK_KEY_MUTE)
         {
                 if (value == 1)
                         compositor_volume_step(0, 1);
@@ -13061,7 +13129,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
 
         // The volume keys are the desktop's, whichever window has the keys.
         if (!(modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) &&
-            (code == CK_KEY_MUTE || code == CK_KEY_VOLUME_DOWN || code == CK_KEY_VOLUME_UP))
+            (code == CK_KEY_MUTE || code == CK_KEY_VOLUME_DOWN || code == CK_KEY_VOLUME_UP || code == CK_KEY_MICMUTE))
         {
                 if (value)
                         compositor_volume_key(code, value);
@@ -13683,6 +13751,16 @@ static void compositor_button(unsigned int code, int down)
                 }
                 else
                         compositor_launcher_open(compositor.pointer_x, compositor.pointer_y);
+                return;
+        }
+
+        // The microphone cell: a left press opens the recording strips (the script starts them), a middle one mutes the microphone.
+        if (tab == TASKBAR_MIC)
+        {
+                if (code == COMPOSITOR_BTN_LEFT)
+                        compositor_mic_open(compositor.pointer_x, compositor.pointer_y);
+                else if (code == COMPOSITOR_BTN_MIDDLE)
+                        compositor_mic_step();
                 return;
         }
 

@@ -29,6 +29,9 @@
 // The volume item at the start of the tray, a cell of its own when the sound server is there: pressed, it opens the mixer, a middle
 // press mutes, and the wheel over it changes the volume (compositor.c).
 #define TASKBAR_VOLUME (-6)
+// And before it a microphone, a cell of its own while a program records from one: pressed, it opens the recording strips of the mixer, a
+// middle press mutes the microphone (compositor.c).
+#define TASKBAR_MIC (-7)
 
 // The kept settings the battery is named in (the battery verb keeps "battery NAME" there), and the name of that file in
 // /root, which the compositor reads again when it is written.
@@ -110,6 +113,8 @@ static void taskbar_launcher_set(int on);
 static int taskbar_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 static int taskbar_volume_set(int present, int percent, int muted, int flash);
 static int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
+static int taskbar_mic_set(int present, int muted);
+static int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height);
 
 #else
 
@@ -150,6 +155,10 @@ static inline int taskbar_anchor(const struct taskbar_view *view, int *x, int *y
 static inline int taskbar_volume_set(int present, int percent, int muted, int flash)
 { (void)present, (void)percent, (void)muted, (void)flash; return 0; }
 static inline int taskbar_volume_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
+{ (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
+static inline int taskbar_mic_set(int present, int muted)
+{ (void)present, (void)muted; return 0; }
+static inline int taskbar_mic_anchor(const struct taskbar_view *view, int *x, int *y, int *width, int *height)
 { (void)view, (void)x, (void)y, (void)width, (void)height; return 0; }
 
 #endif
