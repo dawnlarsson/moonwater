@@ -13777,15 +13777,8 @@ static void compositor_button(unsigned int code, int down)
         // The tray takes no press but a pair of left ones, which open the settings (compositor_settings_open).
         if (tab == COMPOSITOR_TRAY && code == COMPOSITOR_BTN_LEFT)
         {
-                positive when = clock_monotonic_nanoseconds();
-
-                if (compositor.tray_ns && when - compositor.tray_ns <= COMPOSITOR_AGAIN_NS)
-                {
-                        compositor.tray_ns = 0;
+                if (ui_pair_press(&compositor.tray_ns, clock_monotonic_nanoseconds(), COMPOSITOR_AGAIN_NS))
                         compositor_settings_open();
-                }
-                else
-                        compositor.tray_ns = when;
                 return;
         }
 

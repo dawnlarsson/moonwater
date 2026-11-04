@@ -145786,6 +145786,24 @@ static fn check_kit_spring_fresh(void)
         check("kit spring: a spring that is started is the same whatever memory it was in: the pace it starts at is the clock's", same);
 }
 
+// ui_pair_press: the second press within the gap of the first is the pair; a pair clears the mark (so a third is a first),
+// and a press after the gap is a first.
+static fn check_kit_pair_press(void)
+{
+        positive mark = 0;
+        int pairs = 0;
+        b32 first = ui_pair_press(&mark, 1000000000ull, 400000000ull);
+        b32 edge = ui_pair_press(&mark, 1400000000ull, 400000000ull);
+        b32 third = ui_pair_press(&mark, 1450000000ull, 400000000ull);
+        b32 late = ui_pair_press(&mark, 2000000000ull, 400000000ull);
+        b32 after = ui_pair_press(&mark, 2400000000ull, 400000000ull);
+
+        pairs = first + edge + third + late + after;
+        check("kit pair: the second press within the gap is the pair, and the first press is not", !first && edge);
+        check("kit pair: a pair clears the mark, so a third press within the gap is a first and not a pair", !third);
+        check("kit pair: a press more than the gap after the last is a first, and one at the gap exactly is a pair", !late && after && pairs == 2);
+}
+
 // ui_notch_take: 120ths add up across turns, a notch is taken whole and the rest kept, and a backward turn takes notches back.
 static fn check_kit_notch_take(void)
 {
@@ -156062,6 +156080,7 @@ b32 main()
         check_kit_hand();
         check_kit_wheel_near_end();
         check_kit_notch_take();
+        check_kit_pair_press();
         check_kit_spring_fresh();
         check_kit_wheel_burst();
         check_terminal_wheel_curve();

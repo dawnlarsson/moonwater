@@ -114,6 +114,20 @@ static b64 ui_bezier_at(const struct ui_bezier address_to e, b64 x)
         return ui_bezier_y(e, t);
 }
 
+// A press that is the second of a pair: within gap of the press that was the first (mark is that press's time, 0 for none).
+// A pair clears the mark, so a third press within the gap is a first, and a press after the gap is a first. The compositor's
+// tray opens the settings on a pair; a count of clicks is ui_click_count's, which also wants the place.
+static inline int ui_pair_press(positive *mark, positive now, positive gap)
+{
+        if (*mark && now - *mark <= gap)
+        {
+                *mark = 0;
+                return 1;
+        }
+        *mark = now;
+        return 0;
+}
+
 // The whole notches a turn of a wheel makes, its 120ths added to the rest kept from the turns before (the rest is what is left
 // under the last notch, for the next turn: a wheel that reports 120ths sends several turns to a notch). The compositor's
 // tray wheel and the kit's wheel share it; a turn back takes notches back.

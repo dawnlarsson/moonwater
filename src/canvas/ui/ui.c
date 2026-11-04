@@ -1077,6 +1077,7 @@ static int ui_click_count(const struct ui address_to ui, struct ui_click address
         return k->count;
 }
 
+
 /*
         A press again to confirm, the kit's one default for an action that is not undone (a forget, a command that asks, a
         close with changes in it). The first press arms it, and the line that says so is ui_confirm_line's, the same in every
