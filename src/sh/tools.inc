@@ -202,6 +202,7 @@ SHELL_TOOL(UTIL_SBIN, wipefs, util_linux_wipefs)
 SHELL_TOOL(UTIL_BIN, write, tools_write)
 SHELL_TOOL(GENERAL, xargs, file_xargs)
 SHELL_TOOL(GENERAL, yes, file_yes)
+SHELL_TOOL(SYSTEM, audio, audio_main)
 SHELL_TOOL(SYSTEM, compositor, compositor_main)
 SHELL_TOOL(SYSTEM, edit, system_edit)
 #if MOONWATER_UI_EDITOR

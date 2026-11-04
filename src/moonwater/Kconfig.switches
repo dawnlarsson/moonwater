@@ -843,6 +843,10 @@ endmenu
 menu "Tools: the shell's own programs"
     depends on MOONWATER_SHELL
 
+config MOONWATER_TOOL_AUDIO
+    bool "audio"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_BOWL
     bool "bowl"
     default MOONWATER_TOOLS_ALL

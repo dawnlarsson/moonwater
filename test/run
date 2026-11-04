@@ -256,7 +256,7 @@ describe()
         ranged)   echo "the call-site entries (__max_N, __room_N) on every body of three machines against pages that fault, and every call site naming one under the checked build" ;;
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
-        audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit)" ;;
+        audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit) and the protocol engine (a client written from the PulseAudio wire, the life of a stream, who may do what, every cap, a fuzz with everything counted back)" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
@@ -6557,7 +6557,13 @@ lane_wayland()
         [ "$wayland_status" = 0 ]
 )
 
-#       The audio stack of Canvas's desktop (src/audio). alsa.c, the sound card layer, has CHECK_audio_alsa: the kernel's
+#       The audio stack of Canvas's desktop (src/audio). pulse.c, the protocol engine of the sound server, has
+#       CHECK_audio_pulse: a client written from the PulseAudio wire (its own tag structure writer and reader) against the
+#       engine with a fake host: the handshake, every info at every protocol version that changes it, a stream through its
+#       life (prebuffering, the start, requests, underflow, drain, cork, flush, trigger, latency), volumes down to the
+#       bits that come out, events, who may do what, every cap, a recorded session at every size of piece, and a
+#       fixed-seed fuzz of raw bytes and mutated sessions in which every client, stream, ring and table is counted back.
+#       alsa.c, the sound card layer, has CHECK_audio_alsa: the kernel's
 #       header against its layout, cards of the check's own behind its five kernel calls (what each kind is given and what is
 #       picked, every way a card goes wrong, the pointers across their wrap) and, where the snd-aloop module is loaded
 #       (sudo modprobe snd-aloop index=7 pcm_substreams=2), a sine mixed by the mixing core and read back from the other
@@ -6597,6 +6603,8 @@ lane_audio()
                         -DCHECK_audio_mix test/checks.c -o '$work/check-mix-$audio_cc' -lm && '$work/check-mix-$audio_cc'"
                 audio_row "alsa-checks-$audio_cc" sh -c "$audio_cc $audio_warn -Wno-comment -D_GNU_SOURCE \
                         -DCHECK_audio_alsa test/checks.c -o '$work/check-alsa-$audio_cc' -lm && '$work/check-alsa-$audio_cc'"
+                audio_row "pulse-checks-$audio_cc" sh -c "$audio_cc $audio_warn -Wno-comment -D_GNU_SOURCE \
+                        -DCHECK_audio_pulse test/checks.c -o '$work/check-pulse-$audio_cc' -lm && '$work/check-pulse-$audio_cc'"
         done
 
         [ "$audio_status" = 0 ]

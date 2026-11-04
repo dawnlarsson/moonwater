@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Mutation proofs for the audio engines, src/audio/mix.c (the mixing core) and src/audio/alsa.c (the sound card layer).
+"""Mutation proofs for the audio engines, src/audio/mix.c (the mixing core), src/audio/alsa.c (the sound card layer) and src/audio/pulse.c (the protocol).
 
 Each mutation is one edit to a copy of one of them (a coefficient, an exponent, a bound, a flag, a byte order, a constant),
-built into CHECK_audio_mix or CHECK_audio_alsa with gcc; the check must turn red.  A mutation that survives is a hole
+built into CHECK_audio_mix, CHECK_audio_alsa or CHECK_audio_pulse with gcc; the check must turn red.  A mutation that survives is a hole
 in the check.
 
     python3 test/audio_mutations.py [NAME...]          from the tree's root; 8 builds at a time, about 4 minutes
@@ -12,7 +12,7 @@ Last run: see the commit that changed this line.
 import concurrent.futures, os, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c')}
+engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c'), 'pulse': os.path.join(root, 'src/audio/pulse.c')}
 checks = os.path.join(root, 'test/checks.c')
 work = tempfile.mkdtemp(prefix='audio-mutations-')
 only = sys.argv[1:]
@@ -76,6 +76,42 @@ M = [
     ("alsa", "bytes returned as frames", "return result < 0 ? result : result / pcm->frame_bytes;\n}\n\nAUDIO_API long audio_pcm_read", "return result;\n}\n\nAUDIO_API long audio_pcm_read"),
     ("alsa", "PCM_INFO number", "AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x31,", "AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x32,"),
     ("alsa", "access other than read/write", "audio_alsa_only(&hw, AUDIO_ALSA_ACCESS, AUDIO_ALSA_ACCESS_RW_INTERLEAVED);", "audio_alsa_only(&hw, AUDIO_ALSA_ACCESS, 0);"),
+    # ---- pulse.c ----
+    ("pulse", "shared memory offered", "pulse_w_u32(&w, PULSE_VERSION); // no shared memory, no memfd: neither flag", "pulse_w_u32(&w, PULSE_VERSION | 0x80000000u);"),
+    ("pulse", "commands served before the handshake", "if (!c->authorized && command != PULSE_COMMAND_AUTH && command != PULSE_COMMAND_SET_CLIENT_NAME)", "if (0 && command != PULSE_COMMAND_AUTH)"),
+    ("pulse", "any program sets the sink volume", "if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != 2)", "if (n != 2)"),
+    ("pulse", "any program sets any stream's volume", "if (!pulse_may(c, s->uid))\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != s->map_channels)", "if (n != s->map_channels)"),
+    ("pulse", "no cap on a user's clients", "if (uid != 0 && used_by_user >= PULSE_PER_USER)", "if (0)"),
+    ("pulse", "no cap on a client's streams", "if (count >= PULSE_STREAMS_PER_CLIENT || !s)", "if (!s)"),
+    ("pulse", "no cap on the rings", "if (p->ring_total + ring > PULSE_RING_TOTAL)", "if (0)"),
+    ("pulse", "shared memory flags accepted", "if (flags & 0xff000000u)", "if (0)"),
+    ("pulse", "data off the frame accepted", "if (length % (long)s->voice.frame)\n                return PULSE_DEAD;", ""),
+    ("pulse", "frame length not capped", "if (channel == PULSE_INVALID ? length > PULSE_FRAME_COMMAND : length > PULSE_FRAME_DATA)", "if (0)"),
+    ("pulse", "a full queue written past", "if (pulse_out_fill(c) + 20 + length > PULSE_OUT)\n                return PULSE_DEAD;", ""),
+    ("pulse", "base volume with the wrong tag", "pulse_w_volume(w, AUDIO_VOLUME_NORM);              // base volume", "pulse_w_u32(w, AUDIO_VOLUME_NORM);"),
+    ("pulse", "sink volume not a mean", "return audio_volume_gain(n ? sum / (unsigned long)n : 0);", "return audio_volume_gain(sum);"),
+    ("pulse", "mute does not mute", "if (s->muted || s->corked || s->dying)\n                left = right = 0.0f;", "if (s->corked || s->dying)\n                left = right = 0.0f;"),
+    ("pulse", "a muted stream stands still", "s->voice.flows = !s->corked;", "s->voice.flows = 0;"),
+    ("pulse", "events to everyone", "if (!c || !c->authorized || !(c->subscribe & (1ul << facility)))", "if (!c || !c->authorized)"),
+    ("pulse", "the program's own process id", "pulse_props_set(&c->props, \"application.process.id\", (const unsigned char *)pid, n + 1);", ""),
+    ("pulse", "names shown as they are", "if (c >= 0x20 && c < 0x7f)\n                                        to[n++] = (char)c;", "if (c >= 0x20)\n                                        to[n++] = (char)c;"),
+    ("pulse", "requests of any size", "if (!missing || (missing < s->minreq && (queued + s->outstanding) != 0))", "if (!missing)"),
+    ("pulse", "start target ignored", "if (fill > 0 && (fill >= s->prebuf || s->trigger))", "if (fill > 0)"),
+    ("pulse", "no underflow said", "else if (!s->flushing)\n                        pulse_stream_signal(p, s, PULSE_COMMAND_UNDERFLOW, 1);", ""),
+    ("pulse", "drain answered at once", "#define PULSE_DRAIN_USEC 20000l", "#define PULSE_DRAIN_USEC 0l"),
+    ("pulse", "a stream cut when its client goes", "if (s->voice.now[0] == 0 && s->voice.now[1] == 0)\n                pulse_stream_free(p, s);\n}", "pulse_stream_free(p, s);\n}"),
+    ("pulse", "strings of any length", "#define PULSE_STRING 1024 ", "#define PULSE_STRING 100000 "),
+    ("pulse", "no cap on a property list", "if (props->count >= PULSE_PROPS)\n                return 0;", ""),
+    ("pulse", "no time to say who", "now - c->born > PULSE_AUTH_USEC", "now - c->born > (1l << 40)"),
+    ("pulse", "the remembered volume not used", "if (p->host.recall && app[0] && p->host.recall(p->host.context, app, &remembered, &mute_remembered))", "if (0)"),
+    ("pulse", "a change not remembered", "if (owner && pulse_props_text(&owner->props, \"application.name\", app, sizeof(app)))\n                                p->host.remember(p->host.context, app, volume[0], s->muted);", ""),
+    ("pulse", "every program sees every stream", "if (p->stream[i].used && !p->stream[i].dying && (list || p->stream[i].index == index) && pulse_may(c, p->stream[i].uid))", "if (p->stream[i].used && !p->stream[i].dying && (list || p->stream[i].index == index))"),
+    ("pulse", "every program sees every client", "&& (c->root || p->client[i]->uid == c->uid))", ")"),
+    ("pulse", "a request not counted", "if (pulse_enqueue(c, PULSE_INVALID, w.p, w.len) == PULSE_DONE)\n                s->outstanding += missing;", "pulse_enqueue(c, PULSE_INVALID, w.p, w.len);"),
+    ("pulse", "kill open to all", "if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (command == PULSE_COMMAND_KILL_SINK_INPUT)", "if (command == PULSE_COMMAND_KILL_SINK_INPUT)"),
+    ("pulse", "the default sink open to all", "if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (name)\n                {", "if (name)\n                {"),
+    ("pulse", "a flush that cuts at once", "s->voice.ring.write = s->voice.ring.limit;\n                                s->flushing = 1;", "s->voice.ring.limit = s->voice.ring.write = s->voice.ring.read;\n                                s->flushing = 1;"),
+    ("pulse", "cork not applied", "s->corked = cork;\n                if (cork)\n                        s->underrun = 1;\n                pulse_stream_apply(s);", "s->corked = cork;"),
 ]
 
 sources = {k: open(v).read() for k, v in engines.items()}
@@ -98,11 +134,11 @@ def run(index):
     open(d + "/src/audio/" + which + ".c", "w").write(src.replace(old, new) if name.startswith("peak") else src.replace(old, new, 1))
     exe = d + "/check"
     cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_audio_" + which, d + "/test/checks.c", "-o", exe, "-lm"],
-                        capture_output=True, text=True)
+                        capture_output=True, text=True, errors="replace")
     if cc.returncode:
         return (name, "BUILD ERROR", cc.stderr[:200])
     try:
-        r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+        r = subprocess.run([exe], capture_output=True, text=True, errors="replace", timeout=300)
     except subprocess.TimeoutExpired:
         return (name, "RED (hang)", "")
     last = [l for l in r.stdout.splitlines() if l.startswith("CHECK_audio_")]

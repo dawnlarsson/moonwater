@@ -414,8 +414,8 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
 /* ---- the ring a program's bytes wait in ---- */
 
 /*
-        data is size bytes, a multiple of the stream's frame; read, write and end are byte counts from the stream's start.
-        What can be played is [read, end); write is where the program's next bytes go, and it is behind end after a seek
+        data is size bytes, a multiple of the stream's frame; read, write and limit are byte counts from the stream's start.
+        What can be played is [read, limit); write is where the program's next bytes go, and it is behind limit after a seek
         back (a program may rewrite what it wrote and was not played), or ahead of it after a seek forward (the gap is
         silence).
 */
@@ -423,7 +423,7 @@ struct audio_ring
 {
         unsigned char *data;
         unsigned long size, frame;
-        unsigned long read, write, end;
+        unsigned long read, write, limit;
         unsigned char silence;
 };
 
@@ -432,13 +432,13 @@ AUDIO_API void audio_ring_open(struct audio_ring *ring, unsigned char *data, uns
         ring->data = data;
         ring->frame = frame;
         ring->size = size - size % frame;
-        ring->read = ring->write = ring->end = 0;
+        ring->read = ring->write = ring->limit = 0;
         ring->silence = silence;
 }
 
 AUDIO_API unsigned long audio_ring_fill(const struct audio_ring *ring)
 {
-        return ring->end - ring->read;
+        return ring->limit - ring->read;
 }
 
 // What can be written at the cursor before it would pass the oldest byte not yet played, a ring's size on.
@@ -447,7 +447,7 @@ AUDIO_API unsigned long audio_ring_room(const struct audio_ring *ring)
         return ring->size - (ring->write - ring->read);
 }
 
-// n bytes at the stream's byte count at, whole, to dst (at is in [read, end - n]).
+// n bytes at the stream's byte count at, whole, to dst (at is in [read, limit - n]).
 AUDIO_API void audio_ring_copy_out(const struct audio_ring *ring, unsigned long at, unsigned char *dst, unsigned long n)
 {
         unsigned long from = at % ring->size, first = ring->size - from;
@@ -475,8 +475,8 @@ AUDIO_API unsigned long audio_ring_put(struct audio_ring *ring, const unsigned c
         if (n > first)
                 __builtin_memcpy(ring->data, src + first, n - first);
         ring->write += n;
-        if (ring->write > ring->end)
-                ring->end = ring->write;
+        if (ring->write > ring->limit)
+                ring->limit = ring->write;
         return n;
 }
 
@@ -497,20 +497,20 @@ AUDIO_API unsigned long audio_ring_put_silence(struct audio_ring *ring, unsigned
         for (unsigned long i = first; i < n; i++)
                 ring->data[i - first] = ring->silence;
         ring->write += n;
-        if (ring->write > ring->end)
-                ring->end = ring->write;
+        if (ring->write > ring->limit)
+                ring->limit = ring->write;
         return n;
 }
 
 /*
         Moves the cursor as PulseAudio's seek does: mode 0 is relative to the cursor, 1 absolute, 2 relative to the read
-        count, 3 relative to the end. Behind the read count, a ring's size past it, off a frame, or any overflow is refused
-        (-1); past the end the gap is filled with silence.
+        count, 3 relative to the limit. Behind the read count, a ring's size past it, off a frame, or any overflow is refused
+        (-1); past the limit the gap is filled with silence.
 */
 AUDIO_API int audio_ring_seek(struct audio_ring *ring, long mode, long long offset)
 {
         long long target;
-        unsigned long base = mode == 0 ? ring->write : mode == 2 ? ring->read : mode == 3 ? ring->end : 0;
+        unsigned long base = mode == 0 ? ring->write : mode == 2 ? ring->read : mode == 3 ? ring->limit : 0;
 
         if (mode < 0 || mode > 3 || offset % (long long)ring->frame)
                 return -1;
@@ -520,11 +520,11 @@ AUDIO_API int audio_ring_seek(struct audio_ring *ring, long mode, long long offs
         target = (long long)base + offset;
         if (target < (long long)ring->read || target - (long long)ring->read > (long long)ring->size)
                 return -1;
-        if ((unsigned long)target > ring->end)
+        if ((unsigned long)target > ring->limit)
         {
-                unsigned long gap = (unsigned long)target - ring->end, was = ring->write;
+                unsigned long gap = (unsigned long)target - ring->limit, was = ring->write;
 
-                ring->write = ring->end;
+                ring->write = ring->limit;
                 if (audio_ring_put_silence(ring, gap) != gap)
                 {
                         ring->write = was;
@@ -546,7 +546,7 @@ AUDIO_API void audio_ring_drop(struct audio_ring *ring, unsigned long n)
 // Everything not played is thrown away.
 AUDIO_API void audio_ring_flush(struct audio_ring *ring)
 {
-        ring->read = ring->write = ring->end = ring->end > ring->write ? ring->end : ring->write;
+        ring->read = ring->write = ring->limit = ring->limit > ring->write ? ring->limit : ring->write;
 }
 
 /* ---- the channel map ---- */
@@ -849,6 +849,7 @@ struct audio_voice
         float peak[2];                  // the greatest sample since the last take
         struct audio_table *table;      // the resampler's, none at equal rates
         int flushed;                    // the filter's tail has been given zeros to come out on
+        int flows;                      // set: a voice whose gain is nothing still plays on (muted), instead of standing still (corked)
         struct audio_resampler rs;
 };
 
@@ -959,6 +960,29 @@ AUDIO_API int audio_voice_rate(struct audio_voice *voice, long rate)
         return 0;
 }
 
+// The voice is played at another sink's rate (it was moved): a table for the new ratio, or none; its filter starts over.
+AUDIO_API int audio_voice_retarget(struct audio_voice *voice, long out_rate)
+{
+        struct audio_table *table = 0;
+
+        if (out_rate < 1 || out_rate > AUDIO_RATE_MAX)
+                return AUDIO_E_INVALID;
+        if (out_rate == voice->out_rate)
+                return 0;
+        if (voice->rate != out_rate)
+        {
+                table = audio_table_take(voice->rate, out_rate);
+                if (!table)
+                        return AUDIO_E_NOMEM;
+        }
+        audio_table_give(voice->table);
+        voice->table = table;
+        voice->out_rate = out_rate;
+        if (table)
+                audio_rs_open(&voice->rs, table);
+        return 0;
+}
+
 // The input frames of the stream ahead of the frame a voice is playing that its filter needs: its latency, in the stream's rate.
 AUDIO_API long audio_voice_delay(const struct audio_voice *voice)
 {
@@ -974,22 +998,22 @@ AUDIO_API long audio_voice_delay(const struct audio_voice *voice)
 static inline __attribute__((always_inline)) void audio_gain_run(float *dst, const float *x, long n, float *now, float target, float slope, float *peak, int add)
 {
         float g = *now, pk = *peak;
-        long i = 0, ramp = 0;
+        long i = 0, ramp = 0, steps = 0;
 
         if (g != target)
         {
                 float distance = target > g ? target - g : g - target;
 
-                ramp = (long)(distance / slope);
-                if ((float)ramp * slope < distance)
-                        ramp++;
-                if (ramp > n)
-                        ramp = n;
+                steps = (long)(distance / slope);
+                if ((float)steps * slope < distance)
+                        steps++;
+                ramp = steps > n ? n : steps;
                 for (; i < ramp; i++)
                 {
                         float y, a;
 
-                        g = target > g ? (g + slope < target ? g + slope : target) : (g - slope > target ? g - slope : target);
+                        // The last step of a ramp lands on the target itself, not on what the steps added up to.
+                        g = i + 1 == steps ? target : target > g ? (g + slope < target ? g + slope : target) : (g - slope > target ? g - slope : target);
                         y = x[i] * g;
                         a = y < 0 ? -y : y;
                         pk = a > pk ? a : pk;
@@ -1081,7 +1105,8 @@ static void audio_voice_pull(struct audio_sink *sink, struct audio_voice *voice,
         without a click, and a resampling one is started over (the gap is the program's). With drain set the filter's tail
         is given zeros once the ring is empty, so the last of the data comes out. A voice whose gain is nothing and
         going nowhere plays nothing, and takes nothing from its ring (a corked stream's time stands still): the caller
-        sets the gain to zero and waits for the ramp.
+        sets the gain to zero and waits for the ramp. A muted one is the same with flows set: it goes on being read, and
+        adds nothing.
 */
 AUDIO_API long audio_voice_mix(struct audio_sink *sink, struct audio_voice *voice, long frames, int drain)
 {
@@ -1092,7 +1117,7 @@ AUDIO_API long audio_voice_mix(struct audio_sink *sink, struct audio_voice *voic
                 frames = AUDIO_BLOCK;
         if (frames < 1)
                 return 0;
-        if (voice->now[0] == 0 && voice->now[1] == 0 && voice->target[0] == 0 && voice->target[1] == 0)
+        if (!voice->flows && voice->now[0] == 0 && voice->now[1] == 0 && voice->target[0] == 0 && voice->target[1] == 0)
                 return 0;
 
         if (!voice->table)

@@ -1062,6 +1062,8 @@ static bool floodlight_parent_supervised;
 #if defined(__x86_64__)
 #pragma GCC pop_options
 #endif
+// The sound server: a process of its own, and plain C that is mostly loops over floats, which the size optimisation above would not vectorise.
+#include "../audio/service.c"
 #include "../canvas/ui/features.h"
 #if MOONWATER_UI_ANY
 #if defined(__x86_64__)
