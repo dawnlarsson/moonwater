@@ -1904,6 +1904,9 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_random,
 };
 
+/* The window manager of Xwayland (xwm.c): its socket, its connection and its window table, all in fixed storage. */
+#include "xwm.c"
+
 /* ---- the socket ---- */
 
 /*
@@ -1953,6 +1956,7 @@ static void compositor_wl_start(void)
                 return;
         }
         compositor_wl.started = 1;
+        compositor_xwm_start();
         for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
                 compositor_wl.transfer[at].in = compositor_wl.transfer[at].out = compositor_wl.transfer[at].keep = -1;
         // EFD_CLOEXEC | EFD_NONBLOCK: what the transfers' threads knock on; with none, no copy or paste is taken.
@@ -2149,6 +2153,8 @@ static void compositor_wl_flush_all(void)
 /* Where the polls for the clients go in the loop's list, and what comes of them. */
 static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned int count)
 {
+        unsigned int base = count;
+
         if (!compositor_wl.started)
                 return count;
         wanted[count++] = (struct compositor_poll){compositor_wl.listen, COMPOSITOR_POLLIN, 0};
@@ -2174,7 +2180,8 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 if (compositor_wl.fd[slot] >= 0 && wayland_stall_due(slot, &fd) && fd >= 0)
                         wanted[count++] = (struct compositor_poll){(int)fd, COMPOSITOR_POLLIN, 0};
         }
-        return count;
+        // The window manager of Xwayland (xwm.c): its listening socket and its connection.
+        return compositor_xwm_poll(wanted, count, base);
 }
 
 static void compositor_wl_pass(const struct compositor_poll *wanted)
@@ -2210,6 +2217,7 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
         // The transfers whose threads have ended: each thread ends itself at its deadline, so the loop waits on nothing else of them.
         if (wanted[1 + WAYLAND_CLIENTS].returned)
                 compositor_wl_transfers_done();
+        compositor_xwm_pass(wanted);
 }
 
 /* ---- input: the pointer and the keys, as a client is told of them ---- */
@@ -2529,6 +2537,7 @@ static void compositor_wl_stop(void)
         for (long at = 0; at < 16; at++)
                 if (compositor_wl.keymap[at] >= 0)
                         system_close(compositor_wl.keymap[at]);
+        compositor_xwm_stop();
         system_close(compositor_wl.listen);
         compositor_wl.listen = -1;
         compositor_wl.started = 0;

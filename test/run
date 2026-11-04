@@ -6606,6 +6606,32 @@ lane_wayland()
                         wayland_status=1
                         note "wayland: the X client did not build against $wayland_xroot (test/wayland_xclient.c)"
                 fi
+                # The window manager of Xwayland (test/wayland_xwm.sh): its connection on the compositor's socket, the root's Composite
+                # redirect, and a window's surface and Expose. The Xlib client for it (test/wayland_xwm_client.c) is built both ways.
+                if [ -n "$wayland_xroot" ] && [ -x "$work/shell-wayland" ] && mkdir -p "$work/xwm" &&
+                        ${CC:-gcc} -std=gnu11 -O2 -Wall -Wextra -Werror -I"$wayland_xroot/usr/include" test/wayland_xwm_client.c \
+                                -L"$wayland_xroot/usr/lib" -lX11 -Wl,-rpath-link,"$wayland_xroot/usr/lib" -o "$work/xwm-client" > "$work/xwm-client.out" 2>&1 &&
+                        { ! command -v clang > /dev/null 2>&1 || clang -std=gnu11 -O2 -Wall -Wextra -Werror -I"$wayland_xroot/usr/include" test/wayland_xwm_client.c \
+                                -L"$wayland_xroot/usr/lib" -lX11 -Wl,-rpath-link,"$wayland_xroot/usr/lib" -o "$work/xwm-client-clang" > "$work/xwm-client-clang.out" 2>&1; }; then
+                        unshare -rm sh test/wayland_xwm.sh "$work/shell-wayland" "$wayland_xroot" "$work/xwm-client" "$work/xwm" > "$work/xwm.out" 2>&1
+                        wayland_at=0
+                        while IFS= read -r wayland_line; do
+                                case $wayland_line in
+                                "ok "*) wayland_at=$((wayland_at + 1)); tally "wayland-xwm-$wayland_at" 1 1 ;;
+                                "FAIL "*)
+                                        wayland_at=$((wayland_at + 1))
+                                        tally "wayland-xwm-$wayland_at" 0 1
+                                        wayland_status=1
+                                        note "wayland xwm: $wayland_line"
+                                        ;;
+                                esac
+                        done < "$work/xwm.out"
+                        [ "$wayland_at" -gt 0 ] || { tally wayland-xwm-ran 0 1; wayland_status=1; note "wayland xwm ran no row"; }
+                elif [ -n "$wayland_xroot" ]; then
+                        tally wayland-xwm-build 0 1
+                        wayland_status=1
+                        note "wayland: the window manager's X client did not build (test/wayland_xwm_client.c)"
+                fi
         fi
 
         [ "$wayland_status" = 0 ]
