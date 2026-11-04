@@ -173364,6 +173364,987 @@ int main(int argc, char **argv)
 }
 #endif /* CHECK_wayland */
 
+#ifdef CHECK_xwm_wire
+/*
+        CHECK_xwm_wire: the X11 wire codec (src/canvas/xwm_wire.c) that the window manager of Xwayland speaks. Every request
+        is checked against the bytes it should be, written out by hand here; every event, reply and error is parsed from a
+        sample laid out the same way; and the hostile rows feed every parser each prefix of a sample, lengths that lie, caps,
+        a buffer too small for an encoder, and 10000 bytes from a fixed seed, which must never crash and always answer a
+        bounded result. Built with the sanitizers (address and undefined) it proves no byte is read or written past a buffer.
+
+            cc -std=gnu11 -O2 -Wall -Wextra -DCHECK_xwm_wire test/checks.c
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../src/canvas/xwm_wire.c"
+
+static unsigned xw_checks, xw_failures;
+
+#define XWCHECK(condition, ...)                                                                                       \
+        do                                                                                                            \
+        {                                                                                                             \
+                xw_checks++;                                                                                          \
+                if (!(condition))                                                                                     \
+                {                                                                                                     \
+                        xw_failures++;                                                                                \
+                        printf("  FAIL: ");                                                                           \
+                        printf(__VA_ARGS__);                                                                          \
+                        printf(" (line %d)\n", __LINE__);                                                             \
+                }                                                                                                     \
+        } while (0)
+
+/* ---- helpers: a copy of exactly n bytes, so that an overread is past the allocation and the sanitizers see it ---- */
+
+static unsigned char *xw_exact(const unsigned char *src, unsigned long n)
+{
+        unsigned char *p = malloc(n ? n : 1);
+
+        if (!p)
+        {
+                printf("  FAIL: out of memory\n");
+                exit(2);
+        }
+        if (n)
+                memcpy(p, src, n);
+        return p;
+}
+
+static unsigned char *xw_blank(unsigned long n)
+{
+        unsigned char *p = malloc(n ? n : 1);
+
+        if (!p)
+        {
+                printf("  FAIL: out of memory\n");
+                exit(2);
+        }
+        memset(p, 0, n ? n : 1);
+        return p;
+}
+
+static int xw_same(const unsigned char *a, const unsigned char *b, unsigned long n)
+{
+        return memcmp(a, b, n) == 0;
+}
+
+/* Writes v into n bytes at off, little-endian, as the test's own layout of a message. */
+static void xw_u(unsigned char *b, unsigned long off, unsigned long v, int n)
+{
+        for (int i = 0; i < n; i++)
+                b[off + i] = (unsigned char)((v >> (8 * i)) & 0xffu);
+}
+
+/* The parsers as one shape, so the truncation rows can run each one at every length. */
+static int xw_p_event(const unsigned char *b, unsigned long n)
+{
+        struct xwm_event e;
+        return xwm_parse_event(b, n, &e);
+}
+
+static int xw_p_error(const unsigned char *b, unsigned long n)
+{
+        struct xwm_error e;
+        return xwm_parse_error(b, n, &e);
+}
+
+static int xw_p_atom(const unsigned char *b, unsigned long n)
+{
+        struct xwm_atom_reply r;
+        return xwm_parse_atom_reply(b, n, &r);
+}
+
+static int xw_p_property(const unsigned char *b, unsigned long n)
+{
+        struct xwm_property_reply r;
+        return xwm_parse_property_reply(b, n, &r);
+}
+
+static int xw_p_geometry(const unsigned char *b, unsigned long n)
+{
+        struct xwm_geometry_reply r;
+        return xwm_parse_geometry_reply(b, n, &r);
+}
+
+static int xw_p_attributes(const unsigned char *b, unsigned long n)
+{
+        struct xwm_attributes_reply r;
+        return xwm_parse_attributes_reply(b, n, &r);
+}
+
+static int xw_p_setup(const unsigned char *b, unsigned long n)
+{
+        struct xwm_setup s;
+        return xwm_parse_setup(b, n, &s);
+}
+
+/* The sample messages, laid out by hand from the protocol's field offsets. */
+
+static void xw_sample_map_request(unsigned char *e)
+{
+        memset(e, 0, 32);
+        e[0] = 20; xw_u(e, 2, 0x0102, 2); xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4);
+}
+
+static void xw_sample_configure_request(unsigned char *e)
+{
+        memset(e, 0, 32);
+        e[0] = 0x80 | 23; e[1] = 1; xw_u(e, 2, 7, 2); xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4);
+        xw_u(e, 12, 0, 4); xw_u(e, 16, (unsigned long)-3 & 0xffff, 2); xw_u(e, 18, 10, 2);
+        xw_u(e, 20, 640, 2); xw_u(e, 22, 480, 2); xw_u(e, 24, 0, 2); xw_u(e, 26, 0x0f, 2);
+}
+
+static void xw_sample_setup(unsigned char *b)
+{
+        memset(b, 0, 144);
+        b[0] = 1; xw_u(b, 2, 11, 2); xw_u(b, 4, 0, 2); xw_u(b, 6, 34, 2); xw_u(b, 8, 11, 4);
+        xw_u(b, 12, 0x00200000, 4); xw_u(b, 16, 0x001fffff, 4); xw_u(b, 20, 256, 4);
+        xw_u(b, 24, 8, 2); xw_u(b, 26, 65535, 2); b[28] = 1; b[29] = 2; b[30] = 0; b[31] = 0;
+        b[32] = 32; b[33] = 32; b[34] = 8; b[35] = 255;
+        memcpy(b + 40, "Xwayland", 8);
+        b[48] = 24; b[49] = 32; b[50] = 32;
+        b[56] = 32; b[57] = 32; b[58] = 32;
+        /* the screen, at 64 */
+        xw_u(b, 64, 0x5a1, 4); xw_u(b, 68, 0x20, 4); xw_u(b, 72, 0xffffff, 4); xw_u(b, 76, 0, 4);
+        xw_u(b, 80, 0x001a0000, 4); xw_u(b, 84, 1920, 2); xw_u(b, 86, 1080, 2); xw_u(b, 88, 508, 2); xw_u(b, 90, 285, 2);
+        xw_u(b, 92, 1, 2); xw_u(b, 94, 1, 2); xw_u(b, 96, 0x21, 4); b[100] = 0; b[101] = 0; b[102] = 24; b[103] = 2;
+        /* depth 24 with one visual, then depth 32 with none */
+        b[104] = 24; xw_u(b, 106, 1, 2);
+        xw_u(b, 112, 0x21, 4); b[116] = 4; b[117] = 8; xw_u(b, 118, 256, 2); xw_u(b, 120, 0xff0000, 4); xw_u(b, 124, 0xff00, 4); xw_u(b, 128, 0xff, 4);
+        b[136] = 32; xw_u(b, 138, 0, 2);
+}
+
+/* ---- the encoders: each request as the bytes it must be ---- */
+
+static void xw_test_setup_request(void)
+{
+        static const unsigned char want[12] = {0x6c, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        unsigned char out[32];
+
+        memset(out, 0xee, sizeof out);
+        XWCHECK(xwm_enc_setup_request(out, sizeof out) == 12, "the setup request is 12 bytes");
+        XWCHECK(xw_same(out, want, 12), "the setup request asks for little-endian, protocol 11.0, and no authorization");
+        XWCHECK(xwm_enc_setup_request(out, 11) == XWM_ERR_SPACE, "a setup request into 11 bytes is refused");
+        XWCHECK(xwm_enc_setup_request(0, 12) == XWM_ERR_ARG, "a setup request into no buffer is refused");
+}
+
+static void xw_test_intern_atom(void)
+{
+        static const unsigned char wm_protocols[20] = {0x10, 0x00, 0x05, 0x00, 0x0c, 0x00, 0x00, 0x00,
+                'W', 'M', '_', 'P', 'R', 'O', 'T', 'O', 'C', 'O', 'L', 'S'};
+        static const unsigned char wm_s0[16] = {0x10, 0x01, 0x04, 0x00, 0x05, 0x00, 0x00, 0x00,
+                'W', 'M', '_', 'S', '0', 0x00, 0x00, 0x00};
+        unsigned char out[32];
+        long n;
+
+        n = xwm_enc_intern_atom(out, sizeof out, 0, (const unsigned char *)"WM_PROTOCOLS", 12);
+        XWCHECK(n == 20 && xw_same(out, wm_protocols, 20), "InternAtom WM_PROTOCOLS: 20 bytes, length 5 units, the name at 8");
+        n = xwm_enc_intern_atom(out, sizeof out, 1, (const unsigned char *)"WM_S0", 5);
+        XWCHECK(n == 16 && xw_same(out, wm_s0, 16), "InternAtom WM_S0 with only-if-exists: the name padded to 8 bytes, length 4 units");
+        XWCHECK(xwm_enc_intern_atom(out, 19, 0, (const unsigned char *)"WM_PROTOCOLS", 12) == XWM_ERR_SPACE, "InternAtom into 19 bytes is refused");
+        XWCHECK(xwm_enc_intern_atom(out, sizeof out, 0, (const unsigned char *)"", 0) == XWM_ERR_ARG, "an empty atom name is refused");
+        XWCHECK(xwm_enc_intern_atom(out, sizeof out, 0, 0, 5) == XWM_ERR_ARG, "an atom name with no bytes is refused");
+}
+
+static void xw_test_get_property(void)
+{
+        static const unsigned char want[24] = {0x14, 0x00, 0x06, 0x00, 0x01, 0x00, 0x40, 0x00, 0x27, 0x00, 0x00, 0x00,
+                0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00};
+        unsigned char out[24];
+        long n;
+
+        n = xwm_enc_get_property(out, sizeof out, 0, 0x00400001, 39, 31, 0, 256);
+        XWCHECK(n == 24 && xw_same(out, want, 24), "GetProperty of WM_NAME as STRING, 256 units at offset 0");
+        out[1] = 0xee;
+        XWCHECK(xwm_enc_get_property(out, sizeof out, 1, 0x00400001, 39, 31, 0, 256) == 24 && out[1] == 1, "GetProperty with delete set sends the delete flag");
+        XWCHECK(xwm_enc_get_property(out, sizeof out, 0, 0x00400001, 39, 31, 0, 16385) == XWM_ERR_CAP, "a GetProperty asking for more than the property cap is refused");
+        XWCHECK(xwm_enc_get_property(out, 23, 0, 0x00400001, 39, 31, 0, 256) == XWM_ERR_SPACE, "GetProperty into 23 bytes is refused");
+}
+
+static void xw_test_change_property(void)
+{
+        static const unsigned char ab[28] = {0x12, 0x00, 0x07, 0x00, 0x01, 0x00, 0x40, 0x00, 0x27, 0x00, 0x00, 0x00,
+                0x1f, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 'a', 'b', 0x00, 0x00};
+        static const unsigned char two32[32] = {0x12, 0x02, 0x08, 0x00, 0x01, 0x00, 0x40, 0x00, 0x27, 0x00, 0x00, 0x00,
+                0x1f, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+                0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55};
+        unsigned char out[40];
+        long n;
+
+        n = xwm_enc_change_property(out, sizeof out, XWM_PROP_REPLACE, 0x00400001, 39, 31, 8, (const unsigned char *)"ab", 2);
+        XWCHECK(n == 28 && xw_same(out, ab, 28), "ChangeProperty: two bytes of format 8, padded to 28 bytes, length 7 units");
+        n = xwm_enc_change_property(out, sizeof out, XWM_PROP_APPEND, 0x00400001, 39, 31, 32,
+                (const unsigned char *)"\x44\x33\x22\x11\x88\x77\x66\x55", 8);
+        XWCHECK(n == 32 && xw_same(out, two32, 32), "ChangeProperty append of two 32-bit elements: the count is 2, the data little-endian");
+        XWCHECK(xwm_enc_change_property(out, sizeof out, 0, 1, 39, 31, 16, (const unsigned char *)"abc", 3) == XWM_ERR_ARG, "format 16 with an odd byte count is refused");
+        XWCHECK(xwm_enc_change_property(out, sizeof out, 0, 1, 39, 31, 7, (const unsigned char *)"ab", 2) == XWM_ERR_ARG, "a format of 7 is refused");
+        XWCHECK(xwm_enc_change_property(out, sizeof out, 3, 1, 39, 31, 8, (const unsigned char *)"ab", 2) == XWM_ERR_ARG, "a mode of 3 is refused");
+        XWCHECK(xwm_enc_change_property(out, sizeof out, 0, 1, 39, 31, 8, 0, 2) == XWM_ERR_ARG, "data with no bytes is refused");
+        XWCHECK(xwm_enc_change_property(out, sizeof out, 0, 1, 39, 31, 8, 0, XWM_PROPERTY_MAX + 1) == XWM_ERR_CAP, "a property over the cap is refused");
+        XWCHECK(xwm_enc_change_property(out, 27, 0, 1, 39, 31, 8, (const unsigned char *)"ab", 2) == XWM_ERR_SPACE, "ChangeProperty into 27 bytes is refused");
+}
+
+static void xw_test_select_events(void)
+{
+        static const unsigned char want[16] = {0x02, 0x00, 0x04, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x5a, 0x00};
+        unsigned char out[16];
+        unsigned int wm_root = XWM_MASK_SUBSTRUCTURE_REDIRECT | XWM_MASK_SUBSTRUCTURE_NOTIFY | XWM_MASK_PROPERTY_CHANGE |
+                XWM_MASK_STRUCTURE_NOTIFY;
+
+        XWCHECK(wm_root == 0x5a0000u, "the root's mask is the four bits 20, 19, 22 and 17");
+        XWCHECK(xwm_enc_select_events(out, sizeof out, 0x100, wm_root) == 16 && xw_same(out, want, 16),
+                "ChangeWindowAttributes sets the event mask of the root");
+        XWCHECK(xwm_enc_select_events(out, sizeof out, 0x100, 1u << 25) == XWM_ERR_ARG, "an event mask with a bit the protocol does not have is refused");
+}
+
+static void xw_test_create_window(void)
+{
+        static const unsigned char want[32] = {0x01, 0x00, 0x08, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0xff, 0xff, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00};
+        unsigned char out[32];
+
+        XWCHECK(xwm_enc_create_window(out, sizeof out, 0, 0x00400001, 0x100, -1, 0, 1, 1, XWM_CLASS_INPUT_ONLY, 0) == 32
+                && xw_same(out, want, 32), "CreateWindow of an InputOnly check window at -1,0, 1 by 1, with no values");
+        XWCHECK(xwm_enc_create_window(out, sizeof out, 0, 0x00400001, 0x100, 0, 0, 0, 1, 1, 0) == XWM_ERR_ARG, "a window of width 0 is refused");
+        XWCHECK(xwm_enc_create_window(out, sizeof out, 0, 0x00400001, 0x100, 40000, 0, 1, 1, 1, 0) == XWM_ERR_ARG, "an x out of INT16 is refused");
+        XWCHECK(xwm_enc_create_window(out, sizeof out, 0, 0x00400001, 0x100, 0, 0, 1, 1, 3, 0) == XWM_ERR_ARG, "a window class of 3 is refused");
+        XWCHECK(xwm_enc_create_window(out, 31, 0, 0x00400001, 0x100, 0, 0, 1, 1, 2, 0) == XWM_ERR_SPACE, "CreateWindow into 31 bytes is refused");
+}
+
+static void xw_test_window_ops(void)
+{
+        static const unsigned int ops[5] = {XWM_OP_MAP_WINDOW, XWM_OP_UNMAP_WINDOW, XWM_OP_DESTROY_WINDOW, XWM_OP_GET_GEOMETRY,
+                XWM_OP_GET_WINDOW_ATTRIBUTES};
+        static const unsigned char codes[5] = {8, 10, 4, 14, 3};
+        unsigned char out[8];
+
+        for (int i = 0; i < 5; i++)
+        {
+                unsigned char want[8] = {0, 0x00, 0x02, 0x00, 0x01, 0x00, 0x40, 0x00};
+
+                want[0] = codes[i];
+                XWCHECK(xwm_enc_window_op(out, sizeof out, ops[i], 0x00400001) == 8 && xw_same(out, want, 8),
+                        "a window request of opcode %u is eight bytes: the opcode, length 2, the window", (unsigned)codes[i]);
+        }
+        XWCHECK(xwm_enc_window_op(out, sizeof out, 1, 0x00400001) == XWM_ERR_ARG, "CreateWindow is not a window request of eight bytes");
+        XWCHECK(xwm_enc_window_op(out, 7, XWM_OP_MAP_WINDOW, 0x00400001) == XWM_ERR_SPACE, "a window request into 7 bytes is refused");
+}
+
+static void xw_test_configure_window(void)
+{
+        static const unsigned char want[24] = {0x0c, 0x00, 0x06, 0x00, 0x01, 0x00, 0x40, 0x00, 0x45, 0x00, 0x00, 0x00,
+                0xfb, 0xff, 0xff, 0xff, 0x20, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        static const unsigned char none[12] = {0x0c, 0x00, 0x03, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+        unsigned char out[32];
+        struct xwm_configure c;
+
+        c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_STACK_MODE;
+        c.x = -5; c.y = 0; c.width = 800; c.height = 0; c.border = 0; c.sibling = 0; c.stack_mode = XWM_STACK_ABOVE;
+        XWCHECK(xwm_enc_configure_window(out, sizeof out, 0x00400001, &c) == 24 && xw_same(out, want, 24),
+                "ConfigureWindow of x, width and stack mode: the mask 0x45, the values in bit order, length 6 units");
+        c.mask = 0;
+        XWCHECK(xwm_enc_configure_window(out, sizeof out, 0x00400001, &c) == 12 && xw_same(out, none, 12),
+                "ConfigureWindow with no fields is the window and an empty mask");
+        c.mask = 0x80;
+        XWCHECK(xwm_enc_configure_window(out, sizeof out, 0x00400001, &c) == XWM_ERR_ARG, "a mask bit the protocol does not have is refused");
+        c.mask = XWM_CONFIGURE_WIDTH; c.width = 0;
+        XWCHECK(xwm_enc_configure_window(out, sizeof out, 0x00400001, &c) == XWM_ERR_ARG, "a width of 0 is refused");
+        c.mask = XWM_CONFIGURE_X; c.x = 40000;
+        XWCHECK(xwm_enc_configure_window(out, sizeof out, 0x00400001, &c) == XWM_ERR_ARG, "an x out of INT16 is refused");
+        c.mask = XWM_CONFIGURE_STACK_MODE; c.stack_mode = 5;
+        XWCHECK(xwm_enc_configure_window(out, sizeof out, 0x00400001, &c) == XWM_ERR_ARG, "a stack mode of 5 is refused");
+        c.mask = XWM_CONFIGURE_ALL; c.x = c.y = 1; c.width = c.height = 1; c.stack_mode = 0; c.border = 1; c.sibling = 1;
+        XWCHECK(xwm_enc_configure_window(out, 39, 0x00400001, &c) == XWM_ERR_SPACE, "ConfigureWindow of seven fields into 39 bytes is refused");
+        XWCHECK(xwm_enc_configure_window(out, sizeof out, 0x00400001, 0) == XWM_ERR_ARG, "ConfigureWindow with no values is refused");
+}
+
+static void xw_test_set_input_focus(void)
+{
+        static const unsigned char want[12] = {0x2a, 0x01, 0x03, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+        unsigned char out[12];
+
+        XWCHECK(xwm_enc_set_input_focus(out, sizeof out, XWM_REVERT_POINTER_ROOT, 0x00400001, XWM_CURRENT_TIME) == 12
+                && xw_same(out, want, 12), "SetInputFocus to the window, revert to the pointer's root, at CurrentTime");
+        XWCHECK(xwm_enc_set_input_focus(out, sizeof out, 3, 0x00400001, 0) == XWM_ERR_ARG, "a revert-to of 3 is refused");
+}
+
+/* A ClientMessage of format 32, as the 32 bytes the event is (its type 33, its format 32, the window, the type atom, and the
+   data words from byte 12). */
+static void xw_test_client_message(unsigned char *ev)
+{
+        static const unsigned char want[32] = {0x21, 0x20, 0x00, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0x01, 0x01, 0x00, 0x00, 0x22, 0x22, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        unsigned int data[2] = {0x101, 0x2222};
+        long n;
+
+        n = xwm_enc_client_message(ev, 32, 0x00400001, 0x100, data, 2);
+        XWCHECK(n == 32 && xw_same(ev, want, 32), "a ClientMessage of format 32: window, type, and two data words, rest zero");
+        XWCHECK(xwm_enc_client_message(ev, 32, 0x00400001, 0x100, data, 6) == XWM_ERR_ARG, "a ClientMessage with six data words is refused");
+        XWCHECK(xwm_enc_client_message(ev, 31, 0x00400001, 0x100, data, 2) == XWM_ERR_SPACE, "a ClientMessage into 31 bytes is refused");
+}
+
+static void xw_test_send_event(void)
+{
+        static const unsigned char want[44] = {0x19, 0x00, 0x0b, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x21, 0x20, 0x00, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
+                0x22, 0x22, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0};
+        unsigned char ev[32], out[44];
+        long n;
+
+        xw_test_client_message(ev);
+        n = xwm_enc_send_event(out, sizeof out, 0, 0x00400001, 0, ev, 32);
+        XWCHECK(n == 44 && xw_same(out, want, 44), "SendEvent of a WM_DELETE_WINDOW-shaped ClientMessage: 44 bytes, length 11 units, the event inside");
+        XWCHECK(xwm_enc_send_event(out, sizeof out, 0, 0x00400001, 0, ev, 31) == XWM_ERR_ARG, "an event that is not 32 bytes is refused");
+        ev[0] = 1;
+        XWCHECK(xwm_enc_send_event(out, sizeof out, 0, 0x00400001, 0, ev, 32) == XWM_ERR_ARG, "a reply is not an event that can be sent");
+        ev[0] = 0x63;
+        XWCHECK(xwm_enc_send_event(out, sizeof out, 0, 0x00400001, 0, ev, 32) == XWM_ERR_ARG, "an event of type 99 is refused");
+        ev[0] = 33;
+        XWCHECK(xwm_enc_send_event(out, 43, 0, 0x00400001, 0, ev, 32) == XWM_ERR_SPACE, "SendEvent into 43 bytes is refused");
+}
+
+/* Every encoder into a buffer of exactly its size writes it, and into one byte less answers XWM_ERR_SPACE (the buffers are
+   exact, so a write past what the encoder reported is a sanitizer report). */
+static void xw_test_encoders_fit(void)
+{
+        unsigned char ev[32];
+        unsigned int one[1] = {5};
+        struct xwm_configure c;
+        unsigned char *out;
+
+        xw_test_client_message(ev);
+        c.mask = XWM_CONFIGURE_Y;
+        c.y = 9;
+        out = xw_blank(12);
+        XWCHECK(xwm_enc_setup_request(out, 12) == 12, "the setup request fits its exact size");
+        XWCHECK(xwm_enc_setup_request(out, 11) == XWM_ERR_SPACE, "the setup request one byte short is refused");
+        free(out);
+        out = xw_blank(20);
+        XWCHECK(xwm_enc_intern_atom(out, 20, 0, (const unsigned char *)"WM_PROTOCOLS", 12) == 20, "InternAtom fits its exact size");
+        XWCHECK(xwm_enc_intern_atom(out, 19, 0, (const unsigned char *)"WM_PROTOCOLS", 12) == XWM_ERR_SPACE, "InternAtom one byte short is refused");
+        free(out);
+        out = xw_blank(16);
+        XWCHECK(xwm_enc_configure_window(out, 16, 1, &c) == 16, "ConfigureWindow of one value fits its exact size");
+        XWCHECK(xwm_enc_configure_window(out, 15, 1, &c) == XWM_ERR_SPACE, "ConfigureWindow of one value one byte short is refused");
+        free(out);
+        out = xw_blank(32);
+        XWCHECK(xwm_enc_client_message(out, 32, 1, 2, one, 1) == 32, "a ClientMessage fits its exact size");
+        XWCHECK(xwm_enc_client_message(out, 31, 1, 2, one, 1) == XWM_ERR_SPACE, "a ClientMessage one byte short is refused");
+        free(out);
+        out = xw_blank(44);
+        XWCHECK(xwm_enc_send_event(out, 44, 0, 1, 0, ev, 32) == 44, "SendEvent fits its exact size");
+        XWCHECK(xwm_enc_send_event(out, 43, 0, 1, 0, ev, 32) == XWM_ERR_SPACE, "SendEvent one byte short is refused");
+        free(out);
+        out = xw_blank(24);
+        XWCHECK(xwm_enc_get_property(out, 24, 0, 1, 2, 3, 0, 4) == 24, "GetProperty fits its exact size");
+        XWCHECK(xwm_enc_get_property(out, 23, 0, 1, 2, 3, 0, 4) == XWM_ERR_SPACE, "GetProperty one byte short is refused");
+        free(out);
+}
+
+/* ---- the replies, errors and events: each parsed from a sample laid out by hand ---- */
+
+static void xw_test_events(void)
+{
+        unsigned char e[32];
+        struct xwm_event v;
+        int r;
+
+        xw_sample_map_request(e);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_MAP_REQUEST && v.sequence == 0x0102 && v.parent == 0x5a1 && v.window == 0x400001 && v.synthetic == 0,
+                "MapRequest: the parent, the window and the sequence");
+
+        xw_sample_configure_request(e);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_CONFIGURE_REQUEST && v.synthetic == 1 && v.detail == 1 && v.x == -3 && v.y == 10,
+                "ConfigureRequest: a synthetic event with the stack mode and a negative x");
+        XWCHECK(v.width == 640 && v.height == 480 && v.border == 0 && v.value_mask == 0x0f && v.window == 0x400001 && v.sibling == 0,
+                "ConfigureRequest: the size, the border, the mask and the window");
+
+        memset(e, 0, 32); e[0] = 18; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4); e[12] = 1;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_UNMAP_NOTIFY && v.event == 0x5a1 && v.window == 0x400001 && v.from_configure == 1,
+                "UnmapNotify: the event, the window, and from-configure");
+
+        memset(e, 0, 32); e[0] = 17; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_DESTROY_NOTIFY && v.window == 0x400001, "DestroyNotify: the window");
+
+        memset(e, 0, 32); e[0] = 22; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4); xw_u(e, 20, 1920, 2); xw_u(e, 22, 1080, 2); e[26] = 1;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_CONFIGURE_NOTIFY && v.width == 1920 && v.height == 1080 && v.override == 1,
+                "ConfigureNotify: the size and the override-redirect flag");
+
+        memset(e, 0, 32); e[0] = 28; xw_u(e, 4, 0x400001, 4); xw_u(e, 8, 39, 4); xw_u(e, 12, 0x1234, 4); e[16] = 1;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_PROPERTY_NOTIFY && v.atom == 39 && v.time == 0x1234 && v.state == 1,
+                "PropertyNotify: the window, the atom, the time, and the state Deleted");
+
+        /* a ClientMessage carrying the surface serial as two words: the low word first */
+        memset(e, 0, 32); e[0] = 33; e[1] = 32; xw_u(e, 4, 0x400001, 4); xw_u(e, 8, 0x200, 4); xw_u(e, 12, 7, 4); xw_u(e, 16, 2, 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_CLIENT_MESSAGE && v.format == 32 && v.atom == 0x200 && v.data[0] == 7 && v.data[1] == 2,
+                "ClientMessage of format 32: the serial's two words");
+        XWCHECK(v.data[2] == 0 && v.data[3] == 0 && v.data[4] == 0, "the data words past the ones sent are zero");
+        e[1] = 8; memcpy(e + 12, "abcd", 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.format == 8 && v.data[0] == 0, "ClientMessage of format 8 is read as a format, its data not read as words");
+        e[1] = 24;
+        XWCHECK(xwm_parse_event(e, 32, &v) == XWM_ERR_ARG, "ClientMessage of format 24 is refused");
+
+        memset(e, 0, 32); e[0] = 16; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400002, 4); xw_u(e, 12, 5, 2); xw_u(e, 14, 6, 2);
+        xw_u(e, 16, 100, 2); xw_u(e, 18, 50, 2); e[22] = 1;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_CREATE_NOTIFY && v.window == 0x400002 && v.x == 5 && v.width == 100 && v.override == 1,
+                "CreateNotify: the window, its place and size, and the override-redirect flag");
+
+        memset(e, 0, 32); e[0] = 9; e[1] = 0; xw_u(e, 4, 0x400001, 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_FOCUS_IN && v.event == 0x400001, "FocusIn: the window it is for");
+        memset(e, 0, 32); e[0] = 10; e[1] = 3; xw_u(e, 4, 0x400001, 4); e[8] = 1;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_FOCUS_OUT && v.mode == 1 && v.detail == 3, "FocusOut: its mode and its detail");
+        memset(e, 0, 32); e[0] = 7; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_ENTER && v.event == 0x400001, "EnterNotify: the event window");
+        memset(e, 0, 32); e[0] = 8; xw_u(e, 8, 0x400001, 4); e[26] = 2;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_LEAVE && v.mode == 2, "LeaveNotify: its mode");
+
+        memset(e, 0, 32); e[0] = 12; xw_u(e, 4, 0x400001, 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_IGNORED && v.code == 12, "Expose is known and ignored");
+        memset(e, 0, 32); e[0] = 21; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_IGNORED && v.code == 21, "ReparentNotify is known and ignored");
+
+        memset(e, 0, 32); e[0] = 2;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_UNKNOWN && v.code == 2, "a KeyPress is an event this codec does not read: unknown, and it succeeds");
+        memset(e, 0, 32); e[0] = 35; e[1] = 0; xw_u(e, 4, 0, 4);
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_UNKNOWN && v.code == 35, "a GenericEvent is unknown, framed by its own length");
+        memset(e, 0, 32); e[0] = 0x80 | 99;
+        r = xwm_parse_event(e, 32, &v);
+        XWCHECK(r == XWM_OK && v.kind == XWM_EV_UNKNOWN && v.code == 99 && v.synthetic == 1, "a type of 99 sent by a client is unknown, with the send-event bit");
+
+        memset(e, 0, 32); e[0] = 0; XWCHECK(xwm_parse_event(e, 32, &v) == XWM_ERR_TYPE, "an error is not an event");
+        memset(e, 0, 32); e[0] = 1; XWCHECK(xwm_parse_event(e, 32, &v) == XWM_ERR_TYPE, "a reply is not an event");
+        memset(e, 0, 32); e[0] = 0x80; XWCHECK(xwm_parse_event(e, 32, &v) == XWM_ERR_TYPE, "a send-event bit on type 0 is still an error, not an event");
+        XWCHECK(xwm_message_type(e, 32) == 0 && xwm_message_type(e, 31) == XWM_ERR_SHORT, "the message type is the first byte without the send-event bit; 31 bytes is short");
+}
+
+static void xw_test_replies(void)
+{
+        unsigned char r[48];
+        struct xwm_atom_reply a;
+        struct xwm_property_reply p;
+        struct xwm_geometry_reply g;
+        struct xwm_attributes_reply t;
+        struct xwm_error er;
+
+        memset(r, 0, 48);
+        r[0] = 1; xw_u(r, 2, 7, 2); xw_u(r, 8, 0x123, 4);
+        XWCHECK(xwm_parse_atom_reply(r, 32, &a) == XWM_OK && a.sequence == 7 && a.atom == 0x123, "InternAtom reply: the sequence and the atom");
+        XWCHECK(xwm_parse_atom_reply(r, 31, &a) == XWM_ERR_SHORT, "an InternAtom reply of 31 bytes is short");
+        xw_u(r, 4, 1, 4);
+        XWCHECK(xwm_parse_atom_reply(r, 40, &a) == XWM_ERR_LENGTH, "an InternAtom reply with a length of one unit is refused");
+        xw_u(r, 4, 0, 4); r[0] = 0;
+        XWCHECK(xwm_parse_atom_reply(r, 32, &a) == XWM_ERR_TYPE, "an error is not an InternAtom reply");
+
+        /* GetProperty: STRING "hello", format 8, two units, padded */
+        memset(r, 0, 48);
+        r[0] = 1; r[1] = 8; xw_u(r, 2, 9, 2); xw_u(r, 4, 2, 4); xw_u(r, 8, 31, 4); xw_u(r, 12, 0, 4); xw_u(r, 16, 5, 4);
+        memcpy(r + 32, "hello", 5);
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_OK && p.sequence == 9 && p.format == 8 && p.type == 31 && p.elements == 5,
+                "GetProperty reply: format 8, five elements, type STRING, sequence 9");
+        XWCHECK(p.value == r + 32 && p.value_len == 5 && memcmp(p.value, "hello", 5) == 0, "the value is the five bytes at 32, which is inside the buffer");
+        XWCHECK(xwm_parse_property_reply(r, 39, &p) == XWM_ERR_LENGTH, "a GetProperty reply cut one byte short of its value is refused");
+        XWCHECK(xwm_parse_property_reply(r, 31, &p) == XWM_ERR_SHORT, "a GetProperty reply of 31 bytes is short");
+        xw_u(r, 4, 0xffffffffu, 4);
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_ERR_LENGTH, "a length field of 0xffffffff is refused, not read");
+        xw_u(r, 4, 3, 4);
+        XWCHECK(xwm_parse_property_reply(r, 44, &p) == XWM_ERR_LENGTH, "a length field that disagrees with the value's length is refused");
+        xw_u(r, 4, 2, 4);
+        xw_u(r, 16, 65537, 4);
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_ERR_CAP, "a value of 65537 bytes is over the property cap");
+        xw_u(r, 16, 5, 4); r[1] = 9;
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_ERR_ARG, "a format of 9 is refused");
+        r[1] = 0; xw_u(r, 4, 0, 4); xw_u(r, 16, 0, 4);
+        XWCHECK(xwm_parse_property_reply(r, 32, &p) == XWM_OK && p.value_len == 0, "an empty property reply is 32 bytes and no value");
+        r[1] = 0; xw_u(r, 16, 5, 4);
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_ERR_ARG, "a format of 0 with elements is refused");
+        r[1] = 16; xw_u(r, 16, 4, 4); xw_u(r, 4, 2, 4);
+        XWCHECK(xwm_parse_property_reply(r, 48, &p) == XWM_OK && p.value_len == 8, "a format-16 reply of four elements is eight bytes");
+
+        memset(r, 0, 48);
+        r[0] = 1; r[1] = 24; xw_u(r, 2, 9, 2); xw_u(r, 8, 0x5a1, 4); xw_u(r, 12, 0xfffe, 2); xw_u(r, 14, 4, 2);
+        xw_u(r, 16, 1920, 2); xw_u(r, 18, 1080, 2); xw_u(r, 20, 0, 2);
+        XWCHECK(xwm_parse_geometry_reply(r, 32, &g) == XWM_OK && g.sequence == 9 && g.depth == 24 && g.root == 0x5a1, "GetGeometry reply: depth and root");
+        XWCHECK(g.x == -2 && g.y == 4 && g.width == 1920 && g.height == 1080 && g.border == 0, "GetGeometry reply: a negative x, the size, the border");
+        XWCHECK(xwm_parse_geometry_reply(r, 31, &g) == XWM_ERR_SHORT, "a GetGeometry reply of 31 bytes is short");
+
+        memset(r, 0, 48);
+        r[0] = 1; xw_u(r, 2, 10, 2); xw_u(r, 4, 3, 4); xw_u(r, 8, 0x21, 4); xw_u(r, 12, 1, 2); r[15] = 1; r[25] = 1; r[26] = 2;
+        xw_u(r, 28, 0x20, 4); xw_u(r, 32, 0x40000, 4); xw_u(r, 36, 0x40000, 4);
+        XWCHECK(xwm_parse_attributes_reply(r, 44, &t) == XWM_OK && t.sequence == 10 && t.visual == 0x21 && t.window_class == 1,
+                "GetWindowAttributes reply: the visual and the class");
+        XWCHECK(t.map_state == XWM_VIEWABLE && t.map_installed == 1 && t.colormap == 0x20 && t.your_mask == 0x40000 && t.win_gravity == 1,
+                "GetWindowAttributes reply: viewable, its colormap, its mask, its gravity");
+        XWCHECK(xwm_parse_attributes_reply(r, 43, &t) == XWM_ERR_LENGTH, "a GetWindowAttributes reply of 43 bytes is refused");
+        xw_u(r, 4, 0, 4);
+        XWCHECK(xwm_parse_attributes_reply(r, 44, &t) == XWM_ERR_LENGTH, "a GetWindowAttributes reply whose length is zero is refused");
+
+        memset(r, 0, 48);
+        r[0] = 0; r[1] = 3; xw_u(r, 2, 5, 2); xw_u(r, 4, 0x400001, 4); xw_u(r, 8, 0, 2); r[10] = 4;
+        XWCHECK(xwm_parse_error(r, 32, &er) == XWM_OK && er.code == 3 && er.sequence == 5 && er.bad_value == 0x400001 && er.major == 4,
+                "an error: the code, the sequence, the bad value and the major opcode");
+        XWCHECK(xwm_parse_error(r, 31, &er) == XWM_ERR_SHORT, "an error of 31 bytes is short");
+        XWCHECK(xwm_parse_error(r + 0, 32, 0) == XWM_ERR_ARG, "an error into no struct is refused");
+        r[0] = 1;
+        XWCHECK(xwm_parse_error(r, 32, &er) == XWM_ERR_TYPE, "a reply is not an error");
+}
+
+static void xw_test_setup(void)
+{
+        unsigned char b[144];
+        unsigned char f[16];
+        struct xwm_setup s;
+        int r;
+
+        xw_sample_setup(b);
+        r = xwm_parse_setup(b, 144, &s);
+        XWCHECK(r == XWM_OK && s.status == XWM_SETUP_SUCCESS && s.major == 11 && s.minor == 0 && s.release == 11, "setup: a success with protocol 11.0");
+        XWCHECK(s.resource_base == 0x200000 && s.resource_mask == 0x1fffff && s.motion_buffer == 256, "setup: the resource-id base and mask, and the motion buffer");
+        XWCHECK(s.vendor == 8 && s.max_request == 65535 && s.formats == 2 && s.screens == 1, "setup: the vendor length, the request size, the formats and the screens");
+        XWCHECK(s.root == 0x5a1 && s.root_visual == 0x21 && s.root_depth == 24 && s.root_events == 0x001a0000, "setup: the first screen's root, visual, depth and event mask");
+        XWCHECK(s.width == 1920 && s.height == 1080 && s.width_mm == 508 && s.height_mm == 285, "setup: the first screen's size");
+        XWCHECK(s.min_keycode == 8 && s.max_keycode == 255 && s.scanline_unit == 32, "setup: the keycodes and the bitmap format");
+
+        memset(f, 0, sizeof f);
+        f[0] = 0; f[1] = 5; xw_u(f, 2, 11, 2); xw_u(f, 6, 2, 2); memcpy(f + 8, "nope!", 5);
+        XWCHECK(xwm_parse_setup(f, 16, &s) == XWM_OK && s.status == XWM_SETUP_FAILED && s.reason == 5 && s.major == 11,
+                "a refused setup: its reason's length, not its text");
+        memset(f, 0, sizeof f);
+        f[0] = 2; xw_u(f, 6, 1, 2);
+        XWCHECK(xwm_parse_setup(f, 12, &s) == XWM_OK && s.status == XWM_SETUP_AUTHENTICATE, "an authenticate setup is reported as such");
+        f[0] = 9;
+        XWCHECK(xwm_parse_setup(f, 12, &s) == XWM_ERR_TYPE, "a setup status of 9 is refused");
+}
+
+static void xw_test_framing(void)
+{
+        unsigned char e[32], r[48];
+
+        memset(e, 0, 32); e[0] = 22;
+        XWCHECK(xwm_server_message_size(e, 32) == 32, "an event is 32 bytes");
+        memset(r, 0, 48); r[0] = 1; xw_u(r, 4, 2, 4);
+        XWCHECK(xwm_server_message_size(r, 48) == 40, "a reply of two units is 40 bytes");
+        xw_u(r, 4, 16384, 4);
+        XWCHECK(xwm_server_message_size(r, 48) == 32 + 65536, "a reply of the largest size the cap allows is 65568 bytes");
+        xw_u(r, 4, 16385, 4);
+        XWCHECK(xwm_server_message_size(r, 48) == XWM_ERR_CAP, "a reply one unit past the cap is refused");
+        xw_u(r, 4, 0xffffffffu, 4);
+        XWCHECK(xwm_server_message_size(r, 48) == XWM_ERR_CAP, "a reply that claims four gigabytes is refused at the frame");
+        memset(r, 0, 48); r[0] = 35; xw_u(r, 4, 1, 4);
+        XWCHECK(xwm_server_message_size(r, 48) == 36, "a GenericEvent is framed by its length");
+        XWCHECK(xwm_server_message_size(e, 31) == XWM_ERR_SHORT, "framing needs the 32 bytes of a message");
+}
+
+/* ---- hostile input: every prefix of a sample, lengths that lie, caps, and types that are not the parser's ---- */
+
+typedef int (*xw_parse_fn)(const unsigned char *, unsigned long);
+
+/* Every prefix of the sample, shorter than it, is refused; the whole sample is accepted. */
+static void xw_truncate_rows(const char *what, const unsigned char *whole, unsigned long n, xw_parse_fn parse)
+{
+        for (unsigned long cut = 0; cut < n; cut++)
+        {
+                unsigned char *p = xw_exact(whole, cut);
+                int r = parse(p, cut);
+
+                XWCHECK(r < 0, "%s cut to %lu of %lu bytes is refused", what, cut, n);
+                free(p);
+        }
+        {
+                unsigned char *p = xw_exact(whole, n);
+                int r = parse(p, n);
+
+                XWCHECK(r == XWM_OK, "%s whole is accepted (%d)", what, r);
+                free(p);
+        }
+}
+
+static void xw_test_truncation(void)
+{
+        unsigned char e[32], r[48], s[144];
+        unsigned char f[16];
+
+        xw_sample_map_request(e);
+        xw_truncate_rows("MapRequest", e, 32, xw_p_event);
+        xw_sample_configure_request(e);
+        xw_truncate_rows("ConfigureRequest", e, 32, xw_p_event);
+        xw_sample_map_request(e);
+        e[0] = 33; e[1] = 32; xw_u(e, 8, 0x200, 4); xw_u(e, 12, 7, 4);
+        xw_truncate_rows("ClientMessage", e, 32, xw_p_event);
+
+        memset(r, 0, sizeof r);
+        r[0] = 1; r[1] = 8; xw_u(r, 2, 9, 2); xw_u(r, 4, 2, 4); xw_u(r, 8, 31, 4); xw_u(r, 16, 5, 4); memcpy(r + 32, "hello", 5);
+        xw_truncate_rows("GetProperty reply", r, 40, xw_p_property);
+        memset(r, 0, sizeof r);
+        r[0] = 1; xw_u(r, 2, 7, 2); xw_u(r, 8, 0x123, 4);
+        xw_truncate_rows("InternAtom reply", r, 32, xw_p_atom);
+        memset(r, 0, sizeof r);
+        r[0] = 1; r[1] = 24; xw_u(r, 2, 9, 2); xw_u(r, 8, 0x5a1, 4); xw_u(r, 16, 1920, 2);
+        xw_truncate_rows("GetGeometry reply", r, 32, xw_p_geometry);
+        memset(r, 0, sizeof r);
+        r[0] = 1; xw_u(r, 2, 10, 2); xw_u(r, 4, 3, 4); xw_u(r, 8, 0x21, 4);
+        xw_truncate_rows("GetWindowAttributes reply", r, 44, xw_p_attributes);
+        memset(r, 0, sizeof r);
+        r[0] = 0; r[1] = 3; xw_u(r, 2, 5, 2); xw_u(r, 4, 0x400001, 4); r[10] = 4;
+        xw_truncate_rows("error", r, 32, xw_p_error);
+
+        xw_sample_setup(s);
+        xw_truncate_rows("setup", s, 144, xw_p_setup);
+        memset(f, 0, sizeof f);
+        f[0] = 0; f[1] = 5; xw_u(f, 2, 11, 2); xw_u(f, 6, 2, 2); memcpy(f + 8, "nope!", 5);
+        xw_truncate_rows("refused setup", f, 16, xw_p_setup);
+}
+
+/* Lengths that lie: a length field that claims more than the buffer holds, or more than the cap, is refused, and a length
+   that disagrees with the structure is refused too. None of them is read past. */
+static void xw_test_lengths(void)
+{
+        unsigned char r[40], s[144], e[32];
+        struct xwm_property_reply p;
+        struct xwm_setup st;
+
+        memset(r, 0, sizeof r);
+        r[0] = 1; r[1] = 8; xw_u(r, 4, 2, 4); xw_u(r, 16, 5, 4); memcpy(r + 32, "hello", 5);
+        xw_u(r, 4, 0xffffffffu, 4);
+        XWCHECK(xwm_server_message_size(r, 40) == XWM_ERR_CAP, "a reply whose length is 0xffffffff is not framed");
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_ERR_LENGTH, "a GetProperty reply claiming 0xffffffff units is refused");
+        xw_u(r, 4, 1000000, 4);
+        XWCHECK(xwm_server_message_size(r, 40) == XWM_ERR_CAP, "a reply of a million units is not framed");
+        xw_u(r, 4, 9, 4);
+        XWCHECK(xwm_server_message_size(r, 40) == 32 + 36 && xwm_parse_property_reply(r, 40, &p) == XWM_ERR_LENGTH,
+                "a reply of nine units in a buffer of 40 is framed as 68 and does not parse from 40");
+        xw_u(r, 4, 2, 4);
+        xw_u(r, 16, 1005, 4);
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_ERR_LENGTH, "a value count that disagrees with the length is refused");
+
+        xw_sample_setup(s);
+        xw_u(s, 6, 0xffff, 2);
+        XWCHECK(xwm_setup_size(s, 144) == XWM_ERR_CAP, "a setup whose length is 65535 units is over the setup cap");
+        xw_u(s, 6, 34 + 10, 2);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_LENGTH, "a setup that claims ten more units than the buffer holds is refused");
+        xw_sample_setup(s);
+        xw_u(s, 6, 33, 2);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_LENGTH, "a setup that claims one unit less than its structure is refused");
+
+        memset(e, 0, sizeof e);
+        e[0] = 35; xw_u(e, 4, 0x7fffffffu, 4);
+        XWCHECK(xwm_server_message_size(e, 32) == XWM_ERR_CAP, "a GenericEvent claiming two gigabytes is refused at the frame");
+}
+
+/* Caps: every count and every length the parsers take, one over its cap, is refused before anything is sized by it. */
+static void xw_test_caps(void)
+{
+        unsigned char s[144], r[40];
+        struct xwm_setup st;
+        struct xwm_property_reply p;
+        unsigned char *big = xw_blank(XWM_PROPERTY_MAX);
+        unsigned char *out = xw_blank(XWM_PROPERTY_MAX + 24);
+        unsigned char name[XWM_ATOM_NAME_MAX + 1];
+
+        for (unsigned long i = 0; i < sizeof name; i++)
+                name[i] = 'a';
+        XWCHECK(xwm_enc_intern_atom(out, XWM_PROPERTY_MAX + 24, 0, name, XWM_ATOM_NAME_MAX + 1) == XWM_ERR_CAP,
+                "an atom name of 257 bytes is over the atom cap");
+        XWCHECK(xwm_enc_intern_atom(out, XWM_PROPERTY_MAX + 24, 0, name, XWM_ATOM_NAME_MAX) > 0,
+                "an atom name of exactly the cap is written");
+        XWCHECK(xwm_enc_change_property(out, XWM_PROPERTY_MAX + 24, 0, 1, 39, 31, 8, big, XWM_PROPERTY_MAX + 1) == XWM_ERR_CAP,
+                "a ChangeProperty of 65537 bytes is over the property cap");
+        XWCHECK(xwm_enc_change_property(out, XWM_PROPERTY_MAX + 24, 0, 1, 39, 31, 8, big, XWM_PROPERTY_MAX) == XWM_PROPERTY_MAX + 24,
+                "a ChangeProperty of exactly the property cap is written");
+        XWCHECK(xwm_enc_get_property(out, XWM_PROPERTY_MAX + 24, 0, 1, 39, 31, 0, XWM_PROPERTY_MAX / 4 + 1) == XWM_ERR_CAP,
+                "a GetProperty of one unit past the cap is refused");
+        free(big);
+        free(out);
+
+        memset(r, 0, sizeof r);
+        r[0] = 1; r[1] = 32; xw_u(r, 4, 0, 4); xw_u(r, 16, XWM_PROPERTY_MAX / 4 + 1, 4);
+        XWCHECK(xwm_parse_property_reply(r, 40, &p) == XWM_ERR_CAP, "a 32-bit reply of more elements than the cap holds is refused");
+
+        xw_sample_setup(s);
+        xw_u(s, 24, XWM_VENDOR_MAX + 1, 2);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_CAP, "a vendor string one byte over its cap is refused");
+        xw_sample_setup(s);
+        s[29] = XWM_FORMATS_MAX + 1;
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_CAP, "a format count one over its cap is refused");
+        xw_sample_setup(s);
+        s[28] = XWM_SCREENS_MAX + 1;
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_CAP, "a screen count one over its cap is refused");
+        xw_sample_setup(s);
+        s[28] = 0;
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_ARG, "a server with no screen is refused");
+        xw_sample_setup(s);
+        s[103] = XWM_DEPTHS_MAX + 1;
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_CAP, "a screen with one depth over the depth cap is refused");
+        xw_sample_setup(s);
+        xw_u(s, 106, 300, 2);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_CAP, "a depth with more visuals than the visual cap is refused");
+        xw_sample_setup(s);
+        xw_u(s, 16, 0, 4);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_ARG, "a resource-id mask of zero is refused");
+        xw_sample_setup(s);
+        xw_u(s, 12, 0x00200000 | 0x1, 4);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_ARG, "a resource-id base that overlaps the mask is refused");
+        xw_sample_setup(s);
+        xw_u(s, 2, 12, 2);
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_TYPE, "a server of protocol major 12 is refused");
+}
+
+/* Types that are not the parser's: refused as types, and an unknown type is framed and reported, not parsed further. */
+static void xw_test_types(void)
+{
+        unsigned char e[32], r[32], s[144];
+        struct xwm_atom_reply a;
+        struct xwm_error er;
+        struct xwm_setup st;
+
+        memset(e, 0, sizeof e);
+        e[0] = 2; xw_u(e, 2, 3, 2);
+        XWCHECK(xwm_parse_error(e, 32, &er) == XWM_ERR_TYPE, "a KeyPress is not an error");
+        XWCHECK(xwm_parse_atom_reply(e, 32, &a) == XWM_ERR_TYPE, "a KeyPress is not an InternAtom reply");
+        memset(r, 0, sizeof r);
+        r[0] = 0x81;
+        XWCHECK(xwm_parse_atom_reply(r, 32, &a) == XWM_ERR_TYPE, "a reply with the send-event bit is not a reply");
+        xw_sample_setup(s);
+        s[0] = 9;
+        XWCHECK(xwm_parse_setup(s, 144, &st) == XWM_ERR_TYPE, "a setup of status 9 is refused");
+        memset(e, 0, sizeof e);
+        e[0] = 0x63;
+        XWCHECK(xwm_message_type(e, 32) == 0x63, "a message of type 99 is typed 99");
+        XWCHECK(xwm_server_message_size(e, 32) == 32, "a message of type 99 is framed as 32 bytes, and no more is read");
+}
+
+/* ---- fuzz: a fixed seed, 10000 rounds of random bytes into every parser and every encoder, and a stream of 10000 bytes
+   walked the way the connection reads it. Nothing crashes, every answer is one of the codes, and every frame is bounded. */
+
+static unsigned int xw_rng = 0x2545f491u;
+
+static unsigned int xw_rand(void)
+{
+        unsigned int x = xw_rng;
+
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        return xw_rng = x;
+}
+
+/* An encoder's answer is an error, or the bytes it wrote, which fit the buffer. */
+static int xw_fits(long n, unsigned long cap)
+{
+        return n < 0 || (unsigned long)n <= cap;
+}
+
+static int xw_bounded(long r)
+{
+        return r == XWM_OK || (r < 0 && r >= XWM_ERR_TYPE) || r > 0;
+}
+
+static void xw_test_fuzz(void)
+{
+        static unsigned char stream[10000];
+        unsigned long at = 0, frames = 0, unknown = 0, bad = 0, parsed = 0;
+        unsigned int rounds = 10000;
+
+        for (unsigned long i = 0; i < sizeof stream; i++)
+                stream[i] = (unsigned char)xw_rand();
+        while (at < sizeof stream)
+        {
+                unsigned long rest = sizeof stream - at;
+                long size = xwm_server_message_size(stream + at, rest);
+                unsigned char *p;
+                long type;
+                struct xwm_event ev;
+
+                if (size <= 0 || (unsigned long)size > rest)
+                        break;
+                p = xw_exact(stream + at, (unsigned long)size);
+                type = xwm_message_type(p, (unsigned long)size);
+                if (type == XWM_ERROR)
+                {
+                        struct xwm_error er;
+                        bad += !xw_bounded(xwm_parse_error(p, (unsigned long)size, &er));
+                }
+                else if (type == XWM_REPLY)
+                {
+                        struct xwm_atom_reply a;
+                        struct xwm_property_reply pr;
+                        struct xwm_geometry_reply g;
+                        struct xwm_attributes_reply t;
+
+                        bad += !xw_bounded(xwm_parse_atom_reply(p, (unsigned long)size, &a));
+                        bad += !xw_bounded(xwm_parse_property_reply(p, (unsigned long)size, &pr));
+                        bad += !xw_bounded(xwm_parse_geometry_reply(p, (unsigned long)size, &g));
+                        bad += !xw_bounded(xwm_parse_attributes_reply(p, (unsigned long)size, &t));
+                }
+                else
+                {
+                        int r = xwm_parse_event(p, (unsigned long)size, &ev);
+
+                        bad += !xw_bounded(r);
+                        if (r == XWM_OK && ev.kind == XWM_EV_UNKNOWN)
+                                unknown++;
+                }
+                parsed++;
+                free(p);
+                frames++;
+                at += (unsigned long)size;
+        }
+        XWCHECK(bad == 0, "the stream of 10000 random bytes: every frame's parse answers a code (%lu bad)", bad);
+        XWCHECK(at <= sizeof stream && frames > 0, "the stream is walked forward only, and not past its end");
+        printf("CHECK_xwm_wire stream: %lu bytes, %lu frames parsed, %lu unknown, %lu bytes walked\n", (unsigned long)sizeof stream, frames, unknown, at);
+        (void)parsed;
+
+        bad = 0;
+        for (unsigned int round = 0; round < rounds; round++)
+        {
+                unsigned long len = xw_rand() % 200;
+                unsigned char *b = xw_blank(len ? len : 1);
+                unsigned long i;
+                unsigned int pick = xw_rand();
+
+                for (i = 0; i < len; i++)
+                        b[i] = (unsigned char)xw_rand();
+                if (len >= 1 && (pick & 1))
+                        b[0] = (unsigned char)(xw_rand() % 40 | ((pick & 2) ? 0x80 : 0));
+                if (len >= 8 && (pick & 4))
+                        xw_u(b, 4, xw_rand() % 5, 4);
+                if (len >= 8 && (pick & 8))
+                        xw_u(b, 6, xw_rand() % 9, 2);
+                {
+                        struct xwm_event ev;
+                        struct xwm_error er;
+                        struct xwm_atom_reply a;
+                        struct xwm_property_reply pr;
+                        struct xwm_geometry_reply g;
+                        struct xwm_attributes_reply t;
+                        struct xwm_setup st;
+                        long size = xwm_server_message_size(b, len);
+                        long setup = xwm_setup_size(b, len);
+
+                        bad += !xw_bounded(xwm_parse_event(b, len, &ev));
+                        bad += !xw_bounded(xwm_parse_error(b, len, &er));
+                        bad += !xw_bounded(xwm_parse_atom_reply(b, len, &a));
+                        bad += !xw_bounded(xwm_parse_property_reply(b, len, &pr));
+                        bad += !xw_bounded(xwm_parse_geometry_reply(b, len, &g));
+                        bad += !xw_bounded(xwm_parse_attributes_reply(b, len, &t));
+                        bad += !xw_bounded(xwm_parse_setup(b, len, &st));
+                        bad += !xw_bounded(size) || !xw_bounded(setup);
+                        if (len > 0)
+                        {
+                                bad += !xw_bounded(xwm_parse_event(b, len - 1, &ev));
+                                bad += !xw_bounded(xwm_parse_property_reply(b, len - 1, &pr));
+                                bad += !xw_bounded(xwm_parse_setup(b, len - 1, &st));
+                        }
+                        if (xwm_parse_property_reply(b, len, &pr) == XWM_OK && (pr.value < b || pr.value + pr.value_len > b + len))
+                                bad++;
+                }
+                free(b);
+        }
+        XWCHECK(bad == 0, "10000 rounds of random messages into every parser: every answer is a code, every value inside its buffer (%lu bad)", bad);
+
+        bad = 0;
+        for (unsigned int round = 0; round < rounds; round++)
+        {
+                unsigned long cap = xw_rand() % 64;
+                unsigned char *out = xw_blank(cap ? cap : 1);
+                unsigned long nlen = xw_rand() % 300;
+                unsigned char *name = xw_blank(nlen ? nlen : 1);
+                unsigned char ev[33];
+                unsigned int data[7];
+                struct xwm_configure c;
+                unsigned int pick = xw_rand();
+                long n;
+
+                for (unsigned long i = 0; i < nlen; i++)
+                        name[i] = (unsigned char)xw_rand();
+                for (unsigned long i = 0; i < sizeof ev; i++)
+                        ev[i] = (unsigned char)xw_rand();
+                for (unsigned long i = 0; i < 7; i++)
+                        data[i] = xw_rand();
+                c.mask = xw_rand() & 0xff;
+                c.x = (int)(xw_rand() % 70000) - 35000;
+                c.y = (int)(xw_rand() % 70000) - 35000;
+                c.width = xw_rand() % 70000;
+                c.height = xw_rand() % 70000;
+                c.border = xw_rand() % 70000;
+                c.sibling = xw_rand();
+                c.stack_mode = xw_rand() % 7;
+
+                n = xwm_enc_setup_request(out, cap);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_intern_atom(out, cap, pick & 1, name, nlen);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_get_property(out, cap, pick & 2, xw_rand(), xw_rand(), xw_rand(), xw_rand(), xw_rand() % 20000);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_change_property(out, cap, xw_rand() % 4, xw_rand(), xw_rand(), xw_rand(), xw_rand() % 40, name, nlen);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_select_events(out, cap, xw_rand(), xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_create_window(out, cap, xw_rand() % 300, xw_rand(), xw_rand(), (int)(xw_rand() % 70000) - 35000,
+                        (int)(xw_rand() % 70000) - 35000, xw_rand() % 70000, xw_rand() % 70000, xw_rand() % 4, xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_window_op(out, cap, xw_rand() % 50, xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_configure_window(out, cap, xw_rand(), &c);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_set_input_focus(out, cap, xw_rand() % 4, xw_rand(), xw_rand());
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_send_event(out, cap, pick & 1, xw_rand(), xw_rand(), ev, sizeof ev - 1 - (pick & 1));
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                n = xwm_enc_client_message(out, cap, xw_rand(), xw_rand(), data, xw_rand() % 8);
+                bad += !xw_bounded(n) || !xw_fits(n, cap);
+                free(name);
+                free(out);
+        }
+        XWCHECK(bad == 0, "10000 rounds of random arguments into every encoder: every answer is a code, every write inside its buffer (%lu bad)", bad);
+}
+
+int main(void)
+{
+        xw_test_setup_request();
+        xw_test_intern_atom();
+        xw_test_get_property();
+        xw_test_change_property();
+        xw_test_select_events();
+        xw_test_create_window();
+        xw_test_window_ops();
+        xw_test_configure_window();
+        xw_test_set_input_focus();
+        xw_test_send_event();
+        xw_test_encoders_fit();
+        xw_test_events();
+        xw_test_replies();
+        xw_test_setup();
+        xw_test_framing();
+        xw_test_truncation();
+        xw_test_lengths();
+        xw_test_caps();
+        xw_test_types();
+        xw_test_fuzz();
+        printf("CHECK_xwm_wire: %u checks, %u failures\n", xw_checks, xw_failures);
+        return xw_failures != 0;
+}
+#endif /* CHECK_xwm_wire */
+
 #ifdef CHECK_dbus
 /*
         CHECK_dbus: Moonwater's session bus (src/dbus/dbus.c) against clients that speak its wire, and a fake host. The

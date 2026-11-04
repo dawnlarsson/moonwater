@@ -6435,6 +6435,9 @@ esac
 #       CONFIG_MOONWATER_WAYLAND) and test/wayland_e2e.sh runs it headless, in a private /run, against real
 #       libwayland clients (test/wayland_shm.c, wayland-info): a window drawn, damaged and maximized, two clients
 #       at once with one killed, hostile bytes on the socket, and the socket gone when the compositor ends.
+#       The X11 wire codec, xwm_wire.c (the window manager's side of Xwayland's connection): built alone and with gcc and clang, and
+#       CHECK_xwm_wire, which writes each request out by hand and checks its bytes, parses every event, reply and error from a sample,
+#       and feeds the parsers prefixes, lying lengths, caps and 10000 fixed-seed random bytes.
 #       checks.c has a stray /* at line 19527, so its compiles here drop -Wcomment and keep everything else.
 lane_wayland()
 (
@@ -6465,6 +6468,11 @@ lane_wayland()
                 wayland_row "checks-$wayland_cc" sh -c "$wayland_cc $wayland_warn -Wno-comment -D_GNU_SOURCE \
                         -DCHECK_wayland -DCONFIG_MOONWATER_WAYLAND test/checks.c -o '$work/check-$wayland_cc' && \
                         '$work/check-$wayland_cc'"
+                # The X11 wire codec the window manager of Xwayland speaks (xwm_wire.c): built alone, then its checks.
+                wayland_row "xwm-engine-$wayland_cc" $wayland_cc $wayland_warn -c src/canvas/xwm_wire.c -o "$work/xwm_wire.o"
+                wayland_row "xwm-checks-$wayland_cc" sh -c "$wayland_cc $wayland_warn -Wno-comment -D_GNU_SOURCE \
+                        -DCHECK_xwm_wire test/checks.c -o '$work/xwm-check-$wayland_cc' && \
+                        '$work/xwm-check-$wayland_cc'"
                 if $wayland_cc $wayland_warn -c src/canvas/wayland.c -o "$work/wayland-off.o" 2> /dev/null; then
                         tally "wayland-off-refused-$wayland_cc" 0 1
                         wayland_status=1
