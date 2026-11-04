@@ -1893,6 +1893,37 @@ static fn bowl_session_prepare_at(string_address home, string_address runtime,
 static string_address address_to bowl_environment(
     string_address address_to inherited);
 
+static bool bowl_input_granted(string_address root);
+
+/*
+        The input devices of a bowl the grants file does not name. A bowl's
+        process is the machine's root in a user namespace on the default tier
+        (its user is mapped to root's id), so the device modes do not keep
+        it from a node: the nodes are taken out of its view instead. In its
+        own mount namespace /dev/input is an empty tmpfs and /dev/uinput is
+        /dev/null, which opens but refuses every control (a pad cannot be
+        made, and no event can be read from the machine).
+*/
+static bipolar bowl_input_mask(void)
+{
+        bipolar failed;
+
+        if (system_access_at(AT_FDCWD, "/dev/input", 0) >= 0)
+        {
+                failed = system_mount("tmpfs", "/dev/input", "tmpfs",
+                                      MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755");
+                if (failed)
+                        return failed;
+        }
+        if (system_access_at(AT_FDCWD, "/dev/uinput", 0) >= 0)
+        {
+                failed = system_mount("/dev/null", "/dev/uinput", 0, MS_BIND, 0);
+                if (failed)
+                        return failed;
+        }
+        return 0;
+}
+
 static DEAD_END fn bowl_inside(string_address root,
                                string_address program,
                                string_address address_to arguments,
@@ -1915,6 +1946,8 @@ static DEAD_END fn bowl_inside(string_address root,
                                   : bowl_fast_enter(root);
         if (!failed && isolated)
                 failed = bowl_inputs_mount();
+        if (!failed && !bowl_input_granted(root))
+                failed = bowl_input_mask();
 
         if (failed)
         {
@@ -2397,17 +2430,146 @@ static fn bowl_session_hosts(void)
 }
 
 /*
-        The input group's line in the machine's /etc/group, with the bowl user in
-        it: the group the input device nodes are owned by on a build with
-        CONFIG_MOONWATER_INPUT_GROUP, and nothing on one without.
+        The input group's line in the machine's /etc/group. Nobody is in it: a
+        bowl gets the group only through the grants file below.
 */
 #ifndef SHELL_NO_INPUT_GROUP
 #define BOWL_STRINGIFY_(number) #number
 #define BOWL_STRINGIFY(number) BOWL_STRINGIFY_(number)
-#define BOWL_INPUT_GROUP_LINE "input:x:" BOWL_STRINGIFY(MOONWATER_INPUT_GID) ":" BOWL_USER_NAME "\n"
+#define BOWL_INPUT_GROUP_LINE "input:x:" BOWL_STRINGIFY(MOONWATER_INPUT_GID) ":\n"
 #else
 #define BOWL_INPUT_GROUP_LINE ""
 #endif
+
+/*
+        Which bowls may have the input devices. The input device nodes are the
+        keyboard and the pointer's events and a pad's controls: a program that
+        has them reads every key typed on the machine. A bowl gets the group
+        only when this file names it, one line "input ROOT" where ROOT is the
+        bowl's root as its launcher names it. The file is Moonwater's, in /etc,
+        which a bowl sees read-only; a bowl's own /var and root are its own, so
+        a marker there would be a bowl's to forge, and this is not.
+
+        Read by the launcher as root before the user is dropped, bounded: a
+        file over BOWL_INPUT_GRANTS_LIMIT is no grant at all, and a line that
+        is not exactly "input" and the root is no grant either, so a second
+        word, a trailing byte, another root or a control character names
+        nothing. A missing file grants nothing.
+*/
+#define BOWL_INPUT_GRANTS "/etc/moonwater/input-bowls"
+#define BOWL_INPUT_GRANTS_LIMIT 4096
+#define BOWL_INPUT_WORD "input "
+
+/* The line a root is granted by, its trailing slash taken off, or 0 when the root is too long to name. */
+static positive bowl_input_line(string_address root, p8 address_to line, positive room)
+{
+        positive length = string_length(root);
+
+        while (length > 1 && root[length - 1] == '/')
+                length--;
+        if (length == 0 || length + sizeof(BOWL_INPUT_WORD) > room)
+                return 0;
+        memory_copy(line, BOWL_INPUT_WORD, sizeof(BOWL_INPUT_WORD) - 1);
+        memory_copy(line + sizeof(BOWL_INPUT_WORD) - 1, root, length);
+        return (positive)(sizeof(BOWL_INPUT_WORD) - 1 + length);
+}
+
+/* The grants file, read whole into text: its length, or -1 when it is missing or over the limit. */
+static bipolar bowl_input_read(p8 address_to text)
+{
+        //      The read keeps one byte back for the end of the text, so a file
+        //      of LIMIT + 1 bytes comes back as LIMIT + 1 and is over.
+        bipolar got = file_slurp_regular_at(AT_FDCWD, BOWL_INPUT_GRANTS, text,
+                                            BOWL_INPUT_GRANTS_LIMIT + 2, O_NOFOLLOW);
+
+        if (got < 0 || got > BOWL_INPUT_GRANTS_LIMIT)
+                return -1;
+        return got;
+}
+
+/* Whether the grants file names the bowl at root: a whole line, exactly. */
+static bool bowl_input_granted(string_address root)
+{
+        p8 text[BOWL_INPUT_GRANTS_LIMIT + 2];
+        p8 want[BOWL_PATH_LIMIT];
+        positive want_length = bowl_input_line(root, want, sizeof(want));
+        bipolar got;
+
+        if (!want_length)
+                return false;
+        got = bowl_input_read(text);
+        if (got <= 0)
+                return false;
+
+        for (positive at = 0; at < (positive)got;)
+        {
+                positive stop = at;
+
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                if (stop - at == want_length && memory_compare(text + at, want, want_length) == 0)
+                        return true;
+                at = stop + 1;
+        }
+        return false;
+}
+
+/*
+        Grants or takes away the input group for the bowl at root: the file is
+        rewritten without the bowl's line, and with it when granted. Refused,
+        and left as it was, when it is over the limit (a file that was
+        edited by hand past it is not Moonwater's to rewrite).
+*/
+static b32 bowl_input_grant(string_address root, bool granted)
+{
+        p8 text[BOWL_INPUT_GRANTS_LIMIT + 2];
+        p8 want[BOWL_PATH_LIMIT];
+        positive want_length = bowl_input_line(root, want, sizeof(want));
+        positive used = 0;
+        bipolar got;
+
+        if (!want_length)
+                return bowl_refuse("the bowl's root is too long to name\n");
+        got = bowl_input_read(text);
+        if (got < 0)
+        {
+                if (system_access_at(AT_FDCWD, BOWL_INPUT_GRANTS, 0) >= 0)
+                        return bowl_refuse("the input grants file is too big to change\n");
+                got = 0;
+        }
+
+        system_make_directory_at(AT_FDCWD, "/etc/moonwater", 0755);
+        for (positive at = 0; at < (positive)got;)
+        {
+                positive stop = at;
+
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                if (!(stop - at == want_length && memory_compare(text + at, want, want_length) == 0))
+                {
+                        memory_copy(text + used, text + at, stop - at);
+                        used += stop - at;
+                        text[used++] = '\n';
+                }
+                at = stop + 1;
+        }
+        if (granted)
+        {
+                memory_copy(text + used, want, want_length);
+                used += want_length;
+                text[used++] = '\n';
+        }
+        if (!used)
+        {
+                //      Nothing left to grant: the file goes, and a file that was
+                //      already gone is no failure.
+                if (system_remove_at(AT_FDCWD, BOWL_INPUT_GRANTS, 0) < 0 &&
+                    system_access_at(AT_FDCWD, BOWL_INPUT_GRANTS, 0) >= 0)
+                        return bowl_refuse("the input grants file could not be removed\n");
+                return 0;
+        }
+        return bowl_write_bytes(BOWL_INPUT_GRANTS, (string_address)text, used);
+}
 
 static fn bowl_session_identity(void)
 {
@@ -3110,7 +3272,7 @@ static fn bowl_bus_refresh(string_address root);
 
 static const p32 bowl_device_groups[] = {
     BOWL_USER_ID, 5 /* tty */, 29 /* audio */, 44 /* video */,
-    104 /* input */, BOWL_GROUP_RENDER,
+    BOWL_GROUP_RENDER,
 };
 
 /*
@@ -3192,9 +3354,20 @@ static fn bowl_user_store_prepare(void)
         identity; the dumpable flag the drop cleared is set again so the maps
         can be written and a desktop's crash handlers work.
 */
-static fn bowl_become_user_hardened(void)
+static fn bowl_become_user_hardened(bool input)
 {
+        p32 groups[array_count(bowl_device_groups) + 1];
+        positive group_count = array_count(bowl_device_groups);
+
         bowl_user_store_prepare();
+
+        for (positive at = 0; at < group_count; at++)
+                groups[at] = bowl_device_groups[at];
+#ifndef SHELL_NO_INPUT_GROUP
+        //      The input group, for a bowl the grants file names (bowl_input_granted).
+        if (input)
+                groups[group_count++] = MOONWATER_INPUT_GID;
+#endif
 
         /*  Dropping from root to the user clears the dumpable flag, which
             makes /proc/self root-owned and would refuse the id-map writes
@@ -3202,8 +3375,8 @@ static fn bowl_become_user_hardened(void)
             debuggers and crash handlers need it), so it is set back before the
             namespace is made. No new privileges is set last, once the maps are
             in: it does not stop a browser making its own sandbox namespace. */
-        if (system_call_2(syscall(setgroups), array_count(bowl_device_groups),
-                          (positive)bowl_device_groups) < 0 ||
+        if (system_call_2(syscall(setgroups), group_count,
+                          (positive)groups) < 0 ||
             system_call_3(syscall(setresgid), BOWL_USER_ID, BOWL_USER_ID,
                           BOWL_USER_ID) < 0 ||
             system_call_3(syscall(setresuid), BOWL_USER_ID, BOWL_USER_ID,
@@ -3231,23 +3404,25 @@ static fn bowl_become_user_hardened(void)
 /*  The launch is run as the user. A refusal of the namespace itself is the
     machine's to make and is not an error; a namespace that was made and could
     not be given its ids is no process to go on with. */
-static fn bowl_become_user(void)
+static fn bowl_become_user(bool input)
 {
         positive uid = (positive)system_call(syscall(geteuid));
         positive gid = (positive)system_call(syscall(getegid));
 
         if (MOONWATER_STRICT_BOWL >= STRICT_TIGHT)
         {
-                bowl_become_user_hardened();
+                bowl_become_user_hardened(input);
                 return;
         }
 
 #ifndef SHELL_NO_INPUT_GROUP
-        /*  The input group is a supplementary group the bowl keeps. Groups are
-            the kernel's ids, not the namespace's, so the input device nodes (mode
-            0660 in that group) stay open to the bowl's user after the unshare.
-            It is set before the unshare: the namespace maps no group but the
-            user's own, and setgroups inside it would be refused. */
+        /*  A bowl the grants file names keeps the input group: groups are the
+            kernel's ids, not the namespace's, so the input device nodes (mode
+            0660 in that group) stay open to its user after the unshare. It is
+            set before the unshare: the namespace maps no group but the user's
+            own, and setgroups inside it would be refused. Every other bowl keeps
+            none, as it always did. */
+        if (input)
         {
                 p32 input_group[1] = {MOONWATER_INPUT_GID};
 
@@ -3293,7 +3468,7 @@ static b32 bowl_launch(string_address root, string_address program,
                               "desktop session\n"));
 
         if (!isolated && program && !bowl_as_root && bowl_is_root())
-                bowl_become_user();
+                bowl_become_user(bowl_input_granted(root));
         environment = bowl_environment(file_environment_all());
 
         terminal_terminfo_install();
@@ -7908,6 +8083,10 @@ struct bowl_profile
         // The session runs X programs, and so the bowl holds the wrapper
         // that starts their X server (xwayland-moonwater, below).
         bool xwayland;
+        // Whether the profile's bowls need the input devices (a game controller,
+        // Steam Input's pad): install grants the bowl the input group in the
+        // grants file, and remove takes it away.
+        bool input;
 };
 
 /*
@@ -8470,7 +8649,7 @@ static const struct bowl_profile bowl_profiles[] = {
      false, bowl_chrome_names, BOWL_CHROME_UNAVAILABLE, true},
     {"steam", "Steam (Arch's package, with 32-bit graphics and sound) on Canvas",
      "start it with: steam", bowl_steam_components, bowl_steam_session,
-     false, null, BOWL_STEAM_UNAVAILABLE, true, true},
+     false, null, BOWL_STEAM_UNAVAILABLE, true, true, true},
 };
 
 #define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam\n"
@@ -9246,6 +9425,17 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
 
         if (profile->xwayland)
                 bowl_xwayland_install(profile);
+        if (profile->input)
+                for (const struct bowl_component address_to part =
+                         profile->components;
+                     part->distro; part++)
+                {
+                        const struct bowl_distro address_to distro =
+                            bowl_find_distro(part->distro);
+
+                        if (distro && bowl_input_grant(distro->root, true))
+                                return 1;
+                }
 
         string_format(log, bowl_label "%s is ready. %s\n", profile->label,
                       profile->next);
@@ -9420,6 +9610,8 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                     !bowl_profile_marked(distro->root, profile->name))
                         continue;
 
+                if (profile->input)
+                        bowl_input_grant(distro->root, false);
                 failed = bowl_profile_unexpose(distro->root, profile->name, marker);
                 if (!failed && bowl_has(distro->root, distro->marker))
                 {
