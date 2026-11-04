@@ -10569,6 +10569,9 @@ static void compositor_clip_gesture(int row);
 // 0 for an event the device did not make (a timer's, a key of the loop's own). compositor_input_read sets it for each event.
 static unsigned long long compositor_stamp_now;
 
+// Whether the left button is down on a keyboard window (WINDOW_KEYBOARD): its key requests are read while it is (compositor_osk_read).
+static unsigned char compositor_osk_held[WINDOWS];
+
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
 {
         struct windows *table = compositor.table;
@@ -10576,6 +10579,8 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
 
         if (row < 0)
                 return 0;
+        if (type == WINDOW_EVENT_BUTTON && a == COMPOSITOR_BTN_LEFT)
+                compositor_osk_held[row] = (flags & WINDOW_KEY_DOWN) != 0;
         // A key pressed or a button pressed or let go is the person's: the clipboard lets the row copy and paste for a while.
         if ((type == WINDOW_EVENT_KEY && (flags & WINDOW_KEY_DOWN) && !(flags & WINDOW_KEY_REPEAT)) || type == WINDOW_EVENT_BUTTON)
                 compositor_clip_gesture(row);
@@ -10846,8 +10851,9 @@ static void compositor_focus(int row)
 {
         int was = compositor.focus;
 
-        // A popup never takes the keys from its window; the window that loses them loses its popups.
-        if (was == row || (row >= 0 && compositor_popup_parent[row] >= 0))
+        // A popup never takes the keys from its window; the window that loses them loses its popups. A window that asked for no
+        // keys (WINDOW_NO_KEYS, the on-screen keyboard) is never given them, by a press on it or by anything else.
+        if (was == row || (row >= 0 && (compositor_popup_parent[row] >= 0 || (compositor.asks[row] & WINDOW_NO_KEYS))))
                 return;
         if (was >= 0)
                 compositor_popups_close(was, -1);
@@ -12874,7 +12880,8 @@ static void compositor_take(int row)
                 compositor.lifted[row] = table->lift[row];
                 compositor.moved[row] = table->moved[row];
                 compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
-                compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB);
+                compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB | WINDOW_NO_KEYS |
+                                                            WINDOW_KEYBOARD);
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
@@ -13412,12 +13419,47 @@ static void compositor_clip_keep(unsigned int which, int opened, unsigned int le
 #endif
 }
 
-// What a row's knock may carry for the clipboard: an offer of a copy, a paste asked for.
+/*
+        The on-screen keyboard's key requests (windows_keyboard_send), read from the row's ring in order and posted to the window with
+        the keys, as a key of the keyboard's own would be (its code and character, its modifiers and its press). They are honoured only
+        while the person's press is on the keyboard row: held now, or pressed within COMPOSITOR_CLIP_GESTURE_NS. So a program with no
+        press of the person's on it can put no key into the window with the keys, and a row that is not a keyboard has no ring read.
+        Anything else in the flags (the pointer's, the touch's) is dropped; the requests are read even when nothing is posted, so a
+        ring that was refused is not left full.
+*/
+static void compositor_osk_read(int row)
+{
+        struct windows address_to table = compositor.table;
+        unsigned int head;
+        positive now;
+
+        if (row < 0 || row >= WINDOWS || !(compositor.asks[row] & WINDOW_KEYBOARD))
+                return;
+        head = __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE);
+        now = clock_monotonic_nanoseconds();
+        while (table->osk_tail[row] != head)
+        {
+                unsigned int at = table->osk_tail[row] % WINDOWS_OSK;
+                int target = compositor.focus >= 0 ? compositor_popup_top(compositor.focus) : -1;
+                b32 pressed = compositor_osk_held[row] || now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS;
+
+                if (pressed && target >= 0 && target != row)
+                        compositor_post(target, WINDOW_EVENT_KEY,
+                                        table->osk_flags[row][at] & (WINDOW_KEY_DOWN | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT |
+                                                                     WINDOW_KEY_ALTGR | WINDOW_KEY_SUPER | WINDOW_KEY_REPEAT),
+                                        table->osk_code[row][at], table->osk_character[row][at]);
+                __atomic_store_n(&table->osk_tail[row], table->osk_tail[row] + 1, __ATOMIC_RELEASE);
+        }
+}
+
+// What a row's knock may carry for the clipboard: an offer of a copy, a paste asked for. The keyboard's key requests are read here too.
 static void compositor_clip_door(int row)
 {
         struct windows address_to table = compositor.table;
         unsigned int offer = __atomic_load_n(&table->clip_offer_serial[row], __ATOMIC_ACQUIRE);
         unsigned int ask = __atomic_load_n(&table->clip_ask_serial[row], __ATOMIC_ACQUIRE);
+
+        compositor_osk_read(row);
         positive now;
 
         if (offer == compositor_clip.offer_seen[row] && ask == compositor_clip.ask_seen[row])

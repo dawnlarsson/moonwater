@@ -222,6 +222,9 @@ SHELL_TOOL(SYSTEM, settings, settings_main)
 #if MOONWATER_UI_MIXER
 SHELL_TOOL(SYSTEM, mixer, mixer_main)
 #endif
+#if MOONWATER_UI_KEYBOARD
+SHELL_TOOL(SYSTEM, osk, osk_main)
+#endif
 SHELL_TOOL(SYSTEM, sessionbus, sessionbus_main)
 SHELL_TOOL(SYSTEM, spawn, screen_spawn)
 SHELL_TOOL(SYSTEM, surface, surface_main)

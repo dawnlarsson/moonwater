@@ -3787,6 +3787,9 @@ static fn ui_chase_at(struct ui_chase address_to c, const b64 address_to want, b
 #define UI_BUTTON_PRIMARY 1
 #define UI_BUTTON_OUTLINED 2
 #define UI_BUTTON_TEXT 3
+// A key of the on-screen keyboard (osk.c): a button whose corners are the kit's 8 px, not the pill a button is.
+#define UI_BUTTON_KEY 4
+#define UI_BUTTON_KEY_RADIUS 8
 #define UI_SLIDER_STEPS 1
 #define UI_SLIDER_LINE 2
 #define UI_SLIDER_VERTICAL 4 // stood on its end, without a label: the mixer's (ui_vslider_draw)
@@ -4106,7 +4109,8 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         UI_CALL();
         b64 sx, sy;
         b32 tx, ty, ox = ui_q8(ui, c->x) + ui_q8(ui, c->w) / 2, oy = ui_q8(ui, c->y) + ui_q8(ui, c->h) / 2;
-        struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2);
+        struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h),
+                                       c->variant == UI_BUTTON_KEY ? ui_q(UI_BUTTON_KEY_RADIUS) : ui_q(c->h) / 2);
         unsigned int fill, ink, layer;
         int width, baseline, x;
 

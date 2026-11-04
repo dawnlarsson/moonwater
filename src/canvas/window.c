@@ -726,6 +726,14 @@ struct window_place
 // A window that draws its own frame, as a Wayland client does: the top of its picture is its own (a press there is not the
 // compositor's to take for moving it), which a client moves by asking (xdg_toplevel.move).
 #define WINDOW_NO_GRAB 16u
+// The on-screen keyboard's two (src/canvas/ui/osk.c): WINDOW_NO_KEYS, the window never has the keys, not when it is made nor when a
+// press lands on it (a tap on a key never moves the keys from the field); WINDOW_KEYBOARD, the window's key requests (the table's
+// osk_*) are sent to the window with the keys, but only while a press of the person's is on this window (compositor_osk_read).
+#define WINDOW_NO_KEYS 32u
+#define WINDOW_KEYBOARD 64u
+// A key request the keyboard makes, one ring of WINDOWS_OSK entries a row: the evdev code, the character (0 for none) and the
+// WINDOW_KEY_* flags (DOWN, the modifiers, REPEAT). The program writes at osk_head and knocks; the compositor reads from osk_tail.
+#define WINDOWS_OSK 16
 
 // What the compositor did not do of a screen's displays line (struct windows' output_refused): a refresh rate the screen
 // does not offer at its size, which it keeps its mode for; a turn it cannot do, which it is left unturned for; and a place
@@ -856,6 +864,10 @@ struct windows
         unsigned int ground[WINDOWS]; // the compositor's: what a glass window's tint came to, 0xrrggbb
         unsigned int window_scale[WINDOWS]; // the compositor's: the percent the window is drawn at, its screen's (0 until known)
         unsigned int lift[WINDOWS];   // anyone's: one more raises the window and gives it the keys
+        // The keyboard's key requests (WINDOWS_OSK entries a row, the program's head and the compositor's tail, see WINDOWS_KEYBOARD).
+        unsigned int osk_head[WINDOWS], osk_tail[WINDOWS];
+        int osk_code[WINDOWS][WINDOWS_OSK], osk_character[WINDOWS][WINDOWS_OSK];
+        unsigned int osk_flags[WINDOWS][WINDOWS_OSK];
         unsigned int hover_off[WINDOWS]; // the program's: 1 when it does not want the pointer's motion over it
         unsigned int pinch_wanted[WINDOWS]; // the program's: 1 when it takes WINDOW_EVENT_PINCH (windows_pinch); 0 sends a pinch as Ctrl and a wheel
         /*
@@ -3365,6 +3377,27 @@ static void windows_knock(const struct window_row *own)
         char byte = 0;
 
         window_call(WINDOW_SYS_WRITE, own->door, (long)&byte, 1, 0, 0, 0);
+}
+
+/*
+        A key the on-screen keyboard sends the window with the keys (WINDOW_KEYBOARD): one entry of the row's ring, knocked on. A ring of
+        WINDOWS_OSK entries the compositor has not read yet refuses the key (0): a keyboard that taps faster than the compositor reads is
+        not a case a person reaches, and a refused key is none rather than a late one.
+*/
+static int windows_keyboard_send(const struct window_row *own, int code, int character, unsigned int flags)
+{
+        struct windows *table = own->table;
+        unsigned int head = table->osk_head[own->row], at;
+
+        if (head - __atomic_load_n(&table->osk_tail[own->row], __ATOMIC_ACQUIRE) >= WINDOWS_OSK)
+                return 0;
+        at = head % WINDOWS_OSK;
+        table->osk_code[own->row][at] = code;
+        table->osk_character[own->row][at] = character;
+        table->osk_flags[own->row][at] = flags;
+        __atomic_store_n(&table->osk_head[own->row], head + 1, __ATOMIC_RELEASE);
+        windows_knock(own);
+        return 1;
 }
 
 // A picture, drawn into buffer which: named, counted and knocked for. Width, height and the damage first.

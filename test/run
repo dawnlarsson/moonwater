@@ -176,7 +176,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland audio dbus issues"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact text_asm shell_asm known socket net waterlink link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk audio dbus issues"
 
 describe()
 {
@@ -258,6 +258,7 @@ describe()
         storage_io) echo "positional-read retries, exact bounds, zero padding and ELF table handoff" ;;
         storage_format) echo "GPT, FAT32 and ext4 as an install writes them, checked by sfdisk and e2fsck" ;;
         audio)    echo "the audio stack (src/audio): the mixing core (formats, the ring, the channel map, mixing of known sines exact where the arithmetic is integer, the ramps, the fade of a stream that runs out, the resampler's error, gain and rejection, a fuzz with everything given back) and the sound card layer (the kernel's header, cards of the check's own, a loopback card read back bit for bit) and the protocol engine (a client written from the PulseAudio wire, the life of a stream, who may do what, every cap, a fuzz with everything counted back)" ;;
+        osk) echo "the on-screen keyboard: the headless compositor, a terminal with the keys and the keyboard, typed on by the pointer (a capital, the numbers page, a held Back), the shell's files are the proof (test/osk_e2e.sh)" ;;
         gpulists) echo "the apps' draw lists on the card: the headless compositor with the settings and the mixer, the card's screen against canvas gpu off, the table's list state, a toggle and a kill (test/gpu_lists_e2e.sh)" ;;
         wayland)  echo "the Canvas Wayland shim (wayland.c): the protocol engine against a client that speaks from the generated tables, every event read back by them, caps and fuzz, nothing left over" ;;
         dbus)     echo "the session bus (src/dbus): the wire, the authentication, names, match rules, routing, the Settings portal, two dozen kinds of message that end a connection, caps and a fuzz; and sd-bus, libdbus and GDBus against the sessionbus tool" ;;
@@ -320,7 +321,7 @@ seam_lanes()
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine cli script bowl storage_io storage_format" ;;
-        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues" ;;
+        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues osk" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
         *) return 1 ;;
@@ -6656,6 +6657,30 @@ lane_gpulists()
         else
                 tally gpulists 0 1
                 note "gpulists: $status rows failed (the rows above)"
+        fi
+        return "$status"
+)
+
+#       The on-screen keyboard end to end (test/osk_e2e.sh): the headless compositor with a terminal that has the keys and the keyboard,
+#       the keyboard tapped by a pointer on the evdev fifo (test/osk_input.py), and the shell's files are the proof: a command typed
+#       with Shift and Enter, digits off the numbers page, and a held Back that empties a line. No render node is needed.
+lane_osk()
+(
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+        if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
+                note "osk: the shell binary did not build"
+                tally osk 0 1
+                return 1
+        fi
+        sh test/osk_e2e.sh "$work/shell" "$work/e2e" > "$work/lane.out" 2>&1
+        status=$?
+        cat "$work/lane.out"
+        if [ "$status" = 0 ]; then
+                tally osk 1 1
+        else
+                tally osk 0 1
+                note "osk: $status rows failed (the rows above)"
         fi
         return "$status"
 )
