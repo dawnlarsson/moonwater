@@ -314,6 +314,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'resample_polyphase2_f
       'paired timing against the mixing core\'s C loop as the service is built (-O2, the baseline) and at -O3 for the tier, '
       'at 44.1, 22.05, 96 and 192 kHz into 48 kHz (64 to 256 taps, 256 frames a call) and 16 frames, three tables rotating '
       'so the rows come from L2, with AVX2 and FMA and with SSE2; V and without on riscv64, NEON on arm64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'resample_polyphase2_f32_rows',
+      'paired timing against the weighted routine it takes the place of for a ratio that reduces to p / q (44.1, 22.05 and 32 kHz '
+      'into 48 with their 160, 320 and 3 rows, 96 and 192 kHz with one; 64 to 256 taps, 256 frames a call and 16), three tables '
+      'rotating so the rows come from L2, with AVX2 and FMA and with SSE2; V and without on riscv64, NEON on arm64')
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fast_argmax_f32',
       'paired timing against the first-NaN-or-first-maximum C loop at -O3 and against '
       'the fast-math two passes the compiler vectorises, for the same instruction set, '

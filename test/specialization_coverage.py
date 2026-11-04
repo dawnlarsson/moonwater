@@ -386,6 +386,10 @@ cover('folds_already', 'count', 'resample_polyphase2_f32',
       'the mixing core hands it the frames a period asks for (the sink\'s block, 16 to 512) and the table\'s taps and phases, '
       'which the two sample rates of a stream set at run time; a literal count would remove one compare from a stream of '
       'a thousand multiply-adds')
+cover('folds_already', 'count', 'resample_polyphase2_f32_rows',
+      'the mixing core hands it the frames a period asks for (the sink\'s block, 16 to 512) and the table\'s taps and phases, '
+      'which the two sample rates of a stream set at run time; a literal count would remove one compare from a stream of '
+      'a thousand multiply-adds')
 cover('folds_already', 'count', 'fused_residual_add_f32',
       'a training step hands it a whole activation, batch by context by '
       'width: thousands to millions of floats a call, where a literal count '
