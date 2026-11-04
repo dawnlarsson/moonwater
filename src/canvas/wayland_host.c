@@ -1620,7 +1620,32 @@ static positive compositor_wl_due(void)
                 if (at && (!first || at < first))
                         first = at;
         }
+        // The idle notifications: the next one that may go idle, on the same clock (ms).
+        {
+                long idle = wayland_idle_due();
+
+                if (idle > 0 && (!first || (positive)(idle + 1) * 1000000ull < first))
+                        first = (positive)(idle + 1) * 1000000ull;
+        }
         return first;
+}
+
+// The idle clock the moonwater debug line reads (window.c's table): when the shim last had input, the inhibitors that hold, the idle notifications.
+static void compositor_wl_idle_table(void)
+{
+        long input = 0, inhibitors = 0, idled = 0;
+
+        wayland_idle_state(&input, &inhibitors, &idled);
+        compositor.table->wl_input_ms = (unsigned long)input;
+        compositor.table->wl_inhibitors = (unsigned int)inhibitors;
+        compositor.table->wl_idled = (unsigned int)idled;
+}
+
+// An input event the compositor read (a key, a button, a motion, a finger): the idle clock counts from it.
+static void compositor_wl_input(void)
+{
+        if (compositor_wl.started)
+                wayland_input_seen();
 }
 
 // Whether a dma-buf has no writer: asked at once, never waited for.
@@ -2125,6 +2150,8 @@ static void compositor_wl_wake(void)
                 compositor_wl.screens_told = compositor_wl_screens_digest();
                 wayland_screens_changed();
         }
+        wayland_idle_tick();
+        compositor_wl_idle_table();
         if (stats.rows > 0)
                 wayland_scales_sweep();
         if (stats.rows > 0 || stats.clients > 0)

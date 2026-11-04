@@ -22346,6 +22346,14 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                                                             (string_address) "the glass (taskbar)");
                 }
         }
+        //      The Wayland shim's idle clock: the seconds since it was given input, the idle inhibitors that hold (a surface shown), and the
+        //      ext-idle-notify notifications that are idle. There is no screen-off timer yet, so nothing here blanks or suspends the screen.
+        if (table->wl_input_ms)
+                host_say(log, "  idle            %p s since the last input, %p idle inhibitors holding, %p idle notifications idle\n",
+                         (positive)((clock_monotonic_nanoseconds() / 1000000ull - table->wl_input_ms) / 1000), (positive)table->wl_inhibitors,
+                         (positive)table->wl_idled);
+        else
+                host_say(log, "  idle            no clock (the Wayland shim is off)\n");
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         if (table->refused && table->refused_error)

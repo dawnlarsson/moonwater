@@ -102,6 +102,7 @@
 #define WAYLAND_DMABUFS 48           // buffers made of dma-bufs one client has (each holds a descriptor)
 #define WAYLAND_DMABUFS_ALL 192      // and all clients together
 #define WAYLAND_CONSTRAINTS 8        // pointer locks and confinements one client holds
+#define WAYLAND_NOTIFIES 8           // ext-idle-notify notifications one client holds
 #define WAYLAND_RELATIVES 8          // relative pointers one client holds
 #define WAYLAND_FOURCC_ARGB8888 0x34325241UL
 #define WAYLAND_FOURCC_XRGB8888 0x34325258UL
@@ -460,6 +461,15 @@ struct wayland_constraint
         unsigned short surface;
 };
 
+// An ext_idle_notification_v1: its object, its timeout in ms, whether it counts input alone (get_input_idle_notification), whether it
+// is idle and since when (the shim's ms: the last time it was idle, and the time it counts from otherwise: its creation or its resume).
+struct wayland_notify
+{
+        unsigned int id;
+        unsigned char live, input_only, idle;
+        long timeout, since, idled;
+};
+
 // A zwp_linux_buffer_params_v1: the planes it was given, up to four, and whether it made its buffer.
 struct wayland_params
 {
@@ -501,6 +511,8 @@ struct wayland_client
         unsigned int feedback_id[WAYLAND_FEEDBACKS];
         unsigned char feedbacks, dmabufs;
         struct wayland_constraint constraints[WAYLAND_CONSTRAINTS];
+        struct wayland_notify notifies[WAYLAND_NOTIFIES];
+        long inhibitors;                             // zwp_idle_inhibitor_v1 objects it holds (its objects are scanned only while one is)
         unsigned int relative_id[WAYLAND_RELATIVES];
         unsigned char relatives;
         long axis_left[2];          // the wheel's turns not yet a whole notch, for a client that has only notches
@@ -562,7 +574,7 @@ static struct
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
-        long idle_inhibitors;                  // idle inhibitors held by every client (each counted once, while it lives)
+        long input_at;                         // the shim's ms of the last input event the compositor gave it (wayland_input_seen): the idle clock
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
         struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
@@ -733,6 +745,9 @@ static long wayland_object_new(struct wayland_client *c, unsigned long id, long 
 static void wayland_object_free(struct wayland_client *c, long slot)
 {
         unsigned long id = c->objects[slot].id;
+
+        if (c->objects[slot].iface == WLI_zwp_idle_inhibitor_v1 && c->inhibitors > 0)
+                c->inhibitors--;
 
         if (id < WAYLAND_IDS)
                 c->index[id] = 0;
@@ -963,6 +978,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wp_fifo_manager_v1, 1},
     {WLI_wp_commit_timing_manager_v1, 1},
     {WLI_zwp_pointer_gestures_v1, 3},
+    {WLI_ext_idle_notifier_v1, 2},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -5634,20 +5650,96 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 surface = wayland_surface_of(c, a[1].slot);
                 if (!surface)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                // Counted while the inhibitor lives: flag 2 says this one is counted (and is let go with its client or its destroy).
-                c->objects[a[0].slot].flags |= 2;
-                wayland.idle_inhibitors++;
+                // The inhibitor is linked to its surface, as a shortcuts inhibitor is: it holds while that surface is shown
+                // (wayland_inhibitors_now), and ends with its surface or its own destroy, which is the object going.
+                c->objects[a[0].slot].link = (short)wayland_surface_index(c, surface);
+                c->objects[a[0].slot].aux = (unsigned short)surface->gen;
+                c->inhibitors++;
                 return WAYLAND_OK;
         case WLI_zwp_idle_inhibitor_v1:
-                if (self->flags & 2)
-                {
-                        self->flags &= (unsigned short)~2;
-                        wayland.idle_inhibitors--;
-                }
                 return WAYLAND_OK;
         default:
                 return WAYLAND_OK;
         }
+}
+
+/*
+        The idle clock (ext-idle-notify, and the screen's idle answer for the moonwater debug line). The clock is the last input the
+        compositor gave the shim (wayland_input_seen). An idle inhibitor holds while its surface is shown on a screen: a window the host
+        says is shown and is not minimized (the surface's root, for a subsurface). A surface with no window holds nothing, and neither does
+        one whose window is gone; whether the window is covered is not known cheaply, so a covered window still holds.
+*/
+static int wayland_surface_shown(struct wayland_client *c, struct wayland_surface *s)
+{
+        struct wayland_facts facts;
+
+        if (!s)
+                return 0;
+        s = wayland_root_of(c, s);
+        if (!s->live || s->row < 0 || wayland.host->row_facts(wayland.host->context, s->row, &facts) < 0)
+                return 0;
+        return !(facts.states & WAYLAND_STATE_SUSPENDED);
+}
+
+// The idle inhibitors that hold now: each zwp_idle_inhibitor_v1 of every client whose surface is shown.
+static long wayland_inhibitors_now(void)
+{
+        long count = 0;
+
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                if (!c || c->dead || !c->inhibitors)
+                        continue;
+                for (long at = 0; at < WAYLAND_OBJECTS; at++)
+                        if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && c->objects[at].id &&
+                            wayland_surface_shown(c, wayland_surface_of(c, at)))
+                                count++;
+        }
+        return count;
+}
+
+static void wayland_notify_say(struct wayland_client *c, struct wayland_notify *n, long opcode)
+{
+        struct wayland_event e = wayland_begin(c, n->id, opcode);
+
+        wayland_end(&e);
+}
+
+/*
+        ext-idle-notify (ext_idle_notifier_v1, version 2). A notification counts from its creation, or from the input it was last resumed
+        by, and goes idle when the shim has been given no input for its timeout and, unless it was made by get_input_idle_notification,
+        no idle inhibitor holds. An idle notification sends resumed on the next input, and counts from that input again.
+*/
+static int wayland_idle_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        long at;
+
+        if (self->iface == WLI_ext_idle_notifier_v1)
+        {
+                struct wayland_notify *n;
+
+                if (op != WLQ_ext_idle_notifier_v1_get_idle_notification && op != WLQ_ext_idle_notifier_v1_get_input_idle_notification)
+                        return WAYLAND_OK;
+                for (at = 0; at < WAYLAND_NOTIFIES && c->notifies[at].live; at++)
+                        ;
+                if (at == WAYLAND_NOTIFIES)
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many idle notifications");
+                n = &c->notifies[at];
+                n->live = 1;
+                n->idle = 0;
+                n->input_only = op == WLQ_ext_idle_notifier_v1_get_input_idle_notification;
+                n->id = c->objects[a[0].slot].id;
+                n->timeout = (long)a[1].u;
+                n->since = wayland.host->now(wayland.host->context);
+                n->idled = 0;
+                c->objects[a[0].slot].link = (short)at;
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_ext_idle_notification_v1_destroy && self->link >= 0 && self->link < WAYLAND_NOTIFIES)
+                c->notifies[self->link].live = 0;
+        return WAYLAND_OK;
 }
 
 /* ---- one request ---- */
@@ -5872,6 +5964,10 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_zwp_pointer_gesture_hold_v1:
                         status = wayland_gestures_request(c, o, op, a);
                         break;
+                case WLI_ext_idle_notifier_v1:
+                case WLI_ext_idle_notification_v1:
+                        status = wayland_idle_request(c, o, op, a);
+                        break;
                 case WLI_wp_fifo_manager_v1:
                 case WLI_wp_fifo_v1:
                 case WLI_wp_commit_timing_manager_v1:
@@ -5968,6 +6064,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
                 wayland.row_client[row] = wayland.row_surface[row] = -1;
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
         wayland.host = host;
+        wayland.input_at = host->now(host->context);
         wayland.screens = host->screens(host->context, wayland.screen, WAYLAND_SCREENS);
         if (wayland.screens < 0)
                 wayland.screens = 0;
@@ -6029,13 +6126,6 @@ WAYLAND_API void wayland_drop(long slot)
                 return;
         wayland_touch_forget(slot);
         wayland_token_forget(slot);
-        // The idle inhibitors this client held are let go with it.
-        for (long at = 0; at < WAYLAND_OBJECTS; at++)
-                if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && (c->objects[at].flags & 2))
-                {
-                        c->objects[at].flags &= (unsigned short)~2;
-                        wayland.idle_inhibitors--;
-                }
         for (long at = 0; at < WAYLAND_SURFACES; at++)
                 if (c->surfaces[at].live)
                 {
@@ -6728,7 +6818,110 @@ WAYLAND_API long wayland_row_async(long row)
 */
 WAYLAND_API long wayland_idle_inhibited(void)
 {
-        return wayland.idle_inhibitors > 0;
+        return wayland_inhibitors_now();
+}
+
+/* The compositor gave the shim an input event (a key, a button, a motion, a finger): the idle clock starts again from now. */
+WAYLAND_API void wayland_input_seen(void)
+{
+        if (wayland.host)
+                wayland.input_at = wayland.host->now(wayland.host->context);
+}
+
+/*
+        Runs the idle notifications: each one that has been given no input for its timeout (and no inhibitor holds it) goes idle, and each
+        one that is idle and has input since sends resumed. Called on each pass of the compositor, so it is current when a frame is.
+*/
+WAYLAND_API void wayland_idle_tick(void)
+{
+        long now;
+        int inhibited = -1;
+
+        if (!wayland.host)
+                return;
+        now = wayland.host->now(wayland.host->context);
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                if (!c || c->dead)
+                        continue;
+                for (long at = 0; at < WAYLAND_NOTIFIES; at++)
+                {
+                        struct wayland_notify *n = &c->notifies[at];
+                        long base;
+
+                        if (!n->live)
+                                continue;
+                        if (n->idle)
+                        {
+                                if (wayland.input_at > n->idled)
+                                {
+                                        n->idle = 0;
+                                        n->since = wayland.input_at;
+                                        wayland_notify_say(c, n, WLE_ext_idle_notification_v1_resumed);
+                                }
+                                continue;
+                        }
+                        if (!n->input_only && inhibited < 0)
+                                inhibited = wayland_inhibitors_now() > 0;
+                        base = wayland.input_at > n->since ? wayland.input_at : n->since;
+                        if ((!n->input_only && inhibited) || now - base < n->timeout)
+                                continue;
+                        n->idle = 1;
+                        n->idled = now;
+                        wayland_notify_say(c, n, WLE_ext_idle_notification_v1_idled);
+                }
+        }
+}
+
+/*
+        When the next idle notification may go idle, on the shim's clock (ms), or 0 for none: a notification that is not idle and is not
+        held by an inhibitor. The compositor's loop wakes for it, so an idle desktop still goes idle on time.
+*/
+WAYLAND_API long wayland_idle_due(void)
+{
+        long due = 0;
+        int inhibited = -1;
+
+        if (!wayland.host)
+                return 0;
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                if (!c || c->dead)
+                        continue;
+                for (long at = 0; at < WAYLAND_NOTIFIES; at++)
+                {
+                        struct wayland_notify *n = &c->notifies[at];
+                        long base, when;
+
+                        if (!n->live || n->idle)
+                                continue;
+                        if (!n->input_only && inhibited < 0)
+                                inhibited = wayland_inhibitors_now() > 0;
+                        if (!n->input_only && inhibited)
+                                continue;
+                        base = wayland.input_at > n->since ? wayland.input_at : n->since;
+                        when = base + n->timeout;
+                        if (!due || when < due)
+                                due = when;
+                }
+        }
+        return due;
+}
+
+/* What the idle clock says, for the moonwater debug line: the shim's ms of the last input, the inhibitors that hold, the notifications idle. */
+WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idled)
+{
+        *input_ms = wayland.host ? wayland.input_at : 0;
+        *inhibitors = wayland_inhibitors_now();
+        *idled = 0;
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+                if (wayland.client[slot] && !wayland.client[slot]->dead)
+                        for (long at = 0; at < WAYLAND_NOTIFIES; at++)
+                                *idled += wayland.client[slot]->notifies[at].live && wayland.client[slot]->notifies[at].idle;
 }
 
 WAYLAND_API long wayland_row_modal(long row)

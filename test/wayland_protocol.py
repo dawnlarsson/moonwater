@@ -104,6 +104,9 @@ CONFIG = [
     ("protocols", "unstable/pointer-gestures/pointer-gestures-unstable-v1.xml", [
         "zwp_pointer_gestures_v1", "zwp_pointer_gesture_swipe_v1", "zwp_pointer_gesture_pinch_v1", "zwp_pointer_gesture_hold_v1",
     ]),
+    ("protocols", "staging/ext-idle-notify/ext-idle-notify-v1.xml", [
+        "ext_idle_notifier_v1", "ext_idle_notification_v1",
+    ]),
 ]
 
 

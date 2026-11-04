@@ -917,6 +917,10 @@ struct windows
         // The app's: the frames it recorded into its list (list_tried) and, of them, the ones that did not record whole, by cause (enum ui_list_lost).
         unsigned int list_tried[WINDOWS];
         unsigned int list_lost[WINDOWS][UI_LOST_COUNT];
+        // The Wayland shim's idle clock, for moonwater debug: the shim's ms of the last input it was given (0 when the shim is off), the
+        // idle inhibitors that hold (their surface is shown), and the idle notifications that are idle. The compositor writes them on each wake.
+        unsigned long wl_input_ms;
+        unsigned int wl_inhibitors, wl_idled;
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u

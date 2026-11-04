@@ -168872,7 +168872,7 @@ static void test_inhibit_state(void)
         WLCHECK(c->errors == 0 && wayland_idle_inhibited() == 1, "an idle inhibitor is held while it lives");
         other = wlc_id(c, WLI_zwp_idle_inhibitor_v1, 1);
         wlc_send(c, idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, other, s.surface);
-        WLCHECK(wayland_idle_inhibited() == 1, "a second inhibitor is counted, and the answer is still that one is held");
+        WLCHECK(wayland_idle_inhibited() == 2, "a second inhibitor on a shown surface is counted: each holds while its surface is shown");
         wlc_send(c, inhibitor, WLQ_zwp_idle_inhibitor_v1_destroy);
         wlc_send(c, other, WLQ_zwp_idle_inhibitor_v1_destroy);
         WLCHECK(wayland_idle_inhibited() == 0, "and none held once they are destroyed");
@@ -168897,6 +168897,143 @@ static void test_inhibit_state(void)
         /* a client going lets go of the inhibitor it held */
         wlc_end(c);
         WLCHECK(wayland_idle_inhibited() == 0, "a client that goes lets go of the inhibitors it held");
+        wayland_stop();
+}
+
+/*
+        ext-idle-notify, and what holds it idle back. The clock is the last input the compositor gave (wayland_input_seen), and the fake
+        host's clock is held still, so each row says exactly when a notification goes idle. An inhibitor holds only while its surface is
+        shown and not minimized; a get_input_idle_notification counts input alone.
+*/
+static long idle_count(struct wlc *c, long opcode)
+{
+        wlc_pump(c);
+        return wlc_count(c, WLI_ext_idle_notification_v1, opcode);
+}
+
+static void test_idle_notify(void)
+{
+        struct session s, s2;
+        struct wlc *c;
+        unsigned long notifier, note, later, inhibitor, input_note, first;
+        unsigned long s2_notifier, s2_note[9];
+        long in_ms, inhibitors, idled, at;
+
+        wl_reset();
+        fake.clock_still = 1;
+        fake.now = 10000;
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        notifier = wl_global(c, s.registry, WLI_ext_idle_notifier_v1, 2);
+        wlc_forget(c);
+        WLCHECK(c->errors == 0 && notifier != 0, "ext-idle-notify is advertised, at version 2");
+
+        /* a notification goes idle at its timeout from the last input (the start), not a millisecond before, and says so once */
+        note = wlc_id(c, WLI_ext_idle_notification_v1, 2);
+        wlc_send(c, notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, note, 1000UL, s.seat);
+        WLCHECK(c->errors == 0 && wayland_idle_due() == 11000, "a notification is due its timeout after the input it counts from");
+        fake.now = 10999;
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 0, "not idle a millisecond before its timeout");
+        fake.now = 11000;
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 1, "idle at its timeout, with one idled event");
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 1, "and told once, not again on the next pass");
+        WLCHECK(wayland_idle_due() == 0, "nothing is due while it waits for input to resume it");
+
+        /* input resumes it, and its timeout counts from that input */
+        fake.now = 12000;
+        wayland_input_seen();
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_resumed) == 1, "input after idle sends resumed, once");
+        fake.now = 12999;
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 1, "the timeout counts from that input, not from the start");
+        fake.now = 13000;
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 2, "idle again a timeout after it");
+
+        /* an inhibitor on a shown surface holds a notification from going idle; its destroy lets it go at once */
+        inhibitor = wlc_id(c, WLI_zwp_idle_inhibitor_v1, 1);
+        wlc_send(c, s.idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, inhibitor, s.surface);
+        later = wlc_id(c, WLI_ext_idle_notification_v1, 2);
+        wlc_send(c, notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, later, 500UL, s.seat);
+        fake.now = 14000;
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 2, "an inhibitor on a shown surface holds a notification from going idle");
+        WLCHECK(wayland_idle_due() == 0 && wayland_idle_inhibited() == 1, "nothing is due while it holds, and the inhibitor is counted");
+        wlc_send(c, inhibitor, WLQ_zwp_idle_inhibitor_v1_destroy);
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 3, "destroying the inhibitor lets the notification it held go idle at once");
+
+        /* get_input_idle_notification ignores inhibitors: only input counts */
+        inhibitor = wlc_id(c, WLI_zwp_idle_inhibitor_v1, 1);
+        wlc_send(c, s.idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, inhibitor, s.surface);
+        input_note = wlc_id(c, WLI_ext_idle_notification_v1, 2);
+        wlc_send(c, notifier, WLQ_ext_idle_notifier_v1_get_input_idle_notification, input_note, 500UL, s.seat);
+        fake.now = 14600;
+        wayland_idle_tick();
+        WLCHECK(idle_count(c, WLE_ext_idle_notification_v1_idled) == 4, "an input-only notification goes idle though an inhibitor holds");
+
+        /* a minimized window's inhibitor holds nothing; shown again, it holds */
+        fake.row[0].states = WAYLAND_STATE_SUSPENDED;
+        WLCHECK(wayland_idle_inhibited() == 0, "a minimized window's inhibitor holds nothing");
+        fake.row[0].states = 0;
+        WLCHECK(wayland_idle_inhibited() == 1, "and holds again once the window is shown");
+
+        /* the idle clock: the input it counts from, the inhibitors that hold, the notifications idle (three: note, later, input_note) */
+        wayland_idle_state(&in_ms, &inhibitors, &idled);
+        WLCHECK(in_ms == 12000 && inhibitors == 1 && idled == 3, "the idle clock says when input last came, what holds, and what is idle");
+        wlc_send(c, inhibitor, WLQ_zwp_idle_inhibitor_v1_destroy);
+
+        /* a timeout of none is idle at once; the largest is due a long way off and does not go idle */
+        first = wlc_id(c, WLI_ext_idle_notification_v1, 2);
+        wlc_send(c, notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, first, 0UL, s.seat);
+        wayland_idle_tick();
+        WLCHECK(c->errors == 0 && idle_count(c, WLE_ext_idle_notification_v1_idled) == 5, "a timeout of 0 is idle at once");
+        first = wlc_id(c, WLI_ext_idle_notification_v1, 2);
+        wlc_send(c, notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, first, 0xffffffffUL, s.seat);
+        wayland_idle_tick();
+        WLCHECK(c->errors == 0 && idle_count(c, WLE_ext_idle_notification_v1_idled) == 5 && wayland_idle_due() > 0,
+                "the largest timeout is accepted and is due far off, not at once");
+
+        /* a shown surface destroyed takes its inhibitor with it */
+        inhibitor = wlc_id(c, WLI_zwp_idle_inhibitor_v1, 1);
+        wlc_send(c, s.idle, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, inhibitor, s.surface);
+        WLCHECK(wayland_idle_inhibited() == 1, "a new inhibitor holds on the shown surface");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_destroy);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_destroy);
+        wlc_send(c, s.surface, WLQ_wl_surface_destroy);
+        WLCHECK(c->errors == 0 && wayland_idle_inhibited() == 0, "destroying its surface ends its inhibitor");
+
+        /* one client holds eight; the ninth is refused, and a destroyed one gives its place back */
+        session_open(&s2);
+        s2_notifier = wl_global(s2.c, s2.registry, WLI_ext_idle_notifier_v1, 2);
+        wlc_forget(s2.c);
+        for (at = 0; at < 8; at++)
+        {
+                s2_note[at] = wlc_id(s2.c, WLI_ext_idle_notification_v1, 2);
+                wlc_send(s2.c, s2_notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, s2_note[at], 100UL, s2.seat);
+        }
+        WLCHECK(s2.c->errors == 0, "eight notifications a client is given");
+        wlc_send(s2.c, s2_note[0], WLQ_ext_idle_notification_v1_destroy);
+        s2_note[8] = wlc_id(s2.c, WLI_ext_idle_notification_v1, 2);
+        wlc_send(s2.c, s2_notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, s2_note[8], 100UL, s2.seat);
+        WLCHECK(s2.c->errors == 0, "a destroyed notification gives its place back");
+        wlc_send(s2.c, s2_notifier, WLQ_ext_idle_notifier_v1_get_idle_notification, wlc_id(s2.c, WLI_ext_idle_notification_v1, 2), 100UL,
+                 s2.seat);
+        WLCHECK(s2.c->errors == 1 && s2.c->error_code == WLN_wl_display_error_no_memory,
+                "a ninth notification is refused with no_memory");
+        wlc_end(s2.c);
+
+        /* a client that goes takes its notifications with it: nothing is due, and nothing is idle */
+        wlc_end(c);
+        WLCHECK(wayland_idle_due() == 0, "a client that goes takes its notifications with it");
+        wayland_idle_state(&in_ms, &inhibitors, &idled);
+        WLCHECK(idled == 0 && inhibitors == 0, "and nothing is idle or held");
         wayland_stop();
 }
 
@@ -172648,6 +172785,7 @@ int main(int argc, char **argv)
         test_axis_stop();
         test_hints();
         test_inhibit_state();
+        test_idle_notify();
         test_activation();
         test_pacing();
         test_cursor_shape();

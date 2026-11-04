@@ -14325,6 +14325,7 @@ static void compositor_screen_chord(unsigned int code)
 static int compositor_wl_key(unsigned int code, int value);
 static int compositor_wl_hold_counts(int dx, int dy, positive now);
 static void compositor_wl_hold_keep(void);
+static void compositor_wl_input(void);
 #endif
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
@@ -16342,6 +16343,11 @@ static void compositor_input_read(unsigned int at)
 
                         // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
                         compositor_stamp_now = now;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        // The idle clock (ext-idle-notify) counts from the input a person gives: keys, buttons, motion, fingers.
+                        if (event->type == COMPOSITOR_EV_KEY || event->type == COMPOSITOR_EV_REL || event->type == COMPOSITOR_EV_ABS)
+                                compositor_wl_input();
+#endif
                         // The touch trace (window.c): a touch-down looks for its switch, and each raw event of a touch screen or a pad is a line.
                         if (compositor.touchscreen[at] || compositor.touchpad[at])
                         {
