@@ -322,6 +322,9 @@ cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'pcm_widen',
       'paired timing, with the library\'s decoder after it, against the loops of mix.c it took over (-O2, the baseline) for each of '
       'the nine kinds and the big-endian float, 512 frames of two channels and of six, with AVX2 and SSE2; V and without on '
       'riscv64, NEON on arm64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'pcm_pack24',
+      'paired timing, with the pair\'s 24-in-32 encoder before it, against the loop of mix.c it took over (-O2, the baseline), '
+      '512 frames of two channels, with AVX2 and SSE2; V and without on riscv64, NEON on arm64')
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fast_argmax_f32',
       'paired timing against the first-NaN-or-first-maximum C loop at -O3 and against '
       'the fast-math two passes the compiler vectorises, for the same instruction set, '

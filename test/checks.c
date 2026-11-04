@@ -9757,11 +9757,27 @@ static AUDIO_C_UNUSED void audio_c_widen(unsigned *dst, const unsigned char *src
                 dst[i] = audio_c_widen_one((unsigned)kind, src + i * width[kind]);
 }
 
+// The three low bytes of each of lanes 32-bit words, little-endian, one after the other.
+static AUDIO_C_UNUSED void audio_c_pack24(unsigned char *dst, const unsigned *src, unsigned long lanes)
+{
+        for (unsigned long i = 0; i < lanes; i++)
+        {
+                dst[3 * i] = (unsigned char)src[i];
+                dst[3 * i + 1] = (unsigned char)(src[i] >> 8);
+                dst[3 * i + 2] = (unsigned char)(src[i] >> 16);
+        }
+}
+
 //      A hosted check has no library: it takes this C for the routines of the library's names, which mix.c calls.
 #ifdef AUDIO_C_AS_LIBRARY
 void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
 {
         audio_c_widen(dst, src, samples, kind);
+}
+
+void pcm_pack24(unsigned char *dst, const unsigned *src, unsigned long lanes)
+{
+        audio_c_pack24(dst, src, lanes);
 }
 
 void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
@@ -172324,6 +172340,58 @@ static void al_widen_case(unsigned kind, unsigned long long samples, int front, 
                 faults->bits += kind < 9 ? dst[i] != audio_c_widen_one(kind, src + i * al_widen_width[kind]) : dst[i] != 0xdeadbeefu;
 }
 
+/*
+        pcm_pack24: every count to 330 and long ones, the words against a page that faults after the last (or after a page that
+        faults before the first), the bytes written exactly 3 * lanes (the guard page past them, the bytes either side kept).
+*/
+static void al_pack_case(unsigned long long lanes, int front, al_faults *faults)
+{
+        unsigned *src = front ? (unsigned *)al_low[0] : (unsigned *)al_high[0] - lanes;
+        p8 *dst = front ? (p8 *)al_low[3] + 64 : (p8 *)al_high[3] - 3 * lanes;
+
+        faults->cases++;
+        for (unsigned long long i = 0; i < lanes; i++)
+                src[i] = (unsigned)al_next();
+        for (int i = 0; i < 16; i++)
+        {
+                dst[i - 16] = (p8)(0xa5 + i);
+                if (front)
+                        dst[3 * lanes + i] = (p8)(0x5a + i);
+        }
+        for (unsigned long long i = 0; i < 3 * lanes; i++)
+                dst[i] = 0xee;
+        VECTOR_FIRST_CALL(al_first);
+        pcm_pack24(dst, src, lanes);
+        for (unsigned long long i = 0; i < lanes; i++)
+        {
+                faults->bits += dst[3 * i] != (p8)src[i];
+                faults->bits += dst[3 * i + 1] != (p8)(src[i] >> 8);
+                faults->bits += dst[3 * i + 2] != (p8)(src[i] >> 16);
+        }
+        for (int i = 0; i < 16; i++)
+        {
+                faults->outside += dst[i - 16] != (p8)(0xa5 + i);
+                if (front)
+                        faults->outside += dst[3 * lanes + i] != (p8)(0x5a + i);
+        }
+}
+
+static void al_pack_tier(void)
+{
+        static const unsigned long long longs[] = {331, 344, 511, 512, 1000, 4095, 4096};
+        al_faults faults = {0, 0, 0, 0, 0, 0, 0};
+
+        for (unsigned long long lanes = 0; lanes <= 330; lanes++)
+                for (int front = 0; front < 2; front++)
+                        al_pack_case(lanes, front, &faults);
+        for (unsigned long i = 0; i < sizeof(longs) / sizeof(longs[0]); i++)
+                for (int front = 0; front < 2; front++)
+                        al_pack_case(longs[i], front, &faults);
+        check("pcm_pack24: every count to 330 and long ones, the bytes the C's", faults.bits == 0);
+        check("pcm_pack24: nothing written past the three bytes of the last lane (the guard page), the bytes either side untouched", faults.outside == 0);
+        check("pcm_pack24: cases ran", faults.cases > 600);
+}
+
 static void al_widen_tier(void)
 {
         static const unsigned long long longs[] = {331, 344, 511, 512, 1000, 4095, 4096};
@@ -172996,6 +173064,8 @@ static void al_abi_all(void)
         ((void (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 40);
         al_abi_target = (void *)resample_polyphase2_f32_rows;
         ((unsigned long long (*)(float *, float *, const float *, const float *, const float *, unsigned long long, unsigned long long, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, table, 64, 2, 0x180000000ull, 0x100000000ull, 3);
+        al_abi_target = (void *)pcm_pack24;
+        ((void (*)(unsigned char *, const unsigned *, unsigned long long))al_abi_call)(bytes, (const unsigned *)left, 103);
         al_abi_target = (void *)pcm_widen;
         for (unsigned long long kind = 0; kind < 9; kind++)
                 ((void (*)(unsigned *, const unsigned char *, unsigned long long, unsigned long long))al_abi_call)((unsigned *)out0, bytes, 103, kind);
@@ -173098,6 +173168,7 @@ b32 main(void)
                         al_encode_tier("avx2");
                         al_mix2_tier();
                         al_widen_tier();
+                        al_pack_tier();
                 }
                 cpu_has_fma = 0;
                 if (had2)
@@ -173110,6 +173181,7 @@ b32 main(void)
                 al_encode_tier("sse2");
                 al_mix2_tier();
                 al_widen_tier();
+                al_pack_tier();
                 cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
         }
 #elif RISCV64
@@ -173138,6 +173210,7 @@ b32 main(void)
                         al_encode_tier(tier ? "no V" : vector == 2 ? "V, every call the first" : "no V, every call the first");
                         al_mix2_tier();
                         al_widen_tier();
+                        al_pack_tier();
                 }
                 al_first = false;
                 cpu_has_vector = vector;
@@ -173150,6 +173223,7 @@ b32 main(void)
         al_encode_tier("neon");
         al_mix2_tier();
         al_widen_tier();
+        al_pack_tier();
 #endif
         return test_report(null);
 }
@@ -173477,6 +173551,22 @@ static void au_test_encode(void)
                         memcpy(&word, back + i * 4, 4);
                         AUCHECK(word == expect, "24-in-32 sample %ld of round %d: %d against %d", i, round, word, expect);
                 }
+        }
+        {
+                //      Stereo 24 bits in three bytes, 2500 frames (the encoder works 1024 a pass): every sample is the low three bytes of the
+                //      same sample in the 24-in-32 form.
+                static float l24[2500], r24[2500];
+                static unsigned char three[2500 * 6], four[2500 * 8];
+
+                for (int i = 0; i < 2500; i++)
+                {
+                        l24[i] = (float)((i * 37) % 2000 - 1000) / 1000.0f;
+                        r24[i] = -l24[i] * 0.7f + (float)(i % 7) * 1e-6f;
+                }
+                AUCHECK(audio_encode(AUDIO_FORMAT_S24LE, three, 2500, 2, l24, r24) == 2500 * 6, "stereo 24 bits answers another count");
+                AUCHECK(audio_encode(AUDIO_FORMAT_S24_32LE, four, 2500, 2, l24, r24) == 2500 * 8, "stereo 24 in 32 answers another count");
+                for (int i = 0; i < 5000; i++)
+                        AUCHECK(!memcmp(three + i * 3, four + i * 4, 3), "stereo 24 bits, sample %d", i);
         }
         // 32 bits: the float has 24 of them, so the sample is within 64.
         for (int round = 0; round < 64; round++)
@@ -191385,6 +191475,81 @@ static fn al_encode_rows(string_address tier, bool wide)
 //      with AVX-512 on its AVX-512 tier, -O3 at 512 bits.
 static p8 al_has512;
 
+/*
+        The card's 24 bits in three bytes, stereo, 512 frames: the pair into 24-in-32 lanes and pcm_pack24 against the loop mix.c had
+        (a rounded integer a sample, three bytes stored one at a time), built as the service is (-O2).
+*/
+static unsigned al_pack_lanes[1024];
+
+__attribute__((noinline, noclone, optimize("O2"))) static void al_pack_old(unsigned char *dst, const float *left, const float *right, long frames)
+{
+        for (long i = 0; i < frames; i++)
+                for (long c = 0; c < 2; c++)
+                {
+                        float v = c == 0 ? left[i] : right[i];
+                        double d = (double)v * 8388608.0, r;
+                        long long bits;
+                        int x;
+                        unsigned char *q = dst + (i * 2 + c) * 3;
+
+                        if (v != v)
+                                x = 0;
+                        else
+                        {
+                                d = d > 8388607.0 ? 8388607.0 : d;
+                                d = d < -8388608.0 ? -8388608.0 : d;
+                                r = d + 6755399441055744.0;
+                                __builtin_memcpy(&bits, &r, 8);
+                                x = (int)(bits & 0xffffffffll);
+                        }
+                        q[0] = (unsigned char)x;
+                        q[1] = (unsigned char)(x >> 8);
+                        q[2] = (unsigned char)(x >> 16);
+                }
+}
+
+static p64 al_pack_run(bool assembly, positive shape, positive reps)
+{
+        p64 start = get_cpu_time();
+
+        (void)shape;
+        for (positive r = 0; r < reps; r++)
+        {
+                if (assembly)
+                {
+                        f32_pair_to_s24_32((unsigned char *)al_pack_lanes, al_encode_left, al_encode_right, 512);
+                        pcm_pack24((unsigned char *)al_encode_out, al_pack_lanes, 1024);
+                }
+                else
+                        al_pack_old((unsigned char *)al_encode_out, al_encode_left, al_encode_right, 512);
+        }
+        return get_cpu_time() - start;
+}
+
+static fn al_pack_bench(string_address tier)
+{
+        positive reps = (1u << 20) / 512 + 1, ratios[TRIES];
+        p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+        for (positive trial = 0; trial < TRIES; trial++)
+        {
+                p64 former, assembly;
+
+                BENCH_ALTERNATE(trial, former, al_pack_run(false, 0, reps), assembly, al_pack_run(true, 0, reps));
+                ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                best_c = former < best_c ? former : best_c;
+                best_a = assembly < best_a ? assembly : best_a;
+        }
+        order(ratios, TRIES);
+        string_format(log, "encode of 24 bits in three bytes, 2 channels of 512 frames, %s against C -O2 as built: paired median ASM/C ", tier);
+        al_hundredths(ratios[TRIES / 2]);
+        string_format(log, "%%; best ticks a call ASM ");
+        al_hundredths((positive)(best_a * 100 / reps));
+        string_format(log, ", C ");
+        al_hundredths((positive)(best_c * 100 / reps));
+        log("\n", 1);
+}
+
 static fn al_scale_rows(string_address tier, bool wide, bool has512_tier)
 {
         for (positive shape = 0; shape < sizeof(al_scale_shapes) / sizeof(al_scale_shapes[0]); shape++)
@@ -191542,6 +191707,7 @@ b32 main(void)
                         al_shapes_run(tier == 1 ? "avx2 fma" : "sse2");
                         al_rows_bench(tier == 1 ? "avx2 fma" : "sse2");
                         al_widen_bench(tier == 1 ? "avx2" : "sse2");
+                        al_pack_bench(tier == 1 ? "avx2" : "sse2");
                 }
                 al_scale_rows(tier == 0 ? "avx512" : tier == 1 ? "avx2" : "sse2", tier <= 1, tier == 0);
                 if (tier)
@@ -191565,6 +191731,7 @@ b32 main(void)
                 al_shapes_run(tier == 0 ? "V" : "no V");
                 al_rows_bench(tier == 0 ? "V" : "no V");
                 al_widen_bench(tier == 0 ? "V" : "no V");
+                al_pack_bench(tier == 0 ? "V" : "no V");
                 al_scale_rows(tier == 0 ? "V" : "no V", true, false);
                 al_decode_rows(tier == 0 ? "V" : "no V", true);
                 al_encode_rows(tier == 0 ? "V" : "no V", true);
@@ -191575,6 +191742,7 @@ b32 main(void)
         al_shapes_run("neon");
         al_rows_bench("neon");
         al_widen_bench("neon");
+        al_pack_bench("neon");
         al_scale_rows("neon", true, false);
         al_decode_rows("neon", true);
         al_encode_rows("neon", true);

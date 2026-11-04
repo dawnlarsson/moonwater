@@ -393,6 +393,9 @@ cover('folds_already', 'count', 'resample_polyphase2_f32_rows',
 cover('folds_already', 'count', 'pcm_widen',
       'the decoder hands it a pass of up to 4096 samples of a voice whose format the stream chose at run time; a literal count '
       'would remove one compare from a loop of dozens of vector turns')
+cover('folds_already', 'count', 'pcm_pack24',
+      'the encoder hands it a pass of up to 2048 lanes of the sink\'s period, which the card\'s period and the service\'s set at run time; '
+      'a literal count would remove one compare from a loop of dozens of vector turns')
 cover('folds_already', 'count', 'fused_residual_add_f32',
       'a training step hands it a whole activation, batch by context by '
       'width: thousands to millions of floats a call, where a literal count '

@@ -115,6 +115,7 @@ void f32_pair_to_f32(unsigned char *dst, const float *left, const float *right, 
 unsigned long f32_pair_clip(float *left, float *right, unsigned long count);
 void f32_rows_mix2(float *out0, float *out1, const float *rows, unsigned long stride, const float *matrix, unsigned long count, unsigned long channels);
 void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind);
+void pcm_pack24(unsigned char *dst, const unsigned int *src, unsigned long lanes);
 #endif
 
 /* ---- numbers: sin, sqrt and the Bessel function, in double, with no library ---- */
@@ -228,6 +229,7 @@ AUDIO_API void audio_init(void)
         integer decoder's scale gives the sample's own; a byte-swapped float is a float, held to [-16, 16] with a NaN made zero).
 */
 #define AUDIO_WIDE 4096 // lanes a pass holds
+#define AUDIO_PACK 1024 // frames a pass of the 24-bit encoder holds
 
 AUDIO_API void audio_decode(long format, const unsigned char *src, long frames, long channels, float *const *dst)
 {
@@ -327,6 +329,22 @@ AUDIO_API long audio_encode(long format, unsigned char *dst, long frames, long c
                         f32_pair_to_s24_32(dst, left, right, (unsigned long)frames);
                 else
                         f32_pair_to_f32(dst, left, right, (unsigned long)frames);
+                return frames * 2 * bytes;
+        }
+        // The 24-bit form in three bytes: the library's 24-in-32 pairs, packed to three bytes by its next routine, a pass of 1024
+        // frames at a time.
+        if (channels == 2 && format == AUDIO_FORMAT_S24LE)
+        {
+                static unsigned int lanes[2 * AUDIO_PACK];
+
+                for (long done = 0; done < frames;)
+                {
+                        long take = frames - done < AUDIO_PACK ? frames - done : AUDIO_PACK;
+
+                        f32_pair_to_s24_32((unsigned char *)lanes, left + done, right + done, (unsigned long)take);
+                        pcm_pack24(dst + done * 6, lanes, (unsigned long)(2 * take));
+                        done += take;
+                }
                 return frames * 2 * bytes;
         }
         for (long i = 0; i < frames; i++)
