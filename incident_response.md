@@ -41,6 +41,30 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-137: the editor opened a device to find out it was not a file
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Side effects of opening a device or FIFO a link names (denial of service: a watchdog armed, a tape rewound, a waiting writer let go) |
+| Moonwater exposure window | 2026-10-30 16:59 +01:00 (`3f919186`, the editor) to the fix, about 4 days 18 hours |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `CHECK_terminal`, `editor hostile: a FIFO with a writer waiting on it is refused, and the writer is not let go` |
+
+**How it was exposed.** `editor_load` opened the path to read (O_RDONLY, O_NONBLOCK) and only then asked fstat
+whether it was a regular file, and `editor_check_disk` opened it again the same way each time the window got the
+keys. A link named like a document (`notes.txt -> /dev/watchdog`, left in an archive or a shared directory) opened as
+root armed the machine's hardware watchdog, and its close without the magic byte left it running: the machine
+reset a minute later. Opening a tape device rewinds it at its close, and opening a FIFO releases a writer blocked on
+it, which is what the check uses.
+
+**The fix.** The path is opened O_PATH first, which opens nothing; fstat on that decides, and only a regular file is
+opened to be read, through /proc/self/fd of the pin, so the file read is the file looked at. The changed-on-disk look
+uses O_PATH alone.
+
+**The check.** A FIFO named notes.txt with a child blocked opening it to write: the editor refuses it and the child
+must still be blocked 300 ms later. With the old open put back (the mutant) the child's open returns at once.
+
 ### MW-2026-136: a font of a few hundred kilobytes held font_load for seconds, and a kern table every pair
 
 | | |

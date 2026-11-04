@@ -156575,6 +156575,45 @@ static fn editor_hostile_check(struct ui address_to wui)
                 }
         }
 
+        // A FIFO named like a document, a writer waiting on it: looking at it opens nothing, so the writer is not let go.
+        // Opening a device to look at it acts on it as this open let the writer go: a watchdog is armed by its open.
+        {
+                char pipe_path[96];
+                bipolar child, status_word = 0, reaped = 0;
+                b32 opened;
+                b64 pause[2] = {0, 20000000};
+
+                string_copy(string_copy((string_address)pipe_path, (string_address)dir) + string_length((string_address)dir), (string_address) "/notes.txt");
+                system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)pipe_path, 0010600, 0);
+                child = system_fork();
+                if (child == 0)
+                {
+                        // Waits here until something opens the FIFO to read it.
+                        bipolar writer = system_open_at(AT_FDCWD, (string_address)pipe_path, O_WRONLY | O_CLOEXEC);
+
+                        system_call_1(syscall(exit_group), writer >= 0 ? 7 : 1);
+                }
+                for (int k = 0; k < 5; k++)
+                        system_call_2(syscall(nanosleep), (positive)pause, 0);
+                editor.count = 0;
+                opened = editor_open((string_address)pipe_path);
+                for (int k = 0; k < 15 && !reaped; k++)
+                {
+                        system_call_2(syscall(nanosleep), (positive)pause, 0);
+                        reaped = system_call_4(syscall(wait4), (positive)child, (positive)&status_word, 1, 0); // WNOHANG
+                }
+                check("editor hostile: a FIFO with a writer waiting on it is refused, and the writer is not let go", child > 0 && !opened && reaped == 0);
+                {
+                        bipolar reader = system_open_at(AT_FDCWD, (string_address)pipe_path, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+
+                        if (!reaped && child > 0)
+                                system_call_4(syscall(wait4), (positive)child, (positive)&status_word, 0, 0);
+                        if (reader >= 0)
+                                system_close(reader);
+                }
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)pipe_path, 0);
+        }
+
         // A mapped file cut short by another program while it is open (a log rotated by copytruncate): read on as zeros
         // past the cut and said to have changed on disk. The read was SIGBUS, and the editor (this check with it) gone.
         {

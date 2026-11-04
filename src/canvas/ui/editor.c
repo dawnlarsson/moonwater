@@ -153,8 +153,11 @@ static int editor_folder(const char address_to path, const error_stat address_to
 // A file's bytes: mapped when large, read when small, refused when it is not a regular file. False with a status.
 static b32 editor_load(struct editor_tab address_to tab, string_address path)
 {
-        // Without blocking: opening a FIFO to read waits for a writer, and the editor would hang on a hostile path.
-        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+        // The path pinned before what it names is opened: opening a device to look at it can act on it (a watchdog is
+        // armed by its open, a tape rewinds at its close, a FIFO's waiting writer is let go), and a link named like a
+        // document can name one. Only a regular file is then opened to be read, through the pin, so it is the file
+        // looked at; without blocking, as a FIFO put there in between would wait for a writer.
+        bipolar handle = system_open_at(AT_FDCWD, path, O_PATH | O_CLOEXEC), pinned;
         error_stat facts;
         char link[64], resolved[EDITOR_PATH];
         bipolar got;
@@ -207,6 +210,16 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
         tab->owner = facts.st_uid, tab->group = facts.st_gid;
         // A path past the room was cut short by readlinkat: a save under the cut name would write another file.
         tab->folder = got >= (bipolar)sizeof(resolved) - 1 ? -1 : editor_folder(tab->path, &facts);
+        pinned = handle;
+        handle = system_open_at(AT_FDCWD, (string_address)link, FILE_READ | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+        system_close(pinned);
+        if (handle < 0)
+        {
+                if (tab->folder >= 0)
+                        system_close(tab->folder);
+                tab->folder = -1;
+                return false;
+        }
         if (facts.st_size >= EDITOR_MAP_FROM)
         {
                 long mapped = (long)system_call_6(syscall(mmap), 0, (positive)facts.st_size, 1, 2, (positive)handle, 0);
@@ -335,11 +348,11 @@ static b32 editor_save(struct editor_tab address_to tab)
         return true;
 }
 
-// Whether the file was changed by someone else since it was opened or saved. Without O_NONBLOCK, a FIFO that replaced the
-// file would hang the window until a writer came (a FIFO's size is 0, so it is seen as changed).
+// Whether the file was changed by someone else since it was opened or saved. Looked at through O_PATH, which opens
+// nothing: a FIFO that replaced the file would hang a reading open, and a device put there acts when it is opened.
 static fn editor_check_disk(struct editor_tab address_to tab)
 {
-        bipolar handle = tab->path[0] ? system_open_at(AT_FDCWD, (string_address)tab->path, FILE_READ | O_NONBLOCK | O_NOCTTY | O_CLOEXEC) : -1;
+        bipolar handle = tab->path[0] ? system_open_at(AT_FDCWD, (string_address)tab->path, O_PATH | O_CLOEXEC) : -1;
         error_stat facts;
 
         if (handle < 0)
