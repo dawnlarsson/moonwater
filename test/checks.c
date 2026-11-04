@@ -217141,6 +217141,10 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                 mixer.focused = 1;
                         }
 
+                        // A warm-up paint: a painter keeps state between paints (the mixer's tabs tween and their pip), and the first paint after a
+                        // change is not the steady frame; the reference and the recording are both steady.
+                        memory_zero(app_dummy, sizeof(app_dummy));
+                        paint(app_dummy);
                         memory_zero(app_cpu, sizeof(app_cpu));
                         paint(app_cpu);
 
@@ -218638,6 +218642,7 @@ b32 main(void)
 
                         app_rows(1, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                         app_rows(2, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
+                        app_rows(3, big, kops, kbins, kbins + (4 << 20), 4u << 20, four, 4, 0);
                 }
         }
 
