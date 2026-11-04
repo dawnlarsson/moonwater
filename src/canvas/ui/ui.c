@@ -4055,7 +4055,7 @@ static fn ui_vslider_draw(struct ui address_to ui, struct ui_control address_to 
         b64 value = c->value, halo;
         int knob = c->down ? 14 : c->hover ? 18 : UI_VSLIDER_KNOB, bar = c->down ? 4 : c->hover ? 8 : 6;
         b32 cx = ui_q8(ui, c->x) + ui_q8(ui, c->w) / 2, top = ui_q8(ui, c->y), bottom = ui_q8(ui, c->y + c->h), ky, r;
-        unsigned int accent = ui_role(UI_PRIMARY), fill_ink = c->on ? ui_role(UI_OUTLINE) : accent, off = ui_role(UI_CONTROL_OFF);
+        unsigned int accent = ui_role(UI_PRIMARY), fill_ink = c->on ? ui_role(UI_OUTLINE) : accent, off = ui_well(ui, UI_CONTROL_OFF, 30);
         struct ui_box track, fill, dot;
 
         if (c->sliding)
@@ -4088,7 +4088,7 @@ static fn ui_vslider_draw(struct ui address_to ui, struct ui_control address_to 
         }
         r = ui_q8(ui, knob) / 2;
         dot = (struct ui_box){cx - r, ky - r, cx + r, ky + r, r, r};
-        ui_kit_fill(ui, &dot, c->on ? ui_role(UI_OUTLINE) : ui_role(UI_ON_SURFACE), null);
+        ui_kit_fill(ui, &dot, c->on ? ui_role(UI_OUTLINE) : ui_text_colour(ui, UI_ON_SURFACE), null);
         // The keys are on it: a ring in the accent, 3 out from the knob.
         if (c->focused)
         {
@@ -5026,10 +5026,10 @@ static fn ui_avatar_draw(struct ui address_to ui, struct ui_control address_to c
         const struct ui_type address_to t = &ui_types[UI_LABEL_MEDIUM];
         const font_face address_to faces[2] = {ui->bold ? ui->bold : ui->regular, ui->regular};
 
-        ui_kit_fill(ui, &box, ui_role(UI_SURFACE_HIGHEST), null);
+        ui_kit_fill(ui, &box, ui_well(ui, UI_SURFACE_HIGHEST, 16), null);
         width = ui_run_in(ui, faces, 0, 0, (string_address)c->label, t->size, 0, 0, 0, ui->width, 0);
         ui_run_in(ui, faces, ui_dev(ui, c->x) + (ui_dev(ui, size) - width) / 2, ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, size) - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM),
-                  (string_address)c->label, t->size, ui_role(UI_ON_SURFACE) & 0xffffffu, 255, ui_dev(ui, c->x), ui_dev(ui, c->x + size), 0);
+                  (string_address)c->label, t->size, ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu, 255, ui_dev(ui, c->x), ui_dev(ui, c->x + size), 0);
         if (c->on)
         {
                 struct ui_box ring = ui_box_of(ui, ui_q(c->x + size - 8 - 2), ui_q(c->y + size - 8 - 2), ui_q(13), ui_q(13), ui_q(7));
@@ -8042,7 +8042,7 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
                 struct ui_box track = {left * 256, top * 256, (left + bar) * 256, bottom * 256, bar * 128, bar * 128}, piece;
                 b64 edges[4] = {0, UI_METER_AMBER, UI_METER_RED, UI_ONE};
 
-                ui_kit_fill(ui, &track, ui_mix(ui_role(UI_ON_SURFACE), 14, 0), null);
+                ui_kit_fill(ui, &track, ui_mix(ui_text_colour(ui, UI_ON_SURFACE), 14, 0), null);
                 for (int part = 0; part < 3; part++)
                 {
                         b64 low = edges[part], high = edges[part + 1] < shown[channel] ? edges[part + 1] : shown[channel];
@@ -8330,7 +8330,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
                 int room = ui_dev(ui, UI_STRIP_W - 8), width, group = (UI_STRIP_W - UI_STRIP_GROUP) / 2;
                 string_address name;
                 b64 shown[2], hold[2];
-                unsigned int ink = strip->muted ? ui_role(UI_ON_SURFACE_VARIANT) : ui_role(UI_ON_SURFACE);
+                unsigned int ink = ui_text_colour(ui, strip->muted ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE);
 
                 if (left + ui_dev(ui, UI_STRIP_W) <= s->x || left >= s->x + s->w)
                         continue;
@@ -8341,7 +8341,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
 
                         ui_kit_fill(ui, &(struct ui_box){(centre - face / 2) * 256, (s->y + ui_dev(ui, 16)) * 256, (centre + face / 2) * 256,
                                                          (s->y + ui_dev(ui, 16) + face) * 256, face * 128, face * 128},
-                                    ui_role(UI_SURFACE_HIGHEST), null);
+                                    ui_well(ui, UI_SURFACE_HIGHEST, 16), null);
                         if (strip->master == 2)
                                 ui_microphone(ui, centre - size / 2, s->y + ui_dev(ui, 16) + (face - size) / 2, size, strip->muted, ink);
                         else
@@ -8361,7 +8361,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
                 language_format(text, sizeof(text), WORDS(settings_percent), (long)strip->percent);
                 width = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM);
                 ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, s->y + ui_dev(ui, 16 + UI_STRIP_FACE + 8 + 16), UI_BODY_MEDIUM), (string_address)text,
-                            UI_BODY_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0);
+                            UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
                 // The meter beside the slider, the length of its track.
                 for (int channel = 0; channel < 2; channel++)
                         ui_level_now(&strip->level[channel], ui_kit.now, &shown[channel], &hold[channel]);
@@ -8381,7 +8381,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
 
                 at = ui_rtl() ? s->w - bar - at : at;
                 ui_kit_fill(ui, &(struct ui_box){(s->x + at) * 256, y * 256, (s->x + at + bar) * 256, (y + thick) * 256, thick * 128, thick * 128},
-                            ui_mix(ui_role(UI_ON_SURFACE), 24, 0), null);
+                            ui_mix(ui_text_colour(ui, UI_ON_SURFACE), 24, 0), null);
         }
 }
 
@@ -8392,7 +8392,7 @@ static fn ui_strips_message(struct ui address_to ui, struct ui_strips address_to
         int measured = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM), at = measured < width ? (width - measured) / 2 : 0;
 
         ui_kit_text_in(ui, left + at, ui_kit_baseline(ui, s->y + s->h / 2 - ui_dev(ui, 10), UI_BODY_MEDIUM), (string_address)text, UI_BODY_MEDIUM,
-                       ui_role(UI_ON_SURFACE_VARIANT), 0, left, left + width);
+                       ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, left, left + width);
 }
 
 // A value set for strip k by the person: it is theirs for a moment, whatever the app lists meanwhile, and the slider shows it.
@@ -10186,6 +10186,7 @@ struct ui_app
         b32 own_title;                  // the app names its window itself as it runs (the terminal): the kit sets the title once, at the start
         b32 dismiss;                    // a popup: the loop ends when the keys go elsewhere after they have been its (had_keys is the kit's)
         b32 had_keys;
+        void (*page)(unsigned int page); // optional: a second start asked for this page (ui_lift_page), the one a tab press would show
 };
 
 // The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done, as is an app whose focus hook says so.
@@ -10203,6 +10204,18 @@ static fn ui_app_changed(struct ui_app address_to app)
         *app->dirty = true;
         if (app->changed)
                 app->changed();
+}
+
+// A second start asked this window for a page (ui_lift_page): the app is told once, as a press on that page's tab would tell it.
+static fn ui_app_asked(struct ui_app address_to app)
+{
+        unsigned int asked = app->page ? __atomic_exchange_n(&app->own->table->page[app->own->row], 0u, __ATOMIC_ACQ_REL) : 0;
+
+        if (asked)
+        {
+                app->page(asked - 1);
+                ui_app_changed(app);
+        }
 }
 
 static int ui_app_run(struct ui_app address_to app)
@@ -10297,6 +10310,7 @@ static int ui_app_run(struct ui_app address_to app)
                                 running = false;
                 }
 
+                ui_app_asked(app);
                 if ((table->focus == row) != *app->focused)
                 {
                         *app->focused = table->focus == row;
@@ -10505,9 +10519,10 @@ static b32 ui_is_program(unsigned int pid, string_address name)
 /*
         Another window of the program name that has shown a picture is lifted: the compositor is told to raise it, as a
         second start asks. With put_away, the program is sent SIGTERM instead, and the compositor sees its door close as
-        it does any program's end. The window own is not another. True when there was one.
+        it does any program's end. The window own is not another. True when there was one. With ask not 0 the window is
+        asked for a page as well (ask - 1, ui_lift_page), which it takes once.
 */
-static b32 ui_lift_other(const struct window_row address_to own, string_address name, b32 put_away)
+static b32 ui_lift_row(const struct window_row address_to own, string_address name, b32 put_away, unsigned int ask)
 {
         struct windows address_to table = own->table;
 
@@ -10526,6 +10541,8 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
                         system_call_2(syscall(kill), (positive)pid, SIGTERM);
                         return true;
                 }
+                if (ask)
+                        __atomic_store_n(&table->page[row], ask, __ATOMIC_RELEASE);
                 __atomic_add_fetch(&table->lift[row], 1, __ATOMIC_RELEASE);
                 windows_door_name(door_name, row, 0);
                 door = system_open_at(AT_FDCWD, (string_address)door_name, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
@@ -10537,6 +10554,17 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
                 return true;
         }
         return false;
+}
+
+static b32 ui_lift_other(const struct window_row address_to own, string_address name, b32 put_away)
+{
+        return ui_lift_row(own, name, put_away, 0);
+}
+
+// The same, and the other window is asked to show page (0 up) as well: the window's page hook (ui_app) is told.
+static b32 ui_lift_page(const struct window_row address_to own, string_address name, unsigned int page)
+{
+        return ui_lift_row(own, name, false, page + 1);
 }
 
 /* ---- text: a field, a text area and the code view, over text.c's documents ---- */

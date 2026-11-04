@@ -146468,6 +146468,20 @@ static positive mixer_waits(const char address_to path, char address_to into, po
         return got;
 }
 
+// An event handed to the mixer as the loop hands it: a motion first puts the pointer where the kit keeps it (ui_event_context).
+static b32 mixer_moved(const struct window_event address_to event)
+{
+        if (event->type == WINDOW_EVENT_MOTION)
+                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
+        return mixer_event(event);
+}
+
+static unsigned int mixer_asked_page = 77;
+static void mixer_asked_hook(unsigned int page)
+{
+        mixer_asked_page = page;
+}
+
 static fn mixer_fixture_streams(void)
 {
         struct audio_state *page = &mixer_fixture_page;
@@ -146745,18 +146759,48 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 press = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
                 ui_kit_held = null;
-                mixer_event(&move);
+                mixer_moved(&move);
                 check("mixer popup: a press on the row takes the keys to it and starts nothing", mixer_event(&press) && mixer.row.keys == 1 && !file_text(started_path, said, sizeof(said)));
                 check("mixer popup: its release there starts the mixer and ends the popup", !mixer_event(&lift) && mixer_waits(started_path, said, sizeof(said)) >= 23);
                 system_remove_at(AT_FDCWD, started_path, 0);
                 mixer.row.keys = 0;
                 ui_kit_held = null;
                 move = (struct window_event){WINDOW_EVENT_MOTION, 0, s->control[0].x + s->control[0].w / 2, s->control[0].y + 40};
-                mixer_event(&move);
+                mixer_moved(&move);
                 check("mixer popup: a press on the slider is the strip's, and the row starts nothing", mixer_event(&press) && ui_kit_held == &s->control[0] && !mixer.row.keys &&
                                                                                                       s->item[0].percent > 70);
                 mixer_event(&lift);
                 check("mixer popup: and so is the release: nothing is started", ui_kit_held == null && file_text(started_path, said, sizeof(said)) == 0);
+
+                // The tray's popup is glass: clear where nothing is drawn, and its strip's pieces the ground's ink laid over the glass (a slider's track a well of it),
+                // not the theme's surface colours; the same strip in a window of the kit's surface is opaque.
+                {
+                        struct ui_control address_to slider = &s->control[0];
+                        int track_x = slider->x + slider->w / 2, track_y = slider->y + 4;
+                        unsigned int opaque_track, glass_track, glass_corner, opaque_corner;
+
+                        mixer_fixture_streams();
+                        mixer_fixture_page.seq += 2;
+                        mixer.listed = false;
+                        mixer_poll(mixer_t0 + 850000000ll);
+                        ui_kit.now = mixer_t0 + 850000000ll;
+                        for (int k = 0; k < 640 * 400; k++)
+                                pixels[k] = 0;
+                        mixer.ui.opaque = 1, mixer.ui.glass = 0;
+                        mixer_draw(pixels);
+                        opaque_track = pixels[track_y * 640 + track_x], opaque_corner = pixels[4 * 640 + 2];
+                        for (int k = 0; k < 640 * 400; k++)
+                                pixels[k] = 0;
+                        mixer.ui.opaque = 0, mixer.ui.glass = 1;
+                        ui_inks(&mixer.ui, UI_GLASS_GROUND);
+                        mixer_draw(pixels);
+                        glass_track = pixels[track_y * 640 + track_x], glass_corner = pixels[4 * 640 + 2];
+                        check("mixer popup: as glass it is clear where nothing is drawn, and in a window of the kit's surface that is the surface",
+                              (glass_corner >> 24) == 0 && (opaque_corner >> 24) == 255);
+                        check("mixer popup: and the slider's track is a well of the ground's ink, not the opaque colour of the role",
+                              (opaque_track >> 24) == 255 && (glass_track >> 24) > 0 && (glass_track >> 24) < 255);
+                        mixer.ui.opaque = 1, mixer.ui.glass = 0;
+                }
 
                 // The keys going elsewhere ends a popup (the kit's rule, ui_app_keys); before they came it had never had them; a window that is not a popup is not ended by it.
                 {
@@ -146873,13 +146917,13 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         press = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                         lift = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
                         ui_kit_held = null;
-                        mixer_event(&move);
+                        mixer_moved(&move);
                         mixer_event(&press);
                         mixer_event(&lift);
                         check("mixer pages: a press and release on the Playback tab shows it", !mixer.recording && s->item[0].master == 1);
                         x = ui_tab_left(&mixer.ui, &mixer.tabs, 1) + ui_tab_width(&mixer.ui, &mixer.tabs, 1) / 2;
                         move = (struct window_event){WINDOW_EVENT_MOTION, 0, x, y};
-                        mixer_event(&move);
+                        mixer_moved(&move);
                         mixer_event(&press);
                         mixer_event(&lift);
                         check("mixer pages: and on the Recording tab shows that", mixer.recording && s->item[0].master == 2);
@@ -146932,7 +146976,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         system_remove_at(AT_FDCWD, capture_path, 0);
                         move = (struct window_event){WINDOW_EVENT_MOTION, 0, allow->x + allow->w / 2, allow->y + allow->h / 2};
                         ui_kit_held = null;
-                        mixer_event(&move);
+                        mixer_moved(&move);
                         mixer_event(&press);
                         check("mixer recording off: a press on the button turns nothing on", !file_text(capture_path, said, sizeof(said)));
                         mixer_event(&lift);
@@ -147002,6 +147046,30 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer.row.keys = 0;
                 mixer.recording = false;
                 mixer.width = 640, mixer.height = 400;
+        }
+
+        // A second start of the mixer with -i asks the first for its Recording page, as a window is lifted (ui_lift_page): the app is told once, by the kit's
+        // loop, and the mixer shows the page a press on its tab would.
+        {
+                struct ui_app asked = {0};
+
+                mixer_fixture_table.page[mixer.own.row] = 2;
+                asked.own = &mixer.own, asked.dirty = &mixer.dirty, asked.page = mixer_asked_hook;
+                ui_app_asked(&asked);
+                check("kit: a page asked of a window is told to its app, as its number, and taken", mixer_asked_page == 1 && !mixer_fixture_table.page[mixer.own.row]);
+                mixer_asked_page = 77;
+                ui_app_asked(&asked);
+                check("kit: and only once", mixer_asked_page == 77);
+                mixer_fixture_table.page[mixer.own.row] = 3;
+                asked.page = null;
+                ui_app_asked(&asked);
+                check("kit: an app with no hook for it leaves the request where it is", mixer_fixture_table.page[mixer.own.row] == 3);
+                mixer_fixture_table.page[mixer.own.row] = 0;
+                mixer.recording = false;
+                mixer_asked(1);
+                check("mixer: asked for page 1 it shows Recording, as a press on the tab does", mixer.recording && s->item[0].master == 2);
+                mixer_asked(0);
+                check("mixer: and asked for page 0 it shows Playback", !mixer.recording && s->item[0].master == 1);
         }
 
         // The model of a page read by another writer while it is read: a page whose sequence is odd is not taken.

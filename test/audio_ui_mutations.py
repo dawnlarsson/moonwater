@@ -128,6 +128,10 @@ M = [
     (T, "the microphone not struck when muted", "size, taskbar.mic_muted, ui_role(UI_ERROR)", "size, 0, ui_role(UI_ERROR)"),
     (U, "a popup ended before it had the keys", "if (app->dismiss && app->had_keys && !focused)", "if (app->dismiss && !focused)"),
     (U, "a window that is not a popup ended by losing the keys", "if (app->dismiss && app->had_keys && !focused)", "if (app->had_keys && !focused)"),
+    (U, "a slider's track is the opaque role over glass", "off = ui_well(ui, UI_CONTROL_OFF, 30);", "off = ui_role(UI_CONTROL_OFF);"),
+    (U, "a page asked is not taken", "__atomic_exchange_n(&app->own->table->page[app->own->row], 0u, __ATOMIC_ACQ_REL)", "__atomic_load_n(&app->own->table->page[app->own->row], __ATOMIC_ACQUIRE)"),
+    (X, "a page asked is ignored", "                mixer_page(page == 1);", "                (void)page;"),
+    (X, "a page asked is the other page", "                mixer_page(page == 1);", "                mixer_page(page == 0);"),
     (X, "the off message missing", "ui_strips_message(ui, strips, WORDS(mixer_off), false);", "(void)strips;"),
 ]
 

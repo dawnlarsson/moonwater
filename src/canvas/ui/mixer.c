@@ -91,7 +91,6 @@ static struct
         // The tray's popup (-q), and where it opens (-a).
         b32 quick, beside;
         struct ui_anchor anchor; // the panel's button it opens beside (-a): the kit's
-        int pointer_x, pointer_y;
         struct ui_buttons row;   // its Mixer row
         struct ui_buttons allow; // Allow, on the Recording page with recording turned off
         struct ui_control tabs;  // the two pages
@@ -470,8 +469,6 @@ static b32 mixer_event(const struct window_event address_to event)
 
         if (event->type == WINDOW_EVENT_KEY && down && event->a == UI_KEY_ESCAPE)
                 return false;
-        if (event->type == WINDOW_EVENT_MOTION)
-                mixer.pointer_x = event->a, mixer.pointer_y = event->b;
         // The pages: Control with Page Up and Page Down, or Tab, and a press on a tab.
         if (!mixer.quick && mixer.have && event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) &&
             (event->a == UI_KEY_PAGE_UP || event->a == UI_KEY_PAGE_DOWN || event->a == UI_KEY_TAB))
@@ -484,7 +481,7 @@ static b32 mixer_event(const struct window_event address_to event)
                 p32 tabs;
 
                 mixer_tabs_layout(ui);
-                tabs = ui_tabs_pointer(ui, &mixer.tabs, event, mixer.pointer_x, mixer.pointer_y);
+                tabs = ui_tabs_pointer(ui, &mixer.tabs, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 if (tabs & UI_TABS_CHOSEN)
                         mixer_page(mixer.tabs.at == 1);
                 mixer.dirty |= (tabs & UI_TABS_DRAW) != 0;
@@ -492,10 +489,10 @@ static b32 mixer_event(const struct window_event address_to event)
                         return true;
         }
         // The buttons of the window: Allow (recording is off), and the popup's Mixer row.
-        allow = mixer.capture_off ? ui_buttons_event(ui, &mixer.allow, event, mixer.pointer_x, mixer.pointer_y) : 0;
+        allow = mixer.capture_off ? ui_buttons_event(ui, &mixer.allow, event, ui_kit.pointer_x, ui_kit.pointer_y) : 0;
         if (allow & UI_BUTTONS_FIRED)
                 mixer_allow();
-        row = mixer.quick && !(allow & UI_BUTTONS_TAKEN) ? ui_buttons_event(ui, &mixer.row, event, mixer.pointer_x, mixer.pointer_y) : 0;
+        row = mixer.quick && !(allow & UI_BUTTONS_TAKEN) ? ui_buttons_event(ui, &mixer.row, event, ui_kit.pointer_x, ui_kit.pointer_y) : 0;
         if (row & UI_BUTTONS_FIRED)
                 return !mixer_start_full();
         if ((allow | row) & UI_BUTTONS_DRAW)
@@ -564,7 +561,7 @@ static int mixer_open(void)
         long mapped;
 
         // The popup is not lifted by a second start: pressed again, the cell puts it away.
-        if (!mixer.quick && ui_lift_other(&mixer.own, (string_address) "mixer", false))
+        if (!mixer.quick && (mixer.recording ? ui_lift_page(&mixer.own, (string_address) "mixer", 1) : ui_lift_other(&mixer.own, (string_address) "mixer", false)))
                 return 0;
         mapped = ui_map(sizeof(struct mixer_big));
         if (mapped < 0 && mapped > -4096)
@@ -589,6 +586,13 @@ static int mixer_open(void)
         return -1;
 }
 
+// A second start of the mixer with -i asked this one for the Recording page: the page a press on its tab shows.
+static fn mixer_asked(unsigned int page)
+{
+        if (!mixer.quick)
+                mixer_page(page == 1);
+}
+
 static struct ui_app mixer_app = {
         .own = &mixer.own,
         .ui = &mixer.ui,
@@ -606,6 +610,7 @@ static struct ui_app mixer_app = {
         .changed = mixer_dirty,
         .size = mixer_size,
         .tick = mixer_tick,
+        .page = mixer_asked,
 };
 
 static b32 mixer_main()
@@ -628,7 +633,7 @@ static b32 mixer_main()
                 if (string_equals(program_argument(at), (string_address) "-q"))
                 {
                         mixer.quick = true;
-                        mixer_app.glass = WINDOW_DISMISS | WINDOW_NO_TAB; // put away by a press anywhere but on it, and no tab
+                        mixer_app.glass = WINDOW_GLASS | WINDOW_DISMISS | WINDOW_NO_TAB; // glass over what is under it, put away by a press anywhere but on it, and no tab
                         mixer_app.dismiss = true;                          // and by the keys going elsewhere
                         mixer_app.name = (string_address) "mixer-quick";
                         continue;

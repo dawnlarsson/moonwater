@@ -795,6 +795,8 @@ struct windows
         char name[WINDOWS][WINDOWS_NAME];
         // Anyone's, as lift is: one more puts a window that shows where its placement says now (`window move`).
         unsigned int moved[WINDOWS];
+        // Anyone's, with a lift: the page a second start asks the window it lifts to show, its number and one (0: none), which the window takes once.
+        unsigned int page[WINDOWS];
 
         /*
                 The compositor's, for the launcher: where the panel's launcher button was last pressed, so the launcher it
@@ -2174,6 +2176,7 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         table->asked[row] = 0;
         table->ground[row] = 0;
         __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&table->page[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->hover_off[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][0], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][1], 0, __ATOMIC_RELEASE);
