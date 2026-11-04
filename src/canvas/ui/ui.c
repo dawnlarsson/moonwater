@@ -1198,6 +1198,7 @@ static b64 ui_exp_neg(b64 x);
 
 // The kit's time as the pass or the event set it (ui_kit.now), for the motion functions that take none.
 static positive ui_kit_time(void);
+static positive ui_drag_now(void); // the time a drag reads for its event: the device's stamp, else ui_kit_time (defined with the kit's state)
 
 struct ui_drag
 {
@@ -1216,14 +1217,14 @@ struct ui_drag
 
 static fn ui_drag_start(struct ui_drag address_to drag, int at)
 {
-        positive now = (positive)ui_kit_time();
+        positive now = ui_drag_now();
         drag->last = at, drag->speed = 0, drag->owed = 0, drag->rate = 0, drag->at = now, drag->flying = false;
         drag->samples = 0, drag->batch = 0, drag->batch_at = 0;
 }
 
 static int ui_drag_follow(struct ui_drag address_to drag, int at)
 {
-        positive now = (positive)ui_kit_time();
+        positive now = ui_drag_now();
         int moved = at - drag->last;
         long gap = now > drag->at ? (long)(now - drag->at) : 0;
 
@@ -1393,7 +1394,7 @@ static b32 ui_throws(long speed, int scale)
 // The finger lifted, at the scale the drag is drawn at (a list's, a terminal's): ui_drag_let_go is that at the standard scale.
 static b32 ui_drag_throw_let_go(struct ui_drag address_to drag, int scale)
 {
-        positive now = (positive)ui_kit_time();
+        positive now = ui_drag_now();
         // A finger that stopped before it lifted throws nothing, and one whose lift came late throws what it was doing, less (ui_drag_late).
         if (now > drag->at && now - drag->at > UI_FLING_GONE_NS)
                 drag->speed = 0;
@@ -2191,11 +2192,26 @@ static struct ui_kit
         int reach_top, reach_bottom;
         int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
         b64 test_clock;                    // a check's clock, ns (0: the monotonic clock): the kit reads it for every time, so a row needs no real one
+        b64 stamp;                         // the device's stamp of the event being handled (window_event.when), or 0: a drag reads its time from it (ui_drag_now)
 } ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
 
 static positive ui_kit_time(void)
 {
         return (positive)ui_kit.now;
+}
+
+// The time a drag reads for the event it is handed: the device's stamp of the event (ui_kit.stamp, set by ui_event_context), or the
+// kit's time when the event has none. The dispatch time is when the program got to it, which for a batch is one time for many reports.
+static positive ui_drag_now(void)
+{
+        return ui_kit.stamp ? (positive)ui_kit.stamp : (positive)ui_kit.now;
+}
+
+// The same for the wheel and the hand's timers, which read the kit's clock when there is no stamp (ui_kit_clock, a check's or the monotonic).
+static b64 ui_kit_clock(void);
+static b64 ui_event_clock(void)
+{
+        return ui_kit.stamp ? ui_kit.stamp : ui_kit_clock();
 }
 
 // The kit's clock, ns: the monotonic clock, or a check's (ui_kit.test_clock). Every kit read of the time is this one.
@@ -5886,6 +5902,7 @@ static fn ui_kit_track(const struct window_event address_to event)
 static fn ui_kit_pass(void)
 {
         ui_kit.now = (b64)ui_kit_clock();
+        ui_kit.stamp = 0; // the pass's own time: no event's stamp goes on past the pass's events
 }
 
 static fn ui_event_context(const struct window_event address_to event)
@@ -5894,6 +5911,7 @@ static fn ui_event_context(const struct window_event address_to event)
         ui_kit_retract = event->type == WINDOW_EVENT_MOTION && (event->flags & WINDOW_KEY_SETTLE) != 0;
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
         ui_kit.now = (b64)ui_kit_clock();
+        ui_kit.stamp = event->when;
         ui_kit_track(event);
 }
 
@@ -6830,7 +6848,7 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
 // (they are a distance each, not a place the finger is at), and a stretch they pulled springs home and a region inside its ends stops.
 static void ui_scroll_release_hand(struct ui_scroll address_to s, b32 lifted)
 {
-        positive last = s->hand_drag.samples > 0 ? s->hand_drag.when[s->hand_drag.samples - 1] : 0, now = (positive)ui_kit_clock();
+        positive last = s->hand_drag.samples > 0 ? s->hand_drag.when[s->hand_drag.samples - 1] : 0, now = ui_drag_now();
         long speed = last ? ui_drag_velocity(&s->hand_drag, last) : 0;
         b32 thrown;
 
@@ -6891,7 +6909,7 @@ static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int hei
 // and the region may be held past its ends by UI_SCROLL_VIEW_PAST views (the stretch draws how far, through ui_scroll_pull).
 static void ui_scroll_hand(struct ui_scroll address_to s, b64 move)
 {
-        positive now = (positive)ui_kit_clock();
+        positive now = ui_drag_now();
         b64 most = ui_scroll_most256(s), lim = (b64)(s->view > 0 ? s->view : 0) * UI_SCROLL_SCALE * UI_SCROLL_VIEW_PAST;
 
         if (!s->dragging || !s->hand)
@@ -6918,7 +6936,7 @@ static void ui_scroll_hand(struct ui_scroll address_to s, b64 move)
 static b32 ui_scroll_precise(const struct ui address_to ui, struct ui_scroll address_to s, int q)
 {
         int before = s->scroll;
-        b64 now = ui_wheel_clock();
+        b64 now = ui_event_clock();
 
         if (!q)
                 return false;
@@ -7028,7 +7046,7 @@ static b64 ui_wheel_clock(void)
 
 static b64 ui_wheel_rate(const struct ui_scroll address_to s)
 {
-        b64 now = (b64)ui_kit_clock();
+        b64 now = ui_event_clock();
         b64 gap = s->notch && now > s->notch ? now - s->notch : UI_WHEEL_SLOW_NS;
 
         if (gap >= UI_WHEEL_SLOW_NS)
@@ -7056,7 +7074,7 @@ static b32 ui_scroll_wheel(const struct ui address_to ui, struct ui_scroll addre
         s->wheel = (int)(total - (long)steps * 120);
         if (!steps)
                 return false;
-        now = ui_wheel_clock();
+        now = ui_event_clock();
         rate = ui_kit.wheel_off ? 256 : ui_wheel_rate(s);
         last = s->notch;
         s->notch = now;
@@ -9895,7 +9913,7 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
 {
         if (f->press.dragged)
         {
-                positive now = (positive)ui_kit.now; // the event's own time (ui_event_context)
+                positive now = ui_drag_now(); // the event's own time (ui_event_context)
                 // The throw's speed is the finger's velocity over its last reports (ui_drag_fling), down the screen positive; the
                 // region moves the other way (ui_finger_move).
                 long speed = ui_drag_velocity(&f->drag, now);

@@ -133707,6 +133707,69 @@ static b32 check_pause_lift(long pause_ms)
     return region.gliding != 0;
 }
 
+/*
+    A fling at 125 Hz: a report every 8 ms, 10 px each (1250 px a second), 24 reports, the finger lifting 4 ms after the last. Delivered
+    as they came (each at its own dispatch time), or in batches of four handed over together at the batch's dispatch time (2 ms after
+    its last report, as a busy program takes them). Each report carries its device stamp (ui_kit.stamp), the time it was made. The
+    velocity at the lift is the same for both, because a drag reads the stamp (ui_drag_now), not the dispatch time.
+*/
+static long check_batch_fling(int batched)
+{
+    struct ui_drag drag;
+    positive start = 1000000000ull, arrive, dispatch, last = 0;
+
+    static positive at[25];
+
+    ui_kit.stamp = 0, ui_kit.busy = 0;
+    (ui_kit.now = (b64)start, ui_kit.test_clock = (b64)start, ui_kit.stamp = (b64)start, ui_drag_start(&drag, 100));
+    // Uneven: the reports come 5 ms and 11 ms apart in turn (a panel's jitter), so a batch spread evenly is not their times.
+    arrive = start;
+    for (int k = 1; k <= 24; k++)
+        arrive += (k & 1) ? 5000000ull : 11000000ull, at[k] = arrive;
+    for (int k = 1; k <= 24; k++)
+    {
+        // A batch is handed over together when its last report is in, at that report's time plus 2 ms; each of its reports
+        // is then followed as it was made (its stamp), and the kit's own time is the batch's.
+        if (batched && (k - 1) % 4 != 3 && k != 24)
+            continue;
+        if (batched)
+        {
+            for (int j = k - (k - 1) % 4; j <= k; j++)
+            {
+                dispatch = at[k] + 2000000ull;
+                ui_kit.now = (b64)dispatch, ui_kit.test_clock = (b64)dispatch, ui_kit.stamp = (b64)at[j];
+                ui_drag_follow(&drag, 100 + 10 * j);
+            }
+        }
+        else
+        {
+            ui_kit.now = (b64)at[k], ui_kit.test_clock = (b64)at[k], ui_kit.stamp = (b64)at[k];
+            ui_drag_follow(&drag, 100 + 10 * k);
+        }
+        last = at[k];
+    }
+    ui_kit.now = (b64)(last + 4000000ull), ui_kit.test_clock = ui_kit.now, ui_kit.stamp = ui_kit.now;
+    {
+        long speed = ui_drag_velocity(&drag, (positive)ui_kit.stamp);
+
+        ui_kit.stamp = 0, ui_kit.test_clock = 0;
+        return speed;
+    }
+}
+
+static void check_kit_batch_stamps(void)
+{
+    long single = check_batch_fling(0), batch = check_batch_fling(1);
+    long gap = single > batch ? single - batch : batch - single;
+
+    string_format(log, "  kit batch stamps: a 125 Hz fling at %b px a second as delivered one by one, %b as delivered in fours\n",
+                  (bipolar)single, (bipolar)batch);
+    check("kit batch stamps: a fling at 125 Hz with jitter is read as a fling, not a stop (800 to 1500 px a second, about its 1250)",
+          single > 800 && single < 1500);
+    check("kit batch stamps: the same fling delivered in batches of four has the same velocity (the device's stamps, not the dispatch)",
+          gap * 100 <= single * 1);
+}
+
 static void check_kit_pause_rule(void)
 {
     b32 soon = check_pause_lift(10), later = check_pause_lift(60), longer = check_pause_lift(160);
@@ -147063,6 +147126,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
         ui_kit.now = 9000000000ll, ui_kit.busy = 0, ui_kit.test_clock = 0;
         ui_scroll_set(&region, g->start);
         first_scroll = region.scroll;
+        ui_kit.stamp = 0;
         pos[0] = 0;
         for (long t = 1; t < RB_MOVES; t++)
                 pos[t] = pos[t - 1] + (t - 1 < total ? rb_speed_at(g, t - 1) * 256 / 1000 : 0);
@@ -147092,7 +147156,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
 
                 while (next < count && reports[next].deliver <= tf)
                 {
-                        ui_kit.now = 9000000000ll + reports[next].deliver * 1000, ui_kit.test_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + reports[next].deliver * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.stamp = 9000000000ll + reports[next].arrive * 1000;
                         rb_give(kind, &ui, &region, &finger, &down, reports[next].want, &sent);
                         next++;
                 }
@@ -147102,14 +147166,14 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                 {
                         struct window_event stop = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP, 0, 0};
 
-                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.stamp = ui_kit.now;
                         ui_wheel_turn(&ui, &region, &stop);
                         lifted = true;
                         delivered_at_lift = region.scroll - first_scroll;
                 }
                 if (kind == 1 && down && !lifted && next == count && tf >= lift_us)
                 {
-                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + lift_us * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.stamp = ui_kit.now;
                         ui_finger_up(&finger, false);
                         lifted = true;
                         delivered_at_lift = region.scroll - first_scroll;
@@ -147118,7 +147182,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                 {
                         long before = region.scroll;
 
-                        ui_kit.now = 9000000000ll + tf * 1000, ui_kit.test_clock = ui_kit.now;
+                        ui_kit.now = 9000000000ll + tf * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.stamp = 0;
                         if (kind == 0)
                         {
                                 struct window_event report = {WINDOW_EVENT_WHEEL, WINDOW_WHEEL_PRECISE, -2, 0};
@@ -147133,7 +147197,7 @@ static void rb_run(int kind, int hz, int delivery, const struct rb_gesture addre
                         out->regrab_jump = rb_abs(region.scroll - before);
                         second = true;
                 }
-                ui_kit.now = 9000000000ll + tf * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0;
+                ui_kit.now = 9000000000ll + tf * 1000, ui_kit.test_clock = ui_kit.now, ui_kit.busy = 0, ui_kit.stamp = 0;
                 if (ui_scroll_glide(&ui, &region) || 1)
                 {
                         drawn[frames] = region.scroll - first_scroll;
@@ -153287,6 +153351,7 @@ static fn field_check(struct ui address_to wui)
     check_kit_late_lift();
     check_kit_throw_dp();
     check_kit_pause_rule();
+    check_kit_batch_stamps();
         check_field_drag_drawn(wui);
         check_field_flick(wui);
         check_throw_last_step(wui);

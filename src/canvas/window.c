@@ -822,6 +822,7 @@ struct windows
         unsigned int event_head[WINDOWS], event_tail[WINDOWS];
         unsigned short event_type[WINDOWS][WINDOWS_EVENTS], event_flags[WINDOWS][WINDOWS_EVENTS];
         int event_a[WINDOWS][WINDOWS_EVENTS], event_b[WINDOWS][WINDOWS_EVENTS];
+        unsigned long long event_when[WINDOWS][WINDOWS_EVENTS]; // the device's stamp of each event (window_event.when), 0 for none
 
         /*
                 The clipboard, an OS service the compositor holds (.github/SECURITY.md says what it guards). Two
@@ -1832,6 +1833,9 @@ struct window_event
 {
         unsigned int type, flags;
         int a, b;
+        // When the device made it (its evdev stamp, CLOCK_MONOTONIC nanoseconds), or 0 when none was given: a drag, its velocity and
+        // its late lift read this, not the time the program dispatched the event (ui_drag_now), so a batch of reports is its own speed.
+        unsigned long long when;
 };
 
 _Static_assert(sizeof(struct window) == 1288, "window page ABI");
@@ -2931,6 +2935,7 @@ static int windows_event(const struct window_row *own, struct window_event *even
         event->flags = table->event_flags[row][at];
         event->a = __atomic_exchange_n(&table->event_a[row][at], 0, __ATOMIC_ACQ_REL);
         event->b = table->event_b[row][at];
+        event->when = table->event_when[row][at];
         __atomic_store_n(&table->event_tail[row], tail + 1, __ATOMIC_RELEASE);
         return 1;
 }

@@ -9720,6 +9720,10 @@ static void compositor_inputs_watch(void)
 */
 static void compositor_clip_gesture(int row);
 
+// The device stamp (CLOCK_MONOTONIC ns) of the device event being read, which the events posted for it carry (window_event.when);
+// 0 for an event the device did not make (a timer's, a key of the loop's own). compositor_input_read sets it for each event.
+static unsigned long long compositor_stamp_now;
+
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
 {
         struct windows *table = compositor.table;
@@ -9751,6 +9755,7 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
                 table->event_a[row][last] = a;
                 table->event_b[row][last] = b;
                 table->event_flags[row][last] = (unsigned short)flags;
+                table->event_when[row][last] = compositor_stamp_now;
                 return 1;
         }
 
@@ -9764,7 +9769,10 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
                     (long)held + a >= -COMPOSITOR_WHEEL_JOIN &&
                     __atomic_compare_exchange_n(&table->event_a[row][last], &held, held + a, 0, __ATOMIC_ACQ_REL,
                                                 __ATOMIC_ACQUIRE))
+                {
+                        table->event_when[row][last] = compositor_stamp_now;
                         return 1;
+                }
         }
 
         if (used >= WINDOWS_EVENTS)
@@ -9775,6 +9783,7 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
         table->event_flags[row][at] = (unsigned short)flags;
         table->event_a[row][at] = a;
         table->event_b[row][at] = b;
+        table->event_when[row][at] = compositor_stamp_now;
         __atomic_store_n(&table->event_head[row], head + 1, __ATOMIC_RELEASE);
         return 1;
 }
@@ -15294,6 +15303,8 @@ static void compositor_input_read(unsigned int at)
                         struct compositor_input_event *event = &events[i];
                         positive now = (positive)event->seconds * 1000000000ull + (positive)event->microseconds * 1000ull;
 
+                        // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
+                        compositor_stamp_now = now;
                         if ((event->type == COMPOSITOR_EV_REL && event->code < 2) || event->type == COMPOSITOR_EV_ABS)
                                 compositor.motion_ts = compositor.motion_ts ? compositor.motion_ts : now;
 
@@ -15413,6 +15424,7 @@ static void compositor_input_read(unsigned int at)
 
         if (moved)
                 compositor_motion();
+        compositor_stamp_now = 0;
 
         if (!compositor.wakeonly[at])
                 compositor_hold_touch(clock_monotonic_nanoseconds());
