@@ -8222,6 +8222,8 @@ static string_address bowl_steam_arch[] = {
     "xorg-xwayland",
     // The Steam Runtime's container.
     "bubblewrap",
+    // The wrapper that starts the rootless X server (xwayland-moonwater) is a Python script.
+    "python",
     null};
 
 // Nothing of the bowl's /usr/bin by name: the session is the way in.
