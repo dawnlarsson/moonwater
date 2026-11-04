@@ -53,11 +53,26 @@ session()
         MOONWATER_ASKED=1 bin/editor note.txt > editor.log 2>&1 &
         sleep 3
         bin/moonwater debug > debug.editor.txt 2>&1
-        bin/osk -t "$work/keys.txt" > osk.log 2>&1 &
+        case "${5:-real}" in
+        copy)
+                # the same program from another file: a copy of the executable, which is not the keyboard's file
+                mkdir -p "$work/other"
+                cp "$compositor" "$work/other/osk"
+                "$work/other/osk" -t "$work/keys.txt" > osk.log 2>&1 &
+                ;;
+        renamed)
+                # the same file, but a process named keyb (its comm), with the applet's name for its arguments
+                ln -sf "$compositor" "$work/bin/keyb"
+                python3 -I -c 'import os, sys; os.execv(sys.argv[1], ["osk", "-t", sys.argv[2]])' "$work/bin/keyb" "$work/keys.txt" > osk.log 2>&1 &
+                ;;
+        *)
+                bin/osk -t "$work/keys.txt" > osk.log 2>&1 &
+                ;;
+        esac
         sleep 3
         bin/moonwater debug > debug.shown.txt 2>&1
         cp after.img before.img
-        if [ "$4" = auto ]; then
+        if [ "$4" = auto ] && [ "${5:-real}" = real ]; then
                 # the keyboard's keys, typed into the field: a held Back empties the first line, a capital (Shift), the numbers page,
                 # Enter, then Ctrl+S saves the file
                 python3 "$here/osk_input.py" input.fifo keys.txt "text:abcdef" hold:Back:2 "text:Osk
@@ -77,7 +92,7 @@ Done" ctrl:s > input.log 2>&1
 }
 
 if [ "${1:-}" = session ]; then
-        session "$2" "$3" "$4" "$5"
+        session "$2" "$3" "$4" "$5" "${6:-}" "${7:-}" "${8:-}"
         exit $?
 fi
 
@@ -88,6 +103,10 @@ compositor=$(cd "$(dirname "$compositor")" && pwd)/$(basename "$compositor")
 unshare -rm sh "$self" session "$work" "$compositor" "$fonts" auto > "$work/session.out" 2>&1 < /dev/null
 mkdir -p "$work/off"
 unshare -rm sh "$self" session "$work/off" "$compositor" "$fonts" off > "$work/off/session.out" 2>&1 < /dev/null
+# the impostors: a copy of the keyboard's file, and the same file run under another name, each started where the keyboard is
+mkdir -p "$work/copy" "$work/renamed"
+unshare -rm sh "$self" session "$work/copy" "$compositor" "$fonts" auto copy > "$work/copy/session.out" 2>&1 < /dev/null
+unshare -rm sh "$self" session "$work/renamed" "$compositor" "$fonts" auto renamed > "$work/renamed/session.out" 2>&1 < /dev/null
 
 # the keyboard is a window of the desktop, at the bottom of the screen, above the panel and across the middle
 if grep -q '^  window [0-9]* *Keyboard at ' "$work/debug.shown.txt" 2> /dev/null; then
@@ -168,4 +187,13 @@ if [ -s "$work/after.shot.img" ] && [ "$(tr -d '\000' < "$work/after.shot.img" |
 else
         row FAIL "the screen after the typing is drawn" "no screen"
 fi
+# a program that is not the keyboard's executable or is not named osk has no keyboard role: its flags are dropped, so it is no keyboard,
+# and with the setting auto and a field focused the keyboard is not shown for it
+for who in copy renamed; do
+        line=$(python3 -I "$here/osk_debug.py" keyboard "$work/$who/debug.shown.txt")
+        case "$line" in
+        hidden\ 1\ *) row ok "a program that asks for the keyboard's flags from $( [ "$who" = copy ] && echo "a copy of the executable" || echo "the same executable under another name") has no keyboard role (no keyboard is shown)" ;;
+        *) row FAIL "a program that asks for the keyboard's flags from $who has no keyboard role" "debug: $line" ;;
+        esac
+done
 exit "$failures"

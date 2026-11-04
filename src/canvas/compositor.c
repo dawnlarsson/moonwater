@@ -13381,6 +13381,53 @@ refused:
         return 0;
 }
 
+// The program the on-screen keyboard is, by its name (/proc/PID/comm, what ui_is_program reads).
+#define COMPOSITOR_OSK_NAME "osk\n"
+
+// Whether a /proc path names the same file as the compositor's own executable's: the device and the inode, which the link of
+// /proc/PID/exe gives for the file it runs, whoever asks. The statx follows the link (no AT_SYMLINK_NOFOLLOW).
+static b32 compositor_same_file(const char *path, const unsigned char *mine)
+{
+        unsigned char theirs[256];
+
+        memory_zero(theirs, sizeof(theirs));
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)path, 0, 0x7ff, (positive)theirs, 0) < 0)
+                return 0;
+        // struct statx: stx_ino (u64) at 32, stx_dev_major and stx_dev_minor (u32 each) at 136, contiguous.
+        return !memory_compare(theirs + 32, mine + 32, 8) && !memory_compare(theirs + 136, mine + 136, 8);
+}
+
+/*
+        Whether a window's process is the on-screen keyboard (osk.c), the window whose keyboard flags the compositor believes: the
+        process runs the compositor's own executable (/proc/self/exe, the multi-call shell, so any applet of it runs that), and its
+        name is osk. Another program of the same executable is named otherwise, and a copy of the executable runs another file.
+        Judged once when the window is taken (compositor_take), not per key.
+*/
+static b32 compositor_osk_is(unsigned int pid)
+{
+        unsigned char mine[256];
+        char path[40] = "/proc/", comm[8] = {0};
+        bipolar handle;
+        positive length;
+
+        if (!pid)
+                return 0;
+        memory_zero(mine, sizeof(mine));
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive) "/proc/self/exe", 0, 0x7ff, (positive)mine, 0) < 0)
+                return 0;
+        length = positive_into_string((string_address)path + 6, (positive)pid);
+        string_copy((string_address)path + 6 + length, (string_address) "/exe");
+        if (!compositor_same_file(path, mine))
+                return 0;
+        string_copy((string_address)path + 6 + length, (string_address) "/comm");
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+        if (handle < 0)
+                return 0;
+        system_read_once((b32)handle, comm, sizeof(comm) - 1);
+        system_close(handle);
+        return !memory_compare(comm, COMPOSITOR_OSK_NAME, sizeof(COMPOSITOR_OSK_NAME) - 1);
+}
+
 /*
         A knock: what the row says now, read once into the compositor's own
         columns and clamped there. A new title goes to its tab. A new picture
@@ -13466,6 +13513,10 @@ static void compositor_take(int row)
                 compositor.glassy[row] = table->glass[row] & WINDOW_GLASS;
                 compositor.asks[row] = table->glass[row] & (WINDOW_NO_CLOSE | WINDOW_DISMISS | WINDOW_NO_TAB | WINDOW_NO_GRAB | WINDOW_NO_KEYS |
                                                             WINDOW_KEYBOARD);
+                // The keyboard's two are the on-screen keyboard's own (compositor_osk_is): any other window's are dropped, and it
+                // takes the keys as a window with no flags does.
+                if ((compositor.asks[row] & (WINDOW_NO_KEYS | WINDOW_KEYBOARD)) && !compositor_osk_is(table->pid[row]))
+                        compositor.asks[row] &= ~(WINDOW_NO_KEYS | WINDOW_KEYBOARD);
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
