@@ -4683,7 +4683,9 @@ static p8 build_gpu_source[1 << 20];
 */
 static b32 build_gpu_kernels(string_address input, string_address output)
 {
-        string_address temporary = build_join(output, ".gpu_tmp", null);
+        //      One temporary a process (its pid in the name): builds that run together (the gate's shells) wrote the one file and one renamed it
+        //      from under the other.
+        string_address temporary = build_join(output, ".gpu_tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
         bipolar got;
 
         refuse_if(!build_is_file(input), 1, "gpu-kernels: no such file: %s\n", input);
