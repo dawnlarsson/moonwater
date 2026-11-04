@@ -452,12 +452,17 @@ static b32 gpu_start(positive bytes)
         positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
         p64 make[4] = {size, 4096, 2, 64}, map[1] = {0}, va[8] = {0, 1 | 14ull << 32, GPU_VA, 0, size};
         unsigned int ctx[4] = {1, 0, 0, 0}, who[16] = {0};
-        char path[] = "/dev/dri/renderD128", name[8] = "";
-        p64 ver[8] = {0, 0, 7, (p64)name}, ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32};
+        char path[] = "/dev/dri/renderD128";
+        p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32};
         long at;
 
         for (unsigned int node = 0; node < 8; node++)
         {
+                // Made again for each node: the kernel writes back the whole length of the driver's name, and no 0 after what it copies, so a node after
+                // "i915" was read as "amdg" (never ours) and one after "virtio_gpu" had ten bytes copied into these eight.
+                char name[8] = "";
+                p64 ver[8] = {0, 0, 7, (p64)name};
+
                 path[17] = (char)('0' + (28 + node) / 10), path[18] = (char)('0' + (28 + node) % 10);
                 gpu.fd = (int)system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
                 if (gpu.fd < 0)

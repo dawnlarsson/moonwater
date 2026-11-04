@@ -208621,6 +208621,16 @@ b32 main(void)
                 string_format(log, "gpu: no amdgpu render node, skipped\n");
                 return test_report(null);
         }
+        // What gpu_start's look at each render node stands on: the version call writes back the whole length of the driver's name and puts no 0 after the
+        // bytes it copies, so its record and the name are made again for each node (a node after "i915" was read as "amdg", one after "virtio_gpu"
+        // had ten bytes copied into eight).
+        {
+                char name[8] = {'x', 'x', 'x', 'x', 'x', 'x', 'x', 0};
+                p64 ver[8] = {0, 0, 3, (p64)name};
+
+                check("gpu: the version call answers the name's whole length and ends nothing it copies",
+                      system_control(gpu.fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && ver[2] == 6 && name[0] == 'a' && name[2] == 'd' && name[3] == 'x');
+        }
         pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at), ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         memory_zero(&ui, sizeof(ui));
         ui.pixels = gpu_kit_want, ui.pitch = PP, ui.width = PW, ui.height = PH, ui.top = 0, ui.bottom = PH, ui.scale = 100;
