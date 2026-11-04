@@ -95,7 +95,7 @@ settings_issue_gpu_map	f52f	הליבה סירבה למפות את תמונות �
 settings_issue_gpu_refused	f29c	הכרטיס סירב ל-%1$d פריימים: %2$s
 settings_issue_gpu_scanout	1379	הכרטיס סירב למאגר המסגרת של חלון ליציאה ישירה (שגיאה %1$d)
 settings_issue_gpu_untrusted	14ea	בדיקת העצמי של הכרטיס צייר לא נכון, ולכן לא נותנים בו אמון (משפחה %1$d)
-settings_issue_gpu_userptr	ff23	הליבה נבנתה בלי תמיכת userptr ל-GPU (CONFIG_DRM_AMDGPU_USERPTR), ולכן הכרטיס לא יכול לקרוא את תמונות החלונות: בנה מחדש את הליבה עם האפשרות הזו
+settings_issue_gpu_userptr	ff23	הליבה נבנתה בלי userptr ל-GPU (CONFIG_DRM_AMDGPU_USERPTR), והכרטיס לא קורא תמונות חלונות: בנה אותה מחדש
 settings_issue_unknown	e812	בעיה שהגרסה הזו אינה מכנה (קוד %1$d)
 settings_item_add	fbef	Enter שומר את שם ההתקן; הרדיו נדלק עבור מה שמזווגים
 settings_item_ask	6aad	Enter מבקש את הסיסמה ומתחבר
@@ -137,9 +137,9 @@ settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	מסך %1$d: %2$s
 settings_screen_named	d918	מסך %1$d: %2$s [%3$s]
 settings_status_in_use	2ec7	בשימוש: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים (%3$d%%)
-settings_status_none	afed	هیچ GPU پشتیبانی‌شده‌ای نیست: پردازنده همه چیز را می‌کشد
+settings_status_none	afed	אין GPU נתמך: המעבד מצייר הכול
 settings_status_not	2583	לא בשימוש: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים, והמעבד צייר את השאר
-settings_status_off	4e63	خاموش: تنظیم خاموش است، پس پردازنده همه چیز را می‌کشد
+settings_status_off	4e63	כבוי: ההגדרה כבויה, לכן המעבד מצייר הכול
 settings_status_partly	af8b	בשימוש חלקי: כרטיס המסך הרכיב %1$d מתוך %2$d פריימים (%3$d%%)
 settings_status_waiting	dfe6	ממתין לפריימים הראשונים
 settings_stopped	f34e	נעצר

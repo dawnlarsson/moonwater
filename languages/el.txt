@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Ο πυρήνας αρνήθηκε να αντιστ
 settings_issue_gpu_refused	f29c	Η κάρτα αρνήθηκε %1$d καρέ: %2$s
 settings_issue_gpu_scanout	1379	Η κάρτα αρνήθηκε το framebuffer ενός παραθύρου για άμεση έξοδο (σφάλμα %1$d)
 settings_issue_gpu_untrusted	14ea	Το αυτοτέστ της κάρτας σχεδίασε λάθος, γι' αυτό δεν είναι αξιόπιστη (οικογένεια %1$d)
-settings_issue_gpu_userptr	ff23	Ο πυρήνας μεταγλωττίστηκε χωρίς υποστήριξη userptr για την GPU (CONFIG_DRM_AMDGPU_USERPTR), οπότε η κάρτα δεν μπορεί να διαβάσει τις εικόνες των παραθύρων: μεταγλωττίστε ξανά τον πυρήνα με αυτήν
+settings_issue_gpu_userptr	ff23	Ο πυρήνας δεν έχει userptr για την GPU (CONFIG_DRM_AMDGPU_USERPTR): η κάρτα δεν διαβάζει τις εικόνες παραθύρων. Ξαναχτίστε τον
 settings_issue_unknown	e812	Ένα πρόβλημα που αυτή η έκδοση δεν ονομάζει (κωδικός %1$d)
 settings_item_add	fbef	το Enter κρατά το όνομα μιας συσκευής· η ασύρματη λειτουργία ενεργοποιείται για ό,τι ζευγαρώνει
 settings_item_ask	6aad	το Enter ζητά τον κωδικό και συνδέεται

@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Ядро отказалось отображать �
 settings_issue_gpu_refused	f29c	Видеокарта отказалась от %1$d кадров: %2$s
 settings_issue_gpu_scanout	1379	Видеокарта отказалась от framebuffer окна для прямого вывода (ошибка %1$d)
 settings_issue_gpu_untrusted	14ea	Самотест видеокарты нарисовал неверно, поэтому ей не доверяют (семейство %1$d)
-settings_issue_gpu_userptr	ff23	Ядро собрано без поддержки userptr для GPU (CONFIG_DRM_AMDGPU_USERPTR), поэтому видеокарта не может читать картинки окон: пересоберите ядро с этой опцией
+settings_issue_gpu_userptr	ff23	Ядро без userptr для GPU (CONFIG_DRM_AMDGPU_USERPTR): видеокарта не читает картинки окон. Пересоберите ядро с ним
 settings_issue_unknown	e812	Проблема, которую эта версия не называет (код %1$d)
 settings_item_add	fbef	Enter запоминает имя устройства; радио включается для того, что соединяется
 settings_item_ask	6aad	Enter спросит пароль и подключится

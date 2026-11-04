@@ -155828,8 +155828,21 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         bad_text += (said->text_length && said->text[said->text_length - 1] == ' ') !=
                                     (mine->text_length && mine->text[mine->text_length - 1] == ' ');
                         bad_text += (said->text_length && said->text[0] == ' ') != (mine->text_length && mine->text[0] == ' ');
-                        bad_glyphs += !lcheck_drawn(face_regular, behind_regular, mine->text, mine->text_length) ||
-                                      !lcheck_drawn(face_bold, behind_bold, mine->text, mine->text_length);
+                        {
+                                b32 undrawn = !lcheck_drawn(face_regular, behind_regular, mine->text, mine->text_length) ||
+                                              !lcheck_drawn(face_bold, behind_bold, mine->text, mine->text_length);
+                                char said_key[64];
+                                positive key_room = mine->key_length < sizeof(said_key) - 1 ? mine->key_length : sizeof(said_key) - 1;
+
+                                bad_glyphs += undrawn;
+                                // The first few say which text, in which language: a letter of it has no glyph in the shipped face.
+                                if (undrawn && bad_glyphs <= 8)
+                                {
+                                        memory_copy(said_key, mine->key, key_room);
+                                        said_key[key_room] = 0;
+                                        string_format(log, "  language %s: a letter of '%s' has no glyph in the shipped face\n", (string_address)code, (string_address)said_key);
+                                }
+                        }
                         // A word a row of tabs shows has no blank in it: the tabs are the words of a list a blank apart.
                         if (said->key_length > 1 && said->key[0] == '=' &&
                             (lcheck_same(said->key, said->key_length, "=light", 6) || lcheck_same(said->key, said->key_length, "=dark", 5) ||

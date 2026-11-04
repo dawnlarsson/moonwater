@@ -95,7 +95,7 @@ settings_issue_gpu_map	f52f	رفض النواة تعيين صور النوافذ
 settings_issue_gpu_refused	f29c	رفضت البطاقة %1$d إطارًا: %2$s
 settings_issue_gpu_scanout	1379	رفضت البطاقة المخزن الإطاري لنافذة للإخراج المباشر (الخطأ %1$d)
 settings_issue_gpu_untrusted	14ea	اختبار البطاقة الذاتي رسم بشكل خاطئ، لذلك لا يُوثق بها (العائلة %1$d)
-settings_issue_gpu_userptr	ff23	بُني النواة دون دعم userptr للمعالج الرسومي (CONFIG_DRM_AMDGPU_USERPTR)، لذلك لا تستطيع البطاقة قراءة صور النوافذ: أعد بناء النواة مع هذا الخيار
+settings_issue_gpu_userptr	ff23	النواة بُنيت دون userptr للمعالج الرسومي (CONFIG_DRM_AMDGPU_USERPTR) فلا تقرأ البطاقة صور النوافذ: أعد بناءها به
 settings_issue_unknown	e812	مشكلة لا تسمّيها هذه النسخة (الرمز %1$d)
 settings_item_add	fbef	Enter يحفظ اسم الجهاز؛ ويعمل الراديو لإقران ما يقترن
 settings_item_ask	6aad	Enter يطلب كلمة المرور ويتصل

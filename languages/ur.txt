@@ -95,7 +95,7 @@ settings_issue_gpu_map	f52f	کرنل نے کارڈ کے لیے ونڈو کی ت�
 settings_issue_gpu_refused	f29c	کارڈ نے %1$d فریم رد کیے: %2$s
 settings_issue_gpu_scanout	1379	کارڈ نے براہ راست آؤٹ پٹ کے لیے ایک ونڈو کا فریم بفر رد کیا (خرابی %1$d)
 settings_issue_gpu_untrusted	14ea	کارڈ کا خود ٹیسٹ غلط بنا، اس لیے اس پر بھروسا نہیں (فیملی %1$d)
-settings_issue_gpu_userptr	ff23	کرنل GPU کے لیے userptr معاونت کے بغیر بنا ہے (CONFIG_DRM_AMDGPU_USERPTR)، اس لیے کارڈ ونڈو کی تصاویر نہیں پڑھ سکتا: اس آپشن کے ساتھ کرنل دوبارہ بنائیں
+settings_issue_gpu_userptr	ff23	کرنل GPU کے userptr کے بغیر بنا ہے (CONFIG_DRM_AMDGPU_USERPTR): کارڈ ونڈو کی تصاویر نہیں پڑھتا، کرنل دوبارہ بنائیں
 settings_issue_unknown	e812	ایک مسئلہ جسے یہ ورژن نام نہیں دیتا (کوڈ %1$d)
 settings_item_add	fbef	Enter ڈیوائس کا نام محفوظ رکھتا ہے؛ جو جوڑا جائے اس کے لیے ریڈیو چل پڑتا ہے
 settings_item_ask	6aad	Enter پاس ورڈ مانگتا ہے اور منسلک ہو جاتا ہے
@@ -137,9 +137,9 @@ settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	اسکرین %1$d: %2$s
 settings_screen_named	d918	اسکرین %1$d: %2$s [%3$s]
 settings_status_in_use	2ec7	استعمال میں: کارڈ نے %2$d میں سے %1$d فریم ترکیب کیے (%3$d%%)
-settings_status_none	afed	אין GPU נתמך: המעבד מצייר הכול
+settings_status_none	afed	کوئی معاون GPU نہیں: پروسیسر سب کچھ بناتا ہے
 settings_status_not	2583	استعمال نہیں ہو رہا: کارڈ نے %2$d میں سے %1$d فریم ترکیب کیے، باقی پروسیسر نے بنائے
-settings_status_off	4e63	כבוי: ההגדרה כבויה, לכן המעבד מצייר הכול
+settings_status_off	4e63	بند: ترتیب بند ہے، اس لیے پروسیسر سب کچھ بناتا ہے
 settings_status_partly	af8b	جزوی طور پر استعمال میں: کارڈ نے %2$d میں سے %1$d فریم ترکیب کیے (%3$d%%)
 settings_status_waiting	dfe6	پہلے فریم کا انتظار
 settings_stopped	f34e	رک گیا
