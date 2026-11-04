@@ -91,6 +91,32 @@ bool moonwater_dirhash_simd = true;
 module_param_named(dirhash_simd, moonwater_dirhash_simd, bool, 0644);
 #endif
 
+// The arguments of __kmalloc_noprof after the size, for a kzalloc(GFP_KERNEL)
+// of the C's. With CONFIG_KMALLOC_PARTITION_CACHES slab.h puts a token, one
+// unsigned long, between the size and the flags (DECL_TOKEN_PARAMS), so the
+// flags are the third argument and the second chooses the cache: the call's
+// own address under the random partition, as _CODE_LOCATION_ gives the C
+// (_THIS_IP_), and 0 under the typed one, the type nobody named (any other
+// number there indexes past the copies). Without the token the flags went
+// where the token is read and the allocator took whatever was left in the
+// third register for its flags: an opener's open(2) flags, or a hash off the
+// disk, with no __GFP_ZERO for an arena that needs zeroed memory.
+#ifdef CONFIG_KMALLOC_PARTITION_CACHES
+#ifdef CONFIG_KMALLOC_PARTITION_RANDOM
+#define MW_KZALLOC_X64 "   lea     0(%rip), %rsi\n   mov     $MW_GFP_KZ, %edx\n"
+#define MW_KZALLOC_ARM "   adr     x1, .\n   mov     w2, #(MW_GFP_KZ & 0xffff)\n   movk    w2, #((MW_GFP_KZ >> 16) & 0xffff), lsl #16\n"
+#define MW_KZALLOC_RV "   auipc   a1, 0\n   li      a2, MW_GFP_KZ\n"
+#else
+#define MW_KZALLOC_X64 "   xor     %esi, %esi\n   mov     $MW_GFP_KZ, %edx\n"
+#define MW_KZALLOC_ARM "   mov     x1, #0\n   mov     w2, #(MW_GFP_KZ & 0xffff)\n   movk    w2, #((MW_GFP_KZ >> 16) & 0xffff), lsl #16\n"
+#define MW_KZALLOC_RV "   li      a1, 0\n   li      a2, MW_GFP_KZ\n"
+#endif
+#else
+#define MW_KZALLOC_X64 "   mov     $MW_GFP_KZ, %esi\n"
+#define MW_KZALLOC_ARM "   mov     w1, #(MW_GFP_KZ & 0xffff)\n   movk    w1, #((MW_GFP_KZ >> 16) & 0xffff), lsl #16\n"
+#define MW_KZALLOC_RV "   li      a1, MW_GFP_KZ\n"
+#endif
+
 //
 //       htree_dirblock_to_tree -- fs/ext4/namei.c
 //
@@ -2543,7 +2569,7 @@ __asm__(
 __asm__(
     ASM_FUNC(ext4_dir_open)
     "        push    %rbp\n   mov     %rsp, %rbp\n   push    %rbx\n   push    %r12\n   mov     %rsi, %r12\n"
-    "        mov     $(MW_DPI_ARENA+32), %edi\n   mov     $MW_GFP_KZ, %esi\n   call    __kmalloc_noprof\n"
+    "        mov     $(MW_DPI_ARENA+32), %edi\n" MW_KZALLOC_X64 "   call    __kmalloc_noprof\n"
     "        test    %rax, %rax\n   jz      1f\n   mov     %rax, MW_FILE_PRIV(%r12)\n   xor     %eax, %eax\n   jmp     2f\n"
     "1:      mov     $-12, %eax\n"
     "2:      pop     %r12\n   pop     %rbx\n   pop     %rbp\n"
@@ -2602,7 +2628,7 @@ __asm__(
     "        mov     %rbx, %rsi\n   call    rb_insert_color\n   xor     %eax, %eax\n   jmp     .Lsd_out\n"
     "        # a new chunk: linked in front of the list, its first word the old head\n"
     ".Lsd_grow:\n"
-    "        mov     $AR_CHUNK, %edi\n   mov     $MW_GFP_KZ, %esi\n   call    __kmalloc_noprof\n   test    %rax, %rax\n   jz      .Lsd_enomem\n"
+    "        mov     $AR_CHUNK, %edi\n" MW_KZALLOC_X64 "   call    __kmalloc_noprof\n   test    %rax, %rax\n   jz      .Lsd_enomem\n"
     "        lea     MW_DPI_ARENA(%rbx), %rcx\n   mov     (%rcx), %rdx\n   mov     %rdx, (%rax)\n   mov     %rax, (%rcx)\n"
     "        lea     AR_CHUNK(%rax), %rdx\n   mov     %rdx, 16(%rcx)\n   add     $8, %rax\n"
     "        mov     MW_FS_LEN(%r15), %edx\n   lea     54(%rdx), %edx\n   and     $-8, %edx\n   lea     (%rax,%rdx), %rsi\n   jmp     .Lsd_have\n"
@@ -2627,7 +2653,7 @@ __asm__(
 __asm__(
     ASM_FUNC(ext4_dir_open)
     "        stp     x29, x30, [sp, #-32]!\n   mov     x29, sp\n   str     x19, [sp, #16]\n   mov     x19, x1\n"
-    "        mov     w0, #(MW_DPI_ARENA+32)\n   mov     w1, #(MW_GFP_KZ & 0xffff)\n   movk    w1, #((MW_GFP_KZ >> 16) & 0xffff), lsl #16\n"
+    "        mov     w0, #(MW_DPI_ARENA+32)\n" MW_KZALLOC_ARM
     "        bl      __kmalloc_noprof\n   cbz     x0, 1f\n   str     x0, [x19, #MW_FILE_PRIV]\n   mov     w0, #0\n   b       2f\n"
     "1:      mov     w0, #-12\n"
     "2:      ldr     x19, [sp, #16]\n   ldp     x29, x30, [sp], #32\n"
@@ -2686,7 +2712,7 @@ __asm__(
     "        mov     x1, x19\n   bl      rb_insert_color\n   mov     w0, #0\n   b       .Lsd_out\n"
     "        # a new chunk: linked in front of the list, its first word the old head\n"
     ".Lsd_grow:\n"
-    "        mov     w0, #AR_CHUNK\n   mov     w1, #(MW_GFP_KZ & 0xffff)\n   movk    w1, #((MW_GFP_KZ >> 16) & 0xffff), lsl #16\n"
+    "        mov     w0, #AR_CHUNK\n" MW_KZALLOC_ARM
     "        bl      __kmalloc_noprof\n   cbz     x0, .Lsd_enomem\n"
     "        add     x6, x19, #MW_DPI_ARENA\n   ldr     x8, [x6]\n   str     x8, [x0]\n   str     x0, [x6]\n   add     x8, x0, #AR_CHUNK\n"
     "        str     x8, [x6, #16]\n   add     x0, x0, #8\n   add     x7, x0, x25\n   b       .Lsd_have\n"
@@ -2712,7 +2738,7 @@ __asm__(
 __asm__(
     ASM_FUNC(ext4_dir_open)
     "        addi    sp, sp, -32\n   sd      ra, 24(sp)\n   sd      s0, 16(sp)\n   addi    s0, sp, 32\n   sd      s1, 8(sp)\n   mv      s1, a1\n"
-    "        li      a0, MW_DPI_ARENA+32\n   li      a1, MW_GFP_KZ\n   call    __kmalloc_noprof\n   beqz    a0, 1f\n"
+    "        li      a0, MW_DPI_ARENA+32\n" MW_KZALLOC_RV "   call    __kmalloc_noprof\n   beqz    a0, 1f\n"
     "        sd      a0, MW_FILE_PRIV(s1)\n   li      a0, 0\n   j       2f\n"
     "1:      li      a0, -12\n"
     "2:      ld      ra, 24(sp)\n   ld      s0, 16(sp)\n   ld      s1, 8(sp)\n   addi    sp, sp, 32\n"
@@ -2762,7 +2788,7 @@ __asm__(
     "        mv      a1, s1\n   call    rb_insert_color\n   li      a0, 0\n   j       .Lsd_out\n"
     "        # a new chunk: linked in front of the list, its first word the old head\n"
     ".Lsd_grow:\n"
-    "        li      a0, AR_CHUNK\n   li      a1, MW_GFP_KZ\n   call    __kmalloc_noprof\n   beqz    a0, .Lsd_enomem\n"
+    "        li      a0, AR_CHUNK\n" MW_KZALLOC_RV "   call    __kmalloc_noprof\n   beqz    a0, .Lsd_enomem\n"
     "        addi    t1, s1, MW_DPI_ARENA\n   ld      t0, 0(t1)\n   sd      t0, 0(a0)\n   sd      a0, 0(t1)\n   li      t0, AR_CHUNK\n"
     "        add     t0, a0, t0\n   sd      t0, 16(t1)\n   addi    a0, a0, 8\n   add     t2, a0, s7\n   j       .Lsd_have\n"
     ".Lsd_enomem:\n"

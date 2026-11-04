@@ -41,6 +41,32 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-162: on the locked tier the ext4 readdir ports allocated with flags taken from the wrong register
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Ring-0 calling-convention error (an allocator called with the arguments of another signature): unzeroed memory taken as zeroed, allocation flags chosen by the caller's leftover registers |
+| Moonwater exposure window | 2026-10-07 18:42 +02:00 (`b7c5be64`, sec_mem_locked partitions the kmalloc caches) to the fix, 28 days, on images of the locked tier only |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `--harness kernel_ports`, the six rows `ext4_htree_store_dirent: with the caches partitioned (random\|typed) the allocator is given a token and then kzalloc's flags` on x86_64, arm64 and riscv64 (54 of 60 with the parent's kernel.c) |
+
+**How it was exposed.** ext4_dir_open and ext4_htree_store_dirent in kernel/kernel.c (asm, all three architectures,
+since `a3d76922`) call `__kmalloc_noprof(size, GFP_KERNEL | __GFP_ZERO)`. With CONFIG_KMALLOC_PARTITION_CACHES, which
+kernel/profile/sec_mem_locked turns on, slab.h declares `__kmalloc_noprof(size_t, kmalloc_token_t, gfp_t)`. So the
+flags were read as the token, and the flags the allocator used were whatever the third argument register held:
+- for ext4_dir_open, the caller's own third argument (in the x86_64 build examined, the opener's open(2) flags);
+- for a new arena chunk, the object size on x86_64 and the minor hash being stored on arm64 and riscv64 (zero for
+  ".", read off the disk for a casefolded and encrypted directory).
+The arena depends on zeroed memory: a node's `next` is never written. Without __GFP_ZERO a chunk with stale bytes
+sends call_filldir after a wild pointer and free_rb_tree_fname into kfree of one. The tier as shipped also sets
+init_on_alloc=1, which zeroes these objects anyway, so the bug as shipped was wrong allocation flags: no direct
+reclaim, and bits an opener or an image can choose, such as __GFP_MEMALLOC (the emergency reserves) and __GFP_NOFAIL.
+The default and the other tiers do not partition the caches and were not affected. Now each call puts a token in the
+second register and the flags in the third when the option is on: the call's own address under the random partition,
+as `_CODE_LOCATION_` gives the C, and 0 under the typed one. The default build's asm is byte for byte what it was.
+The harness stub takes the token signature when the option is defined and asks for exactly kzalloc's flags.
+
 ### MW-2026-132: the editor's save followed a directory swapped for a link after the file was opened
 
 | | |

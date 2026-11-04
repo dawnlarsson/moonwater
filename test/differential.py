@@ -92857,11 +92857,20 @@ void _raw_spin_unlock(void *l) { int *p = l; if (!*p) LF.bad++; *p = 0; }
 void dput(struct dentry *d) { LF.dputs++; if (d->d_lockref.count <= 0) LF.bad++; d->d_lockref.count--; }
 struct dentry *offset_dir_lookup(struct dentry *parent, loff_t offset) { return lf_lookup ? lf_lookup(parent, offset) : NULL; }
 static struct { long live, allocs, frees, fail_at; } MA;
+/* With the partitioned caches slab.h puts a token between the size and the flags
+   (DECL_TOKEN_PARAMS); the typed partition indexes the copies by it. */
+#ifdef CONFIG_KMALLOC_PARTITION_CACHES
+void *__kmalloc_noprof(size_t size, unsigned long token, unsigned gfp)
+#else
 void *__kmalloc_noprof(size_t size, unsigned gfp)
+#endif
 {
         MA.allocs++;
         if (MA.fail_at && MA.allocs == MA.fail_at) return NULL;
-        if ((gfp & 0x100) == 0) abort();              /* the arena wants zeroed pages: the flag must be there */
+        if (gfp != (GFP_KERNEL | __GFP_ZERO)) abort();   /* kzalloc(GFP_KERNEL), as the C asks: the arena wants zeroed pages */
+#ifdef CONFIG_KMALLOC_PARTITION_TYPED
+        if (token >= 15) abort();
+#endif
         MA.live++;
         return calloc(1, size);
 }
@@ -93870,6 +93879,14 @@ def harness_kernel_ports(argv):
                 continue
             plain = run(arch, compiler, runner, cflags, count, False, port)
             checks(plain is not None, "%s %s: built and ran" % (arch, port))
+            # The allocator's arguments move with the kernel's configuration: the locked tier
+            # (sec_mem_locked) partitions the caches, and a token goes before the flags.
+            if port == "ext4_htree_store_dirent":
+                for partition in ("RANDOM", "TYPED"):
+                    flags = ["-DCONFIG_KMALLOC_PARTITION_CACHES=1", "-DCONFIG_KMALLOC_PARTITION_%s=1" % partition]
+                    split = run(arch, compiler, runner, cflags + flags, min(count, 600), False, port)
+                    checks(split is not None and split[1] == 0,
+                           "%s %s: with the caches partitioned (%s) the allocator is given a token and then kzalloc's flags" % (arch, port, partition.lower()))
             if plain:
                 cases, bad, stores = plain
                 checks(bad == 0 and stores > 500, "%s %s: %d cases, %d entries, %d differ from the kernel's C" % (arch, port, cases, stores, bad))
