@@ -216732,10 +216732,10 @@ static struct ui_scene app_scene;
 
 // The regions are the kit's own (the picture at GPU_DATA with its pitch, the ops, the binning, and the text covers' region the text rows reuse
 // after this). At 100 percent the launcher (560 by 400) fits the kit's 700 by 419 picture; the larger scales need a bigger picture region.
-static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at, positive cover_at)
+// fixed_pitch: 0 for the picture's own width as its pitch, else that pitch (the kit's 700 buffer for 100 percent).
+static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at, positive cover_at, positive cover_size, const int *scales, int count,
+                              int fixed_pitch)
 {
-        static const int scales[1] = {100};
-        const int pitch = 700;
         unsigned int address_to ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         unsigned int address_to pic = (unsigned int address_to)((p8 address_to)gpu.at + pic_at);
         positive size = 0, bytes = compositor_map_file(program_argument(3), &size);
@@ -216749,9 +216749,9 @@ static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at
         for (int mode = 0; mode < 2; mode++)
         {
                 ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
-                for (int k = 0; k < 1; k++)
+                for (int k = 0; k < count; k++)
                 {
-                        int s = scales[k], W = LAUNCHER_WIDTH * s / 100, H = 400 * s / 100;
+                        int s = scales[k], W = LAUNCHER_WIDTH * s / 100, H = 400 * s / 100, pitch = fixed_pitch ? fixed_pitch : W;
                         int bad = 0;
 
                         // The launcher as its window has it: three programs of the desktop listed, the field and the power row.
@@ -216772,7 +216772,7 @@ static void app_launcher_rows(positive pic_at, positive ops_at, positive bins_at
 
                         memory_zero(&app_scene, sizeof(app_scene));
                         app_scene.ops = ops, app_scene.room = 1u << 15, app_scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + cover_at);
-                        app_scene.size = 16u << 20, app_scene.at = cover_at;
+                        app_scene.size = cover_size, app_scene.at = cover_at;
                         launcher.ui.scene = &app_scene;
                         launcher_draw(app_dummy);
                         launcher.ui.scene = null;
@@ -216981,7 +216981,11 @@ b32 main(void)
         }
 
         gpu_kit_recorded_controls(pic_at, ops_at, bins_at);
-        app_launcher_rows(pic_at, ops_at, bins_at, bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20));
+        {
+                static const int hundred[1] = {100};
+
+                app_launcher_rows(pic_at, ops_at, bins_at, bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20), 16u << 20, hundred, 1, 700);
+        }
 
         // Text: runs painted by ui_run_in on the processor, the same runs recorded (the font engine's coverage, packed to bytes) and drawn by the GPU, a window's
         // clear first; every size, ink, alpha, stroke and clip, over a random ground. Needs the face (argument 3); without it the rows are skipped.
@@ -218189,9 +218193,17 @@ b32 main(void)
                 while (gpu_map_count)
                         gpu_drop(0);
         }
+        // The launcher at 150, 200 and 300 percent, in the 8K section's regions (its picture, its ops and its bins), after that section has run.
+        {
+                static const int larger[3] = {150, 200, 300};
+                positive big = bins_at + (8 << 20), kops = big + (positive)7680 * 4320 * 4, kbins = kops + (1 << 20);
+
+                app_launcher_rows(big, kops, kbins, kbins + (4 << 20), 4u << 20, larger, 3, 0);
+        }
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */
+
 
 #ifdef CHECK_draw_list
 /*
