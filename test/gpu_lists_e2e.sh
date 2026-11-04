@@ -31,8 +31,12 @@ session()
 {
         mode=$1
         work=$2
+        fonts=$3
         mount -t tmpfs tmpfs /run
         mount -t tmpfs tmpfs /root
+        # the kit's faces are /usr/share/fonts/inter and ibm-plex-mono (ui.c); a machine without them loads none, and an app with no font exits. The
+        # repository's fonts are bound over the directory in this namespace only.
+        mount --bind "$fonts" /usr/share/fonts || return 1
         mkdir -p /run/moonwater
         cd "$work" || return 1
         if [ "$mode" = off ]; then
@@ -79,7 +83,7 @@ session()
 }
 
 if [ "${1:-}" = session ]; then
-        session "$2" "$3"
+        session "$2" "$3" "$4"
         exit 0
 fi
 
@@ -98,8 +102,9 @@ row()
         if [ "$1" = ok ]; then echo "ok $2"; else echo "FAIL $2 ${3:-}"; failures=$((failures + 1)); fi
 }
 
-unshare -rm sh "$self" session card "$work" > "$work/card.session.out" 2>&1
-unshare -rm sh "$self" session off "$work" > "$work/off.session.out" 2>&1
+fonts=$(cd "$(dirname "$0")/../fonts" && pwd)
+unshare -rm sh "$self" session card "$work" "$fonts" > "$work/card.session.out" 2>&1
+unshare -rm sh "$self" session off "$work" "$fonts" > "$work/off.session.out" 2>&1
 
 lists_card=$(grep '^  lists ' "$work/card.canvas.txt" 2> /dev/null | sed 's/^  lists *\([0-9]*\) windows.*/\1/')
 refused_card=$(grep '^  lists ' "$work/card.canvas.txt" 2> /dev/null | sed 's/.*, \([0-9]*\) refused.*/\1/')

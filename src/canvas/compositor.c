@@ -16489,10 +16489,10 @@ static int compositor_table(void)
         compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive) "/run/moonwater", 0755, 0, 0, 0);
         compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, 0, 0, 0, 0);
 
-        // A memfd for a headless compositor too: sealed against shrinking, so nothing that writes the table truncates it under
-        // the compositor's mapping (a plain file truncated is SIGBUS at the compositor's next read of it). The plain file is
-        // what is left when there is no memfd; what the card does with a memfd (udmabuf, the device's table) asks for a card.
-        handle = compositor_table_memfd(bytes);
+        // A memfd for a compositor with the card: sealed against shrinking, so nothing that writes the table truncates it under the compositor's
+        // mapping. What the card does with a memfd (udmabuf, the device's table) asks for a card, so a headless compositor has none: its table is
+        // the plain file at WINDOWS_TABLE, which the programs in its /run open when the device gives them none (windows_take).
+        handle = compositor.card >= 0 ? compositor_table_memfd(bytes) : -1;
         compositor.table_memfd = handle >= 0 ? (int)handle + 1 : 0;
         // The device hands programs the table of the compositor that has the card, and no headless one's.
         if (handle >= 0 && compositor.card >= 0)
