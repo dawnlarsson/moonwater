@@ -2016,7 +2016,7 @@ static b32 bowl_env_named(string_address entry, string_address name)
 #define BOWL_USER_ID_TEXT "1000"
 #define BOWL_USER_NAME "user"
 #define BOWL_ENV_ROOM 512
-#define BOWL_ENV_DEFAULTS 12
+#define BOWL_ENV_DEFAULTS 13
 
 static p8 bowl_runtime_path[sizeof(BOWL_RUNTIME_DIR) + 20]
     __attribute__((section(".bss.hot")));
@@ -2640,6 +2640,21 @@ static bool bowl_session_bus_offered(void)
 }
 
 /*
+        Moonwater's sound server (src/audio), where a program's sound is mixed and a person's volume for it is kept: the
+        PulseAudio protocol every libpulse program and Chromium speaks, at /run/moonwater/pulse/native. A program looks for a
+        server at $XDG_RUNTIME_DIR/pulse/native, which in a bowl is not where the machine's is, so it is told where; a program
+        that has set PULSE_SERVER (its own server, or none) is not asked again, and it is only offered where the socket is: a
+        machine whose sound server is not running (moonwater audio server off, no desktop) has none to offer.
+*/
+#define BOWL_SOUND_VARIABLE "PULSE_SERVER"
+#define BOWL_SOUND_SOCKET "/run/moonwater/pulse/native"
+
+static bool bowl_sound_offered(void)
+{
+        return system_access_at(AT_FDCWD, (string_address)BOWL_SOUND_SOCKET, 0) >= 0;
+}
+
+/*
         The language the person chose for the desktop (`moonwater language`, a code of two letters in /root/language), for the
         programs of a bowl to start in: LANGUAGE=de, which is the variable a browser takes its interface language from and a
         gettext program takes its messages from, and which LANG (always C.UTF-8 here, since a bowl has no locales of the
@@ -2676,7 +2691,8 @@ static string_address address_to bowl_environment(
 {
         static string_address mixed[BOWL_ENV_ROOM];
         bool have[BOWL_VARS] = {false};
-        bool have_bus = false, have_language = false, offer_bus = bowl_session_bus_offered();
+        bool have_bus = false, have_sound = false, have_language = false;
+        bool offer_bus = bowl_session_bus_offered(), offer_sound = bowl_sound_offered();
         string_address language = bowl_language_offered((string_address)BOWL_LANGUAGE_PATH);
         positive n = 0;
         b32 skipped = false;
@@ -2698,6 +2714,8 @@ static string_address address_to bowl_environment(
                         have[bowl_variables[which].counts_as] = true;
                 if (bowl_env_named(inherited[at], BOWL_SESSION_BUS_VARIABLE))
                         have_bus = true;
+                if (bowl_env_named(inherited[at], BOWL_SOUND_VARIABLE))
+                        have_sound = true;
                 if (bowl_env_named(inherited[at], BOWL_LANGUAGE_VARIABLE))
                         have_language = true;
 
@@ -2725,6 +2743,7 @@ static string_address address_to bowl_environment(
                 for (positive at = 0; at < BOWL_VAR_LC_ALL; at++)
                         missing += !have[at];
                 missing += offer_bus && !have_bus;
+                missing += offer_sound && !have_sound;
                 missing += language && !have_language;
                 if (!skipped && !missing)
                         return inherited;
@@ -2742,6 +2761,8 @@ static string_address address_to bowl_environment(
                         mixed[n++] = (string_address)bowl_variables[at].fallback;
         if (offer_bus && !have_bus)
                 mixed[n++] = (string_address)BOWL_SESSION_BUS_VARIABLE "=unix:path=" BOWL_SESSION_BUS_SOCKET;
+        if (offer_sound && !have_sound)
+                mixed[n++] = (string_address)BOWL_SOUND_VARIABLE "=unix:" BOWL_SOUND_SOCKET;
         if (language && !have_language)
                 mixed[n++] = language;
         mixed[n] = null;

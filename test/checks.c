@@ -97217,7 +97217,7 @@ static fn chrome_profile(void)
                         string_address offered;
 
                         right &= ftruncate(handle, 0) == 0 && lseek(handle, 0, SEEK_SET) == 0 &&
-                                 write(handle, languages[each].file, strlen(languages[each].file)) == (ssize_t)strlen(languages[each].file);
+                                 write(handle, languages[each].file, strlen(languages[each].file)) == (long)strlen(languages[each].file);
                         offered = bowl_language_offered((string_address)path);
                         right &= languages[each].want ? offered && !strcmp((const char *)offered, languages[each].want) : !offered;
                 }

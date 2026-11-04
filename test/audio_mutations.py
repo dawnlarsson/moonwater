@@ -3,7 +3,8 @@
 
 Each mutation is one edit to a copy of one of them (a coefficient, an exponent, a bound, a flag, a byte order, a constant),
 built into CHECK_audio_mix, CHECK_audio_alsa or CHECK_audio_pulse with gcc; the check must turn red.  A mutation that survives is a hole
-in the check.
+in the check.  The "bowl" ones are edits to a copy of src/bowl.c (the PULSE_SERVER a bowl's program is offered), run against the
+bowl_session harness of test/differential.py, which must exit with an error.
 
     python3 test/audio_mutations.py [NAME...]          from the tree's root; 8 builds at a time, about 4 minutes
 
@@ -13,7 +14,7 @@ import concurrent.futures, os, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 engines = {'mix': os.path.join(root, 'src/audio/mix.c'), 'alsa': os.path.join(root, 'src/audio/alsa.c'), 'pulse': os.path.join(root, 'src/audio/pulse.c'),
-           'control': os.path.join(root, 'src/audio/control.c')}
+           'control': os.path.join(root, 'src/audio/control.c'), 'bowl': os.path.join(root, 'src/bowl.c')}
 checks = os.path.join(root, 'test/checks.c')
 work = tempfile.mkdtemp(prefix='audio-mutations-')
 only = sys.argv[1:]
@@ -130,6 +131,14 @@ M = [
     ("control", "the sink named by nothing", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, sink);\n        ctl_w_cvolume(&w, both, 2);", "ctl_w_u32(&w, CTL_NONE);\n        ctl_w_string(&w, 0);\n        ctl_w_cvolume(&w, both, 2);"),
     ("control", "the timeout of the connection ignored", "long wait = c->timeout_ms ? c->timeout_ms : CTL_TIMEOUT_MS;", "long wait = CTL_TIMEOUT_MS;"),
     ("control", "a stream's mute misread", "into->muted = ctl_r_bool(&r);", "into->muted = 0, (void)ctl_r_bool(&r);"),
+    # ---- bowl.c (the sound server a bowl's program is offered, checked by the bowl_session harness) ----
+    ("bowl", "the sound server offered with no socket", "return system_access_at(AT_FDCWD, (string_address)BOWL_SOUND_SOCKET, 0) >= 0;", "return true;"),
+    ("bowl", "the sound server offered over the program's own", "if (offer_sound && !have_sound)\n                mixed[n++]", "if (offer_sound)\n                mixed[n++]"),
+    ("bowl", "a session with its own everything else not offered the sound server", "                missing += offer_sound && !have_sound;\n", ""),
+    ("bowl", "the program's own sound server not seen", "if (bowl_env_named(inherited[at], BOWL_SOUND_VARIABLE))\n                        have_sound = true;", "if (0)\n                        have_sound = true;"),
+    ("bowl", "the sound server's socket said wrong", "\"=unix:\" BOWL_SOUND_SOCKET", "\"=\" BOWL_SOUND_SOCKET"),
+    ("bowl", "no room kept for what is offered", "#define BOWL_ENV_DEFAULTS 13", "#define BOWL_ENV_DEFAULTS 12"),
+    ("bowl", "the bus offered with no socket", "return system_access_at(AT_FDCWD, (string_address)BOWL_SESSION_BUS_SOCKET, 0) >= 0;", "return true;"),
     ("control", "the stream killed is another", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index);", "ctl_begin(c, &w, CTL_COMMAND_KILL_SINK_INPUT);\n        ctl_w_u32(&w, index + 1);"),
 ]
 
@@ -145,6 +154,22 @@ def run(index):
         return (name, "NOT APPLIED", "")
     d = os.path.join(work, "m%d" % index)
     shutil.rmtree(d, ignore_errors=True)
+    if which == "bowl":
+        os.makedirs(d + "/src")
+        os.makedirs(d + "/test")
+        shutil.copy(os.path.join(root, "test/differential.py"), d + "/test/differential.py")
+        open(d + "/src/bowl.c", "w").write(src.replace(old, new, 1))
+        try:
+            r = subprocess.run([sys.executable, d + "/test/differential.py", "--harness", "bowl_session"], capture_output=True, text=True,
+                               errors="replace", timeout=300, env=dict(os.environ, CC="gcc"))
+        except subprocess.TimeoutExpired:
+            return (name, "RED (hang)", "")
+        fails = [l.strip() for l in r.stderr.splitlines() + r.stdout.splitlines() if l.startswith("FAIL")][:1]
+        if r.returncode == 0:
+            return (name, "SURVIVED", "bowl session")
+        if "error:" in r.stdout + r.stderr:
+            return (name, "BUILD ERROR", (r.stdout + r.stderr)[:200])
+        return (name, "RED", "bowl session" + (" | " + fails[0][:110] if fails else ""))
     os.makedirs(d + "/src/audio")
     os.makedirs(d + "/test")
     os.symlink(checks, d + "/test/checks.c")

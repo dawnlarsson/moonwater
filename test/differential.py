@@ -41836,9 +41836,24 @@ static void system_close(bipolar handle) { (void)handle; }
 /*  The identity files are there; every directory is not, so that session prep
     takes the walk that makes it, which is what this window counts. */
 static int etc_missing;
+/*  The desktop's session bus and sound server are where their sockets are:
+    a window says which of them there is. */
+static int bus_present, sound_present;
 static bipolar system_access_at(bipolar dir, string_address path, positive mode) {
     (void)dir; (void)mode;
+    if (!strcmp(path, "/run/moonwater/bus")) return bus_present ? 0 : -2;
+    if (!strcmp(path, "/run/moonwater/pulse/native")) return sound_present ? 0 : -2;
     return !strncmp(path, "/etc/", 5) && !etc_missing ? 0 : -2;
+}
+/*  The language the person chose, as /root/language keeps it. */
+static const char *mock_language;
+static bipolar system_read_once(bipolar handle, void *into, positive room) {
+    (void)handle;
+    if (!mock_language) return -2;
+    positive n = strlen(mock_language);
+    if (n > room) n = room;
+    memcpy(into, mock_language, n);
+    return (bipolar)n;
 }
 static bipolar system_stat_at_stub(void) { return -2; }
 #define system_stat_at(dir, path, flags, mask, into) system_stat_at_stub()
@@ -41945,6 +41960,20 @@ static int env_named(string_address *environment, const char *name) {
         if (!strncmp(*environment, name, n) && (*environment)[n] == '=') return 1;
     return 0;
 }
+static int env_count(string_address *environment, const char *name) {
+    size_t n = strlen(name);
+    int count = 0;
+    if (!environment) return 0;
+    for (; *environment; environment++)
+        if (!strncmp(*environment, name, n) && (*environment)[n] == '=') count++;
+    return count;
+}
+static int env_length(string_address *environment) {
+    int count = 0;
+    if (!environment) return 0;
+    while (*environment++) count++;
+    return count;
+}
 '''
     source += steps
     source += bowl[start:stop]
@@ -42007,6 +42036,85 @@ int main(void) {
         mock_uid = 0;
         got = bowl_environment(have);
         check(got == have, "a complete session is left alone");
+    }
+
+    /*  The desktop's session bus and its sound server are offered to a
+        program that has none of its own, and only where their sockets are. */
+    {
+        string_address complete[] = {
+            "TERM=dumb", "TERMINFO=/x", "HOME=/home/a", "PATH=/bin", "LANG=C",
+            "USER=a", "LOGNAME=a", "XDG_RUNTIME_DIR=/tmp/rt", "SHELL=/bin/bash",
+            "TMPDIR=/var/tmp", null};
+        string_address with_sound[] = {
+            "TERM=dumb", "TERMINFO=/x", "HOME=/home/a", "PATH=/bin", "LANG=C",
+            "USER=a", "LOGNAME=a", "XDG_RUNTIME_DIR=/tmp/rt", "SHELL=/bin/bash",
+            "TMPDIR=/var/tmp", "PULSE_SERVER=unix:/tmp/mine", null};
+        string_address own[] = {"PULSE_SERVER=unix:/tmp/mine", "HOME=/home/a", null};
+        string_address empty[] = {"PULSE_SERVER=", "HOME=/home/a", null};
+        string_address lookalike[] = {"PULSE_SERVER_X=1", "XPULSE_SERVER=1", "HOME=/home/a", null};
+        string_address own_bus[] = {"DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/b", "HOME=/home/a", null};
+
+        mock_uid = 0;
+        bus_present = sound_present = 0;
+        got = bowl_environment(null);
+        check(!env_named(got, "PULSE_SERVER") && !env_named(got, "DBUS_SESSION_BUS_ADDRESS"),
+              "where there is no sound server and no bus, neither is offered");
+        check(bowl_environment(complete) == complete,
+              "a complete session on a machine with neither is left alone");
+
+        sound_present = 1;
+        got = bowl_environment(null);
+        check(env_has(got, "PULSE_SERVER=unix:/run/moonwater/pulse/native"),
+              "where the sound server is, a program is told its socket");
+        check(!env_named(got, "DBUS_SESSION_BUS_ADDRESS"), "and the sound server's socket offers no bus");
+        got = bowl_environment(complete);
+        check(got != complete && env_has(got, "PULSE_SERVER=unix:/run/moonwater/pulse/native") &&
+                  env_has(got, "HOME=/home/a") && env_count(got, "PULSE_SERVER") == 1,
+              "a session that has everything else is still offered the sound server");
+        got = bowl_environment(with_sound);
+        check(got == with_sound, "a complete session that has its own sound server is left alone");
+        got = bowl_environment(own);
+        check(env_has(got, "PULSE_SERVER=unix:/tmp/mine") && env_count(got, "PULSE_SERVER") == 1,
+              "a program's own sound server is kept and not offered a second");
+        got = bowl_environment(empty);
+        check(env_has(got, "PULSE_SERVER=") && env_count(got, "PULSE_SERVER") == 1,
+              "a program that set the variable empty chose that");
+        got = bowl_environment(lookalike);
+        check(env_has(got, "PULSE_SERVER=unix:/run/moonwater/pulse/native"),
+              "a name that only begins or ends like the variable does not stop the offer");
+
+        bus_present = 1;
+        sound_present = 0;
+        got = bowl_environment(null);
+        check(env_has(got, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/moonwater/bus") && !env_named(got, "PULSE_SERVER"),
+              "where the bus is and the sound server is not, the bus is offered alone");
+        got = bowl_environment(own_bus);
+        check(env_has(got, "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/b") && env_count(got, "DBUS_SESSION_BUS_ADDRESS") == 1,
+              "a program's own bus is kept and not offered a second");
+
+        /*  Room: everything a program can be offered is added, or the block is
+            left as it came, and it never runs past the array it is built in. */
+        {
+            static string_address crowd[520];
+            string_address *whole;
+            unsigned at;
+
+            bus_present = sound_present = 1;
+            mock_language = "de\n";
+            for (at = 0; at < 498; at++) crowd[at] = "X=1";
+            crowd[498] = null;
+            whole = bowl_environment(crowd);
+            check(whole != crowd && env_count(whole, "PULSE_SERVER") == 1 && env_count(whole, "DBUS_SESSION_BUS_ADDRESS") == 1 &&
+                      env_count(whole, "LANGUAGE") == 1 && env_length(whole) == 498 + 13,
+                  "with room for all of what is offered, all of it is added");
+            crowd[498] = "X=1";
+            crowd[499] = null;
+            whole = bowl_environment(crowd);
+            check(whole == crowd && env_length(whole) == 499,
+                  "with room for part of it, the environment is left as it came");
+            mock_language = null;
+        }
+        bus_present = sound_present = 0;
     }
 
     {
