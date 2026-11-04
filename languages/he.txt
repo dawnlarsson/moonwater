@@ -112,6 +112,7 @@ settings_map_keys	54c9	החצים בוחרים מסך. Shift וחץ מזיזים
 settings_map_none	1b29	אין מסך מחובר.
 settings_map_one	7ff2	מחובר מסך אחד בלבד.
 settings_menu_keys	5546	חץ למעלה וחץ למטה בוחרים, Enter קובע, Escape יוצא
+settings_metrics	7e10	כרטיס: ממוצע %1$d µs, מקסימום %2$d µs; מעבד: %3$d µs, מקסימום %4$d µs; מיפויים %5$d; התעוררות %6$d; %7$d פריימים/ש, %8$d רשימות/ש
 settings_mode_largest	c7c4	התמונה הגדולה ביותר
 settings_mode_preferred	024c	מומלץ
 settings_name_chars	58a2	שם הוא אותיות לטיניות, ספרות ומקפים

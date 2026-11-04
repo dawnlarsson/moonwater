@@ -810,6 +810,10 @@ static b32 gpu_start(positive bytes)
 #define GPU_MAPS 256
 static struct { positive from, to, va; unsigned int handle, used; b32 written; b32 dma; positive offset; } gpu_maps[GPU_MAPS]; // dma: made by the dma-buf route (offset: its place in the table's memfd)
 static unsigned int gpu_map_count, gpu_tick;
+// The metrics the compositor publishes (window.c's metric_*): the lookups that found a map and that did not, the card's clock-ramp wakes, and its
+// jobs with their total wait (gpu_run).
+static unsigned int gpu_map_hits, gpu_map_misses, gpu_wakes, gpu_jobs;
+static unsigned long long gpu_job_ns;
 #ifndef GPU_MAP_FAKE
 #define GPU_MAP_FAKE(taken)
 #endif
@@ -1020,8 +1024,10 @@ static positive gpu_va_bytes(const void *pointer, positive bytes)
                 if ((positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to && bytes <= gpu_maps[i].to - (positive)pointer) // no sum to wrap
                 {
                         gpu_maps[i].used = gpu_tick;
+                        gpu_map_hits++;
                         return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
                 }
+        gpu_map_misses++;
         return 0;
 }
 #define gpu_va(pointer) gpu_va_bytes(pointer, 1)
@@ -1195,7 +1201,7 @@ static b32 gpu_idle(void)
 }
 
 // Run the kernel over the arguments' w by rows pixels; false if it did not finish (then gpu_idle holds the buffer until it has).
-static b32 gpu_run(void)
+static b32 gpu_run_job(void)
 {
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), address_to k = gpu_kernels[which].words;
         positive code = GPU_VA + gpu_kernel_at[which], args = GPU_VA + 512;
@@ -1251,6 +1257,16 @@ static b32 gpu_run(void)
         gpu.pending = 0;
         gpu_last_job = clock_monotonic_nanoseconds();
         return true;
+}
+
+// A job run and waited for (gpu_run_job), timed: the count and the total wait the metrics publish.
+static b32 gpu_run(void)
+{
+        b64 began = clock_monotonic_nanoseconds();
+        b32 done = gpu_run_job();
+
+        gpu_jobs++, gpu_job_ns += clock_monotonic_nanoseconds() - began;
+        return done;
 }
 
 // ui_box_radii on a box record's rx and ry (words 6 and 7): where two corners come to more than a side, the one factor that fits them all.
@@ -1341,6 +1357,7 @@ static void gpu_wake(void)
 
         if (!gpu.at || !gpu_last_job || now - gpu_last_job < GPU_WAKE_IDLE || !gpu_idle())
                 return;
+        gpu_wakes++;
         ops_at = gpu.size - GPU_WAKE_AT, bins_at = ops_at + 4096, d_at = ops_at + 8192;
         ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0, ops[6] = ops[7] = 0;

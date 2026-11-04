@@ -22358,6 +22358,14 @@ static b32 host_debug(string_address address_to arguments, positive count)
                          (table->gpu_map_why & 255) == 7 ? (string_address) "the render node would not import the dma-buf" :
                                                            (string_address) "the card would not map the dma-buf",
                          (positive)(table->gpu_map_why >> 8));
+        //      The metrics: the presents' time on the card and on the processor (the mean and the worst of the last 128 each, microseconds), the maps,
+        //      the card's wakes and jobs, and the rates each second.
+        host_say(log, "  metrics         the card's present: %p us mean, %p us worst; the processor's: %p us mean, %p us worst (the last 128 each)\n",
+                 (positive)table->metric_card_mean, (positive)table->metric_card_worst, (positive)table->metric_processor_mean, (positive)table->metric_processor_worst);
+        host_say(log, "  metrics         maps held %p (lookups that found one %p, that did not %p); clock wakes %p; jobs %p, %p us mean wait\n",
+                 (positive)table->metric_maps, (positive)table->metric_map_hits, (positive)table->metric_map_misses, (positive)table->metric_wakes,
+                 (positive)table->metric_jobs, (positive)table->metric_job_mean);
+        host_say(log, "  metrics         %p presents a second, %p list frames a second\n", (positive)table->metric_presents, (positive)table->metric_lists);
         // The issue board: every issue raised, one line each, so the terminal and Settings tell the same story.
         {
                 struct windows_issues board;

@@ -111,6 +111,7 @@ settings_map_keys	54c9	Arrows choose a screen. Shift and an arrow moves it. Ente
 settings_map_none	1b29	No screen is connected.
 settings_map_one	7ff2	Only one screen is connected.
 settings_menu_keys	5546	Up and Down choose, Enter sets it, Escape leaves it
+settings_metrics	7e10	Card %1$d µs mean, %2$d µs worst; processor %3$d µs, %4$d µs worst; maps %5$d; wakes %6$d; %7$d presents a second, %8$d list frames a second
 settings_mode_largest	c7c4	Biggest picture
 settings_mode_preferred	024c	Recommended
 settings_name_chars	58a2	a name is letters, digits and hyphens

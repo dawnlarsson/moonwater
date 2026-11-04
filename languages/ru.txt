@@ -111,6 +111,7 @@ settings_map_keys	54c9	Стрелки выбирают экран. Shift и ст
 settings_map_none	1b29	Экран не подключён.
 settings_map_one	7ff2	Подключён только один экран.
 settings_menu_keys	5546	Вверх и Вниз выбирают, Enter задаёт, Escape оставляет
+settings_metrics	7e10	Карта: %1$d мкс ср., %2$d мкс макс.; процессор: %3$d мкс, %4$d мкс макс.; карты %5$d; пробуждений %6$d; %7$d кадр/с, %8$d списков/с
 settings_mode_largest	c7c4	Наибольшее изображение
 settings_mode_preferred	024c	Рекомендуется
 settings_name_chars	58a2	имя состоит из букв, цифр и дефисов

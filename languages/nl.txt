@@ -111,6 +111,7 @@ settings_map_keys	54c9	Pijlen kiezen een scherm. Shift en een pijl verplaatst he
 settings_map_none	1b29	Er is geen scherm aangesloten.
 settings_map_one	7ff2	Er is maar één scherm aangesloten.
 settings_menu_keys	5546	Omhoog en Omlaag kiezen, Enter stelt in, Escape laat
+settings_metrics	7e10	Kaart: %1$d µs gemiddeld, %2$d µs op zijn slechtst; processor: %3$d µs, %4$d µs op zijn slechtst; koppelingen %5$d; ontwaakt %6$d; %7$d presentaties/s, %8$d lijsten/s
 settings_mode_largest	c7c4	Grootste beeld
 settings_mode_preferred	024c	Aanbevolen
 settings_name_chars	58a2	een naam bestaat uit letters, cijfers en streepjes

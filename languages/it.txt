@@ -111,6 +111,7 @@ settings_map_keys	54c9	Le frecce scelgono uno schermo. Shift e una freccia lo sp
 settings_map_none	1b29	Nessuno schermo è collegato.
 settings_map_one	7ff2	È collegato un solo schermo.
 settings_menu_keys	5546	Su e Giù scelgono, Enter imposta, Escape lascia
+settings_metrics	7e10	Scheda: %1$d µs in media, %2$d µs nel peggiore; processore: %3$d µs, %4$d µs nel peggiore; mappe %5$d; risvegli %6$d; %7$d presentazioni/s, %8$d liste/s
 settings_mode_largest	c7c4	Immagine più grande
 settings_mode_preferred	024c	Consigliato
 settings_name_chars	58a2	un nome è fatto di lettere, cifre e trattini

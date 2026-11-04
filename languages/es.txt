@@ -111,6 +111,7 @@ settings_map_keys	54c9	Las flechas eligen una pantalla. Shift y una flecha la mu
 settings_map_none	1b29	No hay ninguna pantalla conectada.
 settings_map_one	7ff2	Solo hay una pantalla conectada.
 settings_menu_keys	5546	Arriba y Abajo eligen, Enter lo aplica, Escape lo deja
+settings_metrics	7e10	Tarjeta: %1$d µs de media, %2$d µs en el peor caso; procesador: %3$d µs, %4$d µs en el peor caso; mapas %5$d; despertares %6$d; %7$d presentaciones por segundo, %8$d listas por segundo
 settings_mode_largest	c7c4	Imagen más grande
 settings_mode_preferred	024c	Recomendado
 settings_name_chars	58a2	un nombre son letras, dígitos y guiones

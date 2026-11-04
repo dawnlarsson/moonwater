@@ -112,6 +112,7 @@ settings_map_keys	54c9	تیر کی کلیدیں: اسکرین کا انتخاب�
 settings_map_none	1b29	کوئی اسکرین منسلک نہیں۔
 settings_map_one	7ff2	صرف ایک اسکرین منسلک ہے۔
 settings_menu_keys	5546	اوپر اور نیچے منتخب کرتے ہیں، Enter لاگو کرتا ہے، Escape باہر نکلتا ہے
+settings_metrics	7e10	کارڈ: اوسط %1$d µs، زیادہ %2$d µs؛ پروسیسر: %3$d µs، زیادہ %4$d µs؛ میپ %5$d؛ جاگنا %6$d؛ %7$d فریم/س، %8$d فہرست/س
 settings_mode_largest	c7c4	سب سے بڑی تصویر
 settings_mode_preferred	024c	تجویز کردہ
 settings_name_chars	58a2	نام لاطینی حروف، ہندسوں اور ہائفن پر مشتمل ہوتا ہے

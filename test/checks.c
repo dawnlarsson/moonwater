@@ -222875,6 +222875,30 @@ static void iss_rows_gpu(void)
         check("gpu status: fewer than sixteen presents keep the answer", windows_gpu_judge(&gpu, WINDOWS_GPU_STATUS_IN_USE, 3, 2) == WINDOWS_GPU_STATUS_IN_USE);
 }
 
+// The metrics' helpers (windows_metric_stats and windows_metric_rate): the mean and the worst of a ring in microseconds, and a rate per second.
+static void iss_rows_metrics(void)
+{
+        unsigned long long ring[WINDOWS_METRIC_RUN + 40];
+        unsigned int mean = 99, worst = 99;
+
+        memory_zero(ring, sizeof(ring));
+        windows_metric_stats(ring, 0, &mean, &worst);
+        check("metrics: an empty ring has a mean and a worst of none", mean == 0 && worst == 0);
+        ring[0] = 1000, ring[1] = 3000, ring[2] = 2000;
+        windows_metric_stats(ring, 3, &mean, &worst);
+        check("metrics: the mean and the worst of three presents, in microseconds", mean == 2 && worst == 3);
+        for (unsigned int i = 0; i < WINDOWS_METRIC_RUN + 40; i++)
+                ring[i] = 5000;
+        ring[WINDOWS_METRIC_RUN + 10] = 90000000ull;
+        windows_metric_stats(ring, WINDOWS_METRIC_RUN + 40, &mean, &worst);
+        check("metrics: a ring is read as its last 128 samples, and its worst is among them", mean == 5 && worst == 5);
+        ring[7] = 40000000ull;
+        windows_metric_stats(ring, WINDOWS_METRIC_RUN, &mean, &worst);
+        check("metrics: a sample in the ring is its worst, and the mean follows it", worst == 40000 && mean == 5 + (40000 - 5) / 128);
+        check("metrics: a rate is the count per second over the nanoseconds it took", windows_metric_rate(10, 2000000000ull) == 5 && windows_metric_rate(0, 1000) == 0);
+        check("metrics: no time at all is no rate, not a division by zero", windows_metric_rate(10, 0) == 0);
+}
+
 b32 main(void)
 {
         iss_rows_basic();
@@ -222882,6 +222906,7 @@ b32 main(void)
         iss_rows_torn();
         iss_rows_hostile();
         iss_rows_gpu();
+        iss_rows_metrics();
         return test_report(null);
 }
 #endif /* CHECK_issues */

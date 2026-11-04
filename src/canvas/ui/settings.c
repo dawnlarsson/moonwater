@@ -791,7 +791,7 @@ static struct settings_sub settings_sub[SETTINGS_SUBS];
 static int settings_sub_count;
 static struct windows_issues settings_board;
 static positive settings_board_due;
-static char settings_status[SETTINGS_SUB_TEXT];
+static char settings_status[SETTINGS_SUB_TEXT], settings_metric_line[SETTINGS_SUB_TEXT];
 static unsigned int settings_gpu_status = WINDOWS_GPU_STATUS_NOT, settings_gpu_at, settings_gpu_drawn, settings_gpu_processor;
 static unsigned int settings_gpu_ring_drawn[SETTINGS_GPU_SAMPLES], settings_gpu_ring_processor[SETTINGS_GPU_SAMPLES];
 static unsigned int settings_gpu_shown_total;
@@ -845,6 +845,9 @@ static void settings_gpu_sample(void)
                 drawn += settings_gpu_ring_drawn[k], processor += settings_gpu_ring_processor[k];
         settings_gpu_status = windows_gpu_judge(table, settings_gpu_status, drawn, processor);
         settings_gpu_shown_total = drawn + processor;
+        language_format(settings_metric_line, sizeof(settings_metric_line), WORDS(settings_metrics), (long)table->metric_card_mean, (long)table->metric_card_worst,
+                        (long)table->metric_processor_mean, (long)table->metric_processor_worst, (long)table->metric_maps, (long)table->metric_wakes,
+                        (long)table->metric_presents, (long)table->metric_lists);
         switch (settings_gpu_status)
         {
         case WINDOWS_GPU_STATUS_OFF: language_format(settings_status, sizeof(settings_status), WORDS(settings_status_off)); break;
@@ -938,6 +941,9 @@ static int settings_sub_rows(int row, int count)
         {
                 string_copy_bounded((string_address)text, (string_address)settings_status, sizeof(text));
                 count = settings_sub_put(section, false, null, text, count);
+                // The card's and the processor's presents, the maps and the wakes, as the table counts them (one line, a second old at most).
+                string_copy_bounded((string_address)text, (string_address)settings_metric_line, sizeof(text));
+                count = settings_sub_put(section, true, null, text, count);
         }
         for (int i = 0; i < WINDOWS_ISSUES && count < UI_LIST_MOST - 1; i++)
         {
@@ -970,7 +976,7 @@ static long settings_board_tick(void)
 {
         positive now = (positive)ui_kit.now;
         struct windows_issues copy;
-        char before[SETTINGS_SUB_TEXT];
+        char before[SETTINGS_SUB_TEXT], before_metric[SETTINGS_SUB_TEXT];
 
         if (!settings.own.table)
                 return -1;
@@ -980,8 +986,10 @@ static long settings_board_tick(void)
         if (!windows_issues_read(settings.own.table, &copy))
                 return (long)SETTINGS_BOARD_NS;
         string_copy_bounded((string_address)before, (string_address)settings_status, sizeof(before));
+        string_copy_bounded((string_address)before_metric, (string_address)settings_metric_line, sizeof(before_metric));
         settings_gpu_sample();
-        if (memory_compare(&copy, &settings_board, sizeof(copy)) || !string_equals((string_address)before, (string_address)settings_status))
+        if (memory_compare(&copy, &settings_board, sizeof(copy)) || !string_equals((string_address)before, (string_address)settings_status) ||
+            !string_equals((string_address)before_metric, (string_address)settings_metric_line))
         {
                 settings_board = copy;
                 settings_rebuild();

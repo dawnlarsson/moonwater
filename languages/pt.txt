@@ -111,6 +111,7 @@ settings_map_keys	54c9	As setas escolhem uma tela. Shift e uma seta a movem. Ent
 settings_map_none	1b29	Nenhuma tela está conectada.
 settings_map_one	7ff2	Apenas uma tela está conectada.
 settings_menu_keys	5546	Cima e Baixo escolhem, Enter aplica, Escape deixa
+settings_metrics	7e10	Placa: %1$d µs em média, %2$d µs no pior caso; processador: %3$d µs, %4$d µs no pior caso; mapas %5$d; despertares %6$d; %7$d apresentações/s, %8$d listas/s
 settings_mode_largest	c7c4	Maior imagem
 settings_mode_preferred	024c	Recomendado
 settings_name_chars	58a2	um nome é feito de letras, dígitos e hifens

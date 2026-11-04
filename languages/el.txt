@@ -111,6 +111,7 @@ settings_map_keys	54c9	Τα βέλη επιλέγουν οθόνη. Το Shift �
 settings_map_none	1b29	Δεν είναι συνδεδεμένη καμία οθόνη.
 settings_map_one	7ff2	Είναι συνδεδεμένη μόνο μία οθόνη.
 settings_menu_keys	5546	Πάνω και Κάτω επιλέγουν, το Enter ορίζει, το Escape αφήνει
+settings_metrics	7e10	Κάρτα: %1$d µs μέσος, %2$d µs μέγ.· επεξ.: %3$d µs, %4$d µs μέγ.· χάρτες %5$d· %6$d αφυπνίσεις· %7$d καρέ/δλ, %8$d λίστες/δλ
 settings_mode_largest	c7c4	Μεγαλύτερη εικόνα
 settings_mode_preferred	024c	Προτεινόμενο
 settings_name_chars	58a2	ένα όνομα αποτελείται από γράμματα, ψηφία και παύλες

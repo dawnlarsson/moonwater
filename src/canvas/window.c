@@ -1030,6 +1030,16 @@ struct windows
         // A client's (Wayland) picture: the committed pictures the compositor read where the client's buffer is (client_in_place) and the
         // ones it copied into the table (client_copied), and the presents the card drew with such a picture in place (client_card).
         unsigned int client_in_place, client_copied, client_card;
+        /*
+                The metrics (moonwater debug, and Settings' line under the GPU row), the compositor's: metric_card_* and metric_processor_* are the mean
+                and the worst, in microseconds, of the last WINDOWS_METRIC_RUN presents the card drew and the processor drew (a whole present each);
+                metric_maps the maps the card holds now, metric_map_hits and metric_map_misses the lookups that found a map and that did not;
+                metric_wakes the clock-ramp wakes of the card, metric_jobs its jobs and metric_job_mean the mean of their wait in microseconds;
+                metric_presents and metric_lists are the presents and the list frames drawn in the last second.
+        */
+        unsigned int metric_card_mean, metric_card_worst, metric_processor_mean, metric_processor_worst;
+        unsigned int metric_maps, metric_map_hits, metric_map_misses, metric_wakes, metric_jobs, metric_job_mean;
+        unsigned int metric_presents, metric_lists;
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u
@@ -1265,6 +1275,29 @@ static unsigned int windows_issues_worst(const struct windows_issues *all, const
                                 (*count)++;
                 }
         return worst;
+}
+
+// The metrics' rings: the last samples of a path's presents (nanoseconds), and the mean and the worst of them in microseconds. A rate is a count over
+// the nanoseconds it took, per second.
+#define WINDOWS_METRIC_RUN 128
+static void windows_metric_stats(const unsigned long long *ring, unsigned int count, unsigned int *mean_us, unsigned int *worst_us)
+{
+        unsigned long long sum = 0, worst = 0;
+
+        if (count > WINDOWS_METRIC_RUN)
+                count = WINDOWS_METRIC_RUN;
+        for (unsigned int i = 0; i < count; i++)
+        {
+                sum += ring[i];
+                worst = ring[i] > worst ? ring[i] : worst;
+        }
+        *mean_us = count ? (unsigned int)(sum / count / 1000) : 0;
+        *worst_us = (unsigned int)(worst / 1000);
+}
+
+static unsigned int windows_metric_rate(unsigned long long count, unsigned long long nanoseconds)
+{
+        return nanoseconds ? (unsigned int)(count * 1000000000ull / nanoseconds) : 0;
 }
 
 // The key of the GPU option's issues, as Settings' row for "canvas gpu" has it.

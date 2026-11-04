@@ -112,6 +112,7 @@ settings_map_keys	54c9	کلیدهای جهت: انتخاب نمایشگر. Shift
 settings_map_none	1b29	هیچ نمایشگری متصل نیست.
 settings_map_one	7ff2	فقط یک نمایشگر متصل است.
 settings_menu_keys	5546	بالا و پایین انتخاب می‌کنند، Enter اعمال می‌کند، Escape خارج می‌شود
+settings_metrics	7e10	کارت: میانگین %1$d µs، حداکثر %2$d µs؛ پردازنده: %3$d µs، حداکثر %4$d µs؛ نگاشت %5$d؛ بیداری %6$d؛ %7$d فریم/ث، %8$d فهرست/ث
 settings_mode_largest	c7c4	بزرگ‌ترین تصویر
 settings_mode_preferred	024c	پیشنهادی
 settings_name_chars	58a2	نام شامل حروف لاتین، رقم‌ها و خط تیره است

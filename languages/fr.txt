@@ -111,6 +111,7 @@ settings_map_keys	54c9	Les flèches choisissent un écran. Shift et une flèche 
 settings_map_none	1b29	Aucun écran n'est connecté.
 settings_map_one	7ff2	Un seul écran est connecté.
 settings_menu_keys	5546	Haut et Bas choisissent, Enter applique, Escape laisse
+settings_metrics	7e10	Carte : %1$d µs en moyenne, %2$d µs au pire ; processeur : %3$d µs, %4$d µs au pire ; mappages %5$d ; réveils %6$d ; %7$d présentations/s, %8$d listes/s
 settings_mode_largest	c7c4	Image la plus grande
 settings_mode_preferred	024c	Recommandé
 settings_name_chars	58a2	un nom, ce sont des lettres, des chiffres et des tirets

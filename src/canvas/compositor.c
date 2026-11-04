@@ -8027,6 +8027,9 @@ static void compositor_gpu_issues(void)
         }
 }
 
+// Whether the present in hand was drawn by the card (set by compositor_gpu_present, read by compositor_metric_note; cleared at each present).
+static int compositor_present_on_card;
+
 // The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it (and the reason is counted).
 static int compositor_gpu_present(const struct compositor_frame *frames, unsigned int count)
 {
@@ -8039,6 +8042,7 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         if (why == COMPOSITOR_GPU_WHY_DRAWN)
         {
                 compositor_gpu_counts.drawn++;
+                compositor_present_on_card = 1;
                 compositor_gpu_publish();
                 return 1;
         }
@@ -8344,11 +8348,65 @@ static void compositor_present_frames(void);
 
 // A present: a dma-buf a window shows is read by the card or the processor, and its reads are bracketed by the kernel's sync for the
 // processor's (compositor_wl_lent_sync: the bracket for each window's dma-buf picture read in place, as a copy of one is).
+/*
+        The presents' time, on the card and on the processor: each present's whole time (compositor_present), by the path it took, in rings of
+        the last WINDOWS_METRIC_RUN presents of each (nanoseconds). The table gets the means, the worst and the counts after each present; the
+        rates of presents and of list frames each second. The card's own numbers (maps, wakes, jobs) are gpu.c's, read here.
+*/
+static unsigned long long compositor_metric_card[WINDOWS_METRIC_RUN], compositor_metric_processor[WINDOWS_METRIC_RUN];
+static unsigned int compositor_metric_card_at, compositor_metric_card_count, compositor_metric_processor_at, compositor_metric_processor_count;
+static unsigned long long compositor_metric_presents, compositor_metric_since, compositor_metric_presents_then, compositor_metric_lists_then;
+static unsigned int compositor_metric_presents_second, compositor_metric_lists_second;
+
+static void compositor_metric_publish(void)
+{
+        struct windows address_to table = compositor.table;
+        unsigned long long now = clock_monotonic_nanoseconds(), lists = compositor_list_counts[COMPOSITOR_LIST_DRAWN];
+        unsigned int mean, worst;
+
+        if (!table)
+                return;
+        windows_metric_stats(compositor_metric_card, compositor_metric_card_count, &mean, &worst);
+        table->metric_card_mean = mean, table->metric_card_worst = worst;
+        windows_metric_stats(compositor_metric_processor, compositor_metric_processor_count, &mean, &worst);
+        table->metric_processor_mean = mean, table->metric_processor_worst = worst;
+#ifdef MOONWATER_GPU_C
+        table->metric_maps = gpu_map_count, table->metric_map_hits = gpu_map_hits, table->metric_map_misses = gpu_map_misses;
+        table->metric_wakes = gpu_wakes, table->metric_jobs = gpu_jobs;
+        table->metric_job_mean = gpu_jobs ? (unsigned int)(gpu_job_ns / gpu_jobs / 1000) : 0;
+#endif
+        if (!compositor_metric_since)
+                compositor_metric_since = now, compositor_metric_presents_then = compositor_metric_presents, compositor_metric_lists_then = lists;
+        if (now - compositor_metric_since >= 1000000000ull)
+        {
+                compositor_metric_presents_second = windows_metric_rate(compositor_metric_presents - compositor_metric_presents_then, now - compositor_metric_since);
+                compositor_metric_lists_second = windows_metric_rate(lists - compositor_metric_lists_then, now - compositor_metric_since);
+                compositor_metric_since = now, compositor_metric_presents_then = compositor_metric_presents, compositor_metric_lists_then = lists;
+        }
+        table->metric_presents = compositor_metric_presents_second, table->metric_lists = compositor_metric_lists_second;
+}
+
+static void compositor_metric_note(unsigned long long nanoseconds)
+{
+        if (compositor_present_on_card)
+                compositor_metric_card[compositor_metric_card_at] = nanoseconds, compositor_metric_card_at = (compositor_metric_card_at + 1) % WINDOWS_METRIC_RUN,
+                compositor_metric_card_count++;
+        else
+                compositor_metric_processor[compositor_metric_processor_at] = nanoseconds,
+                compositor_metric_processor_at = (compositor_metric_processor_at + 1) % WINDOWS_METRIC_RUN, compositor_metric_processor_count++;
+        compositor_metric_presents++;
+        compositor_metric_publish();
+}
+
 static void compositor_present(void)
 {
+        unsigned long long began = clock_monotonic_nanoseconds();
+
+        compositor_present_on_card = 0;
         compositor_wl_lent_sync(1);
         compositor_present_frames();
         compositor_wl_lent_sync(0);
+        compositor_metric_note(clock_monotonic_nanoseconds() - began);
 }
 
 static void compositor_present_frames(void)

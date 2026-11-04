@@ -111,6 +111,7 @@ settings_map_keys	54c9	Pfeile wählen einen Bildschirm. Shift und ein Pfeil vers
 settings_map_none	1b29	Es ist kein Bildschirm angeschlossen.
 settings_map_one	7ff2	Es ist nur ein Bildschirm angeschlossen.
 settings_menu_keys	5546	Auf und Ab wählen, Enter übernimmt, Escape lässt es
+settings_metrics	7e10	Karte: %1$d µs im Mittel, %2$d µs im Schlimmsten; Prozessor: %3$d µs, %4$d µs im Schlimmsten; Abbildungen %5$d; Aufwecken %6$d; %7$d Bilder/s, %8$d Listen/s
 settings_mode_largest	c7c4	Größtes Bild
 settings_mode_preferred	024c	Empfohlen
 settings_name_chars	58a2	ein Name besteht aus Buchstaben, Ziffern und Bindestrichen

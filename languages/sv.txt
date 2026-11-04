@@ -111,6 +111,7 @@ settings_map_keys	54c9	Piltangenterna väljer en skärm. Shift och en pil flytta
 settings_map_none	1b29	Ingen skärm är ansluten.
 settings_map_one	7ff2	Bara en skärm är ansluten.
 settings_menu_keys	5546	Upp och Ned väljer, Enter ställer in, Escape lämnar
+settings_metrics	7e10	Kort: %1$d µs i snitt, %2$d µs värst; processor: %3$d µs, %4$d µs värst; mappningar %5$d; uppvakningar %6$d; %7$d bildrutor per sekund, %8$d listor per sekund
 settings_mode_largest	c7c4	Största bilden
 settings_mode_preferred	024c	Rekommenderad
 settings_name_chars	58a2	ett namn består av bokstäver, siffror och bindestreck

@@ -111,6 +111,7 @@ settings_map_keys	54c9	Strzałki wybierają ekran. Shift i strzałka przesuwa go
 settings_map_none	1b29	Nie podłączono żadnego ekranu.
 settings_map_one	7ff2	Podłączono tylko jeden ekran.
 settings_menu_keys	5546	Góra i Dół wybierają, Enter ustawia, Escape zostawia
+settings_metrics	7e10	Karta: %1$d µs średnio, %2$d µs najgorzej; procesor: %3$d µs, %4$d µs najgorzej; mapowania %5$d; wybudzenia %6$d; %7$d prezentacji/s, %8$d list/s
 settings_mode_largest	c7c4	Największy obraz
 settings_mode_preferred	024c	Zalecany
 settings_name_chars	58a2	nazwa składa się z liter, cyfr i myślników

@@ -122,6 +122,7 @@ LANGUAGE_ID(settings_map_keys, "Arrows choose a screen. Shift and an arrow moves
 LANGUAGE_ID(settings_map_none, "No screen is connected.")
 LANGUAGE_ID(settings_map_one, "Only one screen is connected.")
 LANGUAGE_ID(settings_menu_keys, "Up and Down choose, Enter sets it, Escape leaves it")
+LANGUAGE_ID(settings_metrics, "Card %1$d µs mean, %2$d µs worst; processor %3$d µs, %4$d µs worst; maps %5$d; wakes %6$d; %7$d presents a second, %8$d list frames a second")
 LANGUAGE_ID(settings_mode_largest, "Biggest picture")
 LANGUAGE_ID(settings_mode_preferred, "Recommended")
 LANGUAGE_ID(settings_name_chars, "a name is letters, digits and hyphens")

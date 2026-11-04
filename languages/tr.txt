@@ -111,6 +111,7 @@ settings_map_keys	54c9	Oklar bir ekran seçer. Shift ve bir ok onu taşır. Ente
 settings_map_none	1b29	Bağlı bir ekran yok.
 settings_map_one	7ff2	Yalnızca bir ekran bağlı.
 settings_menu_keys	5546	Yukarı ve Aşağı seçer, Enter ayarlar, Escape bırakır
+settings_metrics	7e10	Kart: ortalama %1$d µs, en kötü %2$d µs; işlemci: %3$d µs, en kötü %4$d µs; eşlemeler %5$d; uyanmalar %6$d; saniyede %7$d sunum, saniyede %8$d liste
 settings_mode_largest	c7c4	En büyük görüntü
 settings_mode_preferred	024c	Önerilen
 settings_name_chars	58a2	bir ad harflerden, rakamlardan ve tirelerden oluşur
