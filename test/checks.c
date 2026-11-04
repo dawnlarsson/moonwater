@@ -132920,13 +132920,13 @@ static void check_touch_path(struct ui address_to wui)
     check("touch path: a drag after the long press extends the selection by words", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 16);
     touch_one(TOUCH_PATH_LEFT + gx, TOUCH_PATH_TOP + by, true);
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
-    check("touch path: the lift keeps the selection, and nothing is still dragged", doc_sel_end(&t.doc.selections[0]) == 16 && !t.dragging);
+    check("touch path: the lift keeps the selection, and nothing is still dragged", doc_sel_end(&t.doc.selections[0]) == 16 && !t.sel.dragging);
 
     /* The handle: the end of the selection has a knob hung under its line, in the accent, and a finger on it moves that end by
        characters, the start staying where it is. */
     ui_begin(wui, wui->pixels, wui->pitch, wui->width, wui->height);
     ui_text_draw(wui, &t, 20, 60, 190, 44, 0);
-    t.bar = false; // the actions bar the lift showed lies over the field in a window this small: it is another row's
+    t.sel.bar = false; // the actions bar the lift showed lies over the field in a window this small: it is another row's
     ui_text_overlay(wui, &t);
     ex = touch_path_x(wui, &t, 16);
     knob = t.top + t.line_height + 6 * compositor.scale / 100;
@@ -133041,7 +133041,7 @@ static void scroll_ticks(struct ui address_to wui, struct ui_text address_to t, 
     b32 redraw = false;
 
     for (int step = 0; step <= 12; step++)
-        (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_text_autoscroll(wui, t, &redraw));
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_select_autoscroll(wui, ui_text_sel(t), &redraw));
 }
 
 static void scroll_code(struct ui address_to wui, struct ui_text address_to t, int top)
@@ -133057,9 +133057,9 @@ static void scroll_code(struct ui address_to wui, struct ui_text address_to t, i
     ui_text_open(t, UI_TEXT_CODE, (const p8 address_to)text, length, ui_text_keymap());
     t->focused = true;
     t->top_line = (p64)top;
-    t->dragging = false;
-    t->edge.past = 0;
-    t->edge.at = 0;
+    t->sel.dragging = false;
+    t->sel.edge.past = 0;
+    t->sel.edge.at = 0;
     ui_text_draw(wui, t, SCROLL_CODE_LEFT, SCROLL_CODE_TOP, SCROLL_CODE_WIDTH, SCROLL_CODE_HEIGHT, 0);
 }
 
@@ -133071,9 +133071,9 @@ static void scroll_field(struct ui address_to wui, struct ui_text address_to t, 
     ui_field_open(t, own, text);
     t->focused = true;
     doc_select_set(&t->doc, at_end ? length : 0, at_end ? length : 0);
-    t->dragging = false;
-    t->edge.past = 0;
-    t->edge.at = 0;
+    t->sel.dragging = false;
+    t->sel.edge.past = 0;
+    t->sel.edge.at = 0;
     ui_text_draw(wui, t, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
 }
 
@@ -133202,7 +133202,7 @@ static void scroll_field_drawn(struct ui address_to wui, struct ui_text address_
     {
         int jump;
 
-        (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_text_autoscroll(wui, t, &redraw));
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_select_autoscroll(wui, ui_text_sel(t), &redraw));
         ui_text_draw(wui, t, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
         jump = (int)t->scroll_x - prev;
         *largest = jump > *largest ? jump : *largest;
@@ -133346,10 +133346,10 @@ static void check_field_flick(struct ui address_to wui)
     }
     ui_kit.now = now += 16000000ull;
     ui_field_event(wui, &field, null, &up, x, y - 400);
-    thrown = field.grab.drag.flying;
+    thrown = field.sel.grab.drag.flying;
     for (int step = 1; step <= 150; step++)
         ui_kit.now = now += 16000000ull, (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_timeout(wui, &field, -1, &redraw));
-    check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !field.grab.drag.flying);
+    check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !field.sel.grab.drag.flying);
     ui_text_close(&field);
 }
 
@@ -133378,7 +133378,7 @@ static void check_throw_last_step(struct ui address_to wui)
     }
     ui_kit.now = now += 16000000ull;
     ui_text_event(wui, &view, &up, x, y - 400);
-    for (int step = 1; step <= 300 && view.grab.drag.flying; step++)
+    for (int step = 1; step <= 300 && view.sel.grab.drag.flying; step++)
     {
         p64 was = view.top_line;
         b32 redraw = false;
@@ -133388,7 +133388,7 @@ static void check_throw_last_step(struct ui address_to wui)
             moved = true, moved_unasked |= !redraw;
     }
     check("code view throw: it moves the lines, and each tick that moves them asks for the picture, the one that stops it too",
-          moved && !moved_unasked && !view.grab.drag.flying);
+          moved && !moved_unasked && !view.sel.grab.drag.flying);
     ui_text_close(&view);
 }
 
@@ -152028,14 +152028,14 @@ static fn touch_hold_check(struct ui address_to wui, struct ui_text address_to t
         asks = ui_field_event(wui, t, null, &(struct window_event){WINDOW_EVENT_MOTION, touch, gamma + 1, y}, gamma + 1, y);
         check("touch: a drag after a long press extends the selection by words", field_selected(t, 6, 16));
         asks = field_button(wui, t, 0x110, false, gamma + 1, y, cancel);
-        check("touch: the lift ends the drag and keeps the selection", (asks & UI_TEXT_MOVED) && field_selected(t, 6, 16) && !t->dragging);
+        check("touch: the lift ends the drag and keeps the selection", (asks & UI_TEXT_MOVED) && field_selected(t, 6, 16) && !t->sel.dragging);
 
         // A tap on the selection keeps it and shows the actions bar (no popup menu), which is Cut, Copy, Paste and Select All.
-        t->bar = false;
+        t->sel.bar = false;
         field_button(wui, t, 0x110, true, beta + 1, y, touch);
         asks = field_button(wui, t, 0x110, false, beta + 1, y, touch);
         check("touch: a tap on the selection keeps it, shows the actions bar and asks for no popup menu",
-              !(asks & UI_TEXT_MENU) && t->bar && field_selected(t, 6, 16));
+              !(asks & UI_TEXT_MENU) && t->sel.bar && field_selected(t, 6, 16));
         {
                 static struct ui_popmenu m;
 
@@ -152095,9 +152095,9 @@ static fn touch_scroll_open(struct ui address_to wui, struct ui_text address_to 
         ui_text_open(view, UI_TEXT_CODE, (const p8 address_to)text, length, ui_text_keymap());
         view->focused = true;
         view->top_line = (p64)top;
-        view->dragging = false;
-        view->edge.past = 0;
-        view->edge.at = 0;
+        view->sel.dragging = false;
+        view->sel.edge.past = 0;
+        view->sel.edge.at = 0;
         ui_text_draw(wui, view, 20, 20, 300, 100, 0);
 }
 
@@ -152114,8 +152114,8 @@ static int touch_scroll_rows(struct ui address_to wui, struct ui_text address_to
         row = view->top + 2 * view->line_height + view->line_height / 2;
         field_button(wui, view, 0x110, true, x, row, 0);
         field_motion(wui, view, x, view->top - past);
-        (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_autoscroll(wui, view, &redraw));
-        (ui_kit.now = ui_kit.test_clock = (b64)(now + 200000000ull), ui_text_autoscroll(wui, view, &redraw));
+        (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_select_autoscroll(wui, ui_text_sel(view), &redraw));
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + 200000000ull), ui_select_autoscroll(wui, ui_text_sel(view), &redraw));
         *follows = doc_sel_start(&view->doc.selections[view->doc.primary]) == doc_line_start(&view->doc, view->top_line);
         field_button(wui, view, 0x110, false, x, row, 0);
         ui_text_close(view);
@@ -152139,13 +152139,13 @@ static fn touch_scroll_check(struct ui address_to wui)
         row = view.top + 2 * view.line_height + view.line_height / 2;
         field_button(wui, &view, 0x110, true, x, row, 0);
         field_motion(wui, &view, x, view.top - 200);
-        (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_text_autoscroll(wui, &view, &redraw));
+        (ui_kit.now = ui_kit.test_clock = (b64)(now), ui_select_autoscroll(wui, ui_text_sel(&view), &redraw));
         field_motion(wui, &view, x, view.top + view.line_height);
-        check("scroll: a drag back inside the box stops it", !(ui_kit.now = ui_kit.test_clock = (b64)(now + 200000000ull), ui_text_autoscroll(wui, &view, &redraw)) && view.top_line == 10);
+        check("scroll: a drag back inside the box stops it", !(ui_kit.now = ui_kit.test_clock = (b64)(now + 200000000ull), ui_select_autoscroll(wui, ui_text_sel(&view), &redraw)) && view.top_line == 10);
         field_motion(wui, &view, x, view.top - 200);
-        (ui_kit.now = ui_kit.test_clock = (b64)(now + 400000000ull), ui_text_autoscroll(wui, &view, &redraw));
+        (ui_kit.now = ui_kit.test_clock = (b64)(now + 400000000ull), ui_select_autoscroll(wui, ui_text_sel(&view), &redraw));
         field_button(wui, &view, 0x110, false, x, row, 0);
-        check("scroll: the lift stops it", !(ui_kit.now = ui_kit.test_clock = (b64)(now + 600000000ull), ui_text_autoscroll(wui, &view, &redraw)) && view.top_line == 10);
+        check("scroll: the lift stops it", !(ui_kit.now = ui_kit.test_clock = (b64)(now + 600000000ull), ui_select_autoscroll(wui, ui_text_sel(&view), &redraw)) && view.top_line == 10);
         ui_text_close(&view);
 }
 
@@ -152199,7 +152199,7 @@ static p32 ts_event(struct ui address_to wui, struct ui_text address_to t, unsig
 
 static void ts_reset(struct ui_text address_to t)
 {
-        t->click.at = 0, t->click.count = 0;
+        t->sel.click.at = 0, t->sel.click.count = 0;
 }
 
 static p32 ts_down(struct ui address_to wui, struct ui_text address_to t, int x, int y)
@@ -152263,7 +152263,7 @@ static b32 ts_knob(struct ui address_to wui, struct ui_text address_to t, p64 of
 
         if (ui_text_where(wui, t, offset, x, &top))
                 return false;
-        *y = top + t->line_height + ui_dev(wui, UI_TEXT_HANDLE);
+        *y = top + t->line_height + ui_dev(wui, UI_SELECT_HANDLE);
         return true;
 }
 
@@ -152290,7 +152290,7 @@ static void ts_ticks(struct ui address_to wui, struct ui_text address_to t, posi
         b32 redraw = false;
 
         for (int step = 0; step <= steps; step++)
-                (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_text_autoscroll(wui, t, &redraw));
+                (ui_kit.now = ui_kit.test_clock = (b64)(now + (positive)step * 16000000ull), ui_select_autoscroll(wui, ui_text_sel(t), &redraw));
 }
 
 // Whether the bar's items are these ids, in this order (0 for none).
@@ -152299,7 +152299,7 @@ static b32 ts_ids(const struct ui_text address_to t, int a, int b, int c, int d)
         int want[4] = {a, b, c, d};
 
         for (int k = 0; k < 4; k++)
-                if ((want[k] != 0) != (k < t->bar_count) || (want[k] && t->bar_id[k] != want[k]))
+                if ((want[k] != 0) != (k < t->sel.bar_count) || (want[k] && t->sel.bar_id[k] != want[k]))
                         return false;
         return true;
 }
@@ -152366,7 +152366,7 @@ static p64 ts_code(struct ui address_to wui, int scale)
         ts_lift(wui, &ts_view, x, row);
         ts_draw(wui, &ts_view);
         if (ts_knob(wui, &ts_view, ts_line_start[3], &sx, &sy) && ts_knob(wui, &ts_view, ts_line_start[3] + 4, &kx, &ky))
-                got |= (p64)(ts_accent(wui, sx, sy) && ts_accent(wui, kx, ky) && ts_view.handles) << TS_HANDLES;
+                got |= (p64)(ts_accent(wui, sx, sy) && ts_accent(wui, kx, ky) && ts_view.sel.handles) << TS_HANDLES;
 
         /* A finger a little less than half a target from a knob takes it, to the right, below and above; a little more does not. */
         {
@@ -152378,12 +152378,12 @@ static p64 ts_code(struct ui address_to wui, int scale)
                         ts_code_open(wui, &length);
                         ts_word(wui, &sx, &sy, &kx, &ky);
                         ts_down(wui, &ts_view, kx + dx[k] * (half - 2), ky + dy[k] * (half - 2));
-                        in += ts_view.finger == UI_TEXT_FINGER_HANDLE;
+                        in += ts_view.sel.finger == UI_SELECT_FINGER_HANDLE;
                         ts_up(wui, &ts_view, kx, ky);
                         ts_code_open(wui, &length);
                         ts_word(wui, &sx, &sy, &kx, &ky);
                         ts_down(wui, &ts_view, kx + dx[k] * (half + 3), ky + dy[k] * (half + 3));
-                        out += ts_view.finger == UI_TEXT_FINGER_HANDLE;
+                        out += ts_view.sel.finger == UI_SELECT_FINGER_HANDLE;
                         ts_up(wui, &ts_view, kx, ky);
                 }
                 got |= (p64)(in == 5) << TS_GRAB_IN;
@@ -152399,7 +152399,7 @@ static p64 ts_code(struct ui address_to wui, int scale)
         ts_up(wui, &ts_view, kx, ky + 5 * lh);
         got |= (p64)ts_is(&ts_view, ts_line_start[3], ts_line_start[8] + 3) << TS_ACROSS_LINES;
         got |= (p64)(doc_sel_start(&ts_view.doc.selections[ts_view.doc.primary]) == ts_line_start[3]) << TS_KEEPS_START;
-        got |= (p64)ts_view.bar << TS_HANDLE_BAR; // the lift of a dragged handle brings the bar back
+        got |= (p64)ts_view.sel.bar << TS_HANDLE_BAR; // the lift of a dragged handle brings the bar back
 
         /* The start's handle taken and moved past the end: the ends cross. */
         ts_code_open(wui, &length);
@@ -152443,29 +152443,29 @@ static p64 ts_code(struct ui address_to wui, int scale)
         ts_code_open(wui, &length);
         row = ts_row(&ts_view, 6), x = ts_col(wui, &ts_view, 2);
         ts_select(wui, &ts_view, x, row);
-        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_CUT, UI_TEXT_MENU_COPY, UI_TEXT_MENU_PASTE, UI_TEXT_MENU_ALL)) << TS_BAR_ITEMS;
-        got |= (p64)(ts_view.bar_up && ts_view.bar_y + ts_view.bar_h <= row - lh / 2) << TS_BAR_ABOVE;
-        got |= (p64)(ts_view.bar_up && ts_view.bar_x >= 0 && ts_view.bar_y >= ui_dev(wui, UI_TEXT_TITLEBAR) &&
-                                  ts_view.bar_x + ts_view.bar_w <= TS_WIDTH && ts_view.bar_y + ts_view.bar_h <= TS_HEIGHT) << TS_BAR_INSIDE;
+        got |= (p64)(ts_view.sel.bar_up && ts_ids(&ts_view, UI_SELECT_CUT, UI_SELECT_COPY, UI_SELECT_PASTE, UI_SELECT_ALL)) << TS_BAR_ITEMS;
+        got |= (p64)(ts_view.sel.bar_up && ts_view.sel.bar_y + ts_view.sel.bar_h <= row - lh / 2) << TS_BAR_ABOVE;
+        got |= (p64)(ts_view.sel.bar_up && ts_view.sel.bar_x >= 0 && ts_view.sel.bar_y >= ui_dev(wui, UI_SELECT_TITLEBAR) &&
+                                  ts_view.sel.bar_x + ts_view.sel.bar_w <= TS_WIDTH && ts_view.sel.bar_y + ts_view.sel.bar_h <= TS_HEIGHT) << TS_BAR_INSIDE;
         /* A tap on an item of the bar does it: Select All selects the text and leaves the bar up. */
-        ts_tap(wui, &ts_view, ts_view.bar_x + (ts_view.bar_at[3] + ts_view.bar_at[4]) / 2, ts_view.bar_y + ts_view.bar_h / 2);
+        ts_tap(wui, &ts_view, ts_view.sel.bar_x + (ts_view.sel.bar_at[3] + ts_view.sel.bar_at[4]) / 2, ts_view.sel.bar_y + ts_view.sel.bar_h / 2);
         ts_draw(wui, &ts_view);
-        got |= (p64)(ts_is(&ts_view, 0, (p64)length) && ts_view.bar && ts_view.bar_up) << TS_BAR_SELECT_ALL;
+        got |= (p64)(ts_is(&ts_view, 0, (p64)length) && ts_view.sel.bar && ts_view.sel.bar_up) << TS_BAR_SELECT_ALL;
         /* Copy takes the bar away and leaves the selection; Cut takes the text out, and the handles and the bar with it. */
         ts_code_open(wui, &length);
         ts_select(wui, &ts_view, x, row);
-        ts_tap(wui, &ts_view, ts_view.bar_x + (ts_view.bar_at[1] + ts_view.bar_at[2]) / 2, ts_view.bar_y + ts_view.bar_h / 2);
-        got |= (p64)(ts_is(&ts_view, ts_line_start[6], ts_line_start[6] + 4) && !ts_view.bar && ts_view.handles) << TS_BAR_COPY;
+        ts_tap(wui, &ts_view, ts_view.sel.bar_x + (ts_view.sel.bar_at[1] + ts_view.sel.bar_at[2]) / 2, ts_view.sel.bar_y + ts_view.sel.bar_h / 2);
+        got |= (p64)(ts_is(&ts_view, ts_line_start[6], ts_line_start[6] + 4) && !ts_view.sel.bar && ts_view.sel.handles) << TS_BAR_COPY;
         ts_code_open(wui, &length);
         ts_select(wui, &ts_view, x, row);
-        ts_tap(wui, &ts_view, ts_view.bar_x + (ts_view.bar_at[0] + ts_view.bar_at[1]) / 2, ts_view.bar_y + ts_view.bar_h / 2);
-        got |= (p64)(doc_length(&ts_view.doc) == length - 4 && !ts_view.bar && !ts_view.handles) << TS_BAR_CUT;
+        ts_tap(wui, &ts_view, ts_view.sel.bar_x + (ts_view.sel.bar_at[0] + ts_view.sel.bar_at[1]) / 2, ts_view.sel.bar_y + ts_view.sel.bar_h / 2);
+        got |= (p64)(doc_length(&ts_view.doc) == length - 4 && !ts_view.sel.bar && !ts_view.sel.handles) << TS_BAR_CUT;
 
         /* A selection on the first row, with the box at the window's top, has no room above for the bar: it is below the handles. */
         ts_top = 0;
         ts_code_open(wui, &length);
         ts_select(wui, &ts_view, ts_col(wui, &ts_view, 2), ts_row(&ts_view, 0));
-        got |= (p64)(ts_view.bar_up && ts_view.bar_y >= ts_view.top + lh + 2 * ui_dev(wui, UI_TEXT_HANDLE)) << TS_BAR_BELOW;
+        got |= (p64)(ts_view.sel.bar_up && ts_view.sel.bar_y >= ts_view.top + lh + 2 * ui_dev(wui, UI_SELECT_HANDLE)) << TS_BAR_BELOW;
         ts_top = 40;
 
         /* A tap on the selection takes the bar away and a second brings it back; a tap on a handle does the same, and a tap elsewhere
@@ -152476,21 +152476,21 @@ static p64 ts_code(struct ui address_to wui, int scale)
         ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 13), row);
         ts_draw(wui, &ts_view);
         {
-                b32 gone = !ts_view.bar && !ts_view.bar_up && ts_is(&ts_view, 0, 26);
+                b32 gone = !ts_view.sel.bar && !ts_view.sel.bar_up && ts_is(&ts_view, 0, 26);
 
                 ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 13), row);
                 ts_draw(wui, &ts_view);
-                got |= (p64)(gone && ts_view.bar && ts_view.bar_up) << TS_TOGGLE_SELECTION;
+                got |= (p64)(gone && ts_view.sel.bar && ts_view.sel.bar_up) << TS_TOGGLE_SELECTION;
         }
-        ts_view.bar = false;
+        ts_view.sel.bar = false;
         ts_draw(wui, &ts_view);
         ts_knob(wui, &ts_view, 26, &kx, &ky);
         ts_tap(wui, &ts_view, kx, ky);
         ts_draw(wui, &ts_view);
-        got |= (p64)(ts_view.bar && ts_view.bar_up && ts_is(&ts_view, 0, 26)) << TS_TOGGLE_HANDLE;
+        got |= (p64)(ts_view.sel.bar && ts_view.sel.bar_up && ts_is(&ts_view, 0, 26)) << TS_TOGGLE_HANDLE;
         ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 1));
         ts_draw(wui, &ts_view);
-        got |= (p64)(ts_is(&ts_view, 27 + 5, 27 + 5) && !ts_view.handles && !ts_view.bar && !ts_view.bar_up) << TS_TAP_CLEARS;
+        got |= (p64)(ts_is(&ts_view, 27 + 5, 27 + 5) && !ts_view.sel.handles && !ts_view.sel.bar && !ts_view.sel.bar_up) << TS_TAP_CLEARS;
 
         /* A finger that drags the text still scrolls it, with the selection and its handles where they were, and the bar not shown while
               it moves; thrown and settled, the bar comes back, and the loop is told to draw it. */
@@ -152508,15 +152508,15 @@ static p64 ts_code(struct ui address_to wui, int scale)
                 for (int step = 1; step <= 10; step++)
                         ts_move(wui, &ts_view, fx, fy + step * lh / 2);
                 ts_draw(wui, &ts_view);
-                got |= (p64)(ts_view.top_line < 20 && ts_is(&ts_view, ts_line_start[23], ts_line_start[23] + 4) && ts_view.handles) << TS_SCROLLS;
-                got |= (p64)(ts_view.bar && !ts_view.bar_up) << TS_BAR_HIDES;
+                got |= (p64)(ts_view.top_line < 20 && ts_is(&ts_view, ts_line_start[23], ts_line_start[23] + 4) && ts_view.sel.handles) << TS_SCROLLS;
+                got |= (p64)(ts_view.sel.bar && !ts_view.sel.bar_up) << TS_BAR_HIDES;
                 ts_up(wui, &ts_view, fx, fy + 5 * lh);
-                for (int step = 1; step < 600 && ts_view.grab.drag.flying; step++)
-                        (ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + (positive)step * 16000000ull), ui_text_fling(&ts_view));
-                (ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + 1000000000ull), ui_text_bar_tick(&ts_view, &redraw));
+                for (int step = 1; step < 600 && ts_view.sel.grab.drag.flying; step++)
+                        (ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + (positive)step * 16000000ull), ui_select_fling(wui, ui_text_sel(&ts_view)));
+                (ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + 1000000000ull), ui_select_bar_tick(ui_text_sel(&ts_view), &redraw));
                 ts_view.top_line = 20;
                 ts_draw(wui, &ts_view);
-                got |= (p64)(redraw && ts_view.bar_up) << TS_BAR_RETURNS;
+                got |= (p64)(redraw && ts_view.sel.bar_up) << TS_BAR_RETURNS;
         }
 
         /* A second tap on the same place is a double tap, a word; a third, the line. */
@@ -152527,7 +152527,7 @@ static p64 ts_code(struct ui address_to wui, int scale)
         ts_up(wui, &ts_view, x, row);
         ts_down(wui, &ts_view, x, row);
         ts_up(wui, &ts_view, x, row);
-        got |= (p64)(ts_is(&ts_view, 0, 26) && ts_view.handles && ts_view.bar) << TS_DOUBLE_TAP;
+        got |= (p64)(ts_is(&ts_view, 0, 26) && ts_view.sel.handles && ts_view.sel.bar) << TS_DOUBLE_TAP;
         ts_down(wui, &ts_view, x, row);
         ts_up(wui, &ts_view, x, row);
         got |= (p64)ts_is(&ts_view, 0, 27) << TS_TRIPLE_TAP;
@@ -152538,8 +152538,8 @@ static p64 ts_code(struct ui address_to wui, int scale)
         ts_event(wui, &ts_view, WINDOW_EVENT_MOTION, 0, 0, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 6));
         ts_event(wui, &ts_view, WINDOW_EVENT_BUTTON, 0, 0x110, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 6));
         ts_draw(wui, &ts_view);
-        got |= (p64)(ts_is(&ts_view, ts_line_start[4] + 1, ts_line_start[6] + 5) && !ts_view.handles && !ts_view.bar && !ts_view.bar_up &&
-                                  !ts_view.over_bottom) << TS_MOUSE;
+        got |= (p64)(ts_is(&ts_view, ts_line_start[4] + 1, ts_line_start[6] + 5) && !ts_view.sel.handles && !ts_view.sel.bar && !ts_view.sel.bar_up &&
+                                  !ts_view.sel.over_bottom) << TS_MOUSE;
 
         /* The bar fades in with full motion (not whole at its first frame, and the loop is asked for the next); with reduced motion it is
               whole at once and asks for no frame; and a settled bar asks the loop for nothing, a widget without the keys neither blinks. */
@@ -152547,25 +152547,25 @@ static p64 ts_code(struct ui address_to wui, int scale)
         ts_view.focused = false;
         ts_select(wui, &ts_view, ts_col(wui, &ts_view, 2), ts_row(&ts_view, 6));
         ui_kit.motion = 0;
-        ts_view.quiet_at = 0;
-        ts_view.bar_up = false;
+        ts_view.sel.quiet_at = 0;
+        ts_view.sel.bar_up = false;
         ui_kit.busy = 0;
         ts_draw(wui, &ts_view);
         {
-                int px = ts_view.bar_x + 6, py = ts_view.bar_y + ts_view.bar_h / 2;
+                int px = ts_view.sel.bar_x + 6, py = ts_view.sel.bar_y + ts_view.sel.bar_h / 2;
                 unsigned int first = wui->pixels[(positive)py * TS_WIDTH + (positive)px];
                 b32 busy = ui_kit.busy, redraw = false;
 
-                ts_view.bar_since = clock_monotonic_nanoseconds() - 2 * UI_TEXT_BAR_FADE_NS;
+                ts_view.sel.bar_since = clock_monotonic_nanoseconds() - 2 * UI_SELECT_BAR_FADE_NS;
                 ui_kit.busy = 0;
                 ts_draw(wui, &ts_view);
-                got |= (p64)(busy && ts_view.bar_up && !ui_kit.busy && first != wui->pixels[(positive)py * TS_WIDTH + (positive)px]) << TS_FADE;
+                got |= (p64)(busy && ts_view.sel.bar_up && !ui_kit.busy && first != wui->pixels[(positive)py * TS_WIDTH + (positive)px]) << TS_FADE;
                 got |= (p64)((ui_kit.now = ui_kit.test_clock = (b64)(clock_monotonic_nanoseconds() + 1000000000ull), ui_text_timeout(wui, &ts_view, -1, &redraw)) == -1 && !redraw) << TS_IDLE;
                 ui_kit.motion = 1;
-                ts_view.bar_up = false;
+                ts_view.sel.bar_up = false;
                 ui_kit.busy = 0;
                 ts_draw(wui, &ts_view);
-                got |= (p64)(ts_view.bar_up && !ui_kit.busy) << TS_REDUCED;
+                got |= (p64)(ts_view.sel.bar_up && !ui_kit.busy) << TS_REDUCED;
         }
         ui_text_close(&ts_view);
         return got;
@@ -152590,7 +152590,7 @@ static p64 ts_fields(struct ui address_to wui, int scale)
         /* A long press on "beta" selects it and shows the field's bar; its end's handle taken and moved on to the end of "delta" extends it
               across words. */
         ts_select(wui, &ts_view, field_x(wui, &ts_view, 7), y);
-        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_CUT, UI_TEXT_MENU_COPY, UI_TEXT_MENU_PASTE, UI_TEXT_MENU_ALL)) << TS_FIELD_ITEMS;
+        got |= (p64)(ts_view.sel.bar_up && ts_ids(&ts_view, UI_SELECT_CUT, UI_SELECT_COPY, UI_SELECT_PASTE, UI_SELECT_ALL)) << TS_FIELD_ITEMS;
         ts_knob(wui, &ts_view, 10, &kx, &ky);
         ts_reset(&ts_view);
         ts_down(wui, &ts_view, kx, ky);
@@ -152613,7 +152613,7 @@ static p64 ts_fields(struct ui address_to wui, int scale)
         /* And the start's handle of a selection far along, held in the band at the left, takes the start back to the text's start. */
         ui_field_open(&ts_view, &ts_own, words);
         doc_select_set(&ts_view.doc, 90, 100);
-        ts_view.handles = true;
+        ts_view.sel.handles = true;
         ts_draw(wui, &ts_view);
         if (ts_knob(wui, &ts_view, 90, &kx, &ky))
         {
@@ -152631,7 +152631,7 @@ static p64 ts_fields(struct ui address_to wui, int scale)
         ts_view.masked = true;
         ts_draw(wui, &ts_view);
         ts_select(wui, &ts_view, ts_view.left + ts_view.cell * 2, ts_view.top + ts_view.line_height / 2);
-        got |= (p64)(ts_is(&ts_view, 0, 7) && ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_PASTE, 0, 0, 0)) << TS_MASKED;
+        got |= (p64)(ts_is(&ts_view, 0, 7) && ts_view.sel.bar_up && ts_ids(&ts_view, UI_SELECT_PASTE, 0, 0, 0)) << TS_MASKED;
         ui_text_close(&ts_view);
 
         /* A read only view has Copy and Select All, and no Cut or Paste. */
@@ -152639,7 +152639,7 @@ static p64 ts_fields(struct ui address_to wui, int scale)
         ts_view.own = &ts_own, ts_view.focused = true, ts_view.read_only = true;
         ts_draw(wui, &ts_view);
         ts_select(wui, &ts_view, ts_col(wui, &ts_view, 5), ts_row(&ts_view, 0));
-        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_COPY, UI_TEXT_MENU_ALL, 0, 0)) << TS_READ_ONLY;
+        got |= (p64)(ts_view.sel.bar_up && ts_ids(&ts_view, UI_SELECT_COPY, UI_SELECT_ALL, 0, 0)) << TS_READ_ONLY;
         ui_text_close(&ts_view);
 
         /* A caret has Paste and Select All, and an empty field Paste alone. */
@@ -152647,14 +152647,14 @@ static p64 ts_fields(struct ui address_to wui, int scale)
         ts_view.own = &ts_own, ts_view.focused = true;
         ts_draw(wui, &ts_view);
         ts_tap(wui, &ts_view, ts_col(wui, &ts_view, 1), ts_row(&ts_view, 0));
-        ts_view.bar = true;
+        ts_view.sel.bar = true;
         ts_draw(wui, &ts_view);
-        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_PASTE, UI_TEXT_MENU_ALL, 0, 0)) << TS_CARET_BAR;
+        got |= (p64)(ts_view.sel.bar_up && ts_ids(&ts_view, UI_SELECT_PASTE, UI_SELECT_ALL, 0, 0)) << TS_CARET_BAR;
         ui_text_close(&ts_view);
         ui_field_open(&ts_view, &ts_own, "");
         ts_draw(wui, &ts_view);
         ts_select(wui, &ts_view, ts_view.left + 2, ts_view.top + ts_view.line_height / 2);
-        got |= (p64)(ts_view.bar_up && ts_ids(&ts_view, UI_TEXT_MENU_PASTE, 0, 0, 0)) << TS_EMPTY_BAR;
+        got |= (p64)(ts_view.sel.bar_up && ts_ids(&ts_view, UI_SELECT_PASTE, 0, 0, 0)) << TS_EMPTY_BAR;
         ui_text_close(&ts_view);
         return got;
 }
@@ -152685,9 +152685,9 @@ static p64 ts_rows(struct ui address_to wui, int scale)
                 p64 start = doc_sel_start(&ts_view.doc.selections[ts_view.doc.primary]);
 
 
-                got |= (p64)(start > 4 * 8 && start < 60 * 4 && ts_view.handles && !ui_text_where(wui, &ts_view, start, &x, &top) &&
+                got |= (p64)(start > 4 * 8 && start < 60 * 4 && ts_view.sel.handles && !ui_text_where(wui, &ts_view, start, &x, &top) &&
                                           top == ts_view.top + lh) << TS_WRAP_HIT;
-                y = top + lh + ui_dev(wui, UI_TEXT_HANDLE);
+                y = top + lh + ui_dev(wui, UI_SELECT_HANDLE);
                 got |= (p64)ts_accent(wui, x, y) << TS_WRAP_HANDLE;
         }
         ui_text_close(&ts_view);
@@ -152758,7 +152758,7 @@ static fn touch_select_check(struct ui address_to wui)
         TS(TS_WRAP_HANDLE, "touch select: and its handle is drawn on that row");
         TS(TS_FOLD_HIT, "touch select: with a fold closed, the row under the finger is the line it is drawn as");
 #undef TS
-        check("touch select: the bar keeps below the compositor's top of a window, where its press is the window's own", UI_TEXT_TITLEBAR == COMPOSITOR_GRAB);
+        check("touch select: the bar keeps below the compositor's top of a window, where its press is the window's own", UI_SELECT_TITLEBAR == COMPOSITOR_GRAB);
         *wui = saved;
         ui_kit.motion = motion;
         compositor_call(syscall(munmap), (positive)pixels, TS_WIDTH * TS_HEIGHT * 4, 0, 0, 0, 0);
@@ -153090,15 +153090,15 @@ static fn field_check(struct ui address_to wui)
                 field_button(wui, &t, 0x110, true, beta + 1, y, 0);
                 field_button(wui, &t, 0x110, false, beta + 1, y, 0);
                 check("field: a triple click takes the line", field_selected(&t, 0, 16));
-                t.click.at = 0;
+                t.sel.click.at = 0;
                 field_button(wui, &t, 0x110, true, field_x(wui, &t, 0) + 1, y, 0);
                 field_motion(wui, &t, gamma - 1, y + 40);
                 check("field: a drag selects, even off the well", (field_button(wui, &t, 0x110, false, gamma - 1, y + 40, 0) & UI_TEXT_MOVED) &&
                                                                       field_selected(&t, 0, 11));
-                t.click.at = 0;
+                t.sel.click.at = 0;
                 field_button(wui, &t, 0x110, true, beta + 1, y, 0);
                 field_button(wui, &t, 0x110, false, beta + 1, y, 0);
-                t.click.at = 0;
+                t.sel.click.at = 0;
                 field_button(wui, &t, 0x110, true, field_x(wui, &t, 16) - 1, y, WINDOW_KEY_SHIFT);
                 field_button(wui, &t, 0x110, false, field_x(wui, &t, 16) - 1, y, WINDOW_KEY_SHIFT);
                 check("field: Shift with a click extends from the caret", field_selected(&t, 6, 16));
@@ -155793,7 +155793,7 @@ static fn check_kit_defaults(struct ui address_to wui)
 
         // A finger's long press in the code view, sent as the compositor sends it: the editor's own picture has the selection's handles
         // and its actions bar over the text (editor_draw ends with the overlay).
-#ifdef UI_TEXT_BAR_ITEMS
+#ifdef UI_SELECT_BAR_ITEMS
         {
                 unsigned int pixels[600 * 300];
                 const unsigned int held = WINDOW_KEY_TOUCH | WINDOW_KEY_HOLD;
@@ -155820,7 +155820,7 @@ static fn check_kit_defaults(struct ui address_to wui)
                 editor_draw(pixels);
                 check("editor: a finger's long press in the code view selects a word, and the editor's picture shows its handles and the actions bar",
                       doc_sel_start(&tab->view.doc.selections[tab->view.doc.primary]) == 0 && doc_sel_end(&tab->view.doc.selections[tab->view.doc.primary]) == 5 &&
-                          tab->view.handles && tab->view.bar_up && tab->view.bar_count == 4);
+                          tab->view.sel.handles && tab->view.sel.bar_up && tab->view.sel.bar_count == 4);
                 editor.count = 0;
         }
 #else
@@ -155921,7 +155921,7 @@ static fn check_field_hands(string_address regular)
                         launcher_send(&taken);
                         launcher_draw((unsigned int address_to)pixels);
                         check("launcher: a finger's long press in the field selects its word, and the picture shows its handles and the actions bar",
-                              launcher_holds("lsof") && launcher.field.handles && launcher.field.bar_up && launcher.field.bar_count == 3);
+                              launcher_holds("lsof") && launcher.field.sel.handles && launcher.field.sel.bar_up && launcher.field.sel.bar_count == 3);
                         // The handles are in the picture, in the accent under the line, though the list was drawn under its own clip after the field.
                         {
                                 int hx, htop;
@@ -155929,7 +155929,7 @@ static fn check_field_hands(string_address regular)
 
                                 check("launcher: the handle's knob is drawn in the accent under the field's line, past the clip the list drew under",
                                       !ui_text_where(&launcher.ui, &launcher.field, doc_sel_end(&launcher.field.doc.selections[0]), &hx, &htop) &&
-                                          (shown[(positive)(htop + launcher.field.line_height + ui_dev(&launcher.ui, UI_TEXT_HANDLE)) * launcher.ui.pitch + (positive)hx] & 0xffffffu) ==
+                                          (shown[(positive)(htop + launcher.field.line_height + ui_dev(&launcher.ui, UI_SELECT_HANDLE)) * launcher.ui.pitch + (positive)hx] & 0xffffffu) ==
                                               (ui_role(UI_PRIMARY) & 0xffffffu));
                         }
                 }
@@ -156055,14 +156055,14 @@ static fn check_field_hands(string_address regular)
                                 settings_event_at(&taken);
                                 settings_draw_rows((unsigned int address_to)pixels, 0, 0);
                                 check("settings: a finger's long press in the name's field selects a word, and the picture shows its handles and the actions bar",
-                                      settings_editing() == name && settings.edit.handles && settings.edit.bar_up && settings.edit.bar_count >= 3);
+                                      settings_editing() == name && settings.edit.sel.handles && settings.edit.sel.bar_up && settings.edit.sel.bar_count >= 3);
                                 {
                                         int hx, htop;
                                         const unsigned int address_to shown = (const unsigned int address_to)pixels;
 
                                         check("settings: and the handle's knob is drawn in the accent under the field's line, past the clip the page drew under",
                                               !ui_text_where(&settings.ui, &settings.edit, doc_sel_end(&settings.edit.doc.selections[0]), &hx, &htop) &&
-                                                  (shown[(positive)(htop + settings.edit.line_height + ui_dev(&settings.ui, UI_TEXT_HANDLE)) * settings.ui.pitch + (positive)hx] & 0xffffffu) ==
+                                                  (shown[(positive)(htop + settings.edit.line_height + ui_dev(&settings.ui, UI_SELECT_HANDLE)) * settings.ui.pitch + (positive)hx] & 0xffffffu) ==
                                                       (ui_role(UI_PRIMARY) & 0xffffffu));
                                 }
                         }
@@ -156652,7 +156652,7 @@ static b32 inputs_f_primary_paste(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click.at = 0;
+        inputs_target(in)->sel.click.at = 0;
         before = inputs_windows->clip_ask_serial[0];
         inputs_click(in, 0x112, inputs_x(in, 0), inputs_y(in), 0);
         asked = inputs_windows->clip_ask_serial[0] != before && inputs_windows->clip_ask_which[0] == WINDOWS_CLIP_PRIMARY;
@@ -156664,7 +156664,7 @@ static b32 inputs_f_click_caret(const struct inputs_input address_to in)
 {
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click.at = 0;
+        inputs_target(in)->sel.click.at = 0;
         inputs_click(in, 0x110, inputs_x(in, 2), inputs_y(in), 0);
         return inputs_caret(in) == 2 && inputs_target(in)->doc.selection_count == 1;
 }
@@ -156679,7 +156679,7 @@ static b32 inputs_f_drag_select(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click.at = 0;
+        inputs_target(in)->sel.click.at = 0;
         y = inputs_y(in);
         before = inputs_windows->clip_offer_serial[0];
         inputs_button(in, 0x110, true, inputs_x(in, 0), y, 0);
@@ -156700,7 +156700,7 @@ static b32 inputs_f_double_click(const struct inputs_input address_to in)
                 return true;
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click.at = 0;
+        inputs_target(in)->sel.click.at = 0;
         x = inputs_x(in, in->masked ? 2 : 5);
         inputs_click(in, 0x110, x, inputs_y(in), 0);
         inputs_click(in, 0x110, x, inputs_y(in), 0);
@@ -156713,7 +156713,7 @@ static b32 inputs_f_triple_click(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click.at = 0;
+        inputs_target(in)->sel.click.at = 0;
         for (int k = 0; k < 3; k++)
                 inputs_click(in, 0x110, inputs_x(in, 2), inputs_y(in), 0);
         return inputs_sel(in, 0, n);
@@ -156729,7 +156729,7 @@ static b32 inputs_f_right_menu(const struct inputs_input address_to in)
 
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click.at = 0;
+        inputs_target(in)->sel.click.at = 0;
         p->field = null;
         p->menu.count = 0;
         inputs_click(in, 0x111, inputs_x(in, 2), inputs_y(in), 0);
@@ -156817,7 +156817,7 @@ static b32 inputs_f_masked_no_copy(const struct inputs_input address_to in)
                 return true;
         inputs_begin(in);
         inputs_draw(in);
-        inputs_target(in)->click.at = 0;
+        inputs_target(in)->sel.click.at = 0;
         before = inputs_windows->clip_offer_serial[0];
         inputs_button(in, 0x110, true, inputs_x(in, 0), inputs_y(in), 0);
         inputs_move(in, inputs_x(in, n), inputs_y(in));

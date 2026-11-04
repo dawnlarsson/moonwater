@@ -3873,7 +3873,7 @@ static b32 settings_event(const struct window_event address_to event)
                         UI_TEXT_COMMIT for a plain value, UI_TEXT_CANCEL for a command): the press then goes on to the row it is on,
                         unless that is the row typed in, whose label a press only leaves.
                 */
-                if (settings_editing() >= 0 && (settings_edit_shown() || event->type != WINDOW_EVENT_MOTION || settings.edit.dragging) &&
+                if (settings_editing() >= 0 && (settings_edit_shown() || event->type != WINDOW_EVENT_MOTION || settings.edit.sel.dragging) &&
                     (asks = ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, x, y)))
                 {
                         b32 outside = event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL);
