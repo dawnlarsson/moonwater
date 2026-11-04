@@ -49,7 +49,7 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 | Class | Denial of service: an uninterruptible wait of the root compositor's only loop on a lock another process holds |
 | Attacker | a window's program, or whatever holds an end of one of the compositor's FIFOs (root today: they are 0600, MW-2026-020); the machine script for keys.fire |
 | Moonwater exposure window | from `c793b422` (2026-10-11 19:16 +02:00, the compositor and its doors) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_doors`) |
+| Fixed by | `7aa4762fe` (`src/canvas/compositor.c` `compositor_doors`) |
 
 **What it was.** Every read, write and open of a pipe takes the pipe's lock first, whatever O_NONBLOCK says, and poll takes
 none (the Wayland shim's clipboard had the same fault, MW-2026-113). A process with an end of a FIFO can keep that lock: a
@@ -88,7 +88,7 @@ the program), a change of the window protocol.
 | Class | Denial of service: SIGBUS in the root compositor from a file truncated under its mapping |
 | Attacker | whatever can write the table (root today, MW-2026-050) |
 | Moonwater exposure window | from `0b5d97442` (2026-10-14 13:51 +02:00, the memfd for a compositor with a card) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_table`) |
+| Fixed by | `4b64825fa` (`src/canvas/compositor.c` `compositor_table`) |
 
 **What it was.** A compositor with a card keeps its window table in a memfd sealed against shrinking and growing, linked at
 `/run/moonwater/windows`. A headless one (`-H`, a test's) kept it in a plain file there, which anything that can open it
@@ -112,7 +112,7 @@ gcc). Where no user namespace can be made the row says NOT RUN.
 | Class | Authorization decided from a field the requester writes (CWE-639 class): the clipboard's owner of a popup |
 | Attacker | a window's program; reachable by a non-root program only if the table is ever opened to one |
 | Moonwater exposure window | from `76914efe` (2026-10-30 16:03 +01:00, the clipboard) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_clip_root`) |
+| Fixed by | `f7890bb92` (`src/canvas/compositor.c` `compositor_clip_root`) |
 
 **What it was.** A paste is answered READY only to the window with the keys, or to a popup of it, after a press of the
 person's on that row. Which window a popup belongs to was read from the row's `popup_parent` in the table, which its program
@@ -136,7 +136,7 @@ popup parent, and is none, is refused a paste after its own press. With the old 
 | Class | Denial of service: the root compositor ended by a signal its own writes raise |
 | Attacker | none outside root: the machine script closing keys.fire between the compositor's open and write, or the sound server going while a volume is told |
 | Moonwater exposure window | for a build with `CONFIG_MOONWATER_WAYLAND=n`, from `c793b422` (2026-10-11 19:16 +02:00) to the fixing commit; a default build ignored it from `compositor_wl_start` |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_pipe_ignore`) |
+| Fixed by | `beb66f7f4` (`src/canvas/compositor.c` `compositor_pipe_ignore`) |
 
 **What it was.** A write to a pipe or a socket whose reader has gone raises SIGPIPE, which ends a process that does not
 ignore it. The compositor writes chords into keys.fire, which it opens only while the script reads it (the script can close
@@ -158,7 +158,7 @@ reader after `compositor_pipe_ignore` is answered EPIPE and lives. With the line
 | Class | Link following and a blocking open in a root process (CWE-59, CWE-833 class) |
 | Attacker | root, or whatever can write /root and /run/moonwater (nothing else can) |
 | Moonwater exposure window | from `c793b422` (2026-10-11 19:16 +02:00, the compositor) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `COMPOSITOR_SETTING_OPEN`, `compositor_script_say`) |
+| Fixed by | `86b44c0b3` (`src/canvas/compositor.c` `COMPOSITOR_SETTING_OPEN`, `compositor_script_say`) |
 
 **What it was.** The compositor reads its settings from files of /root (`compositor_word`, `compositor_text`, the
 keyboard's layout), the keys list and the sound server's page from /run, and writes chords into the machine script's FIFO
@@ -185,7 +185,7 @@ one (gcc).
 | Class | Out-of-bounds read on the stack (CWE-125): a count trusted from the second of two calls |
 | Attacker | (5) a physical peripheral: a DisplayPort MST dock or hub whose ports come and go between the compositor's two GETRESOURCES calls |
 | Moonwater exposure window | from `13d03ddf` (2026-10-26 19:24 +01:00, every screen of the card read) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_connected_read`) |
+| Fixed by | `7fc4c5eae` (`src/canvas/compositor.c` `compositor_connected_read`) |
 
 **What it was.** The card's connectors are asked for twice, as DRM wants: how many, then the list into room for that
 many (16 at most, a stack array). `drm_mode_getresources` writes no more ids than the room it is given and then answers
