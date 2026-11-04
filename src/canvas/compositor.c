@@ -14276,13 +14276,10 @@ static void compositor_wheel_flags(int v120, int horizontal, unsigned int flags)
         {
                 // The wheel over the tray's volume cell turns the volume, five percent a notch (120ths of one add up).
                 static int notch;
+                int turns = ui_notch_take(&notch, v120);
 
-                notch += v120;
-                if (notch >= 120 || notch <= -120)
-                {
-                        compositor_volume_step(COMPOSITOR_VOLUME_STEP * (notch / 120), 0);
-                        notch %= 120;
-                }
+                if (turns)
+                        compositor_volume_step(COMPOSITOR_VOLUME_STEP * turns, 0);
                 return;
         }
         if (row < 0)

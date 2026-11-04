@@ -145379,6 +145379,19 @@ static void burst_shape(const struct burst_run address_to run, long address_to p
         }
 }
 
+// ui_notch_take: 120ths add up across turns, a notch is taken whole and the rest kept, and a backward turn takes notches back.
+static fn check_kit_notch_take(void)
+{
+        int rest = 0;
+        int a = ui_notch_take(&rest, 60), b = ui_notch_take(&rest, 60), c = ui_notch_take(&rest, 119), d = ui_notch_take(&rest, 1);
+        int e = ui_notch_take(&rest, -240), f = ui_notch_take(&rest, -1), g = ui_notch_take(&rest, -119);
+
+        check("kit notch: 120ths add up across turns: 60 and 60 is one notch, 119 is none, one more is the next", a == 0 && b == 1 && c == 0 && d == 1);
+        check("kit notch: a notch is taken whole and the rest after it is none: 60 60 119 1 leaves nothing kept", rest == 0);
+        check("kit notch: a turn back takes notches back: -240 is two, and -1 is none yet, kept as the rest", e == -2 && f == 0);
+        check("kit notch: the rest carries on backward: -1 and -119 is the notch back, the rest is none", g == -1 && rest == 0);
+}
+
 static fn check_kit_wheel_burst(void)
 {
         static struct wheel_note notes[100];
@@ -155380,6 +155393,7 @@ b32 main()
         check_kit_confirm_repeat();
         check_kit_hand();
         check_kit_wheel_near_end();
+        check_kit_notch_take();
         check_kit_wheel_burst();
         check_terminal_wheel_curve();
         check_kit_turn();

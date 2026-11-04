@@ -114,4 +114,17 @@ static b64 ui_bezier_at(const struct ui_bezier address_to e, b64 x)
         return ui_bezier_y(e, t);
 }
 
+// The whole notches a turn of a wheel makes, its 120ths added to the rest kept from the turns before (the rest is what is left
+// under the last notch, for the next turn: a wheel that reports 120ths sends several turns to a notch). The compositor's
+// tray wheel and the kit's wheel share it; a turn back takes notches back.
+static inline int ui_notch_take(int *rest, int v120)
+{
+        int turns;
+
+        *rest += v120;
+        turns = *rest / 120;
+        *rest %= 120;
+        return turns;
+}
+
 #endif
