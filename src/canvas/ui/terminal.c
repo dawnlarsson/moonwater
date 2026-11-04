@@ -2228,9 +2228,6 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         a release leaves marked is the PRIMARY selection, Ctrl+Shift+C (or Ctrl+Insert) copies it, and Ctrl+Shift+V,
         Shift+Insert and the middle button paste, through term_paste.
 */
-#define TERMINAL_SELECT_CHARS 0
-#define TERMINAL_SELECT_WORDS 1
-#define TERMINAL_SELECT_LINES 2
 
 // The line and column of the ring under a cell of the grid (row and column on the screen), as terminal_build lays them.
 static b32 terminal_place_at(unsigned int row, unsigned int column, unsigned int address_to line_out, unsigned int address_to column_out)
@@ -2290,49 +2287,53 @@ static b32 terminal_word_cell(unsigned int line, unsigned int column)
         return c > 127 || byte_is_alpha((b8)c) || byte_is_digit((b8)c) || (c && memory_first_of((address_any) "_-./~:@%+=", (b8)c, 10));
 }
 
-// The selection's ends snapped to its kind: a word's edges, or a whole line, about the place the hand is at.
-static void terminal_select_snap(void)
+// A place in the grid's ring as one number in reading order (the line, then the column in it: a column is under the window's
+// stride, which is under TERMINAL_PLACE), so the kit's selection rule compares places as it compares text offsets.
+#define TERMINAL_PLACE 65536
+
+static p64 terminal_place(unsigned int line, unsigned int column)
 {
-        unsigned int anchor = terminal.select_press_column, active = terminal.select_active_column;
+        return (p64)line * TERMINAL_PLACE + column;
+}
 
-        if (terminal.select_kind == TERMINAL_SELECT_LINES)
+// The span a kind takes at a place: its characters (the place alone), its word (the cells of the word it is in, or the one cell
+// where there is no word), or its line (the whole line). The kit's kinds (ui_select_extend) decide the selection from these.
+static void terminal_select_span_of(int kind, unsigned int line, unsigned int column, p64 address_to start, p64 address_to finish)
+{
+        if (kind == UI_SELECT_LINES)
         {
-                b32 forward = terminal.select_press_line <= terminal.select_active_line;
-
-                terminal.select_anchor_line = terminal.select_press_line;
-                terminal.select_anchor_column = forward ? 0 : window->stride;
-                terminal.select_active_column = forward ? window->stride : 0;
+                *start = terminal_place(line, 0), *finish = terminal_place(line, window->stride);
                 return;
         }
-        if (terminal.select_kind == TERMINAL_SELECT_WORDS)
+        if (kind == UI_SELECT_WORDS)
         {
-                b32 forward = terminal.select_press_line < terminal.select_active_line ||
-                              (terminal.select_press_line == terminal.select_active_line && anchor <= active);
-                unsigned int from = forward ? anchor : active, line = forward ? terminal.select_press_line : terminal.select_active_line;
+                unsigned int from = column, to = column;
 
                 while (from && terminal_word_cell(line, from - 1) && terminal_word_cell(line, from))
                         from--;
-                if (forward)
-                        terminal.select_anchor_column = from;
-                else
-                        terminal.select_active_column = from;
-                line = forward ? terminal.select_active_line : terminal.select_press_line;
-                {
-                        unsigned int to = forward ? active : anchor;
-
-                        while (terminal_word_cell(line, to))
-                                to++;
-                        to += to == (forward ? active : anchor);
-                        if (forward)
-                                terminal.select_active_column = to;
-                        else
-                                terminal.select_anchor_column = to;
-                }
-                terminal.select_anchor_line = terminal.select_press_line;
+                while (terminal_word_cell(line, to))
+                        to++;
+                to += to == column;
+                *start = terminal_place(line, from), *finish = terminal_place(line, to);
                 return;
         }
-        terminal.select_anchor_line = terminal.select_press_line;
-        terminal.select_anchor_column = anchor;
+        *start = *finish = terminal_place(line, column);
+}
+
+// The selection's ends snapped to its kind: a word's edges, or a whole line, about the place the hand is at (ui_select_extend, the
+// rule the text widget's selection takes too).
+static void terminal_select_snap(void)
+{
+        p64 press_start, press_finish, start, finish, anchor, active;
+
+        terminal_select_span_of(terminal.select_kind, terminal.select_press_line, terminal.select_press_column, &press_start, &press_finish);
+        terminal_select_span_of(terminal.select_kind, terminal.select_active_line, terminal.select_active_column, &start, &finish);
+        ui_select_extend(terminal.select_kind, press_start, press_finish, start, finish,
+                         terminal_place(terminal.select_active_line, terminal.select_active_column), &anchor, &active);
+        terminal.select_anchor_line = (unsigned int)(anchor / TERMINAL_PLACE);
+        terminal.select_anchor_column = (unsigned int)(anchor % TERMINAL_PLACE);
+        terminal.select_active_line = (unsigned int)(active / TERMINAL_PLACE);
+        terminal.select_active_column = (unsigned int)(active % TERMINAL_PLACE);
 }
 
 // The marked cells of a row of the frame: the part of line from column from (used of it written) the selection covers.
@@ -2532,13 +2533,12 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                 }
                 else
                 {
-                        terminal.select_kind = terminal.clicks == 3 ? TERMINAL_SELECT_LINES : terminal.clicks == 2 ? TERMINAL_SELECT_WORDS
-                                                                                                                     : TERMINAL_SELECT_CHARS;
+                        terminal.select_kind = ui_select_kind(terminal.clicks);
                         terminal.select_box = alt && terminal.clicks == 1;
                         terminal.select_press_line = terminal.select_active_line = line;
                         terminal.select_press_column = terminal.select_active_column = at;
                         terminal_select_snap();
-                        terminal.selecting = terminal.select_kind != TERMINAL_SELECT_CHARS;
+                        terminal.selecting = terminal.select_kind != UI_SELECT_CHARS;
                 }
                 terminal.select_dragging = true;
                 terminal.select_edge.past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
@@ -2678,14 +2678,14 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
                 return true;
         terminal_place_at(row, column, &line, &at);
         terminal.select_box = false;
-        terminal.select_kind = TERMINAL_SELECT_WORDS;
+        terminal.select_kind = UI_SELECT_WORDS;
         terminal.select_press_line = terminal.select_active_line = line;
         terminal.select_press_column = terminal.select_active_column = at;
         terminal_select_snap();
         // The word is the selection; from here a drag moves its far end by cells, from the word's first cell.
         terminal.select_press_line = terminal.select_anchor_line;
         terminal.select_press_column = terminal.select_anchor_column;
-        terminal.select_kind = TERMINAL_SELECT_CHARS;
+        terminal.select_kind = UI_SELECT_CHARS;
         terminal.selecting = true;
         terminal.select_dragging = true;
         terminal.select_edge.past = 0;

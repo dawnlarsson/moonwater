@@ -12213,25 +12213,48 @@ static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, i
 
 // A drag's selection, taken at the point at: it grows by the drag's kind from where the drag began (drag_kind, drag_start and
 // drag_end). A word or a line is taken whole, back to the start of one before the drag's start and on to the end of one after.
+/*
+        A selection's kinds, for every selection the kit makes (a text widget's, the terminal's): a drag marks characters, a double
+        click words and a triple click lines, and what a drag goes over extends by the kind. ui_select_kind is the kind a click count
+        makes (the kit's count runs 1 to 3); ui_select_extend is the one rule of a drag. Given the press's span (press_start,
+        press_finish: the press's place for characters, its word, its line) and the span of the place the drag is at (start, finish:
+        the place itself for characters), the selection runs from the press span's far end to the place's near end, or from the
+        press span's near end to the place's far end, and a character drag's active end is the place itself.
+*/
+#define UI_SELECT_CHARS 1
+#define UI_SELECT_WORDS 2
+#define UI_SELECT_LINES 3
+
+static int ui_select_kind(int clicks)
+{
+        return clicks == 3 ? UI_SELECT_LINES : clicks == 2 ? UI_SELECT_WORDS : UI_SELECT_CHARS;
+}
+
+static void ui_select_extend(int kind, p64 press_start, p64 press_finish, p64 start, p64 finish, p64 at, p64 address_to anchor,
+                             p64 address_to active)
+{
+        if (start < press_start)
+                *anchor = press_finish, *active = start;
+        else
+                *anchor = press_start, *active = finish > press_finish ? finish : press_finish;
+        if (kind == UI_SELECT_CHARS)
+                *active = at;
+}
+
 static fn ui_text_extend(struct ui address_to ui, struct ui_text address_to t, p64 at, b32 reveal)
 {
         p64 start = at, finish = at;
         struct doc_selection address_to primary = &t->doc.selections[t->doc.primary];
 
-        if (t->drag_kind == 2)
+        if (t->drag_kind == UI_SELECT_WORDS)
                 doc_word_at(&t->doc, at, &start, &finish);
-        else if (t->drag_kind == 3)
+        else if (t->drag_kind == UI_SELECT_LINES)
         {
                 p64 line = doc_line_of(&t->doc, at);
 
                 start = doc_line_start(&t->doc, line), finish = doc_line_start(&t->doc, line + 1);
         }
-        if (start < t->drag_start)
-                primary->anchor = t->drag_end, primary->active = start;
-        else
-                primary->anchor = t->drag_start, primary->active = finish > t->drag_end ? finish : t->drag_end;
-        if (t->drag_kind == 1)
-                primary->active = at;
+        ui_select_extend(t->drag_kind, t->drag_start, t->drag_end, start, finish, at, &primary->anchor, &primary->active);
         doc_normalize(&t->doc);
         if (reveal)
                 ui_text_reveal(ui, t);
@@ -12852,7 +12875,7 @@ static p32 ui_text_pick(struct ui address_to ui, struct ui_text address_to t, p6
         doc_select_set(&t->doc, start, finish);
         t->finger = UI_TEXT_FINGER_SELECT, t->holding = holding, t->dragging = true, t->drag_box = false;
         t->handles = true, t->bar = false, t->grab.press.down = false;
-        t->drag_kind = clicks == 3 ? 3 : 2, t->drag_start = start, t->drag_end = finish;
+        t->drag_kind = ui_select_kind(clicks), t->drag_start = start, t->drag_end = finish;
         ui_text_reveal(ui, t);
         ui_text_wake(t);
         return UI_TEXT_MOVED;

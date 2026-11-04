@@ -122289,6 +122289,26 @@ static void check_kit_clip_chord(void)
           !ui_clip_read(null, &answer, true, &bytes, &length) && bytes == null && length == 0);
 }
 
+/*
+        The kit's selection rule (ui_select_extend, the text widget's and the terminal's): a double click is a word and a triple a line, a
+        drag by words from a word to a later one takes both words whole, one to an earlier word takes it from the press word's far end
+        back to the place's word start, and a drag by characters takes the place it is at.
+*/
+static void check_kit_select_rule(void)
+{
+    p64 anchor = 0, active = 0;
+
+    check("kit: a double click selects words and a triple click lines, a single click characters",
+          ui_select_kind(1) == UI_SELECT_CHARS && ui_select_kind(2) == UI_SELECT_WORDS && ui_select_kind(3) == UI_SELECT_LINES);
+    /* press on the word 10..14, drag to the word 20..25 (after it) and to 2..6 (before it). */
+    ui_select_extend(UI_SELECT_WORDS, 10, 14, 20, 25, 22, &anchor, &active);
+    check("kit: a word drag forward takes the press word whole and the place's word to its end", anchor == 10 && active == 25);
+    ui_select_extend(UI_SELECT_WORDS, 10, 14, 2, 6, 3, &anchor, &active);
+    check("kit: a word drag back takes the press word's far end and the place's word start", anchor == 14 && active == 2);
+    ui_select_extend(UI_SELECT_CHARS, 10, 10, 12, 12, 12, &anchor, &active);
+    check("kit: a character drag's active end is the place", anchor == 10 && active == 12);
+}
+
 static void check_edge_steps(void)
 {
     struct ui_edge edge = {-25, 0, 0};
@@ -157093,6 +157113,7 @@ b32 main()
         check_edge_steps();
         check_kit_zoom_key();
         check_kit_clip_chord();
+        check_kit_select_rule();
         check_take();
         check_land();
         check_glass();
