@@ -173837,6 +173837,48 @@ static void xw_test_get_property(void)
         XWCHECK(xwm_enc_get_property(out, 23, 0, 0x00400001, 39, 31, 0, 256) == XWM_ERR_SPACE, "GetProperty into 23 bytes is refused");
 }
 
+/* QueryExtension and the Composite requests, with the bytes written out by hand: "Composite" is nine bytes, padded to twelve,
+   so the request is 20 bytes, five units. Composite's major opcode is 139 here (any value from 128 to 255 is one). */
+static void xw_test_extensions(void)
+{
+        static const unsigned char query[20] = {0x62, 0x00, 0x05, 0x00, 0x09, 0x00, 0x00, 0x00,
+                'C', 'o', 'm', 'p', 'o', 's', 'i', 't', 'e', 0x00, 0x00, 0x00};
+        static const unsigned char version[12] = {0x8b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00};
+        static const unsigned char redirect[12] = {0x8b, 0x02, 0x03, 0x00, 0x01, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x00};
+        static const unsigned char reply[32] = {0x01, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x01, 0x8b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        unsigned char out[40], bad[32];
+        struct xwm_extension_reply r;
+        long n;
+
+        n = xwm_enc_query_extension(out, sizeof out, (const unsigned char *)"Composite", 9);
+        XWCHECK(n == 20 && xw_same(out, query, 20), "QueryExtension Composite: 20 bytes, length 5 units, the name at 8");
+        XWCHECK(xwm_enc_query_extension(out, 19, (const unsigned char *)"Composite", 9) == XWM_ERR_SPACE, "QueryExtension into 19 bytes is refused");
+        XWCHECK(xwm_enc_query_extension(out, sizeof out, 0, 0) == XWM_ERR_ARG, "QueryExtension with no name is refused");
+        XWCHECK(xwm_enc_query_extension(out, sizeof out, (const unsigned char *)"Composite", 65) == XWM_ERR_CAP, "a QueryExtension name over the cap is refused");
+        n = xwm_enc_composite_query_version(out, sizeof out, 139, 0, 4);
+        XWCHECK(n == 12 && xw_same(out, version, 12), "Composite QueryVersion 0.4: minor 0, client 0.4, twelve bytes");
+        XWCHECK(xwm_enc_composite_query_version(out, sizeof out, 127, 0, 4) == XWM_ERR_ARG, "a core opcode is no Composite opcode");
+        XWCHECK(xwm_enc_composite_query_version(out, 11, 139, 0, 4) == XWM_ERR_SPACE, "QueryVersion into 11 bytes is refused");
+        n = xwm_enc_composite_redirect_subwindows(out, sizeof out, 139, 0x00200001, XWM_REDIRECT_MANUAL);
+        XWCHECK(n == 12 && xw_same(out, redirect, 12), "Composite RedirectSubwindows of the root, Manual: minor 2, the window at 4, update at 8");
+        XWCHECK(xwm_enc_composite_redirect_subwindows(out, sizeof out, 139, 0x00200001, 2) == XWM_ERR_ARG, "an update that is neither Automatic nor Manual is refused");
+        XWCHECK(xwm_enc_composite_redirect_subwindows(out, sizeof out, 0, 0x00200001, 1) == XWM_ERR_ARG, "a zero opcode is no extension opcode");
+        XWCHECK(xwm_parse_extension_reply(reply, 32, &r) == XWM_OK && r.sequence == 5 && r.present == 1 && r.major_opcode == 139,
+                "QueryExtension reply: present, the major opcode 139, the sequence 5");
+        XWCHECK(xwm_parse_extension_reply(reply, 31, &r) == XWM_ERR_SHORT, "an extension reply of 31 bytes is short");
+        memcpy(bad, reply, 32);
+        bad[8] = 2;
+        XWCHECK(xwm_parse_extension_reply(bad, 32, &r) == XWM_ERR_ARG, "a present flag that is neither 0 nor 1 is refused");
+        memcpy(bad, reply, 32);
+        bad[4] = 1;
+        XWCHECK(xwm_parse_extension_reply(bad, 32, &r) == XWM_ERR_LENGTH, "an extension reply whose length is not zero units is refused");
+        memcpy(bad, reply, 32);
+        bad[0] = 0;
+        XWCHECK(xwm_parse_extension_reply(bad, 32, &r) == XWM_ERR_TYPE, "an error is not an extension reply");
+}
+
 static void xw_test_change_property(void)
 {
         static const unsigned char ab[28] = {0x12, 0x00, 0x07, 0x00, 0x01, 0x00, 0x40, 0x00, 0x27, 0x00, 0x00, 0x00,
@@ -174599,6 +174641,7 @@ int main(void)
         xw_test_intern_atom();
         xw_test_get_property();
         xw_test_change_property();
+        xw_test_extensions();
         xw_test_select_events();
         xw_test_create_window();
         xw_test_window_ops();

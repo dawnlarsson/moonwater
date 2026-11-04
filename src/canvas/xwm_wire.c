@@ -109,6 +109,15 @@
 #define XWM_OP_SEND_EVENT 25
 #define XWM_OP_SET_INPUT_FOCUS 42
 
+/* QueryExtension and the Composite extension's requests: the major opcode of an extension is the one QueryExtension names. */
+#define XWM_OP_QUERY_EXTENSION 98
+#define XWM_EXT_NAME_MAX 64          /* the bytes of an extension's name */
+#define XWM_EXT_MAJOR_FIRST 128      /* an extension's major opcode is at least this: the core's are below it */
+#define XWM_COMPOSITE_QUERY_VERSION 0
+#define XWM_COMPOSITE_REDIRECT_SUBWINDOWS 2
+#define XWM_REDIRECT_AUTOMATIC 0
+#define XWM_REDIRECT_MANUAL 1
+
 /* The setup reply's status: the first byte. */
 #define XWM_SETUP_FAILED 0
 #define XWM_SETUP_SUCCESS 1
@@ -260,6 +269,11 @@ struct xwm_error
 struct xwm_atom_reply
 {
         unsigned int sequence, atom;
+};
+
+struct xwm_extension_reply
+{
+        unsigned int sequence, present, major_opcode, first_event, first_error;
 };
 
 /* The value is a pointer into the buffer the caller passed, which the parser checked: it is valid while that buffer is. */
@@ -553,6 +567,60 @@ XWM_API long xwm_enc_set_input_focus(unsigned char *out, unsigned long cap, unsi
         out[1] = (unsigned char)revert_to;
         xwm_put32(out + 4, focus);
         xwm_put32(out + 8, time);
+        return n;
+}
+
+/* QueryExtension: the name's bytes, padded to a unit. The reply says whether the extension is there and its opcodes. */
+XWM_API long xwm_enc_query_extension(unsigned char *out, unsigned long cap, const unsigned char *name, unsigned long name_len)
+{
+        long n;
+
+        if (!name || name_len == 0)
+                return XWM_ERR_ARG;
+        if (name_len > XWM_EXT_NAME_MAX)
+                return XWM_ERR_CAP;
+        n = xwm_request_start(out, cap, XWM_REQUEST_SHORT + xwm_pad4(name_len), XWM_OP_QUERY_EXTENSION);
+        if (n < 0)
+                return n;
+        xwm_put16(out + 4, (unsigned int)name_len);
+        for (unsigned long i = 0; i < name_len; i++)
+                out[XWM_REQUEST_SHORT + i] = name[i];
+        return n;
+}
+
+/* Composite QueryVersion: twelve bytes, the client's version (the protocol's answer is the one the server can give). The major
+   opcode is the one QueryExtension gave; an extension's opcode is at least XWM_EXT_MAJOR_FIRST. */
+XWM_API long xwm_enc_composite_query_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int client_major, unsigned int client_minor)
+{
+        long n;
+
+        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 12, major_opcode);
+        if (n < 0)
+                return n;
+        out[1] = XWM_COMPOSITE_QUERY_VERSION;
+        xwm_put32(out + 4, client_major);
+        xwm_put32(out + 8, client_minor);
+        return n;
+}
+
+/* Composite RedirectSubwindows: the window's children are redirected to offscreen pixmaps, Manual (the window manager composes
+   them) or Automatic. Twelve bytes. */
+XWM_API long xwm_enc_composite_redirect_subwindows(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int window, unsigned int update)
+{
+        long n;
+
+        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255)
+                return XWM_ERR_ARG;
+        if (update != XWM_REDIRECT_AUTOMATIC && update != XWM_REDIRECT_MANUAL)
+                return XWM_ERR_ARG;
+        n = xwm_request_start(out, cap, 12, major_opcode);
+        if (n < 0)
+                return n;
+        out[1] = XWM_COMPOSITE_REDIRECT_SUBWINDOWS;
+        xwm_put32(out + 4, window);
+        out[8] = (unsigned char)update;
         return n;
 }
 
@@ -907,6 +975,23 @@ XWM_API int xwm_parse_attributes_reply(const unsigned char *buf, unsigned long l
         out->all_masks = xwm_get32(buf + 32);
         out->your_mask = xwm_get32(buf + 36);
         out->do_not_propagate = xwm_get16(buf + 40);
+        return XWM_OK;
+}
+
+/* A QueryExtension reply: 32 bytes, with no more. present is 0 or 1; the opcodes are the extension's (zero when it is absent). */
+XWM_API int xwm_parse_extension_reply(const unsigned char *buf, unsigned long len, struct xwm_extension_reply *out)
+{
+        if (!buf || !out)
+                return XWM_ERR_ARG;
+        if (xwm_reply_fits(buf, len, 0) != XWM_OK)
+                return xwm_reply_fits(buf, len, 0);
+        if (buf[8] > 1)
+                return XWM_ERR_ARG;
+        out->sequence = xwm_get16(buf + 2);
+        out->present = buf[8];
+        out->major_opcode = buf[9];
+        out->first_event = buf[10];
+        out->first_error = buf[11];
         return XWM_OK;
 }
 
