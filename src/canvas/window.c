@@ -911,6 +911,7 @@ struct windows
         unsigned int list_state[WINDOWS];
         unsigned int list_seen[WINDOWS];
         unsigned int list_refused;
+        unsigned int list_why[16]; // the compositor's: the lists drawn (0) and the lists refused by reason (compositor_list_why), for moonwater debug
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u

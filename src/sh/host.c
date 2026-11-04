@@ -22296,7 +22296,21 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 for (unsigned int row = 0; row < WINDOWS; row++)
                         if (table->pid[row] && table->list_state[row] == 1)
                                 from_lists++;
-                host_say(log, "  lists           %p windows drawn from their lists, %p refused\n", (positive)from_lists, (positive)table->list_refused);
+                host_say(log, "  lists           %p windows drawn from their lists, %p refused; list mode %s\n", (positive)from_lists, (positive)table->list_refused,
+                         table->list_mode ? (string_address) "on" : (string_address) "off (touch /run/moonwater/lists)");
+                if (table->list_why[0])
+                        host_say(log, "  lists drawn     %p frames\n", (positive)table->list_why[0]);
+                for (unsigned int why = 1; why < 9; why++)
+                        if (table->list_why[why])
+                                host_say(log, "  list refused    %p, %s\n", (positive)table->list_why[why],
+                                         why == 1 ? (string_address) "the header is not valid (size, magic, version)" :
+                                         why == 2 ? (string_address) "a partial list after a frame painted in pixels" :
+                                         why == 3 ? (string_address) "no card to draw it (off, away, given up, or a job running)" :
+                                         why == 4 ? (string_address) "the list does not open as the window's picture" :
+                                         why == 5 ? (string_address) "an op is not one a window is made of, or reaches outside" :
+                                         why == 6 ? (string_address) "the program published while the ops were read" :
+                                         why == 7 ? (string_address) "the cover bytes or the picture could not be mapped" :
+                                                    (string_address) "the card did not finish the scene");
         }
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");

@@ -982,6 +982,24 @@ static void compositor_draw(const struct compositor_target *t, const struct comp
         compositor_draw_with(t, frame, compositor_radius(frame));
 }
 
+// Why a window's list was not drawn by the card (counted, and shown by moonwater debug): the program then paints that frame in pixels. The card sets the
+// reason (compositor_list_why) before it answers 0.
+enum compositor_list_why
+{
+        COMPOSITOR_LIST_DRAWN,
+        COMPOSITOR_LIST_INVALID, // window_list_valid refused the header (magic, version, size, torn)
+        COMPOSITOR_LIST_PARTIAL, // a list that is not the whole picture after a frame the program painted in pixels
+        COMPOSITOR_LIST_CARD,    // no card to draw it: the setting off, the card away or given up, not started, or a job still running
+        COMPOSITOR_LIST_OPEN,    // the list could not be opened as the picture's (its size is not the window's, a publish was writing it)
+        COMPOSITOR_LIST_CUT,     // an op of the list is not one a window is made of, or reaches outside what it may
+        COMPOSITOR_LIST_TORN,    // the program published a new generation while the ops were read
+        COMPOSITOR_LIST_MAPS,    // the cover bytes or the picture could not be mapped for the card
+        COMPOSITOR_LIST_JOB,     // the card did not finish the scene
+        COMPOSITOR_LIST_COUNT
+};
+static enum compositor_list_why compositor_list_why;
+static unsigned int compositor_list_counts[COMPOSITOR_LIST_COUNT];
+
 #ifdef MOONWATER_GPU_C
 /*
         The GPU's compose (src/canvas/gpu.c): frames as the records of its scene, which draws them in order as compositor_draw does -- a frame's
@@ -7789,12 +7807,18 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         int x0, y0, x1, y1;
 
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
-        if (row < 0 || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3) || !compositor_gpu || compositor_gpu_state.dead || !compositor_gpu_up() ||
-            !gpu_idle() || ui_draw_list_open(list, list_bytes, &view) != 1 || (int)view.width != width || (int)view.height != height)
-                return 0;
+        compositor_list_why = COMPOSITOR_LIST_DRAWN;
+        if (row < 0 || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3))
+                return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
+        if (!compositor_gpu || compositor_gpu_state.dead || !compositor_gpu_up() || !gpu_idle())
+                return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
+        if (ui_draw_list_open(list, list_bytes, &view) != 1 || (int)view.width != width || (int)view.height != height)
+                return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
         made = compositor_gpu_list_ops(view.ops, view.count, view.cover_at, view.cover_used, list_bytes, width, height, slot, g->ops, g->room);
-        if (made == COMPOSITOR_GPU_LIST_REFUSED || !ui_draw_list_still(list, &view)) // the generation moved under the read: the next present reads the new one
-                return 0;
+        if (made == COMPOSITOR_GPU_LIST_REFUSED)
+                return compositor_list_why = COMPOSITOR_LIST_CUT, 0;
+        if (!ui_draw_list_still(list, &view)) // the generation moved under the read: the next present reads the new one
+                return compositor_list_why = COMPOSITOR_LIST_TORN, 0;
         x0 = view.x0 < 0 ? 0 : view.x0 > width ? width : view.x0, y0 = view.y0 < 0 ? 0 : view.y0 > height ? height : view.y0;
         x1 = view.x1 < 0 ? 0 : view.x1 > width ? width : view.x1, y1 = view.y1 < 0 ? 0 : view.y1 > height ? height : view.y1;
         if (!made || x1 <= x0 || y1 <= y0)
@@ -7803,21 +7827,21 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         {
                 cover_from = (positive)list + view.cover_at - COMPOSITOR_GPU_LIST_REACH, cover_to = (positive)list + view.cover_at + view.cover_used + COMPOSITOR_GPU_LIST_REACH;
                 if (!gpu_map((const void *)cover_from, cover_to - cover_from) || !(cover_va = gpu_va_bytes((const void *)cover_from, cover_to - cover_from)))
-                        return 0;
+                        return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
                 bases[slot] = cover_va - (view.cover_at - COMPOSITOR_GPU_LIST_REACH);
         }
         bytes = 4 * ((positive)pitch * (positive)(height - 1) + w4);
         if (!(picture_va = gpu_va_written(picture, bytes)))
         {
                 if (!gpu_map_written(picture, bytes) || !(picture_va = gpu_va_written(picture, bytes)))
-                        return 0;
+                        return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
         }
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, made, COMPOSITOR_GPU_BINS_AT, picture_va, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x0, (unsigned int)y0,
                        (unsigned int)x1, (unsigned int)y1))
         {
                 if (++compositor_gpu_state.failures >= 3)
                         compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG;
-                return 0;
+                return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
         compositor_gpu_state.failures = 0;
         damage[0] = x0, damage[1] = y0, damage[2] = x1, damage[3] = y1;
@@ -12575,16 +12599,24 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
                 struct ui_draw_view view;
 
                 if (ui_draw_list_open(list, WINDOW_LIST_BYTES, &view) != 1 || view.x0 > 0 || view.y0 > 0 || view.x1 < (int)width || view.y1 < (int)height)
+                {
+                        compositor_list_why = COMPOSITOR_LIST_PARTIAL;
                         goto refused;
+                }
         }
+        compositor_list_why = COMPOSITOR_LIST_INVALID;
         if (window_list_valid(list, (int)width, (int)height) &&
             compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
         {
+                compositor_list_counts[COMPOSITOR_LIST_DRAWN]++;
+                table->list_why[COMPOSITOR_LIST_DRAWN] = compositor_list_counts[COMPOSITOR_LIST_DRAWN];
                 compositor_listed[row] = 1;
                 __atomic_store_n(&table->list_state[row], 1u, __ATOMIC_RELEASE);
                 return 1;
         }
 refused:
+        compositor_list_counts[compositor_list_why]++;
+        table->list_why[compositor_list_why] = compositor_list_counts[compositor_list_why];
         compositor_listed[row] = 0;
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         __atomic_store_n(&table->list_state[row], 2u, __ATOMIC_RELEASE);
