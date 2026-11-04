@@ -63,8 +63,8 @@ session()
         napps=0
         for app in $APPS; do
                 case $app in
-                terminal) # the launcher's words: its mono face and bold, then the program (a shell that prints a long output, so the window scrolls)
-                        bin/terminal -f "$fonts_mono" -b "$fonts_bold" -x /bin/sh -c "seq 1 400; sleep 900" > "$work/$mode.$app.log" 2>&1 & ;;
+                terminal) # the launcher's words: its mono face and bold, then the program (an interactive shell on the pty: the input it is sent runs there)
+                        bin/terminal -f "$fonts_mono" -b "$fonts_bold" -x /bin/sh > "$work/$mode.$app.log" 2>&1 & ;;
                 editor) bin/editor ${LANE_EDITOR_FILE:-} > "$work/$mode.$app.log" 2>&1 & ;;
                 *) bin/$app > "$work/$mode.$app.log" 2>&1 & ;;
                 esac
