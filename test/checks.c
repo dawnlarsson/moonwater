@@ -148339,6 +148339,13 @@ static fn mixer_fixture_streams(void)
         page->inputs = 1, page->records = 4;
 }
 
+// A poll of the mixer's page at a time the row drives: the kit's clock is that time too (ui_kit.now, ui_kit.test_clock), which the strips read.
+static b32 check_mixer_poll_at(b64 when)
+{
+        ui_kit.now = ui_kit.test_clock = when;
+        return mixer_poll((b64)when);
+}
+
 static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixels)
 {
         struct window_event e;
@@ -148367,7 +148374,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
 
         // The listing: the device first, then one strip a program, by the name it gave, the streams of one as one, and one that gave none by its connection.
         mixer_fixture_streams();
-        check("mixer: a page that is the server's is read whole", mixer_poll(mixer_t0) && mixer.have);
+        check("mixer: a page that is the server's is read whole", check_mixer_poll_at(mixer_t0) && mixer.have);
         check("mixer: the device, then Firefox (two streams), mpv and the program that gave no name: four strips", s->count == 4);
         check("mixer: the device is a strip of its own, named as the person is shown it, at 80 percent",
               s->item[0].master && string_equals((string_address)s->item[0].name, (string_address) "Speakers (Realtek)") && s->item[0].percent == 80 && !s->item[0].muted);
@@ -148385,18 +148392,18 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 b64 fed = s->item[1].level[0].at;
 
                 check("mixer: a page that has not moved lists nothing again (the meters are not fed twice), and one that has does",
-                      !mixer_poll(mixer_t0 + 16000000ll) && s->item[1].level[0].at == fed && (mixer_fixture_page.seq += 2, mixer_poll(mixer_t0 + 32000000ll)) &&
+                      !check_mixer_poll_at(mixer_t0 + 16000000ll) && s->item[1].level[0].at == fed && (mixer_fixture_page.seq += 2, check_mixer_poll_at(mixer_t0 + 32000000ll)) &&
                           s->item[1].level[0].at == mixer_t0 + 32000000ll);
         }
         // Two streams of one name from two users are two programs.
         mixer_fixture_page.stream[3] = (struct audio_state_stream){20, 8, 65536, AUDIO_STATE_PLAYING, 500, 500, 102, 1001, "Firefox", "Another user's", ""};
         mixer_fixture_page.seq += 2;
-        mixer_poll(mixer_t0 + 48000000ll);
+        check_mixer_poll_at(mixer_t0 + 48000000ll);
         check("mixer: the same name from another user is another program", s->count == 4 && string_equals((string_address)s->item[3].name, (string_address) "Firefox") &&
                                                                                      mixer.big->group[2].count == 1 && mixer.big->group[2].member[0] == 20);
         mixer_fixture_streams();
         mixer_fixture_page.seq += 4;
-        mixer_poll(mixer_t0 + 64000000ll);
+        check_mixer_poll_at(mixer_t0 + 64000000ll);
 
         // What a change sends: the device's volume and mute for the sink by its name, a program's for each of its streams, once for a number of events.
         mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
@@ -148463,7 +148470,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
 
         // A page that is not the server's, or none: the window says so.
         mixer_fixture_page.magic = 0;
-        mixer_poll(mixer_t0 + 500000000ll);
+        check_mixer_poll_at(mixer_t0 + 500000000ll);
         check("mixer: a page that is not the server's has no strips", !mixer.have && s->count == 0);
         for (int k = 0; k < 640 * 400; k++)
                 pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
@@ -148497,7 +148504,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         for (int k = 0; k < AUDIO_STATE_STREAMS; k++)
                 mixer_fixture_page.stream[k].index = 0xffffffffu;
         mixer_fixture_page.seq += 2;
-        mixer_poll(mixer_t0 + 600000000ll);
+        check_mixer_poll_at(mixer_t0 + 600000000ll);
         for (int k = 0; k < 640 * 400; k++)
                 pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
         mixer_draw(pixels);
@@ -148519,7 +148526,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         // The picture of the device's strip at 80 percent: the slider's fill is the accent up to the knob, which is four fifths up its travel.
         mixer_fixture_streams();
         mixer_fixture_page.seq += 2;
-        mixer_poll(mixer_t0 + 700000000ll);
+        check_mixer_poll_at(mixer_t0 + 700000000ll);
         for (int k = 0; k < 640 * 400; k++)
                 pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
         ui_kit.now = mixer_t0 + 700000000ll;
@@ -148551,7 +148558,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_streams();
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false; // listed again whatever the page's number was
-                mixer_poll(mixer_t0 + 800000000ll);
+                check_mixer_poll_at(mixer_t0 + 800000000ll);
                 check("mixer popup: the device's strip alone, with no program in it", s->count == 1 && s->item[0].master && mixer.big->copy.stream[0].index != MIXER_NONE);
                 for (int k = 0; k < 640 * 400; k++)
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
@@ -148618,7 +148625,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         mixer_fixture_streams();
                         mixer_fixture_page.seq += 2;
                         mixer.listed = false;
-                        mixer_poll(mixer_t0 + 850000000ll);
+                        check_mixer_poll_at(mixer_t0 + 850000000ll);
                         ui_kit.now = mixer_t0 + 850000000ll;
                         for (int k = 0; k < 640 * 400; k++)
                                 pixels[k] = 0;
@@ -148679,7 +148686,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_streams();
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
-                mixer_poll(mixer_t0 + 900000000ll);
+                check_mixer_poll_at(mixer_t0 + 900000000ll);
                 mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive, mixer_fake_now};
                 mixer.big->ctl.open = 1;
                 mixer.connected = true;
@@ -148786,7 +148793,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_page.capture = 0;
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
-                mixer_poll(mixer_t0 + 1000000000ll);
+                check_mixer_poll_at(mixer_t0 + 1000000000ll);
                 check("mixer recording off: no strips, and the Allow button has the keys", mixer.capture_off && s->count == 0 && mixer.allow.keys == 1);
                 for (int k = 0; k < 640 * 400; k++)
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
@@ -148827,7 +148834,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         mixer_fixture_page.record[k].index = 0xffffffffu;
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
-                mixer_poll(mixer_t0 + 1100000000ll);
+                check_mixer_poll_at(mixer_t0 + 1100000000ll);
                 for (int k = 0; k < 640 * 400; k++)
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 mixer_draw(pixels);
@@ -148848,7 +148855,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                         mixer_fixture_page.record[k].index = 0xffffffffu;
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
-                mixer_poll(mixer_t0 + 1200000000ll);
+                check_mixer_poll_at(mixer_t0 + 1200000000ll);
                 for (int k = 0; k < 640 * 400; k++)
                         pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
                 mixer_draw(pixels);
@@ -148868,7 +148875,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_streams();
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
-                mixer_poll(mixer_t0 + 1300000000ll);
+                check_mixer_poll_at(mixer_t0 + 1300000000ll);
                 mixer.quick = true;
                 mixer.width = ui_px(&mixer.ui, MIXER_QUICK_WIDTH(3)), mixer.height = ui_px(&mixer.ui, MIXER_QUICK_H);
                 mixer.row.keys = 1;
@@ -148896,31 +148903,31 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer_fixture_page.output_why = AUDIO_STATE_WHY_NOTHING;
                 mixer_fixture_page.seq += 2;
                 mixer.listed = false;
-                mixer_poll(mixer_t0 + 1400000000ll);
+                check_mixer_poll_at(mixer_t0 + 1400000000ll);
                 check("mixer: an output with nothing plugged into it is a dim strip that says so, with the reason it plays; the programs say nothing",
                       s->item[0].dim && string_equals((string_address)s->item[0].note[0], (string_address)WORDS(mixer_unplugged)) &&
                           string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_nothing)) && !s->item[1].dim && !s->item[1].note[0][0] && s->noted);
                 mixer_fixture_page.device_list[0].flags = AUDIO_STATE_DEVICE_ACTIVE;
                 mixer_fixture_page.output_why = AUDIO_STATE_WHY_DISPLAY;
                 mixer_fixture_page.seq += 2;
-                mixer_poll(mixer_t0 + 1500000000ll);
+                check_mixer_poll_at(mixer_t0 + 1500000000ll);
                 check("mixer: one that is plugged in is not dim and says only why it plays", !s->item[0].dim && !s->item[0].note[0][0] &&
                                                                                                   string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_display)));
                 mixer_fixture_page.output_state = AUDIO_STATE_OUT_CLOCK;
                 mixer_fixture_page.seq += 2;
-                mixer_poll(mixer_t0 + 1600000000ll);
+                check_mixer_poll_at(mixer_t0 + 1600000000ll);
                 check("mixer: a server that plays to a clock has picked nothing, and says nothing of it", !s->item[0].note[1][0] && !s->noted);
                 mixer_fixture_page.output_state = 0;
                 for (unsigned int why = 1; why <= 6; why++)
                 {
                         mixer_fixture_page.output_why = why;
                         mixer_fixture_page.seq += 2;
-                        mixer_poll(mixer_t0 + 1700000000ll + (b64)why * 1000000ll);
+                        check_mixer_poll_at(mixer_t0 + 1700000000ll + (b64)why * 1000000ll);
                         check("mixer: each reason it plays is a line of its own", s->item[0].note[1][0] != 0 && (why == 1 || !string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_chosen))));
                 }
                 mixer_fixture_page.output_why = 0;
                 mixer_fixture_page.seq += 2;
-                mixer_poll(mixer_t0 + 1800000000ll);
+                check_mixer_poll_at(mixer_t0 + 1800000000ll);
                 check("mixer: and none known is none said", !s->item[0].note[1][0]);
         }
 
@@ -148952,6 +148959,7 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         mixer_fixture_page.seq |= 1;
         check("mixer: a page that is being written is not read (the sequence is odd at every try)", !audio_state_read(&mixer_fixture_page, &mixer.big->copy));
         mixer_fixture_page.seq &= ~1u;
+        ui_kit.test_clock = 0;
 }
 
 #endif
@@ -149004,25 +149012,25 @@ static fn check_kit_strips(void)
                 b32 attack, fall, holds, then_falls, floor_ok, again;
 
                 memory_zero(&l, sizeof(l));
-                ui_level_feed(&l, 16384, 1000000000ll);
-                ui_level_now(&l, 1000000000ll, &bar, &line);
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll), ui_level_feed(&l, 16384));
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll), ui_level_now(&l, &bar, &line));
                 attack = bar == top && line == top;
-                ui_level_now(&l, 1000000000ll + 750000000ll, &bar, &line);
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 750000000ll), ui_level_now(&l, &bar, &line));
                 fall = bar > top - UI_Q2(51) && bar < top - UI_Q2(49);
                 holds = line == top;
-                ui_level_now(&l, 1000000000ll + 1000000000ll + 750000000ll, &bar, &line);
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 1000000000ll + 750000000ll), ui_level_now(&l, &bar, &line));
                 then_falls = line > top - UI_Q2(51) && line < top - UI_Q2(49) && bar == 0;
-                ui_level_now(&l, 1000000000ll + 4000000000ll, &bar, &line);
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 4000000000ll), ui_level_now(&l, &bar, &line));
                 floor_ok = bar == 0 && line == 0;
                 // A quieter peak while the line holds leaves it; a louder one raises both and starts its wait again.
-                ui_level_feed(&l, 100, 1000000000ll + 4100000000ll);
-                ui_level_feed(&l, 4096, 1000000000ll + 4200000000ll);
-                ui_level_now(&l, 1000000000ll + 4200000000ll + 900000000ll, &bar, &line);
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 4100000000ll), ui_level_feed(&l, 100));
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 4200000000ll), ui_level_feed(&l, 4096));
+                (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 4200000000ll + 900000000ll), ui_level_now(&l, &bar, &line));
                 again = line == ui_level_of(4096) && bar < ui_level_of(4096);
                 check("kit strips: the bar rises at once, falls over 1.5 seconds and is gone", attack && fall && floor_ok);
                 check("kit strips: the line holds a second, then falls as the bar does, and a new peak holds it again", holds && then_falls && again);
                 check("kit strips: a meter that shows nothing is not moving, and one that shows something is",
-                      !ui_level_moving(&l, 1000000000ll + 20000000000ll) && ui_level_moving(&l, 1000000000ll + 4200000000ll + 100000000ll));
+                      !(ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 20000000000ll), ui_level_moving(&l)) && (ui_kit.now = ui_kit.test_clock = (b64)(1000000000ll + 4200000000ll + 100000000ll), ui_level_moving(&l)));
         }
 
         // The vertical slider's value under a point: the knob's centre, in the box less the knob, held to the ends and to the step.

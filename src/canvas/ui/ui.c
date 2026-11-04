@@ -8263,8 +8263,9 @@ static b64 ui_level_of(unsigned int peak)
 }
 
 // What the meter shows at now: the bar after its fall, and the line after its wait and its fall, never under the bar.
-static fn ui_level_now(const struct ui_level address_to l, b64 now, b64 address_to shown, b64 address_to hold)
+static fn ui_level_now(const struct ui_level address_to l, b64 address_to shown, b64 address_to hold)
 {
+        b64 now = (b64)ui_kit_clock();
         b64 bar = l->shown - ui_progress(now - l->at, UI_LEVEL_FALL_NS), line;
 
         bar = bar < 0 ? 0 : bar;
@@ -8274,11 +8275,12 @@ static fn ui_level_now(const struct ui_level address_to l, b64 now, b64 address_
 }
 
 // A peak seen at now.
-static fn ui_level_feed(struct ui_level address_to l, unsigned int peak, b64 now)
+static fn ui_level_feed(struct ui_level address_to l, unsigned int peak)
 {
+        b64 now = (b64)ui_kit_clock();
         b64 target = ui_level_of(peak), bar, line;
 
-        ui_level_now(l, now, &bar, &line);
+        ui_level_now(l, &bar, &line);
         if (target > bar)
                 bar = target;
         if (target >= line)
@@ -8291,11 +8293,12 @@ static fn ui_level_feed(struct ui_level address_to l, unsigned int peak, b64 now
 }
 
 // Whether the meter shows anything now, so that the window is drawn again.
-static b32 ui_level_moving(const struct ui_level address_to l, b64 now)
+static b32 ui_level_moving(const struct ui_level address_to l)
 {
+        b64 now = (b64)ui_kit_clock();
         b64 bar, line;
 
-        ui_level_now(l, now, &bar, &line);
+        ui_level_now(l, &bar, &line);
         return bar > 0 || line > 0;
 }
 
@@ -8472,8 +8475,8 @@ static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const c
                 strip->percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
                 strip->muted = muted;
         }
-        ui_level_feed(&strip->level[0], left, now);
-        ui_level_feed(&strip->level[1], right, now);
+        ui_level_feed(&strip->level[0], left);
+        ui_level_feed(&strip->level[1], right);
 }
 
 // Of the strip added last: a note under its volume (which of the UI_STRIP_NOTES, its words) and whether it is dim. Both are said again at each listing.
@@ -8678,7 +8681,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
                 }
                 // The meter beside the slider, the length of its track.
                 for (int channel = 0; channel < 2; channel++)
-                        ui_level_now(&strip->level[channel], ui_kit.now, &shown[channel], &hold[channel]);
+                        ui_level_now(&strip->level[channel], &shown[channel], &hold[channel]);
                 ui_meter_draw(ui, ui_strip_part(ui, left, ui_dev(ui, group), ui_dev(ui, UI_METER_WIDTH)), ui_dev(ui, slider->y), ui_dev(ui, slider->y + slider->h),
                               shown, hold);
                 if (shown[0] > 0 || shown[1] > 0 || hold[0] > shown[0] || hold[1] > shown[1])
