@@ -334,8 +334,10 @@ static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
 }
 #endif
 
-// A tone at cover 255ths of itself.
-static unsigned int ui_cover(unsigned int tone, unsigned int cover)
+// A premultiplied tone (ui_tone, or a pixel of a picture) at cover 255ths of itself: every channel, alpha included, times the cover. The
+// box layer's cover of a straight colour is ui_kit_cover (256ths, premultiplied after the alpha is taken): the two differ in input and in
+// rounding, so they are not one function.
+static unsigned int ui_tone_cover(unsigned int tone, unsigned int cover)
 {
         unsigned int out = 0;
 
@@ -557,7 +559,7 @@ static fn ui_round(struct ui address_to ui, int x, int y, int width, int height,
                         cover = ui_round_cover_cached(column, row, width, height, radius);
 
                         if (cover)
-                                ui_dot(ui, x + column, y + row, ui_cover(tone, cover));
+                                ui_dot(ui, x + column, y + row, ui_tone_cover(tone, cover));
                 }
         }
 }
@@ -2775,7 +2777,7 @@ static fn ui_kit_run(unsigned int address_to row, b32 count, unsigned int tone)
 }
 
 // The tone of a colour at a cover, as ui_kit_put lays it: a colour wholly over is itself, opaque or premultiplied.
-// The argb at cover (256ths) of itself, premultiplied: the box layer's cover. ui_cover is the same at 255ths on each channel.
+// The argb at cover (256ths) of itself, premultiplied: the box layer's cover. ui_tone_cover is the same at 255ths on each channel.
 static inline unsigned int ui_kit_cover(unsigned int argb, unsigned int cover)
 {
         if (cover >= UI_FULL && argb >> 24 == 255)
