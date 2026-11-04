@@ -122163,6 +122163,10 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #ifdef CHECK_gpu_kit
 static int gpu_fake_busy; // the check's fake fence: while it is set, every job waited for is answered as still running (nothing on the card is held)
 #define GPU_WAIT_CS(wait) (gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_io(3u, 9, 32, wait))
+// The fake card's prerequisites: gpu_fake_step names the step that fails, with gpu_fake_error for its error (gpu.c's gpu_req_step).
+static int gpu_fake_step = -1;
+static unsigned int gpu_fake_error;
+#define GPU_STEP_FAKE(code, failed, error) do { if (gpu_fake_step == (int)(code)) (failed) = 1, (error) = gpu_fake_error; } while (0)
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
 // The compositor's calls of a card go through card_fake_control (below): a card a check makes is answered there, and every
@@ -220466,6 +220470,55 @@ b32 main(void)
         struct ui ui;
         positive bad = 0;
 
+        // The prerequisites (gpu.c's gpu_req), with no card to see: the fake fails each step in turn, and the start stops at that step with its error kept,
+        // every step before it passed, and nothing of the card left open (the buffer, the context, the descriptor). The message of each step is there.
+        {
+                // The required steps: a fake that fails one stops the start there.
+                static const enum gpu_req steps[] = {GPU_REQ_NODE, GPU_REQ_DRIVER, GPU_REQ_FAMILY, GPU_REQ_USERPTR, GPU_REQ_CONTEXT, GPU_REQ_RING, GPU_REQ_SELFTEST};
+                static const unsigned int errors[] = {2, 0, 0, 19, 12, 62, 0};
+
+                for (unsigned int k = 0; k < sizeof(steps) / sizeof(steps[0]); k++)
+                {
+                        unsigned int want = (1u << steps[k]) - 2; // the steps before it, not its own bit (bit 0 is no step)
+                        int started;
+
+                        gpu_fake_step = (int)steps[k], gpu_fake_error = errors[k];
+                        started = gpu_start(1 << 20);
+                        gpu_fake_step = -1;
+                        check("gpu requirements: a card failing one step stops there, and that step is the first kept", !started && gpu_req.first == steps[k]);
+                        check("gpu requirements: that step keeps its error", gpu_req.error == errors[k]);
+                        check("gpu requirements: the steps before it passed, its own did not", (gpu_req.mask & (1u << steps[k])) == 0 && (gpu_req.mask & want) == want);
+                        check("gpu requirements: nothing of the card is left open", gpu.fd == -1 && gpu.at == 0);
+                }
+                // The dma-buf route, once the card is up: a fake that fails one of its steps leaves the card up, the route kept with its error, its bits unset.
+                {
+                        static const enum gpu_req route[] = {GPU_REQ_UDMABUF, GPU_REQ_PRIME};
+                        static const unsigned int errors[] = {2, 22};
+                        // The PRIME step follows udmabuf: a user the device refuses (the box's dawn, EACCES; root opens it) has only the udmabuf row.
+                        long probe = system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC);
+                        int openable = probe >= 0;
+
+                        if (openable)
+                                system_close((int)probe);
+
+                        if (!openable)
+                                string_format(log, "gpu requirements: /dev/udmabuf does not open for this user: the PRIME row is not run\n");
+                        for (unsigned int k = 0; k < (openable ? 2u : 1u); k++)
+                        {
+                                int started;
+
+                                gpu_fake_step = (int)route[k], gpu_fake_error = errors[k];
+                                started = gpu_start(1 << 20);
+                                gpu_fake_step = -1;
+                                check("gpu requirements: a failed dma-buf step leaves the card up", started && gpu_req.first == 0 && gpu_req.route == route[k]);
+                                check("gpu requirements: the route's step keeps its error and its bit stays unset", gpu_req.route_error == errors[k] && (gpu_req.mask & (1u << route[k])) == 0);
+                                gpu_stop();
+                        }
+                }
+                for (unsigned int code = 1; code < GPU_REQ_COUNT; code++)
+                        check("gpu requirements: every step has its name and its fix in words", windows_gpu_req_names[code] && windows_gpu_req_names[code][0] && windows_gpu_req_fixes[code] && windows_gpu_req_fixes[code][0]);
+                check("gpu requirements: the userptr fix names the kernel option", string_find((string_address)windows_gpu_req_fixes[GPU_REQ_USERPTR], (string_address)"CONFIG_DRM_AMDGPU_USERPTR") != 0);
+        }
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {
                 check("gpu: the card passes the self-test", !gpu.broken);
@@ -221918,7 +221971,7 @@ b32 main(void)
                 check("gpu settings: turned on again, it composes the next present", compositor_gpu && !compositor_gpu_state.dead && compositor_gpu_present(&f, 1) == 1);
                 compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu = 0;
                 compositor_gpu_settings();
-                check("gpu settings: a GPU that never started is not tried again", compositor_gpu_state.dead);
+                check("gpu settings: a GPU that never started is looked for again when it is turned on", !compositor_gpu_state.dead);
                 compositor_gpu_state.dead = 0;
                 compositor.damages = 0, compositor_gpu_state.up = 0;
         }

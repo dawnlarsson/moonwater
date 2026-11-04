@@ -22291,6 +22291,33 @@ static b32 host_debug(string_address address_to arguments, positive count)
                         host_say(log, "  gpu refused     %p, %s\n", (positive)table->gpu_refused[why], windows_gpu_reasons[why] ? windows_gpu_reasons[why] : (string_address) "?");
         if (table->gpu_family)
                 host_say(log, "  gpu card        amdgpu family %p, device id %p\n", (positive)table->gpu_family, (positive)table->gpu_device);
+        //      The card's prerequisites in the order the path needs them (gpu.c's gpu_req): each one ok, failed (with its error and the fix in words) or not reached.
+        if (!table->gpu_req_checked)
+                host_say(log, "  gpu requirements not checked (the card is looked for when canvas gpu is on and a present wants it)\n");
+        else
+        {
+                char driver[9], node[21];
+
+                memory_copy(driver, table->gpu_req_driver, 8), driver[8] = 0;
+                memory_copy(node, table->gpu_req_node, 20), node[20] = 0;
+                host_say(log, "  gpu requirements %s\n", table->gpu_req_first ? (string_address) "stopped at the first that failed, below" : (string_address) "all passed");
+                host_say(log, "    node          %s %s, mode %p owner %p\n", table->gpu_req_mask & 2 ? (string_address) "ok    " : (string_address) "failed",
+                         node[0] ? (string_address)node : (string_address) "-", (positive)table->gpu_req_mode, (positive)table->gpu_req_owner);
+                host_say(log, "    driver        %s %s\n", table->gpu_req_mask & 4 ? (string_address) "ok    " : table->gpu_req_first == 2 ? (string_address) "failed" : (string_address) "not reached",
+                         driver[0] ? (string_address)driver : (string_address) "-");
+                for (unsigned int step = 3; step < WINDOWS_GPU_REQS; step++)
+                {
+                        if (table->gpu_req_mask & 1u << step)
+                                host_say(log, "    %s  ok\n", windows_gpu_req_names[step]);
+                        else if (table->gpu_req_first == step)
+                                host_say(log, "    %s  failed, error %p: %s\n", windows_gpu_req_names[step], (positive)table->gpu_req_error, windows_gpu_req_fixes[step]);
+                        else if (table->gpu_req_route == step)
+                                host_say(log, "    %s  failed, error %p: %s (the card composes; the fallback for a refused userptr is not there)\n", windows_gpu_req_names[step],
+                                         (positive)table->gpu_req_route_error, windows_gpu_req_fixes[step]);
+                        else
+                                host_say(log, "    %s  not reached\n", windows_gpu_req_names[step]);
+                }
+        }
         if (table->gpu_map_why && table->gpu_map_probe)
                 host_say(log, "  gpu map probes  the node answers a plain question: %s; userptr over anonymous memory: error %p; over the refused page: error %p, without validating it: error %p (0 is taken)\n",
                          table->gpu_map_probe & 1 ? (string_address) "yes" : (string_address) "no", (positive)(table->gpu_map_probe >> 8 & 255),

@@ -7389,6 +7389,29 @@ static void compositor_gpu_publish(void)
         compositor.table->gpu_family = gpu.family, compositor.table->gpu_device = gpu.device, compositor.table->gpu_map_probe = gpu_map_probe;
         if (gpu_said[0] && memory_compare(compositor.table->gpu_said, gpu_said, sizeof(gpu_said)))
                 memory_copy(compositor.table->gpu_said, gpu_said, sizeof(gpu_said));
+        compositor.table->gpu_req_first = gpu_req.first, compositor.table->gpu_req_error = gpu_req.error, compositor.table->gpu_req_mask = gpu_req.mask;
+        compositor.table->gpu_req_mode = gpu_req.mode, compositor.table->gpu_req_owner = gpu_req.owner;
+        compositor.table->gpu_req_route = gpu_req.route, compositor.table->gpu_req_route_error = gpu_req.route_error;
+        memory_copy(compositor.table->gpu_req_driver, gpu_req.driver, sizeof(gpu_req.driver)), memory_copy(compositor.table->gpu_req_node, gpu_req.node, sizeof(gpu_req.node));
+}
+
+// The prerequisites of the card, as the table and the issue board say them after a start: the first one that failed is an ERROR under "canvas gpu" with its
+// fix (the detail) and the kernel's error; when the card is up, that issue is cleared. The table's record is written either way (moonwater debug).
+typedef char gpu_req_words_fit[sizeof(windows_gpu_req_fixes) / sizeof(windows_gpu_req_fixes[0]) == GPU_REQ_COUNT ? 1 : -1];
+static void compositor_gpu_requirements(void)
+{
+        if (!compositor.table)
+                return;
+        compositor.table->gpu_req_checked = 1;
+        compositor_gpu_publish();
+        if (gpu_req.first)
+                windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.first, gpu_req.error,
+                                  windows_gpu_req_fixes[gpu_req.first]);
+        else if (gpu_req.route) // the card composes; a refused userptr has no fallback until the dma-buf route works
+                windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.route, gpu_req.route_error,
+                                  windows_gpu_req_fixes[gpu_req.route]);
+        else
+                windows_issue_clear(compositor.table, "canvas gpu", WINDOWS_ISSUE_GPU_REQUIRES);
 }
 
 // A refusal of the card: the reason is counted, and said when it is first or due. A present the card is refused is the processor's (processor 1);
@@ -7420,9 +7443,17 @@ static int compositor_gpu_up(void)
         {
                 compositor_gpu_state.dead = 1;
                 compositor_gpu_state.dead_why = gpu.broken ? COMPOSITOR_GPU_WHY_UNTRUSTED : COMPOSITOR_GPU_WHY_NO_CARD;
-                compositor_say(gpu.broken ? "the GPU is not trusted, its self-test drew wrong, family" : "no card the GPU's kernels are for, the processor composes", gpu.family);
+                compositor_gpu_requirements();
+                string_format(log, "compositor: the GPU is not up: %s failed (error %p): %s\n", windows_gpu_req_names[gpu_req.first], (positive)gpu_req.error,
+                              windows_gpu_req_fixes[gpu_req.first]);
+                log_flush();
                 return 0;
         }
+        compositor_gpu_requirements();
+        if (gpu_req.route)
+                string_format(log, "compositor: the GPU is up; its dma-buf route is not (%s, error %p): %s\n", windows_gpu_req_names[gpu_req.route],
+                              (positive)gpu_req.route_error, windows_gpu_req_fixes[gpu_req.route]),
+                    log_flush();
         g->ops = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), g->room = (1 << 20) / 32;
         g->tables = (unsigned char *)gpu.at + COMPOSITOR_GPU_TABLES_AT, g->tables_at = COMPOSITOR_GPU_TABLES_AT, g->tables_size = 1 << 20;
         compositor_gpu_state.up = 1;
@@ -13291,8 +13322,9 @@ static void compositor_gpu_settings(void)
         // drew its self-test wrong, stays given up).
         if (compositor_gpu && !was)
         {
-                // Turned on from off: the hangs and their cool-downs are forgiven (a card that never started stays given up: no card).
-                if (compositor_gpu_state.up)
+                // Turned on from off: the hangs and their cool-downs are forgiven. A card that never started is looked for again (its prerequisites checked once
+                // more: a driver or a node that came late); a card that drew its self-test wrong stays given up.
+                if (compositor_gpu_state.up || compositor_gpu_state.dead_why != COMPOSITOR_GPU_WHY_UNTRUSTED)
                         compositor_gpu_state.dead = 0;
                 compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.cool_steps = 0;
         }

@@ -516,6 +516,22 @@ static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
     "the scanout is not one the card can draw into", "a window's picture is not mapped for the card", "a landing (scaled)", "a snap preview or a shared edge",
     "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
     "other frames, or empty damage"};
+// The GPU's prerequisites, in the order the path needs them (gpu.c's enum gpu_req, the same order): their names, and what to do about each one, in words.
+// moonwater debug shows them, and the issue board's detail for a failed one.
+#define WINDOWS_GPU_REQS 10
+static const string_address windows_gpu_req_names[WINDOWS_GPU_REQS] = {"none", "render node", "driver", "family", "userptr", "context", "ring", "self-test",
+                                                                     "udmabuf", "PRIME import"};
+static const string_address windows_gpu_req_fixes[WINDOWS_GPU_REQS] = {
+    "", "no render node of the card opened: check its mode and owner, and that the driver is loaded (the render group, or mode 0666, lets a user open it)",
+    "the card's driver is not amdgpu: there is no GPU path for it yet (i915, virtio_gpu and nouveau stay on the processor)",
+    "this AMD family has no kernels (RDNA2 only: 144, 146, 149, 151); the card stays on the processor",
+    "the kernel would not map a page for the card: rebuild it with CONFIG_DRM_AMDGPU_USERPTR=y (error 19 is that kernel: it selects HMM_MIRROR and MMU_NOTIFIER)",
+    "the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)",
+    "the compute ring did not finish the self-test job: firmware, clocks or a ring reset (the kernel lines say which)",
+    "the card drew the self-test picture wrong: its kernels do not match this family's ISA; the card stays on the processor",
+    "/dev/udmabuf would not make a dma-buf of a memfd page: CONFIG_UDMABUF=y, and /dev/udmabuf must open (the card still composes; a refused userptr then has no fallback)",
+    "a dma-buf would not import into the render node: the card cannot read a window's memfd (CONFIG_DRM_AMDGPU, with PRIME; the card still composes)"};
+
 /*
         The issue board: the problems a Settings option has, which any program that holds the table may raise and clear, and which Settings and
         moonwater debug read. An issue is its key (the words of the option's row, "canvas gpu", NUL-ended), a severity (WINDOWS_ISSUE_WARNING or
@@ -544,6 +560,7 @@ enum windows_issue_code
         WINDOWS_ISSUE_GPU_SCANOUT,   // the card refused a window's framebuffer for direct scan-out: a the kernel's error number
         WINDOWS_ISSUE_AUDIO_OPEN,    // the audio service could not open the sink: a the error number
         WINDOWS_ISSUE_AUDIO_RATE,    // the sink refused the sample rate: a the rate
+        WINDOWS_ISSUE_GPU_REQUIRES,  // a prerequisite of the GPU path failed: a the step (gpu.c's enum gpu_req), b the kernel's error; the detail is the fix
         WINDOWS_ISSUE_COUNT
 };
 typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
@@ -954,6 +971,8 @@ struct windows
         unsigned int gpu_map_why; // why the last map of a picture for the card was refused (gpu.c's gpu_map_why), 0 for none yet
         unsigned int gpu_family, gpu_device, gpu_map_probe; // the card's family and device id, and what the probes after a refused map found (gpu.c)
         char gpu_said[256];                                 // the last lines the kernel's log had about the card when a map was refused, joined with ' | '
+        unsigned int gpu_req_checked, gpu_req_first, gpu_req_error, gpu_req_mask, gpu_req_mode, gpu_req_owner, gpu_req_route, gpu_req_route_error; // the prerequisites (gpu.c's gpu_req): whether they were checked, the first that failed (0 none), its error, the bits that passed, the node's mode and owner
+        char gpu_req_driver[8], gpu_req_node[20];                                                           // the first node's driver name and path
 
         /*
                 The window lists (window_list_of): WINDOWS lists of list_bytes each, after the pictures, row r's at lists + r * list_bytes from

@@ -446,56 +446,288 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 #define GPU_WAIT_CS(wait) gpu_io(3u, 9, 32, wait) // a check puts a fake fence here
 #endif
 
-static b32 gpu_selftest(void);
-
 // The card must draw what it should before anything is trusted to it: families of the ISA the kernels are in (RDNA2, gfx10.3: Van Gogh 144, Yellow Carp 146, Raphael 149,
 // Mendocino 151) are tried, and each is held to the hash of the picture one small scene of every kind of op made on the card they were written on.
 #define GPU_FAMILIES(f) ((f) == 144 || (f) == 146 || (f) == 149 || (f) == 151)
-// The first render node of a card the kernels are for (amdgpu, family 149: gfx1036, Raphael's), with bytes of pixels behind the page of commands, and one
-// context; false if there is none or any step is refused. Another card is passed over here and not hung by code that is not its own.
+#define GPU_TEST_HASH 2024535671u
+// The prerequisites of the path, in the order it needs them. gpu_start stops at the first that fails and keeps it: the code, the kernel's error (its
+// errno; 0 where the step failed by what it found, not by a call), and a bit in gpu_req.mask for each that passed. The node the checks looked at (its path,
+// mode and owner), the driver's name and the family are kept whether or not that node was taken: moonwater debug says them.
+enum gpu_req
+{
+        GPU_REQ_NONE,
+        GPU_REQ_NODE,     // a render node opens (none does: the first one's error, and its mode and owner)
+        GPU_REQ_DRIVER,   // a node's driver is amdgpu (the first node's name is kept; another driver has no GPU path yet)
+        GPU_REQ_FAMILY,   // the family is one the kernels are for (the family and device id are kept)
+        GPU_REQ_USERPTR,  // AMDGPU_GEM_USERPTR maps an anonymous page (19: a kernel without CONFIG_DRM_AMDGPU_USERPTR)
+        GPU_REQ_CONTEXT,  // a GEM buffer, its VM map and a compute context
+        GPU_REQ_RING,     // the compute ring finished the self-test's job (its error when it did not: the submit's, or 62 for a job still running)
+        GPU_REQ_SELFTEST, // the card drew the self-test's picture as the kernels do
+        GPU_REQ_UDMABUF,  // the dma-buf route, the fallback for a refused userptr: /dev/udmabuf makes a dma-buf of a sealed memfd page
+        GPU_REQ_PRIME,    // and that dma-buf imports into the render node. Checked once the card is up (gpu_route_probe): not a step the card needs while userptr works
+        GPU_REQ_COUNT
+};
+// first: the required step that failed (0 none; the card is not up); route: the dma-buf route's step that failed once the card is up (0 none; the card is up)
+static struct { unsigned int first, error, mask, mode, owner, family, device, route, route_error; char driver[8], node[20]; } gpu_req;
+static unsigned int gpu_last_error; // the last job's refusal: the submit's errno, 62 (ETIME) for one that did not finish in time, 5 for a wait that failed
+
+// A step of the prerequisites: passed (its bit in mask) or failed (the first failure and its error kept). GPU_STEP_FAKE is the check's fake card: it may
+// make a step fail, with the error it gives; by default nothing is faked.
+#ifndef GPU_STEP_FAKE
+#define GPU_STEP_FAKE(code, failed, error)
+#endif
+static b32 gpu_req_step(enum gpu_req code, b32 failed, unsigned int error)
+{
+        GPU_STEP_FAKE(code, failed, error);
+        if (failed)
+        {
+                if (!gpu_req.first)
+                        gpu_req.first = code, gpu_req.error = error;
+                return false;
+        }
+        gpu_req.mask |= 1u << code;
+        return true;
+}
+
+// A request on a descriptor: 0 when the kernel did it, else its errno.
+static unsigned int gpu_raw(int fd, unsigned int request, void *a)
+{
+        long r = system_control(fd, request, a);
+
+        return r < 0 ? (unsigned int)-r & 255 : 0;
+}
+#define gpu_call(dir, n, size, a) gpu_raw(gpu.fd, GPU_IO(dir, n, size), a)
+#define GPU_GEM_CLOSE 0x40086409u // DRM_IOW(0x09, struct drm_gem_close)
+
+// The node's mode and owner, from statx (the mode is at 28 of its record, the owner at 20 on every architecture).
+static void gpu_req_stat(const char *path)
+{
+        unsigned char st[256] = {0};
+        unsigned short mode = 0;
+        unsigned int owner = 0;
+
+        if (system_stat_at(AT_FDCWD, (string_address)path, 0, 0x7ffu, st) != 0)
+                return;
+        memory_copy(&mode, st + 28, 2), memory_copy(&owner, st + 20, 4);
+        gpu_req.mode = mode & 07777u, gpu_req.owner = owner;
+}
+
+// The probe's answer for userptr: an anonymous page taken for the card by the kernel's userptr (validated, so the kernel takes the pages at once), then let go.
+// 0 when it took it, else the errno.
+// The probe's answer for userptr: an anonymous page taken for the card by the kernel's userptr (validated, so the kernel takes the pages at once), then let go.
+// 0 when it took it, else the errno.
+static unsigned int gpu_userptr_error(positive at, positive flags)
+{
+        p64 up[3] = {at, 4096, flags};
+        unsigned int e = gpu_call(3u, 0x11, 24, up);
+
+        if (e == 0)
+        {
+                p64 close[1] = {up[2] >> 32}; // the kernel wrote the handle into the high half of up[2]
+
+                gpu_raw(gpu.fd, GPU_GEM_CLOSE, close);
+        }
+        return e;
+}
+
+// A dma-buf of [offset, offset + size) of a sealed memfd, through /dev/udmabuf: its descriptor, or -errno.
+static long gpu_dmabuf_make(int memfd, positive offset, positive size)
+{
+        struct { unsigned int memfd, flags; unsigned long offset, size; } create = {(unsigned int)memfd, 1, offset, size}; // UDMABUF_FLAGS_CLOEXEC
+        long udmabuf = system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC), made;
+
+        if (udmabuf < 0)
+                return udmabuf;
+        made = system_control((int)udmabuf, 0x40187542u, &create); // _IOW('u', 0x42, struct udmabuf_create)
+        system_close((int)udmabuf);
+        return made;
+}
+
+// A dma-buf imported into the render node: its handle there, or -errno. The descriptor is closed either way (the handle holds the buffer).
+static long gpu_dmabuf_in(int dmabuf)
+{
+        struct { unsigned int handle, flags; int fd; } prime = {0, 0, dmabuf};
+        long made = system_control(gpu.fd, 3u << 30 | 12u << 16 | 0x642eu, &prime); // DRM_IOCTL_PRIME_FD_TO_HANDLE
+
+        system_close(dmabuf);
+        return made < 0 ? made : (long)prime.handle;
+}
+
+// A memfd page made sealed for the udmabuf driver (F_SEAL_SHRINK), its dma-buf: the descriptor, or -errno.
+static long gpu_dmabuf_probe_make(void)
+{
+        long memfd = system_call_2(syscall(memfd_create), (positive) "moonwater-gpu", 1 | 2), made; // MFD_CLOEXEC | MFD_ALLOW_SEALING
+
+        if (memfd < 0)
+                return memfd;
+        system_truncate_handle((int)memfd, 4096);
+        system_call_3(syscall(fcntl), (positive)memfd, 1033, 2); // F_ADD_SEALS, F_SEAL_SHRINK
+        made = gpu_dmabuf_make((int)memfd, 0, 4096);
+        system_close((int)memfd);
+        return made;
+}
+
+static void gpu_say_kernel(void);
+static unsigned int gpu_test_hash(void);
+
+// The dma-buf route's own prerequisites (udmabuf, then PRIME), checked once the card is up: a card whose userptr works does not need them, and one whose userptr
+// is refused is served by them (the fallback). A step that fails is kept as gpu_req.route with its error; the card still composes.
+static void gpu_route_probe(void)
+{
+        long made = gpu_dmabuf_probe_make();
+        enum gpu_req step = GPU_REQ_UDMABUF;
+        b32 failed = made < 0;
+        unsigned int e = failed ? (unsigned int)-made & 255 : 0;
+
+        GPU_STEP_FAKE(GPU_REQ_UDMABUF, failed, e);
+        if (failed)
+        {
+                if (made >= 0)
+                        system_close((int)made);
+        }
+        else
+        {
+                made = gpu_dmabuf_in((int)made); // closes the dma-buf
+                step = GPU_REQ_PRIME, failed = made < 0, e = failed ? (unsigned int)-made & 255 : 0;
+                GPU_STEP_FAKE(GPU_REQ_PRIME, failed, e);
+                if (made >= 0)
+                {
+                        unsigned int close[2] = {(unsigned int)made, 0};
+
+                        gpu_raw(gpu.fd, GPU_GEM_CLOSE, close); // the handle, let go
+                }
+        }
+        if (failed)
+                gpu_req.route = step, gpu_req.route_error = e;
+        else
+                gpu_req.mask |= 1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME;
+}
+
+// Let go of the card: its buffer unmapped, its descriptor closed (the kernel frees the buffer, the context and the maps with it). After a start that failed.
+static void gpu_stop(void)
+{
+        if (gpu.at)
+                system_call_2(syscall(munmap), (positive)gpu.at, gpu.size);
+        if (gpu.fd >= 0)
+                system_close(gpu.fd);
+        gpu.fd = -1, gpu.at = 0, gpu.size = 0, gpu.ctx = 0, gpu.handle = 0, gpu.imports = 0, gpu.pending = 0;
+}
+
+// The first card that is one the kernels are for, with bytes of pixels behind the page of commands, and one context. Every prerequisite is a step (gpu_req):
+// the node, the driver, the family, userptr, a dma-buf through udmabuf and PRIME, the buffer and context, the self-test's picture and the ring that drew it.
+// False if any step is refused, the first kept in gpu_req; a card that another driver or family has is passed over, and not hung by code that is not its own.
 static b32 gpu_start(positive bytes)
 {
         positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
         p64 make[4] = {size, 4096, 2, 64}, map[1] = {0}, va[8] = {0, 1 | 14ull << 32, GPU_VA, 0, size};
-        unsigned int ctx[4] = {1, 0, 0, 0}, who[16] = {0};
+        unsigned int ctx[4] = {1, 0, 0, 0}, who[16] = {0}, e = 0, open_error = 0;
         char path[] = "/dev/dri/renderD128";
         p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32};
-        long at;
+        int named = 0, amd = 0, amd_named = 0;
+        long at, made, hash;
 
+        memory_zero(&gpu_req, sizeof(gpu_req));
+        gpu.fd = -1, gpu.broken = 0;
         for (unsigned int node = 0; node < 8; node++)
         {
                 // Made again for each node: the kernel writes back the whole length of the driver's name, and no 0 after what it copies, so a node after
                 // "i915" was read as "amdg" (never ours) and one after "virtio_gpu" had ten bytes copied into these eight.
                 char name[8] = "";
                 p64 ver[8] = {0, 0, 7, (p64)name};
+                long fd;
 
                 path[17] = (char)('0' + (28 + node) / 10), path[18] = (char)('0' + (28 + node) % 10);
-                gpu.fd = (int)system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
-                if (gpu.fd < 0)
-                        continue;
-                if (system_control(gpu.fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && string_equals((string_address)name, (string_address)"amdgpu") && gpu_io(1u, 5, 32, ask) && GPU_FAMILIES(who[4]))
+                fd = system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
+                if (fd < 0)
                 {
-                        gpu.family = who[4], gpu.device = who[0];
+                        if (node == 0)
+                                open_error = (unsigned int)-fd & 255, gpu_req_stat(path), memory_copy(gpu_req.node, path, sizeof(path));
+                        continue;
+                }
+                if (!named)
+                        named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
+                if (gpu_raw((int)fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && string_equals((string_address)name, (string_address)"amdgpu"))
+                {
+                        // The first amdgpu node is the card's, whether or not its family is one the kernels are for: that is what the family step says.
+                        unsigned int family_error = gpu_raw((int)fd, GPU_IO(1u, 5, 32), ask);
+
+                        if (!amd_named)
+                        {
+                                amd_named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
+                                gpu_req.family = family_error ? 0 : (unsigned int)who[4], gpu_req.device = family_error ? 0 : (unsigned int)who[0];
+                        }
+                        amd = 1;
+                        if (!family_error && GPU_FAMILIES(who[4]))
+                        {
+                                gpu.fd = (int)fd;
+                                break;
+                        }
+                        system_close((int)fd);
+                        continue;
+                }
+                system_close((int)fd);
+        }
+        gpu.family = gpu_req.family, gpu.device = gpu_req.device;
+        do
+        {
+                if (!gpu_req_step(GPU_REQ_NODE, !named, open_error))
+                        break;
+                if (!gpu_req_step(GPU_REQ_DRIVER, !amd, 0))
+                        break;
+                if (!gpu_req_step(GPU_REQ_FAMILY, gpu.fd < 0, 0))
+                        break;
+                // Userptr: an anonymous page the kernel takes for the card (the probe lets it go again).
+                {
+                        long page = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+
+                        e = page < 0 && page > -4096 ? 12 : gpu_userptr_error((positive)page, 0xc);
+                        if (!(page < 0 && page > -4096))
+                                system_call_2(syscall(munmap), (positive)page, 4096);
+                        if (!gpu_req_step(GPU_REQ_USERPTR, e != 0, e))
+                                break;
+                }
+                // The buffer, its VM map and the compute context: all of the card's own memory.
+                e = gpu_call(3u, 0, 32, make);
+                if (!e)
+                        va[0] = map[0] = gpu.handle = (unsigned int)make[0], e = gpu_call(3u, 1, 8, map);
+                if (!e)
+                        e = gpu_call(1u, 8, 64, va);
+                if (!e)
+                        e = gpu_call(3u, 2, 16, ctx);
+                if (!e)
+                {
+                        at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, map[0]);
+                        if (at < 0 && at > -4096)
+                                e = (unsigned int)-at & 255;
+                        else
+                                gpu.at = (unsigned int address_to)at;
+                }
+                if (!gpu_req_step(GPU_REQ_CONTEXT, e != 0, e))
+                        break;
+                gpu.ctx = ctx[0], gpu.size = size;
+                for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
+                {
+                        gpu_kernel_at[i] = here;
+                        memory_copy((p8 address_to)gpu.at + here, gpu_kernels[i].words + 2, gpu_kernels[i].size - 8);
+                        here = (here + gpu_kernels[i].size - 8 + 255) & ~255u;
+                }
+                // The self-test: the card must finish its job (RING) and draw the picture the kernels draw (SELFTEST).
+                hash = gpu_test_hash();
+                if (!gpu_req_step(GPU_REQ_RING, hash == 0, gpu_last_error))
+                {
+                        gpu_say_kernel();
                         break;
                 }
-                system_close(gpu.fd), gpu.fd = -1;
-        }
-        if (gpu.fd < 0 || !gpu_io(3u, 0, 32, make))
-                return false;
-        va[0] = map[0] = gpu.handle = (unsigned int)make[0];
-        if (!gpu_io(3u, 1, 8, map) || !gpu_io(1u, 8, 64, va) || !gpu_io(3u, 2, 16, ctx))
-                return false;
-        at = system_call_6(syscall(mmap), 0, size, 3, 1, (positive)gpu.fd, map[0]);
-        if (at < 0 && at > -4096)
-                return false;
-        gpu.at = (unsigned int address_to)at, gpu.ctx = ctx[0], gpu.size = size;
-        for (unsigned int i = 0, here = 1024; i < GPU_KERNELS; i++)
-        {
-                gpu_kernel_at[i] = here;
-                memory_copy((p8 address_to)gpu.at + here, gpu_kernels[i].words + 2, gpu_kernels[i].size - 8);
-                here = (here + gpu_kernels[i].size - 8 + 255) & ~255u;
-        }
-        return gpu_selftest();
+                if (!gpu_req_step(GPU_REQ_SELFTEST, hash != GPU_TEST_HASH, 0))
+                {
+                        gpu.broken = 1;
+                        break;
+                }
+                gpu_route_probe();
+                return true;
+        } while (0);
+        gpu_stop();
+        return false;
 }
 
 // Pages of the processor's (a window's picture: a memfd's, mapped shared) the GPU can reach, as userptr buffers at addresses of their own: gpu_map widens
@@ -549,21 +781,6 @@ static void gpu_drop(unsigned int i)
 // last lines the kernel's log has about the card (/dev/kmsg gives a record a read) kept. moonwater debug shows them, so a machine nobody can sit at can say why.
 static unsigned int gpu_map_probe, gpu_map_said;
 static char gpu_said[256];
-
-static unsigned int gpu_userptr_error(positive at, positive flags)
-{
-        p64 up[3] = {at, 4096, flags};
-        long r = system_control(gpu.fd, GPU_IO(3u, 0x11, 24), up);
-
-        if (r == 0)
-        {
-                p64 close[1] = {up[2] >> 32};
-
-                system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
-                return 0;
-        }
-        return (unsigned int)-r & 255;
-}
 
 static void gpu_say_kernel(void)
 {
@@ -816,7 +1033,7 @@ static b32 gpu_run(void)
                                 bos[named++] = gpu_maps[i].handle;
                 boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
                 cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
-                if (gpu_io(3u, 4, 24, cs))
+                if ((gpu_last_error = gpu_raw(gpu.fd, GPU_IO(3u, 4, 24), cs)) == 0)
                         break;
                 // A page moved under the job as it was submitted, or a map's pages are gone: asked again, without the maps that are, unless the job reads one.
                 if (++tries == 3 || gpu_drop_unmapped())
@@ -824,7 +1041,10 @@ static b32 gpu_run(void)
         }
         wait[0] = gpu.pending = cs[0], wait[1] = clock_monotonic_nanoseconds() + 2000000000ull;
         if (!GPU_WAIT_CS(wait) || wait[0])
+        {
+                gpu_last_error = wait[0] ? 62 : 5; // ETIME: still running after two seconds; EIO: the wait itself failed
                 return false;
+        }
         gpu.pending = 0;
         gpu_last_job = clock_monotonic_nanoseconds();
         return true;
@@ -924,7 +1144,6 @@ static void gpu_wake(void)
         gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
 }
 
-#define GPU_TEST_HASH 2024535671u
 static unsigned int gpu_test_hash(void)
 {
         enum { W = 256, H = 32 };
@@ -976,9 +1195,4 @@ static unsigned int gpu_test_hash(void)
         return hash | 1;
 }
 
-static b32 gpu_selftest(void)
-{
-        gpu.broken = gpu_test_hash() != GPU_TEST_HASH;
-        return !gpu.broken;
-}
 #endif
