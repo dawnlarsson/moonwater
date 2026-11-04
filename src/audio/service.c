@@ -80,6 +80,7 @@ static struct
 {
         struct pulse pulse;
         int listen, signals, timer;
+        int live[PULSE_CLIENTS], live_count, live_dirty; // the connected clients, in a list the passes visit (rebuilt when one came or went)
         int notify, settings_due;       // inotify on the settings directory (-1 when refused: the look is then every half second), and a look it asked for
         int fd[PULSE_CLIENTS];
         positive stalled[PULSE_CLIENTS];
@@ -1220,8 +1221,20 @@ static void audio_stats_say(const char *why)
 
 /* ---- the clients ---- */
 
+// The connected clients as a list: a pass visits these and not all the slots. A change (a client came or went) makes it dirty, and the loop
+// makes it again before the next pass.
+static void audio_live_relist(void)
+{
+        audio_service.live_count = 0;
+        for (int slot = 0; slot < PULSE_CLIENTS; slot++)
+                if (audio_service.fd[slot] >= 0)
+                        audio_service.live[audio_service.live_count++] = slot;
+        audio_service.live_dirty = 0;
+}
+
 static void audio_client_drop(long slot)
 {
+        audio_service.live_dirty = 1;
         if (audio_service.fd[slot] >= 0)
                 system_close(audio_service.fd[slot]);
         audio_service.fd[slot] = -1;
@@ -1253,6 +1266,7 @@ static void audio_accept(void)
                 }
                 audio_service.fd[slot] = (int)fd;
                 audio_service.stalled[slot] = 0;
+                audio_service.live_dirty = 1;
         }
 }
 
@@ -1303,6 +1317,18 @@ static int audio_client_write(long slot, positive now)
                 pulse_client_sent(&audio_service.pulse, slot, put);
         }
         return 1;
+}
+
+// The clients that are connected: a late one (it never said who it is) is dropped, and what each has queued is sent as far as its socket takes it.
+static void audio_clients_pass(positive now)
+{
+        for (int k = 0; k < audio_service.live_count; k++)
+        {
+                long slot = audio_service.live[k];
+
+                if (audio_service.fd[slot] >= 0 && (pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now)))
+                        audio_client_drop(slot);
+        }
 }
 
 /* ---- the sound ---- */
@@ -2214,6 +2240,8 @@ static b32 audio_main()
                 struct audio_poll wanted[5 + AUDIO_INPUTS + PULSE_CLIENTS];
                 long owner[5 + AUDIO_INPUTS + PULSE_CLIENTS];
                 unsigned int count = 0;
+                if (audio_service.live_dirty) // a client that came in the last pass is polled from here on (as the slots were: a newer one waits for the next pass)
+                        audio_live_relist();
                 positive now;
                 long awaited, wait[2] = {0, audio_busy() ? 16000000 : 250000000};
 
@@ -2249,12 +2277,16 @@ static b32 audio_main()
                 }
                 wanted[count] = (struct audio_poll){audio_service.listen, AUDIO_POLLIN, 0};
                 owner[count++] = -2;
-                for (long slot = 0; slot < PULSE_CLIENTS; slot++)
+                for (int k = 0; k < audio_service.live_count; k++)
+                {
+                        long slot = audio_service.live[k];
+
                         if (audio_service.fd[slot] >= 0)
                         {
                                 wanted[count] = (struct audio_poll){audio_service.fd[slot], (short)(AUDIO_POLLIN | (pulse_client_pending(&audio_service.pulse, slot) ? AUDIO_POLLOUT : 0)), 0};
                                 owner[count++] = slot;
                         }
+                }
                 awaited = audio_call(syscall(ppoll), (positive)wanted, count, (positive)wait, 0, 0, 0);
                 now = clock_monotonic_nanoseconds();
                 audio_service.budget = 4 * AUDIO_READ;
@@ -2296,12 +2328,9 @@ static b32 audio_main()
                 // Whatever the pass queued is sent, the drains are answered, and a client that never says who it is, or never reads, is dropped.
                 pulse_tick(&audio_service.pulse);
                 audio_inputs_run(now);
-                for (long slot = 0; slot < PULSE_CLIENTS; slot++)
-                        if (audio_service.fd[slot] >= 0)
-                        {
-                                if (pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now))
-                                        audio_client_drop(slot);
-                        }
+                if (audio_service.live_dirty)
+                        audio_live_relist();
+                audio_clients_pass(now);
                 // The page, the settings, the cards, and what a program changed that is kept.
                 if (now - audio_service.state_at >= (audio_busy() ? AUDIO_STATE_NS : AUDIO_STATE_IDLE_NS))
                 {

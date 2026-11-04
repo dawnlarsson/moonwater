@@ -184201,6 +184201,89 @@ static void sv_test_notify(void)
         audio_service.notify = -1;
 }
 
+/* ---- the client list: the passes visit the connected clients, a pass keeps them, and one that went is taken out of the list ---- */
+static void sv_test_clients(void)
+{
+        int fds[2][2];
+        long slots[2];
+
+        sv_setup();
+        for (int k = 0; k < 2; k++)
+        {
+                pipe(fds[k]);
+                slots[k] = pulse_client_open(&audio_service.pulse, 1000 + k, 2000 + k);
+                audio_service.fd[slots[k]] = fds[k][0];
+        }
+        audio_live_relist();
+        SVCHECK(audio_service.live_count == 2, "two clients are listed (%d)", audio_service.live_count);
+        audio_clients_pass(clock_monotonic_nanoseconds());
+        SVCHECK(audio_service.fd[slots[0]] >= 0 && audio_service.fd[slots[1]] >= 0, "a pass that finds nothing queued keeps every client");
+        audio_client_drop(slots[0]);
+        SVCHECK(audio_service.live_dirty == 1, "a client that went makes the list dirty");
+        audio_live_relist();
+        SVCHECK(audio_service.live_count == 1 && audio_service.live[0] == slots[1], "after one went the list has the other");
+        audio_client_drop(slots[1]);
+        audio_live_relist();
+        SVCHECK(audio_service.live_count == 0, "and with none the list is empty");
+        close(fds[0][1]);
+        close(fds[1][1]);
+}
+
+/* the 32-slot pass that the list replaced, as it was (for the bench) */
+static void sv_old_clients_pass(positive now)
+{
+        for (long slot = 0; slot < PULSE_CLIENTS; slot++)
+                if (audio_service.fd[slot] >= 0)
+                {
+                        if (pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now))
+                                audio_client_drop(slot);
+                }
+}
+
+/* the client pass on a pinned core, with 1, 4 and 16 connected clients that have nothing queued (`clients CPU`) */
+static void sv_bench_clients(int cpu)
+{
+        enum { PASSES = 4001 };
+        static unsigned long long samples[PASSES];
+        static int fds[16][2];
+        cpu_set_t set;
+        const int counts[3] = {1, 4, 16};
+
+        CPU_ZERO(&set);
+        CPU_SET(cpu, &set);
+        sched_setaffinity(0, sizeof set, &set);
+        positive now0 = clock_monotonic_nanoseconds();
+        for (int c = 0; c < 3; c++)
+        {
+                sv_setup();
+                for (int k = 0; k < counts[c]; k++)
+                {
+                        long slot;
+
+                        pipe(fds[k]);
+                        slot = pulse_client_open(&audio_service.pulse, 1000 + k, 2000 + k);
+                        audio_service.fd[slot] = fds[k][0];
+                }
+                audio_live_relist();
+                for (int i = 0; i < PASSES; i++)
+                {
+                        samples[i] = sv_now();
+                        sv_old_clients_pass(now0); /* the clock is read once: a read is a call of its own */
+                        samples[i] = sv_now() - samples[i];
+                }
+                qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+                printf("client pass, %2d clients, the 32-slot scan: median %llu, p90 %llu (ticks)\n", counts[c], samples[PASSES / 2], samples[PASSES * 9 / 10]);
+                for (int i = 0; i < PASSES; i++)
+                {
+                        samples[i] = sv_now();
+                        audio_clients_pass(now0);
+                        samples[i] = sv_now() - samples[i];
+                }
+                qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+                printf("client pass, %2d clients, the live list:    median %llu, p90 %llu (ticks)\n", counts[c], samples[PASSES / 2], samples[PASSES * 9 / 10]);
+        }
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -184213,6 +184296,7 @@ static int sv_main_checks(void)
         sv_test_bucket();
         sv_test_text();
         sv_test_notify();
+        sv_test_clients();
         sv_test_socket();
         sv_test_card();
         sv_test_file();
@@ -184256,6 +184340,11 @@ static void sv_bench_text(int cpu)
 
 int main(int argc, char **argv)
 {
+        if (argc > 1 && strcmp(argv[1], "clients") == 0)
+        {
+                sv_bench_clients(argc > 2 ? atoi(argv[2]) : 8);
+                return 0;
+        }
         if (argc > 1 && strcmp(argv[1], "text") == 0)
         {
                 sv_bench_text(argc > 2 ? atoi(argv[2]) : 8);

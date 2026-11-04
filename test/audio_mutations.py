@@ -353,6 +353,8 @@ M = [
     ("service", "a copy that is cut one byte late", "        for (; i < room - 1 && from[i]; i++)", "        for (; i < room && from[i]; i++)"),
     ("service", "any file in the settings directory is an event", "        else if (length >= 6 && memory_compare(buffer + at + 16, \"audio.\", 6) == 0)", "        else if (length >= 6)"),
     ("service", "a setting moved into place is not an event", "unsigned long mask = 0x8 | 0x40 | 0x80 | 0x100 | 0x200;", "unsigned long mask = 0x8 | 0x40 | 0x100 | 0x200;"),
+    ("service", "a pass drops every client", "        if (audio_service.fd[slot] >= 0 && (pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now)))", "        if (audio_service.fd[slot] >= 0 && (1 || pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now)))"),
+    ("service", "the client list leaves out slot 0", "        for (int slot = 0; slot < PULSE_CLIENTS; slot++)\n                if (audio_service.fd[slot] >= 0)\n                        audio_service.live[", "        for (int slot = 1; slot < PULSE_CLIENTS; slot++)\n                if (audio_service.fd[slot] >= 0)\n                        audio_service.live["),
     ("service", "the capture thread keeps the real-time policy", "        audio_call(syscall(sched_setscheduler), 0, 0, (positive)&ordinary, 0, 0, 0); // pid 0: this thread", "        (void)ordinary;"),
     ("service", 'a settings FIFO is waited for (no O_NONBLOCK)', '0x80000 | 0x20000 | 0x800, 0, 0, 0);', '0x80000 | 0x20000, 0, 0, 0);'),
 ]
