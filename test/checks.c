@@ -216959,6 +216959,51 @@ b32 main(void)
                 compositor.damages = 0, compositor_gpu_state.up = 0;
         }
 
+        // Why the card is refused a present is counted, and the processor's presents with it, in the table moonwater canvas reads: a width the card does not
+        // draw (695) is refused as an alignment, a present it draws is counted as the card's, and the counts are the table's, not only the compositor's.
+        {
+                static struct windows why_table;
+                struct compositor_frame f;
+                unsigned int drawn0, processor0, align0, align1;
+                int drew_now, refused_wide;
+                enum { WW = 695, WH = 40 };
+                long screen_mem = system_call_6(syscall(mmap), 0, (positive)WW * WH * 4, 3, 0x22, (positive)-1, 0);
+
+                if (screen_mem < 0 && screen_mem > -4096)
+                        return 1;
+                // The card is taken as started when the rows above started it (gpu.at is its buffer); with none, the present at the width the card draws is
+                // not asked of it, and the refusal above is still the processor's.
+                compositor_gpu_state.up = gpu.at != 0, compositor_gpu_state.force = 1, compositor_gpu_state.dead = 0, compositor_gpu = 1, compositor.card = -1;
+                compositor.width = WW, compositor.height = WH, compositor.scanout = (unsigned int address_to)screen_mem, compositor.scanout_pitch = 2784;
+                compositor.scanout_bytes = (positive)WW * WH * 4, compositor.cursor.drawn = 0, compositor.damages = 1;
+                compositor.damage[0][0] = 0, compositor.damage[0][1] = 0, compositor.damage[0][2] = WW, compositor.damage[0][3] = WH;
+                memory_zero(&why_table, sizeof(why_table));
+                compositor.table = &why_table;
+                compositor_gpu_counts.drawn = compositor_gpu_counts.processor = 0;
+                memory_zero(compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
+                memory_zero(&f, sizeof(f));
+                f.x = 4, f.y = 4, f.width = 20, f.height = 20, f.scale = 100, f.builtin = 1, f.slot = -2, f.line = 0, f.pitch = 0;
+                refused_wide = !compositor_gpu_present(&f, 1);
+                align0 = why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
+                processor0 = why_table.gpu_processor;
+                drawn0 = why_table.gpu_drawn;
+                check("gpu why: a width the card does not draw is refused", refused_wide);
+                check("gpu why: the refusal is counted as an alignment reason", align0 == 1);
+                check("gpu why: and as the processor's present, not the card's", processor0 == 1 && drawn0 == 0);
+                check("gpu why: the table's counts are the compositor's", why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN] == compositor_gpu_counts.why[COMPOSITOR_GPU_WHY_ALIGN] && why_table.gpu_processor == compositor_gpu_counts.processor);
+                if (gpu.at) // a card: the same present at the width it draws is the card's, and counted so
+                {
+                        compositor.width = 696, compositor.scanout_pitch = 2784;
+                        drew_now = compositor_gpu_present(&f, 1);
+                        align1 = why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN];
+                        check("gpu why: a width the card draws is composed by it, and counted as its present", drew_now == 1 && why_table.gpu_drawn == 1 && why_table.gpu_processor == 1 && align1 == 1);
+                }
+                else
+                        string_format(log, "  gpu why: no amdgpu card, the present at the width it draws is not asked of it\n");
+                compositor.table = 0;
+                compositor.damages = 0;
+        }
+
         // What the maps cost a present: every job names every map, and the kernel looks at the pages of each userptr buffer it is named at every
         // submission. A job of one 64 by 4 fill, best and median of 31, with no maps; the two buffers of five 1920 by 1080 windows of a 3840-wide
         // screen (the window table's rows); those and a band of 34 tabs, 48 rows of 3840, each tab a map of its own slice; and the windows and the tabs

@@ -22283,6 +22283,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                                : table->overlay < 0 ? (string_address) "none, or refused"
                                                                     : (string_address) "not asked yet");
         host_say(log, "  shown straight  %p frames\n", (positive)table->scanned);
+        //      The GPU's compose: the presents the card drew, the presents the processor drew, and why the card was refused the others.
+        host_say(log, "  gpu             the GPU composed %p presents, the processor %p\n", (positive)table->gpu_drawn, (positive)table->gpu_processor);
+        for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)
+                if (table->gpu_refused[why])
+                        host_say(log, "  gpu refused     %p, %s\n", (positive)table->gpu_refused[why], windows_gpu_reasons[why] ? windows_gpu_reasons[why] : (string_address) "?");
         host_say(log, "  refused         %s\n",
                  table->refused < sizeof(refusals) / sizeof(refusals[0]) ? refusals[table->refused] : (string_address) "?");
         host_say(log, "  top window      %s%s\n", table->unscanned ? (string_address) "not shown straight: " : (string_address) "",

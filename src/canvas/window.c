@@ -503,6 +503,16 @@ static inline int window_key(struct window *window, struct window_key *key)
         and one more, and the window is put where they say now.
 */
 #define WINDOWS_TABLE "/run/moonwater/windows"
+// The reasons the GPU's compose refused a present (struct windows gpu_refused, compositor.c's compositor_gpu_why): one slot each, none of them
+// the card drawing it. The names are host.c's, in the same order.
+#define WINDOWS_GPU_REASONS 24
+// The names, in the order of compositor.c's enum compositor_gpu_why (slot 0 is the card drawing it: no refusal, and never said).
+static const string_address windows_gpu_reasons[WINDOWS_GPU_REASONS] = {
+    "drawn", "canvas gpu is off", "headless, and not asked for the GPU (-G)", "no card the GPU's kernels are for", "the self-test drew wrong",
+    "given up after hangs", "finger spots", "a width not a multiple of 4, or a pitch not 16 bytes", "a job given up on may still run",
+    "the scanout is not one the card can draw into", "a window's picture is not mapped for the card", "a landing (scaled)", "a snap preview or a shared edge",
+    "the records or the cover tables are full", "a close button not wholly in its picture", "the scene did not finish", "a turned screen (the processor turned it)",
+    "other frames, or empty damage"};
 #define WINDOWS_DOOR "/run/moonwater/window."
 /*      A door is read by the compositor, which runs as root, and the row it
         names is freed when every writer of the door has closed (the program
@@ -850,6 +860,15 @@ struct windows
         unsigned int popup_parent[WINDOWS];
         int popup_x[WINDOWS], popup_y[WINDOWS], popup_w[WINDOWS], popup_h[WINDOWS];
         unsigned int popup_flags[WINDOWS];
+
+        /*
+                The GPU's compose, for moonwater canvas: the presents the compositor composed on the card (gpu_drawn) and on the
+                processor (gpu_processor), and for each reason in WINDOWS_GPU_REASON how many presents the card was refused them
+                (gpu_refused). A present is counted once, as drawn or as the processor's, and a reason counts the presents it
+                refused (a turn the card refused is counted as the processor's turn, the present still the card's).
+        */
+        unsigned int gpu_drawn, gpu_processor;
+        unsigned int gpu_refused[WINDOWS_GPU_REASONS];
 };
 
 #define WINDOWS_CLIP_CLIPBOARD 0u

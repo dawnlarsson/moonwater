@@ -987,6 +987,33 @@ static void compositor_draw(const struct compositor_target *t, const struct comp
         (the panel, a picture scaled, a line lit, a close button, a preview) makes the whole answer none, and the frames are drawn by the processor.
 */
 #define COMPOSITOR_GPU_TABLES 128
+
+// Why the GPU did not compose a present (compositor_gpu_present), one code each: the presents the card drew and the presents it was refused are
+// counted (compositor_gpu_counts, moonwater canvas's gpu lines), and each reason is said in the log. The names are host.c's (the same order).
+enum compositor_gpu_why
+{
+        COMPOSITOR_GPU_WHY_DRAWN,     // not a refusal: the card drew the present
+        COMPOSITOR_GPU_WHY_OFF,       // canvas gpu off
+        COMPOSITOR_GPU_WHY_HEADLESS,  // no card, and the headless compositor not asked for the GPU (-G)
+        COMPOSITOR_GPU_WHY_NO_CARD,   // no card the kernels are for, or the GPU did not start
+        COMPOSITOR_GPU_WHY_UNTRUSTED, // a card whose self-test drew wrong
+        COMPOSITOR_GPU_WHY_DEAD,      // given up after hangs (until canvas gpu is turned off and on)
+        COMPOSITOR_GPU_WHY_SPOTS,     // finger spots are on the screen
+        COMPOSITOR_GPU_WHY_ALIGN,     // a width that is not a multiple of 4, or a pitch that is not 16 bytes
+        COMPOSITOR_GPU_WHY_BUSY,      // a job given up on may still be running
+        COMPOSITOR_GPU_WHY_OUTPUT,    // the scanout is not one the card can draw into
+        COMPOSITOR_GPU_WHY_PICTURE,   // a window's picture is not in a map the card can read
+        COMPOSITOR_GPU_WHY_SCALED,    // a window landing, drawn scaled
+        COMPOSITOR_GPU_WHY_PREVIEW,   // a snap preview or a shared edge's mark is drawn
+        COMPOSITOR_GPU_WHY_POOL,      // the records or the cover tables are full
+        COMPOSITOR_GPU_WHY_BUTTON,    // a close button that is not wholly in its window's picture
+        COMPOSITOR_GPU_WHY_HANG,      // the scene did not finish
+        COMPOSITOR_GPU_WHY_TURN,      // a turned screen's rotation did not finish on the card (the processor turned it)
+        COMPOSITOR_GPU_WHY_OTHER,     // a frame of another kind, or the damage is empty
+        COMPOSITOR_GPU_WHY_COUNT
+};
+typedef char compositor_gpu_why_fits[COMPOSITOR_GPU_WHY_COUNT <= WINDOWS_GPU_REASONS ? 1 : -1];
+
 // A frame's picture's address for the GPU: in the map that holds all of it, 0 for none. A map that holds only its first byte (made when the window was
 // smaller) would have the card read its rows below from the addresses after that map's end, which are another buffer's: another window's pixels.
 #define compositor_gpu_va(f) gpu_va_bytes((f)->pixels, 4 * ((f)->pitch * (positive)((f)->height - 1) + (positive)(f)->width))
@@ -994,6 +1021,7 @@ struct compositor_gscene
 {
         unsigned int *ops;                  // the records, in the GPU's buffer
         unsigned int count, room, width, height; // and the picture they are for
+        enum compositor_gpu_why why;        // why the frames were refused, when they were
         unsigned char *tables;              // the cover tables' pool, in the GPU's buffer, its size and its place from the buffer's start
         unsigned int tables_size, tables_at, tables_used, kept;
         struct
@@ -1107,10 +1135,16 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
         if (!compositor_close_box(f, &bx, &by, &side))
                 return true;
         if (bx < 0 || by < 0 || bx + side > (int)compositor_gscene.width || by + side > (int)compositor_gscene.height || side > 255 || f->pitch > 65535)
+        {
+                compositor_gscene.why = COMPOSITOR_GPU_WHY_BUTTON;
                 return false;
+        }
         halo = compositor_gpu_close_table(side, half, 0), cross = compositor_gpu_close_table(side, half, 1);
         if (!halo || !cross)
+        {
+                compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
                 return false;
+        }
         at = compositor_gpu_va(f) + 4ull * ((positive)(by - f->y) * f->pitch + (positive)(bx - f->x));
         op[0] = 6u | (unsigned int)side << 8 | (unsigned int)f->pitch << 16, op[1] = (unsigned int)bx, op[2] = (unsigned int)by, op[3] = (unsigned int)(bx + side);
         op[4] = (unsigned int)(by + side), op[5] = halo, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32) | tone << 8;
@@ -1159,9 +1193,14 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
 
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
-        if ((!f->builtin && (!f->pixels || w <= 0 || h <= 0 || !compositor_gpu_va(f))) || compositor_scaled(f) || f->preview[0] || f->preview[1] || f->preview[2] ||
-            f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3] || g->count + 40 > g->room - 400)
-                return false;
+        if (!f->builtin && (!f->pixels || w <= 0 || h <= 0 || !compositor_gpu_va(f)))
+                return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
+        if (compositor_scaled(f))
+                return g->why = COMPOSITOR_GPU_WHY_SCALED, false;
+        if (f->preview[0] || f->preview[1] || f->preview[2] || f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3])
+                return g->why = COMPOSITOR_GPU_WHY_PREVIEW, false;
+        if (g->count + 40 > g->room - 400)
+                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
         b = x - ox, ri = r > b ? r - b : 0;
         if (b)
@@ -1197,7 +1236,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
                 edge_table = b ? compositor_gpu_table(r, b, corner, 0) : 0;
                 content_table = ri ? compositor_gpu_table(r, b, corner, 1) : 0;
                 if ((b && !edge_table) || (ri && !content_table))
-                        return false;
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
                 if (b)
                         compositor_gpu_rect(5, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
                 if (ri && sx2 > sx1 && sy2 > sy1)
@@ -1211,7 +1250,7 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
 {
         struct compositor_gscene *g = &compositor_gscene;
 
-        g->count = 0;
+        g->count = 0, g->why = COMPOSITOR_GPU_WHY_DRAWN;
         if (g->kept > COMPOSITOR_GPU_TABLES / 2) // the tables of the last scenes let go when the pool is half full: a scene is under that
                 g->kept = 0, g->tables_used = 0;
         compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
@@ -6884,6 +6923,7 @@ static int compositor_turning_software(void)
 */
 #ifdef MOONWATER_GPU_C
 static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned int degrees, unsigned int x0, unsigned int y0, unsigned int x1, unsigned int y1);
+static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor);
 #endif
 // gpu: the scene was composed by the GPU into the scanout (there is no mirror of it then), and the GPU turns it.
 static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int clips, int gpu)
@@ -6913,11 +6953,17 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
                                 continue;
 #ifdef MOONWATER_GPU_C
                         if (!gpu || !compositor_gpu_rotate(at, screen, degrees, x0 - screen[0], y0 - screen[1], x1 - screen[0], y1 - screen[1]))
+                        {
+                                if (gpu) // the present was the card's; the turn it was refused is counted as the processor's
+                                        compositor_gpu_refuse(COMPOSITOR_GPU_WHY_TURN, 0);
 #endif
-                        windows_rotate_u32(compositor_turns[at].pixels, compositor_turns[at].pitch / 4,
-                                           scene + (unsigned long)screen[1] * pitch + (unsigned long)screen[0], pitch,
-                                           (unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0],
-                                           y0 - screen[1], x1 - screen[0], y1 - screen[1]);
+                                windows_rotate_u32(compositor_turns[at].pixels, compositor_turns[at].pitch / 4,
+                                                   scene + (unsigned long)screen[1] * pitch + (unsigned long)screen[0], pitch,
+                                                   (unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0],
+                                                   y0 - screen[1], x1 - screen[0], y1 - screen[1]);
+#ifdef MOONWATER_GPU_C
+                        }
+#endif
                         windows_rotate_panel((unsigned int)screen[2], (unsigned int)screen[3], degrees, x0 - screen[0],
                                              y0 - screen[1], x1 - screen[0], y1 - screen[1], panel);
                         for (unsigned int side = 0; side < 4; side++)
@@ -6950,10 +6996,45 @@ static void compositor_say(string_address what, bipolar value);
 static struct
 {
         int up, dead, force, told; // started; given up; headless is to use it (-G); said once that it composes
+        enum compositor_gpu_why dead_why; // why it is given up: no card, untrusted, or the hangs
         unsigned int failures;     // hangs in a row
         positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer)
         positive turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS]; // the same for the buffers Canvas turns screens in
 } compositor_gpu_state;
+
+// The presents the card drew and the processor drew, and the reasons the card was refused (moonwater canvas says them, from the table). A reason
+// is said in the log the first time, and then at most once a minute with its count (checked each 64th refusal, so a clock read is rare).
+static struct
+{
+        unsigned int drawn, processor, why[COMPOSITOR_GPU_WHY_COUNT];
+        b64 said_at[COMPOSITOR_GPU_WHY_COUNT];
+} compositor_gpu_counts;
+
+// The counts as the table says them (moonwater canvas reads the table, not the processor's memory).
+static void compositor_gpu_publish(void)
+{
+        if (!compositor.table)
+                return;
+        compositor.table->gpu_drawn = compositor_gpu_counts.drawn, compositor.table->gpu_processor = compositor_gpu_counts.processor;
+        memory_copy(compositor.table->gpu_refused, compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
+}
+
+// A refusal of the card: the reason is counted, and said when it is first or due. A present the card is refused is the processor's (processor 1);
+// a turned screen the card did not turn is a refusal of its own (processor 0: the present was the card's).
+static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
+{
+        unsigned int n = ++compositor_gpu_counts.why[why];
+        b64 now = 0;
+
+        compositor_gpu_counts.processor += (unsigned int)processor;
+        if (n == 1 || ((n & 63) == 0 && (now = clock_monotonic_nanoseconds()) - compositor_gpu_counts.said_at[why] >= 60000000000ull))
+        {
+                compositor_gpu_counts.said_at[why] = now ? now : clock_monotonic_nanoseconds();
+                string_format(log, "compositor: the GPU refused a present (%s), the processor composed it; %p so far\n", windows_gpu_reasons[why], (positive)n);
+                log_flush();
+        }
+        compositor_gpu_publish();
+}
 
 // The GPU started once, on a card it has kernels for, with the pools laid out in its buffer.
 static int compositor_gpu_up(void)
@@ -6965,6 +7046,7 @@ static int compositor_gpu_up(void)
         if (!gpu_start((2 << 20) + (16 << 20)))
         {
                 compositor_gpu_state.dead = 1;
+                compositor_gpu_state.dead_why = gpu.broken ? COMPOSITOR_GPU_WHY_UNTRUSTED : COMPOSITOR_GPU_WHY_NO_CARD;
                 compositor_say(gpu.broken ? "the GPU is not trusted, its self-test drew wrong, family" : "no card the GPU's kernels are for, the processor composes", gpu.family);
                 return 0;
         }
@@ -7022,29 +7104,38 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
         return compositor_gpu_va(f) || (gpu_map(f->pixels, bytes) && compositor_gpu_va(f));
 }
 
-// The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it.
-static int compositor_gpu_present(const struct compositor_frame *frames, unsigned int count)
+// The present's damage drawn by the GPU: why it is not, or COMPOSITOR_GPU_WHY_DRAWN when it is.
+static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame *frames, unsigned int count)
 {
         struct compositor_gscene *g = &compositor_gscene;
         int x1 = compositor.width, y1 = compositor.height, x2 = 0, y2 = 0;
         positive out;
 
-        if (!compositor_gpu || compositor_gpu_state.dead || (compositor.card < 0 && !compositor_gpu_state.force) ||
-            compositor_spots_any(0) || (compositor.width & 3) || (compositor.scanout_pitch & 15))
-                return 0;
-        if (!compositor_gpu_up() || !gpu_idle()) // a job given up on may still read the buffer: no record is written into it until it is done
-                return 0;
+        if (!compositor_gpu)
+                return COMPOSITOR_GPU_WHY_OFF;
+        if (compositor_gpu_state.dead)
+                return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
+        if (compositor.card < 0 && !compositor_gpu_state.force)
+                return COMPOSITOR_GPU_WHY_HEADLESS;
+        if (compositor_spots_any(0))
+                return COMPOSITOR_GPU_WHY_SPOTS;
+        if ((compositor.width & 3) || (compositor.scanout_pitch & 15))
+                return COMPOSITOR_GPU_WHY_ALIGN;
+        if (!compositor_gpu_up())
+                return compositor_gpu_state.dead_why;
+        if (!gpu_idle()) // a job given up on may still read the buffer: no record is written into it until it is done
+                return COMPOSITOR_GPU_WHY_BUSY;
         // A present is a tick of the maps' (gpu_trim) whether the GPU draws it or not: a run of presents the processor draws (a window landing, scaled) made
         // maps of the pictures and let none go, and once all were held the GPU drew nothing again.
         gpu_trim();
         if (!(out = compositor_gpu_output()))
-                return 0;
+                return COMPOSITOR_GPU_WHY_OUTPUT;
         g->width = (unsigned int)compositor.width, g->height = (unsigned int)compositor.height;
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_gpu_picture(&frames[k]))
-                        return 0;
+                        return COMPOSITOR_GPU_WHY_PICTURE;
         if (!compositor_gpu_frames(frames, count, compositor_ground))
-                return 0;
+                return g->why;
         if (compositor.cursor.drawn)
                 compositor_gpu_cursor(compositor.cursor.x, compositor.cursor.y, compositor.cursor.drawn_shape, compositor.cursor.drawn_scale, compositor_cursor_ink(0, 0),
                                       compositor_cursor_ink(1, 0));
@@ -7055,18 +7146,33 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
                 x1 = d[0] < x1 ? d[0] : x1, y1 = d[1] < y1 ? d[1] : y1, x2 = d[2] > x2 ? d[2] : x2, y2 = d[3] > y2 ? d[3] : y2;
         }
         if (x2 <= x1 || y2 <= y1)
-                return 0;
+                return COMPOSITOR_GPU_WHY_OTHER;
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), (unsigned int)compositor.width,
                        (unsigned int)compositor.height, (unsigned int)x1, (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
         {
                 if (++compositor_gpu_state.failures >= 3)
-                        compositor_gpu_state.dead = 1;
-                return 0;
+                        compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG;
+                return COMPOSITOR_GPU_WHY_HANG;
         }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);
         compositor_gpu_state.failures = 0;
-        return 1;
+        return COMPOSITOR_GPU_WHY_DRAWN;
+}
+
+// The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it (and the reason is counted).
+static int compositor_gpu_present(const struct compositor_frame *frames, unsigned int count)
+{
+        enum compositor_gpu_why why = compositor_gpu_draw(frames, count);
+
+        if (why == COMPOSITOR_GPU_WHY_DRAWN)
+        {
+                compositor_gpu_counts.drawn++;
+                compositor_gpu_publish();
+                return 1;
+        }
+        compositor_gpu_refuse(why, 1);
+        return 0;
 }
 
 // A screen Canvas turns, the damage of it (x0, y0, x1, y1 of the screen) turned from the scanout into the screen's own buffer by the GPU (windows_rotate_u32's turn:
