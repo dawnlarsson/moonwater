@@ -1581,7 +1581,7 @@ static fn settings_rebuild(void)
                 }
         settings.list.count = count;
         if (settings.choice >= 0 && settings_pos(settings.choice) < 0)
-                settings.choice = -1, ui_popup_close(&settings.popup);
+                settings.choice = -1, ui_popmenu_close(&settings.popup);
         if (settings_pos(settings.list.focus) < 0 && count)
                 settings.list.focus = settings.list.id[0];
         settings_layout();
@@ -3122,7 +3122,7 @@ static fn settings_output_apply(int row, const char address_to label)
         Its words are copied here, since a popup keeps the labels it is given (a & is doubled, so it is no mnemonic).
 */
 /*
-        The menu's answer, as the runner gives it (ui_popup_pump): the popup closes as it answers, and the answer goes to the app.
+        The menu's answer, as the runner gives it (ui_popmenu_pump): the popup closes as it answers, and the answer goes to the app.
         A negative answer is the menu gone (Escape, Left, or the compositor's press outside), and closes the choice.
 */
 static fn settings_chose(int id);
@@ -3131,7 +3131,7 @@ static fn settings_menu_answer(int answer)
 {
         if (answer != UI_MENU_NOTHING)
         {
-                ui_popup_close(&settings.popup);
+                ui_popmenu_close(&settings.popup);
                 settings_chose(answer);
         }
 }
@@ -3141,7 +3141,7 @@ static fn settings_menu_close(void)
         if (settings.choice < 0)
                 return;
         settings.choice = -1;
-        ui_popup_close(&settings.popup);
+        ui_popmenu_close(&settings.popup);
         settings_say((string_address) "");
         settings_dirty();
 }
@@ -3193,10 +3193,10 @@ static fn settings_menu_open(int row)
         settings.popup.field = null;
         settings.choice = row, settings.choice_x = x, settings.choice_y = y;
         settings_reveal();
-        ui_popup_open(&settings.popup, &settings.own, &settings.ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch);
+        ui_popmenu_open(&settings.popup, &settings.own, &settings.ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch);
         settings.popup.menu.hot = current >= 0 ? current : 0;
         if (settings.popup.open)
-                ui_popup_present(&settings.popup);
+                ui_popmenu_present(&settings.popup);
         settings_say((string_address)WORDS(settings_menu_keys));
         settings_dirty();
 }
@@ -4607,7 +4607,7 @@ static fn settings_size(unsigned int width, unsigned int height)
         settings_side_reveal();
         // A choice's menu is a popup under its row, which the layout may have moved: it closes, and the row is asked again.
         if (settings.choice >= 0)
-                settings.choice = -1, ui_popup_close(&settings.popup);
+                settings.choice = -1, ui_popmenu_close(&settings.popup);
         settings_dirty();
 }
 

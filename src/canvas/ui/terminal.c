@@ -2453,7 +2453,7 @@ static fn terminal_menu_open(int x, int y, b32 touch)
         ui_popmenu_add(m, WORDS(menu_zoom_in), "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
         ui_popmenu_add(m, WORDS(menu_zoom_out), "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
         ui_popmenu_add(m, WORDS(menu_reset_zoom), "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET);
-        ui_popup_open(&terminal_menu, &terminal.own, &terminal.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
+        ui_popmenu_open(&terminal_menu, &terminal.own, &terminal.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
 static fn terminal_chose(int id)

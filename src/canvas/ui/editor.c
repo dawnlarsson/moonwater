@@ -471,7 +471,7 @@ static fn editor_menu_open(int x, int y)
         ui_popmenu_add(m, WORDS(menu_go_to_line), "Ctrl+G", 0, EDITOR_MENU_LINE);
         ui_popmenu_add(m, WORDS(menu_toggle_comment), "Ctrl+/", 0, EDITOR_MENU_COMMENT);
         editor.menu.field = view;
-        ui_popup_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
+        ui_popmenu_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
 }
 
 static fn editor_chose(int id)

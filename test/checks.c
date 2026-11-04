@@ -125485,7 +125485,7 @@ static void check_compositor_popup_press(b32 touch)
 }
 
 /*
-        A menu opened, shown, closed and opened again on the row a program took (ui_popup_shows, with the row taken the way
+        A menu opened, shown, closed and opened again on the row a program took (ui_popmenu_shows, with the row taken the way
         windows_take takes it): every open's picture is the menu drawn whole, and is the one the compositor places as a popup
         of its window, at the size the menu is. Every other open moves the hot item before the compositor has taken the first
         picture, which the present must wait for and then show again: a move the compositor was not ready for is shown.
@@ -125551,7 +125551,7 @@ static void check_popup_ground_steady(void)
     popup.own.buffer = compositor.buffer;
     popup.own.stride = GLASS_SIDE;
     popup.own.output_width = popup.own.output_height = GLASS_SIDE;
-    if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 1))
+    if (!ui_popmenu_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 1))
     {
         check("popup ground: the menu opens", false);
         return;
@@ -125561,20 +125561,20 @@ static void check_popup_ground_steady(void)
     // The menu's pump takes the kit's clock: over a window that has not drawn since (idle), a press's ripple and its fade run on the
     // time now, not on the parent's last frame, so the menu does not stay busy with a ripple that never ages.
     ui_kit.now = 1000;
-    ui_popup_pump(&popup);
+    ui_popmenu_pump(&popup);
     check("popup: the menu's pump takes the kit's clock, not the parent's last frame's", ui_kit.now > 1000);
     for (int hot = 0; hot < 4; hot++)
     {
         if (hot == 2)
             continue;
         popup.menu.hot = hot;
-        ui_popup_present(&popup);
+        ui_popmenu_present(&popup);
         compositor_take(3);
         compositor_present();
-        ui_popup_pump(&popup);
+        ui_popmenu_pump(&popup);
         compositor_take(3);
         compositor_present();
-        ui_popup_pump(&popup);
+        ui_popmenu_pump(&popup);
         if (!first_ground)
             first_ground = table->ground[3] & 0xffffffu, first_ink = popup.ui.ground & 0xffffffu;
         moves++;
@@ -125660,17 +125660,17 @@ static void check_dropdown_labels(void)
         for (int slot = 0; slot < 2; slot++)
             memory_zero((void address_to)windows_pixels(&popup.own, (unsigned int)slot), sizeof(unsigned int) * GLASS_SIDE * GLASS_SIDE);
         opens++;
-        if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
+        if (!ui_popmenu_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
         {
             missing++;
             continue;
         }
         compositor_take(3);
         compositor_present();
-        ui_popup_pump(&popup);
+        ui_popmenu_pump(&popup);
         compositor_take(3);
         compositor_present();
-        ui_popup_pump(&popup);
+        ui_popmenu_pump(&popup);
         if (!compositor.showing[3] || compositor_popup_parent[3] != 1)
         {
             missing++;
@@ -125798,7 +125798,7 @@ static void check_dropdown_selected(void)
 
 /*
         A dropdown closes when it is scrolled. A wheel or a touchpad's scroll over the menu's own window closes it (the menu's row
-        answers UI_MENU_GONE, as Escape does), and a scroll the app's window receives closes it too (ui_popup_scroll), once: a
+        answers UI_MENU_GONE, as Escape does), and a scroll the app's window receives closes it too (ui_popmenu_scroll), once: a
         second one finds it closed. A motion that is not a scroll leaves it open.
 */
 static void check_dropdown_scroll(void)
@@ -125858,27 +125858,27 @@ static void check_dropdown_scroll(void)
         popup.own.buffer = compositor.buffer;
         popup.own.stride = GLASS_SIDE;
         popup.own.output_width = popup.own.output_height = GLASS_SIDE;
-        shown[round] = ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0) && popup.open;
+        shown[round] = ui_popmenu_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0) && popup.open;
         compositor_take(3);
         compositor_present();
-        ui_popup_pump(&popup);
+        ui_popmenu_pump(&popup);
         if (round == 0)
         {
             // A wheel over the menu: the compositor sends it to the menu's own row.
             compositor_post(3, WINDOW_EVENT_WHEEL, 0, 120, 0);
-            answer[0] = ui_popup_pump(&popup);
+            answer[0] = ui_popmenu_pump(&popup);
         }
         else if (round == 1)
         {
             // A touchpad's sideways scroll over the menu.
             compositor_post(3, WINDOW_EVENT_WHEEL, 0, 120, 1);
-            answer[1] = ui_popup_pump(&popup);
+            answer[1] = ui_popmenu_pump(&popup);
         }
         else
         {
-            // A scroll the app's window receives (the app's loop asks ui_popup_scroll), then one more: the menu is closed by the first.
-            answer[2] = ui_popup_scroll(&popup, &wheel);
-            again = ui_popup_scroll(&popup, &sideways);
+            // A scroll the app's window receives (the app's loop asks ui_popmenu_scroll), then one more: the menu is closed by the first.
+            answer[2] = ui_popmenu_scroll(&popup, &wheel);
+            again = ui_popmenu_scroll(&popup, &sideways);
         }
         closed[round] = !popup.open;
         popup.open = false;
@@ -125897,8 +125897,8 @@ static void check_dropdown_scroll(void)
     popup.own.buffer = compositor.buffer;
     popup.own.stride = GLASS_SIDE;
     popup.own.output_width = popup.own.output_height = GLASS_SIDE;
-    ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0);
-    kept = ui_popup_scroll(&popup, &motion);
+    ui_popmenu_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0);
+    kept = ui_popmenu_scroll(&popup, &motion);
     kept_open = popup.open;
     popup.open = false;
     compositor_popup_leave(3);
@@ -125975,7 +125975,7 @@ static void check_popup_reopen(void)
         popup.own.buffer = compositor.buffer;
         popup.own.stride = GLASS_SIDE;
         popup.own.output_width = popup.own.output_height = GLASS_SIDE;
-        if (!ui_popup_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
+        if (!ui_popmenu_shows(&popup, &parent_row, &parent_ui, 10, 10, 0, 0, WINDOW_POPUP_POINT, 0))
         {
             missing++;
             continue;
@@ -125986,15 +125986,15 @@ static void check_popup_reopen(void)
         if (variant == 1)
         {
             popup.menu.hot = hot;
-            ui_popup_present(&popup);
+            ui_popmenu_present(&popup);
         }
         compositor_take(3);
         compositor_present();
         if (variant == 2)
         {
-            ui_popup_pump(&popup);
+            ui_popmenu_pump(&popup);
             popup.menu.hot = hot;
-            ui_popup_present(&popup);
+            ui_popmenu_present(&popup);
         }
         // Each knock of the compositor's takes wakes the app, which pumps the menu, and a picture it was not ready for is
         // presented then, until the menu has nothing left to show.
@@ -126002,7 +126002,7 @@ static void check_popup_reopen(void)
         {
             compositor_take(3);
             compositor_present();
-            ui_popup_pump(&popup);
+            ui_popmenu_pump(&popup);
         }
         compositor_take(3);
         compositor_present();
@@ -134430,7 +134430,7 @@ static void settings_menu_point(const struct window_event address_to event, int 
 
 static void settings_menu_gone(void)
 {
-        ui_popup_close(&settings.popup);
+        ui_popmenu_close(&settings.popup);
         settings_chose(UI_MENU_GONE);
 }
 
@@ -148962,7 +148962,7 @@ b32 main()
                         frames_pixels[y * SETTINGS_GALLERY_W + x] = ui_over(pixel, 0xff000000u | 0x2b2b2eu);
                 }
                 frames_write((string_address) "launcher", 0, 0, 0, launcher.width, launcher.height);
-                // A dropdown is glass too (ui_popup_look): its menu over the same glass, no face and no outline, its hot choice lit.
+                // A dropdown is glass too (ui_popmenu_look): its menu over the same glass, no face and no outline, its hot choice lit.
                 {
                         static struct ui_popmenu menu;
                         struct ui menu_ui = launcher.ui;
@@ -151035,7 +151035,7 @@ static fn field_check(struct ui address_to wui)
 /*
         Glass: a temporary overlay is glass, what is under it shows through, and its pieces are drawn in the inks of its
         ground (ui_text_colour, ui_well), flat: no shadow, ring or outline past an edge. The launcher and its menus are glass
-        (WINDOW_GLASS, the menus through ui_popup_look); the settings window, the editor and the terminal are the kit's
+        (WINDOW_GLASS, the menus through ui_popmenu_look); the settings window, the editor and the terminal are the kit's
         surface and not glass. A glass window has no line (compositor_line).
 */
 #if MOONWATER_UI_LAUNCHER
@@ -151135,11 +151135,11 @@ static fn check_glass_pieces(string_address regular)
         memory_zero(&popup, sizeof(popup));
         popup.own.table = &table, popup.own.row = 2;
         table.ground[2] = 0x112233u;
-        ui_popup_look(&popup, &table, &parent);
+        ui_popmenu_look(&popup, &table, &parent);
         check("glass: a menu is glass: its row is glass with no close button, and its inks are the row's ground",
               popup.ui.glass && !popup.ui.opaque && table.glass[2] == UI_POPUP_GLASS && popup.ui.ground == 0x112233u);
         table.ground[2] = 0;
-        ui_popup_look(&popup, &table, &parent);
+        ui_popmenu_look(&popup, &table, &parent);
         check("glass: a menu opened before the compositor gave its ground is inked by the parent's", popup.ui.ground == 0xe0e0e0u);
 
         // A glass window has its line too, as a floating window that is not glass does.
@@ -154719,7 +154719,7 @@ static fn menu_defaults_check(struct ui address_to wui)
 
                 memory_zero(&popup, sizeof(popup));
                 popup.own.table = &glass_table, popup.own.row = 1;
-                ui_popup_look(&popup, &glass_table, wui);
+                ui_popmenu_look(&popup, &glass_table, wui);
                 check("menu: a popup is glass, its row has the glass flags and no close button", popup.ui.glass && !popup.ui.opaque &&
                       glass_table.glass[1] == UI_POPUP_GLASS);
         }

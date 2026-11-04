@@ -6696,8 +6696,8 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 /* ---- menus: one set of defaults, a popup surface and the list in it ---- */
 /*
         A menu: ui_popmenu_add (an item), ui_popmenu_choosable, ui_popmenu_size and ui_popmenu_at (its size and place),
-        ui_popmenu_event (its input), ui_popmenu_draw. A popup window: ui_popup_open and ui_popup_close, ui_popup_present,
-        ui_popup_pump (its event loop) and ui_popup_scroll. The sizes are ui_menu_sizes, one set for every menu.
+        ui_popmenu_event (its input), ui_popmenu_draw. A popup window: ui_popmenu_open and ui_popmenu_close, ui_popmenu_present,
+        ui_popmenu_pump (its event loop) and ui_popmenu_scroll. The sizes are ui_menu_sizes, one set for every menu.
 */
 
 /*
@@ -7116,7 +7116,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         m->hot = at;
                 return UI_MENU_NOTHING;
         }
-        // A scroll (the wheel's or a touchpad's) over the menu closes it, as a scroll anywhere does (ui_popup_scroll).
+        // A scroll (the wheel's or a touchpad's) over the menu closes it, as a scroll anywhere does (ui_popmenu_scroll).
         if (event->type == WINDOW_EVENT_WHEEL)
                 return UI_MENU_GONE;
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
@@ -7154,8 +7154,8 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
 
 /*
         A popup an app opens: its own row of the table, a picture of its own drawn with the app's engine and faces, and
-        its menu. ui_popup_open takes the row (as a popup of the app's window, at an anchor in the window's pixels),
-        ui_popup_pump reads its events and answers what was chosen, and ui_popup_close leaves the row. The app's runner
+        its menu. ui_popmenu_open takes the row (as a popup of the app's window, at an anchor in the window's pixels),
+        ui_popmenu_pump reads its events and answers what was chosen, and ui_popmenu_close leaves the row. The app's runner
         waits on its wake too while it is open (ui_app.popup).
 */
 struct ui_popup
@@ -7170,10 +7170,10 @@ struct ui_popup
 
 /*
         A picture of the menu, into the buffer the compositor is not reading. While the compositor has not taken the last one
-        there is no buffer free: the picture is kept as pending, and ui_popup_pump presents it once the compositor's knock says
+        there is no buffer free: the picture is kept as pending, and ui_popmenu_pump presents it once the compositor's knock says
         it has taken it. A change made in between (a hot item moved by a key) is drawn then, not lost.
 */
-static fn ui_popup_present(struct ui_popup address_to p)
+static fn ui_popmenu_present(struct ui_popup address_to p)
 {
         struct windows address_to table = p->own.table;
         unsigned int row = p->own.row;
@@ -7196,12 +7196,12 @@ static fn ui_popup_present(struct ui_popup address_to p)
 
 /*
         A menu's look: it is glass, a temporary overlay, so its face is what is under it and its inks are that ground's. The
-        compositor gives the ground as it composes the menu (ui_popup_pump takes it again as it comes); until then the
+        compositor gives the ground as it composes the menu (ui_popmenu_pump takes it again as it comes); until then the
         parent's will do. The row is glass the same way (WINDOW_GLASS, window.c), and no close button.
 */
 #define UI_POPUP_GLASS (WINDOW_NO_CLOSE | WINDOW_GLASS)
 
-static void ui_popup_look(struct ui_popup address_to p, struct windows address_to table, const struct ui address_to parent_ui)
+static void ui_popmenu_look(struct ui_popup address_to p, struct windows address_to table, const struct ui address_to parent_ui)
 {
         unsigned int ground = table->ground[p->own.row];
         struct ui own = p->ui;
@@ -7227,10 +7227,10 @@ static void ui_popup_look(struct ui_popup address_to p, struct windows address_t
 }
 
 /*
-        The menu on its row, which ui_popup_open has taken: its look, its place and its first picture. Split from the take so a
+        The menu on its row, which ui_popmenu_open has taken: its look, its place and its first picture. Split from the take so a
         check can put a menu on a row of its own table (checks.c's popup reopen).
 */
-static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
+static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
                           int x, int y, int width, int height, unsigned int flags, b32 touch)
 {
         struct windows address_to table = p->own.table;
@@ -7246,7 +7246,7 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
-        ui_popup_look(p, table, parent_ui);
+        ui_popmenu_look(p, table, parent_ui);
         p->shown = -1;
         p->pending = false;
         p->menu.touch = touch;
@@ -7262,11 +7262,11 @@ static b32 ui_popup_shows(struct ui_popup address_to p, const struct window_row 
         table->popup_flags[p->own.row] = flags;
         string_copy_bounded((string_address)table->title[p->own.row], (string_address) "menu", WINDOWS_TITLE);
         p->open = true;
-        ui_popup_present(p);
+        ui_popmenu_present(p);
         return true;
 }
 
-static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
+static b32 ui_popmenu_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
                          int x, int y, int width, int height, unsigned int flags, b32 touch)
 {
         if (p->open)
@@ -7274,10 +7274,10 @@ static b32 ui_popup_open(struct ui_popup address_to p, const struct window_row a
         p->open = false;
         if (windows_take(&p->own) < 0)
                 return false;
-        return ui_popup_shows(p, parent, parent_ui, x, y, width, height, flags, touch);
+        return ui_popmenu_shows(p, parent, parent_ui, x, y, width, height, flags, touch);
 }
 
-static fn ui_popup_close(struct ui_popup address_to p)
+static fn ui_popmenu_close(struct ui_popup address_to p)
 {
         if (p->open)
                 windows_leave(&p->own);
@@ -7289,16 +7289,16 @@ static fn ui_popup_close(struct ui_popup address_to p)
         Escape does, and the answer is UI_MENU_GONE for the app (the app's loop calls this on each event it reads, once). A menu
         that stayed open would float over content the scroll has moved away from.
 */
-static int ui_popup_scroll(struct ui_popup address_to p, const struct window_event address_to event)
+static int ui_popmenu_scroll(struct ui_popup address_to p, const struct window_event address_to event)
 {
         if (!p->open || event->type != WINDOW_EVENT_WHEEL)
                 return UI_MENU_NOTHING;
-        ui_popup_close(p);
+        ui_popmenu_close(p);
         return UI_MENU_GONE;
 }
 
 // The popup's events: the id chosen (the popup closed), UI_MENU_GONE when it went, UI_MENU_NOTHING otherwise.
-static int ui_popup_pump(struct ui_popup address_to p)
+static int ui_popmenu_pump(struct ui_popup address_to p)
 {
         struct window_event event;
         int answer = UI_MENU_NOTHING;
@@ -7310,12 +7310,12 @@ static int ui_popup_pump(struct ui_popup address_to p)
         ui_kit.now = (b64)clock_monotonic_nanoseconds();
         // A picture the compositor was not ready for goes now, when it has taken the one before (its knock wakes the app).
         if (p->pending && windows_ready(&p->own))
-                ui_popup_present(p);
+                ui_popmenu_present(p);
         // The compositor's ground for the menu as it came: its inks follow, and the menu is drawn again in them.
         if ((p->own.table->ground[p->own.row] & 0xffffffu) && (p->own.table->ground[p->own.row] & 0xffffffu) != p->ui.ground)
         {
                 ui_inks(&p->ui, p->own.table->ground[p->own.row]);
-                ui_popup_present(p);
+                ui_popmenu_present(p);
         }
         while (windows_event(&p->own, &event) && answer == UI_MENU_NOTHING)
         {
@@ -7331,14 +7331,14 @@ static int ui_popup_pump(struct ui_popup address_to p)
                         answer = UI_MENU_NOTHING;
                 if (p->menu.hot != hot || p->menu.top != top || p->menu.scroll.scroll != scroll || p->menu.scroll.hover != lit ||
                     p->menu.scroll.held != held)
-                        ui_popup_present(p);
+                        ui_popmenu_present(p);
         }
         if (p->menu.moving && answer == UI_MENU_NOTHING)
-                ui_popup_present(p);
+                ui_popmenu_present(p);
         if (p->own.table->state[p->own.row] & WINDOW_CLOSING)
                 answer = UI_MENU_GONE;
         if (answer != UI_MENU_NOTHING)
-                ui_popup_close(p);
+                ui_popmenu_close(p);
         return answer;
 }
 
@@ -10096,10 +10096,10 @@ static int ui_app_run(struct ui_app address_to app)
                 while (running && windows_event(app->own, &event))
                 {
                         ui_event_context(&event);
-                        // A scroll over the window closes its open popup before the app has the scroll (ui_popup_scroll).
+                        // A scroll over the window closes its open popup before the app has the scroll (ui_popmenu_scroll).
                         if (app->popup)
                         {
-                                int gone = ui_popup_scroll(app->popup, &event);
+                                int gone = ui_popmenu_scroll(app->popup, &event);
 
                                 if (gone != UI_MENU_NOTHING && app->chose)
                                         app->chose(gone);
@@ -10109,7 +10109,7 @@ static int ui_app_run(struct ui_app address_to app)
                 }
                 if (app->popup && app->popup->open)
                 {
-                        int chosen = ui_popup_pump(app->popup);
+                        int chosen = ui_popmenu_pump(app->popup);
 
                         if (chosen != UI_MENU_NOTHING && app->chose)
                                 app->chose(chosen);
@@ -12042,7 +12042,7 @@ static b32 ui_text_menu_open(struct ui_popup address_to p, struct ui_text addres
         p->menu.count = 0;
         ui_text_menu_items(&p->menu, t, false);
         p->field = t;
-        return ui_popup_open(p, t->own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
+        return ui_popmenu_open(p, t->own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
 // What an item of the menu does, to the widget it was opened for: what changed, as ui_text_event answers.
