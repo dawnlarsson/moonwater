@@ -123962,6 +123962,73 @@ static void check_taskbar_geometry(void)
     }
 }
 
+/* A language that reads from the right turns the compositor's chrome over: a window's close button is at its top left and the minimise
+   button on its inside, and a bottom band has its launcher button at the right end, its tabs in the order the windows showed from the
+   right and its tray at the left end. Each box is the mirror, in the window or the band, of the one a language that reads from the left
+   has, and a press at the mirrored place is on the same thing. */
+static void check_rtl_chrome(void)
+{
+    struct compositor_frame frame;
+    struct taskbar_view view;
+    static const unsigned char lengths[3] = {6, 9, 12};
+    int bx = 0, by = 0, side = 0, mx = 0, my = 0, mside = 0, left[8][4], mirrored[8][4], slots[5] = {TASKBAR_LAUNCHER, 0, 1, 2, -2}, taken = 0;
+    int band_x, band_y, band_w, band_h;
+    b32 turned = true, hit = true, order;
+
+    language_directory = "languages/";
+    memory_zero(&frame, sizeof(frame));
+    frame.x = 100, frame.y = 50, frame.width = 800, frame.height = 600, frame.scale = 100, frame.close = 1;
+    language_take(0);
+    compositor_close_box(&frame, &bx, &by, &side);
+    compositor_minimize_box(&frame, &mx, &my, &mside);
+    check("rtl chrome: reading from the left the close button is at the window's top right and the minimise button to its left",
+          side > 0 && bx + side < frame.x + frame.width && bx > frame.x + frame.width / 2 && mx < bx);
+    language_take('a' | 'r' << 8);
+    {
+        int rx = 0, ry = 0, rside = 0, rmx = 0, rmy = 0, rmside = 0;
+
+        compositor_close_box(&frame, &rx, &ry, &rside);
+        compositor_minimize_box(&frame, &rmx, &rmy, &rmside);
+        check("rtl chrome: reading from the right they are the mirror of those in the window: the close button at its top left, the minimise button to its right",
+              rside == side && rmside == mside && ry == by && rmy == my && rx == 2 * frame.x + frame.width - bx - side &&
+                  rmx == 2 * frame.x + frame.width - mx - mside && rx < frame.x + frame.width / 2 && rmx > rx);
+    }
+    language_take(0);
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.width = 2560, compositor.height = 1440, compositor.scale = 100;
+    taskbar_settings_set("bottom", "primary", "battery none\n");
+    taskbar_launcher_set(1);
+    for (int mode = 0; mode < 2; mode++)
+    {
+        language_take(mode ? ('a' | 'r' << 8) : 0);
+        view = compositor_taskbar_view();
+        view.count = 3, view.lengths = lengths;
+        taskbar_band(&view, &band_x, &band_y, &band_w, &band_h);
+        for (int at = 0; at < 5; at++)
+        {
+            int x, y, w, h;
+
+            if (!taskbar_slot(&view, slots[at], &x, &y, &w, &h))
+                x = y = w = h = -1;
+            (mode ? mirrored : left)[at][0] = x, (mode ? mirrored : left)[at][1] = y, (mode ? mirrored : left)[at][2] = w, (mode ? mirrored : left)[at][3] = h;
+            if (mode && w > 0)
+                hit &= taskbar_hit(&view, x + w / 2, y + h / 2) == slots[at];
+            taken += mode && w > 0;
+        }
+    }
+    language_take(0);
+    for (int at = 0; at < 5; at++)
+        turned &= left[at][2] > 0 && mirrored[at][2] == left[at][2] && mirrored[at][1] == left[at][1] && mirrored[at][3] == left[at][3] &&
+                  mirrored[at][0] == 2 * band_x + band_w - left[at][0] - left[at][2];
+    order = left[1][0] < left[2][0] && left[2][0] < left[3][0] && mirrored[1][0] > mirrored[2][0] && mirrored[2][0] > mirrored[3][0] &&
+            left[0][0] < left[1][0] && mirrored[0][0] > mirrored[1][0] && left[4][0] > left[3][0] && mirrored[4][0] < mirrored[3][0];
+    check("rtl chrome: a bottom band's launcher button, three tabs and tray are each the mirror in the band of what they are reading from the left", turned && taken == 5);
+    check("rtl chrome: the launcher button is at the band's right end, the tabs go from the right in the order they were shown, the tray is at the left end", order);
+    check("rtl chrome: a press at the middle of each is on what it is", hit);
+    taskbar_launcher_set(0);
+}
+
 /* The band's titles written with a face: three tabs (the one with the keys, one, one put away, the last a title too
    long for its tab) on a 1920 by 1080 output, over a glass that is a ramp of the output whatever rectangle is asked
    for, the tabs' slots alone redone, so the clock and the minute are not in the picture. */
@@ -153162,6 +153229,7 @@ b32 main()
 #endif
         check_compositor_look();
         check_taskbar_geometry();
+        check_rtl_chrome();
         check_taskbar_tray();
         check_taskbar_launcher();
 #if MOONWATER_UI_ANY
