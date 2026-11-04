@@ -121477,6 +121477,11 @@ static void rtl_keep_add(int x, int y, int w, int h);
 #if MOONWATER_UI_TASKBAR
 #include "../src/canvas/ui/taskbar.c"
 #endif
+#if MOONWATER_UI_MIXER
+#include "../src/audio/mix.c"
+#include "../src/audio/pulse.c"
+#include "../src/canvas/ui/mixer.c"
+#endif
 
 #define SHARED_counted
 #include "checks.c"
@@ -132778,7 +132783,7 @@ static fn check_launcher(void)
 
         launcher_type_text("");
         check("launcher: with nothing typed the list is the desktop's programs",
-              launcher_list_is("w:Settings,w:Terminal,w:Kernel log,"));
+              launcher_list_is("w:Settings,w:Terminal,w:Kernel log,w:Mixer,"));
         launcher_type_text("ls");
         check("launcher: a plain word lists the names it is, then starts, then is inside, the shorter first, and the command last",
               launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.list.focus == 0);
@@ -132922,7 +132927,7 @@ static fn check_launcher(void)
                   string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
         launcher.height = 0;
         launcher_changed();
-        check("launcher: the picture's height follows the list, and has the power row under it", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW + UI_GAP2 + UI_ROW);
+        check("launcher: the picture's height follows the list, and has the power row under it", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 4 * UI_ROW + UI_GAP2 + UI_ROW);
 #ifdef UI_TARGET
         // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
         {
@@ -133241,7 +133246,7 @@ static fn check_launcher_anchor(void)
         launcher.height = 0;
         launcher.width = 560;
         launcher_changed();
-        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 3 * UI_ROW + UI_GAP2 + UI_ROW;
+        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 4 * UI_ROW + UI_GAP2 + UI_ROW;
         launcher.anchor[1] = 100;
         launcher.screen[1] = 0;
         kept &= launcher_most_height() == 100;
@@ -145085,6 +145090,850 @@ static fn check_kit_buttons(void)
 }
 #endif
 
+/*
+        The mixer's pieces of the kit (ui.c): the level meter's arithmetic and its fall and hold, the vertical slider's value under a
+        point and its picture, the speaker, and strips of them: the keys, the wheel, the pointer, the hold of what a person has just
+        changed against what the app lists, the order of a window that reads from the right, the scroll to a strip, and the picture
+        of the meter in its colours. Drawn at scale 100 and 200 into a buffer, and the colours read back from it.
+*/
+static unsigned int strips_pixels[640 * 400], strips_scratch[640 * UI_SCRATCH_ROWS];
+static struct ui_strips strips_state;
+
+static struct window_event strips_key(int code, unsigned int flags)
+{
+        struct window_event e = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, code, 0};
+
+        return e;
+}
+
+// A pixel of the buffer without its alpha.
+static unsigned int strips_pixel(int x, int y)
+{
+        return strips_pixels[y * 640 + x] & 0xffffffu;
+}
+
+static b32 strips_is(int x, int y, unsigned int role)
+{
+        return strips_pixel(x, y) == (ui_role(role) & 0xffffffu);
+}
+
+// How far the strips are scrolled after a second: the first look starts a move that was asked for, the second is where it ends.
+static b64 strips_shift_after(struct ui_strips address_to s)
+{
+        ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+        ui_kit.now += 1000000000ll;
+        return ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+}
+
+// n strips: the device first, the rest "P1", "P2", ... at the percents given, the first of them listed at now.
+static fn strips_list(struct ui_strips address_to s, int n, const int address_to percents, b64 now)
+{
+        static const char address_to names[] = {"Speakers", "Firefox", "mpv", "Discord", "Steam", "Spotify", "Chrome", "OBS", "Zoom"};
+
+        ui_strips_begin(s);
+        for (int k = 0; k < n; k++)
+                ui_strips_add(s, k == 0 ? 0xfffffffeul : 100ul + (unsigned long)k, names[k % 9], percents ? percents[k] : 50, 0, k == 0, k != 0, 0, 0, now);
+        ui_strips_end(s);
+}
+
+#if MOONWATER_UI_MIXER
+/*
+        The mixer program (src/canvas/ui/mixer.c) against a page made up here: the strips it lists from it (the device, then the programs
+        by the name they gave, the streams of one program as one strip), what is sent for a change (the request the server's engine
+        reads, parsed from the bytes), a connection that breaks, a page that is not the server's, and the picture.
+*/
+static struct audio_state mixer_fixture_page;
+static b64 mixer_t0;
+static struct windows mixer_fixture_table;
+
+struct mixer_sent
+{
+        unsigned long command, index, volume, channels;
+        int mute;
+        char text[64];
+};
+
+static struct mixer_sent mixer_log[16];
+static int mixer_logged, mixer_fail_send;
+static unsigned char mixer_reply[32];
+static long mixer_reply_have, mixer_reply_at;
+
+// What the mixer sends is read back as the engine reads it: the command, the tag, and the fields of the five that change a volume or a mute.
+static long mixer_fake_send(void *context, const unsigned char *bytes, long count)
+{
+        const unsigned char *payload = bytes + 20;
+        struct mixer_sent *sent = &mixer_log[mixer_logged < 16 ? mixer_logged : 15];
+        long at = 10;
+        unsigned long command = pulse_be32(payload + 1), tag = pulse_be32(payload + 6);
+
+        (void)context, (void)count;
+        if (mixer_fail_send)
+                return -1;
+        memory_zero(sent, sizeof(*sent));
+        sent->command = command;
+        if (payload[at] == 'L')
+                sent->index = pulse_be32(payload + at + 1), at += 5;
+        if (payload[at] == 't')
+        {
+                string_copy_bounded((string_address)sent->text, (string_address)(payload + at + 1), sizeof(sent->text));
+                at += 2 + (long)string_length((string_address)(payload + at + 1));
+        }
+        if (payload[at] == 'v')
+                sent->channels = payload[at + 1], sent->volume = pulse_be32(payload + at + 2);
+        else if (payload[at] == '1' || payload[at] == '0')
+                sent->mute = payload[at] == '1';
+        mixer_logged++;
+        // Its answer: a bare reply with the tag.
+        memory_zero(mixer_reply, sizeof(mixer_reply));
+        mixer_reply[3] = 10, mixer_reply[4] = mixer_reply[5] = mixer_reply[6] = mixer_reply[7] = 0xff;
+        mixer_reply[20] = 'L', mixer_reply[24] = (unsigned char)PULSE_COMMAND_REPLY;
+        mixer_reply[25] = 'L', mixer_reply[26] = (unsigned char)(tag >> 24), mixer_reply[27] = (unsigned char)(tag >> 16), mixer_reply[28] = (unsigned char)(tag >> 8),
+        mixer_reply[29] = (unsigned char)tag;
+        mixer_reply_have = 30, mixer_reply_at = 0;
+        return 0;
+}
+
+static long mixer_fake_receive(void *context, unsigned char *bytes, long count, long timeout_ms)
+{
+        (void)context, (void)timeout_ms;
+        if (mixer_reply_have - mixer_reply_at < count)
+                return -1;
+        memory_copy(bytes, mixer_reply + mixer_reply_at, (positive)count);
+        mixer_reply_at += count;
+        return 0;
+}
+
+static fn mixer_fixture_streams(void)
+{
+        struct audio_state *page = &mixer_fixture_page;
+
+        memory_zero(page, sizeof(*page));
+        page->magic = AUDIO_STATE_MAGIC, page->version = AUDIO_STATE_VERSION, page->bytes = sizeof(*page), page->seq = 2;
+        page->volume = 52429, page->peak_left = 16384, page->peak_right = 8192;
+        string_copy_bounded((string_address)page->device, (string_address) "Speakers (Realtek)", sizeof(page->device));
+        string_copy_bounded((string_address)page->name, (string_address) "alsa_output.pci.analog", sizeof(page->name));
+        for (int k = 0; k < AUDIO_STATE_STREAMS; k++)
+                page->stream[k].index = 0xffffffffu;
+        page->stream[0] = (struct audio_state_stream){7, 3, 32768, AUDIO_STATE_PLAYING, 16000, 12000, 100, 1000, "Firefox", "Tab one", ""};
+        page->stream[1] = (struct audio_state_stream){9, 3, 65536, AUDIO_STATE_PLAYING, 3000, 2000, 100, 1000, "Firefox", "Tab two", ""};
+        page->stream[2] = (struct audio_state_stream){12, 5, 13107, AUDIO_STATE_MUTED | AUDIO_STATE_CORKED | AUDIO_STATE_PLAYING, 0, 0, 101, 1000, "mpv", "film.mkv", ""};
+        page->stream[3] = (struct audio_state_stream){20, 8, 65536, AUDIO_STATE_PLAYING, 500, 500, 102, 1000, "", "Unnamed Track", "audio-x-generic"};
+        page->streams = 4;
+}
+
+static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixels)
+{
+        struct window_event e;
+        p32 bits;
+        struct ui_strips address_to s;
+        long mapped = ui_map(sizeof(struct mixer_big));
+        int got_log;
+
+        if (mapped < 0 && mapped > -4096)
+        {
+                check("mixer: the state maps", false);
+                return;
+        }
+        mixer_t0 = ui_kit.now + 10000000000ll;
+        memory_zero(&mixer, sizeof(mixer));
+        mixer.big = (struct mixer_big address_to)mapped;
+        mixer.ui = *ui;
+        mixer.own.table = &mixer_fixture_table;
+        mixer_fixture_table.stride = 640;
+        mixer.width = 640, mixer.height = 400, mixer.shown = -1, mixer.focused = true;
+        mixer.page = &mixer_fixture_page;
+        mixer.socket_path = "/nonexistent/native";
+        s = &mixer.big->strips;
+        ui_kit.rtl = 0;
+        ui_kit.now = mixer_t0;
+
+        // The listing: the device first, then one strip a program, by the name it gave, the streams of one as one, and one that gave none by its connection.
+        mixer_fixture_streams();
+        check("mixer: a page that is the server's is read whole", mixer_poll(mixer_t0) && mixer.have);
+        check("mixer: the device, then Firefox (two streams), mpv and the program that gave no name: four strips", s->count == 4);
+        check("mixer: the device is a strip of its own, named as the person is shown it, at 80 percent",
+              s->item[0].master && string_equals((string_address)s->item[0].name, (string_address) "Speakers (Realtek)") && s->item[0].percent == 80 && !s->item[0].muted);
+        check("mixer: a program's streams are one strip at the loudest of their volumes, playing, with the greater peaks",
+              string_equals((string_address)s->item[1].name, (string_address) "Firefox") && s->item[1].percent == 100 && s->item[1].playing && !s->item[1].master &&
+                  mixer.big->group[0].count == 2 && mixer.big->group[0].member[0] == 7 && mixer.big->group[0].member[1] == 9);
+        check("mixer: a program muted and corked is a muted strip that is not playing, at its own volume",
+              string_equals((string_address)s->item[2].name, (string_address) "mpv") && s->item[2].percent == 20 && s->item[2].muted && !s->item[2].playing &&
+                  mixer.big->group[1].count == 1 && mixer.big->group[1].member[0] == 12);
+        check("mixer: a stream with no program name is called by what it plays, and is its connection's alone",
+              string_equals((string_address)s->item[3].name, (string_address) "Unnamed Track") && mixer.big->group[2].count == 1 && mixer.big->group[2].member[0] == 20);
+        check("mixer: the peaks of a stream are its strip's meters",
+              s->item[1].level[0].shown == ui_level_of(16000) && s->item[1].level[1].shown == ui_level_of(12000) && s->item[0].level[0].shown == ui_level_of(16384));
+        {
+                b64 fed = s->item[1].level[0].at;
+
+                check("mixer: a page that has not moved lists nothing again (the meters are not fed twice), and one that has does",
+                      !mixer_poll(mixer_t0 + 16000000ll) && s->item[1].level[0].at == fed && (mixer_fixture_page.seq += 2, mixer_poll(mixer_t0 + 32000000ll)) &&
+                          s->item[1].level[0].at == mixer_t0 + 32000000ll);
+        }
+        // Two streams of one name from two users are two programs.
+        mixer_fixture_page.stream[3] = (struct audio_state_stream){20, 8, 65536, AUDIO_STATE_PLAYING, 500, 500, 102, 1001, "Firefox", "Another user's", ""};
+        mixer_fixture_page.seq += 2;
+        mixer_poll(mixer_t0 + 48000000ll);
+        check("mixer: the same name from another user is another program", s->count == 4 && string_equals((string_address)s->item[3].name, (string_address) "Firefox") &&
+                                                                                     mixer.big->group[2].count == 1 && mixer.big->group[2].member[0] == 20);
+        mixer_fixture_streams();
+        mixer_fixture_page.seq += 4;
+        mixer_poll(mixer_t0 + 64000000ll);
+
+        // What a change sends: the device's volume and mute for the sink by its name, a program's for each of its streams, once for a number of events.
+        mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+        mixer.big->ctl.open = 1;
+        mixer.connected = true;
+        ctl_keep_channels(&mixer.big->ctl, 7, 2), ctl_keep_channels(&mixer.big->ctl, 9, 2), ctl_keep_channels(&mixer.big->ctl, 12, 2);
+        mixer_logged = 0;
+        s->focus = 0, s->focus_id = s->item[0].id;
+        e = strips_key(UI_KEY_DOWN, 0);
+        mixer_event(&e);
+        mixer_event(&e);
+        check("mixer: two keys before the loop's next pass are one thing to send, and nothing is sent yet", mixer_logged == 0 && mixer.big->send[0] == 1 && mixer.dirty);
+        mixer_flush();
+        check("mixer: the device's volume goes to the sink by its name, on both channels, as the percent of 65536",
+              mixer_logged == 1 && mixer_log[0].command == PULSE_COMMAND_SET_SINK_VOLUME && string_equals((string_address)mixer_log[0].text, (string_address) "alsa_output.pci.analog") &&
+                  mixer_log[0].channels == 2 && mixer_log[0].volume == 78u * 65536 / 100 && mixer.big->send[0] == 0);
+        mixer_flush();
+        check("mixer: and is sent once", mixer_logged == 1);
+        e = strips_key(UI_KEY_RIGHT, 0);
+        mixer_event(&e);
+        e = strips_key(UI_KEY_PAGE_DOWN, 0);
+        mixer_event(&e);
+        mixer_flush();
+        check("mixer: a program's volume goes to each of its streams",
+              mixer_logged == 3 && mixer_log[1].command == PULSE_COMMAND_SET_SINK_INPUT_VOLUME && mixer_log[1].index == 7 && mixer_log[1].channels == 2 &&
+                  mixer_log[1].volume == 90u * 65536 / 100 && mixer_log[2].index == 9 && mixer_log[2].volume == 90u * 65536 / 100);
+        e = strips_key(UI_KEY_M, 0);
+        mixer_event(&e);
+        mixer_flush();
+        check("mixer: and so is its mute, as the request that mutes",
+              mixer_logged == 5 && mixer_log[3].command == PULSE_COMMAND_SET_SINK_INPUT_MUTE && mixer_log[3].index == 7 && mixer_log[3].mute == 1 &&
+                  mixer_log[4].index == 9 && mixer_log[4].mute == 1);
+        e = strips_key(UI_KEY_TAB, 0);
+        mixer_event(&e);
+        e = strips_key(UI_KEY_SPACE, 0);
+        mixer_event(&e);
+        mixer.focused = true;
+        mixer_flush();
+        check("mixer: a muted program unmuted is the request that unmutes", mixer_logged == 6 && mixer_log[5].index == 12 && mixer_log[5].mute == 0);
+        s->focus = 0, s->focus_id = s->item[0].id;
+        e = strips_key(UI_KEY_M, 0);
+        mixer_event(&e);
+        mixer_flush();
+        check("mixer: the device's mute goes to the sink", mixer_logged == 7 && mixer_log[6].command == PULSE_COMMAND_SET_SINK_MUTE && mixer_log[6].mute == 1 &&
+                                                              string_equals((string_address)mixer_log[6].text, (string_address) "alsa_output.pci.analog"));
+        got_log = mixer_logged;
+        e = strips_key(UI_KEY_ESCAPE, 0);
+        check("mixer: Escape closes the window, and sends nothing", !mixer_event(&e) && mixer_logged == got_log);
+
+        // A connection that breaks: the change stays to be sent, and the connection is made again at the next pass.
+        e = strips_key(UI_KEY_DOWN, 0);
+        mixer_event(&e);
+        mixer_fail_send = 1;
+        mixer_flush();
+        check("mixer: a send that fails drops the connection and keeps what was to be sent", !mixer.connected && mixer.big->send[0] == 1 && mixer_logged == got_log);
+        mixer_flush();
+        check("mixer: with no server to connect to it waits, and still keeps it", !mixer.connected && mixer.big->send[0] == 1);
+        mixer_fail_send = 0;
+        mixer.big->ctl.transport = (struct ctl_transport){0, mixer_fake_send, mixer_fake_receive};
+        mixer.big->ctl.open = 1;
+        mixer.connected = true;
+        mixer_flush();
+        check("mixer: and sends it when it is back", mixer.big->send[0] == 0 && mixer_logged == got_log + 1);
+
+        // A page that is not the server's, or none: the window says so.
+        mixer_fixture_page.magic = 0;
+        mixer_poll(mixer_t0 + 500000000ll);
+        check("mixer: a page that is not the server's has no strips", !mixer.have && s->count == 0);
+        for (int k = 0; k < 640 * 400; k++)
+                pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+        mixer.ui.pixels = pixels, mixer.ui.pitch = 640;
+        {
+                int ink = 0, middle = 0;
+
+                mixer_draw(pixels);
+                for (int y = 0; y < 400; y++)
+                        for (int x = 0; x < 640; x++)
+                                if ((pixels[y * 640 + x] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu))
+                                {
+                                        ink++;
+                                        middle += y > 160 && y < 240 && x > 100 && x < 540;
+                                }
+                check("mixer: and says that the sound server is off, in the middle of the window", ink > 100 && ink == middle);
+        }
+
+        // A server with no program playing: the device alone, and a line beside it.
+        mixer_fixture_streams();
+        mixer_fixture_page.streams = 0;
+        for (int k = 0; k < AUDIO_STATE_STREAMS; k++)
+                mixer_fixture_page.stream[k].index = 0xffffffffu;
+        mixer_fixture_page.seq += 2;
+        mixer_poll(mixer_t0 + 600000000ll);
+        for (int k = 0; k < 640 * 400; k++)
+                pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+        mixer_draw(pixels);
+        {
+                int inside = 0, beside = 0;
+
+                for (int y = 160; y < 240; y++)
+                        for (int x = 0; x < 640; x++)
+                                if ((pixels[y * 640 + x] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu))
+                                {
+                                        if (x > UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP)
+                                                beside++;
+                                        else
+                                                inside++;
+                                }
+                check("mixer: with nothing playing there is the device's strip, and a line beside it", s->count == 1 && beside > 100 && inside > 20);
+        }
+
+        // The picture of the device's strip at 80 percent: the slider's fill is the accent up to the knob, which is four fifths up its travel.
+        mixer_fixture_streams();
+        mixer_fixture_page.seq += 2;
+        mixer_poll(mixer_t0 + 700000000ll);
+        for (int k = 0; k < 640 * 400; k++)
+                pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+        ui_kit.now = mixer_t0 + 700000000ll;
+        mixer_draw(pixels);
+        {
+                struct ui_control address_to slider = &s->control[0];
+                int x = slider->x + slider->w / 2, knob = slider->y + slider->h - UI_VSLIDER_KNOB / 2 - (slider->h - UI_VSLIDER_KNOB) * 80 / 100;
+
+                if (!(strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_ON_SURFACE)))
+                        string_format(log, "  dump: mixer slider x %p knob %p below %p above %p at %p roles %p %p %p; box %p %p %p %p\n", (positive)x, (positive)knob, (positive)strips_pixel(x, knob + 30),
+                                      (positive)strips_pixel(x, knob - 30), (positive)strips_pixel(x, knob), (positive)(ui_role(UI_PRIMARY) & 0xffffffu),
+                                      (positive)(ui_role(UI_CONTROL_OFF) & 0xffffffu), (positive)(ui_role(UI_ON_SURFACE) & 0xffffffu), (positive)slider->x, (positive)slider->y,
+                                      (positive)slider->w, (positive)slider->h);
+                check("mixer: the device's slider is filled up to its knob at 80 percent and empty above it",
+                      strips_is(x, knob + 30, UI_PRIMARY) && strips_is(x, knob - 30, UI_CONTROL_OFF) && strips_is(x, knob, UI_ON_SURFACE));
+        }
+        // The model of a page read by another writer while it is read: a page whose sequence is odd is not taken.
+        mixer_fixture_page.seq |= 1;
+        check("mixer: a page that is being written is not read (the sequence is odd at every try)", !audio_state_read(&mixer_fixture_page, &mixer.big->copy));
+        mixer_fixture_page.seq &= ~1u;
+}
+
+#endif
+
+static fn check_kit_strips(void)
+{
+        static font_face face;
+        struct ui ui = terminal.ui;
+        positive size = 0, bytes = compositor_map_file(program_argument(program_argument_count() > 3 ? 3 : 1), &size);
+        struct ui_strips address_to s = &strips_state;
+        static const int steady[] = {80, 50, 100, 0, 30, 70, 20, 60, 90};
+
+        if (!bytes || font_load(&face, (const p8 address_to)bytes, size, 0) != 0)
+        {
+                check("kit strips: the face loads", false);
+                return;
+        }
+        ui.pixels = strips_pixels, ui.pitch = 640, ui.width = 640, ui.height = 400, ui.top = 0, ui.bottom = 400, ui.scale = 100;
+        ui.scratch = strips_scratch, ui.scratch_width = 640, ui.band_top = ui.band_bottom = 0, ui.mono = null;
+        ui.regular = ui.bold = &face;
+        ui_kit_theme(UI_THEME_DARK, 0xffffffu, 0);
+        ui_kit.now = 9000000000ll;
+        ui_kit.rtl = 0;
+
+        // The meter's scale: decibels under full scale over 60, held to the meter, and never going down as the peak goes up.
+        {
+                b64 last = 0;
+                b32 steady_up = true, ends, middle, tenth;
+
+                for (unsigned int peak = 0; peak <= 32768; peak++)
+                {
+                        b64 share = ui_level_of(peak);
+
+                        steady_up &= share >= last && share >= 0 && share <= UI_ONE;
+                        last = share;
+                }
+                ends = ui_level_of(0) == 0 && ui_level_of(32768) == UI_ONE && ui_level_of(65535) == UI_ONE && ui_level_of(32767) > UI_Q2(99) &&
+                       ui_level_of(30) == 0;
+                middle = ui_level_of(1024) > UI_Q2(49) && ui_level_of(1024) < UI_Q2(51) && ui_level_of(16384) > UI_Q2(89) && ui_level_of(16384) < UI_Q2(91);
+                tenth = ui_level_of(104) > UI_Q2(15) && ui_level_of(104) < UI_Q2(18) && ui_level_of(8192) > UI_Q2(79) && ui_level_of(8192) < UI_Q2(81);
+                check("kit strips: a peak is a share of a 60 dB meter: none is none, full scale is the whole, -50 dB a sixth, -30 dB the half, -12 dB four fifths, -6 dB nine tenths",
+                      ends && middle && tenth);
+                check("kit strips: and the share never falls as the peak rises (all 32769 peaks)", steady_up);
+        }
+
+        // The bar rises at once, falls over 1.5 s from the top; the line holds a second and falls the same way, and is never under the bar.
+        {
+                struct ui_level l;
+                b64 bar, line, top = ui_level_of(16384);
+                b32 attack, fall, holds, then_falls, floor_ok, again;
+
+                memory_zero(&l, sizeof(l));
+                ui_level_feed(&l, 16384, 1000000000ll);
+                ui_level_now(&l, 1000000000ll, &bar, &line);
+                attack = bar == top && line == top;
+                ui_level_now(&l, 1000000000ll + 750000000ll, &bar, &line);
+                fall = bar > top - UI_Q2(51) && bar < top - UI_Q2(49);
+                holds = line == top;
+                ui_level_now(&l, 1000000000ll + 1000000000ll + 750000000ll, &bar, &line);
+                then_falls = line > top - UI_Q2(51) && line < top - UI_Q2(49) && bar == 0;
+                ui_level_now(&l, 1000000000ll + 4000000000ll, &bar, &line);
+                floor_ok = bar == 0 && line == 0;
+                // A quieter peak while the line holds leaves it; a louder one raises both and starts its wait again.
+                ui_level_feed(&l, 100, 1000000000ll + 4100000000ll);
+                ui_level_feed(&l, 4096, 1000000000ll + 4200000000ll);
+                ui_level_now(&l, 1000000000ll + 4200000000ll + 900000000ll, &bar, &line);
+                again = line == ui_level_of(4096) && bar < ui_level_of(4096);
+                check("kit strips: the bar rises at once, falls over 1.5 seconds and is gone", attack && fall && floor_ok);
+                check("kit strips: the line holds a second, then falls as the bar does, and a new peak holds it again", holds && then_falls && again);
+                check("kit strips: a meter that shows nothing is not moving, and one that shows something is",
+                      !ui_level_moving(&l, 1000000000ll + 20000000000ll) && ui_level_moving(&l, 1000000000ll + 4200000000ll + 100000000ll));
+        }
+
+        // The vertical slider's value under a point: the knob's centre, in the box less the knob, held to the ends and to the step.
+        {
+                struct ui_control c;
+                b32 ends, middle, step, scaled;
+
+                memory_zero(&c, sizeof(c));
+                c.kind = UI_SLIDER, c.variant = UI_SLIDER_VERTICAL | UI_SLIDER_LINE, c.x = 0, c.y = 100, c.w = 28, c.h = 200;
+                c.low = 0, c.high = ui_q(100), c.step = ui_q(1);
+                ends = ui_vslider_at(&ui, &c, 292) == 0 && ui_vslider_at(&ui, &c, 108) == ui_q(100) && ui_vslider_at(&ui, &c, 1000) == 0 &&
+                       ui_vslider_at(&ui, &c, -20) == ui_q(100);
+                middle = ui_vslider_at(&ui, &c, 200) == ui_q(50);
+                step = ui_vslider_at(&ui, &c, 150) == ui_q(77) && ui_vslider_at(&ui, &c, 151) == ui_q(77);
+                ui.scale = 200;
+                scaled = ui_vslider_at(&ui, &c, 400) == ui_q(50) && ui_vslider_at(&ui, &c, 584) == 0 && ui_vslider_at(&ui, &c, 216) == ui_q(100);
+                ui.scale = 100;
+                check("kit strips: a point on the vertical slider is a value: the knob's centre, 0 at the bottom of its travel and 100 at the top, held past them",
+                      ends && middle && scaled);
+                check("kit strips: and snapped to the step", step);
+        }
+
+        // The vertical slider drawn: the fill from the bottom in the accent, the rest in the off colour, the knob at the value; muted, the fill is grey.
+        {
+                struct ui_control c;
+                b32 parts, grey, up;
+
+                memory_zero(&c, sizeof(c));
+                c.kind = UI_SLIDER, c.variant = UI_SLIDER_VERTICAL | UI_SLIDER_LINE, c.x = 20, c.y = 100, c.w = 28, c.h = 200;
+                c.low = 0, c.high = ui_q(100), c.step = ui_q(1), c.value = ui_q(50);
+                ui_control_start(&c);
+                ui_kit.now += 1000000000ll, ui_kit.busy = 0;
+                for (int k = 0; k < 640 * 400; k++)
+                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                ui_control_draw(&ui, &c);
+                parts = strips_is(34, 260, UI_PRIMARY) && strips_is(34, 140, UI_CONTROL_OFF) && strips_is(34, 200, UI_ON_SURFACE) && strips_is(34, 290, UI_PRIMARY) &&
+                        strips_is(34, 110, UI_CONTROL_OFF) && strips_is(60, 200, UI_SURFACE) && strips_is(10, 260, UI_SURFACE);
+                if (!parts)
+                        string_format(log, "  dump: fill %p off %p knob %p foot %p head %p aside %p left %p / roles %p %p %p %p\n", (positive)strips_pixel(34, 260), (positive)strips_pixel(34, 140),
+                                      (positive)strips_pixel(34, 200), (positive)strips_pixel(34, 299), (positive)strips_pixel(34, 101), (positive)strips_pixel(60, 200),
+                                      (positive)strips_pixel(10, 260), (positive)ui_role(UI_PRIMARY), (positive)ui_role(UI_CONTROL_OFF), (positive)ui_role(UI_ON_SURFACE),
+                                      (positive)ui_role(UI_SURFACE));
+                c.on = 1;
+                for (int k = 0; k < 640 * 400; k++)
+                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                ui_control_draw(&ui, &c);
+                grey = strips_is(34, 260, UI_OUTLINE) && strips_is(34, 140, UI_CONTROL_OFF);
+                c.on = 0;
+                c.value = ui_q(100);
+                for (int k = 0; k < 640 * 400; k++)
+                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                ui_control_draw(&ui, &c);
+                up = strips_is(34, 200, UI_PRIMARY) && strips_is(34, 108, UI_ON_SURFACE) && strips_is(34, 290, UI_PRIMARY);
+                check("kit strips: the vertical slider is filled from its bottom to its knob, the rest in the off colour, the knob in the ink, and nothing round it", parts);
+                check("kit strips: muted, its fill is the outline's grey; full, the knob is at the top", grey && up);
+        }
+
+        // Strips listed: what the app says is what is there, in order, with the first the device; an id keeps its state through a new listing.
+        {
+                ui_kit.now += 5000000000ll;
+                strips_list(s, 4, steady, ui_kit.now);
+                check("kit strips: a listing is strips in order, the device first, each with its name, its percent and its initial",
+                      s->count == 4 && s->item[0].master && !s->item[1].master && s->item[0].percent == 80 && s->item[1].percent == 50 && s->item[2].percent == 100 &&
+                          s->item[3].percent == 0 && string_equals((string_address)s->item[1].name, (string_address) "Firefox") &&
+                          string_equals((string_address)s->item[1].initial, (string_address) "F") && string_equals((string_address)s->item[0].initial, (string_address) "S"));
+                ui_strips_add(s, 7, "x", 5, 0, 0, 0, 0, 0, 0);
+                check("kit strips: an add outside a listing is nothing", s->count == 4);
+                // The first letter of a name whole in UTF-8, and a lower case letter made a capital.
+                {
+                        char into[8];
+
+                        ui_strip_initial(into, sizeof(into), "\xc3\xa9toile");
+                        check("kit strips: the initial is the first character whole, a capital where it has one",
+                              string_equals((string_address)into, (string_address) "\xc3\xa9") &&
+                                  (ui_strip_initial(into, sizeof(into), "mpv"), string_equals((string_address)into, (string_address) "M")) &&
+                                  (ui_strip_initial(into, sizeof(into), ""), into[0] == 0));
+                }
+        }
+
+        // Where the strips lie, from the start edge: pad, then UI_STRIP_W each, a gap after the device; scrolled by what the shift says; turned over for a window read from the right.
+        {
+                ui_kit.now += 5000000000ll;
+                strips_list(s, 4, steady, ui_kit.now);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                check("kit strips: the strips lie from the start edge, the gap after the first",
+                      ui_strip_at(&ui, s, 0, 0) == UI_STRIP_PAD && ui_strip_at(&ui, s, 1, 0) == UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP &&
+                          ui_strip_at(&ui, s, 3, 0) == UI_STRIP_PAD + 3 * UI_STRIP_W + UI_STRIP_GAP && ui_strip_at(&ui, s, 1, 50) == UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP - 50);
+                ui_kit.rtl = 1;
+                check("kit strips: reading from the right the first strip is at the right edge and the rest follow toward the left",
+                      ui_strip_at(&ui, s, 0, 0) == 640 - UI_STRIP_PAD - UI_STRIP_W && ui_strip_at(&ui, s, 1, 0) == 640 - UI_STRIP_PAD - 2 * UI_STRIP_W - UI_STRIP_GAP &&
+                          ui_strip_part(&ui, 100, 10, 20) == 100 + UI_STRIP_W - 10 - 20);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                check("kit strips: and the slider's box is mirrored in its strip, so the meter is on the other side of the slider",
+                      s->control[2].x == ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W - (UI_STRIP_W - UI_STRIP_GROUP) / 2 - UI_METER_WIDTH - 6 - UI_STRIP_SLIDER_W);
+                ui_kit.rtl = 0;
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                check("kit strips: reading from the left the slider is right of the meter, and the mute button is under the strip's middle",
+                      s->control[2].x == ui_strip_at(&ui, s, 1, 0) + (UI_STRIP_W - UI_STRIP_GROUP) / 2 + UI_METER_WIDTH + 6 &&
+                          s->control[3].x == ui_strip_at(&ui, s, 1, 0) + (UI_STRIP_W - UI_STRIP_MUTE_W) / 2 && s->control[3].y + s->control[3].h <= 400 - 16 &&
+                          s->control[2].y + s->control[2].h < s->control[3].y);
+        }
+
+        // The keys, on the device first: one, ten, 100, 0; mute; Left and Right the way the window reads; Tab round.
+        {
+                struct window_event e;
+                p32 bits;
+
+                ui_kit.now += 5000000000ll;
+                strips_list(s, 4, steady, ui_kit.now);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                s->focus = 0, s->focus_id = s->item[0].id;
+                e = strips_key(UI_KEY_DOWN, 0);
+                bits = ui_strips_event(&ui, s, &e);
+                check("kit strips: Down is one percent less, and says the volume of the strip changed",
+                      s->item[0].percent == 79 && s->changed == 0 && bits == (UI_STRIPS_DRAW | UI_STRIPS_TAKEN | UI_STRIPS_VOLUME));
+                e = strips_key(UI_KEY_UP, 0);
+                ui_strips_event(&ui, s, &e);
+                e = strips_key(UI_KEY_PAGE_UP, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: Up is one more and Page Up ten", s->item[0].percent == 90);
+                e = strips_key(UI_KEY_PAGE_DOWN, 0);
+                ui_strips_event(&ui, s, &e);
+                e = strips_key(UI_KEY_PAGE_DOWN, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: Page Down ten less", s->item[0].percent == 70);
+                e = strips_key(UI_KEY_HOME, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: Home is 100", s->item[0].percent == 100);
+                e = strips_key(UI_KEY_UP, 0);
+                bits = ui_strips_event(&ui, s, &e);
+                check("kit strips: and Up at 100 changes nothing and says so (the key is taken, no volume is sent)", s->item[0].percent == 100 && bits == UI_STRIPS_TAKEN);
+                e = strips_key(UI_KEY_END, 0);
+                ui_strips_event(&ui, s, &e);
+                e = strips_key(UI_KEY_DOWN, 0);
+                bits = ui_strips_event(&ui, s, &e);
+                check("kit strips: End is 0, and Down at 0 changes nothing", s->item[0].percent == 0 && bits == UI_STRIPS_TAKEN);
+                e = strips_key(UI_KEY_M, 0);
+                bits = ui_strips_event(&ui, s, &e);
+                check("kit strips: M mutes, and says the mute changed", s->item[0].muted && s->changed == 0 && bits == (UI_STRIPS_DRAW | UI_STRIPS_TAKEN | UI_STRIPS_MUTE));
+                e = strips_key(UI_KEY_M, WINDOW_KEY_REPEAT);
+                bits = ui_strips_event(&ui, s, &e);
+                check("kit strips: a held key is one press: the repeat mutes nothing", s->item[0].muted && bits == UI_STRIPS_TAKEN);
+                e = strips_key(UI_KEY_SPACE, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: Space unmutes", !s->item[0].muted);
+                e = strips_key(UI_KEY_ENTER, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: and Enter mutes", s->item[0].muted);
+                e = strips_key(UI_KEY_RIGHT, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: Right goes to the next strip", s->focus == 1 && s->focus_id == s->item[1].id);
+                e = strips_key(UI_KEY_LEFT, 0);
+                ui_strips_event(&ui, s, &e);
+                e = strips_key(UI_KEY_LEFT, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: Left goes back and stops at the first", s->focus == 0);
+                e = strips_key(UI_KEY_TAB, 0);
+                ui_strips_event(&ui, s, &e);
+                e = strips_key(UI_KEY_TAB, 0);
+                ui_strips_event(&ui, s, &e);
+                e = strips_key(UI_KEY_TAB, 0);
+                ui_strips_event(&ui, s, &e);
+                e = strips_key(UI_KEY_TAB, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: Tab goes round the strips and comes back to the first", s->focus == 0);
+                e = strips_key(UI_KEY_TAB, WINDOW_KEY_SHIFT);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: and Shift-Tab goes the other way round", s->focus == 3);
+                ui_kit.rtl = 1;
+                s->focus = 1;
+                e = strips_key(UI_KEY_RIGHT, 0);
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: reading from the right, Right goes to the previous strip: toward the start, which is at the right", s->focus == 0);
+                ui_kit.rtl = 0;
+                e = strips_key(30, 0);
+                bits = ui_strips_event(&ui, s, &e);
+                check("kit strips: another key is the app's", bits == 0);
+                e = (struct window_event){WINDOW_EVENT_KEY, 0, UI_KEY_DOWN, 0};
+                check("kit strips: and so is the release of a key", ui_strips_event(&ui, s, &e) == 0);
+        }
+
+        // The wheel: over a strip two percent a notch, up raising it; a precise input in 120ths; over the ground, or Shift, or sideways, it scrolls.
+        {
+                struct window_event move = {WINDOW_EVENT_MOTION, 0, 0, 100}, notch = {WINDOW_EVENT_WHEEL, 0, 120, 0};
+                p32 bits;
+
+                ui_kit.now += 5000000000ll;
+                strips_list(s, 4, steady, ui_kit.now);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                move.a = ui_strip_at(&ui, s, 1, 0) + 40;
+                ui_strips_event(&ui, s, &move);
+                bits = ui_strips_event(&ui, s, &notch);
+                check("kit strips: a notch up over a strip is two percent more, and it has the keys", s->item[1].percent == 52 && s->changed == 1 && s->focus == 1 &&
+                                                                                                    bits == (UI_STRIPS_DRAW | UI_STRIPS_TAKEN | UI_STRIPS_VOLUME));
+                notch.a = -120;
+                ui_strips_event(&ui, s, &notch);
+                ui_strips_event(&ui, s, &notch);
+                check("kit strips: a notch down is two less", s->item[1].percent == 48);
+                notch.a = 60;
+                bits = ui_strips_event(&ui, s, &notch);
+                check("kit strips: half a notch is nothing yet", s->item[1].percent == 48 && bits == UI_STRIPS_TAKEN);
+                ui_strips_event(&ui, s, &notch);
+                check("kit strips: and the other half is the notch", s->item[1].percent == 50);
+                s->item[1].percent = 99;
+                notch.a = 120;
+                ui_strips_event(&ui, s, &notch);
+                check("kit strips: a notch up is held at 100", s->item[1].percent == 100);
+                bits = ui_strips_event(&ui, s, &notch);
+                check("kit strips: and another changes nothing and sends nothing", s->item[1].percent == 100 && bits == UI_STRIPS_TAKEN);
+        }
+
+        // A volume the person has just changed is theirs for a moment: a listing meanwhile does not replace it; later it does. Ids carry through a new order.
+        {
+                static const int other[] = {10, 20, 30, 40};
+                struct window_event e = strips_key(UI_KEY_DOWN, 0);
+                b64 base;
+
+                ui_kit.now += 5000000000ll;
+                base = ui_kit.now;
+                strips_list(s, 4, steady, base);
+                s->focus = 1, s->focus_id = s->item[1].id;
+                ui_strips_event(&ui, s, &e);
+                check("kit strips: a key changed strip 1", s->item[1].percent == 49);
+                strips_list(s, 4, other, base + 300000000ll);
+                check("kit strips: a listing 300 ms later leaves the person's volume, and takes the others'", s->item[1].percent == 49 && s->item[2].percent == 30 && s->item[0].percent == 10);
+                strips_list(s, 4, other, base + 900000000ll);
+                check("kit strips: and one 900 ms later takes the app's", s->item[1].percent == 20);
+                // A strip that goes keeps nothing, and one that moves up the order keeps its own state.
+                strips_list(s, 4, steady, base + 1000000000ll);
+                ui_strips_begin(s);
+                ui_strips_add(s, 0xfffffffeul, "Speakers", 80, 0, 1, 0, 0, 0, base + 1100000000ll);
+                ui_strips_add(s, 103, "Discord", 0, 0, 0, 1, 0, 0, base + 1100000000ll);
+                ui_strips_add(s, 101, "Firefox", 50, 0, 0, 1, 0, 0, base + 1100000000ll);
+                ui_strips_end(s);
+                check("kit strips: a new order of the same ids is the same strips, the keys on the strip they were on, by its id",
+                      s->count == 3 && string_equals((string_address)s->item[1].name, (string_address) "Discord") && s->focus == 2 && s->focus_id == 101);
+        }
+
+        // The pointer: a press on the slider sets the value where it lands (sliding there when it is far), a drag follows, a press on the button toggles the mute.
+        {
+                struct window_event move = {WINDOW_EVENT_MOTION, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                                    release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                struct ui_control address_to slider, address_to button;
+                p32 bits;
+                int x, y;
+
+                ui_kit.now += 5000000000ll;
+                strips_list(s, 4, steady, ui_kit.now);
+                ui_kit_held = null;
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                slider = &s->control[2 * 1], button = &s->control[2 * 1 + 1];
+                x = slider->x + slider->w / 2;
+                y = slider->y + 20;
+                move.a = x, move.b = y;
+                ui_strips_event(&ui, s, &move);
+                bits = ui_strips_event(&ui, s, &press);
+                check("kit strips: a press on a slider says its volume changed, to the value under the point, and gives the strip the keys",
+                      (bits & UI_STRIPS_VOLUME) && s->changed == 1 && s->focus == 1 && s->item[1].percent > 85 && s->item[1].percent <= 100 && ui_kit_held == slider);
+                move.b = slider->y + slider->h - 30;
+                bits = ui_strips_event(&ui, s, &move);
+                check("kit strips: a drag follows the hand: the value is where the pointer is", (bits & UI_STRIPS_VOLUME) && s->item[1].percent < 20 && s->item[1].percent > 5);
+                move.b = slider->y + slider->h + 60;
+                ui_strips_event(&ui, s, &move);
+                check("kit strips: past the foot of the slider the value is 0, past the head 100", s->item[1].percent == 0);
+                move.b = slider->y - 80;
+                ui_strips_event(&ui, s, &move);
+                check("kit strips: and past the head it is 100", s->item[1].percent == 100);
+                bits = ui_strips_event(&ui, s, &release);
+                check("kit strips: the release lets the slider go", ui_kit_held == null && !slider->down && (bits & UI_STRIPS_DRAW));
+                // The mute button.
+                move.a = button->x + button->w / 2, move.b = button->y + button->h / 2;
+                ui_strips_event(&ui, s, &move);
+                bits = ui_strips_event(&ui, s, &press);
+                check("kit strips: a press on the mute button alone changes nothing", !(bits & UI_STRIPS_MUTE) && !s->item[1].muted);
+                bits = ui_strips_event(&ui, s, &release);
+                check("kit strips: its release mutes the strip, and says so", (bits & UI_STRIPS_MUTE) && s->changed == 1 && s->item[1].muted && !s->item[2].muted);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                check("kit strips: the button then says Unmute and is filled, the slider's track is grey",
+                      string_equals((string_address)button->label, (string_address) "Unmute") && button->variant == UI_BUTTON_PRIMARY && s->control[2].on);
+                // A press that is on no control and a window with nothing to scroll is nobody's.
+                move.a = 630, move.b = 380;
+                ui_strips_event(&ui, s, &move);
+                bits = ui_strips_event(&ui, s, &press);
+                ui_strips_event(&ui, s, &release);
+                check("kit strips: a press on the ground where there is nothing to scroll is nobody's", !(bits & UI_STRIPS_TAKEN) && !s->dragging);
+        }
+
+        // More strips than room: they scroll by the wheel over the ground and by Shift, a drag of the ground, and the keys, held to their ends.
+        {
+                struct window_event move = {WINDOW_EVENT_MOTION, 0, 0, 0}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
+                                    release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0}, side = {WINDOW_EVENT_WHEEL, 0, 0, 120},
+                                    shift = {WINDOW_EVENT_WHEEL, WINDOW_KEY_SHIFT, 120, 0};
+                p32 bits;
+                int most;
+                b64 at;
+
+                ui_kit.now += 5000000000ll;
+                strips_list(s, 9, steady, ui_kit.now);
+                ui_strips_place(&ui, s, 0, 0, 400, 400);
+                most = ui_strips_most(&ui, s);
+                check("kit strips: nine strips do not fit 400 pixels, and the scroll is the rest of them", ui_strips_total(&ui, s) == 2 * UI_STRIP_PAD + 9 * UI_STRIP_W + UI_STRIP_GAP &&
+                                                                                                           most == ui_strips_total(&ui, s) - 400 && most > 0);
+                move.a = 200, move.b = 390;
+                ui_strips_event(&ui, s, &move);
+                bits = ui_strips_event(&ui, s, &side);
+                at = strips_shift_after(s);
+                check("kit strips: the wheel turned sideways scrolls them, a strip a notch", (bits & UI_STRIPS_DRAW) && at == UI_STRIP_W);
+                bits = ui_strips_event(&ui, s, &shift);
+                at = strips_shift_after(s);
+                check("kit strips: and Shift with the wheel up the other way, held to the start", (bits & UI_STRIPS_DRAW) && at == 0);
+                for (int k = 0; k < 12; k++)
+                {
+                        ui_strips_event(&ui, s, &side);
+                        at = strips_shift_after(s);
+                }
+                check("kit strips: and held to the end", at == most);
+                // A drag of the ground.
+                ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
+                move.a = 300, move.b = 395;
+                ui_strips_event(&ui, s, &move);
+                bits = ui_strips_event(&ui, s, &press);
+                move.a = 220;
+                ui_strips_event(&ui, s, &move);
+                at = ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+                check("kit strips: a drag of the ground moves them with the hand", (bits & UI_STRIPS_TAKEN) && s->dragging && at == 80);
+                move.a = 900;
+                ui_strips_event(&ui, s, &move);
+                at = ui_tween_at(&s->shift, ui_kit.now, &(b32){0});
+                ui_strips_event(&ui, s, &release);
+                check("kit strips: held at the start, and the release lets go", at == 0 && !s->dragging);
+                // The keys scroll to the strip they go to.
+                ui_tween_put(&s->shift, 0, UI_TWEEN_NUMBER);
+                s->focus = 0;
+                for (int k = 0; k < 8; k++)
+                {
+                        struct window_event e = strips_key(UI_KEY_RIGHT, 0);
+
+                        ui_strips_event(&ui, s, &e);
+                }
+                at = strips_shift_after(s);
+                check("kit strips: the keys go to the last strip and scroll it whole into view", s->focus == 8 && at == most);
+        }
+
+        // The picture: the device's speaker, a program's initial, the name, the volume as a number, and the meter in its colours.
+        {
+                int percents[] = {80, 50};
+                b32 disc, speaker, meter_bottom, meter_empty, line, amber, red, text;
+                struct ui_control address_to slider;
+                int mx;
+
+                for (int k = 0; k < 640 * 400; k++)
+                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                ui_kit.now += 5000000000ll;
+                ui_strips_begin(s);
+                ui_strips_add(s, 0xfffffffeul, "Speakers", percents[0], 0, 1, 0, 16384, 16384, ui_kit.now);
+                ui_strips_add(s, 101, "Firefox", percents[1], 0, 0, 1, 32767, 32767, ui_kit.now);
+                ui_strips_end(s);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                s->control[0].placed = s->control[2].placed = 0;
+                ui_strips_draw(&ui, s, true);
+                slider = &s->control[0];
+                // The device's meter, at -6 dB: nine tenths of its track, green; the program's, at full scale, runs to the top, through amber and red.
+                mx = ui_strip_part(&ui, ui_strip_at(&ui, s, 0, 0), (UI_STRIP_W - UI_STRIP_GROUP) / 2, UI_METER_WIDTH) + 1;
+                meter_bottom = strips_is(mx, slider->y + slider->h - 4, UI_SUCCESS);
+                meter_empty = strips_pixel(mx, slider->y + 4) != (ui_role(UI_SUCCESS) & 0xffffffu) && strips_pixel(mx, slider->y + 4) != (ui_role(UI_ERROR) & 0xffffffu);
+                mx = ui_strip_part(&ui, ui_strip_at(&ui, s, 1, 0), (UI_STRIP_W - UI_STRIP_GROUP) / 2, UI_METER_WIDTH) + 1;
+                amber = strips_is(mx, slider->y + slider->h - slider->h * 85 / 100, UI_WARNING);
+                red = strips_is(mx, slider->y + slider->h - slider->h * 97 / 100, UI_ERROR);
+                line = strips_is(mx, slider->y + slider->h - slider->h * 70 / 100, UI_SUCCESS) && strips_is(mx, slider->y + slider->h - slider->h * 40 / 100, UI_SUCCESS);
+                disc = strips_pixel(ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2) == (ui_role(UI_SURFACE_HIGHEST) & 0xffffffu);
+                speaker = strips_is(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE) ||
+                          strips_is(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2, UI_ON_SURFACE);
+                text = false;
+                for (int y = 60; y < 80; y++)
+                        for (int x = ui_strip_at(&ui, s, 1, 0); x < ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W; x++)
+                                text |= strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu);
+                if (!(meter_bottom && meter_empty && amber && red))
+                        string_format(log, "  dump: meter %p %p %p %p, slider y %p h %p, mx %p roles %p %p %p; device bar %p %p %p; program bar %p %p %p; disc %p, 1: %p %p\n", (positive)meter_bottom,
+                                      (positive)meter_empty, (positive)amber, (positive)red, (positive)slider->y, (positive)slider->h, (positive)mx, (positive)(ui_role(UI_SUCCESS) & 0xffffffu),
+                                      (positive)(ui_role(UI_WARNING) & 0xffffffu), (positive)(ui_role(UI_ERROR) & 0xffffffu), (positive)strips_pixel(33, 336), (positive)strips_pixel(33, 200),
+                                      (positive)strips_pixel(33, 104), (positive)strips_pixel(mx, 336), (positive)strips_pixel(mx, 136), (positive)strips_pixel(mx, 107),
+                                      (positive)strips_pixel(ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2), (positive)ui_strip_at(&ui, s, 1, 0),
+                                      (positive)(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu));
+                check("kit strips: the device's meter at -6 dB is green from its foot and empty at its head; a program's at full scale goes through amber to red",
+                      meter_bottom && meter_empty && amber && red && line);
+                if (!(disc && speaker && text))
+                        string_format(log, "  dump: disc %p speaker %p text %p; pixels disc %p speaker %p %p roles %p %p\n", (positive)disc, (positive)speaker, (positive)text,
+                                      (positive)strips_pixel(ui_strip_at(&ui, s, 1, 0) + UI_STRIP_W / 2 - 15, 16 + UI_STRIP_FACE / 2),
+                                      (positive)strips_pixel(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 3, 16 + UI_STRIP_FACE / 2),
+                                      (positive)strips_pixel(ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W / 2 - 11 + 4, 16 + UI_STRIP_FACE / 2),
+                                      (positive)(ui_role(UI_SURFACE_HIGHEST) & 0xffffffu), (positive)(ui_role(UI_ON_SURFACE) & 0xffffffu));
+                check("kit strips: the speaker is drawn in the device's disc, a program has its disc, and the name is written under it", disc && speaker && text);
+        }
+
+        // The speaker: waves add to the right of it (to the left reading from the right), a strike puts a cross there, and nothing is past its box.
+        {
+                int right[4], left[4], outside = 0;
+
+                for (int pass = 0; pass < 2; pass++)
+                {
+                        ui_kit.rtl = pass;
+                        for (int variant = 0; variant < 4; variant++)
+                        {
+                                int count = 0;
+
+                                for (int k = 0; k < 640 * 400; k++)
+                                        strips_pixels[k] = 0xff000000u;
+                                ui_speaker(&ui, 100, 100, 24, variant == 3 ? 0 : variant, variant == 3, 0xffffffffu);
+                                for (int y = 0; y < 400; y++)
+                                        for (int x = 0; x < 640; x++)
+                                                if (strips_pixels[y * 640 + x] & 0xffffffu)
+                                                {
+                                                        outside += x < 100 || x >= 124 || y < 100 || y >= 124;
+                                                        count += pass ? x < 110 : x >= 114;
+                                                }
+                                (pass ? left : right)[variant] = count;
+                        }
+                }
+                ui_kit.rtl = 0;
+                check("kit strips: a speaker with no wave has nothing past its cone, one wave has some and two have more, and a strike has its cross there",
+                      right[0] == 0 && right[1] > 8 && right[2] > right[1] + 8 && right[3] > 8);
+                check("kit strips: reading from the right it is turned over: the same on the other side, and nothing past its box",
+                      left[0] == 0 && left[1] == right[1] && left[2] == right[2] && left[3] == right[3] && !outside);
+        }
+
+        // A message instead of strips: written in the middle of the window, or of the room beside the device.
+        {
+                int ink = 0, hits = 0;
+
+                for (int k = 0; k < 640 * 400; k++)
+                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                ui_kit.now += 5000000000ll;
+                strips_list(s, 1, steady, ui_kit.now);
+                ui_strips_place(&ui, s, 0, 0, 640, 400);
+                ui_strips_message(&ui, s, "No sound is playing", true);
+                for (int y = 0; y < 400; y++)
+                        for (int x = 0; x < 640; x++)
+                                if (strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu))
+                                {
+                                        ink++;
+                                        hits += x > UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP && y > 150 && y < 250;
+                                }
+                check("kit strips: a message is written in the room beside the device, in the middle of the window's height", ink > 100 && ink == hits);
+        }
+#if MOONWATER_UI_MIXER
+        ui.opaque = 1;
+        check_mixer_with(&ui, strips_pixels);
+#endif
+}
+
 static fn check_kit_states(void)
 {
         static unsigned int pixels[600 * 300], scratch[600 * UI_SCRATCH_ROWS];
@@ -149299,9 +150148,10 @@ static fn language_files_check(const font_face address_to regular, const font_fa
 // The sources an id may be named in, and the ones converted: no English literal is left in them.
 static const char address_to const lcheck_sources[] = {
     "src/canvas/ui/ui.c",       "src/canvas/ui/settings.c", "src/canvas/ui/launcher.c", "src/canvas/ui/taskbar.c",
-    "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c"};
+    "src/canvas/ui/battery.c",  "src/canvas/ui/editor.c",   "src/canvas/ui/terminal.c", "src/canvas/ui/identify.c", "src/canvas/ui/mixer.c"};
 static const char address_to const lcheck_converted[] = {"src/canvas/ui/ui.c",      "src/canvas/ui/editor.c",   "src/canvas/ui/launcher.c",
-                                                         "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c"};
+                                                         "src/canvas/ui/taskbar.c", "src/canvas/ui/terminal.c", "src/canvas/ui/settings.c",
+                                                         "src/canvas/ui/mixer.c"};
 
 static b32 lcheck_word_byte(char c)
 {
@@ -151115,7 +151965,7 @@ static fn check_field_hands(string_address regular)
                         launcher_event(&press);
                         check("launcher: a release on the row runs it", !launcher_event(&release) && !launcher.press.down);
                 }
-                // The wheel turns a list longer than its window: the three desktop programs in a window one row tall, a notch a
+                // The wheel turns a list longer than its window: the four desktop programs in a window one row tall, a notch a
                 // row, and the list glides to it (its aim moves, and a frame is asked for).
                 {
                         int pad = ui_px(&launcher.ui, UI_PAD);
@@ -151127,7 +151977,7 @@ static fn check_field_hands(string_address regular)
                         launcher.dirty = false;
                         launcher_event(&turn);
                         check("launcher: the wheel turns a list longer than its window, a notch a row, with the glide",
-                              launcher.entries == 3 && launcher.list.scroll.aim > 0 && launcher.dirty);
+                              launcher.entries == 4 && launcher.list.scroll.aim > 0 && launcher.dirty);
                 }
         }
 
@@ -153771,6 +154621,7 @@ b32 main()
         check_kit_place();
         check_kit_controls();
         check_kit_states();
+        check_kit_strips();
         check_kit_buttons();
         check_kit_scroll_ends();
         check_kit_scroll_robust();

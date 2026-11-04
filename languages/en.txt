@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Toggle Co&mment
 menu_undo	b9d3	&Undo
 menu_zoom_in	5bcf	Zoom &In
 menu_zoom_out	9234	Zoom &Out
+mixer_empty	eef1	No sound is playing
+mixer_mute	9f74	Mute
+mixer_off	e944	Sound server is off
+mixer_unmute	72bb	Unmute
 settings_already_joined	71fb	already joined to %s
 settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
 settings_asks_first	e9bd	asks first
@@ -192,6 +196,7 @@ ui_field_full	fe02	that is as much as it holds
 =Large pointer stays (ms, or default)	5626	Large pointer stays (ms, or default)
 =Launcher	44b1	Launcher
 =Machine	be0e	Machine
+=Mixer	123a	Mixer
 =Motion	7647	Motion
 =Mount kept disks	f0c8	Mount kept disks
 =Mouse acceleration	c400	Mouse acceleration

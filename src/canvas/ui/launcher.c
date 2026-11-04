@@ -110,6 +110,9 @@ static const struct launcher_program launcher_programs[] = {
     {"Settings", "settings preferences options", "/settings", 0},
     {"Terminal", "terminal shell console", "/terminal", 1},
     {"Kernel log", "kernel log klog dmesg messages", "/klog", 1},
+#if MOONWATER_UI_MIXER
+    {"Mixer", "mixer sound volume audio", "/mixer", 0},
+#endif
 };
 
 #define LAUNCHER_PROGRAMS (sizeof(launcher_programs) / sizeof(launcher_programs[0]))

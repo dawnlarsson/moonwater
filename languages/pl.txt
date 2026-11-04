@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
 menu_zoom_in	5bcf	&Powiększ
 menu_zoom_out	9234	Pom&niejsz
+mixer_empty	eef1	Nic nie jest odtwarzane
+mixer_mute	9f74	Wycisz
+mixer_off	e944	Serwer dźwięku jest wyłączony
+mixer_unmute	72bb	Włącz dźwięk
 settings_already_joined	71fb	już połączono z %s
 settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty
 settings_asks_first	e9bd	pyta najpierw
@@ -192,6 +196,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Large pointer stays (ms, or default)	5626	Duży wskaźnik pozostaje (ms lub default)
 =Launcher	44b1	Uruchamianie
 =Machine	be0e	Maszyna
+=Mixer	123a	Mikser
 =Motion	7647	Ruch
 =Mount kept disks	f0c8	Montuj zachowane dyski
 =Mouse acceleration	c400	Przyspieszenie myszy

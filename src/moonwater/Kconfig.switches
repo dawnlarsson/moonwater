@@ -875,6 +875,14 @@ config MOONWATER_TOOL_LAUNCHER
     bool "launcher"
     default MOONWATER_TOOLS_ALL
 
+config MOONWATER_TOOL_MIXER
+    bool "mixer"
+    default MOONWATER_TOOLS_ALL
+
+config MOONWATER_TOOL_SESSIONBUS
+    bool "sessionbus"
+    default MOONWATER_TOOLS_ALL
+
 config MOONWATER_TOOL_SETTINGS
     bool "settings"
     default MOONWATER_TOOLS_ALL

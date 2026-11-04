@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
 menu_zoom_in	5bcf	&Inzoomen
 menu_zoom_out	9234	&Uitzoomen
+mixer_empty	eef1	Er wordt geen geluid afgespeeld
+mixer_mute	9f74	Dempen
+mixer_off	e944	De geluidsserver staat uit
+mixer_unmute	72bb	Dempen opheffen
 settings_already_joined	71fb	al verbonden met %s
 settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
 settings_asks_first	e9bd	vraagt eerst
@@ -192,6 +196,7 @@ ui_field_full	fe02	meer past er niet in
 =Large pointer stays (ms, or default)	5626	Grote aanwijzer blijft (ms of default)
 =Launcher	44b1	Starter
 =Machine	be0e	Machine
+=Mixer	123a	Mixer
 =Motion	7647	Beweging
 =Mount kept disks	f0c8	Bewaarde schijven aankoppelen
 =Mouse acceleration	c400	Muisversnelling

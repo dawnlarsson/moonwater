@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Закомментировать/раскомменти
 menu_undo	b9d3	Отменить
 menu_zoom_in	5bcf	Увеличить
 menu_zoom_out	9234	Уменьшить
+mixer_empty	eef1	Звук не воспроизводится
+mixer_mute	9f74	Без звука
+mixer_off	e944	Звуковой сервер выключен
+mixer_unmute	72bb	Включить звук
 settings_already_joined	71fb	уже подключено к %s
 settings_any_text	89dc	любая команда, как слова после moonwater: её глагол, затем аргументы
 settings_asks_first	e9bd	сначала спросит
@@ -192,6 +196,7 @@ ui_field_full	fe02	больше не помещается
 =Large pointer stays (ms, or default)	5626	Крупный указатель остаётся (мс или default)
 =Launcher	44b1	Запуск
 =Machine	be0e	Компьютер
+=Mixer	123a	Микшер
 =Motion	7647	Движение
 =Mount kept disks	f0c8	Монтировать сохранённые диски
 =Mouse acceleration	c400	Ускорение мыши

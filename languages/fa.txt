@@ -49,6 +49,10 @@ menu_toggle_comment	92ac	تغییر وضعیت توضیح
 menu_undo	b9d3	واگرد
 menu_zoom_in	5bcf	بزرگ‌نمایی
 menu_zoom_out	9234	کوچک‌نمایی
+mixer_empty	eef1	صدایی پخش نمی‌شود
+mixer_mute	9f74	بی‌صدا
+mixer_off	e944	کارساز صدا خاموش است
+mixer_unmute	72bb	برداشتن بی‌صدایی
 settings_already_joined	71fb	از قبل به %s متصل است
 settings_any_text	89dc	هر فرمانی، به شکل واژه‌های پس از moonwater: ابتدا فعل، سپس آرگومان‌ها
 settings_asks_first	e9bd	ابتدا می‌پرسد
@@ -193,6 +197,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Large pointer stays (ms, or default)	5626	مدت ماندن نشانگر بزرگ (ms یا default)
 =Launcher	44b1	راه‌انداز
 =Machine	be0e	رایانه
+=Mixer	123a	میکسر
 =Motion	7647	حرکت
 =Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
 =Mouse acceleration	c400	شتاب ماوس

@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
 menu_zoom_in	5bcf	&Zooma in
 menu_zoom_out	9234	Zooma &ut
+mixer_empty	eef1	Inget ljud spelas
+mixer_mute	9f74	Ljud av
+mixer_off	e944	Ljudservern är avstängd
+mixer_unmute	72bb	Ljud på
 settings_already_joined	71fb	redan ansluten till %s
 settings_any_text	89dc	valfritt kommando, som orden efter moonwater: verbet och sedan argumenten
 settings_asks_first	e9bd	frågar först
@@ -192,6 +196,7 @@ ui_field_full	fe02	mer ryms inte
 =Large pointer stays (ms, or default)	5626	Stor pekare kvarstår (ms eller default)
 =Launcher	44b1	Startare
 =Machine	be0e	Maskin
+=Mixer	123a	Mixer
 =Motion	7647	Rörelse
 =Mount kept disks	f0c8	Montera sparade diskar
 =Mouse acceleration	c400	Musacceleration

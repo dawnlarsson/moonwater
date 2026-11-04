@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Attiva/disattiva co&mmento
 menu_undo	b9d3	&Annulla
 menu_zoom_in	5bcf	I&ngrandisci
 menu_zoom_out	9234	&Riduci
+mixer_empty	eef1	Nessun suono in riproduzione
+mixer_mute	9f74	Disattiva audio
+mixer_off	e944	Il server audio è spento
+mixer_unmute	72bb	Riattiva audio
 settings_already_joined	71fb	già connesso a %s
 settings_any_text	89dc	un comando qualsiasi, come le parole dopo moonwater: il verbo e i suoi argomenti
 settings_asks_first	e9bd	chiede prima
@@ -192,6 +196,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Large pointer stays (ms, or default)	5626	Il puntatore grande resta (ms o default)
 =Launcher	44b1	Avviatore
 =Machine	be0e	Macchina
+=Mixer	123a	Mixer
 =Motion	7647	Movimento
 =Mount kept disks	f0c8	Monta i dischi conservati
 =Mouse acceleration	c400	Accelerazione del mouse

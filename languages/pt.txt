@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
 menu_zoom_in	5bcf	&Aumentar zoom
 menu_zoom_out	9234	&Diminuir zoom
+mixer_empty	eef1	Nenhum som está tocando
+mixer_mute	9f74	Silenciar
+mixer_off	e944	O servidor de som está desligado
+mixer_unmute	72bb	Ativar som
 settings_already_joined	71fb	já conectado a %s
 settings_any_text	89dc	qualquer comando, como as palavras depois de moonwater: o verbo e os argumentos
 settings_asks_first	e9bd	pergunta antes
@@ -192,6 +196,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Large pointer stays (ms, or default)	5626	O ponteiro grande permanece (ms ou default)
 =Launcher	44b1	Lançador
 =Machine	be0e	Máquina
+=Mixer	123a	Mixer
 =Motion	7647	Movimento
 =Mount kept disks	f0c8	Montar os discos mantidos
 =Mouse acceleration	c400	Aceleração do mouse

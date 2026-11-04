@@ -49,6 +49,10 @@ menu_toggle_comment	92ac	החלף הערה
 menu_undo	b9d3	בטל
 menu_zoom_in	5bcf	הגדל זום
 menu_zoom_out	9234	הקטן זום
+mixer_empty	eef1	לא מושמע צליל
+mixer_mute	9f74	השתקה
+mixer_off	e944	שרת השמע כבוי
+mixer_unmute	72bb	ביטול השתקה
 settings_already_joined	71fb	כבר מחובר אל %s
 settings_any_text	89dc	כל פקודה, כמילים שאחרי moonwater: הפעולה שלה ואז הארגומנטים
 settings_asks_first	e9bd	ישאל קודם
@@ -193,6 +197,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Large pointer stays (ms, or default)	5626	משך הישארות המצביע הגדול (ms או default)
 =Launcher	44b1	משגר
 =Machine	be0e	מחשב
+=Mixer	123a	מערבל
 =Motion	7647	תנועה
 =Mount kept disks	f0c8	הרכבת הדיסקים השמורים
 =Mouse acceleration	c400	האצת העכבר

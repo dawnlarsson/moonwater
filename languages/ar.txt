@@ -49,6 +49,10 @@ menu_toggle_comment	92ac	تبديل التعليق
 menu_undo	b9d3	تراجع
 menu_zoom_in	5bcf	تكبير
 menu_zoom_out	9234	تصغير
+mixer_empty	eef1	لا يوجد صوت قيد التشغيل
+mixer_mute	9f74	كتم الصوت
+mixer_off	e944	خادم الصوت متوقف
+mixer_unmute	72bb	إلغاء الكتم
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
 settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط
 settings_asks_first	e9bd	يسأل أولا
@@ -193,6 +197,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Large pointer stays (ms, or default)	5626	مدة بقاء المؤشر الكبير (ms أو default)
 =Launcher	44b1	المشغل
 =Machine	be0e	الحاسوب
+=Mixer	123a	خلاط الصوت
 =Motion	7647	الحركة
 =Mount kept disks	f0c8	تركيب الأقراص المحفوظة
 =Mouse acceleration	c400	تسارع الماوس

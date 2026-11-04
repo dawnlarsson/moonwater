@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
 menu_zoom_in	5bcf	Μεγέθυνση
 menu_zoom_out	9234	Σμίκρυνση
+mixer_empty	eef1	Δεν παίζει ήχος
+mixer_mute	9f74	Σίγαση
+mixer_off	e944	Ο διακομιστής ήχου είναι απενεργοποιημένος
+mixer_unmute	72bb	Επαναφορά ήχου
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
 settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα
 settings_asks_first	e9bd	ρωτά πρώτα
@@ -192,6 +196,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Large pointer stays (ms, or default)	5626	Ο μεγάλος δείκτης μένει (ms ή default)
 =Launcher	44b1	Εκκινητής
 =Machine	be0e	Μηχάνημα
+=Mixer	123a	Μίκτης
 =Motion	7647	Κίνηση
 =Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού

@@ -8,6 +8,8 @@ src/canvas/ui/launcher.c	Terminal
 src/canvas/ui/launcher.c	terminal shell console
 src/canvas/ui/launcher.c	Kernel log
 src/canvas/ui/launcher.c	kernel log klog dmesg messages
+src/canvas/ui/launcher.c	Mixer
+src/canvas/ui/launcher.c	mixer sound volume audio
 src/canvas/ui/terminal.c	cannot use the font
 src/canvas/ui/terminal.c	text size
 src/canvas/ui/terminal.c	px, cell

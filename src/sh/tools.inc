@@ -219,6 +219,9 @@ SHELL_TOOL(SYSTEM, identify, identify_main)
 #if MOONWATER_UI_SETTINGS
 SHELL_TOOL(SYSTEM, settings, settings_main)
 #endif
+#if MOONWATER_UI_MIXER
+SHELL_TOOL(SYSTEM, mixer, mixer_main)
+#endif
 SHELL_TOOL(SYSTEM, sessionbus, sessionbus_main)
 SHELL_TOOL(SYSTEM, spawn, screen_spawn)
 SHELL_TOOL(SYSTEM, surface, surface_main)

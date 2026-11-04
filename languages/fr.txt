@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
 menu_zoom_in	5bcf	Zoom a&vant
 menu_zoom_out	9234	Zoom a&rrière
+mixer_empty	eef1	Aucun son n'est lu
+mixer_mute	9f74	Couper le son
+mixer_off	e944	Le serveur de son est arrêté
+mixer_unmute	72bb	Rétablir le son
 settings_already_joined	71fb	déjà connecté à %s
 settings_any_text	89dc	n'importe quelle commande, comme les mots après moonwater : son verbe, puis ses arguments
 settings_asks_first	e9bd	demande d'abord
@@ -192,6 +196,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Large pointer stays (ms, or default)	5626	Le grand pointeur reste (ms ou default)
 =Launcher	44b1	Lanceur
 =Machine	be0e	Machine
+=Mixer	123a	Mélangeur
 =Motion	7647	Animation
 =Mount kept disks	f0c8	Monter les disques conservés
 =Mouse acceleration	c400	Accélération de la souris

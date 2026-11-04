@@ -90,10 +90,10 @@ moonwater canvas clipboard limit [MIB|default]  the most one copy may be, 1 to 1
 moonwater canvas windows [forget]      where windows open again, from where the hand put them; forget empties it
 moonwater mouse sensitivity [PERCENT|default]  how far the pointer goes for the hand, 10 to 500 percent [100]
 moonwater mouse acceleration [on|off]  the pointer outruns a fast hand; off is one to one [on]
-moonwater audio                        the sound card, the volume and the mute, and whether the sound server starts
+moonwater audio                        the volume and the mute, the sound card and the cards there are, the programs that play, and whether the sound server starts
 moonwater audio volume [PERCENT|default]  the volume of everything that plays, 0 to 100 percent [100]
 moonwater audio mute [on|off]          silence everything that plays, and keep the volume [off]
-moonwater audio device [NAME|default]  the sound card that plays, by the name the server gives it; default picks the first that is not HDMI [default]
+moonwater audio device [NAME|default]  the sound card that plays, by the name bare audio lists; default picks the first that is not HDMI [default]
 moonwater audio server [on|off]        the server programs play their sound through; off keeps it from starting with the desktop [on]
 moonwater taskbar position [bottom|top|left|right]  the edge of the screen the taskbar sits on [bottom]
 moonwater taskbar display [primary|all]  the screens the taskbar is on: the primary, or all, each listing its windows [primary]
@@ -279,6 +279,8 @@ Chinese, Japanese and Korean ones need a face and shaping that are not there.
 `languages/glossary` fixes the terms, and `languages/keep` the few English literals a converted file keeps.
 
 On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. With `moonwater taskbar launcher on` the taskbar has a button at its start (its left end, or the top of a side taskbar) that opens it beside the button, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the button while it is open puts it away. Under its list are two buttons, Power off and Restart: each asks for a second press before it powers the machine off or restarts it (a key held down is one press, and its repeats confirm nothing), and Shift-Tab puts the keys on them.
+
+The mixer (`/mixer`, or Mixer in the launcher) shows the sound server's volumes as columns: the output device first, then a strip for each program that has a sound (the streams of one program are one strip), each a disc with the program's letter, its name, its volume, a level meter beside a vertical slider, and a Mute button. Up and Down change the volume of the strip the keys are on by one, Page Up and Page Down by ten, Home and End make it 100 and 0, and M, Space and Enter mute it; Left, Right and Tab go from strip to strip, the wheel over a strip changes it two a notch, and a strip pressed on the slider goes where the hand does. When the strips do not fit, the wheel over the ground, Shift with the wheel and a drag scroll them. It reads the server's page of memory (`/run/moonwater/pulse/state`) and changes volumes over the server's socket, so a volume set on the command line (`moonwater audio volume`), by a program (`pactl`) or in the mixer is one volume; with no server running it says so. Escape closes it.
 
 Every screen the card has connected is one desktop. `moonwater canvas arrange` lays the
 screens by their connectors' names, left to right with their tops level, the first the

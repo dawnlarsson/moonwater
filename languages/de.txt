@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
 menu_zoom_in	5bcf	&Vergrößern
 menu_zoom_out	9234	Verk&leinern
+mixer_empty	eef1	Es wird kein Ton wiedergegeben
+mixer_mute	9f74	Stummschalten
+mixer_off	e944	Der Tonserver ist aus
+mixer_unmute	72bb	Ton einschalten
 settings_already_joined	71fb	bereits verbunden mit %s
 settings_any_text	89dc	ein beliebiger Befehl, wie die Wörter nach moonwater: sein Verb, dann seine Argumente
 settings_asks_first	e9bd	fragt zuerst
@@ -192,6 +196,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Large pointer stays (ms, or default)	5626	Großer Zeiger bleibt (ms oder default)
 =Launcher	44b1	Starter
 =Machine	be0e	Gerät
+=Mixer	123a	Mixer
 =Motion	7647	Bewegung
 =Mount kept disks	f0c8	Gespeicherte Datenträger einhängen
 =Mouse acceleration	c400	Mausbeschleunigung

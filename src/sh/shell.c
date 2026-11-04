@@ -1119,6 +1119,9 @@ static bool floodlight_parent_supervised;
 #if MOONWATER_UI_IDENTIFY
 #include "../canvas/ui/identify.c"
 #endif
+#if MOONWATER_UI_MIXER
+#include "../canvas/ui/mixer.c"
+#endif
 #if MOONWATER_UI_EDITOR
 #if defined(__x86_64__)
 #pragma GCC push_options

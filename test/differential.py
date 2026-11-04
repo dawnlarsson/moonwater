@@ -47395,6 +47395,82 @@ def harness_moonwater_cli(argv):
         check(got["battery auto"]["status"] == 0 and "battery BAT0" not in kept_tune(),
               "battery auto takes the choice back", repr((got["battery auto"], kept_tune())))
 
+        #       moonwater audio: the volume, the mute, the card and the server's switch are kept in /root as the sound server reads them
+        #       (a volume is a percent, never the word default, which the server takes for no word at all), the card is a name, and bare
+        #       the verb says them and then the server's page when it is there: the card, the cards, the programs and their volumes.
+        import struct
+
+        def kept_audio(name):
+            path = sandbox / "root" / name
+            return path.read_text() if path.exists() else None
+
+        lines, finished = session(say("audio volume 40") + say("audio volume 101") + say("audio volume x") + say("audio volume default") +
+                                  say("audio mute on") + say("audio mute maybe") +
+                                  say("audio device alsa_output.pci-0000_00_1f.3.analog-stereo") + say("audio device bad/name") +
+                                  say("audio server off") + say("audio server maybe") + say("audio") + say("audio sideways"))
+        got = answers(lines)
+        check(finished and got["audio volume 40"]["status"] == 0 and any("volume 40 percent" in line for line in got["audio volume 40"]["out"]),
+              "audio volume 40 is kept and said", repr(got["audio volume 40"]))
+        check(got["audio volume 101"]["status"] == 1 and got["audio volume x"]["status"] == 1 and kept_audio("audio.volume") == "100\n",
+              "a volume past 100 or that is no number is refused, and default keeps 100 and not the word default",
+              repr((got["audio volume 101"], got["audio volume x"], kept_audio("audio.volume"))))
+        check(got["audio mute on"]["status"] == 0 and kept_audio("audio.mute") == "on\n" and got["audio mute maybe"]["status"] == 1,
+              "audio mute on is kept as the server reads it, and a word that is none is refused", repr((got["audio mute on"], kept_audio("audio.mute"))))
+        check(got["audio device alsa_output.pci-0000_00_1f.3.analog-stereo"]["status"] == 0 and
+              kept_audio("audio.device") == "alsa_output.pci-0000_00_1f.3.analog-stereo\n" and got["audio device bad/name"]["status"] == 1,
+              "a card is a name the server gives it, kept as it is typed, and a path is no name",
+              repr((got["audio device alsa_output.pci-0000_00_1f.3.analog-stereo"], kept_audio("audio.device"))))
+        check(got["audio server off"]["status"] == 0 and kept_audio("audio.server") == "off\n" and got["audio server maybe"]["status"] == 1,
+              "audio server off is kept for the machine script, and a word that is none is refused", repr((got["audio server off"], kept_audio("audio.server"))))
+        bare = got["audio"]["out"]
+        check(got["audio"]["status"] == 0 and any("volume 100 percent" in line for line in bare) and any("mute on" in line for line in bare) and
+              any("device alsa_output" in line for line in bare) and any("server off" in line for line in bare) and
+              any("the sound server is not running" in line for line in bare),
+              "bare audio says the four, and that the server is not running when it has no page", repr(bare))
+        check(got["audio sideways"]["status"] == 2, "a word that is none is the usage page", repr(got["audio sideways"]))
+
+        def audio_page(volume, muted, device, name, cards, programs):
+            body = struct.pack("<4I", 0x5341574d, 1, 4, 6684)
+            body += struct.pack("<11I", volume, muted, 0, 0, 0, 0, 48000, 256, 5000, len(programs), len(cards))
+            body += device.ljust(96, b"\0") + name.ljust(64, b"\0")
+            for at in range(8):
+                card = cards[at] if at < len(cards) else (b"", b"", 0)
+                body += card[0].ljust(64, b"\0") + card[1].ljust(96, b"\0") + struct.pack("<2I", card[2], 0)
+            for at in range(32):
+                if at < len(programs):
+                    index, client, vol, flags, app, media = programs[at]
+                    body += struct.pack("<6I", index, client, vol, flags, 0, 0) + struct.pack("<iI", 100, 0)
+                    body += app.ljust(48, b"\0") + media.ljust(48, b"\0") + b"\0" * 32
+                else:
+                    body += struct.pack("<6I", 0xffffffff, 0, 0, 0, 0, 0) + struct.pack("<iI", 0, 0) + b"\0" * 128
+            assert len(body) == 6684
+            return body
+
+        (sandbox / "run/moonwater/pulse").mkdir(parents=True, exist_ok=True)
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(
+            52429, 1, b"Speakers (Realtek)", b"alsa_output.pci", [(b"alsa_output.pci", b"Speakers (Realtek)", 1), (b"alsa_output.hdmi", b"HDMI", 0)],
+            [(7, 3, 32768, 4, b"Firefox", b"Tab"), (9, 4, 13107, 1 | 2, b"mpv", b"film.mkv"), (12, 5, 65536, 4, b"", b"A track")]))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("playing on Speakers (Realtek), 80 percent, muted" in line for line in bare) and
+              any("  * alsa_output.pci  Speakers (Realtek)" in line for line in bare) and
+              any("    alsa_output.hdmi  HDMI" in line for line in bare) and
+              any("Firefox  50 percent, playing" in line for line in bare) and any("mpv  20 percent, muted" in line for line in bare) and
+              any("A track  100 percent, playing" in line for line in bare),
+              "bare audio, with a page, says the card and its volume, the cards (the active one starred) and each program with its volume",
+              repr(bare))
+        page = bytearray((sandbox / "run/moonwater/pulse/state").read_bytes())
+        page[8:12] = struct.pack("<I", 5)
+        (sandbox / "run/moonwater/pulse/state").write_bytes(bytes(page))
+        lines, finished = session(say("audio"))
+        check(finished and any("the sound server is not running" in line for line in answers(lines)["audio"]["out"]),
+              "a page that is being written (an odd sequence) is no page", repr(answers(lines)["audio"]))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(b"not the server's" * 500)
+        lines, finished = session(say("audio"))
+        check(finished and any("the sound server is not running" in line for line in answers(lines)["audio"]["out"]),
+              "and neither is a file that is not the server's", repr(answers(lines)["audio"]))
+        (sandbox / "run/moonwater/pulse/state").unlink()
+
         tuned(say("power powersave"))
         check(sys_read("firmware/acpi/platform_profile") == "low-power" and
               sys_read("devices/system/cpu/cpu0/cpufreq/scaling_governor") == "powersave" and

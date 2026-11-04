@@ -57,6 +57,7 @@
 #define HOST_MACHINE_SOURCED HOST_STATE "/machine.sourced"
 
 #include "../moonwater/moonwater.c"
+#include "../audio/state.c" // the sound server's page, which bare `moonwater audio` reads
 
 //      What this file says as log and log_error is said through plain_out and
 //      plain_err (file.c): colour only to a terminal, names shown and not obeyed.
@@ -21490,13 +21491,93 @@ static b32 locale_audio_device(string_address address_to arguments, positive cou
         return locale_audio_device_status();
 }
 
+/*
+        The server's page of memory as a file: read whole and its sequence looked at again (the server writes it sixty times a
+        second while anything plays, and a sequence that is odd or moved under the read is read again, at most eight times).
+        False for no page, one that is not the server's, or one that is not still. A page is root's (mode 0600).
+*/
+static struct audio_state locale_audio_state;
+static p8 locale_audio_raw[sizeof(struct audio_state) + 8]; // the read leaves its last byte for the end, so the buffer is a little more than the page
+
+static bipolar locale_audio_page(void)
+{
+        for (positive tries = 0; tries < 8; tries++)
+        {
+                p8 again[32];
+                unsigned int sequence;
+                bipolar got = host_read_state(AUDIO_STATE_PATH, locale_audio_raw, sizeof(locale_audio_raw));
+
+                if (got < 0)
+                        return got;
+                if (got < (bipolar)sizeof(locale_audio_state))
+                        return 0;
+                memory_copy(&locale_audio_state, locale_audio_raw, sizeof(locale_audio_state));
+                if (locale_audio_state.seq & 1u)
+                        continue;
+                if (host_read_state(AUDIO_STATE_PATH, again, sizeof(again)) < 12)
+                        continue;
+                memory_copy(&sequence, again + 8, sizeof(sequence));
+                if (sequence != locale_audio_state.seq)
+                        continue;
+                return locale_audio_state.magic == AUDIO_STATE_MAGIC && locale_audio_state.version == AUDIO_STATE_VERSION &&
+                               locale_audio_state.bytes == sizeof(locale_audio_state) ? 1 : 0;
+        }
+        return 0;
+}
+
+//      A percent of the server's 65536 for 100, rounded, as the mixer shows it.
+static positive locale_audio_percent(unsigned int volume)
+{
+        return ((positive)volume * 100 + 32768) / 65536;
+}
+
+/*
+        Bare, `moonwater audio` says the rows' values and then what the server shows: the card it plays on and its volume, the cards
+        there are (the active one starred, each by the name `audio device` takes), and the programs that have a sound with their
+        volumes. The settings are anybody's to read; the page is root's.
+*/
+static b32 locale_audio_status(string_address address_to arguments)
+{
+        bipolar page;
+        const struct audio_state address_to state = &locale_audio_state;
+
+        host_setting_group(arguments + 1, 1);
+        locale_audio_device_status();
+        page = locale_audio_page();
+        if (page < 0 && page != -ENOENT)
+        {
+                host_say(log, host_label "sound " LOCALE_NEEDS_ROOT "\n");
+                return 0;
+        }
+        if (page <= 0)
+        {
+                host_say(log, host_label "the sound server is not running\n");
+                return 0;
+        }
+        host_say(log, host_label "playing on %s, %p percent%s\n", (string_address)state->device, locale_audio_percent(state->volume),
+                 state->muted ? (string_address) ", muted" : (string_address) "");
+        for (positive at = 0; at < state->devices && at < AUDIO_STATE_DEVICES; at++)
+                host_say(log, "  %s %s  %s\n", (state->device_list[at].flags & AUDIO_STATE_DEVICE_ACTIVE) ? (string_address) "*" : (string_address) " ",
+                         (string_address)state->device_list[at].name, (string_address)state->device_list[at].description);
+        for (positive at = 0; at < AUDIO_STATE_STREAMS; at++)
+        {
+                const struct audio_state_stream address_to stream = &state->stream[at];
+
+                if (stream->index == 0xffffffffu)
+                        continue;
+                host_say(log, "  %s  %p percent%s%s\n", (string_address)(stream->app[0] ? stream->app : stream->media[0] ? stream->media : "?"),
+                         locale_audio_percent(stream->volume), (stream->flags & AUDIO_STATE_MUTED) ? (string_address) ", muted" : (string_address) "",
+                         (stream->flags & AUDIO_STATE_PLAYING) && !(stream->flags & AUDIO_STATE_CORKED) ? (string_address) ", playing" : (string_address) "");
+        }
+        return 0;
+}
+
 static b32 host_audio(string_address address_to arguments, positive count)
 {
         if (count >= 3 && string_equals(arguments[2], "device"))
                 return locale_audio_device(arguments, count);
         return_if(count != 2, host_usage());
-        host_setting_group(arguments + 1, 1);
-        return locale_audio_device_status();
+        return locale_audio_status(arguments);
 }
 
 /*
@@ -24291,7 +24372,7 @@ static const host_row host_rows[] = {
     {null, "@keyboard", null, 'r'},
     {null, "@mouse", null, 'r'},
     {null, "@taskbar", null, 'r'},
-    {null, "audio", "the sound card, the volume and the mute, and whether the sound server starts", 'b'},
+    {null, "audio", "the volume and the mute, the sound card and the cards there are, the programs that play, and whether the sound server starts", 'b'},
     {null, "@audio", null, 'r'},
     {null, "@name", null, 'r'},
     {null, "@language", null, 'r'},

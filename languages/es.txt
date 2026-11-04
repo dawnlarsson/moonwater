@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Alternar co&mentario
 menu_undo	b9d3	&Deshacer
 menu_zoom_in	5bcf	&Ampliar
 menu_zoom_out	9234	&Reducir
+mixer_empty	eef1	No se reproduce ningún sonido
+mixer_mute	9f74	Silenciar
+mixer_off	e944	El servidor de sonido está apagado
+mixer_unmute	72bb	Activar sonido
 settings_already_joined	71fb	ya conectado a %s
 settings_any_text	89dc	cualquier comando, como las palabras tras moonwater: su verbo y sus argumentos
 settings_asks_first	e9bd	pregunta antes
@@ -192,6 +196,7 @@ ui_field_full	fe02	no cabe más
 =Large pointer stays (ms, or default)	5626	El puntero grande permanece (ms o default)
 =Launcher	44b1	Lanzador
 =Machine	be0e	Equipo
+=Mixer	123a	Mezclador
 =Motion	7647	Movimiento
 =Mount kept disks	f0c8	Montar los discos guardados
 =Mouse acceleration	c400	Aceleración del ratón

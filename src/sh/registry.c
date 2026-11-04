@@ -368,7 +368,7 @@ static const struct settings_row settings_rows[] = {
                       .help = "silence everything that plays, and keep the volume [off]"),
     {null, "Output device (name, or default)", SETTINGS_FIELD, 0, 0, {"audio", "device"}, "device ", null, {"audio", "device"}, null, 0, null,
      .usage = "audio device [NAME|default]",
-     .help = "the sound card that plays, by the name the server gives it; default picks the first that is not HDMI [default]"},
+     .help = "the sound card that plays, by the name bare audio lists; default picks the first that is not HDMI [default]"},
     SETTING_PLAIN_ROW(null, "Sound server", SETTINGS_SWITCH, 0, ("audio", "server"), "server ", null,
                       .path = SETTING_AUDIO_SERVER_PATH, .standard = "on", .usage = "audio server [on|off]",
                       .help = "the server programs play their sound through; off keeps it from starting with the desktop [on]"),

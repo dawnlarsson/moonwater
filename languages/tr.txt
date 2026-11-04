@@ -48,6 +48,10 @@ menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
 menu_zoom_in	5bcf	&Yakınlaştır
 menu_zoom_out	9234	&Uzaklaştır
+mixer_empty	eef1	Çalan ses yok
+mixer_mute	9f74	Sessiz
+mixer_off	e944	Ses sunucusu kapalı
+mixer_unmute	72bb	Sesi aç
 settings_already_joined	71fb	%s ağına zaten bağlı
 settings_any_text	89dc	herhangi bir komut, moonwater'dan sonraki sözcükler gibi: fiili, sonra bağımsız değişkenleri
 settings_asks_first	e9bd	önce sorar
@@ -192,6 +196,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Large pointer stays (ms, or default)	5626	Büyük işaretçi kalır (ms veya default)
 =Launcher	44b1	Başlatıcı
 =Machine	be0e	Makine
+=Mixer	123a	Karıştırıcı
 =Motion	7647	Hareket
 =Mount kept disks	f0c8	Saklanan diskleri bağla
 =Mouse acceleration	c400	Fare ivmesi
