@@ -406,4 +406,94 @@ static inline void ui_touch_reset(struct ui_touch *t)
         t->pinching = 0;
 }
 
+/*
+        The screen edges. A finger that lands in a band at an edge of its screen (UI_EDGE_BAND, the nearest edge) is the system's
+        until it is decided, and the kit is told nothing of it meanwhile. The top and the bottom are the system's by default; the
+        sides are when the compositor's side edges are on. ui_edge_judge says whether it has
+        travelled UI_EDGE_SWIPE inward within a cone of about 30 degrees (SWIPED: the system's gesture, and the window under it
+        gets nothing); whether it has gone back past the slop, or strayed sideways past the slop out of the cone (FAILED: the
+        press is the window's, as if no band were there); or neither yet (UNDECIDED). The caller fails a finger still
+        UI_EDGE_NS after it landed (a slow drag, or a long press). A tap in the band with no travel is the window's click
+        when it lifts. A finger on a control of the window's controls (UI_EDGE_CONTROL) is judged by travel alone: any travel
+        past the slop fails it, a lift without travel is the control's. Sides are the screen's own, from its rectangle in the
+        desktop's pixels, so a screen turned is judged in its own orientation.
+*/
+#define UI_EDGE_BAND 12                  // dp: the band at each edge of a screen where a swipe begins
+#define UI_EDGE_SWIPE 48                 // dp: the travel inward that decides a swipe
+#define UI_EDGE_CONE 60                  // hundredths: the sideways travel a swipe may not pass of its inward travel (about 30 degrees)
+#define UI_EDGE_NS 500000000ull          // a finger still this long after it landed is not a swipe (the kit's long press)
+#define UI_EDGE_CONTROL_SLOP 8           // dp: a finger's slop about the window's controls, above and below their row
+#define UI_EDGE_CONTROL_CELL 40          // dp: a window control's cell, wide (three to a strip)
+
+enum ui_edge_side
+{
+        UI_EDGE_NONE,
+        UI_EDGE_BOTTOM,  // the bottom band: a swipe up
+        UI_EDGE_TOP,     // the top band: a swipe down
+        UI_EDGE_LEFT,    // the left band: a swipe right (the window switcher, when the side edges are on)
+        UI_EDGE_RIGHT,   // the right band: a swipe left (the mixer, when the side edges are on)
+        UI_EDGE_CONTROL  // a finger on one of a window's controls, which were shown by a swipe down
+};
+
+enum ui_edge_verdict
+{
+        UI_EDGE_UNDECIDED,
+        UI_EDGE_SWIPED,
+        UI_EDGE_FAILED
+};
+
+// The side of the rectangle (x, y, width, height) a point is within band of, the nearest where two are; UI_EDGE_NONE when the point
+// is not in the rectangle or is not near any of its edges.
+static inline int ui_edge_band_side(int x, int y, const int *rect, int band)
+{
+        int left = x - rect[0], right = rect[0] + rect[2] - 1 - x, top = y - rect[1], bottom = rect[1] + rect[3] - 1 - y;
+        int side = UI_EDGE_NONE, least = band;
+
+        if (left < 0 || right < 0 || top < 0 || bottom < 0)
+                return UI_EDGE_NONE;
+        if (top < least)
+                least = top, side = UI_EDGE_TOP;
+        if (bottom < least)
+                least = bottom, side = UI_EDGE_BOTTOM;
+        if (left < least)
+                least = left, side = UI_EDGE_LEFT;
+        if (right < least)
+                least = right, side = UI_EDGE_RIGHT;
+        return side;
+}
+
+// The travel of a finger from where it landed: inward toward the screen from the side (positive is inward), and sideways along it.
+static inline void ui_edge_travel(int side, int x0, int y0, int x, int y, int *inward, int *lateral)
+{
+        switch (side)
+        {
+        case UI_EDGE_BOTTOM: *inward = y0 - y, *lateral = x - x0; break;
+        case UI_EDGE_TOP: *inward = y - y0, *lateral = x - x0; break;
+        case UI_EDGE_LEFT: *inward = x - x0, *lateral = y - y0; break;
+        default: *inward = x0 - x, *lateral = y - y0; break;
+        }
+        if (*lateral < 0)
+                *lateral = -*lateral;
+}
+
+// The verdict for a finger that landed at x0, y0 on side and is now at x, y: slop and swipe are in the desktop's pixels (the scale's).
+static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop, int swipe)
+{
+        int inward, lateral;
+        long long past, out;
+
+        if (side == UI_EDGE_CONTROL)
+                return ui_touch_past(x0, y0, x, y, slop) ? UI_EDGE_FAILED : UI_EDGE_UNDECIDED;
+        ui_edge_travel(side, x0, y0, x, y, &inward, &lateral);
+        if (inward <= -slop)
+                return UI_EDGE_FAILED;
+        past = inward > 0 ? inward : 0;
+        if (lateral >= slop && (long long)lateral * 100 > past * UI_EDGE_CONE)
+                return UI_EDGE_FAILED;
+        out = (long long)inward;
+        if (out >= swipe && (long long)lateral * 100 <= out * UI_EDGE_CONE)
+                return UI_EDGE_SWIPED;
+        return UI_EDGE_UNDECIDED;
+}
+
 #endif

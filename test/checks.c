@@ -134308,6 +134308,347 @@ static void check_select_scroll(struct ui address_to wui)
     check("scroll: a finger held past a field's left edge scrolls it left", a.scroll < a.before && a.start < a.finish);
 }
 
+/*
+        The screen's edges (compositor_swipe, compositor_chip_*). A finger that lands in a band at the top or the bottom of a screen is
+        the system's until it is decided: a swipe up from the bottom opens the launcher beside the finger, a swipe down from a window's
+        top band shows its controls (close, minimise, maximise) over the band, and a finger that is no swipe, in time or in travel, is
+        the window's as if the band were not there. The judge (ui_edge_judge) and the bands (ui_edge_band_side) are checked on their own
+        first. Then the compositor's state, and what each window was told, for synthetic fingers on a 256 by 256 screen (one unit of
+        the touch screen a pixel, as touch_one gives it).
+*/
+static void edge_setup(int motion)
+{
+    struct windows address_to table;
+    void address_to chip_cover = compositor.chip.cover, address_to chip_scratch = compositor.chip.scratch;
+
+    layout_setup(256, 1);
+    table = compositor.table;
+    table->motion = (unsigned int)motion;
+    /* Nothing reads these rows' events but the rows, so each starts with the ring empty (WINDOWS_EVENTS, a full ring drops a post). */
+    for (unsigned int row = 0; row < WINDOWS; row++)
+        table->event_tail[row] = table->event_head[row];
+    /* The chip's memory is the compositor's, mapped once: layout_setup clears the compositor, so it is kept. */
+    compositor.chip.cover = chip_cover, compositor.chip.scratch = chip_scratch;
+    compositor.predict_off[COMPOSITOR_PREDICT_TOUCH] = 1;
+    compositor.spots_on = 1;
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    if (system_call_2(syscall(pipe2), (positive)wheel_pipe, O_NONBLOCK))
+    {
+        check("edge: the input pipe is made", false);
+        return;
+    }
+    compositor.inputs[0] = wheel_pipe[0];
+    compositor.input_count = 1;
+    compositor.touchscreen[0] = 1;
+    compositor.screen_touch[0] = (struct compositor_touch_screen){0};
+    for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+        compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
+    compositor.screen_touch[0].slots = 1;
+    compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1020;
+    touch_clock = 1000000;
+    touch_down = 0;
+    compositor.launcher_asked = 0;
+}
+
+// One report of one finger at x, y (lifted when lift), us microseconds after the last report.
+static void edge_at(int x, int y, b32 lift, positive us)
+{
+    const int finger[1][4] = {{0, lift ? -1 : 1, x, y}};
+
+    touch_clock += us;
+    touch_report(1, finger);
+}
+
+// The finger moved from x0, y0 to x1, y1 in steps reports, each us microseconds after the last.
+static void edge_drag(int x0, int y0, int x1, int y1, int steps, positive us)
+{
+    for (int i = 1; i <= steps; i++)
+        edge_at(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps, 0, us);
+}
+
+// A swipe down from a window's top band at x (a window 240 wide at 0, 0) shows its controls: the finger is lifted over the strip's middle.
+static void edge_show_controls(void)
+{
+    edge_at(100, 4, 0, 10000);
+    edge_drag(100, 4, 100, 56, 6, 10000);
+    edge_at(100, 56, 1, 10000);
+}
+
+static void check_compositor_edges(void)
+{
+    struct windows address_to table;
+    unsigned int head;
+    int band_rect[4] = {0, 0, 256, 256}, second_rect[4] = {256, 0, 1920, 1080};
+
+    /* The judge and the bands, alone. */
+    check("edge judge: a straight swipe up from the bottom band, 60 px, is a swipe",
+          ui_edge_judge(UI_EDGE_BOTTOM, 100, 250, 100, 190, 8, 48) == UI_EDGE_SWIPED);
+    check("edge judge: 30 px up is not yet decided", ui_edge_judge(UI_EDGE_BOTTOM, 100, 250, 100, 220, 8, 48) == UI_EDGE_UNDECIDED);
+    check("edge judge: a curve out of the cone (30 px up and 30 across) fails", ui_edge_judge(UI_EDGE_BOTTOM, 100, 250, 130, 220, 8, 48) == UI_EDGE_FAILED);
+    check("edge judge: a diagonal of about 25 degrees is still a swipe", ui_edge_judge(UI_EDGE_BOTTOM, 100, 250, 123, 200, 8, 48) == UI_EDGE_SWIPED);
+    check("edge judge: back down past the slop fails it", ui_edge_judge(UI_EDGE_BOTTOM, 100, 250, 100, 258, 8, 48) == UI_EDGE_FAILED);
+    check("edge judge: sideways out of the band fails it", ui_edge_judge(UI_EDGE_BOTTOM, 100, 250, 150, 252, 8, 48) == UI_EDGE_FAILED);
+    check("edge judge: a top swipe down and a right-hand swipe left are swipes too",
+          ui_edge_judge(UI_EDGE_TOP, 100, 0, 100, 60, 8, 48) == UI_EDGE_SWIPED && ui_edge_judge(UI_EDGE_RIGHT, 250, 100, 190, 100, 8, 48) == UI_EDGE_SWIPED);
+    check("edge judge: a control's finger is judged by travel alone (3 px is nothing, 9 px is a drag)",
+          ui_edge_judge(UI_EDGE_CONTROL, 100, 20, 103, 20, 8, 48) == UI_EDGE_UNDECIDED && ui_edge_judge(UI_EDGE_CONTROL, 100, 20, 109, 20, 8, 48) == UI_EDGE_FAILED);
+    check("edge band: the nearest edge within 12 px, and none in the middle",
+          ui_edge_band_side(5, 128, band_rect, 12) == UI_EDGE_LEFT && ui_edge_band_side(128, 250, band_rect, 12) == UI_EDGE_BOTTOM &&
+              ui_edge_band_side(128, 3, band_rect, 12) == UI_EDGE_TOP && ui_edge_band_side(3, 250, band_rect, 12) == UI_EDGE_LEFT &&
+              ui_edge_band_side(128, 128, band_rect, 12) == UI_EDGE_NONE);
+    check("edge band: a second screen's own edges (its left at 256, its bottom at 1080)",
+          ui_edge_band_side(261, 500, second_rect, 12) == UI_EDGE_LEFT && ui_edge_band_side(1000, 1075, second_rect, 12) == UI_EDGE_BOTTOM &&
+              ui_edge_band_side(1000, 500, second_rect, 12) == UI_EDGE_NONE);
+
+    /* A swipe up over a window that does not cover the band: the launcher opens, and the window gets nothing. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 150, 256, 106);
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    check("edge: a finger in the bottom band is the system's until it is decided, and its mark is shown",
+          compositor.swipe.state == COMPOSITOR_SWIPE_UNDECIDED && compositor.spot[0].on == 1 && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0);
+    edge_drag(128, 252, 128, 200, 6, 10000);
+    check("edge: a swipe up 52 px opens the launcher, and the window under it gets no touch",
+          compositor.launcher_asked == 1 && compositor.swipe.state == COMPOSITOR_SWIPE_SWIPED && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0 &&
+              touch_seen(1, head, WINDOW_EVENT_MOTION, -1, null) == 0);
+    edge_at(128, 200, 1, 10000);
+    check("edge: lifted, the swipe is over and the next finger is the screen's again", compositor.swipe.state == COMPOSITOR_SWIPE_NONE &&
+              compositor.chip.kind == COMPOSITOR_CHIP_NONE);
+
+    /* A tap in the band with no travel is the window's click, where it landed. A window at the screen's bottom has a finger's grip
+       there, so the window is maximized (no grip at the screen's edges). */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor.arranged[1] = COMPOSITOR_MAXIMIZED;
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    edge_at(128, 252, 1, 10000);
+    check("edge: a tap in the band is the window's: its press and release where it landed, and no launcher",
+          touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 2 && compositor.launcher_asked == 0 && compositor.swipe.state == COMPOSITOR_SWIPE_NONE);
+
+    /* A slow drag up from the band: no swipe in time, so the window has the press, and the drag. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor.arranged[1] = COMPOSITOR_MAXIMIZED;
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 100000);
+    for (int i = 1; i <= 6; i++)
+        edge_at(128, 252 - i * 2, 0, 100000);
+    check("edge: a slow drag from the band is the window's: it has the press, then its motion, and no launcher",
+          touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) >= 1 && touch_seen(1, head, WINDOW_EVENT_MOTION, -1, null) >= 1 &&
+              compositor.launcher_asked == 0 && compositor.swipe.state == COMPOSITOR_SWIPE_NONE);
+    edge_at(128, 240, 1, 100000);
+
+    /* A finger that stays in the band past its time, with no report at all, is the window's when the tick comes. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor.arranged[1] = COMPOSITOR_MAXIMIZED;
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    check("edge: a finger in the band is due at its deadline, for the tick", compositor.swipe.state == COMPOSITOR_SWIPE_UNDECIDED &&
+              compositor_touch_due() == compositor.swipe.deadline);
+    compositor_touch_tick(touch_clock * 1000 + UI_EDGE_NS);
+    check("edge: at its time, still, the window has the press (the kit's long press comes after it)",
+          touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 1 && compositor.swipe.state == COMPOSITOR_SWIPE_NONE && compositor.launcher_asked == 0);
+    edge_at(128, 252, 1, 10000);
+
+    /* A second finger before the swipe is decided cancels it: the window has the press and its cancel, and no launcher. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor.arranged[1] = COMPOSITOR_MAXIMIZED;
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    {
+        const int two[2][4] = {{0, 1, 128, 252}, {1, 2, 60, 200}};
+        const int lift[2][4] = {{0, -1, 0, 0}, {1, -1, 0, 0}};
+
+        touch_clock += 10000;
+        touch_report(2, two);
+        touch_clock += 10000;
+        touch_report(2, lift);
+    }
+    check("edge: a second finger cancels the swipe: the window has the press and the cancel of it, and no launcher",
+          touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) >= 2 && compositor.launcher_asked == 0 && compositor.swipe.state == COMPOSITOR_SWIPE_NONE);
+
+    /* A finger that lands while a drag is under way is not the system's. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 150, 256, 106);
+    compositor.drag = 1;
+    edge_at(128, 252, 0, 10000);
+    check("edge: a finger in the band while a window is being dragged is the window's, and no swipe begins", compositor.swipe.state == COMPOSITOR_SWIPE_NONE);
+    compositor.drag = COMPOSITOR_NONE;
+    edge_at(128, 252, 1, 10000);
+
+    /* A left-hand swipe is the window's: its press and its motion, and no chip. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor.arranged[1] = COMPOSITOR_MAXIMIZED;
+    head = table->event_head[1];
+    edge_at(5, 100, 0, 10000);
+    edge_drag(5, 100, 60, 100, 6, 10000);
+    check("edge: a swipe in from the left edge is the window's, as a touch: no system gesture, no controls",
+          touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) >= 1 && touch_seen(1, head, WINDOW_EVENT_MOTION, -1, null) >= 1 &&
+              compositor.swipe.state == COMPOSITOR_SWIPE_NONE && compositor.chip.kind == COMPOSITOR_CHIP_NONE && compositor.launcher_asked == 0);
+    edge_at(60, 100, 1, 10000);
+
+    /* A swipe down from a window's top band shows its controls over the band, and the window gets no touch. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 240, 100);
+    head = table->event_head[1];
+    edge_at(100, 4, 0, 10000);
+    edge_drag(100, 4, 100, 56, 6, 10000);
+    check("edge: a swipe down from a window's top band shows its controls, and the window gets no touch",
+          compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.row == 1 && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0 &&
+              touch_seen(1, head, WINDOW_EVENT_MOTION, -1, null) == 0);
+    check("edge: the controls are three cells, 120 px wide, centred over the top band at 6 px", compositor.chip.w == 120 &&
+              compositor.chip.rel_x == 60 && compositor.chip.rel_y == 6 && compositor.chip.h == 32);
+    edge_at(100, 56, 1, 10000);
+    check("edge: lifted, the controls stay up until they fade", compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.swipe.state == COMPOSITOR_SWIPE_NONE);
+
+    /* Each control, tapped: close, minimise, maximise. */
+    {
+        int cells[3] = {80, 120, 160};
+
+        for (int cell = 0; cell < 3; cell++)
+        {
+            edge_setup(0);
+            table = compositor.table;
+            layout_show(1, 0, 0, 240, 100);
+            edge_show_controls();
+            edge_at(cells[cell], 20, 0, 10000);
+            edge_at(cells[cell], 20, 1, 10000);
+            if (cell == 0)
+                check("edge: a tap on the close control closes the window, and the controls go", (compositor.state[1] & WINDOW_CLOSING) != 0 &&
+                          compositor.chip.kind == COMPOSITOR_CHIP_NONE);
+            else if (cell == 1)
+                check("edge: a tap on the minimise control puts the window away, and the controls go",
+                      (compositor.state[1] & WINDOW_MINIMIZED) != 0 && compositor.chip.kind == COMPOSITOR_CHIP_NONE);
+            else
+                check("edge: a tap on the maximise control maximises the window, and the controls go",
+                      compositor.arranged[1] == COMPOSITOR_MAXIMIZED && compositor.chip.kind == COMPOSITOR_CHIP_NONE);
+        }
+    }
+
+    /* A drag that starts on a control is the window's, from its top band: the window moves with the finger. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 240, 100);
+    edge_show_controls();
+    edge_at(160, 20, 0, 10000);
+    edge_drag(160, 20, 160, 50, 3, 10000);
+    check("edge: a drag that starts on a control is the window's drag, and the window moves with the finger",
+          compositor.drag == 1 && compositor.y[1] > 0);
+    edge_at(160, 50, 1, 10000);
+
+    /* The controls hold for 3 s, then fade out in 0.3 s. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 240, 100);
+    edge_show_controls();
+    {
+        positive shown = compositor.chip.shown;
+
+        compositor_chip_tick(shown + 2900000000ull);
+        check("edge: the controls hold for 3 s", compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.alpha == 255);
+        compositor_chip_tick(shown + 3150000000ull);
+        check("edge: then they fade", compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.alpha > 0 && compositor.chip.alpha < 255);
+        compositor_chip_tick(shown + 3310000000ull);
+        check("edge: and are gone after the fade", compositor.chip.kind == COMPOSITOR_CHIP_NONE);
+    }
+
+    /* The controls slide in over 180 ms with the kit's ease, unless motion is reduced, when they are there at once. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 240, 100);
+    edge_show_controls();
+    {
+        positive shown = compositor.chip.shown;
+        int at_start = compositor.chip.slide;
+
+        compositor_chip_tick(shown + 90000000ull);
+        check("edge: the controls slide in: a little above their place at its start, nearer at the middle",
+              at_start == compositor.chip.h && compositor.chip.slide > 0 && compositor.chip.slide < at_start);
+        compositor_chip_tick(shown + 200000000ull);
+        check("edge: and are in their place at its end", compositor.chip.slide == 0);
+    }
+    edge_setup(1);
+    table = compositor.table;
+    layout_show(1, 0, 0, 240, 100);
+    edge_show_controls();
+    check("edge: with motion reduced the controls are in their place at once", compositor.chip.kind == COMPOSITOR_CHIP_CONTROLS && compositor.chip.slide == 0);
+
+    /* A full-screen window: the first swipe into it is its own, with an indicator; a second within 2 s is the system's; a later one is the window's again. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 0, 256, 256);
+    compositor.arranged[1] = COMPOSITOR_MAXIMIZED;
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    edge_drag(128, 252, 128, 200, 6, 10000);
+    check("edge: the first swipe into a full-screen window is the window's, with an indicator, and no launcher",
+          compositor.chip.kind == COMPOSITOR_CHIP_HINT && compositor.launcher_asked == 0 && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) >= 1 &&
+              touch_seen(1, head, WINDOW_EVENT_MOTION, -1, null) >= 1);
+    edge_at(128, 200, 1, 10000);
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    edge_drag(128, 252, 128, 200, 6, 10000);
+    check("edge: a second swipe within 2 s is the system's: the launcher opens, and the window gets nothing",
+          compositor.launcher_asked == 1 && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0);
+    edge_at(128, 200, 1, 10000);
+    touch_clock += 3000000;
+    head = table->event_head[1];
+    edge_at(128, 252, 0, 10000);
+    edge_drag(128, 252, 128, 200, 6, 10000);
+    check("edge: a swipe after 2 s is the window's again, with its indicator",
+          compositor.launcher_asked == 1 && compositor.chip.kind == COMPOSITOR_CHIP_HINT && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) >= 1);
+    edge_at(128, 200, 1, 10000);
+
+    /* A second screen has its own edges: a point is on the screen it is in, and its band is that screen's bottom. */
+    edge_setup(0);
+    compositor.outputs = 2;
+    compositor.screen[0][0] = 0, compositor.screen[0][1] = 0, compositor.screen[0][2] = 128, compositor.screen[0][3] = 256;
+    compositor.screen[1][0] = 128, compositor.screen[1][1] = 0, compositor.screen[1][2] = 128, compositor.screen[1][3] = 256;
+    {
+        int rect[4] = {0, 0, 0, 0}, number = -1;
+
+        check("edge screen: a point on the second screen is that screen, and its bottom band is the screen's own",
+              compositor_swipe_screen(200, 252, rect, &number) && number == 1 && rect[0] == 128 && rect[2] == 128 &&
+                  ui_edge_band_side(200, 252, rect, 12) == UI_EDGE_BOTTOM && ui_edge_band_side(130, 128, rect, 12) == UI_EDGE_LEFT);
+    }
+    compositor.outputs = 0;
+
+    /* The side edges, when they are on (compositor.side_edges, off by default): a swipe in from the left is the window switcher's step, and
+       one in from the right is the mixer's popup, beside the finger on the right. Neither reaches the window it began on. */
+    edge_setup(0);
+    table = compositor.table;
+    layout_show(1, 0, 40, 120, 160);
+    layout_show(2, 130, 40, 120, 160);
+    compositor.side_edges = 1;
+    compositor.focus = 1;
+    head = table->event_head[1];
+    edge_at(5, 100, 0, 10000);
+    edge_drag(5, 100, 60, 100, 6, 10000);
+    check("edge sides: with the side edges on, a swipe in from the left steps the window switcher, and the window it began on gets nothing",
+          compositor.focus == 2 && touch_seen(1, head, WINDOW_EVENT_BUTTON, -1, null) == 0 && compositor.swipe.state == COMPOSITOR_SWIPE_SWIPED);
+    edge_at(60, 100, 1, 10000);
+    check("edge sides: lifted, the swipe is over", compositor.swipe.state == COMPOSITOR_SWIPE_NONE);
+    table->button_edge = TASKBAR_BOTTOM;
+    edge_at(250, 100, 0, 10000);
+    edge_drag(250, 100, 190, 100, 6, 10000);
+    check("edge sides: a swipe in from the right is the mixer's popup, on the right edge, beside the finger",
+          table->button_edge == TASKBAR_RIGHT && table->button_w > 0 && table->button_y <= 100 && table->button_y + (int)table->button_h > 100);
+    edge_at(190, 100, 1, 10000);
+    compositor.side_edges = 0;
+}
+
 static void check_compositor_touch(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -134756,14 +135097,14 @@ static void check_compositor_touch(void)
     compositor.screen[1][0] = 128, compositor.screen[1][1] = 0, compositor.screen[1][2] = 128, compositor.screen[1][3] = 256;
     string_copy((string_address)compositor.output[0].name, (string_address) "HDMI-A-1");
     string_copy((string_address)compositor.output[1].name, (string_address) "eDP-1");
-    touch_one(254, 254, false);
-    unchanged = compositor.pointer_x == 128 + 1016 * 127 / 1020 && compositor.pointer_y == 254;
-    touch_one(254, 254, true);
+    touch_one(254, 200, false);
+    unchanged = compositor.pointer_x == 128 + 1016 * 127 / 1020 && compositor.pointer_y == 200;
+    touch_one(254, 200, true);
     string_copy((string_address)compositor.output[1].name, (string_address) "DP-2");
-    touch_one(254, 254, false);
-    touch_one(254, 254, true);
+    touch_one(254, 200, false);
+    touch_one(254, 200, true);
     check("touch: on two screens a finger is on the built-in panel's screen, and with none on the primary's",
-          unchanged && compositor.pointer_x == 1016 * 127 / 1020 && compositor.pointer_y == 254);
+          unchanged && compositor.pointer_x == 1016 * 127 / 1020 && compositor.pointer_y == 200);
     compositor.outputs = 0;
 
     /* A mouse moved after a finger shows the pointer again. */
@@ -160214,6 +160555,7 @@ b32 main()
         check_compositor_wheel();
 #ifdef COMPOSITOR_LINE
         check_compositor_touch();
+        check_compositor_edges();
 #endif
 #if MOONWATER_UI_ANY && defined(UI_TARGET)
         check_ui_press();

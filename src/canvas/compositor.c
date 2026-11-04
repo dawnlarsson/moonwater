@@ -3628,6 +3628,77 @@ struct compositor_touch
         int pinch_level;         // a legacy window's pinch: the scale (1024ths) of the last Ctrl and wheel notch sent
 };
 
+/*
+        The screen edges (ui/touch.h). A finger that lands in the top or the bottom band of its screen is the system's until it
+        is decided: the kit is not told of it (COMPOSITOR_SWIPE_UNDECIDED), and the window under it gets nothing. A decided swipe is
+        the system's (COMPOSITOR_SWIPE_SWIPED) until every finger is up. A finger that is not a swipe after all is handed to the
+        kit as it would have been without the band: its landing, then the report as it is (compositor_swipe_hand). The landing
+        frame is kept for that, and the deadline (UI_EDGE_NS) is the time a finger in the band may take to be decided.
+        A window that covers its screen (COMPOSITOR_MAXIMIZED) takes a first swipe as its own, with an indicator at the edge;
+        a second within COMPOSITOR_SWIPE_ARM_NS is the system's.
+*/
+#define COMPOSITOR_SWIPE_NONE 0
+#define COMPOSITOR_SWIPE_UNDECIDED 1
+#define COMPOSITOR_SWIPE_SWIPED 2
+#define COMPOSITOR_SWIPE_ARM_NS 2000000000ull // a second swipe into a window that covers its screen, within this, is the system's
+#define COMPOSITOR_SWIPE_LAUNCHER_DP 48       // the launcher's rectangle when a swipe opens it: its width, beside the finger
+struct compositor_swipe
+{
+        int state;                     // COMPOSITOR_SWIPE_NONE, _UNDECIDED or _SWIPED
+        int device;                    // the touch screen the finger is on
+        int slot;                      // the finger's slot
+        int side;                      // the UI_EDGE_* side it landed in
+        int cell;                      // a control's cell, when it landed on one (side UI_EDGE_CONTROL)
+        int row;                       // the window under it when it landed, or COMPOSITOR_NONE
+        int rect[4];                   // the screen it landed on, in the desktop's pixels, and its number
+        int screen;
+        int x0, y0;                    // where it landed
+        positive deadline;             // when an undecided finger is no swipe any more
+        struct ui_touch_frame landing; // the report it landed in, which the kit is given if it is not a swipe
+        int armed_row;                 // the window whose first swipe was handed to it, or COMPOSITOR_NONE
+        positive armed_until;          // until when a second swipe into armed_row is the system's
+};
+
+/*
+        The chip: what a swipe shows over the desktop, drawn by the compositor over the scene (as the marks are). A controls chip
+        (COMPOSITOR_CHIP_CONTROLS) is the window's controls: close, minimise and maximise, three cells over the top band of the
+        window it was swiped down on. It slides down into its place (the kit's ease), holds for
+        COMPOSITOR_CHIP_HOLD_NS, and fades over COMPOSITOR_CHIP_FADE_NS. An indicator (COMPOSITOR_CHIP_HINT) is a bar at the edge
+        the first swipe into a full-screen window came from. Its coverage is kept in cover: the body, then the glyphs, w x h each.
+*/
+#define COMPOSITOR_CHIP_NONE 0
+#define COMPOSITOR_CHIP_CONTROLS 1
+#define COMPOSITOR_CHIP_HINT 2
+#define COMPOSITOR_CHIP_W_MOST 960            // the largest chip in device pixels: three cells at 800 percent
+#define COMPOSITOR_CHIP_H_MOST 256            // and the strip's height at 800 percent
+#define COMPOSITOR_CHIP_HOLD_NS 3000000000ull // a controls chip is shown this long, then fades
+#define COMPOSITOR_CHIP_FADE_NS 300000000ull
+#define COMPOSITOR_CHIP_HINT_NS 1500000000ull // an indicator is shown this long
+#define COMPOSITOR_CHIP_SLIDE_NS 180000000ull // a controls chip slides in over this
+#define COMPOSITOR_CHIP_TOP_DP 6              // a controls chip's top, below its window's top edge
+#define COMPOSITOR_CHIP_HEIGHT_DP 32          // a controls chip's height
+#define COMPOSITOR_CHIP_GLYPH_DP 6            // a glyph's half size
+#define COMPOSITOR_CHIP_HINT_W_DP 48
+#define COMPOSITOR_CHIP_HINT_H_DP 4
+#define COMPOSITOR_CHIP_HINT_MARGIN_DP 6      // the indicator's gap from its screen's edge
+#define COMPOSITOR_CHIP_BODY 0x1e1e22u        // the strip's body, and the glyphs and the indicator
+#define COMPOSITOR_CHIP_GLYPH 0xe4e4e4u
+#define COMPOSITOR_CHIP_BODY_COVER 224        // the body's strength, of 255
+struct compositor_chip
+{
+        int kind;                  // COMPOSITOR_CHIP_NONE, _CONTROLS or _HINT
+        int row;                   // CONTROLS: the window it is of (the box follows it)
+        int rel_x, rel_y;          // CONTROLS: the top left in the window's pixels; HINT: its place in the desktop
+        int w, h;                  // the size in device pixels
+        int slide;                 // CONTROLS: how far above its place it is still, in device pixels
+        int drawn[5];              // the box and alpha last drawn: x, y, w, h, alpha (what damage is taken for)
+        unsigned int alpha;        // 0..255 now
+        positive shown;            // when it was shown
+        positive hold, fade;       // it holds this long, then fades over this long
+        unsigned char *cover;      // the coverage: the body's w x h, then the glyphs' (COMPOSITOR_CHIP_W_MOST x COMPOSITOR_CHIP_H_MOST each, mapped once)
+        unsigned int *scratch;     // the scene under the chip, composed for a target that is only written (the scanout)
+};
+
 #define COMPOSITOR_EV_KEY 1u
 #define COMPOSITOR_EV_REL 2u
 #define COMPOSITOR_EV_ABS 3u
@@ -4088,6 +4159,9 @@ static struct
         unsigned char touchscreen[COMPOSITOR_INPUTS];
         struct compositor_touch_screen screen_touch[COMPOSITOR_INPUTS];
         struct compositor_touch touch;
+        struct compositor_swipe swipe; // a finger the screen's edges may take (compositor_swipe_report)
+        struct compositor_chip chip;   // what a swipe shows over the desktop (compositor_chip_*)
+        int side_edges;                // a swipe in from the left or the right edge is the system's: the window switcher, and the mixer (off by default)
         // The prediction a frame ahead, per class (COMPOSITOR_PREDICT_*), and the classes `moonwater canvas predict` turned off.
         struct compositor_predict predict[COMPOSITOR_PREDICTS];
         unsigned char predict_off[COMPOSITOR_PREDICTS];
@@ -4154,6 +4228,7 @@ static struct
 // The fingers' marks (the touch section, below): whether any is drawn or fading, drawing them, and their masks.
 static int compositor_spots_any(int fading);
 static void compositor_spots_draw(const struct compositor_target *t);
+static void compositor_spots_marks(const struct compositor_target *t);
 static void compositor_spots_compose(const struct compositor_target *t, const struct compositor_frame *frames,
                                      unsigned int count);
 static void compositor_spots_ready(void);
@@ -7430,12 +7505,13 @@ static unsigned int compositor_gpu_spot_table(int radius, int ring, unsigned int
 
 // The fingers' marks over the scene, in slot order (compositor_spots_draw): each live mark that has area as two records, after the frames and before the
 // pointer. False (and the reason) when the pool is full.
+static void compositor_chip_place(int *box);
 static b32 compositor_gpu_spots(void)
 {
         struct compositor_gscene *g = &compositor_gscene;
         int radius = compositor_spot_radius(compositor.scale), ring = compositor_px1(compositor.scale), inner = radius - ring;
 
-        if (!compositor.spots_shown)
+        if (!compositor.spots_shown && compositor.chip.kind == COMPOSITOR_CHIP_NONE)
                 return true;
         for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         {
@@ -7451,6 +7527,32 @@ static b32 compositor_gpu_spots(void)
                         return g->why = COMPOSITOR_GPU_WHY_POOL, false;
                 compositor_gpu_rect(5, cx - radius, cy - radius, cx + radius, cy + radius, COMPOSITOR_INK_LINE_HELD, 0, fill_at, (unsigned int)(2 * radius));
                 compositor_gpu_rect(5, cx - radius, cy - radius, cx + radius, cy + radius, COMPOSITOR_INK_LINE_HELD, 0, edge_at, (unsigned int)(2 * radius));
+        }
+        // The chip (compositor_chip_draw) as its body and glyphs, each a table of its coverage at its alpha, in the card's records.
+        if (compositor.chip.kind != COMPOSITOR_CHIP_NONE && compositor.chip.alpha)
+        {
+                const struct compositor_chip *c = &compositor.chip;
+                int box[4], layers = c->kind == COMPOSITOR_CHIP_HINT ? 1 : 2;
+                unsigned long cells = (unsigned long)c->w * c->h;
+
+                compositor_chip_place(box);
+                for (int layer = 0; layer < layers; layer++)
+                {
+                        const unsigned char *cover = c->cover + (unsigned long)layer * cells;
+                        unsigned char *table = 0;
+                        unsigned int at, ink = c->kind == COMPOSITOR_CHIP_HINT || layer ? COMPOSITOR_CHIP_GLYPH : COMPOSITOR_CHIP_BODY;
+
+                        if (g->count + 8 > g->room - 400)
+                                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                        at = compositor_gpu_slot(c->w, c->h, 20 + layer + (c->kind == COMPOSITOR_CHIP_HINT ? 2 : 0), (int)c->alpha,
+                                                 (unsigned int)cells, &table);
+                        if (!at)
+                                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                        // A table kept from an earlier present has this key's coverage already (the key is the size, the layer and the alpha).
+                        for (unsigned long i = 0; table && i < cells; i++)
+                                table[i] = (unsigned char)(cover[i] * c->alpha / 255);
+                        compositor_gpu_rect(5, box[0], box[1], box[0] + box[2], box[1] + box[3], ink, 0, at, (unsigned int)c->w);
+                }
         }
         return true;
 }
@@ -15819,15 +15921,337 @@ static void compositor_spot_lift(int slot, positive now)
         compositor.spots_fading |= 1u << slot;
 }
 
-// Whether any mark is drawn, and whether any is fading, which is a frame to draw each period until it is gone.
+/*
+        The chip (compositor.chip): a swipe's controls and indicator, their coverage made once a show (the body and the glyphs in
+        integers: half pixels, a stroke's radius in half pixels, the strokes two to a pixel's ring) and drawn over the scene
+        with the marks, in the processor's pixels and in the card's records (compositor_gpu_spots). The strip is three cells
+        (close, minimise, maximise) on a capsule of its height; a cell is a control's target (compositor_chip_cell).
+*/
+// The coverage of a point by a stroke from a to b, in half pixels (a pixel's centre is 2x + 1), of a radius in half pixels: 255 within it,
+// 128 on the pixel's ring, none beyond.
+static unsigned int compositor_chip_stroke(long px, long py, long ax, long ay, long bx, long by, long radius)
+{
+        long dx = bx - ax, dy = by - ay, qx = px - ax, qy = py - ay;
+        long long len2 = (long long)dx * dx + (long long)dy * dy, dot = (long long)qx * dx + (long long)qy * dy, d2, c, cross;
+
+        if (dot <= 0)
+                d2 = (long long)qx * qx + (long long)qy * qy;
+        else if (dot >= len2)
+                d2 = (long long)(px - bx) * (px - bx) + (long long)(py - by) * (py - by);
+        else
+                cross = (long long)qx * dy - (long long)qy * dx, d2 = cross * cross / len2;
+        c = (long long)radius + 1 - (long long)ui_touch_isqrt((unsigned long long)d2);
+        return c <= 0 ? 0 : c >= 2 ? 255 : 128;
+}
+
+// The body: a capsule of the box's height across the w x h box, at its strength.
+static void compositor_chip_body(unsigned char *cover, int w, int h)
+{
+        long r = h / 2;
+
+        for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                        cover[y * w + x] = (unsigned char)(compositor_chip_stroke(2 * x + 1, 2 * y + 1, 2 * r, 2 * r, 2 * (w - r), 2 * r, 2 * r) *
+                                                            COMPOSITOR_CHIP_BODY_COVER / 255);
+}
+
+// One stroke of a glyph into the glyph layer: the larger coverage where strokes meet. Only the pixels it can reach are looked at.
+static void compositor_chip_stroke_into(unsigned char *layer, int w, int h, long ax, long ay, long bx, long by, long radius)
+{
+        long x0 = (ax < bx ? ax : bx) - radius / 2 - 2, x1 = (ax > bx ? ax : bx) + radius / 2 + 3;
+        long y0 = (ay < by ? ay : by) - radius / 2 - 2, y1 = (ay > by ? ay : by) + radius / 2 + 3;
+
+        x0 = x0 < 0 ? 0 : x0, y0 = y0 < 0 ? 0 : y0;
+        x1 = x1 > w ? w : x1, y1 = y1 > h ? h : y1;
+        for (long y = y0; y < y1; y++)
+                for (long x = x0; x < x1; x++)
+                {
+                        unsigned int c = compositor_chip_stroke(2 * x + 1, 2 * y + 1, 2 * ax, 2 * ay, 2 * bx, 2 * by, radius);
+
+                        if (c > layer[y * w + x])
+                                layer[y * w + x] = (unsigned char)c;
+                }
+}
+
+// The glyphs of the three cells: close (an X), minimise (a bar), maximise (a square), each a G-pixel half size about its cell's middle.
+static void compositor_chip_glyphs(unsigned char *layer, int w, int h, int scale)
+{
+        int cell = w / 3;
+        long g = COMPOSITOR_CHIP_GLYPH_DP * scale / 100, cy = h / 2, radius = 3 * scale / 200 > 2 ? 3 * scale / 200 : 2;
+
+        for (int i = 0; i < 3; i++)
+        {
+                long cx = (long)i * cell + cell / 2;
+
+                if (i == 0)
+                        compositor_chip_stroke_into(layer, w, h, cx - g, cy - g, cx + g, cy + g, radius),
+                            compositor_chip_stroke_into(layer, w, h, cx + g, cy - g, cx - g, cy + g, radius);
+                else if (i == 1)
+                        compositor_chip_stroke_into(layer, w, h, cx - g, cy, cx + g, cy, radius);
+                else
+                        compositor_chip_stroke_into(layer, w, h, cx - g, cy - g, cx + g, cy - g, radius),
+                            compositor_chip_stroke_into(layer, w, h, cx + g, cy - g, cx + g, cy + g, radius),
+                            compositor_chip_stroke_into(layer, w, h, cx + g, cy + g, cx - g, cy + g, radius),
+                            compositor_chip_stroke_into(layer, w, h, cx - g, cy + g, cx - g, cy - g, radius);
+        }
+}
+
+// The coverage of a chip of w x h: the body, and the glyphs after it when glyphs is set.
+static void compositor_chip_paint(int w, int h, int scale, int glyphs)
+{
+        unsigned char *cover = compositor.chip.cover;
+
+        compositor_chip_body(cover, w, h);
+        if (glyphs)
+        {
+                memory_zero(cover + (unsigned long)w * h, (positive)w * h);
+                compositor_chip_glyphs(cover + (unsigned long)w * h, w, h, scale);
+        }
+}
+
+// The chip's memory, mapped once at its largest: the coverage, and the scene under it when a target is only written.
+static int compositor_chip_map(void)
+{
+        struct compositor_chip *c = &compositor.chip;
+
+        if (!c->cover)
+                c->cover = (unsigned char *)compositor_map_zeroed(2UL * COMPOSITOR_CHIP_W_MOST * COMPOSITOR_CHIP_H_MOST);
+        if (!c->scratch)
+                c->scratch = (unsigned int *)compositor_map_zeroed(4UL * COMPOSITOR_CHIP_W_MOST * COMPOSITOR_CHIP_H_MOST);
+        return c->cover && c->scratch;
+}
+
+// Whether the table asks for reduced motion (the kit's motion setting), when a chip slides in at once.
+static int compositor_chip_reduced(void)
+{
+        return compositor.table && compositor.table->motion;
+}
+
+// Where the chip is drawn now, in the desktop's pixels: a controls chip follows its window and slides down into its place.
+static void compositor_chip_place(int *box)
+{
+        const struct compositor_chip *c = &compositor.chip;
+
+        box[2] = c->w, box[3] = c->h;
+        if (c->kind == COMPOSITOR_CHIP_CONTROLS)
+                box[0] = compositor.x[c->row] + c->rel_x, box[1] = compositor.y[c->row] + c->rel_y - c->slide;
+        else
+                box[0] = c->rel_x, box[1] = c->rel_y;
+}
+
+// A box is damaged as the chip is: over every window, so the scene under it is composed again.
+static void compositor_chip_damage(const int *box)
+{
+        if (box[2] <= 0 || box[3] <= 0)
+                return;
+        compositor.damage_by = COMPOSITOR_OVER;
+        compositor_damage(box[0], box[1], box[2], box[3]);
+        compositor.damage_by = 0;
+}
+
+// The chip's box and alpha, when either changed since it was last drawn: the old place and the new are damaged.
+static void compositor_chip_redraw(void)
+{
+        struct compositor_chip *c = &compositor.chip;
+        int box[5], changed = 0;
+
+        compositor_chip_place(box);
+        box[4] = (int)c->alpha;
+        for (int i = 0; i < 5; i++)
+                changed |= box[i] != c->drawn[i];
+        if (!changed)
+                return;
+        compositor_chip_damage(c->drawn);
+        memory_copy(c->drawn, box, sizeof(c->drawn));
+        compositor_chip_damage(c->drawn);
+}
+
+// The chip is taken off: its place is damaged and nothing is drawn.
+static void compositor_chip_hide(void)
+{
+        struct compositor_chip *c = &compositor.chip;
+
+        compositor_chip_damage(c->drawn);
+        memory_zero(c->drawn, sizeof(c->drawn));
+        c->kind = COMPOSITOR_CHIP_NONE;
+        c->alpha = 0;
+}
+
+// The window's controls over its top band, when they fit it (three cells, and a cell's margin either side); false when they do not.
+static int compositor_chip_controls(int row, positive now)
+{
+        struct compositor_chip *c = &compositor.chip;
+        int scale = compositor.scale, cell = UI_EDGE_CONTROL_CELL * scale / 100, w = 3 * cell, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100;
+
+        if (row < 0 || row >= WINDOWS || !compositor_visible(row) || cell < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST)
+                return 0;
+        if ((int)compositor.w[row] < w + 2 * cell || !compositor_chip_map())
+                return 0;
+        compositor_chip_hide();
+        compositor_chip_paint(w, h, scale, 1);
+        c->kind = COMPOSITOR_CHIP_CONTROLS, c->row = row;
+        c->rel_x = ((int)compositor.w[row] - w) / 2, c->rel_y = COMPOSITOR_CHIP_TOP_DP * scale / 100;
+        c->w = w, c->h = h, c->alpha = 255;
+        c->slide = compositor_chip_reduced() ? 0 : h;
+        c->shown = now, c->hold = COMPOSITOR_CHIP_HOLD_NS, c->fade = COMPOSITOR_CHIP_FADE_NS;
+        compositor_chip_redraw();
+        return 1;
+}
+
+// The indicator of a first swipe into a window that covers its screen: a bar at the edge it came from, about the finger's place.
+static void compositor_chip_hint(const int *rect, int x, int y, int side, positive now)
+{
+        struct compositor_chip *c = &compositor.chip;
+        int scale = compositor.scale, w = COMPOSITOR_CHIP_HINT_W_DP * scale / 100, h = COMPOSITOR_CHIP_HINT_H_DP * scale / 100;
+        int margin = COMPOSITOR_CHIP_HINT_MARGIN_DP * scale / 100, left = rect[0] + margin, right = rect[0] + rect[2] - w - margin;
+        int top = rect[1] + margin, bottom = rect[1] + rect[3] - h - margin;
+
+        if (side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT)
+                w = h, h = COMPOSITOR_CHIP_HINT_W_DP * scale / 100, top = rect[1] + margin, bottom = rect[1] + rect[3] - h - margin;
+        if (w < 1 || h < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST || !compositor_chip_map())
+                return;
+        compositor_chip_hide();
+        compositor_chip_paint(w, h, scale, 0);
+        c->kind = COMPOSITOR_CHIP_HINT, c->row = COMPOSITOR_NONE;
+        if (side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT)
+        {
+                // A bar along a side edge, about the finger's height.
+                c->rel_x = side == UI_EDGE_LEFT ? rect[0] + margin : rect[0] + rect[2] - w - margin;
+                c->rel_y = y - h / 2;
+                c->rel_y = c->rel_y < top ? top : c->rel_y > bottom ? bottom : c->rel_y;
+        }
+        else
+        {
+                c->rel_x = x - w / 2;
+                c->rel_x = c->rel_x < left ? left : c->rel_x > right ? right : c->rel_x;
+                c->rel_y = side == UI_EDGE_BOTTOM ? rect[1] + rect[3] - h - margin : rect[1] + margin;
+        }
+        c->w = w, c->h = h, c->slide = 0, c->alpha = 255;
+        c->shown = now, c->hold = COMPOSITOR_CHIP_HINT_NS, c->fade = 0;
+        compositor_chip_redraw();
+}
+
+// The cell of a controls chip a point is over (0 close, 1 minimise, 2 maximise), with the finger's slop above and below; -1 for none.
+static int compositor_chip_cell(int x, int y)
+{
+        const struct compositor_chip *c = &compositor.chip;
+        int x0, y0, slop = UI_EDGE_CONTROL_SLOP * compositor.scale / 100, cell;
+
+        if (c->kind != COMPOSITOR_CHIP_CONTROLS)
+                return -1;
+        x0 = compositor.x[c->row] + c->rel_x, y0 = compositor.y[c->row] + c->rel_y;
+        if (x < x0 || x >= x0 + c->w || y < y0 - slop || y >= y0 + c->h + slop)
+                return -1;
+        cell = (x - x0) / (c->w / 3);
+        return cell > 2 ? 2 : cell;
+}
+
+// Whether a point is on the chip's box (not its slop), which a press there leaves the chip up for.
+static int compositor_chip_on(int x, int y)
+{
+        int box[4];
+
+        if (compositor.chip.kind == COMPOSITOR_CHIP_NONE)
+                return 0;
+        compositor_chip_place(box);
+        return x >= box[0] && x < box[0] + box[2] && y >= box[1] && y < box[1] + box[3];
+}
+
+// The chip as the time has made it: full while it holds and fading after; its slide; and at its end, gone.
+static void compositor_chip_tick(positive now)
+{
+        struct compositor_chip *c = &compositor.chip;
+        positive elapsed, total;
+
+        if (c->kind == COMPOSITOR_CHIP_NONE)
+                return;
+        elapsed = now > c->shown ? now - c->shown : 0;
+        total = c->hold + c->fade;
+        if (elapsed >= total)
+        {
+                compositor_chip_hide();
+                return;
+        }
+        c->alpha = elapsed <= c->hold ? 255 : (unsigned int)(255 * (total - elapsed) / c->fade);
+        if (c->kind == COMPOSITOR_CHIP_CONTROLS)
+        {
+                b64 e = ui_bezier_at(&ui_ease, ui_progress((b64)elapsed, (b64)COMPOSITOR_CHIP_SLIDE_NS));
+
+                c->slide = compositor_chip_reduced() ? 0 : c->h - (int)(((b64)c->h * e) / UI_ONE);
+        }
+        compositor_chip_redraw();
+}
+
+// The chip over a target the scene is read from, the body's ink and the glyphs', at its alpha.
+static void compositor_chip_draw(const struct compositor_target *t)
+{
+        const struct compositor_chip *c = &compositor.chip;
+        int box[4], layers = c->kind == COMPOSITOR_CHIP_HINT ? 1 : 2;
+
+        if (c->kind == COMPOSITOR_CHIP_NONE || !c->alpha)
+                return;
+        compositor_chip_place(box);
+        for (int layer = 0; layer < layers; layer++)
+        {
+                unsigned int ink = c->kind == COMPOSITOR_CHIP_HINT || layer ? COMPOSITOR_CHIP_GLYPH : COMPOSITOR_CHIP_BODY;
+                const unsigned char *cover = c->cover + (unsigned long)layer * c->w * c->h;
+                int x1 = box[0] > t->x1 ? box[0] : t->x1, y1 = box[1] > t->y1 ? box[1] : t->y1;
+                int x2 = box[0] + box[2] < t->x2 ? box[0] + box[2] : t->x2, y2 = box[1] + box[3] < t->y2 ? box[1] + box[3] : t->y2;
+
+                for (int py = y1; py < y2; py++)
+                {
+                        unsigned int *at = t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+
+                        for (int px = x1; px < x2; px++, at++)
+                        {
+                                unsigned int share = (unsigned int)cover[(py - box[1]) * c->w + (px - box[0])] * c->alpha / 255;
+
+                                if (share)
+                                        *at = compositor_mix(*at, ink, share);
+                        }
+                }
+        }
+}
+
+// The chip over a target that is only written (the scanout): the scene under its box composed again into a scratch, the chip over it, and
+// the box copied out, as the marks are.
+static void compositor_chip_compose(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
+{
+        const struct compositor_chip *c = &compositor.chip;
+        int box[4], clip[4] = {t->x1, t->y1, t->x2, t->y2};
+
+        if (c->kind == COMPOSITOR_CHIP_NONE || !c->alpha || !c->scratch)
+                return;
+        compositor_chip_place(box);
+        {
+                int edge[4] = {box[0], box[1], box[0] + box[2], box[1] + box[3]};
+
+                compositor_meet(edge, clip);
+                if (edge[2] <= edge[0] || edge[3] <= edge[1])
+                        return;
+                {
+                        struct compositor_target square = {c->scratch, (unsigned long)(edge[2] - edge[0]), t->width, t->height, edge[0], edge[1],
+                                                           edge[2], edge[3], edge[0], edge[1], 0};
+
+                        compositor_scene(&square, frames, count);
+                        compositor_spots_marks(&square);
+                        compositor_chip_draw(&square);
+                        compositor_blit(t, edge[0], edge[1], edge[2] - edge[0], edge[3] - edge[1], c->scratch, (unsigned long)(edge[2] - edge[0]));
+                }
+        }
+}
+
+// Whether any mark is drawn, and whether any is fading, which is a frame to draw each period until it is gone. A chip is drawn while it is up,
+// and fades on the same frames.
 static int compositor_spots_any(int fading)
 {
-        return (fading ? compositor.spots_fading : compositor.spots_shown) != 0;
+        return (fading ? compositor.spots_fading : compositor.spots_shown) != 0 || compositor.chip.kind != COMPOSITOR_CHIP_NONE;
 }
 
 // The fading marks at now: each fainter by the time since its finger lifted, and gone after COMPOSITOR_SPOT_FADE_NS.
 static void compositor_spots_tick(positive now)
 {
+        compositor_chip_tick(now);
         for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         {
                 positive since;
@@ -15874,8 +16298,8 @@ static void compositor_spots_ready(void)
         compositor_corner_mask(radius - compositor_px1(compositor.scale));
 }
 
-// The marks over a target the scene was composed into and may be read (a slice of a scene composed apart).
-static void compositor_spots_draw(const struct compositor_target *t)
+// The fingers' marks over a target the scene was composed into and may be read (a slice of a scene composed apart).
+static void compositor_spots_marks(const struct compositor_target *t)
 {
         if (!compositor.spots_shown)
                 return;
@@ -15883,6 +16307,13 @@ static void compositor_spots_draw(const struct compositor_target *t)
                 if (compositor.spot[slot].on)
                         compositor_spot_draw(t, compositor.spot[slot].x, compositor.spot[slot].y, compositor.scale,
                                              compositor.spot[slot].alpha);
+}
+
+// The marks and the chip over a target the scene was composed into and may be read (a slice of a scene composed apart).
+static void compositor_spots_draw(const struct compositor_target *t)
+{
+        compositor_spots_marks(t);
+        compositor_chip_draw(t);
 }
 
 /*
@@ -15916,11 +16347,12 @@ static void compositor_spots_compose(const struct compositor_target *t, const st
                                                            box[0], box[1], 0};
 
                         compositor_scene(&square, frames, count);
-                        compositor_spots_draw(&square);
+                        compositor_spots_marks(&square);
                         compositor_blit(t, box[0], box[1], box[2] - box[0], box[3] - box[1], compositor.spot_scratch,
                                         (unsigned long)(box[2] - box[0]));
                 }
         }
+        compositor_chip_compose(t, frames, count);
 }
 
 // `moonwater canvas touch`, read with the other settings the compositor takes at once: on (the row's standard, nothing
@@ -16189,9 +16621,254 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
         are, begun on the first finger down (ui_touch_begin), and each report's events are applied as they come. A report of
         another touch screen waits until this one's gesture is over.
 */
+/*
+        The screen's edges (struct compositor_swipe): the system's gestures from the top and the bottom of a screen. A finger that
+        lands alone in such a band, on nothing the band's own cells or a window's own buttons take, is held back from the kit until
+        ui_edge_judge decides it (compositor_swipe_report): a swipe is the system's, and a finger that is not one is the window's
+        as if the band were not there (compositor_swipe_hand). A finger on the controls of a shown chip is a tap on one of them.
+*/
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_touch_report(unsigned int at, int dropped); // wayland_host.c: the fingers as wl_touch
 #endif
+
+// The screen a point is on: its rectangle in the desktop's pixels and its number; false when no screen holds it.
+static int compositor_swipe_screen(int x, int y, int *rect, int *number)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        for (unsigned int at = 0; at < count; at++)
+                if (x >= screens[at][0] && x < screens[at][0] + screens[at][2] && y >= screens[at][1] && y < screens[at][1] + screens[at][3])
+                {
+                        memory_copy(rect, screens[at], 4 * sizeof(int));
+                        *number = (int)at;
+                        return 1;
+                }
+        return 0;
+}
+
+// Whether a finger landing at x, y on side may be the system's: not on a tab or a tray cell, not on a window's close or minimise button,
+// with no drag or resize under way, and on a top band only over a window (row is the window under it, or COMPOSITOR_NONE).
+static int compositor_swipe_free(int x, int y, int side, int *row)
+{
+        int tab = TASKBAR_HIT_NONE, under, on = 0;
+
+        if (compositor.drag >= 0 || compositor.resize >= 0)
+                return 0;
+        under = compositor_under(x, y, &tab);
+        if (tab != TASKBAR_HIT_NONE)
+                return 0;
+        if (under >= 0)
+        {
+                compositor.touching = 1;
+                on = compositor_on_close(under, x, y) || compositor_on_minimize(under, x, y);
+                compositor.touching = 0;
+        }
+        if (on || (side == UI_EDGE_TOP && under < 0))
+                return 0;
+        *row = under;
+        return 1;
+}
+
+// A finger that landed alone, with the kit taking no gesture: a control of a shown chip, or a top or bottom band the system may take. A landing
+// that is not on the chip takes it away. True when the finger is the system's until it is decided.
+static int compositor_swipe_landing(unsigned int at, positive now, const struct ui_touch_frame *frame, int slot)
+{
+        struct compositor_swipe *swipe = &compositor.swipe;
+        int x = frame->x[slot], y = frame->y[slot], rect[4] = {0, 0, 0, 0}, number = -1, row = COMPOSITOR_NONE, side = UI_EDGE_NONE, cell;
+        int band = UI_EDGE_BAND * compositor.scale / 100;
+
+        cell = compositor_chip_cell(x, y);
+        if (cell >= 0)
+                side = UI_EDGE_CONTROL;
+        else
+        {
+                if (!compositor_chip_on(x, y))
+                        compositor_chip_hide();
+                if (!compositor_swipe_screen(x, y, rect, &number))
+                        return 0;
+                side = ui_edge_band_side(x, y, rect, band);
+                if (side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT)
+                {
+                        if (!compositor.side_edges)
+                                return 0;
+                }
+                else if (side != UI_EDGE_TOP && side != UI_EDGE_BOTTOM)
+                        return 0;
+                if (!compositor_swipe_free(x, y, side, &row))
+                        return 0;
+        }
+        swipe->state = COMPOSITOR_SWIPE_UNDECIDED, swipe->device = (int)at, swipe->slot = slot;
+        swipe->side = side, swipe->cell = cell, swipe->row = row, swipe->screen = number;
+        memory_copy(swipe->rect, rect, sizeof(rect));
+        swipe->x0 = x, swipe->y0 = y;
+        swipe->deadline = now + UI_EDGE_NS;
+        memory_copy(&swipe->landing, frame, sizeof(*frame));
+        return 1;
+}
+
+// The finger is not the system's after all, or was not decided in time: the kit is given it as it would have been without the band, its landing,
+// then the report as it is now. Nothing reached the window before this.
+static void compositor_swipe_hand(unsigned int at, positive now, const struct ui_touch_frame *frame)
+{
+        struct compositor_touch *touch = &compositor.touch;
+        struct ui_touch_frame report;
+        struct ui_touch_out out;
+
+        compositor.swipe.state = COMPOSITOR_SWIPE_NONE;
+        memory_copy(&report, frame, sizeof(report));
+        ui_touch_begin(&touch->gesture, &compositor.swipe.landing, &out);
+        compositor_touch_apply(at, &out, now);
+        // The pointer is read after the landing's events: the start moved it to the finger's landing.
+        report.pointer_x = compositor.pointer_x, report.pointer_y = compositor.pointer_y;
+        report.busy = compositor.drag >= 0 || compositor.resize >= 0;
+        ui_touch_report(&touch->gesture, &report, &out);
+        compositor_touch_apply(at, &out, now);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_wl_touch_report(at, 0);
+#endif
+}
+
+// The launcher, opened by a swipe up: its rectangle is a panel's thickness along the bottom of its screen, beside the finger, as the launcher
+// button's is (window.c's button_*), and the script is told as it is told of the button.
+static void compositor_swipe_launcher(int x, const int *rect, int number)
+{
+        struct windows *table = compositor.table;
+        int w = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100, h = COMPOSITOR_PANEL * compositor.scale / 100;
+
+        if (table)
+        {
+                table->button_x = x - w / 2, table->button_y = rect[1] + rect[3] - h;
+                table->button_w = (unsigned int)w, table->button_h = (unsigned int)h;
+                table->button_edge = TASKBAR_BOTTOM, table->button_screen = (unsigned int)number;
+        }
+        compositor.launcher_asked++;
+        compositor_script_say("launcher_button");
+}
+
+// A tap on a control of the chip: the window's close, its minimise, or its maximise (restored when it is maximised), and the chip is taken away.
+static void compositor_chip_press(int cell)
+{
+        int row = compositor.chip.row;
+
+        compositor_chip_hide();
+        if (row < 0 || row >= WINDOWS || !compositor_visible(row))
+                return;
+        if (cell == 0)
+                compositor_close(row);
+        else if (cell == 1)
+                compositor_minimize_row(row);
+        else if (compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
+                compositor_float(row);
+        else
+                compositor_arrange(row, COMPOSITOR_MAXIMIZED);
+}
+
+// A swipe in from a side edge (compositor.side_edges): the window switcher's step, or the mixer's popup beside the finger. Where a language
+// reads from the right the sides change places, as the swipe's own direction does (a swipe in from the right is then the switcher).
+static void compositor_swipe_side(int side, int y, const int *rect, int number)
+{
+        struct windows *table = compositor.table;
+        int rtl = language_rtl() ? 1 : 0, switcher = (side == UI_EDGE_LEFT) != (rtl != 0);
+        int w = COMPOSITOR_PANEL * compositor.scale / 100, h = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100;
+
+        if (switcher)
+        {
+                compositor_focus_step();
+                compositor_focus_commit();
+                return;
+        }
+        if (table)
+        {
+                table->button_x = side == UI_EDGE_RIGHT ? rect[0] + rect[2] - w : rect[0];
+                table->button_y = y - h / 2;
+                table->button_w = (unsigned int)w, table->button_h = (unsigned int)h;
+                table->button_edge = side == UI_EDGE_RIGHT ? TASKBAR_RIGHT : TASKBAR_LEFT, table->button_screen = (unsigned int)number;
+        }
+        compositor_script_say("volume_button");
+}
+
+// A swipe decided: the system's gesture. Up from the bottom opens the launcher beside the finger; down on a window shows its controls and
+// raises the window. A first swipe into a window that covers its screen is the window's, with an indicator at its edge, and a second swipe
+// within COMPOSITOR_SWIPE_ARM_NS is the system's.
+static void compositor_swipe_act(unsigned int at, positive now, const struct ui_touch_frame *frame)
+{
+        struct compositor_swipe *swipe = &compositor.swipe;
+        int row = swipe->row;
+
+        if (row >= 0 && compositor.arranged[row] == COMPOSITOR_MAXIMIZED && (swipe->armed_row != row || now >= swipe->armed_until))
+        {
+                swipe->armed_row = row, swipe->armed_until = now + COMPOSITOR_SWIPE_ARM_NS;
+                compositor_chip_hint(swipe->rect, swipe->x0, swipe->y0, swipe->side, now);
+                compositor_swipe_hand(at, now, frame);
+                return;
+        }
+        swipe->armed_row = COMPOSITOR_NONE;
+        if (swipe->side == UI_EDGE_TOP)
+        {
+                if (!compositor_chip_controls(row, now))
+                {
+                        compositor_swipe_hand(at, now, frame);
+                        return;
+                }
+                compositor_raise(row);
+                compositor_focus(row);
+        }
+        else if (swipe->side == UI_EDGE_BOTTOM)
+                compositor_swipe_launcher(swipe->x0, swipe->rect, swipe->screen);
+        else
+                compositor_swipe_side(swipe->side, swipe->y0, swipe->rect, swipe->screen);
+        swipe->state = COMPOSITOR_SWIPE_SWIPED;
+}
+
+// A report of a touch screen while the edges may take the finger: true when the report is the system's (the kit is not told it), false when the
+// kit takes the report as it always did. A decided swipe keeps its finger until every finger is up.
+static int compositor_swipe_report(unsigned int at, positive now, const struct ui_touch_frame *frame)
+{
+        struct compositor_swipe *swipe = &compositor.swipe;
+        int other = -1, count, slop = ui_touch_slop(compositor.scale), swipe_px = UI_EDGE_SWIPE * compositor.scale / 100, verdict;
+
+        count = ui_touch_fingers(frame, -1, &other);
+        if (swipe->state == COMPOSITOR_SWIPE_SWIPED)
+        {
+                if (!count)
+                        swipe->state = COMPOSITOR_SWIPE_NONE;
+                return 1;
+        }
+        if (swipe->state == COMPOSITOR_SWIPE_UNDECIDED)
+        {
+                if (!count)
+                {
+                        // Lifted with no travel: a tap on a control of the chip, or the window's click where it landed.
+                        if (swipe->side == UI_EDGE_CONTROL)
+                        {
+                                int cell = swipe->cell;
+
+                                swipe->state = COMPOSITOR_SWIPE_NONE;
+                                compositor_chip_press(cell);
+                        }
+                        else
+                                compositor_swipe_hand(at, now, frame);
+                        return 1;
+                }
+                if (count >= 2 || frame->id[swipe->slot] < 0 || frame->id[swipe->slot] != swipe->landing.id[swipe->slot])
+                {
+                        compositor_swipe_hand(at, now, frame);
+                        return 1;
+                }
+                verdict = ui_edge_judge(swipe->side, swipe->x0, swipe->y0, frame->x[swipe->slot], frame->y[swipe->slot], slop, swipe_px);
+                if (verdict == UI_EDGE_UNDECIDED && now >= swipe->deadline)
+                        verdict = UI_EDGE_FAILED;
+                if (verdict == UI_EDGE_FAILED)
+                        compositor_swipe_hand(at, now, frame);
+                else if (verdict == UI_EDGE_SWIPED)
+                        compositor_swipe_act(at, now, frame);
+                return 1;
+        }
+        if (count != 1 || compositor.touch.gesture.mode != UI_TOUCH_NONE)
+                return 0;
+        return compositor_swipe_landing(at, now, frame, other);
+}
 
 static void compositor_touch_report(unsigned int at, positive now)
 {
@@ -16219,6 +16896,8 @@ static void compositor_touch_report(unsigned int at, positive now)
                 compositor_wl_touch_report(at, 1);
 #endif
                 screen->dropped = 0;
+                if (compositor.swipe.state != COMPOSITOR_SWIPE_NONE && compositor.swipe.device == (int)at)
+                        compositor.swipe.state = COMPOSITOR_SWIPE_NONE;
                 for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 {
                         if (screen->id[slot] >= 0)
@@ -16233,6 +16912,11 @@ static void compositor_touch_report(unsigned int at, positive now)
                 return;
         }
         if (touch->gesture.mode != UI_TOUCH_NONE && touch->device != (int)at)
+        {
+                memory_copy(screen->was, screen->id, sizeof(screen->was));
+                return;
+        }
+        if (compositor.swipe.state != COMPOSITOR_SWIPE_NONE && compositor.swipe.device != (int)at)
         {
                 memory_copy(screen->was, screen->id, sizeof(screen->was));
                 return;
@@ -16261,6 +16945,13 @@ static void compositor_touch_report(unsigned int at, positive now)
         frame.pointer_x = compositor.pointer_x, frame.pointer_y = compositor.pointer_y;
         frame.busy = compositor.drag >= 0 || compositor.resize >= 0;
 
+        // A finger in a band the system may take is the system's, or held back from the kit, until it is decided.
+        if (compositor_swipe_report(at, now, &frame))
+        {
+                memory_copy(screen->was, screen->id, sizeof(screen->was));
+                return;
+        }
+
         // The first finger down: the pointer goes to it, hidden, and its left press is made there (the kit's START and PRESS).
         ui_touch_begin(&touch->gesture, &frame, &out);
         compositor_touch_apply(at, &out, now);
@@ -16280,7 +16971,11 @@ static void compositor_touch_report(unsigned int at, positive now)
 // When the first finger is a long press, or 0: the kit's time for it (a press still for UI_TOUCH_HOLD_NS, the left button down there).
 static positive compositor_touch_due(void)
 {
-        return ui_touch_due(&compositor.touch.gesture, compositor.button_down & 1);
+        positive due = ui_touch_due(&compositor.touch.gesture, compositor.button_down & 1);
+
+        if (compositor.swipe.state == COMPOSITOR_SWIPE_UNDECIDED && (!due || compositor.swipe.deadline < due))
+                due = compositor.swipe.deadline;
+        return due;
 }
 
 // The long press's time has come: the kit's hold, applied (the left press taken back and the right button held at the pointer).
@@ -16288,6 +16983,12 @@ static void compositor_touch_tick(positive now)
 {
         struct ui_touch_out out;
 
+        // A finger in a band that is no swipe in time is the window's, as it landed (a slow drag, or a long press in the band).
+        if (compositor.swipe.state == COMPOSITOR_SWIPE_UNDECIDED && now >= compositor.swipe.deadline)
+        {
+                compositor_swipe_hand((unsigned int)compositor.swipe.device, now, &compositor.swipe.landing);
+                return;
+        }
         ui_touch_tick(&compositor.touch.gesture, now, compositor.button_down & 1, &out);
         compositor_touch_apply((unsigned int)compositor.touch.device, &out, now);
 }
