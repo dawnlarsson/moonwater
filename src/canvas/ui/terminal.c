@@ -213,6 +213,9 @@ static struct
         b32 caret_seen;
         unsigned int caret_at[2], caret_cover[2], caret_marks[2];
         b32 caret_block[2];
+        // While a frame is recorded into the window's list (terminal_list_frame): the picture's top left and the grid's, which the
+        // recorder reads a fill's origin from (a fill of the grid is offset by the paper round it; one of the picture is not).
+        unsigned int address_to rec_whole, address_to rec_grid;
 } terminal = {.shown = -1, .view = TERMINAL_LIVE, .hold_timeout = -1, .caret_at = {~0u, ~0u}};
 
 // The caret as the frame being made draws it: its index in the frame (~0 for none), its cover, and whether it is a block
@@ -877,6 +880,13 @@ static unsigned int terminal_mix(unsigned int ink, unsigned int paper)
         A rectangle of the window in one colour, clipped to it: the part of
         a cell a style paints over its glyph, or the ground of a run of blanks.
 */
+// Whether a frame is being recorded into the window's list (terminal_list_frame): the kit's scene is set then, and its fills and
+// glyph runs are ops, and no pixel is written.
+static b32 terminal_recording(void)
+{
+        return terminal.ui.scene != null;
+}
+
 static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned int width,
                           unsigned int height, unsigned int colour)
 {
@@ -885,6 +895,19 @@ static void terminal_fill(unsigned int address_to pixels, int x, int y, unsigned
 
         if ((unsigned int)x >= x2 || (unsigned int)y >= y2)
                 return;
+        if (terminal_recording())
+        {
+                // The grid's fills are offset by the paper round it; the picture's (the margins and the bar) are not. Any other is lost.
+                int ox = pixels == terminal.rec_grid ? (int)terminal.pad : 0, oy = pixels == terminal.rec_grid ? (int)terminal.pad_y : 0;
+
+                if (pixels != terminal.rec_grid && pixels != terminal.rec_whole)
+                {
+                        terminal.ui.scene->lost = 1;
+                        return;
+                }
+                ui_scene_record(terminal.ui.scene, ox + x, oy + y, ox + (int)x2, oy + (int)y2, colour, true);
+                return;
+        }
 
         memory_fill_u32_rect(pixels + (positive)y * terminal.pitch + x, terminal.pitch,
                              x2 - x, y2 - y, colour);
@@ -984,6 +1007,25 @@ struct terminal_painter
 
 static struct terminal_painter terminal_painters[TERMINAL_BANDS];
 
+// A glyph run recorded (terminal_recording): the codes of the run, on one ground and one face, as font_cells draws them; the cells are the
+// grid's, so its origin is the paper's pad. The painter's engine writes the ops into the scene (ui_scene_cells).
+static void terminal_rec_glyphs(struct terminal_painter address_to painter, unsigned int address_to pixels, unsigned int from,
+                                unsigned int count, b32 heavy, p32 flags, int y, unsigned int ink, unsigned int paper)
+{
+        font_target target = {pixels, terminal.pitch, (b32)terminal.width, (b32)terminal.height};
+
+        if (pixels != terminal.rec_grid)
+        {
+                terminal.ui.scene->lost = 1;
+                return;
+        }
+        painter->ui.scene = terminal.ui.scene;
+        ui_scene_cells(&painter->ui, heavy ? terminal.bold : terminal.plain, heavy ? terminal.bold_count : terminal.plain_count, flags,
+                       painter->codes, count, &terminal.grid, terminal.size, &target, (b32)terminal.pad, (b32)terminal.pad_y,
+                       (b32)(from * terminal.cell_w), y, ink, paper);
+        painter->ui.scene = null;
+}
+
 //      Italic is a slant of the plain face, and bold without a bold face is
 //      the plain face made heavier: neither has a face of its own here.
 static p32 terminal_style(const struct window_cell address_to cell)
@@ -1073,6 +1115,13 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
         do                                                                                             \
         {                                                                                              \
                 unsigned int trail = 0;                                                                \
+                if (terminal_recording())                                                              \
+                {                                                                                      \
+                        if (glyphs)                                                                    \
+                                terminal_rec_glyphs(painter, pixels, glyphs_from, glyphs, glyphs_heavy, glyphs_flags, y, glyphs_ink, glyphs_paper); \
+                        glyphs = 0;                                                                    \
+                        break;                                                                         \
+                }                                                                                      \
                 while (trail < glyphs && painter->codes[glyphs - 1 - trail] == ' ')                    \
                         trail++;                                                                       \
                 if (glyphs > trail)                                                                    \
@@ -1213,7 +1262,21 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 if (cell->flags & WINDOW_CELL_DIM)
                         ink = terminal_mix(ink, paper);
 
-                if (glyph)
+                if (pair && terminal_recording())
+                        terminal.ui.scene->lost = 1; // a wide character is two cells: the recorder does not draw one yet
+
+                if (glyph && terminal_recording())
+                {
+                        b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
+
+                        painter->codes[0] = cell->character;
+                        painter->ui.scene = terminal.ui.scene;
+                        ui_scene_cells(&painter->ui, heavy ? terminal.bold : terminal.plain, heavy ? terminal.bold_count : terminal.plain_count,
+                                       terminal_style(cell), painter->codes, 1, &terminal.grid, terminal.size, &target, (b32)terminal.pad,
+                                       (b32)terminal.pad_y, (b32)(at * terminal.cell_w), y, ink, paper);
+                        painter->ui.scene = null;
+                }
+                else if (glyph)
                 {
                         b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
 
@@ -1541,6 +1604,39 @@ static b32 terminal_overlay_wanted(void);
 static void terminal_overlay_spoil(struct window_cell address_to drawn, int slot);
 static void terminal_overlay(unsigned int address_to whole, int slot);
 
+/*
+        The whole frame recorded into the window's list (ui_list_wanted: the compositor draws lists and has not refused this window's
+        last): every row of cells, the paper round the grid and the bar, drawn through the painter as the recorder (ui_scene_cells
+        and the fills route to the scene). Nothing is written to a picture; ui_list_frame_end publishes the list, and the compositor
+        draws it into buffer 0 and shows it. A frame that did not record whole (a wide character, a room that is full) is discarded,
+        and the frame is painted on the processor as it always was. After a list frame neither picture matches what the processor
+        last drew, so both are drawn whole by the next processor frame.
+*/
+static b32 terminal_list_frame(const struct window_cell address_to now, unsigned int first, unsigned int shown, unsigned int total)
+{
+        struct windows address_to table = terminal.own.table;
+        unsigned int address_to whole = windows_buffer(table, terminal.own.row, 0);
+
+        if (!ui_list_frame_begin())
+                return false;
+        terminal.rec_whole = whole;
+        terminal.rec_grid = terminal_grid(whole);
+        for (unsigned int row = 0; row < ROWS; row++)
+        {
+                terminal_row(&terminal_painters[0], terminal.rec_grid, row, now + (unsigned long)row * COLUMNS, null, 0, COLUMNS);
+                terminal_margin(whole, now, row, 0, COLUMNS);
+        }
+        terminal_bar(whole, now, first, shown, total);
+        terminal.rec_whole = terminal.rec_grid = null;
+        if (!ui_list_frame_end(&terminal.own, (int)terminal.width, (int)terminal.height, null))
+                return false;
+        terminal.valid[0] = terminal.valid[1] = 0;
+        terminal.margin_spoiled[0] = terminal.margin_spoiled[1] = true;
+        terminal.forced = false;
+        terminal.shown = 0;
+        return true;
+}
+
 static b32 terminal_frame(void)
 {
         int slot = terminal_next();
@@ -1582,6 +1678,11 @@ static b32 terminal_frame(void)
                 terminal_bar_place(first, shown, total);
         shift = terminal_grid_shift();
         full = shift != 0 || terminal.shift[slot] != 0;
+        // A frame the compositor draws from the window's list: no shift (the list has no copy within a picture) and no selection
+        // overlay (its handles and bar are not recorded yet), and the last picture taken (windows_ready), so nothing it reads is written.
+        if (!shift && !terminal_overlay_wanted() && windows_ready(&terminal.own) && ui_list_wanted(&terminal.own) &&
+            terminal_list_frame(now, first, shown, total))
+                return true;
         pixels = windows_buffer(table, own, slot);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
         if (drawn)

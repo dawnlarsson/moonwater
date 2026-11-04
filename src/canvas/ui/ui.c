@@ -908,8 +908,8 @@ static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot 
 // their rectangles are one), then per cell with a glyph box, a translate of the box through the cell's tones, its coverage and tones copied into
 // the pool once per frame. x and y are the target's; ox and oy the picture's place of the target's top left. A background that is FONT_UNKNOWN
 // (font_blend), a frame that is out of room, or a cell that does not fit sets lost: the frame is then the processor's.
-static void ui_scene_cells(struct ui address_to ui, const font_face address_to const address_to faces, const p32 address_to codes, p32 run,
-                           const font_metrics address_to grid, p32 em, const font_target address_to target, b32 ox, b32 oy, b32 x, b32 y,
+static void ui_scene_cells(struct ui address_to ui, const font_face address_to const address_to faces, p32 count, p32 flags, const p32 address_to codes,
+                           p32 run, const font_metrics address_to grid, p32 em, const font_target address_to target, b32 ox, b32 oy, b32 x, b32 y,
                            p32 colour, p32 background)
 {
         struct ui_scene address_to scene = ui->scene;
@@ -932,7 +932,7 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
                 unsigned int address_to op;
                 b32 w, h;
 
-                font_cell_plan(ui->engine, faces, 2, codes[i], 1, grid, em, 0, target, x + (b32)i * width, y, colour, background, &plan);
+                font_cell_plan(ui->engine, faces, count, codes[i], 1, grid, em, flags, target, x + (b32)i * width, y, colour, background, &plan);
                 if (plan.unknown || scene->count >= scene->room)
                 {
                         scene->lost = 1;
@@ -14893,7 +14893,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                 b32 cell_x = origin + l->x[start] - t->left, cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
 
                                 if (ui->scene)
-                                        ui_scene_cells(ui, faces, codes, run, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
+                                        ui_scene_cells(ui, faces, 2, 0, codes, run, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
                                 else
                                         font_cells(ui->engine, faces, 2, codes, run, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y, ink & 0xffffffu, paper);
                         }

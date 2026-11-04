@@ -122715,6 +122715,74 @@ static fn render_reference(p32 address_to into, const struct window_cell address
         terminal_bar(into, cells, first, shown, total);
 }
 
+/*
+        The render rig's lists: while render_listing is on, the window's frames are recorded into its list (ui_app_list, the table's list
+        mode on, as ui_app_run leaves them for the terminal) and each frame the list took is replayed here, kinds 0 (fills) and 10 (glyphs
+        through their tones), and compared with the processor's full draw. The bar's track is the kit's boxes, which this replay does not
+        draw, so the columns left of it are compared, and the rows of all of them.
+*/
+static b32 render_listing;
+static positive render_list_frames;
+static unsigned int address_to render_replay_pixels, address_to render_full_pixels;
+
+static unsigned int render_generation(void)
+{
+        return render_listing && ui_app_list.base ? ((unsigned int address_to)ui_app_list.base)[UI_DRAW_LIST_GEN] : 0;
+}
+
+static void render_replay(const struct ui_draw_view address_to view, unsigned int address_to pixels, int pitch)
+{
+        const unsigned char address_to base = ui_app_list.base;
+
+        for (unsigned int i = 0; i < view->count; i++)
+        {
+                const unsigned int address_to op = view->ops + 8 * (unsigned long)i;
+                unsigned int kind = op[0] & 255;
+                int x0 = (int)op[1], y0 = (int)op[2], x1 = (int)op[3], y1 = (int)op[4];
+
+                if (kind == 0)
+                        for (int y = y0; y < y1; y++)
+                                for (int x = x0; x < x1; x++)
+                                        pixels[(positive)y * pitch + x] = op[5];
+                else if (kind == 10)
+                {
+                        const unsigned int address_to tones = (const unsigned int address_to)(base + op[5]);
+                        const unsigned char address_to cover = base + op[7];
+                        positive stride = op[0] >> 8;
+
+                        for (int y = y0; y < y1; y++)
+                                for (int x = x0; x < x1; x++)
+                                        pixels[(positive)y * pitch + x] = tones[cover[(positive)(y - y0) * stride + (x - x0)]];
+                }
+                // The kit's boxes and rings (kinds 2, 8, 9) are the bar's track: the columns it covers are not compared.
+        }
+}
+
+// The list the window's frame took, replayed and compared with the full draw of the cells it was made from (terminal.frame[2]).
+static b32 render_list_check(void)
+{
+        struct ui_draw_view view;
+        unsigned int first, shown, total;
+        int left = (int)terminal.width;
+
+        if (!render_replay_pixels)
+                render_replay_pixels = render_map((positive)2048 * 1280 * 4), render_full_pixels = render_map((positive)2048 * 1280 * 4);
+        if (ui_draw_list_open((unsigned char address_to)ui_app_list.base, WINDOW_LIST_BYTES, &view) != 1)
+                return false;
+        for (positive y = 0; y < terminal.height; y++)
+                memory_fill_u32(render_replay_pixels + y * terminal.pitch, terminal.width, 0xabcdefu);
+        render_replay(&view, render_replay_pixels, (int)terminal.pitch);
+        render_reference(render_full_pixels, terminal.frame[2]);
+        terminal_extent(&first, &shown, &total);
+        if (total > shown && terminal.width >= UI_SCROLL_WIDTH * (unsigned int)terminal_scale() / 100)
+                left = (int)terminal.width - (int)(UI_SCROLL_WIDTH * (unsigned int)terminal_scale() / 100);
+        for (positive y = 0; y < terminal.height; y++)
+                for (int x = 0; x < left; x++)
+                        if (render_replay_pixels[y * terminal.pitch + (positive)x] != render_full_pixels[y * terminal.pitch + (positive)x])
+                                return false;
+        return true;
+}
+
 // A window of the size the grid needs in a table of its own, its rows as long as it is wide, and nothing on
 // any screen yet. The mappings are made once, for the largest grid the steps below ask for.
 static fn render_surface(void)
@@ -122745,6 +122813,8 @@ static fn render_surface(void)
         table->stride = 2048;
         terminal.shown = -1;
         terminal_frames();
+        if (render_listing)
+                table->list_mode = 1;
         memory_fill_u32(render_screen, (positive)2048 * pixels_h, 0xdeadbe);
 }
 
@@ -122818,11 +122888,27 @@ static b32 render_step(positive address_to compared, positive address_to wrong, 
 
                 table->shown[0] = render_next(3) ? table->frame[0] : table->frame[0] - 1;
 
+                unsigned int listed = render_generation();
+
                 if (!terminal_frame())
                 {
                         // Only a window whose last picture was not taken may be refused.
                         (void)step;
                         return terminal.shown >= 0 && table->shown[0] != table->frame[0];
+                }
+
+                // A frame the list took (its generation moved) is replayed and compared, and no picture was drawn.
+                if (render_listing && render_generation() != listed)
+                {
+                        address_to compared += 1;
+                        render_list_frames++;
+                        if (!render_list_check())
+                        {
+                                address_to wrong += 1;
+                                if (address_to wrong < 4)
+                                        string_format(log, "  frame %p: the list does not replay to the full draw\n", step);
+                        }
+                        return true;
                 }
 
                 {
@@ -159908,6 +159994,27 @@ b32 main()
         for (positive step = 0; step < 40000; step++)
                 if (!render_step(&compared, &wrong, step))
                         refused++;
+
+        // The same steps with the window's list mode on: its frames are recorded (ui_app_run's terminal list) and the lists replayed.
+        {
+                positive listed_compared = 0, listed_wrong = 0;
+                p64 saved = render_state; // the later checks draw the same numbers as without these steps
+
+                render_listing = true;
+                ui_draw_list_init(&ui_app_list, (unsigned char address_to)ui_map(WINDOW_LIST_BYTES), WINDOW_LIST_BYTES, WINDOW_LIST_ROOM);
+                ui_app_ui = &terminal.ui, ui_app_row = terminal.own.row;
+                render_surface();
+                for (positive step = 0; step < 6000; step++)
+                        if (!render_step(&listed_compared, &listed_wrong, step))
+                                refused++;
+                render_listing = false;
+                render_state = saved;
+                ui_app_list.ready = 0, ui_app_ui = null;
+                compared += listed_compared, wrong += listed_wrong;
+                string_format(log, "  terminal lists: %p frames of %p steps were taken by the list\n", (positive)render_list_frames, (positive)6000);
+                check("terminal lists: the window's list took frames, and the steps drew them", render_list_frames > 0);
+                check("terminal lists: each list replays to the processor's full draw, left of the bar", listed_wrong == 0 && listed_compared > 0);
+        }
 
         //      What the stream left is no later check's to start from: a grid of one row, the alternate screen, a
         //      program's pointer modes or a view scrolled back failed the killed and pointer rows for some starts of
