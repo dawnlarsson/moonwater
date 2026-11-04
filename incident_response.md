@@ -41,6 +41,40 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-121: a window's least size could win over its buffer's room, and the stretch wrote past the buffer
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 (hardening: not reachable with the shipped scale presets) |
+| Class | Out-of-bounds write in the root compositor (CWE-787): a clamp in the wrong order |
+| Attacker | none in the shipped configuration; the root-only `-s` option at 7 or 8 on a screen under 768 pixels, or a screen narrower than 192 pixels at the 200 percent preset |
+| Moonwater exposure window | from `e00c3a73` (2026-10-11 22:17 +02:00, the first resize) to the fixing commit |
+| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_want`) |
+
+**What it was.** `compositor_want` is where every size a window is asked to be passes (the hand's resize, a divider, a
+tile, a placement, a fit after a scale). It held the size to the least a window is at the desktop's scale, 96 by 48 times
+the scale, and to the most, the largest screen, which is also the room every window's buffer has; but the least was the
+first test of one conditional, so a size below the least took the least even where the least was past the most. At 800
+percent the least is 768 by 384: on a 256-pixel screen the window was made 768 by 384, and `compositor_stretch` filled
+that size into a buffer 256 pixels a row, through the rows after it and into the buffer after it -- the window's other
+buffer, the next row's (another window's pixels) when it showed its second, and past the table's end for row 31. The
+hosted fuzz of this pass found it (SIGSEGV against a PROT_NONE page after the table, in `memory_fill_u32` from
+`compositor_stretch` from `compositor_scale_fit`), with the run-learning read (`memory_runs_u32`) faulting the same way.
+
+**Reachability.** The desktop's scale is the displays line's, one of the presets 50 to 200 (`windows_scale_ok`), or 100;
+at 200 the least is 192 by 96, and the most is the largest screen connected, so a real screen never meets it. `-s` takes
+25 to 800 and is on the compositor's command line, which only the root machine script writes (it passes none). So this
+is a latent memory-safety defect, fixed because the fix is free and the write is in the root process.
+
+**The fix.** The least first and the most last: the room of the buffer is the final word whatever the scale.
+
+**Tests that fail without it.** `CHECK_terminal` `check_compositor_least_scale`: at 800 percent on a 256-pixel screen a
+window asked 10 by 10 is no larger than the screen, and none of its other buffer or the next row's two buffers (filled
+with a pattern) is written. The old order turns both rows red (2 failures, gcc).
+
+**Still open.** `compositor_stretch` trusts `compositor.w` and `h` to be inside the buffer; every writer of them is
+bounded now (`compositor_take` and `compositor_want`), and a guard there was left out as it is on the resize path.
+
 ### MW-2026-120: a pointing device's 32-bit counts overflowed the compositor's sums of them
 
 | | |

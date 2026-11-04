@@ -128116,6 +128116,58 @@ static void check_compositor_lifecycle(void)
 }
 
 /*
+        A window asked for less than the least a window is, at a scale whose least is past the screen (96 by 48 at 800
+        percent is 768 by 384, on a screen of 256): compositor_want let the least win over the most, so the window was made
+        wider and taller than the rows of its buffer, and the stretch to that size wrote past them -- into its other buffer
+        here, into the next row's (another window's pixels) when it showed its second buffer, and past the table for the last
+        row. The most is the last word: the window is no larger than the screen, and nothing past its own buffer is written.
+*/
+static void check_compositor_least_scale(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    unsigned int address_to others[3];
+    unsigned long words = (unsigned long)GLASS_SIDE * GLASS_SIDE, changed = 0;
+    struct windows address_to table;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = compositor.told_row = COMPOSITOR_NONE;
+    compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("least scale: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->motion = 1;
+    table->focus = WINDOWS;
+    table->x[1] = table->y[1] = 10;
+    life_paint(1, 100, 80, GLASS_SIDE);
+    others[0] = windows_buffer(table, 1, 1);
+    others[1] = windows_buffer(table, 2, 0);
+    others[2] = windows_buffer(table, 2, 1);
+    for (unsigned int at = 0; at < 3; at++)
+        for (unsigned long word = 0; word < words; word++)
+            others[at][word] = 0x00123456u;
+    compositor.scale = 800;
+    compositor_want(1, 10, 10);
+    for (unsigned int at = 0; at < 3; at++)
+        for (unsigned long word = 0; word < words; word++)
+            changed += others[at][word] != 0x00123456u;
+    check("least scale: a window asked for less than the least at 800 percent is no larger than the screen",
+          compositor.w[1] <= GLASS_SIDE && compositor.h[1] <= GLASS_SIDE && table->want_width[1] <= GLASS_SIDE &&
+              table->want_height[1] <= GLASS_SIDE);
+    check("least scale: and nothing past its own buffer is written (its other buffer, the next window's)", changed == 0);
+    compositor.scale = 100;
+    life_close(1);
+}
+
+/*
         The same sweep across the seam of two screens, A (320 by 192) and B (256 by 240) side by side: a window that
         straddles the seam is drawn on both, one put past B's edge is kept on B, and one put off both is brought back on.
 */
@@ -156532,6 +156584,7 @@ b32 main()
         check_compositor_lifecycle();
         check_compositor_lifecycle_seam();
         check_compositor_lifecycle_more();
+        check_compositor_least_scale();
         check_compositor_asked();
         check_compositor_tiling();
         check_compositor_layout();

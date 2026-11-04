@@ -9878,12 +9878,13 @@ static void compositor_want(int row, int width, int height)
 {
         int x = compositor.x[row], y = compositor.y[row];
 
-        width = width < WINDOW_MIN_WIDTH * compositor.scale / 100 ? WINDOW_MIN_WIDTH * compositor.scale / 100
-                : width > compositor_most_width()           ? compositor_most_width()
-                                                            : width;
-        height = height < WINDOW_MIN_HEIGHT * compositor.scale / 100 ? WINDOW_MIN_HEIGHT * compositor.scale / 100
-                 : height > compositor_most_height()           ? compositor_most_height()
-                                                               : height;
+        // The least first and the most last: at a scale whose least window is past the largest screen (96 pixels at 800
+        // percent is 768), the least won and a window was made wider than its buffer's rows, which compositor_stretch
+        // then filled into the rows after them -- the next window's pixels, and for the last row past the table.
+        width = width < WINDOW_MIN_WIDTH * compositor.scale / 100 ? WINDOW_MIN_WIDTH * compositor.scale / 100 : width;
+        width = width > compositor_most_width() ? compositor_most_width() : width;
+        height = height < WINDOW_MIN_HEIGHT * compositor.scale / 100 ? WINDOW_MIN_HEIGHT * compositor.scale / 100 : height;
+        height = height > compositor_most_height() ? compositor_most_height() : height;
         compositor.table->want_width[row] = (unsigned int)width;
         compositor.table->want_height[row] = (unsigned int)height;
         compositor.woken |= 1u << row;
