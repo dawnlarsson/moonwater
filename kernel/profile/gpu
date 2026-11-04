@@ -123,6 +123,9 @@ CONFIG_UDMABUF=y
 # Intel
 #
 CONFIG_DRM_I915=y
+# Userptr, as the AMD profile has it: a program's own pages read and written by the GPU, which is how a window's picture
+# reaches the card in the compositor's shared memory. Without it the GEM userptr ioctl is refused. It selects MMU_NOTIFIER.
+CONFIG_DRM_I915_USERPTR=y
 CONFIG_DRM_I915_FORCE_PROBE=""
 CONFIG_DRM_I915_CAPTURE_ERROR=n
 CONFIG_DRM_I915_COMPRESS_ERROR=n

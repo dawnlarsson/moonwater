@@ -14201,7 +14201,7 @@ game_profiles()
         shift
         mkdir -p "$work/game-$game_name" || return 1
         build_tool config --set artifacts="$work/game-$game_name" any general gpu \
-                guests latency prod arch/x64 debug_none limbo desktop "$@" \
+                gpu.amd guests latency prod arch/x64 debug_none limbo desktop "$@" \
                 > "$work/game-$game_name.log" 2>&1 || return 1
         [ "$(grep -c 'Profiles disagree' "$work/game-$game_name.log")" = 0 ]
 }
@@ -14217,6 +14217,33 @@ game_value()
         "") echo absent ;;
         *) echo other ;;
         esac
+}
+#       What the kernel resolves from the composed .config. A symbol an option
+#       selects (HMM_MIRROR and MMU_NOTIFIER under DRM_AMDGPU_USERPTR) is in no
+#       profile, so the composed file cannot say it is on: the kernel's own
+#       Kconfig does. allnoconfig with the composed file as KCONFIG_ALLCONFIG,
+#       run in a copy of the source tree the build made with its objects left
+#       out, so the tree itself is not touched. With no tree at linux/ (the
+#       build makes it) these rows are NOT RUN.
+resolved_tree=$work/kconf
+resolved=
+if [ -f linux/Kconfig ] && command -v make > /dev/null 2>&1 && mkdir -p "$resolved_tree"; then
+        (cd linux && tar -cf - --exclude='*.o' --exclude='*.a' --exclude='*.ko' \
+                --exclude='*.cmd' --exclude='*.pem' --exclude='*.cpio' \
+                --exclude=./.config --exclude=./include/config \
+                --exclude=./include/generated .) 2> /dev/null |
+                (cd "$resolved_tree" && tar -xf -) 2> /dev/null
+        [ -f "$resolved_tree/Kconfig" ] && resolved=1
+fi
+[ -n "$resolved" ] ||
+        echo "  switches     resolved rows NOT RUN -- no kernel tree at linux/ to resolve the profiles against"
+resolve_game()
+{
+        game_name=$1
+        (cd "$resolved_tree" && make -s ARCH=x86_64 \
+                KCONFIG_ALLCONFIG="$work/game-$game_name/.config" allnoconfig) \
+                > "$work/resolved-$game_name.log" 2>&1 || return 1
+        cp "$resolved_tree/.config" "$work/resolved-$game_name.config"
 }
 game_check()
 {
@@ -14240,6 +14267,24 @@ game_check()
                         "$work/game-$game_name.h" > /dev/null 2>&1
                 same "$game_name: Canvas in the header" "$game_canvas" \
                         "$(grep -c '^#define SHELL_NO_CANVAS 1$' "$work/game-$game_name.h")"
+                #       The GPU's userptr and the udmabuf the compositor's windows
+                #       use are on in every image (gpu and gpu.amd are always
+                #       composed), and the kernel selects their own symbols.
+                if [ -n "$resolved" ]; then
+                        if resolve_game "$game_name"; then
+                                for symbol in DRM_AMDGPU_USERPTR HMM_MIRROR MMU_NOTIFIER \
+                                        DRM_I915_USERPTR UDMABUF; do
+                                        same "$game_name resolves $symbol" y \
+                                                "$(game_value "$symbol" "$work/resolved-$game_name.config")"
+                                done
+                                same "$game_name resolves INPUT_UINPUT" "$game_want" \
+                                        "$(game_value INPUT_UINPUT "$work/resolved-$game_name.config")"
+                                same "$game_name resolves INPUT_JOYDEV" "$game_want" \
+                                        "$(game_value INPUT_JOYDEV "$work/resolved-$game_name.config")"
+                        else
+                                lost "$game_name resolves" "$(tail -2 "$work/resolved-$game_name.log" | tr '\n' ' ')"
+                        fi
+                fi
         else
                 lost "$game_name composes" "$(tail -3 "$work/game-$game_name.log" | tr '\n' ' ')"
         fi
