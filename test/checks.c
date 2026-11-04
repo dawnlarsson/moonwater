@@ -183532,6 +183532,15 @@ static positive clock_monotonic_nanoseconds(void)
 }
 static void memory_zero(void *block, unsigned long size) { memset(block, 0, size); }
 static b32 memory_compare(const address_any first, const address_any second, positive size) { return memcmp(first, second, size) != 0; }
+static address_any memory_translate(address_any block, positive size, address_any table)
+{
+        unsigned char *bytes = block;
+        const unsigned char *map = table;
+
+        for (positive i = 0; i < size; i++)
+                bytes[i] = map[bytes[i]];
+        return block;
+}
 static b32 system_close(int fd) { return close(fd); }
 static positive string_length(string_address text) { return (positive)strlen((const char *)text); }
 static positive string_length_max(string_address text, positive bound) { positive n = 0; while (n < bound && text[n]) n++; return n; }
