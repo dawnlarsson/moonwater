@@ -997,7 +997,7 @@ enum compositor_gpu_why
         COMPOSITOR_GPU_WHY_HEADLESS,  // no card, and the headless compositor not asked for the GPU (-G)
         COMPOSITOR_GPU_WHY_NO_CARD,   // no card the kernels are for, or the GPU did not start
         COMPOSITOR_GPU_WHY_UNTRUSTED, // a card whose self-test drew wrong
-        COMPOSITOR_GPU_WHY_DEAD,      // given up after hangs (until canvas gpu is turned off and on)
+        COMPOSITOR_GPU_WHY_DEAD,      // cooling down after hangs (the card is tried again after it; canvas gpu off and on ends it at once)
         COMPOSITOR_GPU_WHY_ALIGN,     // a width that is not a multiple of 4, or a pitch that is not 16 bytes
         COMPOSITOR_GPU_WHY_BUSY,      // a job given up on may still be running
         COMPOSITOR_GPU_WHY_OUTPUT,    // the scanout is not one the card can draw into
@@ -7171,9 +7171,11 @@ static void compositor_say(string_address what, bipolar value);
 #define COMPOSITOR_GPU_BINS_AT (GPU_DATA + (2 << 20))
 static struct
 {
-        int up, dead, force, told; // started; given up; headless is to use it (-G); said once that it composes
-        enum compositor_gpu_why dead_why; // why it is given up: no card, untrusted, or the hangs
-        unsigned int failures;     // hangs in a row
+        int up, dead, force, told; // started; given up for good (no card, or untrusted); headless is to use it (-G); said once that it composes
+        enum compositor_gpu_why dead_why; // why it is given up: no card, or untrusted
+        unsigned int failures;     // hangs in a row (three cool the card down)
+        b64 cool_until;            // the card is not tried again before this monotonic time (0: it is)
+        unsigned int cool_steps;   // how many cool-downs in a row: each one longer, up to sixty-four seconds
         positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer)
         positive turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS]; // the same for the buffers Canvas turns screens in
 } compositor_gpu_state;
@@ -7353,6 +7355,8 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 return COMPOSITOR_GPU_WHY_OFF;
         if (compositor_gpu_state.dead)
                 return compositor_gpu_state.dead_why ? compositor_gpu_state.dead_why : COMPOSITOR_GPU_WHY_DEAD;
+        if (compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until)
+                return COMPOSITOR_GPU_WHY_DEAD; // cooling down after hangs: the processor draws until the card is tried again
         if (compositor.card < 0 && !compositor_gpu_state.force)
                 return COMPOSITOR_GPU_WHY_HEADLESS;
         // A width not a multiple of 4 is drawn to the multiple below it, the columns past it by the processor (compositor_present's strip); a pitch
@@ -7395,8 +7399,15 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out, (unsigned int)(compositor.scanout_pitch / 4), g->width,
                        (unsigned int)compositor.height, (unsigned int)x1, (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
         {
+                // A hang: this present is the processor's and the next tries the card again (gpu_idle makes a new context of a card that reset). Three in a
+                // row cool the card down for two seconds, then four, eight, sixteen, thirty-two and sixty-four, each time it hangs again after one.
                 if (++compositor_gpu_state.failures >= 3)
-                        compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG;
+                {
+                        unsigned int steps = compositor_gpu_state.cool_steps < 5 ? compositor_gpu_state.cool_steps : 5;
+
+                        compositor_gpu_state.cool_until = clock_monotonic_nanoseconds() + (2000000000ull << steps);
+                        compositor_gpu_state.cool_steps++, compositor_gpu_state.failures = 0;
+                }
                 return COMPOSITOR_GPU_WHY_HANG;
         }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
@@ -12582,8 +12593,13 @@ static void compositor_gpu_settings(void)
 #ifdef MOONWATER_GPU_C
         // Turned on again: a GPU given up on after three hangs is tried again (one that never started, a card that is not one the kernels are for or that
         // drew its self-test wrong, stays given up).
-        if (compositor_gpu && !was && compositor_gpu_state.up)
-                compositor_gpu_state.dead = 0, compositor_gpu_state.failures = 0;
+        if (compositor_gpu && !was)
+        {
+                // Turned on from off: the hangs and their cool-downs are forgiven (a card that never started stays given up: no card).
+                if (compositor_gpu_state.up)
+                        compositor_gpu_state.dead = 0;
+                compositor_gpu_state.failures = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.cool_steps = 0;
+        }
 #endif
 }
 #endif

@@ -218027,11 +218027,58 @@ b32 main(void)
                 // Three hangs end the GPU's compose until the setting is turned off and on again (compositor_gpu_settings; the file /root/canvas.gpu is not
                 // there for this check, which reads as on): read again while on, it stays given up; turned on from off, the GPU composes again; a GPU that never
                 // started stays given up.
-                compositor_gpu_state.dead = 1, compositor_gpu_state.failures = 3, compositor_gpu = 1;
+                // A hang is the processor's present, and the next present tries the card again: the fake fence holds the job of the hanging present (its wait
+                // answers "still running", so gpu_run gives it up), and the job is cleared by the reset path gpu_idle takes for a wait that reports an error.
+                // Three hangs in a row cool the card down: the presents in the cool-down are the processor's, the card is tried again when it is over, and
+                // canvas gpu turned off and on ends a cool-down at once.
+                {
+                        int retried, cooling, after;
+
+                        // one hang: the processor's present, then the card tried again at the next, and it draws
+                        gpu_fake_busy = 1;
+                        check("gpu hang: a hang is the processor's present", !compositor_gpu_present(&f, 1) && compositor_gpu_state.failures == 1);
+                        gpu_fake_busy = 0;
+                        gpu.pending = 1ull << 40;
+                        gpu_idle(); // a new context: the card reset, and the hung job is over
+                        retried = compositor_gpu_present(&f, 1) == 1;
+                        check("gpu hang: the next present tries the card again, and draws", retried && compositor_gpu_state.failures == 0);
+                        // three in a row, none drawn between them: the third cools the card down
+                        for (int hang = 0; hang < 3; hang++)
+                        {
+                                gpu_fake_busy = 1;
+                                (void)compositor_gpu_present(&f, 1);
+                                gpu_fake_busy = 0;
+                                if (hang < 2)
+                                {
+                                        gpu.pending = 1ull << 40;
+                                        gpu_idle();
+                                }
+                        }
+                        cooling = compositor_gpu_state.cool_until != 0 && compositor_gpu_state.cool_steps == 1 && !compositor_gpu_present(&f, 1);
+                        check("gpu hang: three in a row cool the card down, and the present in it is the processor's", cooling);
+                        compositor_gpu_state.cool_until = 1; // the cool-down is over
+                        for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
+                                ; // the last hung job is over (the wait is answered at once only once it is)
+                        after = compositor_gpu_present(&f, 1) == 1;
+                        check("gpu hang: the card is tried again when the cool-down is over, and draws", after);
+                        compositor_gpu_state.cool_until = clock_monotonic_nanoseconds() + 60000000000ull;
+                        check("gpu hang: a cool-down is refused while it lasts", compositor_gpu_present(&f, 1) == 0);
+                        compositor_gpu = 0;
+                        compositor_gpu_settings();
+                        for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
+                                ;
+                        check("gpu hang: canvas gpu turned off and on ends the cool-down at once", compositor_gpu && compositor_gpu_state.cool_until == 0 &&
+                              compositor_gpu_state.cool_steps == 0 && compositor_gpu_present(&f, 1) == 1);
+                }
+                compositor_gpu = 1;
                 compositor_gpu_settings();
-                check("gpu settings: read again while on, a GPU given up on after hangs stays given up", compositor_gpu_state.dead);
+                for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
+                        ;
+                check("gpu settings: read again while on, a GPU that is not cooling is not changed by reading", compositor_gpu && !compositor_gpu_state.dead && compositor_gpu_present(&f, 1) == 1);
                 compositor_gpu = 0;
                 compositor_gpu_settings();
+                for (positive began = clock_monotonic_nanoseconds(); !gpu_idle() && clock_monotonic_nanoseconds() - began < 1000000000ull;)
+                        ;
                 check("gpu settings: turned on again, it composes the next present", compositor_gpu && !compositor_gpu_state.dead && compositor_gpu_present(&f, 1) == 1);
                 compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1, compositor_gpu = 0;
                 compositor_gpu_settings();
