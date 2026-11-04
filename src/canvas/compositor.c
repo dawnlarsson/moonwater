@@ -3410,7 +3410,7 @@ struct compositor_poll
         so what it takes is wider than what a pointer takes: a window's edge is COMPOSITOR_TOUCH_GRIP outside it and
         COMPOSITOR_TOUCH_GRIP_IN inside (the top as a pointer's, where the titlebar is), a corner is UI_TARGET each way
         (compositor_corner_reach, the kit's one rule for a finger's target, ui_reach_hit) and COMPOSITOR_TOUCH_CORNER along
-        either edge from it, a tab reaches COMPOSITOR_TOUCH_TAB further toward the middle of its screen and to half the gap
+        either edge from it, a tab reaches the finger's UI_TARGET further toward the middle of its screen and to half the gap
         either side, and the close and the minimise button are the finger's within COMPOSITOR_TOUCH_BUTTON_SLOP of their disc
         (the window goes when the finger lifts from the X: one that moves past the slop was making the press the corner or the
         titlebar gives, and makes it). It moves nothing until it is UI_SLOP from where it went down, so a tap is a click
@@ -3426,7 +3426,6 @@ struct compositor_poll
 // The close and the minimise button of a window, to a finger: the disc and this much more on every side, in logical pixels. The
 // corner is a finger's UI_TARGET, and wins everywhere in it but the disc (compositor_corner_reach, compositor_on_close).
 #define COMPOSITOR_TOUCH_BUTTON_SLOP 4
-#define COMPOSITOR_TOUCH_TAB 20
 #define COMPOSITOR_TOUCH_HOLD_NS 400000000ull
 #define COMPOSITOR_TOUCH_TAP_NS 400000000ull
 #define COMPOSITOR_TOUCH_WHEEL 48
@@ -9806,7 +9805,7 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
 static int compositor_band_hit(int x, int y)
 {
         int hit = TASKBAR_HIT_NONE, bands = compositor_bands();
-        int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale / 100 : 0;
+        int reach = compositor.touching ? UI_TARGET * compositor.scale / 100 : 0;
 
         for (compositor.band_at = 0; compositor.band_at < bands && hit == TASKBAR_HIT_NONE; compositor.band_at++)
         {
@@ -12659,7 +12658,7 @@ static int compositor_quick_row(void)
 static void compositor_button_rect(int x, int y, int which, int (*anchor)(const struct taskbar_view *, int *, int *, int *, int *))
 {
         struct windows *table = compositor.table;
-        int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale / 100 : 0;
+        int reach = compositor.touching ? UI_TARGET * compositor.scale / 100 : 0;
 
         for (compositor.band_at = 0; table && compositor.band_at < compositor_bands(); compositor.band_at++)
         {

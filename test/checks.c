@@ -126418,6 +126418,61 @@ static void check_compositor_glass_popup(void)
         up is brought up and given the keys, and with none the script is asked to start it. One press, a press of the
         middle button, and two too far apart do nothing.
 */
+/*
+        A tab's finger reach: under a finger a tab answers UI_TARGET (44 logical px) past its inner edge, toward the middle of its
+        screen (the old reach was 20 px, so a point 30 px out missed it). The points are the tab's inner edge plus 20, 30 and 50 px,
+        along the band toward the middle: 20 and 30 px land on the tab and 50 px does not.
+*/
+static void check_compositor_tab_reach(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    struct windows address_to table;
+    struct taskbar_view view;
+    int sx, sy, sw, sh, dir, hit, at20, at30, at50;
+
+    memory_zero(&compositor, sizeof(compositor));
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    if (!glass_table_map())
+    {
+        check("tab reach: the table is mapped", false);
+        return;
+    }
+    table = compositor.table;
+    table->x[1] = 20;
+    table->y[1] = 20;
+    table->width[1] = 100;
+    table->height[1] = 60;
+    glass_paint(1, 0, 0, 100, 60, 0x404040u, true);
+    compositor_present();
+    compositor_focus(1);
+
+    view = compositor_band_view();
+    if (!taskbar_slot(&view, 0, &sx, &sy, &sw, &sh))
+    {
+        check("tab reach: the band has a tab", false);
+        return;
+    }
+    // A bottom band's tab reaches up, toward the middle of the screen, by the finger's target (taskbar_hit_reach); the band
+    // of this fixture is at the bottom, which is checked rather than assumed.
+    dir = view.position == TASKBAR_BOTTOM ? 1 : 0;
+    compositor.touching = 1;
+    hit = compositor_band_hit(sx + sw / 2, sy + sh / 2);
+    at20 = compositor_band_hit(sx + sw / 2, sy - 20);
+    at30 = compositor_band_hit(sx + sw / 2, sy - 30);
+    at50 = compositor_band_hit(sx + sw / 2, sy - 50);
+    compositor.touching = 0;
+    check("tab reach: the fixture's band is at the bottom, so its tab reaches up toward the middle", dir);
+    check("tab reach: a finger 20 and 30 px above a tab on the bottom band is on that tab (UI_TARGET reach, 44 px)",
+          hit != TASKBAR_HIT_NONE && at20 == hit && at30 == hit);
+    check("tab reach: a finger 50 px above it is not on that tab", at50 != hit);
+}
+
 static void check_compositor_tray(void)
 {
     static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
@@ -157059,6 +157114,7 @@ b32 main()
         check_compositor_popup_holds();
         check_compositor_glass_popup();
         check_compositor_tray();
+        check_compositor_tab_reach();
         check_compositor_launcher();
         check_compositor_place();
         check_compositor_remember();
