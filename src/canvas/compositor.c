@@ -1731,9 +1731,17 @@ static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, in
                 }
                 if (!compositor_gpu_const_rect(from, py, to, stop, colour, (unsigned int)alpha))
                         return g->why = COMPOSITOR_GPU_WHY_POOL, false;
-                if (!corner && line > 0 && (!compositor_gpu_const_rect(x, py, x + line, stop, fill, (unsigned int)ea) ||
-                                            !compositor_gpu_const_rect(x + w - line, py, x + w, stop, fill, (unsigned int)ea)))
-                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                // The sides are the pixels of the rectangle that are not the middle (compositor_shape_row classifies each pixel once): a line wider than the
+                // rectangle makes the two sides meet, so the left side is cut to the rectangle and the right one starts past it, and no pixel is mixed twice
+                // or outside the rectangle.
+                if (!corner && line > 0)
+                {
+                        int left_to = x + line < x + w ? x + line : x + w, right_from = x + w - line > left_to ? x + w - line : left_to;
+
+                        if (!compositor_gpu_const_rect(x, py, left_to, stop, fill, (unsigned int)ea) ||
+                            !compositor_gpu_const_rect(right_from, py, x + w, stop, fill, (unsigned int)ea))
+                                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                }
                 py = stop;
         }
         return true;

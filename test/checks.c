@@ -218297,6 +218297,75 @@ b32 main(void)
                 }
         }
 
+        // The snap preview's shape at the picture's edges, every small size (1 to 6 by 1 to 6) with every line (0 to 8), radius 0, a radius of 1, and one
+        // past the half: a line wider than the preview is the processor's clamp (compositor_tint), not a size the records take as given. The card's
+        // records against compositor_preview_draw over the whole picture, two alphas of the ink and of the edge. Not random: the same rows every run.
+        {
+                static const int sizes[6] = {1, 2, 3, 4, 5, 6};
+                static const int radii[3] = {0, 1, 9};
+                static const int points[2][2] = {{0, 0}, {693, PH - 2}};
+                static const unsigned int inks[2] = {0x80c06040u, 0xffc06040u}, edges[2] = {0xb0204080u, 0xff204080u};
+                struct compositor_frame lifted;
+                int radii_of[1];
+                positive preview_bad = 0, runs = 0;
+
+                // The picture is at pic_at (GPU_DATA), and the compositor's own pools are at its places too, so the row's records and tables are the Frames
+                // rows' (ops_at, bins_at, and a table pool beyond them), not COMPOSITOR_GPU_OPS_AT, which would lie under the picture.
+                positive preview_tables_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20) + (6 << 20);
+
+                compositor_gscene.width = 696, compositor_gscene.height = PH;
+                compositor_gscene.ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at), compositor_gscene.room = (1 << 20) / 32;
+                compositor_gscene.tables = (unsigned char address_to)gpu.at + preview_tables_at, compositor_gscene.tables_at = (unsigned int)preview_tables_at;
+                compositor_gscene.tables_size = 1 << 20;
+                for (int pw = 0; pw < 6; pw++)
+                        for (int ph = 0; ph < 6; ph++)
+                                for (int line = 0; line <= 8; line++)
+                                        for (int rr = 0; rr < 3; rr++)
+                                                for (int at = 0; at < 2; at++)
+                                                        for (int ink = 0; ink < 2; ink++)
+                                                                for (int edge = 0; edge < 2 && gpu.at; edge++)
+                                                                {
+                                                                        struct compositor_target reference = {gpu_kit_want, PP, 696, PH, 0, 0, 696, PH, 0, 0, 0};
+                                                                        unsigned int ground = 0xff102030u;
+                                                                        int bad = 0;
+
+                                                                        memory_zero(&lifted, sizeof(lifted));
+                                                                        lifted.scale = 100;
+                                                                        lifted.preview[0] = points[at][0], lifted.preview[1] = points[at][1];
+                                                                        lifted.preview[2] = sizes[pw], lifted.preview[3] = sizes[ph];
+                                                                        lifted.preview_ink = inks[ink], lifted.preview_radius = radii[rr], lifted.preview_line = line;
+                                                                        lifted.preview_edge = edges[edge];
+                                                                        radii_of[0] = compositor_radius(&lifted);
+                                                                        memory_fill_u32_rect(gpu_kit_want, PP, 696, PH, ground);
+                                                                        compositor_preview_draw(&reference, &lifted, 1, radii_of);
+                                                                        for (positive i = 0; i < (positive)PP * PH; i++)
+                                                                                pic[i] = 0;
+                                                                        compositor_gscene.kept = 0, compositor_gscene.tables_used = 0; // each scene its own tables: the cache's places are the pool's
+                                                                        if (!compositor_gpu_frames(&lifted, 1, ground) ||
+                                                                            !gpu_scene(ops_at, compositor_gscene.count, bins_at, pic_at, PP, 696, PH, 0, 0, 696, PH))
+                                                                        {
+                                                                                check("gpu preview edges: the lifted preview is the card's records and the card finishes", false);
+                                                                                break;
+                                                                        }
+                                                                        runs++;
+                                                                        for (int y = 0; y < PH; y++)
+                                                                                for (int x = 0; x < 696; x++)
+                                                                                {
+                                                                                        checks++;
+                                                                                        if (((pic[(positive)y * PP + x] ^ gpu_kit_want[(positive)y * PP + x]) & 0x00ffffffu) && ++bad)
+                                                                                        {
+                                                                                                if (bad == 1)
+                                                                                                        string_format(log, "  FAIL gpu preview edges: size %p by %p line %p radius %p at %p,%p: first at %p,%p, card %p, processor %p\n",
+                                                                                                                      (positive)sizes[pw], (positive)sizes[ph], (positive)line, (positive)radii[rr], (positive)points[at][0],
+                                                                                                                      (positive)points[at][1], (positive)x, (positive)y, (positive)pic[(positive)y * PP + x],
+                                                                                                                      (positive)gpu_kit_want[(positive)y * PP + x]);
+                                                                                        }
+                                                                                }
+                                                                        preview_bad += (positive)bad;
+                                                                }
+                check("gpu preview edges: every small preview with every line and radius is the processor's, pixel for pixel", preview_bad == 0 && (runs > 0 || !gpu.at));
+                string_format(log, "  gpu preview edges: %p scenes, %p pixels wrong\n", runs, preview_bad);
+        }
         compositor.spots_shown = 0, compositor.scale = 100;
 
         // 8K: a window's clear and 159 boxes of the sizes cards and buttons have, the radii a card has, a third of them translucent;
