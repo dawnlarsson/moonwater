@@ -148865,6 +148865,16 @@ static fn check_kit_touch_gestures(void)
                   &r, "SPCZzYZzYI", 0);
         touch_ok("kit touch: the resumed pinch reports 1228 from its new begin", r.pinch_last == 1228 && r.pinch_begin == 1024);
 
+        // Two fingers that began 3 px apart (their span is floored at the slop, 16 px) and spread to 300 px: the scale is the span over
+        // 16 px, which is 200 px over 16 px, 12.5 times, so it is capped at 8 times (UI_TOUCH_PINCH_MAX), never the 12800 an unfloored
+        // start would give.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 103, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 1, 300, 100), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_ok("kit touch: a pinch from two fingers 3 px apart is capped at 8 times, not 12800 (the start span is floored at the slop)",
+                 r.pinch_begin == UI_TOUCH_PINCH_ONE && r.pinch_last == UI_TOUCH_PINCH_MAX);
+
         // A drop of the events in a pinch ends it, as a cancel ends a finger down.
         touch_rig_reset(&r, 0);
         touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);

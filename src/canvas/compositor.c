@@ -15616,7 +15616,7 @@ static int compositor_pad_pinch(struct compositor_pad *pad)
                 pad->pinching = 1, pad->pinch_scale = UI_TOUCH_PINCH_ONE;
                 compositor_pad_pinch_event(UI_TOUCH_PINCH_BEGIN, UI_TOUCH_PINCH_ONE);
         }
-        scale = ui_touch_ratio(span, pad->pinch_ref);
+        scale = ui_touch_ratio(span, pad->pinch_ref, COMPOSITOR_PAD_PINCH_SLOP);
         if (scale != pad->pinch_scale)
         {
                 pad->pinch_scale = scale;

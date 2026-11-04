@@ -37,6 +37,7 @@
 #define UI_TOUCH_NOTCH 48                  // the fingers' pixels a notch of the wheel is (120ths), at the scale of 100 percent
 #define UI_TOUCH_EVENTS 12                 // the most events one call answers
 #define UI_TOUCH_PINCH_ONE 1024            // a pinch's scale of 1.0, in 1024ths (the scale is span over the span it began from)
+#define UI_TOUCH_PINCH_MAX 8192            // the largest scale a pinch reports: 8 times the span it began from
 #define UI_TOUCH_PINCH_SLOP 2              // the span of two fingers must change by this many touch slops to begin a pinch (16 px at 100%)
 
 enum ui_touch_kind
@@ -161,10 +162,21 @@ static inline int ui_touch_span(const struct ui_touch_frame *f, int a, int b)
         return (int)ui_touch_isqrt((unsigned long long)(dx * dx + dy * dy));
 }
 
-// A span as a scale of the span it began from, in 1024ths (1024 for a reference of none, which begins nothing).
-static inline int ui_touch_ratio(int span, int ref)
+// A span as a scale of the span it began from, in 1024ths. Both spans are floored at the pinch's slop (floor, in the same units):
+// two fingers that began at nearly the same point would otherwise make the scale of any spread enormous (a start of 3 px and a
+// spread to 200 px is 66 times). The scale is capped at UI_TOUCH_PINCH_MAX (8 times the span it began at).
+static inline int ui_touch_ratio(int span, int ref, int floor)
 {
-        return ref > 0 ? (int)((long long)span * UI_TOUCH_PINCH_ONE / ref) : UI_TOUCH_PINCH_ONE;
+        long long scale;
+
+        if (floor < 1)
+                floor = 1;
+        if (ref < floor)
+                ref = floor;
+        if (span < floor)
+                span = floor;
+        scale = (long long)span * UI_TOUCH_PINCH_ONE / ref;
+        return scale > UI_TOUCH_PINCH_MAX ? UI_TOUCH_PINCH_MAX : (int)scale;
 }
 
 // Whether a span is at least slop away from the span a pinch is measured from, either way.
@@ -298,7 +310,7 @@ static inline void ui_touch_report(struct ui_touch *t, const struct ui_touch_fra
                         {
                                 // Both at once, or only the span: a pinch, scaled about the middle, which carries the pan with it (the
                                 // wheel is not turned meanwhile). Two fingers that moved apart or together are never a wheel after it.
-                                int scale = ui_touch_ratio(span, t->span_ref);
+                                int scale = ui_touch_ratio(span, t->span_ref, slop2);
 
                                 if (!t->pinching)
                                         t->pinching = 1, t->two_moved = 1, t->pinch_scale = UI_TOUCH_PINCH_ONE,
