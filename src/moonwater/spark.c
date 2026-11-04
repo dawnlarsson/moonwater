@@ -1688,6 +1688,25 @@ static void spark_environment_release(struct device_context *context)
         put_cred(context->environment_cred);
 }
 
+/*
+        Whether something watches what this caller starts: a seccomp filter
+        or a tracer. The launch below execs with kernel_execve, which is no
+        system call a filter is asked about, and clones CLONE_UNTRACED, which
+        a tracer is not told of, so for such a caller it would be the way
+        round the filter that took execve away and the tracer that follows
+        its children. It is refused, and the shell forks and execs instead (it
+        falls back on any refusal), in calls both of them see. The child
+        inherited the filter all along; what it escaped was the exec.
+*/
+static inline bool spark_spawn_watched(void)
+{
+#ifdef CONFIG_SECCOMP
+        if (READ_ONCE(current->seccomp.mode) != SECCOMP_MODE_DISABLED)
+                return true;
+#endif
+        return READ_ONCE(current->ptrace) != 0;
+}
+
 static long do_spawn(struct file *file, struct spawn __user *request)
 {
         struct device_context *context = file->private_data;
@@ -1700,6 +1719,9 @@ static long do_spawn(struct file *file, struct spawn __user *request)
         const char *fixed_path;
         long ret;
         pid_t pid;
+
+        if (unlikely(spark_spawn_watched()))
+                return -EPERM;
 
         if (unlikely(copy_from_user(&args, request, sizeof(args))))
                 return -EFAULT;

@@ -28878,6 +28878,9 @@ def harness_core_state(argv):
    stopped: gcc 16 does not pull it in there any more, and the whole lane
    went red on a machine whose compiler had moved on. Ask for it directly. */
 #include <sys/types.h>
+/* The library's name for offsetof (a4dca589), which spark.c and moonwater.c
+   now spell; lib.c is not part of this program. */
+#define offset_of(type, member) __builtin_offsetof(type, member)
 typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
@@ -29062,10 +29065,14 @@ static char *strndup_user(const char *from, long limit) {
     if (++allocations == fail_allocation) return (char *)(long)-ENOMEM;
     return strdup(from);
 }
-/* The task the kernel calls current: which thread group it is in and whether
-   it is on its way out. Nothing but task_tgid and the flags is read. */
-static struct { int tgid; unsigned flags; } task_current;
+/* The task the kernel calls current: which thread group it is in, whether
+   it is on its way out, and whether a seccomp filter or a tracer watches it.
+   Nothing but task_tgid, the flags, seccomp.mode and ptrace is read. */
+static struct { int tgid; unsigned flags; struct { int mode; } seccomp; unsigned ptrace; } task_current;
 #define current (&task_current)
+#define CONFIG_SECCOMP 1
+#define SECCOMP_MODE_DISABLED 0
+#define SECCOMP_MODE_FILTER 2
 #define PF_EXITING 0x4u
 static int spawn_pid = 4242;
 static int spawn_entered;
@@ -29276,6 +29283,31 @@ static void check_spawn_dispatch(void) {
         check(copies==1 && !spawn_entered,
               "the request arrives in one copy and a fault starts nothing");
         fail_copy=0;
+    }
+
+    /* The launch execs with kernel_execve, no system call, and clones the child
+       CLONE_UNTRACED: for a caller a seccomp filter or a tracer watches, it was
+       the way round both. Refused before anything is read or taken; the shell
+       forks and execs instead, in calls they see. */
+    {
+        struct spawn request={.path=(unsigned long)"/thing",
+            .argv=(unsigned long)argv_block,.argv_bytes=sizeof(argv_block)-1,
+            .argv_count=2,.stdio={3,-1,-1}};
+        for (int traced=0;traced<2;traced++) {
+            memset(open_files,0,sizeof(open_files));
+            spawn_entered=0; allocations=fail_allocation=0; copies=0; fail_copy=0;
+            if (traced) task_current.ptrace=1; else task_current.seccomp.mode=SECCOMP_MODE_FILTER;
+            check(device_ioctl(&caller,SPARK_IOCTL_SPAWN,(unsigned long)&request)==-EPERM,
+                  traced ? "a traced caller is refused the launch a tracer would not see"
+                         : "a seccomp-filtered caller is refused the exec its filter would not see");
+            check(!spawn_entered && !copies && open_files[3].references==0,
+                  "and the refusal reads nothing, starts nothing and holds nothing");
+            task_current.ptrace=0; task_current.seccomp.mode=SECCOMP_MODE_DISABLED;
+        }
+        memset(open_files,0,sizeof(open_files));
+        spawn_entered=0; allocations=fail_allocation=0; copies=0; fail_copy=0;
+        check(device_ioctl(&caller,SPARK_IOCTL_SPAWN,(unsigned long)&request)==spawn_pid && spawn_entered==1,
+              "with neither, the same launch goes");
     }
 
     check(device_ioctl(&caller,SPARK_IOCTL_LATENCY,0)==323,
@@ -31737,6 +31769,7 @@ line_add_padded() { line_add "$@"; }
         canvas_numbers = section(canvas, "IOCTL_IS(SPARK_IOCTL_CANVAS",
                                  "long canvas_client_ioctl")
         shapes = ("#include <stddef.h>\n"
+                  "#define offset_of(type, member) __builtin_offsetof(type, member)\n"
                   "#define CONFIG_MOONWATER_CANVAS 1\n"
                   "static unsigned int hash_crc32(unsigned int c, void *d, unsigned long n)"
                   " { (void)d; (void)n; return c; }\n"

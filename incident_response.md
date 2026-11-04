@@ -41,6 +41,28 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-163: a program under a seccomp filter or a tracer could start programs neither saw, through /dev/spark
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Sandbox bypass: an exec made outside the system call a seccomp filter judges, and a child a ptrace supervisor is not told of |
+| Moonwater exposure window | 2026-08-24 15:34 +02:00 (`e6b1208d`, spawn through /dev/spark) to the fix, 72 days |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `--harness core_state`, `a seccomp-filtered caller is refused the exec its filter would not see`, `a traced caller is refused the launch a tracer would not see` and their two `the refusal reads nothing, starts nothing and holds nothing` rows (87,428 of 87,432 with the refusal taken out) |
+
+**How it was exposed.** SPARK_IOCTL_SPAWN (/dev/spark, mode 0666) starts a program with kernel_clone(CLONE_VM |
+CLONE_UNTRACED) and kernel_execve in the child: no execve, execveat, fork, vfork, clone or clone3 system call is made.
+A sandbox that refuses those calls with seccomp and allows ioctl therefore did not stop a new program image. Bowls
+mount devtmpfs at /dev, so a third-party sandbox inside one (a browser's, a service manager's SystemCallFilter, bwrap
+with a filter) has the device. CLONE_UNTRACED also kept the child from a tracer following forks. Booted proof (the
+ring-0 pass's subagent, x86_64 KVM): uid 65534 under a filter refusing fork and execve got EPERM for both and then
+started a program through the request. The child kept the filter, NO_NEW_PRIVS and its Landlock domain, so what was
+escaped is the exec itself; Floodlight's own filter already refuses the request by its number. Now do_spawn refuses
+(EPERM, before it reads the request) a caller whose seccomp mode is not disabled or that is being traced. The shell
+falls back to fork and exec on any refusal, so a filtered or traced shell still runs everything, through calls its
+filter and its tracer see.
+
 ### MW-2026-133: a large file cut short by another program killed the editor and every tab's unsaved work
 
 | | |
