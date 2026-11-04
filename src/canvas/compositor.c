@@ -12599,37 +12599,42 @@ static int compositor_volume_map(void)
         and its screen before the script is told. A popup that is up is put away by this very press (WINDOW_DISMISS), and the cell then
         asks for none, so the cell opens it and closes it.
 */
-static int compositor_quick_row(void)
+// The first window showing whose name is word (the table's name, whole), or COMPOSITOR_NONE.
+static int compositor_row_named(const char *word)
 {
         for (unsigned int row = 0; row < WINDOWS; row++)
         {
                 const volatile char *name = compositor.table->name[row];
-                static const char quick[] = "mixer-quick";
                 unsigned int at = 0;
 
                 if (!compositor.showing[row])
                         continue;
-                while (at < sizeof(quick) && name[at] == quick[at] && quick[at])
+                while (word[at] && name[at] == word[at])
                         at++;
-                if (at == sizeof(quick) - 1 && !name[at])
+                if (!word[at] && !name[at])
                         return (int)row;
         }
         return COMPOSITOR_NONE;
 }
 
-static void compositor_volume_open(int x, int y)
+static int compositor_quick_row(void)
+{
+        return compositor_row_named("mixer-quick");
+}
+
+// The table holds the rectangle of the band's cell at a point (which is the hit taskbar_hit_reach names, anchored by anchor),
+// its edge and its screen, for the script to start the popup beside it. Nothing when no cell of that kind is there.
+static void compositor_button_rect(int x, int y, int which, int (*anchor)(const struct taskbar_view *, int *, int *, int *, int *))
 {
         struct windows *table = compositor.table;
         int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale / 100 : 0;
 
-        if (compositor_quick_row() >= 0)
-                return;
         for (compositor.band_at = 0; table && compositor.band_at < compositor_bands(); compositor.band_at++)
         {
                 struct taskbar_view view = compositor_band_view();
                 int rect[4];
 
-                if (taskbar_hit_reach(&view, x, y, reach) != TASKBAR_VOLUME || !taskbar_volume_anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
+                if (taskbar_hit_reach(&view, x, y, reach) != which || !anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
                         continue;
                 table->button_x = rect[0], table->button_y = rect[1];
                 table->button_w = (unsigned int)rect[2], table->button_h = (unsigned int)rect[3];
@@ -12637,6 +12642,13 @@ static void compositor_volume_open(int x, int y)
                 break;
         }
         compositor.band_at = 0;
+}
+
+static void compositor_volume_open(int x, int y)
+{
+        if (compositor_quick_row() >= 0)
+                return;
+        compositor_button_rect(x, y, TASKBAR_VOLUME, taskbar_volume_anchor);
         compositor_script_say("volume_button");
 }
 
@@ -12803,21 +12815,12 @@ static void compositor_volume_key(unsigned int code, int value)
 */
 static void compositor_settings_open(void)
 {
-        for (unsigned int row = 0; row < WINDOWS; row++)
-        {
-                const volatile char *name = compositor.table->name[row];
-                static const char settings[] = "settings";
-                unsigned int at = 0;
+        int row = compositor_row_named("settings");
 
-                if (!compositor.showing[row])
-                        continue;
-                while (at < sizeof(settings) && name[at] == settings[at] && settings[at])
-                        at++;
-                if (at == sizeof(settings) - 1 && !name[at])
-                {
-                        compositor_reveal(row);
-                        return;
-                }
+        if (row >= 0)
+        {
+                compositor_reveal(row);
+                return;
         }
         compositor.settings_asked++;
         compositor_script_say("tray_double");
@@ -12831,22 +12834,7 @@ static void compositor_settings_open(void)
 */
 static void compositor_launcher_open(int x, int y)
 {
-        struct windows *table = compositor.table;
-        int reach = compositor.touching ? COMPOSITOR_TOUCH_TAB * compositor.scale / 100 : 0;
-
-        for (compositor.band_at = 0; table && compositor.band_at < compositor_bands(); compositor.band_at++)
-        {
-                struct taskbar_view view = compositor_band_view();
-                int rect[4];
-
-                if (taskbar_hit_reach(&view, x, y, reach) != TASKBAR_LAUNCHER || !taskbar_anchor(&view, &rect[0], &rect[1], &rect[2], &rect[3]))
-                        continue;
-                table->button_x = rect[0], table->button_y = rect[1];
-                table->button_w = (unsigned int)rect[2], table->button_h = (unsigned int)rect[3];
-                table->button_edge = view.position, table->button_screen = (unsigned int)compositor.band_at;
-                break;
-        }
-        compositor.band_at = 0;
+        compositor_button_rect(x, y, TASKBAR_LAUNCHER, taskbar_anchor);
         compositor.launcher_asked++;
         compositor_script_say("launcher_button");
 }
