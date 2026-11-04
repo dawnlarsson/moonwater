@@ -28,8 +28,9 @@
         Version 35, with no shared memory and no descriptors passed (the AUTH reply sets neither bit, so a client
         sends its data over the socket): the handshake, client names and properties, playback streams (data with
         seeks, REQUEST, UNDERFLOW, STARTED, drain, cork, flush, trigger, prebuf, latency, buffer attributes, rate
-        updates, names and properties, moving to a sink), record streams (below), the lists and infos of sinks,
-        sources, clients, sink inputs and source outputs (and empty lists of modules, cards and samples), subscription
+        updates, names and properties, moving to a sink), record streams (below), the sample cache (upload, play by
+        name, remove, info), the lists and infos of sinks, sources, clients, sink inputs, source outputs and samples
+        (and empty lists of modules and cards), subscription
         events, volumes and mutes, the default sink and the default source. What is not served is answered with the
         error a client expects (NOTIMPLEMENTED, NOENTITY, NOEXTENSION, ACCESS) and never ignored: a client waiting for
         an answer gets one.
@@ -67,6 +68,12 @@
 #define PULSE_RECORDS_PER_CLIENT 8
 #define PULSE_RECORD_CHUNK 16384        // the most of a record stream's data that one frame carries
 #define PULSE_RECORD_RESERVE 32768      // of a client's output queue kept for its replies and events: record data is dropped before they are
+#define PULSE_SAMPLES 64                // sounds in the cache
+#define PULSE_SAMPLE_MAX (4ul << 20)    // bytes of one
+#define PULSE_SAMPLE_TOTAL (16ul << 20) // and of all of them, with the uploads begun
+#define PULSE_SAMPLE_USER (4ul << 20)   // and of what a user who is not root holds of them
+#define PULSE_UPLOADS 8                 // sounds being uploaded, all clients together
+#define PULSE_UPLOADS_PER_CLIENT 2
 #define PULSE_FRAME_COMMAND 16384    // the most a command frame may carry
 #define PULSE_FRAME_DATA 131072      // and a data frame
 #define PULSE_IN (PULSE_FRAME_DATA + 20)
@@ -195,6 +202,7 @@
 #define PULSE_FACILITY_SOURCE 1
 #define PULSE_FACILITY_SINK_INPUT 2
 #define PULSE_FACILITY_SOURCE_OUTPUT 3
+#define PULSE_FACILITY_SAMPLE_CACHE 6
 #define PULSE_FACILITY_CLIENT 5
 #define PULSE_FACILITY_SERVER 7
 #define PULSE_EVENT_NEW 0x0000u
@@ -260,6 +268,9 @@ struct pulse_stream
         unsigned char *ring_memory;
         unsigned long ring_bytes;
         long uid, pid;
+        int one_shot;                   // a sample being played: it belongs to no connection, and ends when its frames are done
+        long sample_ref;                // the sample it plays, plus one
+        unsigned long maker;            // the connection (its index) that asked for it
         struct audio_voice voice;
 };
 
@@ -290,6 +301,36 @@ struct pulse_sink
         long delay_frames;              // what the card holds, as the host last read it
         unsigned long long played;      // frames mixed
         struct audio_sink mix;
+};
+
+struct pulse_sample
+{
+        int used, condemned;            // condemned: out of the cache, kept for the streams that are playing it
+        unsigned long index;
+        char name[PULSE_NAME];
+        long format, channels, rate;
+        signed char map[AUDIO_CHANNELS_MAX];
+        long map_channels;
+        unsigned char *data;
+        unsigned long bytes;
+        struct pulse_props props;
+        long uid;
+        long playing;
+};
+
+struct pulse_upload
+{
+        int used;
+        long client;
+        unsigned long channel;
+        char name[PULSE_NAME];
+        long format, channels, rate;
+        signed char map[AUDIO_CHANNELS_MAX];
+        long map_channels;
+        struct pulse_props props;
+        unsigned char *data;
+        unsigned long length, got;
+        long uid;
 };
 
 /*
@@ -350,6 +391,9 @@ struct pulse
         struct pulse_sink sink[PULSE_SINKS];
         struct pulse_source source[PULSE_SOURCES];
         struct pulse_record record[PULSE_RECORDS];
+        struct pulse_sample sample[PULSE_SAMPLES];
+        struct pulse_upload upload[PULSE_UPLOADS];
+        unsigned long sample_total, upload_total, next_sample;
         long default_sink, default_source;
         int capture_off;                // the person has turned capture off: no program records
         unsigned long next_client, next_input, next_output;
@@ -1109,9 +1153,18 @@ static void pulse_stream_apply(struct pulse_stream *s)
         s->voice.flows = !s->corked;
 }
 
+static void pulse_sample_release(struct pulse *p, struct pulse_sample *s);
+
 static void pulse_stream_free(struct pulse *p, struct pulse_stream *s)
 {
         audio_voice_close(&s->voice);
+        if (s->sample_ref)
+        {
+                struct pulse_sample *sample = p->sample + s->sample_ref - 1;
+
+                sample->playing--;
+                pulse_sample_release(p, sample);
+        }
         if (s->ring_memory)
         {
                 p->host.release(p->host.context, s->ring_memory, (long)s->ring_bytes);
@@ -1590,6 +1643,8 @@ AUDIO_API int pulse_source_default(struct pulse *p, long slot)
         return 1;
 }
 
+static void pulse_upload_free(struct pulse *p, struct pulse_upload *u);
+
 /* ---- a client's departure ---- */
 
 static void pulse_drop(struct pulse *p, long slot)
@@ -1604,6 +1659,9 @@ static void pulse_drop(struct pulse *p, long slot)
         for (int i = 0; i < PULSE_RECORDS; i++)
                 if (p->record[i].used && p->record[i].client == slot)
                         pulse_record_end(p, p->record + i, 0);
+        for (int i = 0; i < PULSE_UPLOADS; i++)
+                if (p->upload[i].used && p->upload[i].client == slot)
+                        pulse_upload_free(p, p->upload + i);
         pulse_event(p, PULSE_FACILITY_CLIENT, PULSE_EVENT_REMOVE, c->index);
         p->client[slot] = 0;
         p->clients_dropped++;
@@ -2689,6 +2747,354 @@ static int pulse_command_record(struct pulse *p, long slot, unsigned long comman
         return pulse_error(p, c, tag, PULSE_ERR_COMMAND);
 }
 
+/* ---- the sample cache ---- */
+
+/*
+        Sounds a program keeps in the server to play again by name (libcanberra's event sounds: a click, a bell, a message
+        arrived). A program uploads one (CREATE_UPLOAD_STREAM, its data as frames on the channel it was given, then
+        FINISH_UPLOAD_STREAM), plays it (PLAY_SAMPLE: a stream of its own that is the sample's frames, played from the
+        cache's memory without copying them, that ends by itself when they are done), and takes it out (REMOVE_SAMPLE). A
+        sample that is taken out, or replaced by another of its name, goes on for the streams that are playing it and
+        is gone from the cache at once. The cache is bounded as everything else is: a sample, all of them, a user's.
+*/
+
+static int pulse_sample_name_ok(const char *name)
+{
+        long n;
+
+        if (!name)
+                return 0;
+        n = pulse_len(name);
+        if (n < 1 || n >= PULSE_NAME)
+                return 0;
+        for (long i = 0; i < n; i++)
+                if ((unsigned char)name[i] < ' ' || (unsigned char)name[i] == 127)
+                        return 0;
+        return 1;
+}
+
+static struct pulse_sample *pulse_sample_named(struct pulse *p, const char *name)
+{
+        for (int i = 0; i < PULSE_SAMPLES; i++)
+                if (p->sample[i].used && !p->sample[i].condemned && pulse_equal(p->sample[i].name, name))
+                        return p->sample + i;
+        return 0;
+}
+
+// A sample taken out of the cache gives its memory back when nothing plays it any more.
+static void pulse_sample_release(struct pulse *p, struct pulse_sample *s)
+{
+        if (!s->used || !s->condemned || s->playing > 0)
+                return;
+        p->host.release(p->host.context, s->data, (long)s->bytes);
+        p->sample_total -= s->bytes;
+        s->used = 0;
+        s->data = 0;
+}
+
+// What a user holds of the cache, in samples and in uploads not finished.
+static unsigned long pulse_sample_held(struct pulse *p, long uid)
+{
+        unsigned long n = 0;
+
+        for (int i = 0; i < PULSE_SAMPLES; i++)
+                if (p->sample[i].used && p->sample[i].uid == uid)
+                        n += p->sample[i].bytes;
+        for (int i = 0; i < PULSE_UPLOADS; i++)
+                if (p->upload[i].used && p->upload[i].uid == uid)
+                        n += p->upload[i].length;
+        return n;
+}
+
+static struct pulse_upload *pulse_upload_of(struct pulse *p, long client, unsigned long channel)
+{
+        for (int i = 0; i < PULSE_UPLOADS; i++)
+                if (p->upload[i].used && p->upload[i].client == client && p->upload[i].channel == channel)
+                        return p->upload + i;
+        return 0;
+}
+
+static void pulse_upload_free(struct pulse *p, struct pulse_upload *u)
+{
+        if (u->data)
+                p->host.release(p->host.context, u->data, (long)u->length);
+        p->upload_total -= u->length;
+        u->used = 0;
+        u->data = 0;
+}
+
+static void pulse_fill_sample(struct pulse_writer *w, struct pulse_client *c, const struct pulse_sample *s)
+{
+        unsigned long volume[AUDIO_CHANNELS_MAX];
+        unsigned long frames = s->bytes / (unsigned long)(audio_format_bytes(s->format) * s->channels);
+
+        for (long i = 0; i < s->map_channels; i++)
+                volume[i] = AUDIO_VOLUME_NORM;
+        pulse_w_u32(w, s->index);
+        pulse_w_string(w, s->name);
+        pulse_w_cvolume(w, volume, s->map_channels);
+        pulse_w_64(w, 'U', (long long)frames * 1000000 / (long long)s->rate);
+        pulse_w_sample_spec(w, s->format, s->channels, s->rate);
+        pulse_w_channel_map(w, s->map, s->map_channels);
+        pulse_w_u32(w, s->bytes);
+        pulse_w_bool(w, 0); // not lazy: the data is in the cache
+        pulse_w_string(w, 0);
+        if (c->version >= 13)
+                pulse_w_proplist(w, &s->props);
+}
+
+static int pulse_command_create_upload(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+{
+        struct pulse_client *c = p->client[slot];
+        struct pulse_props props = {0};
+        long format = 0, channels = 0, rate = 0, map_channels, mine = 0;
+        signed char map[PULSE_CHANNEL_MAX];
+        unsigned long length;
+        const char *name;
+        struct pulse_upload *u = 0;
+        unsigned char *memory;
+        struct pulse_writer w;
+        int isnull;
+
+        PULSE_NEED_AUTH();
+        name = pulse_r_string(r, &isnull);
+        pulse_r_sample_spec(r, &format, &channels, &rate);
+        map_channels = pulse_r_channel_map(r, map);
+        length = pulse_r_u32(r);
+        if (c->version >= 13)
+                pulse_r_proplist(r, &props);
+        if (!pulse_r_eof(r))
+                return PULSE_DEAD;
+        if (!pulse_sample_name_ok(name) || !audio_format_bytes(format) || channels < 1 || channels > AUDIO_CHANNELS_MAX || rate < 1 || rate > AUDIO_RATE_MAX || map_channels != channels ||
+            length == 0 || length % (unsigned long)(audio_format_bytes(format) * channels))
+                return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+        for (int i = 0; i < PULSE_UPLOADS; i++)
+        {
+                if (p->upload[i].used && p->upload[i].client == slot)
+                        mine++;
+                if (!p->upload[i].used && !u)
+                        u = p->upload + i;
+        }
+        if (length > PULSE_SAMPLE_MAX || mine >= PULSE_UPLOADS_PER_CLIENT || !u || p->sample_total + p->upload_total + length > PULSE_SAMPLE_TOTAL ||
+            (!c->root && pulse_sample_held(p, c->uid) + length > PULSE_SAMPLE_USER))
+                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        memory = p->host.alloc(p->host.context, (long)length);
+        if (!memory)
+                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        __builtin_memset(u, 0, sizeof(*u));
+        u->used = 1;
+        u->client = slot;
+        u->channel = c->next_channel++;
+        pulse_copy(u->name, PULSE_NAME, name);
+        u->format = format;
+        u->channels = channels;
+        u->rate = rate;
+        u->map_channels = map_channels;
+        for (long i = 0; i < channels; i++)
+                u->map[i] = map[i];
+        u->props = props;
+        u->data = memory;
+        u->length = length;
+        u->uid = c->uid;
+        p->upload_total += length;
+        pulse_reply_begin(p, &w, tag);
+        pulse_w_u32(&w, u->channel);
+        pulse_w_u32(&w, length);
+        return pulse_reply_end(c, &w);
+}
+
+// DELETE_UPLOAD_STREAM and FINISH_UPLOAD_STREAM: the upload is given up, or its sample is put in the cache (the one of its name replaced).
+static int pulse_command_upload(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
+{
+        struct pulse_client *c = p->client[slot];
+        unsigned long channel = pulse_r_u32(r);
+        struct pulse_upload *u;
+        struct pulse_sample *old, *s = 0;
+
+        if (!pulse_r_eof(r))
+                return PULSE_DEAD;
+        PULSE_NEED_AUTH();
+        u = pulse_upload_of(p, slot, channel);
+        if (!u)
+                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+        if (command == PULSE_COMMAND_DELETE_UPLOAD_STREAM)
+        {
+                pulse_upload_free(p, u);
+                return pulse_ack(p, c, tag);
+        }
+        if (u->got != u->length)
+        {
+                pulse_upload_free(p, u);
+                return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+        }
+        old = pulse_sample_named(p, u->name);
+        if (old && !pulse_may(c, old->uid))
+        {
+                pulse_upload_free(p, u);
+                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+        }
+        for (int i = 0; i < PULSE_SAMPLES && !s; i++)
+                if (!p->sample[i].used)
+                        s = p->sample + i;
+        if (!s)
+        {
+                pulse_upload_free(p, u);
+                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        }
+        __builtin_memset(s, 0, sizeof(*s));
+        s->used = 1;
+        s->index = old ? old->index : p->next_sample++;
+        pulse_copy(s->name, PULSE_NAME, u->name);
+        s->format = u->format;
+        s->channels = u->channels;
+        s->rate = u->rate;
+        s->map_channels = u->map_channels;
+        for (long i = 0; i < u->map_channels; i++)
+                s->map[i] = u->map[i];
+        s->props = u->props;
+        s->data = u->data;
+        s->bytes = u->length;
+        s->uid = c->uid;
+        p->sample_total += u->length;
+        p->upload_total -= u->length;
+        u->used = 0;
+        u->data = 0;
+        if (old)
+        {
+                old->condemned = 1;
+                pulse_sample_release(p, old);
+        }
+        pulse_event(p, PULSE_FACILITY_SAMPLE_CACHE, old ? PULSE_EVENT_CHANGE : PULSE_EVENT_NEW, s->index);
+        return pulse_ack(p, c, tag);
+}
+
+static int pulse_command_remove_sample(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+{
+        struct pulse_client *c = p->client[slot];
+        int isnull;
+        const char *name = pulse_r_string(r, &isnull);
+        struct pulse_sample *s;
+
+        if (!pulse_r_eof(r) || !name)
+                return PULSE_DEAD;
+        PULSE_NEED_AUTH();
+        s = pulse_sample_named(p, name);
+        if (!s)
+                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+        if (!pulse_may(c, s->uid))
+                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+        s->condemned = 1;
+        pulse_event(p, PULSE_FACILITY_SAMPLE_CACHE, PULSE_EVENT_REMOVE, s->index);
+        pulse_sample_release(p, s);
+        return pulse_ack(p, c, tag);
+}
+
+/*
+        PLAY_SAMPLE: a stream of the sample's frames on a sink, for no program (it is not the requester's: it plays on if the
+        requester goes), that ends when its frames have been played. The ring of its voice is the sample's own memory, with
+        everything in it to be read. The volume is the program's if it gave one, else what is remembered of its name.
+*/
+static int pulse_command_play_sample(struct pulse *p, long slot, struct pulse_reader *r, unsigned long tag)
+{
+        struct pulse_client *c = p->client[slot];
+        struct pulse_props props = {0}, extra = {0};
+        unsigned long sink_index, volume;
+        const char *sink_name, *name;
+        int isnull;
+        struct pulse_sample *sample;
+        struct pulse_stream *s = 0;
+        long sink, mine = 0;
+        struct pulse_writer w;
+        char value[PULSE_VALUE + 1];
+
+        PULSE_NEED_AUTH();
+        sink_index = pulse_r_u32(r);
+        sink_name = pulse_r_string(r, &isnull);
+        volume = pulse_r_u32(r);
+        name = pulse_r_string(r, &isnull);
+        if (c->version >= 13)
+                pulse_r_proplist(r, &props);
+        if (!pulse_r_eof(r) || !name)
+                return PULSE_DEAD;
+        if (sink_name && sink_name[0] && sink_index != PULSE_INVALID)
+                return pulse_error(p, c, tag, PULSE_ERR_INVALID);
+        if (sink_name && sink_name[0])
+                sink = pulse_sink_named(p, sink_name);
+        else if (sink_index != PULSE_INVALID)
+                sink = pulse_find_sink(p, sink_index, 0);
+        else
+                sink = p->default_sink;
+        sample = pulse_sample_named(p, name);
+        if (!sample || sink < 0)
+                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+        for (int i = 0; i < PULSE_STREAMS; i++)
+        {
+                if (p->stream[i].used && !p->stream[i].dying && p->stream[i].one_shot && p->stream[i].maker == c->index)
+                        mine++;
+                if (!p->stream[i].used && !s)
+                        s = p->stream + i;
+        }
+        if (mine >= PULSE_STREAMS_PER_CLIENT || !s)
+                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);
+        __builtin_memset(s, 0, __builtin_offsetof(struct pulse_stream, voice));
+        if (audio_voice_open(&s->voice, sample->format, sample->channels, sample->rate, sample->map, p->sink[sink].rate, sample->data, sample->bytes) < 0)
+                return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);
+        s->voice.ring.write = s->voice.ring.limit = s->voice.ring.size;
+        s->used = 1;
+        s->client = -1;
+        s->index = p->next_input++;
+        s->sink = sink;
+        s->format = sample->format;
+        s->channels = sample->channels;
+        s->rate = sample->rate;
+        s->map_channels = sample->map_channels;
+        for (long i = 0; i < sample->channels; i++)
+                s->map[i] = sample->map[i];
+        s->one_shot = 1;
+        s->maker = c->index;
+        s->sample_ref = (sample - p->sample) + 1;
+        s->owner_set = (sink_name && sink_name[0]) || sink_index != PULSE_INVALID;
+        s->uid = c->uid;
+        s->pid = c->pid;
+        sample->playing++;
+        for (long i = 0; i < PULSE_CHANNEL_MAX; i++)
+                s->volume[i] = volume == PULSE_INVALID ? AUDIO_VOLUME_NORM : volume > AUDIO_VOLUME_MAX ? AUDIO_VOLUME_MAX : volume;
+        if (volume == PULSE_INVALID && p->host.recall && pulse_props_text(&c->props, "application.name", value, sizeof(value)) && value[0])
+        {
+                unsigned long remembered;
+                int mute_remembered;
+
+                if (p->host.recall(p->host.context, value, &remembered, &mute_remembered))
+                {
+                        for (long i = 0; i < PULSE_CHANNEL_MAX; i++)
+                                s->volume[i] = remembered;
+                        s->muted = mute_remembered;
+                }
+        }
+        // What the program said of it, then what the sample was uploaded with; its program's name, and the sample's for the stream's.
+        s->props = props;
+        pulse_props_update(&s->props, &sample->props, 1);
+        if (!pulse_props_text(&s->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))
+                pulse_props_set(&s->props, "application.name", (const unsigned char *)value, pulse_len(value) + 1);
+        if (!pulse_props_text(&s->props, "media.name", value, sizeof(value)))
+        {
+                pulse_props_set(&extra, "media.name", (const unsigned char *)sample->name, pulse_len(sample->name) + 1);
+                pulse_props_update(&s->props, &extra, 1);
+        }
+        pulse_stream_apply(s);
+        p->streams_made++;
+        pulse_reply_begin(p, &w, tag);
+        if (c->version >= 13)
+                pulse_w_u32(&w, s->index);
+        {
+                int err = pulse_reply_end(c, &w);
+
+                pulse_event(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_NEW, s->index);
+                pulse_changed(p, PULSE_CHANGED_STREAMS, sink);
+                return err;
+        }
+}
+
 // The commands on one stream by its channel: delete, cork, flush, trigger, prebuf, drain, latency, name, rate, attributes, properties.
 static int pulse_command_stream(struct pulse *p, long slot, unsigned long command, unsigned long tag, struct pulse_reader *r)
 {
@@ -3041,9 +3447,20 @@ static int pulse_command_info(struct pulse *p, long slot, unsigned long command,
                 if (!list)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 return pulse_reply_end(c, &w);
+        case PULSE_COMMAND_GET_SAMPLE_INFO:
+        case PULSE_COMMAND_GET_SAMPLE_INFO_LIST:
+                for (int i = 0; i < PULSE_SAMPLES; i++)
+                        if (p->sample[i].used && !p->sample[i].condemned && (list || (name && name[0] ? pulse_equal(p->sample[i].name, name) : p->sample[i].index == index)))
+                        {
+                                pulse_fill_sample(&w, c, p->sample + i);
+                                if (!list)
+                                        return pulse_reply_end(c, &w);
+                        }
+                if (!list)
+                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
+                return pulse_reply_end(c, &w);
         case PULSE_COMMAND_GET_MODULE_INFO_LIST:
         case PULSE_COMMAND_GET_CARD_INFO_LIST:
-        case PULSE_COMMAND_GET_SAMPLE_INFO_LIST:
                 return pulse_reply_end(c, &w);
         default:
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
@@ -3201,8 +3618,9 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
                 if (!pulse_r_eof(&r))
                         return PULSE_DEAD;
                 pulse_reply_begin(p, &w, tag);
-                for (int i = 0; i < 5; i++)
+                for (int i = 0; i < 4; i++)
                         pulse_w_u32(&w, 0);
+                pulse_w_u32(&w, p->sample_total);
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_LOOKUP_SINK:
@@ -3470,13 +3888,17 @@ static int pulse_command(struct pulse *p, long slot, const unsigned char *payloa
         case PULSE_COMMAND_SET_SOURCE_PORT:
         case PULSE_COMMAND_SET_CARD_PROFILE:
         case PULSE_COMMAND_SET_PORT_LATENCY_OFFSET:
-        case PULSE_COMMAND_DELETE_UPLOAD_STREAM:
-        case PULSE_COMMAND_FINISH_UPLOAD_STREAM:
-        case PULSE_COMMAND_REMOVE_SAMPLE:
                 PULSE_NEED_AUTH();
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
         case PULSE_COMMAND_CREATE_UPLOAD_STREAM:
+                return pulse_command_create_upload(p, slot, &r, tag);
+        case PULSE_COMMAND_DELETE_UPLOAD_STREAM:
+        case PULSE_COMMAND_FINISH_UPLOAD_STREAM:
+                return pulse_command_upload(p, slot, command, tag, &r);
         case PULSE_COMMAND_PLAY_SAMPLE:
+                return pulse_command_play_sample(p, slot, &r, tag);
+        case PULSE_COMMAND_REMOVE_SAMPLE:
+                return pulse_command_remove_sample(p, slot, &r, tag);
         case PULSE_COMMAND_SEND_OBJECT_MESSAGE:
                 PULSE_NEED_AUTH();
                 return pulse_error(p, c, tag, PULSE_ERR_NOTIMPLEMENTED);
@@ -3507,8 +3929,21 @@ static int pulse_data(struct pulse *p, long slot, unsigned long channel, long lo
 
         if (!c->authorized)
                 return PULSE_DEAD;
-        if (!s) // data for a stream that is gone: dropped, as a program that deleted it just before may have sent some
+        if (!s)
+        {
+                struct pulse_upload *u = pulse_upload_of(p, slot, channel);
+
+                // An upload's data is appended, in order, and never more than was said; data for a stream that is gone is dropped,
+                // as a program that deleted it just before may have sent some.
+                if (u)
+                {
+                        if ((flags & 0xff) != 0 || offset != 0 || (unsigned long)length > u->length - u->got)
+                                return PULSE_DEAD;
+                        __builtin_memcpy(u->data + u->got, data, (unsigned long)length);
+                        u->got += (unsigned long)length;
+                }
                 return PULSE_DONE;
+        }
         if (length % (long)s->voice.frame)
                 return PULSE_DEAD;
         if ((flags & 0xff) != 0 || offset != 0)
@@ -3708,6 +4143,12 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
         }
         played = audio_voice_mix(&sink->mix, &s->voice, frames, s->drain_pending);
         s->playing_for += (unsigned long long)played * s->voice.frame;
+        if (played < frames && s->one_shot)
+        {
+                // A sample's frames are done (the last of them were faded to nothing): it ends, and its end is announced.
+                pulse_stream_end(p, s);
+                return;
+        }
         if (played < frames)
         {
                 // Out of data: it faded to nothing, it waits for its start again (a drain is answered once the card has played it).

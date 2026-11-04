@@ -175700,6 +175700,692 @@ static void pt_test_record_monitor(void)
         PTCHECK(pt_engine.records_made == pt_engine.records_freed && pt_engine.streams_made == pt_engine.streams_freed, "all given back");
 }
 
+/* ---- the sample cache ---- */
+
+// CREATE_UPLOAD_STREAM as libpulse writes it. 0 and *channel when it was made; the error code when refused; -1 for no answer, -2 when the client was ended.
+static long pt_upload(long slot, unsigned version, unsigned long tag, const char *name, long format, int channels, unsigned long rate, unsigned long length, unsigned long *channel,
+                      unsigned long *asked)
+{
+        struct pt_w w = {{0}, 0};
+        const struct pt_frame *f;
+        struct pt_r r;
+        int positions[32];
+
+        for (int i = 0; i < 32; i++)
+                positions[i] = channels == 1 ? AUDIO_POSITION_MONO : i == 0 ? 1 : i == 1 ? 2 : AUDIO_POSITION_AUX0 + i;
+        pt_str(&w, name);
+        pt_spec(&w, (int)format, channels, rate);
+        pt_map(&w, channels, positions);
+        pt_u32(&w, length);
+        if (version >= 13)
+                pt_props(&w, "media.name", "A sound", "media.role", "event");
+        if (pt_command(slot, PULSE_COMMAND_CREATE_UPLOAD_STREAM, tag, &w) < 0)
+                return -2;
+        pt_collect(slot);
+        if ((f = pt_find(PULSE_COMMAND_ERROR)) && f->tag == tag)
+        {
+                r = pt_reply_reader(f);
+                return (long)pt_ru32(&r);
+        }
+        for (int i = 0; i < pt_logged; i++)
+                if (pt_log[i].command == PULSE_COMMAND_REPLY && pt_log[i].tag == tag)
+                {
+                        r = pt_reply_reader(pt_log + i);
+                        *channel = pt_ru32(&r);
+                        *asked = pt_ru32(&r);
+                        return !r.bad && r.at == pt_log[i].length ? 0 : -1;
+                }
+        return -1;
+}
+
+// The whole of a sample sent as an upload's data in pieces, and finished: the error code of the finish, or 0.
+static long pt_upload_send(long slot, unsigned long tag, unsigned long channel, const void *data, unsigned long length, unsigned long piece)
+{
+        struct pt_w w = {{0}, 0};
+        const struct pt_frame *f;
+        struct pt_r r;
+
+        for (unsigned long at = 0; at < length; at += piece)
+                if (pt_data(slot, channel, (const unsigned char *)data + at, (long)(length - at < piece ? length - at : piece), 0, 0) < 0)
+                        return -2;
+        pt_u32(&w, channel);
+        if (pt_command(slot, PULSE_COMMAND_FINISH_UPLOAD_STREAM, tag, &w) < 0)
+                return -2;
+        pt_collect(slot);
+        if ((f = pt_find(PULSE_COMMAND_ERROR)) && f->tag == tag)
+        {
+                r = pt_reply_reader(f);
+                return (long)pt_ru32(&r);
+        }
+        return pt_expect_ack(tag) ? 0 : -1;
+}
+
+// PLAY_SAMPLE: the sink input's index (version 13 on; 0 for an acknowledgement before), or an error code as a negative number below -100, or -1.
+static long pt_play(long slot, unsigned version, unsigned long tag, unsigned long sink_index, const char *sink_name, unsigned long volume, const char *name)
+{
+        struct pt_w w = {{0}, 0};
+        const struct pt_frame *f;
+        struct pt_r r;
+
+        pt_u32(&w, sink_index);
+        pt_str(&w, sink_name);
+        pt_u32(&w, volume);
+        pt_str(&w, name);
+        if (version >= 13)
+                pt_props(&w, "media.role", "event", 0, 0);
+        if (pt_command(slot, PULSE_COMMAND_PLAY_SAMPLE, tag, &w) < 0)
+                return -2;
+        pt_collect(slot);
+        if ((f = pt_find(PULSE_COMMAND_ERROR)) && f->tag == tag)
+        {
+                r = pt_reply_reader(f);
+                return -100 - (long)pt_ru32(&r);
+        }
+        for (int i = 0; i < pt_logged; i++)
+                if (pt_log[i].command == PULSE_COMMAND_REPLY && pt_log[i].tag == tag)
+                {
+                        r = pt_reply_reader(pt_log + i);
+                        if (version >= 13)
+                        {
+                                long index = (long)pt_ru32(&r);
+
+                                return !r.bad && r.at == pt_log[i].length ? index : -1;
+                        }
+                        return pt_log[i].length == 10 ? 0 : -1;
+                }
+        return -1;
+}
+
+static int pt_remove_sample(long slot, unsigned long tag, const char *name)
+{
+        struct pt_w w = {{0}, 0};
+        const struct pt_frame *f;
+        struct pt_r r;
+
+        pt_str(&w, name);
+        pt_command(slot, PULSE_COMMAND_REMOVE_SAMPLE, tag, &w);
+        pt_collect(slot);
+        if ((f = pt_find(PULSE_COMMAND_ERROR)) && f->tag == tag)
+        {
+                r = pt_reply_reader(f);
+                return (int)pt_ru32(&r);
+        }
+        return pt_expect_ack(tag) ? 0 : -1;
+}
+
+struct pt_sample_info
+{
+        unsigned long index, bytes, rate, volume[8];
+        int format, channels, vol_n, lazy, props;
+        char name[80], role[16];
+        long long usec;
+        const char *filename;
+};
+
+// A sample as the info says it, read to the field its version ends at.
+static int pt_read_sample(struct pt_r *r, unsigned version, struct pt_sample_info *s)
+{
+        const char *t;
+        int positions[32];
+
+        memset(s, 0, sizeof(*s));
+        s->index = pt_ru32(r);
+        t = pt_rstr(r);
+        snprintf(s->name, sizeof(s->name), "%s", t ? t : "");
+        s->vol_n = pt_rvol(r, s->volume);
+        s->usec = pt_r64(r, 'U');
+        pt_rspec(r, &s->format, &s->channels, &s->rate);
+        pt_rmap(r, positions);
+        s->bytes = pt_ru32(r);
+        s->lazy = pt_rbool(r);
+        s->filename = pt_rstr(r);
+        if (version >= 13)
+                s->props = pt_rprops(r, "media.role", s->role, sizeof(s->role));
+        return !r->bad;
+}
+
+static int pt_sample_info(long slot, unsigned version, unsigned long tag, unsigned long index, const char *name, struct pt_sample_info *s)
+{
+        struct pt_w w = {{0}, 0};
+        const struct pt_frame *f;
+        struct pt_r r;
+
+        pt_u32(&w, index);
+        pt_str(&w, name);
+        pt_command(slot, PULSE_COMMAND_GET_SAMPLE_INFO, tag, &w);
+        pt_collect(slot);
+        f = pt_find(PULSE_COMMAND_REPLY);
+        if (!f || f->tag != tag)
+                return 0;
+        r = pt_reply_reader(f);
+        return pt_read_sample(&r, version, s) && r.at == f->length;
+}
+
+// The cache from the wire: upload at four versions, the info, the play (the frames come out as they went in), the volume, another sink and another rate, a stream of
+// its own that ends by itself and is announced, a replacement, a removal, and a sample that goes on playing after it is taken out.
+static void pt_test_samples(void)
+{
+        static const unsigned versions[] = {35, 22, 13, 12};
+        static unsigned char out[AUDIO_BLOCK * 4];
+        static short heard[2 * 6000];
+        unsigned long channel, asked;
+
+        pt_make_source();
+        for (unsigned v = 0; v < sizeof(versions) / sizeof(versions[0]); v++)
+        {
+                long slot, watcher, played, heard_frames = 0;
+                struct pt_sample_info info;
+                struct pt_w w = {{0}, 0};
+                const struct pt_frame *f;
+                struct pt_r r;
+                unsigned long what[16], where[16];
+                int n;
+
+                pt_reset();
+                pulse_sink_add(&pt_engine, "null", "Null", 48000);
+                slot = pt_connect(0, 130, versions[v], "Bell");
+                watcher = pt_connect(0, 131, 35, "Watcher");
+                w.n = 0;
+                pt_u32(&w, 0x2ff);
+                pt_command(watcher, PULSE_COMMAND_SUBSCRIBE, 1, &w);
+                pt_collect(watcher);
+                PTCHECK(pt_upload(slot, versions[v], 20, "bell", AUDIO_FORMAT_S16LE, 2, 48000, 4800 * 4, &channel, &asked) == 0 && asked == 4800 * 4, "version %u: an upload begun, and asked for its length", versions[v]);
+                PTCHECK(pt_upload_send(slot, 21, channel, pt_source + 2 * 1000, 4800 * 4, 7000) == 0, "version %u: its data in pieces of 7000 bytes, and finished", versions[v]);
+                pt_collect(watcher);
+                n = pt_events(what, where, 16);
+                PTCHECK(n >= 1 && what[n - 1] == (PULSE_FACILITY_SAMPLE_CACHE | PULSE_EVENT_NEW) && where[n - 1] == 0, "version %u: a watcher is told of the new sample", versions[v]);
+                PTCHECK(pt_sample_info(slot, versions[v], 22, PULSE_INVALID, "bell", &info), "version %u: the info is whole", versions[v]);
+                PTCHECK(info.index == 0 && !strcmp(info.name, "bell") && info.vol_n == 2 && info.volume[0] == 0x10000 && info.format == AUDIO_FORMAT_S16LE && info.channels == 2 && info.rate == 48000 &&
+                            info.usec == 100000 && info.bytes == 4800 * 4 && !info.lazy && !info.filename,
+                        "version %u: the name, the spec, 100 ms, 19200 bytes, not lazy, no file", versions[v]);
+                if (versions[v] >= 13)
+                        PTCHECK(info.props == 2 && !strcmp(info.role, "event"), "version %u: the properties it was uploaded with: %d %s", versions[v], info.props, info.role);
+                PTCHECK(pt_sample_info(slot, versions[v], 23, 0, 0, &info) && !strcmp(info.name, "bell"), "version %u: by index", versions[v]);
+                PTCHECK(!pt_sample_info(slot, versions[v], 24, PULSE_INVALID, "nonesuch", &info) && pt_expect_error(24, PULSE_ERR_NOENTITY), "version %u: a name that is none", versions[v]);
+                pt_command(slot, PULSE_COMMAND_GET_SAMPLE_INFO_LIST, 25, 0);
+                pt_collect(slot);
+                f = pt_find(PULSE_COMMAND_REPLY);
+                if (f)
+                {
+                        r = pt_reply_reader(f);
+                        PTCHECK(pt_read_sample(&r, versions[v], &info) && r.at == f->length && info.index == 0, "version %u: the list has the one", versions[v]);
+                }
+                pt_command(slot, PULSE_COMMAND_STAT, 26, 0);
+                pt_collect(slot);
+                f = pt_find(PULSE_COMMAND_REPLY);
+                PTCHECK(f && f->length == 35 && pulse_be32(f->payload + 31) == 4800 * 4, "version %u: STAT says how much the cache holds", versions[v]);
+                // Play: its stream announced, the frames out as they went in after the fade-in, then it ends by itself.
+                played = pt_play(slot, versions[v], 27, PULSE_INVALID, 0, PULSE_INVALID, "bell");
+                PTCHECK(played >= 0, "version %u: played: %ld", versions[v], played);
+                pt_collect(watcher);
+                n = pt_events(what, where, 16);
+                PTCHECK(n >= 1 && what[n - 1] == (PULSE_FACILITY_SINK_INPUT | PULSE_EVENT_NEW) && (versions[v] < 13 || where[n - 1] == (unsigned long)played), "version %u: a new sink input is announced", versions[v]);
+                for (int block = 0; block < 22; block++)
+                {
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                        if (heard_frames + 256 <= 6000)
+                                memcpy(heard + 2 * heard_frames, out, 256 * 4);
+                        heard_frames += 256;
+                }
+                {
+                        long bad = -1;
+
+                        for (long i = 96; i < 4704 && bad < 0; i++)
+                                if (heard[2 * i] != pt_source[2 * (1000 + i)] || heard[2 * i + 1] != pt_source[2 * (1000 + i) + 1])
+                                        bad = i;
+                        PTCHECK(bad < 0, "version %u: the frames come out as they went in from the 96th to the 96th from the end: differs at %ld", versions[v], bad);
+                        PTCHECK(labs(heard[2 * 5]) <= labs(pt_source[2 * 1005]), "version %u: the first are the fade-in", versions[v]);
+                        bad = -1;
+                        for (long i = 4704; i < 4800 && bad < 0; i++)
+                                if (labs(heard[2 * i]) > labs(pt_source[2 * (1000 + i)]) || labs(heard[2 * i + 1]) > labs(pt_source[2 * (1000 + i) + 1]))
+                                        bad = i;
+                        PTCHECK(bad < 0 && heard[2 * 4799] == 0, "version %u: and the last 96 fade out to nothing: %ld", versions[v], bad);
+                        PTCHECK(heard[2 * 4900] == 0 && heard[2 * 5500 + 1] == 0, "version %u: and silence after", versions[v]);
+                }
+                PTCHECK(pt_engine.streams_made == 1 && pt_engine.streams_freed == 1, "version %u: the stream ended by itself and was freed", versions[v]);
+                pt_collect(watcher);
+                n = pt_events(what, where, 16);
+                {
+                        int removed = 0;
+
+                        for (int i = 0; i < n; i++)
+                                removed += what[i] == (PULSE_FACILITY_SINK_INPUT | PULSE_EVENT_REMOVE) && (versions[v] < 13 || where[i] == (unsigned long)played);
+                        PTCHECK(removed == 1, "version %u: and its end is announced once: %d", versions[v], removed);
+                }
+                PTCHECK(pt_remove_sample(slot, 28, "bell") == 0, "version %u: the sample is taken out", versions[v]);
+                pt_collect(watcher);
+                n = pt_events(what, where, 16);
+                PTCHECK(n >= 1 && what[n - 1] == (PULSE_FACILITY_SAMPLE_CACHE | PULSE_EVENT_REMOVE) && where[n - 1] == 0, "version %u: and announced", versions[v]);
+                PTCHECK(pt_play(slot, versions[v], 29, PULSE_INVALID, 0, PULSE_INVALID, "bell") == -100 - PULSE_ERR_NOENTITY, "version %u: it cannot be played after", versions[v]);
+                PTCHECK(pt_remove_sample(slot, 30, "bell") == PULSE_ERR_NOENTITY, "version %u: nor taken out twice", versions[v]);
+                PTCHECK(pt_engine.sample_total == 0 && pt_allocs == pt_releases + 2, "version %u: the cache holds nothing (the two clients are still here)", versions[v]);
+                pulse_client_close(&pt_engine, slot);
+                pulse_client_close(&pt_engine, watcher);
+                PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "version %u: every block given back", versions[v]);
+        }
+}
+
+// Playing it otherwise: a volume, a sink that is not the default, a rate and a channel count that are not the sink's, a replacement while one plays, a removal while one plays.
+static void pt_test_samples_play(void)
+{
+        static unsigned char out[AUDIO_BLOCK * 4];
+        static short sound[2 * 4800];
+        static float tone[24000], got[48000];
+        unsigned long channel, asked;
+        long slot, played, heard = 0, root_for_samples;
+        static short heard_buffer[2 * 6000];
+
+        pt_make_source();
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        pulse_sink_add(&pt_engine, "other", "Other", 44100);
+        slot = pt_connect(1000, 140, 35, "Player");
+        root_for_samples = pt_connect(0, 141, 35, "Root");
+        for (int i = 0; i < 4800; i++)
+        {
+                sound[2 * i] = pt_source[2 * (2000 + i)];
+                sound[2 * i + 1] = pt_source[2 * (2000 + i) + 1];
+        }
+        PTCHECK(pt_upload(slot, 35, 20, "beep", AUDIO_FORMAT_S16LE, 2, 48000, sizeof(sound), &channel, &asked) == 0 && pt_upload_send(slot, 21, channel, sound, sizeof(sound), 4096) == 0, "a sample");
+        // At a volume: an eighth, exactly, after the fade-in.
+        played = pt_play(slot, 35, 22, PULSE_INVALID, 0, 0x8000, "beep");
+        PTCHECK(played >= 0, "played at 0x8000");
+        for (int block = 0; block < 22; block++)
+        {
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                if (heard + 256 <= 6000)
+                        memcpy(heard_buffer + 2 * heard, out, 256 * 4);
+                heard += 256;
+        }
+        {
+                long bad = -1;
+
+                for (long i = 120; i < 4704 && bad < 0; i++)
+                        if (heard_buffer[2 * i] != (short)pt_ref_wide((float)sound[2 * i] / 32768.0f * 0.125f, 32768.0, 32767.0) ||
+                            heard_buffer[2 * i + 1] != (short)pt_ref_wide((float)sound[2 * i + 1] / 32768.0f * 0.125f, 32768.0, 32767.0))
+                                bad = i;
+                PTCHECK(bad < 0, "an eighth, from frame 120: differs at %ld", bad);
+        }
+        // On the other sink (44100) it is resampled to its rate; named by index and by name.
+        played = pt_play(slot, 35, 23, 1, 0, PULSE_INVALID, "beep");
+        PTCHECK(played >= 0, "played on the second sink by its index");
+        PTCHECK(pt_play(slot, 35, 24, PULSE_INVALID, "other", PULSE_INVALID, "beep") >= 0, "and by its name");
+        PTCHECK(pt_play(slot, 35, 25, 0, "null", PULSE_INVALID, "beep") == -100 - PULSE_ERR_INVALID, "an index and a name together are a mistake");
+        PTCHECK(pt_play(slot, 35, 26, 7, 0, PULSE_INVALID, "beep") == -100 - PULSE_ERR_NOENTITY, "a sink that is none");
+        for (int block = 0; block < 30; block++)
+                pulse_sink_mix(&pt_engine, 1, out, AUDIO_FORMAT_S16LE, 2, 256);
+        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed, "both ended on their own: %lu made, %lu freed", pt_engine.streams_made, pt_engine.streams_freed);
+        PTCHECK(pt_remove_sample(slot, 27, "beep") == 0, "taken out");
+        // A tone at 24000 Hz in one channel of floats, played on a sink of 48000: the amplitude where it was, and nothing else.
+        for (int i = 0; i < 24000; i++)
+                tone[i] = (float)(0.5 * sin(2.0 * M_PI * 1000.0 * (double)i / 24000.0));
+        PTCHECK(pt_upload(slot, 35, 30, "tone", AUDIO_FORMAT_F32LE, 1, 24000, sizeof(tone), &channel, &asked) == 0 && pt_upload_send(slot, 31, channel, tone, sizeof(tone), 60000) == 0, "a second of a tone in 24000 Hz floats");
+        played = pt_play(slot, 35, 32, PULSE_INVALID, 0, PULSE_INVALID, "tone");
+        PTCHECK(played >= 0, "played");
+        {
+                long frames = 0;
+
+                for (int block = 0; block < 190; block++)
+                {
+                        static float conv[AUDIO_BLOCK];
+                        short *s16 = (short *)out;
+
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                        for (int i = 0; i < 256; i++)
+                                conv[i] = (float)s16[2 * i] / 32768.0f;
+                        if (frames + 256 <= 48000)
+                                memcpy(got + frames, conv, 256 * sizeof(float));
+                        frames += 256;
+                }
+                {
+                        double amplitude, rest, db;
+
+                        rest = pt_fit(got + 4800, 24000, 1000.0, 48000.0, &amplitude);
+                        db = 20.0 * log10(amplitude / 0.5);
+                        PTCHECK(fabs(db) < 0.02 && rest < 0.0003, "the tone through the resampler: %.4f dB from where it was, the rest %g", db, rest);
+                }
+        }
+        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed, "ended");
+        PTCHECK(pt_remove_sample(slot, 33, "tone") == 0, "taken out");
+        // Replaced while it plays: the one playing goes on with the old data, the next is the new; the index is the same and the watchers are told of a change.
+        {
+                static short second[2 * 4800];
+                long first_stream, heard_old = 0;
+                struct pt_sample_info info;
+                unsigned long what[16], where[16], ding;
+                long watcher = pt_connect(0, 142, 35, "Watcher");
+                struct pt_w w = {{0}, 0};
+                int n, changed = 0;
+
+                w.n = 0;
+                pt_u32(&w, 0x2ff);
+                pt_command(watcher, PULSE_COMMAND_SUBSCRIBE, 1, &w);
+                pt_collect(watcher);
+                for (int i = 0; i < 4800; i++)
+                {
+                        second[2 * i] = (short)(i % 200 * 100);
+                        second[2 * i + 1] = (short)(-(i % 200) * 100);
+                }
+                PTCHECK(pt_upload(slot, 35, 34, "ding", AUDIO_FORMAT_S16LE, 2, 48000, sizeof(sound), &channel, &asked) == 0 && pt_upload_send(slot, 35, channel, sound, sizeof(sound), 4096) == 0, "a sample to be replaced");
+                PTCHECK(pt_sample_info(slot, 35, 36, PULSE_INVALID, "ding", &info), "its info");
+                ding = info.index;
+                first_stream = pt_play(slot, 35, 37, PULSE_INVALID, 0, PULSE_INVALID, "ding");
+                PTCHECK(first_stream >= 0, "played");
+                for (int block = 0; block < 4; block++)
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                heard_old = 4 * 256;
+                pt_collect(watcher);
+                PTCHECK(pt_upload(slot, 35, 38, "ding", AUDIO_FORMAT_S16LE, 2, 48000, sizeof(second), &channel, &asked) == 0 && pt_upload_send(slot, 39, channel, second, sizeof(second), 4096) == 0,
+                        "uploaded again under the name");
+                pt_collect(watcher);
+                n = pt_events(what, where, 16);
+                for (int i = 0; i < n; i++)
+                        changed += what[i] == (PULSE_FACILITY_SAMPLE_CACHE | PULSE_EVENT_CHANGE) && where[i] == info.index;
+                PTCHECK(changed == 1, "a change of the same index is announced: %d", changed);
+                PTCHECK(pt_sample_info(slot, 35, 40, PULSE_INVALID, "ding", &info) && info.index == ding, "the cache has one of that name, and it has the index it had");
+                PTCHECK(pt_engine.sample_total == sizeof(sound) + sizeof(second), "both are held while the old plays: %lu", pt_engine.sample_total);
+                for (int block = 0; block < 20; block++)
+                {
+                        short *s16 = (short *)out;
+
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                        // the old one is what is playing: its frames, from where it was
+                        if (block < 15)
+                                for (int i = 0; i < 256; i++)
+                                        if (heard_old + i >= 120 && heard_old + i < 4704 && (s16[2 * i] != sound[2 * (heard_old + i)] || s16[2 * i + 1] != sound[2 * (heard_old + i) + 1]))
+                                        {
+                                                PTCHECK(0, "the old sample goes on: frame %ld differs", heard_old + i);
+                                                block = 99;
+                                                break;
+                                        }
+                        heard_old += 256;
+                }
+                PTCHECK(pt_engine.sample_total == sizeof(second), "and the old is given back when it has ended: %lu", pt_engine.sample_total);
+                played = pt_play(slot, 35, 41, PULSE_INVALID, 0, PULSE_INVALID, "ding");
+                PTCHECK(played >= 0, "the next is the new one");
+                {
+                        short *s16 = (short *)out;
+                        int same = 1;
+
+                        for (int block = 0; block < 2; block++)
+                        {
+                                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                                if (block == 1)
+                                        for (int i = 0; i < 256; i++)
+                                                same &= s16[2 * i] == second[2 * (256 + i)] && s16[2 * i + 1] == second[2 * (256 + i) + 1];
+                        }
+                        PTCHECK(same, "and is the new data");
+                }
+                // Taken out while it plays: it plays on, and the memory goes when it has.
+                PTCHECK(pt_remove_sample(slot, 42, "ding") == 0 && pt_engine.sample_total == sizeof(second), "taken out while it plays: still held");
+                PTCHECK(pt_play(slot, 35, 43, PULSE_INVALID, 0, PULSE_INVALID, "ding") == -100 - PULSE_ERR_NOENTITY, "and not played again, though it plays still");
+                PTCHECK(!pt_sample_info(slot, 35, 44, PULSE_INVALID, "ding", &info) && pt_expect_error(44, PULSE_ERR_NOENTITY), "nor shown by its name");
+                pt_command(slot, PULSE_COMMAND_GET_SAMPLE_INFO_LIST, 45, 0);
+                pt_collect(slot);
+                PTCHECK(pt_find(PULSE_COMMAND_REPLY) && pt_find(PULSE_COMMAND_REPLY)->length == 10, "nor listed");
+                for (int block = 0; block < 20; block++)
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                PTCHECK(pt_engine.sample_total == 0 && pt_engine.streams_made == pt_engine.streams_freed, "and gone when it has ended");
+                pulse_client_close(&pt_engine, watcher);
+        }
+        // Its stream belongs to no program: it says what it is, and plays on when the program that asked has gone.
+        {
+                struct pulse_stream *st;
+                char text[PULSE_VALUE + 1];
+                long who = pt_connect(1000, 143, 35, "Doorbell"), idx, bad = -1;
+
+                PTCHECK(pt_upload(who, 35, 50, "door", AUDIO_FORMAT_S16LE, 2, 48000, sizeof(sound), &channel, &asked) == 0 && pt_upload_send(who, 51, channel, sound, sizeof(sound), 4096) == 0, "a sound");
+                idx = pt_play(who, 35, 52, PULSE_INVALID, 0, PULSE_INVALID, "door");
+                st = idx >= 0 ? pulse_input_of(&pt_engine, (unsigned long)idx) : 0;
+                PTCHECK(st && st->client == -1 && st->uid == 1000, "its stream belongs to no connection, and to the user who asked");
+                PTCHECK(st && pulse_props_text(&st->props, "application.name", text, sizeof(text)) && !strcmp(text, "Doorbell"), "it is the asking program's, by name");
+                PTCHECK(st && pulse_props_text(&st->props, "media.role", text, sizeof(text)) && !strcmp(text, "event") && pulse_props_text(&st->props, "media.name", text, sizeof(text)) && !strcmp(text, "A sound"),
+                        "and has the properties it was uploaded with and asked for");
+                pulse_client_close(&pt_engine, who);
+                heard = 0;
+                for (int block = 0; block < 22; block++)
+                {
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                        if (heard + 256 <= 6000)
+                                memcpy(heard_buffer + 2 * heard, out, 256 * 4);
+                        heard += 256;
+                }
+                for (long i = 96; i < 4704 && bad < 0; i++)
+                        if (heard_buffer[2 * i] != sound[2 * i] || heard_buffer[2 * i + 1] != sound[2 * i + 1])
+                                bad = i;
+                PTCHECK(bad < 0, "it plays on all the same when the program has gone: differs at %ld", bad);
+                PTCHECK(pt_remove_sample(root_for_samples, 53, "door") == 0, "taken out");
+        }
+        {
+                long who = pt_connect(1000, 144, 35, "Recall");
+                long bad = -1;
+
+                PTCHECK(pt_upload(who, 35, 60, "remembered", AUDIO_FORMAT_S16LE, 2, 48000, sizeof(sound), &channel, &asked) == 0 && pt_upload_send(who, 61, channel, sound, sizeof(sound), 4096) == 0, "a sound");
+                pt_recall_has = 1;
+                pt_recall_volume = 0x8000;
+                pt_recall_mute = 0;
+                PTCHECK(pt_play(who, 35, 62, PULSE_INVALID, 0, PULSE_INVALID, "remembered") >= 0, "played by a program whose volume is remembered");
+                pt_recall_has = 0;
+                heard = 0;
+                for (int block = 0; block < 22; block++)
+                {
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+                        if (heard + 256 <= 6000)
+                                memcpy(heard_buffer + 2 * heard, out, 256 * 4);
+                        heard += 256;
+                }
+                for (long i = 120; i < 4704 && bad < 0; i++)
+                        if (heard_buffer[2 * i] != (short)pt_ref_wide((float)sound[2 * i] / 32768.0f * 0.125f, 32768.0, 32767.0))
+                                bad = i;
+                PTCHECK(bad < 0, "at the volume remembered of its name, an eighth: differs at %ld", bad);
+                pulse_client_close(&pt_engine, who);
+        }
+        pulse_client_close(&pt_engine, slot);
+        PTCHECK(pt_allocs == pt_releases + 2 && pt_engine.sample_total == sizeof(sound), "every block given back but the sound left in the cache and the client who will take it out");
+        PTCHECK(pt_remove_sample(root_for_samples, 70, "remembered") == 0 && pt_engine.sample_total == 0, "taken out");
+        pulse_client_close(&pt_engine, root_for_samples);
+        PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "every block given back");
+        for (int t = 0; t < AUDIO_TABLES; t++)
+                PTCHECK(audio_tables[t].users == 0, "table %d is not kept", t);
+}
+
+// Who may, and every cap and refusal of the cache.
+static void pt_test_samples_policy(void)
+{
+        static unsigned char big[PULSE_SAMPLE_MAX + 4096];
+        unsigned long channel, asked, second;
+        long root, user, other, played;
+        struct pt_w w = {{0}, 0};
+        const struct pt_frame *f;
+        static unsigned char out[AUDIO_BLOCK * 4];
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        // Before the handshake: refused, all five.
+        {
+                static const unsigned long commands[] = {PULSE_COMMAND_CREATE_UPLOAD_STREAM, PULSE_COMMAND_FINISH_UPLOAD_STREAM, PULSE_COMMAND_DELETE_UPLOAD_STREAM, PULSE_COMMAND_PLAY_SAMPLE,
+                                                         PULSE_COMMAND_REMOVE_SAMPLE};
+                long slot = pulse_client_open(&pt_engine, 0, 9);
+
+                for (unsigned i = 0; i < 5; i++)
+                {
+                        w.n = 0;
+                        pt_u32(&w, 1);
+                        pt_command(slot, commands[i], 3, &w);
+                        pt_collect(slot);
+                        PTCHECK(pt_expect_error(3, PULSE_ERR_ACCESS), "command %lu before the handshake is refused", commands[i]);
+                }
+                pulse_client_close(&pt_engine, slot);
+        }
+        root = pt_connect(0, 150, 35, "Root");
+        user = pt_connect(1000, 151, 35, "User");
+        other = pt_connect(1001, 152, 35, "Other");
+        memset(big, 0x11, sizeof(big));
+        // What is wrong with an upload.
+        PTCHECK(pt_upload(user, 35, 20, "", AUDIO_FORMAT_S16LE, 2, 48000, 4096, &channel, &asked) == PULSE_ERR_INVALID, "an empty name");
+        {
+                char long_name[PULSE_NAME + 8];
+
+                memset(long_name, 'x', sizeof(long_name));
+                long_name[PULSE_NAME] = 0;
+                PTCHECK(pt_upload(user, 35, 21, long_name, AUDIO_FORMAT_S16LE, 2, 48000, 4096, &channel, &asked) == PULSE_ERR_INVALID, "a name of 64 bytes");
+                long_name[PULSE_NAME - 1] = 0;
+                PTCHECK(pt_upload(user, 35, 22, long_name, AUDIO_FORMAT_S16LE, 2, 48000, 4096, &channel, &asked) == 0, "and of 63 is the longest");
+                w.n = 0;
+                pt_u32(&w, channel);
+                pt_command(user, PULSE_COMMAND_DELETE_UPLOAD_STREAM, 23, &w);
+                pt_collect(user);
+                PTCHECK(pt_expect_ack(23) && pt_engine.upload_total == 0, "the upload is given up");
+        }
+        PTCHECK(pt_upload(user, 35, 24, "a\tb", AUDIO_FORMAT_S16LE, 2, 48000, 4096, &channel, &asked) == PULSE_ERR_INVALID, "a name with a control byte");
+        PTCHECK(pt_upload(user, 35, 25, "a", 99, 2, 48000, 4096, &channel, &asked) == PULSE_ERR_INVALID, "a format there is not");
+        PTCHECK(pt_upload(user, 35, 26, "a", AUDIO_FORMAT_S16LE, 2, 0, 4096, &channel, &asked) == PULSE_ERR_INVALID, "no rate");
+        PTCHECK(pt_upload(user, 35, 27, "a", AUDIO_FORMAT_S16LE, 2, 48000, 0, &channel, &asked) == PULSE_ERR_INVALID, "no length");
+        PTCHECK(pt_upload(user, 35, 28, "a", AUDIO_FORMAT_S16LE, 2, 48000, 4098, &channel, &asked) == PULSE_ERR_INVALID, "a length that is not whole frames");
+        PTCHECK(pt_upload(user, 35, 29, "a", AUDIO_FORMAT_S16LE, 9, 48000, 4096, &channel, &asked) == PULSE_ERR_INVALID, "too many channels");
+        PTCHECK(pt_upload(root, 35, 30, "huge", AUDIO_FORMAT_S16LE, 2, 48000, PULSE_SAMPLE_MAX + 4, &channel, &asked) == PULSE_ERR_TOOLARGE, "a sample past the most");
+        // Data that is not right ends the client; a finish that is short is refused and the upload is gone.
+        PTCHECK(pt_upload(other, 35, 31, "x", AUDIO_FORMAT_S16LE, 2, 48000, 400, &channel, &asked) == 0, "an upload to be told too much");
+        PTCHECK(pt_data(other, channel, big, 404, 0, 0) == PULSE_DEAD, "more data than was said ends the client");
+        pulse_client_close(&pt_engine, other);
+        other = pt_connect(1001, 153, 35, "Other");
+        PTCHECK(pt_upload(other, 35, 32, "x", AUDIO_FORMAT_S16LE, 2, 48000, 400, &channel, &asked) == 0, "another");
+        PTCHECK(pt_data(other, channel, big, 100, 0, 8) == PULSE_DEAD, "a seek in an upload ends the client");
+        pulse_client_close(&pt_engine, other);
+        other = pt_connect(1001, 154, 35, "Other");
+        PTCHECK(pt_upload(other, 35, 33, "short", AUDIO_FORMAT_S16LE, 2, 48000, 400, &channel, &asked) == 0, "an upload to be finished short");
+        pt_data(other, channel, big, 396, 0, 0);
+        w.n = 0;
+        pt_u32(&w, channel);
+        pt_command(other, PULSE_COMMAND_FINISH_UPLOAD_STREAM, 34, &w);
+        pt_collect(other);
+        PTCHECK(pt_expect_error(34, PULSE_ERR_INVALID), "finished short, it is refused");
+        pt_command(other, PULSE_COMMAND_FINISH_UPLOAD_STREAM, 35, &w);
+        pt_collect(other);
+        PTCHECK(pt_expect_error(35, PULSE_ERR_NOENTITY) && pt_engine.upload_total == 0, "and the upload is gone");
+        w.n = 0;
+        pt_u32(&w, 77);
+        pt_command(other, PULSE_COMMAND_DELETE_UPLOAD_STREAM, 36, &w);
+        pt_collect(other);
+        PTCHECK(pt_expect_error(36, PULSE_ERR_NOENTITY), "a delete of a channel that is none");
+        // Hostile fields.
+        for (int k = 0; k < 3; k++)
+        {
+                struct pt_w bad = {{0}, 0};
+
+                if (k == 0)
+                        pt_str(&bad, "abc");
+                else if (k == 1)
+                {
+                        pt_str(&bad, "abc");
+                        pt_spec(&bad, AUDIO_FORMAT_S16LE, 2, 48000);
+                }
+                else
+                {
+                        pt_u32(&bad, 0);
+                        pt_u32(&bad, 0);
+                        pt_u32(&bad, 5);
+                }
+                PTCHECK(pt_command(other, k == 2 ? PULSE_COMMAND_PLAY_SAMPLE : PULSE_COMMAND_CREATE_UPLOAD_STREAM, 37, &bad) == PULSE_DEAD, "hostile fields %d end the client", k);
+                pulse_client_close(&pt_engine, other);
+                other = pt_connect(1001, 155 + k, 35, "Other");
+        }
+        // The caps: uploads of a client, a user's share, all of it, the table.
+        PTCHECK(pt_upload(user, 35, 40, "u1", AUDIO_FORMAT_S16LE, 2, 48000, 4096, &channel, &asked) == 0 && pt_upload(user, 35, 41, "u2", AUDIO_FORMAT_S16LE, 2, 48000, 4096, &second, &asked) == 0, "two uploads at once");
+        PTCHECK(pt_upload(user, 35, 42, "u3", AUDIO_FORMAT_S16LE, 2, 48000, 4096, &second, &asked) == PULSE_ERR_TOOLARGE, "a third is too many");
+        w.n = 0;
+        pt_u32(&w, channel);
+        pt_command(other, PULSE_COMMAND_FINISH_UPLOAD_STREAM, 44, &w);
+        pt_collect(other);
+        PTCHECK(pt_expect_error(44, PULSE_ERR_NOENTITY), "another client's upload is not finished by this one");
+        pt_command(other, PULSE_COMMAND_DELETE_UPLOAD_STREAM, 45, &w);
+        pt_collect(other);
+        PTCHECK(pt_expect_error(45, PULSE_ERR_NOENTITY) && pt_engine.upload_total == 8192, "nor given up by it");
+        pulse_client_close(&pt_engine, user);
+        PTCHECK(pt_engine.upload_total == 0 && pt_allocs == pt_releases + 2, "a client that goes in the middle of two uploads gives them back");
+        user = pt_connect(1000, 156, 35, "User");
+        PTCHECK(pt_upload(user, 35, 43, "big", AUDIO_FORMAT_S16LE, 2, 48000, 3 << 20, &channel, &asked) == 0 && pt_upload_send(user, 44, channel, big, 3 << 20, 60000) == 0, "a user may hold 3 MiB");
+        PTCHECK(pt_upload(user, 35, 45, "more", AUDIO_FORMAT_S16LE, 2, 48000, 2 << 20, &channel, &asked) == PULSE_ERR_TOOLARGE, "and not 5");
+        PTCHECK(pt_upload(root, 35, 46, "root1", AUDIO_FORMAT_S16LE, 2, 48000, 4 << 20, &channel, &asked) == 0 && pt_upload_send(root, 47, channel, big, 4 << 20, 100000) == 0, "root may hold more: 4 MiB");
+        PTCHECK(pt_upload(root, 35, 48, "root2", AUDIO_FORMAT_S16LE, 2, 48000, 4 << 20, &channel, &asked) == 0 && pt_upload_send(root, 49, channel, big, 4 << 20, 100000) == 0, "and 4 more");
+        PTCHECK(pt_upload(root, 35, 50, "root3", AUDIO_FORMAT_S16LE, 2, 48000, 4 << 20, &channel, &asked) == 0 && pt_upload_send(root, 51, channel, big, 4 << 20, 100000) == 0, "and 4 more");
+        PTCHECK(pt_upload(root, 35, 52, "root4", AUDIO_FORMAT_S16LE, 2, 48000, 4 << 20, &channel, &asked) == PULSE_ERR_TOOLARGE, "and the cache is full at 16 MiB: %lu", pt_engine.sample_total);
+        // Who can take out and who can replace what.
+        PTCHECK(pt_remove_sample(other, 53, "root1") == PULSE_ERR_ACCESS, "another user cannot take out root's");
+        PTCHECK(pt_upload(other, 35, 54, "root2", AUDIO_FORMAT_S16LE, 2, 48000, 400, &channel, &asked) == 0 && pt_upload_send(other, 55, channel, big, 400, 400) == PULSE_ERR_ACCESS, "nor replace it");
+        PTCHECK(pt_remove_sample(root, 56, "big") == 0, "root can take out a user's");
+        PTCHECK(pt_remove_sample(user, 57, "root3") == PULSE_ERR_ACCESS, "and a user not root's");
+        // The sink input of a sample belongs to its player.
+        played = pt_play(other, 35, 58, PULSE_INVALID, 0, PULSE_INVALID, "root1");
+        PTCHECK(played >= 0, "another user may play root's sample");
+        {
+                struct pt_w info = {{0}, 0};
+
+                pt_u32(&info, (unsigned long)played);
+                pt_command(user, PULSE_COMMAND_GET_SINK_INPUT_INFO, 59, &info);
+                pt_collect(user);
+                PTCHECK(pt_expect_error(59, PULSE_ERR_NOENTITY), "its stream is not shown to a third user");
+                pt_command(other, PULSE_COMMAND_GET_SINK_INPUT_INFO, 60, &info);
+                pt_collect(other);
+                f = pt_find(PULSE_COMMAND_REPLY);
+                PTCHECK(f && f->tag == 60, "but to the one who played it");
+                pt_command(user, PULSE_COMMAND_KILL_SINK_INPUT, 61, &info);
+                pt_collect(user);
+                PTCHECK(pt_expect_error(61, PULSE_ERR_ACCESS), "and not killed by that user");
+                pt_command(root, PULSE_COMMAND_KILL_SINK_INPUT, 62, &info);
+                pt_collect(root);
+                PTCHECK(pt_expect_ack(62), "root kills it");
+        }
+        // Playing too many at once.
+        {
+                int made = 0, refused = 0;
+
+                for (int i = 0; i < PULSE_STREAMS_PER_CLIENT + 4; i++)
+                {
+                        long r = pt_play(other, 35, (unsigned long)(70 + i), PULSE_INVALID, 0, PULSE_INVALID, "root1");
+
+                        made += r >= 0;
+                        refused += r == -100 - PULSE_ERR_TOOLARGE;
+                }
+                PTCHECK(made == PULSE_STREAMS_PER_CLIENT && refused == 4, "a client has %d at once: %d made, %d refused", PULSE_STREAMS_PER_CLIENT, made, refused);
+        }
+        // Everything out: the cache's memory and every stream given back (the streams of samples belong to no program, so they are ended here).
+        pulse_client_close(&pt_engine, other);
+        for (int i = 0; i < PULSE_STREAMS; i++)
+                if (pt_engine.stream[i].used && !pt_engine.stream[i].dying)
+                        pulse_stream_end(&pt_engine, pt_engine.stream + i);
+        pt_remove_sample(root, 90, "root1");
+        pt_remove_sample(root, 91, "root2");
+        pt_remove_sample(root, 92, "root3");
+        for (int block = 0; block < 20; block++)
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
+        PTCHECK(pt_engine.sample_total == 0 && pt_engine.upload_total == 0 && pt_engine.streams_made == pt_engine.streams_freed, "the cache and the streams are empty: %lu bytes, %lu made, %lu freed", pt_engine.sample_total,
+                pt_engine.streams_made, pt_engine.streams_freed);
+        // The table: 64 sounds, and the 65th is too many.
+        {
+                int made = 0, refused = 0;
+                char name[16];
+
+                for (int i = 0; i < PULSE_SAMPLES + 2; i++)
+                {
+                        snprintf(name, sizeof(name), "s%d", i);
+                        if (pt_upload(root, 35, (unsigned long)(100 + i), name, AUDIO_FORMAT_S16LE, 2, 48000, 400, &channel, &asked) == 0 && pt_upload_send(root, (unsigned long)(200 + i), channel, big, 400, 400) == 0)
+                                made++;
+                        else
+                                refused++;
+                }
+                PTCHECK(made == PULSE_SAMPLES && refused == 2, "the table holds %d: %d made, %d refused", PULSE_SAMPLES, made, refused);
+                for (int i = 0; i < PULSE_SAMPLES; i++)
+                {
+                        snprintf(name, sizeof(name), "s%d", i);
+                        pt_remove_sample(root, (unsigned long)(300 + i), name);
+                }
+        }
+        pulse_client_close(&pt_engine, user);
+        pulse_client_close(&pt_engine, root);
+        PTCHECK(pt_engine.sample_total == 0 && pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "every block given back");
+}
+
 /* ---- a recorded session, and what is done to it ---- */
 
 static unsigned char pt_session[1 << 17];
@@ -175897,6 +176583,43 @@ static void pt_make_session(void)
         w.n = 0;
         pt_u32(&w, 1);
         PT_FRAME(PULSE_COMMAND_DELETE_RECORD_STREAM, &w, 0);
+        // A sound kept in the server, played, asked about, and taken out.
+        w.n = 0;
+        pt_str(&w, "Recorded bell");
+        pt_spec(&w, AUDIO_FORMAT_S16LE, 2, 48000);
+        pt_map(&w, 2, pt_stereo);
+        pt_u32(&w, 2400);
+        pt_props(&w, "media.name", "Recorded bell", "media.role", "event");
+        PT_FRAME(PULSE_COMMAND_CREATE_UPLOAD_STREAM, &w, 0);
+        {
+                long length = 2400;
+
+                memset(frame, 0, 20);
+                frame[2] = (unsigned char)(length >> 8);
+                frame[3] = (unsigned char)length;
+                frame[7] = 2;
+                memcpy(frame + 20, pt_source + 4000 * 2, (size_t)length);
+                pt_record(frame, 20 + length);
+        }
+        w.n = 0;
+        pt_u32(&w, 2);
+        PT_FRAME(PULSE_COMMAND_FINISH_UPLOAD_STREAM, &w, 0);
+        w.n = 0;
+        pt_u32(&w, PULSE_INVALID);
+        pt_str(&w, 0);
+        pt_u32(&w, 0x8000);
+        pt_str(&w, "Recorded bell");
+        pt_props(&w, "media.role", "event", 0, 0);
+        PT_FRAME(PULSE_COMMAND_PLAY_SAMPLE, &w, 0);
+        w.n = 0;
+        pt_u32(&w, PULSE_INVALID);
+        pt_str(&w, "Recorded bell");
+        PT_FRAME(PULSE_COMMAND_GET_SAMPLE_INFO, &w, 0);
+        w.n = 0;
+        PT_FRAME(PULSE_COMMAND_GET_SAMPLE_INFO_LIST, &w, 0);
+        w.n = 0;
+        pt_str(&w, "Recorded bell");
+        PT_FRAME(PULSE_COMMAND_REMOVE_SAMPLE, &w, 0);
 #undef PT_FRAME
 }
 
@@ -176077,11 +176800,28 @@ static void pt_test_fuzz(void)
         for (long i = 0; i < PULSE_CLIENTS; i++)
                 if (pt_engine.client[i])
                         pulse_client_close(&pt_engine, i);
+        // What the cache keeps outlives the programs that put it there; the sounds are taken out here, as a server that ended would.
+        for (int i = 0; i < PULSE_SAMPLES; i++)
+                if (pt_engine.sample[i].used)
+                        pt_engine.sample[i].condemned = 1;
         for (int block = 0; block < 6; block++)
         {
                 pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 512);
                 pulse_sink_mix(&pt_engine, 1, out, AUDIO_FORMAT_S16LE, 2, 512);
         }
+        // The streams that play a sound have no program to end them: they are ended with what they play.
+        for (int i = 0; i < PULSE_STREAMS; i++)
+                if (pt_engine.stream[i].used && !pt_engine.stream[i].dying)
+                        pulse_stream_end(&pt_engine, pt_engine.stream + i);
+        for (int block = 0; block < 4; block++)
+        {
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 512);
+                pulse_sink_mix(&pt_engine, 1, out, AUDIO_FORMAT_S16LE, 2, 512);
+        }
+        for (int i = 0; i < PULSE_SAMPLES; i++)
+                if (pt_engine.sample[i].used)
+                        pulse_sample_release(&pt_engine, pt_engine.sample + i);
+        PTCHECK(pt_engine.sample_total == 0 && pt_engine.upload_total == 0, "the cache is empty: %lu and %lu bytes", pt_engine.sample_total, pt_engine.upload_total);
         PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped, "clients: %lu made, %lu dropped", pt_engine.clients_made, pt_engine.clients_dropped);
         PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_engine.ring_total == 0, "streams: %lu made, %lu freed, %lu ring bytes", pt_engine.streams_made, pt_engine.streams_freed, pt_engine.ring_total);
         PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "blocks: %ld made, %ld given back", pt_allocs, pt_releases);
@@ -176091,7 +176831,8 @@ static void pt_test_fuzz(void)
         PTCHECK(pt_engine.streams_made > 200, "the fuzz reached the streams: %lu", pt_engine.streams_made);
         PTCHECK(pt_engine.records_made == pt_engine.records_freed && pulse_source_wanted(&pt_engine, 0) == 0 && pulse_source_wanted(&pt_engine, mic) == 0, "records: %lu made, %lu freed", pt_engine.records_made,
                 pt_engine.records_freed);
-        printf("  fuzz: %lu record streams made\n", pt_engine.records_made);
+        printf("  fuzz: %lu record streams made, %lu sounds put in the cache\n", pt_engine.records_made, pt_engine.next_sample);
+        PTCHECK(pt_engine.next_sample > 20, "the fuzz reached the cache: %lu", pt_engine.next_sample);
         PTCHECK(pt_engine.records_made > 100, "the fuzz reached the record streams: %lu", pt_engine.records_made);
         (void)pt_fuzz_dead;
 }
@@ -176426,6 +177167,9 @@ int main(void)
         pt_test_record_commands();
         pt_test_record_sources();
         pt_test_record_monitor();
+        pt_test_samples();
+        pt_test_samples_play();
+        pt_test_samples_policy();
         pt_test_caps();
         pt_test_memory();
         pt_test_session();
