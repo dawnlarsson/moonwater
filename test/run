@@ -16075,8 +16075,28 @@ fi
         echo '[ -x /tmp/input_probe_clang ] && /tmp/input_probe_clang; echo input-clang-exit $?'
         echo 'mkdir -p /tmp/bwroot/bin /tmp/bwroot/etc /tmp/bwroot/tmp /tmp/bwroot/dev /tmp/bwroot/proc /tmp/bwroot/sys /tmp/bwroot/run /tmp/bwroot/var /tmp/bwroot/usr /tmp/bwroot/lib'
         echo 'cp /tmp/input_probe /tmp/bwroot/bin/probe'
-        echo 'echo input-real-bowl-start'
-        echo 'bowl /tmp/bwroot /bin/probe > /tmp/bowl.out 2>&1; cat /tmp/bowl.out; echo input-real-bowl-exit $?'
+        echo 'mkdir -p /etc/moonwater'
+        #       The grants file is the only thing that gives a bowl the input
+        #       group: each case writes it, then launches the probe in a bowl.
+        echo 'run_bowl() { echo input-$1-start; bowl /tmp/bwroot /bin/probe > /tmp/bowl.out 2>&1; st=$?; cat /tmp/bowl.out; echo input-$1-exit $st; }'
+        echo 'printf "input /tmp/bwroot\n" > /etc/moonwater/input-bowls'
+        echo 'run_bowl granted'
+        echo 'rm -f /etc/moonwater/input-bowls'
+        echo 'run_bowl ungranted'
+        echo 'i=0; while [ $i -lt 300 ]; do echo "input /tmp/bwroot"; i=$((i+1)); done > /etc/moonwater/input-bowls'
+        echo 'run_bowl oversize'
+        echo 'printf "inputs /tmp/bwroot\nroot /tmp/bwroot\ninput /tmp/bwroot/x\ninput  /tmp/bwroot\n" > /etc/moonwater/input-bowls'
+        echo 'run_bowl words'
+        echo 'printf "input /tmp/bwroot\000junk\n\rinput /tmp/bwroot\n" > /etc/moonwater/input-bowls'
+        echo 'run_bowl bytes'
+        echo 'printf "input /tmp/otherroot\n" > /etc/moonwater/input-bowls'
+        echo 'run_bowl otherroot'
+        echo 'printf "inputs x\ninput /tmp/bwroot\n" > /etc/moonwater/input-bowls'
+        echo 'run_bowl mixed'
+        echo ': > /etc/moonwater/input-bowls'
+        echo 'run_bowl removed'
+        echo 'echo input-group-line $(grep -c "^input:x:104:$" /etc/group 2> /dev/null)'
+        echo 'rm -f /etc/moonwater/input-bowls'
         echo 'echo input-bowl-start'
         echo '/tmp/input_probe --bowl-user; echo input-bowl-exit $?'
         echo '/tmp/input_probe --bowl-user-no-input > /tmp/input_denied 2>&1; echo input-denied-exit $?'
@@ -16153,11 +16173,30 @@ sed -n '/^input-bowl-start/,/^input-bowl-exit/p' "$work/transcript" > "$work/bow
 #       And a bowl's own launch (bowl ROOT PROGRAM, the default view), which is
 #       the path a program in a bowl takes: its user is the bowl's, and the
 #       probe runs in it unchanged.
-sed -n '/^input-real-bowl-start/,/^input-real-bowl-exit/p' "$work/transcript" > "$work/real-bowl"
-says real-bowl 'a bowl launch creates a virtual pad'  'uinput device created ok'
-says real-bowl 'a bowl launch finds js0 and reads it' 'button press read back ok'
-says real-bowl 'a bowl launch passes the probe'       'probe passed'
-says real-bowl 'a bowl launch exits 0'                'input-real-bowl-exit 0'
+#       The grants file: a bowl it names gets the input group and the probe
+#       runs to its end; every other case is refused /dev/uinput. Each case is
+#       the lines between its own two markers.
+grant_case()
+{
+        sed -n "/^input-$1-start/,/^input-$1-exit/p" "$work/transcript" > "$work/grant-$1"
+}
+for case_name in granted ungranted oversize words bytes otherroot mixed removed; do
+        grant_case "$case_name"
+done
+says grant-granted 'a bowl the grants file names creates a virtual pad' 'uinput device created ok'
+says grant-granted 'a granted bowl finds js0 and reads the press'        'button press read back ok'
+says grant-granted 'a granted bowl passes the probe'                     'probe passed'
+says grant-granted 'a granted bowl exits 0'                              'input-granted-exit 0'
+says grant-ungranted 'a bowl with no grants file cannot make a pad'    'uinput key bits failed'
+says grant-ungranted 'a bowl with no grants file cannot find js0'        'joystick node appears failed'
+says grant-ungranted 'a bowl with no grants file exits 1'                'input-ungranted-exit 1'
+says grant-oversize  'an oversize grants file grants nothing'            'uinput key bits failed'
+says grant-words     'lines with the wrong words grant nothing'          'uinput key bits failed'
+says grant-bytes     'a line with a NUL or a control byte grants nothing' 'uinput key bits failed'
+says grant-otherroot 'a grant for another root grants this bowl nothing' 'uinput key bits failed'
+says grant-mixed     'a valid grant among junk lines still grants'       'probe passed'
+says grant-removed   'an empty grants file is no grant'                  'uinput key bits failed'
+says transcript 'the host group input has no members'                   'input-group-line 1'
 says bowl 'the bowl user runs as uid 1000'            'running as uid 1000 gid 1000'
 says bowl 'a bowl user creates a virtual pad'         'uinput device created ok'
 says bowl 'a bowl user finds the joystick node'       'joystick node appears ok'

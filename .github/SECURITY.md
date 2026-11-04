@@ -270,20 +270,26 @@ attacker gets its invariants here once there is a lane that proves them.
   on every tier but the hardened and locked ones, which keep 65530: a count of
   mappings, not memory, and a tier that runs no games does not raise it.
 - **Game controllers** (`CONFIG_INPUT_UINPUT`, `CONFIG_INPUT_JOYDEV`,
-  `CONFIG_MOONWATER_INPUT_GROUP`, in kernel/profile/desktop). `/dev/uinput`
-  lets a program put events into the machine, and the event and joystick nodes
-  let it read every key and pointer event. On the desktop image those nodes are
-  mode 0660 in the input group (104), and init sets `/dev/uinput` the same way
-  at boot (`system_input_group`); every bowl's user is in the group, so a
-  program in a bowl, Steam Input's among them, can create a virtual pad and
-  read the machine's input. **This is the security consequence:** any program
-  in any bowl that the desktop runs can inject input events into the whole
-  machine (the session, the other bowls) and read every key typed on any
-  keyboard, passwords included. It is the cost of Steam Input, and it is the
-  desktop image's posture only. The hardened, locked and server profiles turn
-  the group off (`CONFIG_MOONWATER_INPUT_GROUP=n`, with `#> overrides`), and
-  there the nodes stay 0600 root, and uinput is absent in the hardened and
-  locked images. A kernel without the group does not change any node's mode.
+  `CONFIG_MOONWATER_INPUT_GROUP`, in kernel/profile/desktop). On the desktop
+  image the input device nodes (`/dev/input/event*`, `js*`, and `/dev/uinput`)
+  are mode 0660 in the input group, 104, which nobody is in by default. Only a
+  bowl the person set up for Steam, or explicitly allowed, is given the group,
+  at launch: `/etc/moonwater/input-bowls` names it with a line `input ROOT`, the
+  Steam profile's install writes that line and its remove takes it away, and
+  the launcher reads the file as root before it drops the user, bounded (over
+  4096 bytes grants nothing), by exact line (a second word, a control byte, a
+  trailing byte or another root grants nothing). Every other bowl launches as
+  before: no group, and no event, joystick or uinput node is reachable to it.
+  **This is the security consequence, and it is narrower than it was:** a
+  program in the Steam bowl can inject input events into the machine and read
+  every key and pointer event, passwords included, and so can any program in a
+  bowl someone allowed by hand. Steam Input needs both halves: the pad it makes
+  (`/dev/uinput`) and the controller it reads (`/dev/input/*`). The desktop image
+  only; the hardened, locked and server profiles turn the group off
+  (`CONFIG_MOONWATER_INPUT_GROUP=n`, with `#> overrides`), and there the nodes
+  stay 0600 root, and uinput is absent in the hardened and locked images. The
+  grants file is in /etc, which a bowl sees read-only; a marker inside a bowl's
+  own /var or root would be the bowl's to forge, and is not used.
   The mice nodes (`/dev/input/mice`, mouseN) are not in the group: mousedev is
   not changed here. `protected_regular` and `protected_fifos` bind
   root as well: its `>file` onto a file another user made in a sticky `/tmp`
