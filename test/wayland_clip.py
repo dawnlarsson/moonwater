@@ -101,7 +101,7 @@ row(wait_for(first, "cancelled"), "and the first client's source is cancelled, a
 # A paste whose reader keeps the lock of its pipe (test/wayland_hold.py, MW-2026-113): the compositor's write of the text waits
 # for the lock, and the compositor goes on all the same; when the reader lets go it gets the text.
 env = dict(os.environ, MOONWATER_ASKED="1")
-hold = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wayland_hold.py")],
+hold = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wayland_hold.py"), "paste"],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
 said = hold.stdout.readline().strip()
 if said == "ready":
@@ -122,6 +122,21 @@ except (OSError, subprocess.TimeoutExpired):
     got = ""
     hold.kill()
 row(got == "got %d" % len("third's text"), "and the text reaches it when it lets go of the lock", "it said %r" % got)
+
+# A copy ended in the same write that asked for it (MW-2026-114): the source's send event still goes out with the pipe's end,
+# which the compositor closed at the abort and then sent as a number that was nothing (the client was dropped) or was whatever
+# the compositor had opened since.
+copier = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "wayland_hold.py"), "copy"],
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+said = copier.stdout.readline().strip()
+if said == "ready":
+    key(30)
+    said = copier.stdout.readline().strip()
+try:
+    copier.wait(10)
+except subprocess.TimeoutExpired:
+    copier.kill()
+row(said == "sent fifo", "a copy ended in the same write as it was asked is still sent its pipe's end", "the client said %r" % said)
 
 for child in children:
     child.kill()

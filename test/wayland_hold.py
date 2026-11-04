@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """
-A paste reader that keeps its pipe's lock, for test/wayland_clip.py (MW-2026-113): a client of the wire, with a window and the
-keys, that asks for the selection at the next key into a pipe while a thread of its own splices into the same pipe from a
-socket that has nothing to say. A splice holds the pipe's lock while it waits, and a read or a write of the pipe takes that lock
-before it looks at O_NONBLOCK, so the compositor's write of the text waits for as long as the splice does; the compositor's loop
-must not be the one that waits.
+Two clients of the wire for test/wayland_clip.py, each with a window and the keys, that do at the next key what a toolkit
+does not:
 
-    MOONWATER_ASKED=1 python3 test/wayland_hold.py
+    MOONWATER_ASKED=1 python3 test/wayland_hold.py paste
+        asks for the selection into a pipe while a thread of its own splices into the same pipe from a socket that has
+        nothing to say (MW-2026-113). A splice holds the pipe's lock while it waits, and a read or a write of the pipe takes
+        that lock before it looks at O_NONBLOCK, so the compositor's write of the text waits for as long as the splice
+        does; the compositor's loop must not be the one that waits. It says "ready" when it has the keys and an offer,
+        "pasting" once the paste is asked, and at a line on its standard input lets go, reads the pipe and says "got N".
 
-It says "ready" when it has the keys and an offer of the selection, "pasting" once the paste is asked, and at a line on its
-standard input lets go of the lock, reads the pipe and says "got N" with the bytes that came, then ends.
+    MOONWATER_ASKED=1 python3 test/wayland_hold.py copy
+        sets a source as the selection and destroys it in the same write (MW-2026-114): the compositor has made a pipe for
+        the source and queued its write end with the source's send event, and the source's end lets the copy go before the
+        event is sent. It says "ready" when it has the keys, and after the key what came: "sent fifo" for the send event
+        with the pipe's end, "sent other" for one with a descriptor that is not a pipe, "dropped" when the compositor
+        ended the connection, "nothing" when no send event came.
 """
 import os
 import socket
+import stat
 import struct
 import sys
 import threading
 import time
 
-out = sys.stdout
+mode = sys.argv[1] if len(sys.argv) > 1 else "paste"
 
 
 def message(obj, op, *words, extra=b""):
@@ -34,6 +41,8 @@ def string(text):
 wire = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 wire.connect(os.environ.get("WAYLAND_DISPLAY", "/run/moonwater/wayland-0"))
 pending = b""
+received = []   # the descriptors that came, in order
+closed = [False]
 
 
 def events(timeout):
@@ -41,9 +50,15 @@ def events(timeout):
     global pending
     wire.settimeout(timeout)
     try:
-        pending += wire.recv(65536)
+        data, fds, _, _ = socket.recv_fds(wire, 65536, 16)
+        if not data:
+            closed[0] = True
+        pending += data
+        received.extend(fds)
     except socket.timeout:
         pass
+    except OSError:
+        closed[0] = True
     found, at = [], 0
     while at + 8 <= len(pending):
         obj, head = struct.unpack_from("<II", pending, at)
@@ -57,7 +72,7 @@ def events(timeout):
 
 def until(test, timeout=5.0):
     end = time.time() + timeout
-    while time.time() < end:
+    while time.time() < end and not closed[0]:
         for event in events(0.1):
             got = test(event)
             if got is not None:
@@ -92,7 +107,7 @@ os.pwrite(pool, b"\x40" * (64 * 64 * 4), 0)
 socket.send_fds(wire, [message(4, 0, 9, 64 * 64 * 4)], [pool])
 wire.sendall(message(9, 0, 10, 0, 64, 64, 256, 1) + message(6, 1, 10, 0, 0) + message(6, 9, 0, 0, 64, 64) + message(6, 6))
 
-# The keys, and an offer of the selection that is current (the last selection event names it).
+# The keys, and (to paste) an offer of the selection that is current: the last selection event names it.
 state = {"keys": False, "offer": 0}
 
 
@@ -102,16 +117,30 @@ def ready(event):
         state["keys"] = True
     if obj == 14 and op == 5:
         state["offer"] = struct.unpack_from("<I", body)[0]
-    return True if state["keys"] and state["offer"] else None
+    return True if state["keys"] and (state["offer"] or mode == "copy") else None
 
 
 if not until(ready, 8.0):
     print("no keys or no offer", state, flush=True)
     sys.exit(1)
 print("ready", flush=True)
-if not until(lambda e: True if e[0] == 13 and e[1] == 3 and struct.unpack_from("<I", e[2], 12)[0] == 1 else None, 8.0):
+key = until(lambda e: struct.unpack_from("<I", e[2])[0] if e[0] == 13 and e[1] == 3 and struct.unpack_from("<I", e[2], 12)[0] == 1 else None, 8.0)
+if not key:
     print("no key came", flush=True)
     sys.exit(1)
+
+if mode == "copy":
+    # A source of text set as the selection and destroyed at once, and a sync after them to know they were taken.
+    wire.sendall(message(12, 0, 15) + message(15, 0, extra=string("text/plain;charset=utf-8")) + message(14, 1, 15, key) +
+                 message(15, 1) + message(1, 0, 16))
+    sent = until(lambda e: len(received) if e[0] == 15 and e[1] == 1 else None, 5.0)
+    if closed[0] and sent is None:
+        print("dropped", flush=True)
+    elif sent is None:
+        print("nothing", flush=True)
+    else:
+        print("sent fifo" if stat.S_ISFIFO(os.fstat(received[-1]).st_mode) else "sent other", flush=True)
+    sys.exit(0)
 
 # The pipe's lock held by a splice from a socket that says nothing, and the paste asked into the same pipe.
 read_end, write_end = os.pipe()

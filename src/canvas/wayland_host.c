@@ -67,8 +67,9 @@ static struct
         unsigned int layout_told;
         unsigned long screens_told; // the screens the clients were last told, as compositor_wl_screens_digest says them
         long repeat_told[2];        // and the key repeat they were last told: its rate and its delay
-        // The clipboard's transfers. A pull is a copy's source being read: its pipe's read end (in), the end it was handed (out)
-        // until it has been sent, and the sealed file the text is gathered in (keep). A push is a paste: the compositor's text
+        // The clipboard's transfers. A pull is a copy's source being read: its pipe's read end (in) and the sealed file the text is
+        // gathered in (keep); the end the source writes to is the shim's, in the client's queue until it is sent, and the
+        // compositor's copy goes when it is, so the source's closing is the end of the file. A push is a paste: the compositor's text
         // (in, a descriptor of its own for the file, so a newer copy cannot change it half way) written to the client's (out).
         // Each is read and written by a thread of its own (worker), which says how it ended in finished (1 badly, 2 well) and
         // stops when the loop sets cancel; total is a paste's length, limit the most a copy may be.
@@ -1410,12 +1411,15 @@ static long compositor_wl_clip_pull(void *context, long client, long which)
         compositor_wl.transfer[slot].client = (int)client;
         compositor_wl.transfer[slot].row = row;
         compositor_wl.transfer[slot].in = fds[0];
-        compositor_wl.transfer[slot].out = fds[1];
+        compositor_wl.transfer[slot].out = -1; // the end the source writes is the shim's once handed over (MW-2026-114)
         compositor_wl.transfer[slot].keep = (int)keep;
         compositor_wl.transfer[slot].total = 0;
         compositor_wl.transfer[slot].limit = table->clip_limit;
         compositor_wl.transfer[slot].deadline = now + COMPOSITOR_WL_PULL_NS;
-        return compositor_wl_transfer_start(slot) ? fds[1] : -1;
+        if (compositor_wl_transfer_start(slot))
+                return fds[1];
+        system_close(fds[1]);
+        return -1;
 }
 
 // A copy that is ended: the shim ended it (its source went, or another copy came), or the client did.
@@ -1496,18 +1500,6 @@ static void compositor_wl_clip_push(void *context, long row, long which, long fd
         compositor_wl.transfer[slot].limit = 0;
         compositor_wl.transfer[slot].deadline = now + COMPOSITOR_WL_PUSH_NS;
         compositor_wl_transfer_start(slot);
-}
-
-// A client's pipe write end has been sent: ours is let go, so the source's end of file is its own closing.
-static void compositor_wl_clip_sent(long client, int fd)
-{
-        for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
-                if (compositor_wl.transfer[at].state == COMPOSITOR_WL_PULL && compositor_wl.transfer[at].client == client &&
-                    compositor_wl.transfer[at].out == fd)
-                {
-                        system_close(fd);
-                        compositor_wl.transfer[at].out = -1;
-                }
 }
 
 // The selection emptied by a client that held it: the compositor lets it go and tells the others, as for any selection.
@@ -1807,11 +1799,7 @@ static void compositor_wl_flush(long slot)
                 // MSG_DONTWAIT | MSG_NOSIGNAL
                 got = compositor_call(syscall(sendmsg), (positive)compositor_wl.fd[slot], (positive)message, 0x40 | 0x4000, 0, 0, 0);
                 if (got > 0)
-                {
-                        wayland_sent(slot, got);
-                        for (long at = 0; at < fd_count && at < WAYLAND_OUT_FDS; at++)
-                                compositor_wl_clip_sent(slot, pass[at]);
-                }
+                        wayland_sent(slot, got); // which closes a copy's pipe end that went with it: it is the shim's
                 else if (got != -11)
                 {
                         compositor_wl_drop(slot);

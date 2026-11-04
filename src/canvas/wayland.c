@@ -241,9 +241,10 @@ struct wayland_host
         long (*seat)(void *context);
         long (*locks)(void *context);
         // The clipboard, which the compositor holds as text (which is WAYLAND_CLIP_*). clip_size is the bytes of the selection, 0
-        // for none (and while the service is off). clip_pull is a descriptor for a client's source to write its text to, which the
-        // host reads on its own, makes the selection of and says so (wayland_selection_changed, then wayland_clip_pulled), or -1
-        // for a copy it will not take; clip_abort ends a pull. clip_push writes the selection to a descriptor a client gave for the
+        // for none (and while the service is off). clip_pull is a descriptor for a client's source to write its text to, whose other
+        // end the host reads on its own, makes the selection of and says so (wayland_selection_changed, then wayland_clip_pulled), or -1
+        // for a copy it will not take; the descriptor is the shim's from then on, closed once it is sent (wayland_sent) or its client
+        // is gone, so an abort never closes a number still waiting in the queue. clip_abort ends a pull. clip_push writes the selection to a descriptor a client gave for the
         // window row, and takes the descriptor whatever comes of it. clip_clear empties the selection when the client holds it.
         // dma-bufs. dmabuf_info is what is taken (0 for nothing, which keeps zwp_linux_dmabuf_v1 from being offered), dmabuf_table the
         // file of format and modifier pairs the feedback names (the host's: the shim never closes it, -1 for none), dmabuf_map a
@@ -432,6 +433,7 @@ struct wayland_client
         long out_length;
         unsigned char out[WAYLAND_OUT];
         long out_fds[WAYLAND_OUT_FDS], out_fd_at[WAYLAND_OUT_FDS], out_fd_count;
+        unsigned char out_fd_owned[WAYLAND_OUT_FDS]; // the shim's own (a copy's pipe), closed once sent; the others are the host's
         long in_fds[WAYLAND_FDS], in_fd_count;
         unsigned long serial;
         long pool_bytes;
@@ -3506,6 +3508,7 @@ static void wayland_keyboard_keymap(struct wayland_client *c, long slot)
         {
                 wayland_word(&e, WLN_wl_keyboard_keymap_format_xkb_v1);
                 wayland_word(&e, (unsigned long)size);
+                c->out_fd_owned[c->out_fd_count] = 0;
                 c->out_fds[c->out_fd_count] = fd;
                 c->out_fd_at[c->out_fd_count++] = e.start;
         }
@@ -4063,8 +4066,11 @@ static int wayland_set_selection(struct wayland_client *c, struct wayland_object
         c->pending[which] = (unsigned char)(index + 1);
         e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
         wayland_string(&e, mime);
+        // The shim's from here (MW-2026-114): the host that ends the copy before this is sent has nothing to close.
+        c->out_fd_owned[c->out_fd_count] = 1;
         c->out_fds[c->out_fd_count] = fd;
         c->out_fd_at[c->out_fd_count++] = e.start;
+        wayland.fds++;
         wayland_end(&e);
         return WAYLAND_OK;
 }
@@ -4337,6 +4343,7 @@ static void wayland_feedback_send(struct wayland_client *c, long slot)
                 return;
         e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_format_table);
         wayland_word(&e, (unsigned long)size);
+        c->out_fd_owned[c->out_fd_count] = 0;
         c->out_fds[c->out_fd_count] = fd;
         c->out_fd_at[c->out_fd_count++] = e.start;
         wayland_end(&e);
@@ -5187,6 +5194,21 @@ WAYLAND_API long wayland_connect(long pid, long uid)
 }
 
 /*
+        The descriptors of the output queue let go: sent, or the client gone. The shim's own (a copy's pipe) are closed here and
+        nowhere else, so the number the queue holds is open until it has gone out; the host's (a keymap, a format table) stay.
+*/
+static void wayland_out_fds_let_go(struct wayland_client *c)
+{
+        for (long at = 0; at < c->out_fd_count; at++)
+                if (c->out_fd_owned[at])
+                {
+                        wayland.host->close(wayland.host->context, c->out_fds[at]);
+                        wayland.fds--;
+                }
+        c->out_fd_count = 0;
+}
+
+/*
         A client gone, however it went: every window it had, every pool, every descriptor it sent and the shim did not
         use, and its record. The one place that gives back what a client held.
 */
@@ -5234,6 +5256,7 @@ WAYLAND_API void wayland_drop(long slot)
                 wayland.host->close(wayland.host->context, c->in_fds[at]);
                 wayland.fds--;
         }
+        wayland_out_fds_let_go(c);
         for (long which = 0; which < 2; which++)
         {
                 // A selection that was this client's stays, as text, and is nobody's; a copy it was in the middle of is ended.
@@ -5454,7 +5477,7 @@ WAYLAND_API void wayland_sent(long slot, long count)
         for (long at = count; at < c->out_length; at++)
                 c->out[at - count] = c->out[at];
         c->out_length -= count;
-        c->out_fd_count = 0;
+        wayland_out_fds_let_go(c);
 }
 
 /*

@@ -21,6 +21,13 @@ M = [
      "        struct wayland_rect again = wayland_window_of(c, wayland_root_of(c, child));\n"
      "        long ox, oy, wx = again.x, wy = again.y, ww = again.width, wh = again.height;\n"
      "        (void)window;\n"),
+    # MW-2026-114: a copy's pipe end in the output queue is the shim's, closed once sent or when its client goes.
+    ("the queue's own descriptors are never closed",
+     "                if (c->out_fd_owned[at])\n",
+     "                if (c->out_fd_owned[at] && 0)\n"),
+    ("a copy's pipe end is not the shim's",
+     "        c->out_fd_owned[c->out_fd_count] = 1;\n",
+     "        c->out_fd_owned[c->out_fd_count] = 0;\n"),
 ]
 
 

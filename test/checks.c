@@ -164145,10 +164145,9 @@ static long fake_locks(void *context)
         return fake.locks;
 }
 
+// The read end of a copy's pipe goes; its write end is the shim's from the moment it was handed over, and the shim closes it.
 static void fake_pull_close(void)
 {
-        if (fake.pull_wfd > 0)
-                close(fake.pull_wfd);
         if (fake.pull_rfd > 0)
                 close(fake.pull_rfd);
         fake.pull_wfd = fake.pull_rfd = 0;
@@ -164160,7 +164159,7 @@ static long fake_clip_size(void *context, long which)
         return fake.clip_size[which];
 }
 
-/* A source to read: a pipe whose write end goes to the client, kept here until the shim has sent it. */
+/* A source to read: a pipe whose write end goes to the client and is the shim's to close (counted open here, closed by fake_close). */
 static long fake_clip_pull(void *context, long client, long which)
 {
         int fds[2];
@@ -164173,6 +164172,7 @@ static long fake_clip_pull(void *context, long client, long which)
                 return -1;
         fake.pull_rfd = fds[0];
         fake.pull_wfd = fds[1];
+        fake.fds_open++;
         fake.pulls++;
         fake.pull_client = client;
         fake.pull_which = which;
@@ -164567,13 +164567,10 @@ static int wlc_pump(struct wlc *c)
                 at += size;
         }
         c->fds_seen += fd_count;
-        // a descriptor of a copy's source has been sent: the host's end of it is let go
+        // a descriptor of a copy's source that has been sent is closed by the shim, in wayland_sent (MW-2026-114)
         for (long fd_at = 0; fd_at < fd_count; fd_at++)
                 if (fake.pull_wfd > 0 && fds[fd_at] == fake.pull_wfd)
-                {
-                        close(fake.pull_wfd);
                         fake.pull_wfd = 0;
-                }
         wayland_sent(c->slot, length);
         return (int)length;
 }
@@ -167152,6 +167149,51 @@ static void test_clipboard(void)
         WLCHECK(clip_paste(&b, 1, offer, "text/plain;charset=utf-8", text, sizeof text) == 4 && !strcmp(text, "prim") && fake.push_which == 1,
                 "and pasted as itself");
         WLCHECK(cb->errors == 0 && ca->errors == 0, "no error (%s)", cb->error_text);
+
+        /*
+                A copy ended in the same breath as it was asked (MW-2026-114): set_selection and the source's destroy in one read, so
+                the copy is aborted while its send event and the pipe's end still wait in the queue. The descriptor that waits is the
+                pipe the host made, open, and the shim closes it once it is sent; one that waits when its client goes is closed too.
+                The host closed it at the abort, and the queue then sent a number that was nothing, or whatever was opened next.
+        */
+        for (int client_goes = 0; client_goes < 2; client_goes++)
+        {
+                struct clipc d;
+                unsigned char b2[32];
+                const unsigned char *queued;
+                const long *fds;
+                long count = 0, fd = -1, aborts = fake.aborts;
+                char mark[1] = {0};
+                unsigned long copy;
+                int same;
+
+                clip_open(&d);
+                wayland_keyboard_to(d.row);
+                copy = clip_source(&d, 0, "text/plain;charset=utf-8");
+                serial = clip_serial(&d);
+                wlc_put(b2, d.device);
+                wlc_put(b2 + 4, WLQ_wl_data_device_set_selection | 16UL << 16);
+                wlc_put(b2 + 8, copy);
+                wlc_put(b2 + 12, serial);
+                wlc_put(b2 + 16, copy);
+                wlc_put(b2 + 20, WLQ_wl_data_source_destroy | 8UL << 16);
+                wayland_feed(d.s.c->slot, b2, 24, 0, 0);
+                wayland_out(d.s.c->slot, &queued, &fds, &count);
+                fd = count == 1 ? fds[0] : -1;
+                // The number in the queue is the pipe's write end: a byte written to it comes out of the read end the host kept.
+                same = fd >= 0 && fake.pull_rfd > 0 && write((int)fd, "x", 1) == 1 && read(fake.pull_rfd, mark, 1) == 1 && mark[0] == 'x';
+                WLCHECK(fake.aborts == aborts + 1 && same,
+                        "a copy ended before its send event went out leaves the pipe's end in the queue, open%s (%ld queued, %ld aborts)",
+                        client_goes ? " (its client then goes)" : "", count, fake.aborts - aborts);
+                if (!client_goes)
+                {
+                        wlc_pump(d.s.c);
+                        WLCHECK(fd >= 0 && fcntl((int)fd, F_GETFD) < 0, "and the shim closes it once it is sent");
+                }
+                wlc_end(d.s.c);
+                if (client_goes)
+                        WLCHECK(fd >= 0 && fcntl((int)fd, F_GETFD) < 0, "and the shim closes it when its client goes");
+        }
 
         wlc_end(ca);
         wlc_end(cb);

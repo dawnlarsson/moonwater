@@ -41,6 +41,31 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-114: a Wayland copy ended before its send event went out sent a descriptor number the compositor had closed
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Use of a closed descriptor number (a descriptor-table use after free); one client could be handed whatever the root compositor opened next under that number |
+| Attacker | any client of `/run/moonwater/wayland-0` the person has just typed or clicked into (a copy is taken only then) |
+| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the clipboard bridge since `0a4629ac` (2026-11-03 19:44 +0100) |
+| Fixed by | the commit that adds this entry (`src/canvas/wayland.c`: `out_fd_owned`, `wayland_out_fds_let_go`; `src/canvas/wayland_host.c`: `compositor_wl_clip_pull`, the flush) |
+| Tests that fail without it | `CHECK_wayland` clipboard rows "a copy ended before its send event went out leaves the pipe's end in the queue, open" and "and the shim closes it once it is sent / when its client goes"; `test/wayland_mutations.py` "the queue's own descriptors are never closed" and "a copy's pipe end is not the shim's"; `test/wayland_clip.py` row "a copy ended in the same write as it was asked is still sent its pipe's end" (its client is `test/wayland_hold.py copy`): the original compositor dropped that client |
+
+**What it was.** A copy gives the client's source the write end of a pipe the compositor makes: the shim queues it with
+the source's send event, and the host kept its own record of it to close once sent. When the copy was ended before the
+event went out (the source destroyed, or a second copy, in the same write), the host's abort closed that descriptor at
+once, and the queue still held the number: the next send passed a number that was closed (the client was dropped, which
+is what the row sees on the original compositor) or, when the send was held back, the number of whatever the compositor
+opened in between (a new client's connection, another client's pipe or pool), which the first client then received.
+`b0e0b1ce` (MW-2026-113) moved the close to the end of the transfer's thread, which made the window shorter, not gone.
+
+**Fix.** The write end is the shim's from the moment it is queued (`out_fd_owned`): the shim closes it after the send
+that carried it (`wayland_sent`) or when its client goes (`wayland_drop`), and the host keeps no copy of it, so no abort
+has anything to close. The end of the copy is still the source's own closing, since the compositor's copy goes when it is
+sent. Not reproduced: a client actually handed another client's descriptor (that needs the send held back across the
+compositor opening something else); reproduced: the closed number sent, on the box, as the dropped connection.
+
 ### MW-2026-153: a tray format of braces wrote past the tray's text in the compositor
 
 | | |
@@ -358,7 +383,7 @@ cannot chown it asks for 0755 (as root, for the other uid and 4755). Each fails 
 | Class | A root process blocked on a resource its peer controls (CWE-833 shape); denial of service of the desktop |
 | Attacker | any client of `/run/moonwater/wayland-0` the person has just typed or clicked into (a paste or a copy is taken only then) |
 | Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the transfers since `0a4629ac` (2026-11-03 19:44 +0100) |
-| Fixed by | the commit that adds this entry (`src/canvas/wayland_host.c`: `compositor_wl_transfer_run` and the transfers around it) |
+| Fixed by | `b0e0b1ce` (`src/canvas/wayland_host.c`: `compositor_wl_transfer_run` and the transfers around it) |
 | Tests that fail without it | `test/wayland_clip.py` row "a paste whose reader holds its pipe's lock does not hold the compositor" (its reader is `test/wayland_hold.py`): red on the parent, where a client could draw no frame in 5 s while the paste waited; green with the fix, and the text reaches the reader when it lets go |
 
 **What it was.** The compositor read a copy's source from a pipe it made and wrote a paste to the pipe a client gave, on its
@@ -384,7 +409,7 @@ window doors and the compositor's other FIFOs are read on the loop the same way 
 | Class | Work a client controls that grows faster than what it sends (CWE-407); denial of service of the desktop |
 | Attacker | any program that can connect to `/run/moonwater/wayland-0` |
 | Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; the walk in every copy since `4563ba64` (2026-11-03 21:09 +0100) |
-| Fixed by | `f9393dbd` (`src/canvas/wayland.c`: `wayland_window_of`, `wayland_child_copy`, `wayland_flatten`) |
+| Fixed by | `ab981848` (`src/canvas/wayland.c`: `wayland_window_of`, `wayland_child_copy`, `wayland_flatten`) |
 | Tests that fail without it | `CHECK_wayland` `test_tree_cost`: a root commit of a chain of 63 subsurfaces with eight damaged rectangles each, mean of three under 50 ms; `test/wayland_mutations.py` "every copy walks the window again" puts the walk back and the row is red (158 ms) |
 
 **What it was.** Each copy of a subsurface's picture into its window (`wayland_child_copy`) made the window's
