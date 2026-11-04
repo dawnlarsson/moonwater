@@ -86,6 +86,7 @@ static struct
         int wake;                       // the eventfd a transfer's thread knocks on when it has ended
         int hold_row, hold;             // the window that holds the pointer, and how: 0 free, 1 locked, 2 confined
         int dmabuf_table;               // the file of format and modifier pairs the feedback names, made the first time
+        unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         unsigned long render;           // the render node clients allocate on (a dev_t), found the first time; 1 when there is none
         positive slow_until[WAYLAND_CLIENTS];
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut.
@@ -2108,6 +2109,18 @@ static void compositor_wl_frame(void)
         if (!compositor_wl.started)
                 return;
         wayland_frame();
+        compositor_wl_flush_all();
+}
+
+/*
+        A frame was drawn and flipped: the presentation feedbacks its commits took are answered with the time of the flip, which is
+        the compositor's clock as the flip is issued (no vblank event is read here, so the shim claims none), and the period.
+*/
+static void compositor_wl_presented(void)
+{
+        if (!compositor_wl.started)
+                return;
+        wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++);
         compositor_wl_flush_all();
 }
 

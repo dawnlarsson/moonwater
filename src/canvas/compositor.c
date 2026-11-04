@@ -16288,6 +16288,10 @@ static b32 compositor_main()
                         {
                                 compositor.presented = stamp;
                                 compositor_present();
+#ifdef CONFIG_MOONWATER_WAYLAND
+                                // The frame is on its way to the screen: the presentation feedbacks its commits took are answered.
+                                compositor_wl_presented();
+#endif
                                 compositor_land_keep();
                                 compositor_glide_keep();
                                 compositor_preview_keep();

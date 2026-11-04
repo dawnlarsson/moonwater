@@ -167108,6 +167108,79 @@ static void test_frames(void)
         wayland_stop();
 }
 
+/*
+        wp_presentation: the feedback a commit takes is answered by the frame it is drawn in, with the flip's time, the period
+        and the count; a timer's frame that drew nothing answers none. A surface past its limit, a surface with no window and
+        a surface destroyed each discard, as the protocol says, and every object is let go by its event.
+*/
+static long event_at(struct wlc *c, long iface, long opcode, long from);
+
+static void test_presentation(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long presentation, feedback, plain;
+        long a;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        presentation = wl_global(c, s.registry, WLI_wp_presentation, 1);
+        WLCHECK(presentation != 0, "wp_presentation is offered");
+        a = event_at(c, WLI_wp_presentation, WLE_wp_presentation_clock_id, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[0] == 1, "its clock is CLOCK_MONOTONIC (1), told when it is bound");
+        wlc_forget(c);
+
+        feedback = wlc_id(c, WLI_wp_presentation_feedback, 1);
+        wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, feedback);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 0,
+                "a feedback waits for the frame its commit is drawn in, and a timer's frame answers none");
+        wlc_forget(c);
+        wayland_presented(5000000123ul, 16666667ul, 7);
+        wlc_pump(c);
+        a = event_at(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[0] == 0 && c->ev[a].u[1] == 5 && c->ev[a].u[2] == 123 && c->ev[a].u[3] == 16666667 &&
+                    c->ev[a].u[4] == 0 && c->ev[a].u[5] == 7 && c->ev[a].u[6] == 0,
+                "a drawn frame presents it: the seconds split in two, the nanoseconds, the period, the count, no flags");
+        wayland_presented(6000000000ul, 16666667ul, 8);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 1,
+                "the object is let go by its event: a later frame answers no one");
+
+        /* more than the surface holds: the one it cannot hold is discarded at once */
+        wlc_forget(c);
+        for (int at = 0; at < WAYLAND_PRESENTATIONS + 1; at++)
+                wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, wlc_id(c, WLI_wp_presentation_feedback, 1));
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 1,
+                "a surface past its limit discards the one it cannot hold, at once");
+
+        /* a surface with no window has no frame: its feedback is discarded at the commit */
+        plain = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, plain);
+        wlc_forget(c);
+        wlc_send(c, presentation, WLQ_wp_presentation_feedback, plain, wlc_id(c, WLI_wp_presentation_feedback, 1));
+        wlc_send(c, plain, WLQ_wl_surface_commit);
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 1,
+                "a surface with no window discards its feedback at its commit");
+
+        /* a surface destroyed discards the feedbacks it holds */
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_destroy);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == WAYLAND_PRESENTATIONS,
+                "destroying a surface discards the feedbacks it holds");
+        WLCHECK(c->errors == 0, "none of it is a protocol error");
+        wlc_end(c);
+        leak_check("presentation");
+        wayland_stop();
+}
+
 static void test_text(void)
 {
         struct session s;
@@ -170785,6 +170858,7 @@ int main(int argc, char **argv)
         test_destroy_orders();
         test_shm();
         test_frames();
+        test_presentation();
         test_text();
         test_popups();
         test_surface_rules();

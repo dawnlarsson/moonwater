@@ -73,6 +73,7 @@
 #define WAYLAND_EVENT 1024      // the most one event can take
 #define WAYLAND_DAMAGE 8
 #define WAYLAND_CALLBACKS 32
+#define WAYLAND_PRESENTATIONS 4 // presentation feedbacks a surface holds for its next commits (one more is discarded)
 #define WAYLAND_SERIALS 8       // configures sent and not yet acknowledged
 #define WAYLAND_TEXT 128        // a title or an app id, its NUL included
 #define WAYLAND_POOL_BYTES (1L << 30)
@@ -321,6 +322,12 @@ struct wayland_surface
         // The callbacks a commit took, waiting for the frame.
         unsigned int ready[WAYLAND_CALLBACKS];
         unsigned char readies;
+        // Presentation feedback (wp_presentation): the objects requested since the last commit, and those a commit took, which
+        // are answered when the frame that carries the commit is drawn (wayland_presented), not on a frame that was not drawn.
+        unsigned int feedback[WAYLAND_PRESENTATIONS];
+        unsigned char feedbacks;
+        unsigned int presenting[WAYLAND_PRESENTATIONS];
+        unsigned char presentings;
         // What is shown. scale is the buffer scale, and scale120 what a unit of the surface is in pixels, in 120ths (wp_fractional_scale's
         // unit): 120 times the buffer scale, or, where a viewport gives the surface a size, the buffer's pixels over that size.
         long scale, scale120, transform;
@@ -887,6 +894,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wp_tearing_control_manager_v1, 1},
     {WLI_wp_viewporter, 1},
     {WLI_wp_fractional_scale_manager_v1, 1},
+    {WLI_wp_presentation, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -1220,6 +1228,41 @@ static void wayland_callbacks_done(struct wayland_client *c, struct wayland_surf
                 wayland_object_delete(c, slot);
         }
         s->readies = 0;
+}
+
+/*
+        Presentation feedback: a feedback that will not be answered with a frame is discarded, and its object let go. The
+        object's id is looked up in the client's own table, so an id a client has since let go of is none.
+*/
+static void wayland_feedback_discard(struct wayland_client *c, unsigned int id)
+{
+        long slot = wayland_find(c, id, WLI_wp_presentation_feedback);
+
+        if (slot < 0)
+                return;
+        {
+                struct wayland_event e = wayland_begin(c, id, WLE_wp_presentation_feedback_discarded);
+
+                wayland_end(&e);
+        }
+        wayland_object_delete(c, slot);
+}
+
+/*
+        A commit takes the feedbacks requested since the last one: they are answered by the frame it is drawn in, or, when
+        the surface has no window to draw it in (shown 0), discarded now. A surface past its feedbacks discards the one it
+        cannot hold, which is the protocol's answer to a feedback that is not presented.
+*/
+static void wayland_feedback_take(struct wayland_client *c, struct wayland_surface *s, int shown)
+{
+        for (long at = 0; at < s->feedbacks; at++)
+        {
+                if (shown && s->presentings < WAYLAND_PRESENTATIONS)
+                        s->presenting[s->presentings++] = s->feedback[at];
+                else
+                        wayland_feedback_discard(c, s->feedback[at]);
+        }
+        s->feedbacks = 0;
 }
 
 static void wayland_pool_unref(struct wayland_client *c, long pool);
@@ -1694,6 +1737,7 @@ static void wayland_sub_apply(struct wayland_client *c, struct wayland_surface *
                                 wayland_object_free(c, slot);
                 }
         s->callbacks = 0;
+        wayland_feedback_take(c, s, 1);
 }
 
 // The subsurfaces under a surface that are waiting for its commit, applied now, and theirs under them.
@@ -1732,6 +1776,7 @@ static int wayland_sub_commit(struct wayland_client *c, struct wayland_object *s
                         if (s->readies < WAYLAND_CALLBACKS)
                                 s->ready[s->readies++] = s->callback[at];
                 s->callbacks = 0;
+                wayland_feedback_take(c, s, 0);
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
                 return WAYLAND_OK;
         }
@@ -1892,6 +1937,14 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         }
         else if (iface == WLI_zwp_linux_dmabuf_v1 && a[1].version < 4)
                 wayland_dmabuf_formats(c, id, a[1].version);
+        else if (iface == WLI_wp_presentation)
+        {
+                // The clock every presented time is on: CLOCK_MONOTONIC (1), the clock the compositor's frames are timed by.
+                struct wayland_event e = wayland_begin(c, id, WLE_wp_presentation_clock_id);
+
+                wayland_word(&e, 1);
+                wayland_end(&e);
+        }
         else if (iface == WLI_wl_seat)
         {
                 struct wayland_event e = wayland_begin(c, id, WLE_wl_seat_capabilities);
@@ -2344,6 +2397,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 }
         }
         s->callbacks = 0;
+        wayland_feedback_take(c, s, s->row >= 0);
         if (s->row < 0 && s->readies)
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
         return WAYLAND_OK;
@@ -2358,6 +2412,12 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
         switch (op)
         {
         case WLQ_wl_surface_destroy:
+                // The feedbacks a surface still holds are discarded by it: a surface gone is a frame that will not come.
+                for (long at = 0; at < s->feedbacks; at++)
+                        wayland_feedback_discard(c, s->feedback[at]);
+                for (long at = 0; at < s->presentings; at++)
+                        wayland_feedback_discard(c, s->presenting[at]);
+                s->feedbacks = s->presentings = 0;
                 if (s->role_id)
                 {
                         // A role object that outlives its surface is inert; the window goes with the surface.
@@ -4793,6 +4853,27 @@ static void wayland_constraints_drop(struct wayland_client *c, long surface)
         wayland_constraints_update();
 }
 
+/*
+        wp_presentation.feedback (surface, new id): the feedback is answered by the commit that follows it, when its frame is
+        drawn (wayland_presented). Arguments in the order the XML has them: the surface first, then the new object. A surface
+        holding its limit of feedbacks discards the new one at once: the protocol's answer for a frame that is not timed.
+*/
+static int wayland_presentation_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        struct wayland_surface *s;
+
+        if (op != WLQ_wp_presentation_feedback)
+                return WAYLAND_OK;
+        s = wayland_surface_of(c, a[0].slot);
+        if (!s)
+                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+        if (s->feedbacks >= WAYLAND_PRESENTATIONS)
+                wayland_feedback_discard(c, c->objects[a[1].slot].id);
+        else
+                s->feedback[s->feedbacks++] = c->objects[a[1].slot].id;
+        return WAYLAND_OK;
+}
+
 static int wayland_games_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *surface;
@@ -5128,6 +5209,9 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wp_cursor_shape_manager_v1:
                 case WLI_wp_cursor_shape_device_v1:
                         status = wayland_cursor_shape_request(c, o, op, a);
+                        break;
+                case WLI_wp_presentation:
+                        status = wayland_presentation_request(c, o, op, a);
                         break;
                 case WLI_wp_viewporter:
                 case WLI_wp_viewport:
@@ -5709,6 +5793,66 @@ WAYLAND_API void wayland_frame(void)
                 for (long at = 0; at < WAYLAND_SURFACES; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && wayland_root_of(c, &c->surfaces[at]) == s)
                                 wayland_callbacks_done(c, &c->surfaces[at], now);
+        }
+}
+
+/*
+        The feedbacks one surface's commits took, answered: presented at when (nanoseconds on the monotonic clock, split as the
+        protocol has it into seconds and nanoseconds), refreshing every refresh nanoseconds, the frame's count seq. Each object is
+        destroyed by its event, so it is let go with it.
+*/
+static void wayland_presentings_done(struct wayland_client *c, struct wayland_surface *s, unsigned long when, unsigned long refresh,
+                                     unsigned long seq)
+{
+        unsigned long seconds = when / 1000000000ul, nanoseconds = when % 1000000000ul;
+
+        for (long at = 0; at < s->presentings; at++)
+        {
+                long slot = wayland_find(c, s->presenting[at], WLI_wp_presentation_feedback);
+
+                if (slot < 0)
+                        continue;
+                {
+                        unsigned int id = s->presenting[at];
+                        struct wayland_event e = wayland_begin(c, id, WLE_wp_presentation_feedback_presented);
+
+                        wayland_word(&e, (unsigned long)(seconds >> 32));
+                        wayland_word(&e, (unsigned long)(seconds & 0xffffffffu));
+                        wayland_word(&e, nanoseconds);
+                        wayland_word(&e, refresh);
+                        wayland_word(&e, (unsigned long)(seq >> 32));
+                        wayland_word(&e, (unsigned long)(seq & 0xffffffffu));
+                        wayland_word(&e, 0); // flags: none. The time is the compositor's clock at the flip, a vblank it did not see
+                        wayland_end(&e);
+                        wayland_object_delete(c, slot);
+                }
+        }
+        s->presentings = 0;
+}
+
+/*
+        A frame was drawn and flipped to the screen (wayland_presented's when, refresh and seq, as above): the feedbacks its
+        commits took are answered, for every window that is shown and not put away. Called only for a frame that was drawn, so
+        a timer's frame with nothing new answers none.
+*/
+WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq)
+{
+        if (!wayland.host)
+                return;
+        for (long row = 0; row < WAYLAND_ROWS; row++)
+        {
+                struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
+                struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
+                struct wayland_facts facts;
+
+                if (!s || !s->live)
+                        continue;
+                if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
+                        continue;
+                wayland_presentings_done(c, s, when, refresh, seq);
+                for (long at = 0; at < WAYLAND_SURFACES; at++)
+                        if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_SUBSURFACE && wayland_root_of(c, &c->surfaces[at]) == s)
+                                wayland_presentings_done(c, &c->surfaces[at], when, refresh, seq);
         }
 }
 
