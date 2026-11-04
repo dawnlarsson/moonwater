@@ -399,15 +399,18 @@ static int compositor_scaled(const struct compositor_frame *frame)
 }
 
 // The picture's pixel at dx, dy from a frame's contents' top left: the frame's own, or, a frame scaled, the one
-// compositor_blit_scaled draws there (the source cell whose centre is the point's).
+// compositor_blit_scaled draws there: the source cell memory_resample_u32_rect's walk gives a frame drawn whole (the first position half a cell in, stepping by the
+// floored step in 24 bit fractions), so that a corner's or a button's pixel is the contents' own and the card, which makes the whole frame's picture once, agrees.
 static unsigned int compositor_picture_at(const struct compositor_frame *frame, int dx, int dy)
 {
         unsigned long sx = (unsigned long)dx, sy = (unsigned long)dy;
 
         if (compositor_scaled(frame))
         {
-                sx = (2 * sx + 1) * (unsigned long)frame->source_w / (2 * (unsigned long)frame->width);
-                sy = (2 * sy + 1) * (unsigned long)frame->source_h / (2 * (unsigned long)frame->height);
+                unsigned long step_x = ((unsigned long)frame->source_w << 24) / (unsigned long)frame->width, step_y = ((unsigned long)frame->source_h << 24) / (unsigned long)frame->height;
+
+                sx = ((((unsigned long)frame->source_w << 23) / (unsigned long)frame->width) + sx * step_x) >> 24;
+                sy = ((((unsigned long)frame->source_h << 23) / (unsigned long)frame->height) + sy * step_y) >> 24;
         }
         return frame->pixels[sy * frame->pitch + sx];
 }
@@ -7374,6 +7377,90 @@ static b32 compositor_gpu_spots(void)
 #endif
 
 // The present's damage drawn by the GPU: why it is not, or COMPOSITOR_GPU_WHY_DRAWN when it is.
+/*
+        A frame drawn at less than its picture's size (a window landing, a snap assist's thumbnail: compositor_scaled) has the picture it would be at its own size made
+        first, by the card: the source cell whose centre is the point's (compositor_picture_at), by the tables of columns and rows the processor makes (the card divides
+        nothing), into memory of the compositor's own that the card may write (a pool of COMPOSITOR_GPU_SCALED pictures, each grown to the largest asked for and kept), and
+        the frame in the list the present is made from is then an ordinary frame of that picture. The caller's frames are not changed: the first scaled frame makes a copy of
+        the array, which the answer's pointer is then. COMPOSITOR_GPU_WHY_DRAWN when the frames are as they should be drawn, or the reason the card is refused them.
+*/
+#define COMPOSITOR_GPU_SCALED 8
+#define COMPOSITOR_GPU_SCALED_MOST (128ul << 20)
+static struct compositor_frame compositor_gpu_scaled_copy[COMPOSITOR_FRAMES];
+static struct
+{
+        unsigned int *memory;
+        positive bytes;
+} compositor_gpu_scaled_pool[COMPOSITOR_GPU_SCALED];
+
+static enum compositor_gpu_why compositor_gpu_scale_frames(const struct compositor_frame **io, unsigned int count)
+{
+        const struct compositor_frame *frames = *io;
+        unsigned int used = 0;
+
+        if (count > COMPOSITOR_FRAMES)
+                return COMPOSITOR_GPU_WHY_OTHER;
+        for (unsigned int k = 0; k < count; k++)
+        {
+                const struct compositor_frame *f = &frames[k];
+                struct compositor_frame source;
+                unsigned int address_to tables = (unsigned int address_to)((p8 address_to)gpu.at + COMPOSITOR_GPU_BINS_AT);
+                positive bytes, src_va, dst_va;
+
+                if (f->builtin || !f->pixels || !compositor_scaled(f))
+                        continue;
+                if (used == COMPOSITOR_GPU_SCALED || f->width <= 0 || f->height <= 0 || f->source_w <= 0 || f->source_h <= 0 || f->width > 16384 || f->height > 16384 ||
+                    f->source_w > 16384 || f->source_h > 16384 || f->pitch < (unsigned long)f->source_w)
+                        return COMPOSITOR_GPU_WHY_SCALED;
+                bytes = 4ull * (positive)f->width * (positive)f->height;
+                if (bytes > COMPOSITOR_GPU_SCALED_MOST)
+                        return COMPOSITOR_GPU_WHY_SCALED;
+                source = *f;
+                source.width = f->source_w, source.height = f->source_h, source.source_w = source.source_h = 0;
+                if (!compositor_gpu_picture(&source) || !(src_va = compositor_gpu_va(&source)))
+                        return COMPOSITOR_GPU_WHY_PICTURE;
+                if (compositor_gpu_scaled_pool[used].bytes < bytes)
+                {
+                        positive grown = (bytes + (1ull << 20) - 1) & ~((1ull << 20) - 1);
+                        long mapped;
+
+                        if (compositor_gpu_scaled_pool[used].memory)
+                                compositor_call(syscall(munmap), (positive)compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes, 0, 0, 0, 0);
+                        compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].bytes = 0;
+                        mapped = compositor_call(syscall(mmap), 0, grown, 3, 0x22, (positive)-1, 0);
+                        if (mapped < 0 && mapped > -4096)
+                                return COMPOSITOR_GPU_WHY_SCALED;
+                        compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
+                }
+                if (!gpu_map_written(compositor_gpu_scaled_pool[used].memory, bytes) || !(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes)))
+                        return COMPOSITOR_GPU_WHY_PICTURE;
+                // memory_resample_u32_rect's walk (its C is resample_reference): the position of the first column is half a cell in, and it steps by the floored step
+                // in 24 bit fractions. A frame drawn whole starts at 0, 0, so these are the columns and rows of the whole frame; the processor's walk of a part of
+                // it (a damage rectangle, a frame partly off the output) starts its position at the part's, which can differ from this by a source cell here and there.
+                {
+                        positive step_x = ((positive)f->source_w << 24) / (positive)f->width, fx = ((positive)f->source_w << 23) / (positive)f->width;
+                        positive step_y = ((positive)f->source_h << 24) / (positive)f->height, fy = ((positive)f->source_h << 23) / (positive)f->height;
+
+                        for (int x = 0; x < f->width; x++, fx += step_x)
+                                tables[x] = (unsigned int)(fx >> 24);
+                        for (int y = 0; y < f->height; y++, fy += step_y)
+                                tables[f->width + y] = (unsigned int)(fy >> 24);
+                }
+                if (!gpu_scale(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + COMPOSITOR_GPU_BINS_AT, (unsigned int)f->width, (unsigned int)f->height))
+                {
+                        if (++compositor_gpu_state.failures >= 3)
+                                compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG;
+                        return COMPOSITOR_GPU_WHY_HANG;
+                }
+                if (*io == frames)
+                        memory_copy(compositor_gpu_scaled_copy, frames, (positive)count * sizeof(*frames)), *io = compositor_gpu_scaled_copy;
+                compositor_gpu_scaled_copy[k].pixels = compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_copy[k].pitch = (unsigned long)f->width;
+                compositor_gpu_scaled_copy[k].source_w = compositor_gpu_scaled_copy[k].source_h = 0;
+                used++;
+        }
+        return COMPOSITOR_GPU_WHY_DRAWN;
+}
+
 static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame *frames, unsigned int count)
 {
         struct compositor_gscene *g = &compositor_gscene;
@@ -7402,6 +7489,12 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (!(out = compositor_gpu_output()))
                 return COMPOSITOR_GPU_WHY_OUTPUT;
         g->width = (unsigned int)(compositor.width & ~3), g->height = (unsigned int)compositor.height; // the card's columns: a multiple of 4
+        {
+                enum compositor_gpu_why scaled = compositor_gpu_scale_frames(&frames, count); // the landings made pictures of their own size, and the frames those
+
+                if (scaled != COMPOSITOR_GPU_WHY_DRAWN)
+                        return scaled;
+        }
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_gpu_picture(&frames[k]))
                         return COMPOSITOR_GPU_WHY_PICTURE;
@@ -7445,10 +7538,26 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         return COMPOSITOR_GPU_WHY_DRAWN;
 }
 
+static void compositor_lists_set(int on);
+
+// List mode follows the card: on while it composes (started, not given up) and the setting has it, off otherwise, so that a program records its frames as lists only
+// while the compositor can draw them. Changed only when it changes (compositor_lists_set knocks every window); the card going away (a hang's cool-down, canvas gpu
+// off) puts every window back to painting its own pixels.
+static void compositor_gpu_lists_sync(void)
+{
+        struct windows *table = compositor.table;
+        int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead;
+
+        if (table && (__atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE) != 0) != (want != 0))
+                compositor_lists_set(want);
+}
+
 // The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it (and the reason is counted).
 static int compositor_gpu_present(const struct compositor_frame *frames, unsigned int count)
 {
         enum compositor_gpu_why why = compositor_gpu_draw(frames, count);
+
+        compositor_gpu_lists_sync();
 
         if (why == COMPOSITOR_GPU_WHY_DRAWN)
         {
@@ -7458,6 +7567,166 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         }
         compositor_gpu_refuse(why, 1);
         return 0;
+}
+
+/*
+        A program's list of ops (ui_draw_list), as the scene may have them. The list is written by a program the compositor does not trust, so nothing of it
+        reaches the card as it stands: each op is read once into words of the compositor's own, and only the kinds a window is made of (a fill 0, a tone 1,
+        an anti-aliased box 2 with the records 8 and 9 that follow it, a text run 3) are taken; a rectangle of a fill or a tone is cut to the picture, so that a
+        card told to draw it draws in the picture alone; a text run must lie in the picture and its bitmap in the list's cover bytes (cover_at, cover_used), and
+        its word 6 is made here: the alpha and stroke the program gave and the number of the base (slot) that is the list's address in the card's table, which
+        the program does not name. The lanes of a text run read their neighbours by dwords, up to 64 pixels past the run's rows' ends and a row above and
+        below; COMPOSITOR_GPU_LIST_REACH bytes either side of the cover bytes are mapped for them and a list with less room than that after its cover bytes
+        has no text. Answers how many ops were written to `to` (room of them at most), or ~0 for a list that is refused: any other kind, a box whose records
+        are not 8 or 9, a run outside what it may read, a count past the room. An op that draws nothing is left out.
+*/
+#define COMPOSITOR_GPU_LIST_REACH 4096ul
+#define COMPOSITOR_GPU_LIST_REFUSED (~0u)
+#define COMPOSITOR_GPU_LIST_COORD (1 << 24) // a box's place, size and radii in 256ths: a card does not take more (65536 pixels)
+static int compositor_gpu_list_cut(unsigned int word, int low, int high)
+{
+        int value = (int)word;
+
+        return value < low ? low : value > high ? high : value;
+}
+
+static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned int count, positive cover_at, positive cover_used, positive list_bytes, int width,
+                                            int height, unsigned int slot, unsigned int *to, unsigned int room)
+{
+        unsigned int n = 0;
+        b32 text_room = cover_at >= COMPOSITOR_GPU_LIST_REACH && cover_at <= list_bytes && cover_used <= list_bytes - cover_at &&
+                        list_bytes - cover_at - cover_used >= COMPOSITOR_GPU_LIST_REACH;
+
+        if (width <= 0 || height <= 0 || slot < 1 || slot > 255)
+                return COMPOSITOR_GPU_LIST_REFUSED;
+        for (unsigned int i = 0; i < count; i++)
+        {
+                unsigned int w[8], kind;
+
+                memory_copy(w, from + 8 * (positive)i, 32);
+                kind = w[0] & 255;
+                if (kind <= 1)
+                {
+                        int x0 = compositor_gpu_list_cut(w[1], 0, width), y0 = compositor_gpu_list_cut(w[2], 0, height);
+                        int x1 = compositor_gpu_list_cut(w[3], 0, width), y1 = compositor_gpu_list_cut(w[4], 0, height);
+
+                        if (w[0] >> 8)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        if (x0 >= x1 || y0 >= y1)
+                                continue;
+                        if (n >= room)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        to[8 * n] = kind, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
+                        to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = to[8 * n + 7] = 0;
+                        n++;
+                }
+                else if (kind == 2)
+                {
+                        unsigned int records = w[0] >> 8;
+
+                        if (records > 3 || records > count - 1 - i || n + 1 + records > room)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        for (unsigned int k = 0; k <= records; k++)
+                        {
+                                unsigned int r[8];
+
+                                if (k)
+                                {
+                                        memory_copy(r, from + 8 * (positive)(i + k), 32);
+                                        if (r[0] != 8 && r[0] != 9)
+                                                return COMPOSITOR_GPU_LIST_REFUSED;
+                                }
+                                else
+                                        memory_copy(r, w, 32);
+                                to[8 * n] = k ? r[0] : 2u | records << 8;
+                                to[8 * n + 1] = (unsigned int)compositor_gpu_list_cut(r[1], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
+                                to[8 * n + 2] = (unsigned int)compositor_gpu_list_cut(r[2], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
+                                to[8 * n + 3] = (unsigned int)compositor_gpu_list_cut(r[3], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
+                                to[8 * n + 4] = (unsigned int)compositor_gpu_list_cut(r[4], -COMPOSITOR_GPU_LIST_COORD, COMPOSITOR_GPU_LIST_COORD);
+                                to[8 * n + 5] = r[5];
+                                to[8 * n + 6] = (unsigned int)compositor_gpu_list_cut(r[6], 0, COMPOSITOR_GPU_LIST_COORD);
+                                to[8 * n + 7] = (unsigned int)compositor_gpu_list_cut(r[7], 0, COMPOSITOR_GPU_LIST_COORD);
+                                n++;
+                        }
+                        i += records;
+                }
+                else if (kind == 3)
+                {
+                        positive pitch = w[0] >> 8, bytes_from, bytes_to;
+                        int x0 = (int)w[1], y0 = (int)w[2], x1 = (int)w[3], y1 = (int)w[4];
+
+                        if (!text_room || pitch < 3 || pitch > 3500 || x0 < 0 || y0 < 0 || x1 > width || y1 > height)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        if (x0 >= x1 || y0 >= y1)
+                                continue;
+                        if (n >= room || (positive)(x1 - x0) + 2 > pitch)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        // The bitmap's bytes, a row above and below the rows and a byte past either end: all of them cover bytes.
+                        bytes_from = (positive)w[7] - pitch - 1, bytes_to = (positive)w[7] + (positive)(y1 - y0) * pitch + (positive)(x1 - x0) + 1;
+                        if (w[7] < pitch + 1 || bytes_from < cover_at || bytes_to > cover_at + cover_used)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        to[8 * n] = 3u | (unsigned int)pitch << 8, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
+                        to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = (w[6] & 0xffffu) | slot << 16, to[8 * n + 7] = w[7];
+                        n++;
+                }
+                else
+                        return COMPOSITOR_GPU_LIST_REFUSED;
+        }
+        return n;
+}
+
+/*
+        A program's list drawn into its row's picture by the card: the list (list_bytes of it, a program's shared memory), the picture (a half of the row in
+        the window table, pitch pixels a row) and the damage of the frame answered in damage (x0, y0, x1, y1 in the picture). The program paints no pixels in
+        this mode and the compositor is the only writer of the picture, so the card may write it; the card is given the picture as a map it may write and the
+        list's cover bytes (with the margin its lanes read into) as a map to read, whose address the ops reach through the table of bases at the number the cut
+        gave this row. Answers 1 for a frame drawn (or one with nothing to draw), 0 for a list that is not taken or a card that is busy, away or hung: the
+        program then paints that frame in the picture itself. The hand scene kernel draws whole patches of 64 pixels by 4 rows, so the width it is told is the
+        picture's rounded up to a multiple of 4, which the pitch must hold: no op of the cut reaches past the picture's own width.
+*/
+static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsigned long list_bytes, unsigned int *picture, unsigned long pitch, int width, int height,
+                                            int *damage)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        struct ui_draw_view view;
+        unsigned int w4 = ((unsigned int)width + 3) & ~3u, slot = 1 + (unsigned int)row % 255, made;
+        positive address_to bases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT), cover_from, cover_to, cover_va = 0, picture_va, bytes;
+        int x0, y0, x1, y1;
+
+        damage[0] = damage[1] = damage[2] = damage[3] = 0;
+        if (row < 0 || width <= 0 || height <= 0 || !picture || pitch < w4 || (pitch & 3) || !compositor_gpu || compositor_gpu_state.dead || !compositor_gpu_up() ||
+            !gpu_idle() || ui_draw_list_open(list, list_bytes, &view) != 1 || (int)view.width != width || (int)view.height != height)
+                return 0;
+        made = compositor_gpu_list_ops(view.ops, view.count, view.cover_at, view.cover_used, list_bytes, width, height, slot, g->ops, g->room);
+        if (made == COMPOSITOR_GPU_LIST_REFUSED || !ui_draw_list_still(list, &view)) // the generation moved under the read: the next present reads the new one
+                return 0;
+        x0 = view.x0 < 0 ? 0 : view.x0 > width ? width : view.x0, y0 = view.y0 < 0 ? 0 : view.y0 > height ? height : view.y0;
+        x1 = view.x1 < 0 ? 0 : view.x1 > width ? width : view.x1, y1 = view.y1 < 0 ? 0 : view.y1 > height ? height : view.y1;
+        if (!made || x1 <= x0 || y1 <= y0)
+                return 1;
+        if (view.cover_used)
+        {
+                cover_from = (positive)list + view.cover_at - COMPOSITOR_GPU_LIST_REACH, cover_to = (positive)list + view.cover_at + view.cover_used + COMPOSITOR_GPU_LIST_REACH;
+                if (!gpu_map((const void *)cover_from, cover_to - cover_from) || !(cover_va = gpu_va_bytes((const void *)cover_from, cover_to - cover_from)))
+                        return 0;
+                bases[slot] = cover_va - (view.cover_at - COMPOSITOR_GPU_LIST_REACH);
+        }
+        bytes = 4 * ((positive)pitch * (positive)(height - 1) + w4);
+        if (!(picture_va = gpu_va_written(picture, bytes)))
+        {
+                if (!gpu_map_written(picture, bytes) || !(picture_va = gpu_va_written(picture, bytes)))
+                        return 0;
+        }
+        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, made, COMPOSITOR_GPU_BINS_AT, picture_va, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x0, (unsigned int)y0,
+                       (unsigned int)x1, (unsigned int)y1))
+        {
+                if (++compositor_gpu_state.failures >= 3)
+                        compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG;
+                return 0;
+        }
+        compositor_gpu_state.failures = 0;
+        damage[0] = x0, damage[1] = y0, damage[2] = x1, damage[3] = y1;
+        return 1;
 }
 
 // A screen Canvas turns, the damage of it (x0, y0, x1, y1 of the screen) turned from the scanout into the screen's own buffer by the GPU (windows_rotate_u32's turn:
@@ -12150,9 +12419,10 @@ static void compositor_reveal(int row);
         device pixels). It answers 1 when the picture is drawn, or 0 when it cannot
         draw the list: the program's next frame is then its pixels.
 
-        STUB: the renderer is the GPU's and is not written yet (it goes in the GPU
-        section next to compositor_gpu_present), so every list is answered 0. A check
-        that draws its own renderer defines COMPOSITOR_LIST_RENDER_EXTERNAL first.
+        The renderer is the card's (compositor_gpu_list_render_bytes in the GPU
+        section: the list cut to what a window is made of, the picture mapped for the
+        card to write, one scene job); a build with no card answers 0 for every list.
+        A check that draws its own renderer defines COMPOSITOR_LIST_RENDER_EXTERNAL first.
 */
 static int compositor_gpu_list_render(int row, const unsigned int *list, unsigned int *picture, unsigned long pitch_words, int width,
                                       int height, int *damage);
@@ -12160,8 +12430,12 @@ static int compositor_gpu_list_render(int row, const unsigned int *list, unsigne
 static int compositor_gpu_list_render(int row, const unsigned int *list, unsigned int *picture, unsigned long pitch_words, int width,
                                       int height, int *damage)
 {
+#ifdef MOONWATER_GPU_C
+        return compositor_gpu_list_render_bytes(row, (unsigned char *)list, WINDOW_LIST_BYTES, picture, pitch_words, width, height, damage);
+#else
         (void)row, (void)list, (void)picture, (void)pitch_words, (void)width, (void)height, (void)damage;
         return 0;
+#endif
 }
 #endif
 

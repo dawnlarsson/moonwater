@@ -431,14 +431,14 @@ static const unsigned int gpu_bx[] = {
 #include "../../artifacts/gpu_kernels.inc"
 #endif
 
-// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4).
+// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4, 7 a picture scaled by tables).
 static const struct { const unsigned int *words; unsigned int size; } gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
-    {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}};
+    {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + 256 * 7 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + 256 * 8 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (system_control(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 #ifndef GPU_WAIT_CS
@@ -504,7 +504,7 @@ static b32 gpu_start(positive bytes)
 // 256 maps, so that a desktop of forty windows and their band, with a drag's and a landing's transient pictures, can be held in one tick (64 was the room a
 // present had, and a present with no room for a picture is the processor's). A map this tick does not use is not named by its job: no cost to hold it.
 #define GPU_MAPS 256
-static struct { positive from, to, va; unsigned int handle, used; } gpu_maps[GPU_MAPS];
+static struct { positive from, to, va; unsigned int handle, used; b32 written; } gpu_maps[GPU_MAPS];
 static unsigned int gpu_map_count, gpu_tick;
 #define GPU_VA_MAPS 0x2000000000ull
 #define GPU_VA_END (1ull << 40) // a close op's record holds 40 bits of an address: no map or import ends past it
@@ -548,6 +548,12 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         p64 up[3] = {from, to - from, 0xc}, va[8] = {0, 1 | (written ? 6ull : 2ull) << 32, 0, 0, to - from}, close[1];
         unsigned int old = 0;
 
+        // A map the card writes is the only map of its pages: one that held them for reading would be found by gpu_va_bytes and written through, and the card
+        // faults on a write to a map it was given to read.
+        for (unsigned int i = 0; written && i < gpu_map_count; i++)
+                if (from < gpu_maps[i].to && gpu_maps[i].from < to)
+                        gpu_drop(i--);
+
         for (unsigned int i = 1; gpu_map_count == GPU_MAPS && i < GPU_MAPS; i++)
                 old = gpu_tick - gpu_maps[i].used > gpu_tick - gpu_maps[old].used ? i : old;
         if (gpu_map_count == GPU_MAPS && gpu_maps[old].used != gpu_tick)
@@ -557,7 +563,7 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         va[0] = close[0] = up[2] >> 32, va[2] = at;
         if (!gpu_io(1u, 8, 64, va))
                 return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), false; // the buffer with it
-        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at;
+        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
         gpu_maps[gpu_map_count].handle = (unsigned int)va[0], gpu_maps[gpu_map_count++].used = gpu_tick;
         gpu_map_next = at + (to - from);
         return true;
@@ -574,6 +580,18 @@ static positive gpu_va_bytes(const void *pointer, positive bytes)
         return 0;
 }
 #define gpu_va(pointer) gpu_va_bytes(pointer, 1)
+
+// The same, for a map the card may write (gpu_map_written): 0 for a pointer that only a map to read holds.
+static positive gpu_va_written(const void *pointer, positive bytes)
+{
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (gpu_maps[i].written && (positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to && bytes <= gpu_maps[i].to - (positive)pointer)
+                {
+                        gpu_maps[i].used = gpu_tick;
+                        return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
+                }
+        return 0;
+}
 
 // A tick is over (a present): the maps unused for 120 ticks are unmapped and their buffers closed.
 static void gpu_trim(void)
@@ -773,6 +791,19 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         if (!(w & 3) && !(pitch & 3) && !(d_at & 15))
                 a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
         return (a->op == 6 || !hand) && gpu_run(); // text and a box with changes of cover are the kernel by hand's alone
+}
+
+// A picture (src, sp pixels a row) scaled to w by h pixels at dst (dp a row), nearest, the card told by tables where each column and row comes from: the processor
+// has made the w entries of the columns' and then the h entries of the rows' at tab (a GPU address), each the source's index (the source cell whose centre
+// is the point's). The card divides nothing, and reads nothing but what the tables name: false if the card did not finish it (as gpu_run says).
+static b32 gpu_scale(positive src, unsigned int sp, positive dst, unsigned int dp, positive tab, unsigned int w, unsigned int h)
+{
+        struct gpu_args address_to a = GPU_ARGS;
+
+        if (!w || !h || !gpu_idle())
+                return false;
+        a->s = src, a->d = dst, a->g = tab, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = 7, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = GPU_VA + GPU_BASES_AT;
+        return gpu_run();
 }
 
 // One small scene of every kind of op, made from nothing but numbers (a generator for the pictures, the covers and the glyph's bitmap), and the hash of its pixels,

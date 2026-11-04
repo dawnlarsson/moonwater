@@ -1145,6 +1145,45 @@ scene:
 	s_endpgm
 .size scene, .-scene
 
+; op 7: a picture scaled, nearest, by tables: d[y * dp + x] = s[ytab[y] * sp + xtab[x]] for x below w; xtab (w entries) is at g and ytab (the rows) follows it
+; (the tables are made by the processor from the sizes, so that no division is done here: the source cell whose centre is the point's, (2 * x + 1) * source / (2 * width))
+.globl scale
+.p2align 8
+.type scale,@function
+scale:
+	s_load_dwordx4	s[8:11], s[4:5], 0x0
+	s_load_dwordx2	s[12:13], s[4:5], 0x10
+	s_load_dwordx2	s[14:15], s[4:5], 0x18
+	s_load_dword	s16, s[4:5], 0x24
+	v_lshl_or_b32	v1, s6, 6, v0
+	s_waitcnt	lgkmcnt(0)
+	v_cmp_gt_u32	vcc, s16, v1
+	s_and_saveexec_b64 s[0:1], vcc
+	s_cbranch_execz	.scale_done
+	s_lshl_b32	s17, s16, 2
+	s_add_u32	s18, s12, s17
+	s_addc_u32	s19, s13, 0
+	s_lshl_b32	s20, s7, 2
+	s_add_u32	s18, s18, s20
+	s_addc_u32	s19, s19, 0
+	s_load_dword	s21, s[18:19], 0x0
+	v_lshlrev_b32	v2, 2, v1
+	global_load_dword v3, v2, s[12:13]
+	s_waitcnt	lgkmcnt(0)
+	s_waitcnt	vmcnt(0)
+	s_mul_i32	s22, s21, s14
+	v_add_nc_u32	v3, s22, v3
+	v_lshlrev_b32	v3, 2, v3
+	global_load_dword v4, v3, s[8:9]
+	s_mul_i32	s23, s7, s15
+	v_add_nc_u32	v5, s23, v1
+	v_lshlrev_b32	v5, 2, v5
+	s_waitcnt	vmcnt(0)
+	global_store_dword v5, v4, s[10:11]
+.scale_done:
+	s_endpgm
+.size scale, .-scale
+
 .rodata
 .p2align 6
 .macro kernel name, vgprs, sgprs
@@ -1166,3 +1205,4 @@ kernel fill, 8, 24
 kernel tone, 10, 28
 kernel glass, 16, 32
 kernel scene, 88, 106
+kernel scale, 8, 24
