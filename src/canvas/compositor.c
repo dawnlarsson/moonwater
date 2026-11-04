@@ -15617,6 +15617,18 @@ static void compositor_touch_report(unsigned int at, positive now)
         struct ui_touch_frame frame;
         struct ui_touch_out out;
 
+        // The trace (window.c): the gesture's mode and each finger's place in pixels, at the report.
+        WINDOW_TRACE("compositor report: device %b, gesture mode %b, dropped %b\n", (bipolar)at, (bipolar)touch->gesture.mode, (bipolar)screen->dropped);
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                if (screen->id[slot] >= 0)
+                {
+                        int x, y;
+
+                        compositor_touch_point(at, slot, &x, &y);
+                        WINDOW_TRACE("compositor finger: slot %b tracking id %b px %b,%b\n", (bipolar)slot, (bipolar)screen->id[slot],
+                                     (bipolar)x, (bipolar)y);
+                }
+
         // Events were lost: no finger is trusted, and what they were doing ends as if they were lifted, no click made.
         if (screen->dropped)
         {
@@ -15743,6 +15755,17 @@ static void compositor_input_read(unsigned int at)
 
                         // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
                         compositor_stamp_now = now;
+                        // The touch trace (window.c): a touch-down looks for its switch, and each raw event of a touch screen or a pad is a line.
+                        if (compositor.touchscreen[at] || compositor.touchpad[at])
+                        {
+                                if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOUCH && event->value)
+                                        window_trace_touch();
+                                WINDOW_TRACE_START();
+                                WINDOW_TRACE_PART("compositor event: monotonic %p device %p ", (positive)clock_monotonic_nanoseconds(), now);
+                                window_trace_word((const char address_to)compositor.input_name[at]);
+                                WINDOW_TRACE_PART(" type %b code %b value %b", (bipolar)event->type, (bipolar)event->code, (bipolar)event->value);
+                                WINDOW_TRACE_END();
+                        }
                         if ((event->type == COMPOSITOR_EV_REL && event->code < 2) || event->type == COMPOSITOR_EV_ABS)
                                 compositor.motion_ts = compositor.motion_ts ? compositor.motion_ts : now;
 

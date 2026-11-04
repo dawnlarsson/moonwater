@@ -2070,6 +2070,134 @@ static long window_call(long number, long a, long b, long c, long d, long e, lon
 #endif
 
 /*
+        The touch trace, a file switch: while /run/moonwater/touch-trace exists, the compositor and each program that takes touch append
+        lines to /run/moonwater/touch-trace.log, up to WINDOW_TRACE_CAP bytes (a line past it is not written). The switch is looked for
+        at a touch-down (window_trace_touch: one open that fails when the file is not there), and a log is made fresh when the switch
+        goes on. Off, a trace line costs one branch (WINDOW_TRACE); the log is not truncated when the switch goes, so it can be sent.
+        window_trace_out is the sink a line goes to (window_trace_write, the file; a check puts its own there).
+*/
+#define WINDOW_TRACE_SWITCH "/run/moonwater/touch-trace"
+#define WINDOW_TRACE_LOG "/run/moonwater/touch-trace.log"
+#define WINDOW_TRACE_CAP 1048576l
+#define WINDOW_TRACE_TEXT 320
+#define WINDOW_TRACE_APPEND (0x1 | 0x400 | 0x40 | 0x80000)  // O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC
+#define WINDOW_TRACE_NEW (0x1 | 0x200 | 0x40 | 0x80000)     // O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC
+#define WINDOW_TRACE_READ 0x80000                          // O_RDONLY | O_CLOEXEC
+
+static b32 window_trace_live;                    // this program's trace is on: the switch was there at the last touch-down
+static char window_trace_text[WINDOW_TRACE_TEXT];
+static positive window_trace_length;
+
+// The log holds room for a line of length bytes when it is at size now: the size is the log's own end, so the lines of every program count.
+static b32 window_trace_room(long size, long length)
+{
+        return size >= 0 && length > 0 && size + length <= WINDOW_TRACE_CAP;
+}
+
+// Appends a line (length bytes) to the log if it fits under the cap. Answers whether it was written.
+static b32 window_trace_write(const char address_to line, positive length)
+{
+        long handle = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_APPEND, 0644, 0, 0);
+        long size;
+        b32 wrote = false;
+
+        if (handle < 0)
+                return false;
+        size = window_call(WINDOW_SYS_LSEEK, handle, 0, 2, 0, 0, 0); // SEEK_END
+        if (window_trace_room(size, (long)length))
+                wrote = window_call(WINDOW_SYS_WRITE, handle, (long)line, (long)length, 0, 0, 0) == (long)length;
+        window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
+        return wrote;
+}
+
+static b32 (*window_trace_out)(const char address_to line, positive length) = window_trace_write;
+
+// The switch at a touch-down: on when the file is there, and the log made fresh when it was not on before.
+static void window_trace_touch(void)
+{
+        long handle = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_SWITCH, WINDOW_TRACE_READ, 0, 0, 0);
+        b32 was = window_trace_live;
+
+        window_trace_live = handle >= 0;
+        if (handle >= 0)
+                window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
+        if (window_trace_live && !was)
+        {
+                long fresh = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOW_TRACE_LOG, WINDOW_TRACE_NEW, 0644, 0, 0);
+
+                if (fresh >= 0)
+                        window_call(WINDOW_SYS_CLOSE, fresh, 0, 0, 0, 0, 0);
+        }
+}
+
+// The text of a line is formatted through string_format into window_trace_text, and sent with a newline by window_trace_flush.
+static void window_trace_take(address_any data, positive length)
+{
+        const char address_to bytes = (const char address_to)data;
+
+        for (positive at = 0; at < length && window_trace_length < WINDOW_TRACE_TEXT - 1; at++)
+                window_trace_text[window_trace_length++] = bytes[at];
+}
+
+static void window_trace_flush(void)
+{
+        // A line ends in one newline: the format's own, or the flush's where the format gave none.
+        if (window_trace_length < WINDOW_TRACE_TEXT - 1 && (window_trace_length == 0 || window_trace_text[window_trace_length - 1] != '\n'))
+                window_trace_text[window_trace_length++] = '\n';
+        if (window_trace_out)
+                window_trace_out(window_trace_text, window_trace_length);
+        window_trace_length = 0;
+}
+
+// The reasons a release throws or does not, as the trace names them (ui_throw_reason answers one).
+static const char address_to window_trace_reason_thrown = "thrown";
+static const char address_to window_trace_reason_below = "below the floor";
+static const char address_to window_trace_reason_late = "late lift, decayed";
+static const char address_to window_trace_reason_rested = "rested before the lift";
+static const char address_to window_trace_reason_samples = "no samples";
+static const char address_to window_trace_reason_slope = "no slope";
+
+// A word of text (a reason), appended as it is. string_format's %s does not come out through this writer, so a line with a word in it
+// is made of parts: WINDOW_TRACE_START, WINDOW_TRACE_PART (the formatter's numbers), window_trace_word, WINDOW_TRACE_END.
+static void window_trace_word(const char address_to word)
+{
+        if (!window_trace_live || !word)
+                return;
+        for (positive at = 0; word[at] && window_trace_length < WINDOW_TRACE_TEXT - 1; at++)
+                window_trace_text[window_trace_length++] = word[at];
+}
+
+// A trace line when the trace is on: one branch when it is not. The format and its arguments are string_format's (numbers only).
+#define WINDOW_TRACE_START()                                 \
+        do                                                   \
+        {                                                    \
+                if (window_trace_live)                       \
+                        window_trace_length = 0;             \
+        } while (0)
+#define WINDOW_TRACE_PART(...)                               \
+        do                                                   \
+        {                                                    \
+                if (window_trace_live)                       \
+                        string_format(window_trace_take, __VA_ARGS__); \
+        } while (0)
+#define WINDOW_TRACE_END()                                   \
+        do                                                   \
+        {                                                    \
+                if (window_trace_live)                       \
+                        window_trace_flush();                \
+        } while (0)
+#define WINDOW_TRACE(...)                                    \
+        do                                                   \
+        {                                                    \
+                if (window_trace_live)                       \
+                {                                            \
+                        window_trace_length = 0;             \
+                        string_format(window_trace_take, __VA_ARGS__); \
+                        window_trace_flush();                \
+                }                                            \
+        } while (0)
+
+/*
         Sleeps until there is something for the program: a key in its ring,
         a grid the compositor changed, or the other descriptor -- a pty
         master, for a terminal -- having bytes. Napping and looking was how

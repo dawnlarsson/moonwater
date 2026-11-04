@@ -5838,6 +5838,14 @@ static fn ui_event_context(const struct window_event address_to event)
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
         ui_kit.now = (b64)ui_kit_clock();
         ui_kit.stamp = event->when;
+        // A finger's events are traced when the trace is on (window_trace_touch looks for the switch at a finger's press).
+        if (event->flags & WINDOW_KEY_TOUCH)
+        {
+                if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
+                        window_trace_touch();
+                WINDOW_TRACE("kit event: type %b flags %b a %b b %b device %p dispatch %p\n", (bipolar)event->type, (bipolar)event->flags,
+                             (bipolar)event->a, (bipolar)event->b, (positive)event->when, (positive)ui_kit.now);
+        }
         ui_kit_track(event);
 }
 
@@ -6741,6 +6749,8 @@ static void ui_scroll_let_go(struct ui_scroll address_to s, b32 thrown, long spe
                         s->at = s->aim = edge, s->edge = from;
                         if (pulled)
                         {
+                                WINDOW_TRACE("kit release past an end: the stretch %b px springs home, carrying the speed %b px/s outward\n",
+                                             (bipolar)over, (bipolar)carry);
                                 ui_spring_go(&s->back, 0, over << 22);
                                 s->back.pace = UI_SCROLL_BACK_PACE;
                                 ui_spring_speed(&s->back, 1, (b64)(from > 0 ? carry : -carry) * UI_ONE);
@@ -6780,14 +6790,25 @@ static void ui_scroll_release_hand(struct ui_scroll address_to s, b32 lifted)
 
         // A finger that was still for UI_HAND_PAUSE_NS before it lifted throws nothing: the speed at its last report is the speed it
         // had before it stopped (a stop carries the slope of its deceleration, which the gap release read as a throw).
-        if (lifted && last && now > last && now - last > UI_HAND_PAUSE_NS)
+        b32 paused = lifted && last && now > last && now - last > UI_HAND_PAUSE_NS;
+
+        if (paused)
                 speed = 0;
         thrown = s->precise && ui_throws(speed, s->scale);
+        WINDOW_TRACE_START();
+        WINDOW_TRACE_PART("kit hand release (");
+        window_trace_word(lifted ? "lift" : "gap");
+        WINDOW_TRACE_PART("): speed %b px/s, ", (bipolar)speed);
+        window_trace_word(paused ? "paused before the lift: no speed" : "not paused");
+        WINDOW_TRACE_PART(", precise %b, throws %b", (bipolar)s->precise, (bipolar)thrown);
+        WINDOW_TRACE_END();
         s->hand = 0;
         ui_scroll_let_go(s, thrown, speed);
         // A wheel's notches have no release of their own: the gap that ended the hand is not the end of the burst (a trackpad's momentum
         // goes on for a second), so what goes on pushing at the end is taken (ui_scroll_wheel) and the stretch goes home once.
         s->absorb = !s->precise && s->bounds && s->back.live;
+        if (s->absorb)
+                WINDOW_TRACE("kit wheel: the stretch springs home; the notches that go on pushing at its end are absorbed\n");
 }
 
 // The hand let go after the gap of UI_HAND_GAP_NS (no lift was told: a wheel, or a pad that did not say it lifted).
@@ -9872,6 +9893,24 @@ static b32 ui_finger_move(const struct ui address_to ui, struct ui_finger addres
         return changed;
 }
 
+// Why a release throws or does not, for the touch trace (WINDOW_TRACE): the same tests the velocity and the throw make, in order.
+static const char address_to ui_throw_reason(const struct ui_drag address_to drag, positive now, long speed, int scale)
+{
+        positive last = drag->samples > 0 ? drag->when[drag->samples - 1] : 0;
+
+        if (drag->samples < 2)
+                return window_trace_reason_samples;
+        if (now > last && now - last > UI_FLING_GONE_NS)
+                return window_trace_reason_rested;
+        if (now > last && now - last > UI_FLING_STALE_NS)
+                return window_trace_reason_late;
+        if (speed == 0)
+                return window_trace_reason_slope;
+        if (!ui_throws(speed, scale))
+                return window_trace_reason_below;
+        return window_trace_reason_thrown;
+}
+
 // The finger lifted: what it pressed, done, or -1.
 static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
 {
@@ -9882,6 +9921,15 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
                 // region moves the other way (ui_finger_move).
                 long speed = ui_drag_velocity(&f->drag, now);
 
+                positive first = f->drag.samples > 0 ? f->drag.when[0] : now;
+
+                WINDOW_TRACE_START();
+                WINDOW_TRACE_PART("kit lift: speed %b px/s from %p samples over the last %p ms (horizon %p ms), ", (bipolar)speed,
+                                  (positive)f->drag.samples, now > first ? (positive)((now - first) / 1000000) : 0,
+                                  (positive)(UI_FLING_NS / 1000000));
+                window_trace_word(ui_throw_reason(&f->drag, now, speed, f->region ? f->region->scale : 100));
+                WINDOW_TRACE_PART(", cancelled %b, throws %b", (bipolar)cancelled, (bipolar)(f->region && ui_throws(speed, f->region->scale)));
+                WINDOW_TRACE_END();
                 if (f->region)
                         ui_scroll_let_go(f->region, ui_throws(speed, f->region->scale), -speed);
         }

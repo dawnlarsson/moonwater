@@ -133936,6 +133936,77 @@ static void check_kit_batch_stamps(void)
           gap * 100 <= single * 1);
 }
 
+/*
+    The touch trace (window.c): off, a trace line writes nothing; on, it is one line of the shape written; the cap holds (a line that would
+    pass 1 MiB is not written); and a release's reason is the test it failed (the reasons the trace names, from ui_throw_reason).
+*/
+static unsigned int trace_lines;
+static char trace_text[400];
+
+static b32 trace_capture(const char address_to line, positive length)
+{
+    trace_lines++;
+    for (positive at = 0; at < length && at < sizeof(trace_text) - 1; at++)
+        trace_text[at] = line[at], trace_text[at + 1] = 0;
+    return true;
+}
+
+// Whether two NUL-terminated strings are the same text.
+static b32 trace_same(const char address_to a, const char address_to b)
+{
+    positive at = 0;
+
+    for (; a[at] && b[at]; at++)
+        if (a[at] != b[at])
+            return false;
+    return a[at] == b[at];
+}
+
+static struct ui_drag trace_drag(int step, long ms)
+{
+    struct ui_drag drag;
+    positive start = 1000000000ull;
+
+    (ui_kit.now = (b64)start, ui_kit.test_clock = (b64)start, ui_kit.stamp = 0, ui_drag_start(&drag, 100));
+    for (int k = 1; k <= 16; k++)
+        (ui_kit.now = (b64)(start + (positive)k * (positive)ms * 1000000ull), ui_kit.stamp = ui_kit.now, ui_drag_follow(&drag, 100 + step * k));
+    ui_kit.stamp = 0;
+    return drag;
+}
+
+static void check_touch_trace(void)
+{
+    b32 same;
+    const char address_to want = "kit lift: speed 12 px/s, thrown\n";
+    struct ui_drag fast = trace_drag(13, 40), slow = trace_drag(1, 40), none;
+    positive now = 1000000000ull + 16ull * 40000000ull + 10000000ull, rested = now + 200000000ull;
+    long fast_speed, slow_speed;
+
+    memory_zero(&none, sizeof(none));
+    ui_drag_start(&none, 100);
+    window_trace_out = trace_capture;
+    trace_lines = 0;
+    window_trace_live = 0;
+    WINDOW_TRACE_START(); WINDOW_TRACE_PART("kit lift: speed %b px/s, ", (bipolar)12); window_trace_word("thrown"); WINDOW_TRACE_END();
+    check("touch trace: off, a line writes nothing (one branch, and no sink call)", trace_lines == 0);
+    window_trace_live = 1;
+    WINDOW_TRACE_START(); WINDOW_TRACE_PART("kit lift: speed %b px/s, ", (bipolar)12); window_trace_word("thrown"); WINDOW_TRACE_END();
+    same = trace_lines == 1 && trace_same(trace_text, want);
+    check("touch trace: on, the line is written in the shape the format gives, with its newline", same);
+    check("touch trace: the cap holds: a line that would pass 1 MiB is not written, and one that fits is",
+          !window_trace_room(WINDOW_TRACE_CAP - 5, 10) && window_trace_room(WINDOW_TRACE_CAP - 10, 10) && !window_trace_room(-1, 5) &&
+          !window_trace_room(WINDOW_TRACE_CAP, 1));
+    fast_speed = ui_drag_velocity(&fast, now), slow_speed = ui_drag_velocity(&slow, now);
+    check("touch trace: a release's reason is thrown, below the floor, rested, or no samples, as the test that decided it",
+          trace_same(ui_throw_reason(&fast, now, fast_speed, 100), "thrown") &&
+          trace_same(ui_throw_reason(&slow, now, slow_speed, 100), "below the floor") &&
+          trace_same(ui_throw_reason(&fast, rested, fast_speed, 100), "rested before the lift") &&
+          trace_same(ui_throw_reason(&none, now, 0, 100), "no samples"));
+    window_trace_live = 0;
+    window_trace_out = window_trace_write;
+    ui_kit.test_clock = 0;
+}
+
 static void check_kit_pause_rule(void)
 {
     b32 soon = check_pause_lift(10), later = check_pause_lift(60), longer = check_pause_lift(160);
@@ -146904,6 +146975,9 @@ static void terminal_stretch_rest(void)
     if (terminal_extent(&first, &shown, &total) && total > shown)
         ui_scroll_set(&terminal.bar, (int)(first * terminal.cell_h));
     ui_scroll_stop(&terminal.bar);
+    // The compositor has taken the last picture: a picture left untaken makes the next frame wait for a buffer (the caret rows' first
+    // frame was refused that way when these rows ran first).
+    terminal.own.table->shown[0] = terminal.own.table->frame[0];
 }
 
 static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b32 *settled, b32 *list_match)
@@ -147128,6 +147202,7 @@ static void check_terminal_stretch(void)
         terminal.own.table->shown[0] = terminal.own.table->frame[0];
         terminal_frame();
     }
+    terminal.own.table->shown[0] = terminal.own.table->frame[0];
 }
 
 static void check_terminal_wheel_curve(void)
@@ -153850,6 +153925,7 @@ static fn field_check(struct ui address_to wui)
     check_kit_throw_dp();
     check_kit_pause_rule();
     check_kit_batch_stamps();
+    check_touch_trace();
         check_field_drag_drawn(wui);
         check_field_flick(wui);
         check_throw_last_step(wui);
@@ -154840,7 +154916,7 @@ static b32 lcheck_context(const char address_to stmt, positive length)
             "asm", "ASM_", "_Static_assert", "string_equals(", "memory_compare(", "string_has_prefix(", "string_compare", "memory_search(",
             "setting_by_path(", "compositor_word(", "ui_argument(", "program_argument(", "string_table_find(", "word_is(", "string_starts(",
             "compositor_kmsg(", "string_format(log", "log_direct(", "log_error", "host_say(", ".missing =", ".nofont =", ".title =",
-            "terminal_said("};
+            "terminal_said(", "WINDOW_TRACE", "window_trace_word(", "window_trace_reason"};
 
         for (positive k = 0; k < sizeof(names) / sizeof(names[0]); k++)
                 if (lcheck_has(stmt, length, names[k]))
