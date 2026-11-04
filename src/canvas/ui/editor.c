@@ -41,7 +41,7 @@ struct editor_tab
         positive length, mapped;  // mapped: the mapping's length, 0 when read
         p64 size, mtime, mtime_nsec;
         unsigned int mode;
-        b32 open, changed_on_disk;
+        b32 changed_on_disk;
 };
 
 static struct
@@ -162,7 +162,6 @@ static b32 editor_open(string_address path)
                         name = at + 1;
         tab->view.doc.language = doc_language_of((const char address_to)name, tab->bytes, tab->length < 256 ? tab->length : 256);
         tab->view.comment = doc_languages[tab->view.doc.language].comment;
-        tab->open = true;
         editor.tab = editor.count++;
         return true;
 }
