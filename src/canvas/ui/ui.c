@@ -50,6 +50,11 @@
 #define UI_KEEP(x, y, w, h) ((void)0)
 #endif
 
+// The painters the apps call are counted (UI_CALL): one draw of an app is a number of them, which a check reads (ui_kit_calls)
+// as the calls-per-draw measure. A count is a plain increment; nothing in a picture depends on it.
+static unsigned long ui_kit_calls;
+#define UI_CALL() (ui_kit_calls++)
+
 #define UI_ROW (ui_row_height()) // a row of a list or a column: 40, and more as the text grows past its size
 #define UI_ROW_LEAST 40
 #define UI_PAD 16      // the window's margin
@@ -3826,6 +3831,7 @@ static fn ui_kit_press_transform(const struct ui address_to ui, struct ui_contro
 
 static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         b64 sx, sy;
         b32 tx, ty, ox = ui_q8(ui, c->x) + ui_q8(ui, c->w) / 2, oy = ui_q8(ui, c->y) + ui_q8(ui, c->h) / 2;
         struct ui_box face = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(c->h) / 2);
@@ -3866,6 +3872,7 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
 */
 static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         b64 sx, sy, extent, scale, squish, dom;
         b32 tx, ty, live = 0;
         b32 rx = ui_q8(ui, c->x), ry = ui_q8(ui, c->y), rw = ui_q8(ui, c->w), rh = ui_q8(ui, c->h);
@@ -3973,6 +3980,7 @@ static b32 ui_radio_row_y(const struct ui_control address_to c, int item)
 
 static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         static const struct ui_stop squash_x[] = {{0, UI_ONE}, {UI_Q2(20), UI_Q2(80)}, {UI_Q2(60), UI_Q2(110)}, {UI_ONE, UI_ONE}};
         static const struct ui_stop squash_y[] = {{0, UI_ONE}, {UI_Q2(20), UI_Q2(127)}, {UI_Q2(60), UI_Q2(91)}, {UI_ONE, UI_ONE}};
         static const struct ui_stop press[] = {{0, UI_ONE}, {UI_Q2(42), UI_Q2(82)}, {UI_ONE, UI_ONE}};
@@ -4155,6 +4163,7 @@ static b32 ui_vslider_knob_y(const struct ui address_to ui, const struct ui_cont
 
 static fn ui_vslider_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         b32 live = 0, on_knob;
         b64 value = c->value, halo;
         int knob = c->down ? 14 : c->hover ? 18 : UI_VSLIDER_KNOB, bar = c->down ? 4 : c->hover ? 8 : 6;
@@ -4205,6 +4214,7 @@ static fn ui_vslider_draw(struct ui address_to ui, struct ui_control address_to 
 
 static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         if (c->variant & UI_SLIDER_VERTICAL)
         {
                 ui_vslider_draw(ui, c);
@@ -4447,6 +4457,7 @@ static fn ui_tabs_marks(struct ui address_to ui, struct ui_control address_to c,
 #define UI_TABS_H 32 // a segmented tab's height, the pill (a strip of tabs, the editor's file tabs too)
 static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         b32 seg = c->variant == UI_TABS_SEGMENTED, live = 0;
 
         if (c->variant == UI_TABS_VERTICAL)
@@ -4543,6 +4554,7 @@ static fn ui_vtabs_row(const struct ui_control address_to c, int address_to x, i
 
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         b32 busy = ui_kit.busy;
         b64 pip_y;
         int rx, rw;
@@ -4920,6 +4932,7 @@ static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_
 
 static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int state = c->focused ? UI_FIELD_FOCUS : c->hover ? UI_FIELD_HOVER : UI_FIELD_REST;
         b64 want[15], now[15], p;
         b32 bare = c->variant == UI_FIELD_BARE;
@@ -5029,6 +5042,7 @@ static fn ui_input_draw(struct ui address_to ui, struct ui_control address_to c)
 */
 static fn ui_progress_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         struct ui_box track = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(6), ui_q(3)), fill = track;
 
         ui_kit_fill(ui, &track, ui_role(UI_SURFACE_HIGHEST), null);
@@ -5121,6 +5135,7 @@ static fn ui_control_size(struct ui address_to ui, struct ui_control address_to 
 
 static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int role = c->role, dot = c->on ? 2 * UI_DOT : 0;
         // A role's container is the next role, except the error's: its on-colour is laid before its container (role + 2).
         unsigned int fill = role == UI_PRIMARY ? ui_role(UI_PRIMARY_CONTAINER)
@@ -5144,6 +5159,7 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 
 static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         unsigned int ink = c->on ? ui_role(UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT);
         struct ui_box box;
 
@@ -5156,6 +5172,7 @@ static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
 
 static fn ui_avatar_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int size = c->w ? c->w : 32, width = ui_kit_measure(ui, (string_address)c->label, UI_TITLE_SMALL);
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(size), ui_q(size), ui_q(c->variant ? 6 : size / 2));
         const struct ui_type address_to t = &ui_types[UI_LABEL_MEDIUM];
@@ -5177,6 +5194,7 @@ static fn ui_avatar_draw(struct ui address_to ui, struct ui_control address_to c
 
 static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int size = c->w ? c->w : 20;
         b64 ring = size == 14 ? ui_q(2) : size == 28 ? ui_q(3) : ui_q(5) / 2;
         b32 cx = ui_q8(ui, c->x) + ui_q8(ui, size) / 2, cy = ui_q8(ui, c->y) + ui_q8(ui, size) / 2;
@@ -5225,6 +5243,7 @@ static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to 
 // A surface: a card (14 round, the low face, a hairline) or a window (20 round, the high face, a hairline and a lift).
 static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         b32 window = c->kind == UI_WINDOW;
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(window ? 20 : 14));
 
@@ -5254,6 +5273,7 @@ static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to 
 
 static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int role = c->role;
         unsigned int fill = role ? ui_role(role == UI_PRIMARY ? UI_PRIMARY_CONTAINER : role == UI_ERROR ? UI_ERROR_CONTAINER : role + 1)
                                  : ui_role(UI_SURFACE_LOW);
@@ -5272,6 +5292,7 @@ static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to 
 
 static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(14));
         struct ui_box head = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(37), 0);
 
@@ -5287,6 +5308,7 @@ static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
 
 static fn ui_kbd_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int width = ui_kit_measure(ui, (string_address)c->label, UI_MONO);
         struct ui_box box, foot;
 
@@ -5348,6 +5370,7 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
 // One control drawn, whatever it is; the rows it reaches marked when anything in it is moving.
 static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         b32 was = ui_kit.busy;
 
         ui_kit.busy = 0;
@@ -5410,6 +5433,7 @@ static fn ui_control_place(struct ui_control address_to c)
 */
 static fn ui_list_row_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int x, y, w, h;
         struct ui_box row;
         struct ui_place place = {UI_ONE, UI_ONE, 0, 0, 0, 0};
@@ -5458,6 +5482,7 @@ static int ui_swatch_at(const struct ui address_to ui, const struct ui_control a
 
 static fn ui_swatches_draw(struct ui address_to ui, struct ui_control address_to c)
 {
+        UI_CALL();
         int size = ui_dev(ui, UI_SWATCH), step = ui_dev(ui, UI_SWATCH + UI_SWATCH_GAP), left = ui_swatches_left(ui, c);
         b32 out = ui_q8(ui, 3), s = size * 256, y = (ui_dev(ui, c->y) + (ui_dev(ui, c->h) - size) / 2) * 256;
 
@@ -6098,6 +6123,7 @@ static fn ui_scroll_mark(const struct ui address_to ui, const struct ui_scroll a
 
 static fn ui_scroll_draw(struct ui address_to ui, struct ui_scroll address_to s)
 {
+        UI_CALL();
         int top, length;
         struct ui_box thumb;
         unsigned int ink;
@@ -7096,6 +7122,7 @@ static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_t
 
 static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to m)
 {
+        UI_CALL();
         struct ui_menu_sizes sizes = ui_menu_sizes(ui, m->touch);
         int y = sizes.pad;
 
@@ -7697,6 +7724,7 @@ static fn ui_buttons_place(struct ui address_to ui, struct ui_buttons address_to
 // keys: the window has the keys, so the focused button shows its ring.
 static fn ui_buttons_draw(struct ui address_to ui, struct ui_buttons address_to b, b32 keys)
 {
+        UI_CALL();
         if (b->confirm.armed && b->confirm.what >= 1 && b->confirm.what <= b->count && b->says[b->confirm.what - 1])
         {
                 ui_confirm_line(b->said, sizeof(b->said), b->says[b->confirm.what - 1]);
@@ -8287,6 +8315,7 @@ static unsigned int ui_meter_ink(b64 share)
 
 static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, const b64 address_to shown, const b64 address_to hold)
 {
+        UI_CALL();
         for (int channel = 0; channel < 2; channel++)
         {
                 int bar = ui_dev(ui, UI_METER_BAR), left = x + (ui_rtl() ? 1 - channel : channel) * (bar + ui_dev(ui, UI_METER_GAP));
@@ -8590,6 +8619,7 @@ static int ui_strips_over(const struct ui address_to ui, struct ui_strips addres
 
 static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s, b32 keys)
 {
+        UI_CALL();
         b64 shift;
         char text[96], fitted[96];
 
@@ -8670,6 +8700,7 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
 // A line of words in the middle of the area to the right of the first strip, or of all of it with none: what there is to say instead of strips.
 static fn ui_strips_message(struct ui address_to ui, struct ui_strips address_to s, const char address_to text, b32 beside)
 {
+        UI_CALL();
         int taken = beside ? ui_dev(ui, UI_STRIP_PAD + UI_STRIP_W + UI_STRIP_GAP) : 0, left = s->x + (ui_rtl() ? 0 : taken), width = s->w - taken;
         int measured = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM), at = measured < width ? (width - measured) / 2 : 0;
 
@@ -9334,6 +9365,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 {
+        UI_CALL();
         int row_height = ui_dev(ui, UI_ROW);
 
         ui_scroll_glide(ui, &l->scroll);
@@ -10271,6 +10303,7 @@ static fn ui_page_pointer(const struct ui address_to ui, struct ui_page address_
 */
 static fn ui_page_draw(struct ui address_to ui, struct ui_page address_to p, b32 keys)
 {
+        UI_CALL();
         int pad = ui_dev(ui, UI_PAD), left = pad + ui_dev(ui, UI_PAGE_INSET), room = p->width - left - pad, foot = ui_dev(ui, UI_PAGE_FOOT);
 
         ui->top = 0;
@@ -10402,6 +10435,7 @@ static int ui_lines_height(const struct ui address_to ui, int count)
 static fn ui_lines_draw(struct ui address_to ui, struct ui_scroll address_to s, int left, int count,
                         const char address_to (*line)(int at, char address_to into, positive room))
 {
+        UI_CALL();
         int height = ui_dev(ui, UI_LINE), top;
         char text[512];
 
@@ -13027,6 +13061,7 @@ static b32 ui_text_bar_place(struct ui address_to ui, struct ui_text address_to 
 */
 static fn ui_text_overlay_draw(struct ui address_to ui, struct ui_text address_to t)
 {
+        UI_CALL();
         const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
         positive now = ui_kit_clock();
         b32 was = t->bar_up;
@@ -13610,6 +13645,7 @@ static long ui_findbar_timeout(struct ui address_to ui, struct ui_findbar addres
 // The band, its field the width of the window less the gaps, and the hint the app has for its mode (the words are the app's).
 static fn ui_findbar_draw(struct ui address_to ui, struct ui_findbar address_to bar, int top, int width, const char address_to hint)
 {
+        UI_CALL();
         struct ui_control address_to c = &bar->control;
 
         c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
@@ -13948,6 +13984,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
 */
 static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int x, int y, int width, int height, unsigned int ground)
 {
+        UI_CALL();
         static struct ui_text_layout l;
         p64 lines = doc_line_count(&t->doc), line = t->mode == UI_TEXT_FIELD ? 0 : t->top_line;
         font_metrics m;
@@ -14083,6 +14120,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
 */
 static fn ui_text_field_draw(struct ui address_to ui, struct ui_control address_to c, int left, int right, int top, int bottom)
 {
+        UI_CALL();
         struct ui_text address_to t = c->edit;
 
         // The keys coming to it wake the caret, which then blinks a while.

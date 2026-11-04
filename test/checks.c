@@ -137724,6 +137724,34 @@ static b32 settings_frames_same(int slot, string_address when)
 }
 
 // One pass of the kit's loop (ui_app_run) at now: a frame when the picture is due and a display period has gone since the last.
+/*
+        Calls per draw (the kit's counter, ui_kit_calls: the painters the apps call, counted in ui.c): the first draw of each app in
+        the run prints how many painter calls it made, and a row says it made some. Each app has its own row.
+*/
+static b32 kit_draw_seen[5];
+
+static b32 kit_draw_first(int app)
+{
+        if (kit_draw_seen[app])
+                return false;
+        kit_draw_seen[app] = true;
+        return true;
+}
+
+static void kit_draw_print(const char address_to app, unsigned long calls)
+{
+        char digits[24];
+        positive at = sizeof(digits) - 1;
+
+        digits[at] = 0;
+        do
+        {
+                digits[--at] = (char)('0' + calls % 10);
+                calls /= 10;
+        } while (calls && at > 0);
+        string_format(log, "  kit calls: one draw of %s makes %s painter calls\n", (string_address)app, (string_address)(digits + at));
+}
+
 static fn settings_frames_pass(void)
 {
         positive now = settings_frames.now;
@@ -137735,8 +137763,17 @@ static fn settings_frames_pass(void)
         ui_kit.busy = 0;
         ui_kit.damage_top = ui_kit.damage_bottom = 0;
         ui_kit_turn();
-        if (!settings_frame())
-                return;
+        {
+                unsigned long was = ui_kit_calls;
+
+                if (!settings_frame())
+                        return;
+                if (kit_draw_first(0))
+                {
+                        kit_draw_print("settings", ui_kit_calls - was);
+                        check("kit calls: a draw of settings is made of painter calls", ui_kit_calls - was > 0);
+                }
+        }
         ui_kit.drawn = (b64)now;
         if (ui_kit.busy)
         {
@@ -140328,7 +140365,16 @@ static fn check_forced(void)
         cursor_hide();
         term_bytes((const p8 address_to) "\x1b[H\x1b[2Kfirst", 13);
         cursor_show();
-        framed = terminal_frame();
+        {
+                unsigned long was = ui_kit_calls;
+
+                framed = terminal_frame();
+                if (kit_draw_first(4))
+                {
+                        kit_draw_print("terminal", ui_kit_calls - was);
+                        check("kit calls: a frame of the terminal is made of painter calls", ui_kit_calls - was > 0);
+                }
+        }
         table->shown[0] = table->frame[0];
         shown_on = terminal.shown;
         check("forced: the first picture is made and taken", framed && terminal.shown >= 0 && windows_ready(&terminal.own));
@@ -148341,7 +148387,16 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
         {
                 int ink = 0, middle = 0;
 
-                mixer_draw(pixels);
+                {
+                        unsigned long was = ui_kit_calls;
+
+                        mixer_draw(pixels);
+                        if (kit_draw_first(3))
+                        {
+                                kit_draw_print("mixer", ui_kit_calls - was);
+                                check("kit calls: a draw of the mixer is made of painter calls", ui_kit_calls - was > 0);
+                        }
+                }
                 for (int y = 0; y < 400; y++)
                         for (int x = 0; x < 640; x++)
                                 if ((pixels[y * 640 + x] & 0xffffffu) != (ui_role(UI_SURFACE) & 0xffffffu))
@@ -153085,7 +153140,16 @@ static fn check_glass_pieces(string_address regular)
         launcher.focused = true, launcher_app.had_keys = true;
         launcher_type_text("ls");
         launcher_layout();
-        launcher_draw((unsigned int address_to)picture);
+        {
+                unsigned long was = ui_kit_calls;
+
+                launcher_draw((unsigned int address_to)picture);
+                if (kit_draw_first(1))
+                {
+                        kit_draw_print("launcher", ui_kit_calls - was);
+                        check("kit calls: a draw of the launcher is made of painter calls", ui_kit_calls - was > 0);
+                }
+        }
         pad = ui_px(&launcher.ui, UI_PAD);
 #define GLASS_AT(x, y) (picture[(y) * 800 + (x)] >> 24)
         check("glass: a launcher's ground is clear where no piece is drawn: the glass shows through",
@@ -155486,7 +155550,16 @@ static fn check_kit_defaults(struct ui address_to wui)
                 ui_kit_held = null;
                 editor_open(null), editor_open(null), editor_open(null);
                 editor.tab = 0;
-                editor_draw(pixels);
+                {
+                        unsigned long was = ui_kit_calls;
+
+                        editor_draw(pixels);
+                        if (kit_draw_first(2))
+                        {
+                                kit_draw_print("editor", ui_kit_calls - was);
+                                check("kit calls: a draw of the editor is made of painter calls", ui_kit_calls - was > 0);
+                        }
+                }
                 at_x = ui_tab_left(&editor.ui, &editor.strip, 2) + ui_tab_width(&editor.ui, &editor.strip, 2) / 2;
                 at_y = editor.strip.y * editor.ui.scale / 100 + editor.strip.h * editor.ui.scale / 100 / 2;
                 ui_event_context(&(struct window_event){WINDOW_EVENT_MOTION, 0, at_x, at_y});
@@ -215515,6 +215588,8 @@ b32 main(void)
 */
 #define SHARED_counted
 #include "checks.c"
+
+
 #undef SHARED_counted
 
 #define HEAD ".amdgcn_target \"amdgcn-amd-amdhsa--gfx1036\"\n.text\nk:\n"
