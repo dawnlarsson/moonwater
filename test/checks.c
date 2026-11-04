@@ -153053,10 +153053,10 @@ static fn check_caret_blink(void)
         // A key restarts the phase: solid at once, gone in the middle of the cycle of its own, solid again at the next key.
         ui_text_open(&t, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
         t.focused = true;
-        t.blink_at = t.awake_at = now;
+        t.caret.since = t.caret.awake = now;
         check("caret: solid at the key", ui_text_tick(&t, now, &redraw) != 0 && t.caret_fade == 0);
         check("caret: gone three quarters round its own cycle", ui_text_tick(&t, now + cycle / 2, &redraw) != 0 && t.caret_fade == UI_CARET_FULL);
-        t.blink_at = t.awake_at = now + cycle / 2 + 1000000;
+        t.caret.since = t.caret.awake = now + cycle / 2 + 1000000;
         check("caret: a key restarts it solid", ui_text_tick(&t, now + cycle / 2 + 1000000, &redraw) != 0 && t.caret_fade == 0);
 
         // Off is solid, and asks for no frame, whatever the time.
@@ -153069,7 +153069,7 @@ static fn check_caret_blink(void)
         ui_kit.caret_speed = UI_CARET_NORMAL;
         redraw = false;
         check("caret: left alone it stays drawn and asks for no frame",
-              ui_text_tick(&t, t.awake_at + UI_TEXT_BLINK_FOR_NS + 1, &redraw) == 0 && t.caret_fade == 0);
+              ui_text_tick(&t, t.caret.awake + UI_TEXT_BLINK_FOR_NS + 1, &redraw) == 0 && t.caret_fade == 0);
         // The wait ends at the ten seconds, whatever phase the caret is in, so a caret that is gone then is drawn then.
         {
                 positive due = 0;
@@ -153099,7 +153099,7 @@ static fn check_caret_terminal(void)
         static const unsigned int widths[3] = {1, 2, 3};
         unsigned int saved_speed = ui_kit.caret_speed, pixels[60 * 20];
         b32 was_shown = shown, was_focused = terminal.focused;
-        positive since = terminal.caret_since, awake = terminal.caret_awake, now = 3000000000000ull, width_was = terminal.width;
+        positive since = terminal.caret.since, awake = terminal.caret.awake, now = 3000000000000ull, width_was = terminal.width;
         positive height_was = terminal.height, pitch_was = terminal.pitch, cell_h_was = terminal.cell_h;
         long cycle;
 
@@ -153161,18 +153161,18 @@ static fn check_caret_terminal(void)
                 // The phase is set for each frame: solid at its start, gone at three quarters of a cycle, and between at the
                 // middle of the falling fade (a quarter cycle in). Each frame is taken before the next, as the compositor does, and
                 // its caret's pixel is read at once, since the buffer is drawn into again by the frame after.
-                terminal.caret_awake = mid;
-                terminal.caret_since = mid;
+                terminal.caret.awake = mid;
+                terminal.caret.since = mid;
                 framed = terminal_frame();
                 table->shown[own] = table->frame[own];
                 index_full = terminal.shown, cover_full = terminal.caret_cover[index_full];
                 at_full = check_caret_pixel(table, own);
-                terminal.caret_since = mid - (positive)cycle / 2;
+                terminal.caret.since = mid - (positive)cycle / 2;
                 framed = terminal_frame() && framed;
                 table->shown[own] = table->frame[own];
                 index_gone = terminal.shown, cover_gone = terminal.caret_cover[index_gone];
                 at_gone = check_caret_pixel(table, own);
-                terminal.caret_since = mid - quarter;
+                terminal.caret.since = mid - quarter;
                 framed = terminal_frame() && framed;
                 table->shown[own] = table->frame[own];
                 index_mid = terminal.shown, cover_mid = terminal.caret_cover[index_mid];
@@ -153191,12 +153191,12 @@ static fn check_caret_terminal(void)
                 long timeout = -1;
 
                 terminal_caret_step(when, &timeout);
-                terminal.caret_since = when, terminal.caret_awake = when;
+                terminal.caret.since = when, terminal.caret.awake = when;
                 terminal.dirty = false;
                 terminal_caret_step(later, &timeout);
                 check("terminal caret: the wait that ends where the cover changes repaints it, with nothing else to draw", terminal.dirty);
         }
-        terminal.caret_since = since, terminal.caret_awake = awake;
+        terminal.caret.since = since, terminal.caret.awake = awake;
 
         // The settings come from the kit alone: terminal.c asks ui_caret_at and ui_caret_thick, and reads no setting of its own.
         {
@@ -153207,7 +153207,7 @@ static fn check_caret_terminal(void)
                         const char address_to text = (const char address_to)bytes;
 
                         check("terminal caret: the blink and the width come from ui.c's kit, the same as a field's",
-                              check_hits(text, size, "ui_caret_at(") >= 1 && check_hits(text, size, "ui_caret_thick()") >= 1 &&
+                              check_hits(text, size, "ui_caret_cover(") >= 1 && check_hits(text, size, "ui_caret_thick()") >= 1 &&
                               check_hits(text, size, "ui_kit.caret") == 0 && check_hits(text, size, "UI_CARET_SLOW") == 0 &&
                               check_hits(text, size, "UI_CARET_FAST") == 0 && check_hits(text, size, "UI_CARET_OFF") == 0 &&
                               check_hits(text, size, "UI_CARET_THICK") == 0);
@@ -153219,7 +153219,7 @@ static fn check_caret_terminal(void)
 
         shown = was_shown;
         terminal.focused = was_focused;
-        terminal.caret_since = since, terminal.caret_awake = awake;
+        terminal.caret.since = since, terminal.caret.awake = awake;
         ui_kit.caret_speed = saved_speed;
 }
 #endif

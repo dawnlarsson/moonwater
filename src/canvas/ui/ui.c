@@ -10657,6 +10657,20 @@ struct ui_edge
         long owed;
 };
 
+/*
+        A caret's blink (ui_caret_cover): since is when its phase restarted and awake the last key or move, from which it blinks a
+        while. A field and the terminal each keep one; a key or a move wakes it (ui_caret_wake).
+*/
+struct ui_caret
+{
+        positive since, awake;
+};
+
+static void ui_caret_wake(struct ui_caret address_to c, positive now)
+{
+        c->since = c->awake = now;
+}
+
 #define UI_TEXT_SEARCH 64 // a search key's room: the folded text of a field, at most this many bytes less one
 
 struct ui_text
@@ -10700,7 +10714,6 @@ struct ui_text
         p8 search_last[UI_TEXT_SEARCH];         // the search key ui_text_search_changed last answered, and its length
         positive search_length;
         int finger_left;                        // the finger's or throw's pixels not yet a line, up positive
-        positive blink_at;                      // where the caret's phase restarted (ui_text_wake): a key or a move
         unsigned int caret_fade;                // how far the caret has faded: 0 solid, UI_CARET_FULL gone (0 new, so drawn)
         p32 asks, command;
         int menu_x, menu_y;
@@ -10723,7 +10736,7 @@ struct ui_text
         b32 keeps_vertical;                     // the app takes Up and Down (a list's, rows', a scroll): else they go to the ends, as Home and End
         b32 pasting;                            // it asked the clipboard, and the answer is its
         int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
-        positive awake_at;                      // the last key or move, from which the caret blinks a while
+        struct ui_caret caret;                  // the caret's blink: its phase, and the last key or move it blinks a while after (ui_caret_wake)
 };
 
 /*
@@ -10769,7 +10782,7 @@ static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_
         t->numbers = mode == UI_TEXT_CODE;
         t->wrap = mode == UI_TEXT_AREA;
         t->comment = "//";
-        t->blink_at = t->awake_at = clock_monotonic_nanoseconds();
+        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds());
         return true;
 }
 
@@ -10923,7 +10936,7 @@ static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_t
         memory_zero(t->preedit, sizeof(t->preedit));
         memory_copy(t->preedit, text, length);
         t->preedit_length = (p32)length;
-        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_fade = 0;
+        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds()), t->caret_fade = 0;
         return true;
 }
 
@@ -10943,7 +10956,7 @@ static p32 SPARE ui_text_preedit_end(struct ui_text address_to t, b32 commit)
         }
         memory_zero(t->preedit, sizeof(t->preedit));
         t->preedit_length = 0;
-        t->blink_at = t->awake_at = clock_monotonic_nanoseconds(), t->caret_fade = 0;
+        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds()), t->caret_fade = 0;
         return (t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED) | (refused ? UI_TEXT_REFUSED : 0);
 }
 
@@ -11503,7 +11516,7 @@ static b64 ui_caret_until(b64 q, b64 cycle)
 // quarter of a cycle into the solid half, so the caret is solid at once and stays solid while the keys keep coming.
 static fn ui_text_wake(struct ui_text address_to t)
 {
-        t->blink_at = t->awake_at = clock_monotonic_nanoseconds();
+        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds());
         t->caret_fade = 0;
 }
 
@@ -11533,6 +11546,12 @@ static unsigned int ui_caret_at(positive now, positive since, positive awake, po
         return cover;
 }
 
+// A caret's cover at now (ui_caret_at) for its own blink.
+static unsigned int ui_caret_cover(const struct ui_caret address_to c, positive now, positive address_to due)
+{
+        return ui_caret_at(now, c->since, c->awake, due);
+}
+
 static positive ui_text_tick(struct ui_text address_to t, positive now, b32 address_to redraw)
 {
         positive due;
@@ -11540,7 +11559,7 @@ static positive ui_text_tick(struct ui_text address_to t, positive now, b32 addr
 
         if (!t->focused || t->read_only)
                 return 0;
-        cover = ui_caret_at(now, t->blink_at, t->awake_at, &due);
+        cover = ui_caret_cover(&t->caret, now, &due);
         if (t->caret_fade != UI_CARET_FULL - cover)
                 t->caret_fade = UI_CARET_FULL - cover, *redraw = true;
         return due;

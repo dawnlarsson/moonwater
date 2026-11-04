@@ -211,10 +211,10 @@ static struct
         b32 select_touch, touch_select, touch_held;
         struct ui_click click;     // the kit's click count: a double click and a triple, as a field's
         int clicks;
-        // The caret's blink (ui_caret_at, as a field's): when its phase restarted and when it was last awake (a key or a
-        // move), the caret's place and whether it was shown when last seen; and the frame cell and cover each buffer holds,
-        // so a frame draws a caret whose cover changed, as one whose cells changed.
-        positive caret_since, caret_awake;
+        // The caret's blink (ui_caret_cover, as a field's): its phase and the last key or move (ui_caret_wake); the caret's place
+        // and whether it was shown when last seen; and the frame cell and cover each buffer holds, so a frame draws a caret whose
+        // cover changed, as one whose cells changed.
+        struct ui_caret caret;
         unsigned int caret_row, caret_column;
         b32 caret_seen;
         unsigned int caret_at[2], caret_cover[2], caret_marks[2];
@@ -751,7 +751,7 @@ static unsigned int terminal_caret_cover_at(positive now)
 
         if (!shown || !terminal.focused)
                 return UI_CARET_FULL;
-        return ui_caret_at(now, terminal.caret_since, terminal.caret_awake, &due);
+        return ui_caret_cover(&terminal.caret, now, &due);
 }
 
 // The caret of the frame being made: read here, in its own function, since terminal_frame has a local named shown. With no
@@ -772,7 +772,7 @@ static b32 terminal_caret_held(unsigned int slot)
 
 static void terminal_caret_restart(positive now)
 {
-        terminal.caret_since = terminal.caret_awake = now;
+        ui_caret_wake(&terminal.caret, now);
 }
 
 // The caret's phase restarts when it moves; the loop's wait ends when its cover next changes.
@@ -791,7 +791,7 @@ static void terminal_caret_step(positive now, long address_to timeout)
         // as the frame would make it, or it stays at the cover the last frame drew (gone, in the off phase).
         if (terminal.shown >= 0 && (terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at(now)) != terminal.caret_cover[terminal.shown])
                 terminal.dirty = true;
-        ui_caret_at(now, terminal.caret_since, terminal.caret_awake, &due);
+        ui_caret_cover(&terminal.caret, now, &due);
         if (due && (*timeout < 0 || (long)(due - now) < *timeout))
                 *timeout = (long)(due - now);
 }
