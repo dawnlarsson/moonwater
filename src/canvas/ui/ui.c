@@ -12946,6 +12946,16 @@ static void ui_select_drag_to(struct ui address_to ui, struct ui_select address_
         s->ops->moved(ui, s->self, reveal);
 }
 
+// A Shift click: the active end moves to the place and the anchor stays (the text widget's and the terminal's).
+static void ui_select_shift(struct ui address_to ui, struct ui_select address_to s, p64 at)
+{
+        p64 anchor, active;
+
+        (void)ui;
+        s->ops->get(s->self, &anchor, &active);
+        s->ops->extend(s->self, anchor, at);
+}
+
 // A press on a place by its click count: the word or line under it (set: the press replaces the selection; a Shift click and an
 // Alt box keep the selection they made and take the drag only), and the drag that follows the press.
 static void ui_select_start(struct ui_select address_to s, p64 at, int clicks, b32 set)

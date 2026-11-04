@@ -168,9 +168,6 @@ static struct
         */
         struct ui_finger finger;
         int finger_left;
-        // A selection drag past the grid's top (negative) or bottom, in pixels: the view scrolls while it is held there
-        // (terminal_select_autoscroll, the kit's edge scroll).
-        struct ui_edge select_edge;
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
         char named[WINDOW_TITLE_MAX];   // the last title a program set (OSC 0 or 2)
@@ -199,16 +196,15 @@ static struct
         b32 sync_held;
         long hold_timeout;
 
-        // The selection (terminal_select_*): its two ends in the ring, where the press was, its kind, and the clicks.
-        unsigned int select_anchor_line, select_anchor_column, select_active_line, select_active_column;
-        unsigned int select_press_line, select_press_column;
-        int select_kind;
-        b32 selecting, select_dragging, select_box;
+        // The selection (terminal_select_*): the kit's controller (sel: the drag, its click count, the finger, the handles and the
+        // bar), and its two ends as ring places (TERMINAL_PLACE per line): where the press was, and where the drag is. select_box is
+        // an Alt press's rectangle, which the two ends make.
+        struct ui_select sel;
+        p64 sel_anchor, sel_active;
+        b32 select_box;
         // A finger's long press selected it (terminal_hold): its ends are drawn as handles, and the press is still held
         // (touch_select) or was (touch_held, until the lift that ends it).
         b32 select_touch, touch_select, touch_held;
-        struct ui_click click;     // the kit's click count: a double click and a triple, as a field's
-        int clicks;
         // The caret's blink (ui_caret_cover, as a field's): its phase and the last key or move (ui_caret_wake); the caret's place
         // and whether it was shown when last seen; and the frame cell and cover each buffer holds, so a frame draws a caret whose
         // cover changed, as one whose cells changed.
@@ -2217,6 +2213,14 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
 
 /* ---- the selection: what the hand marked, and the clipboard ---- */
 
+// A place in the ring as one number: its line times TERMINAL_PLACE, and a column in the line. The controller compares places as it
+// compares text offsets (ui_select_extend), so the terminal's selection is two of them.
+#define TERMINAL_PLACE 65536
+#define TERMINAL_LINE_OF(p) ((unsigned int)((p) / TERMINAL_PLACE))
+#define TERMINAL_COLUMN_OF(p) ((unsigned int)((p) % TERMINAL_PLACE))
+static b32 terminal_selecting(void);
+static void terminal_select_set(p64 anchor, p64 active);
+
 /*
         A selection is two places in the ring, each a line (as the ring counts them, which only grows) and a column in
         that line as it is stored: a folded line is one line, so a selection keeps its place when the window is made
@@ -2258,14 +2262,14 @@ static b32 terminal_place_at(unsigned int row, unsigned int column, unsigned int
 static void terminal_select_span(unsigned int address_to first_line, unsigned int address_to first_column,
                                  unsigned int address_to last_line, unsigned int address_to last_column)
 {
-        b32 forward = terminal.select_anchor_line < terminal.select_active_line ||
-                      (terminal.select_anchor_line == terminal.select_active_line &&
-                       terminal.select_anchor_column <= terminal.select_active_column);
+        unsigned int anchor_line = TERMINAL_LINE_OF(terminal.sel_anchor), anchor_column = TERMINAL_COLUMN_OF(terminal.sel_anchor);
+        unsigned int active_line = TERMINAL_LINE_OF(terminal.sel_active), active_column = TERMINAL_COLUMN_OF(terminal.sel_active);
+        b32 forward = anchor_line < active_line || (anchor_line == active_line && anchor_column <= active_column);
 
-        *first_line = forward ? terminal.select_anchor_line : terminal.select_active_line;
-        *first_column = forward ? terminal.select_anchor_column : terminal.select_active_column;
-        *last_line = forward ? terminal.select_active_line : terminal.select_anchor_line;
-        *last_column = forward ? terminal.select_active_column : terminal.select_anchor_column;
+        *first_line = forward ? anchor_line : active_line;
+        *first_column = forward ? anchor_column : active_column;
+        *last_line = forward ? active_line : anchor_line;
+        *last_column = forward ? active_column : anchor_column;
 }
 
 // Whether a ring line is still in the ring.
@@ -2277,8 +2281,6 @@ static b32 terminal_line_kept(unsigned int line)
 
 // A place in the grid's ring as one number in reading order (the line, then the column in it: a column is under the window's
 // stride, which is under TERMINAL_PLACE), so the kit's selection rule compares places as it compares text offsets.
-#define TERMINAL_PLACE 65536
-
 static p64 terminal_place(unsigned int line, unsigned int column)
 {
         return (p64)line * TERMINAL_PLACE + column;
@@ -2348,38 +2350,22 @@ static void terminal_select_span_of(int kind, unsigned int line, unsigned int co
         *start = *finish = terminal_place(line, column);
 }
 
-// The selection's ends snapped to its kind: a word's edges, or a whole line, about the place the hand is at (ui_select_extend, the
-// rule the text widget's selection takes too).
-static void terminal_select_snap(void)
-{
-        p64 press_start, press_finish, start, finish, anchor, active;
-
-        terminal_select_span_of(terminal.select_kind, terminal.select_press_line, terminal.select_press_column, &press_start, &press_finish);
-        terminal_select_span_of(terminal.select_kind, terminal.select_active_line, terminal.select_active_column, &start, &finish);
-        ui_select_extend(terminal.select_kind, press_start, press_finish, start, finish,
-                         terminal_place(terminal.select_active_line, terminal.select_active_column), &anchor, &active);
-        terminal.select_anchor_line = (unsigned int)(anchor / TERMINAL_PLACE);
-        terminal.select_anchor_column = (unsigned int)(anchor % TERMINAL_PLACE);
-        terminal.select_active_line = (unsigned int)(active / TERMINAL_PLACE);
-        terminal.select_active_column = (unsigned int)(active % TERMINAL_PLACE);
-}
-
 // The marked cells of a row of the frame: the part of line from column from (used of it written) the selection covers.
 static void terminal_select_mark(struct window_cell address_to out, unsigned int line, unsigned int from)
 {
         unsigned int first_line, first_column, last_line, last_column, start, stop;
 
-        if (!terminal.selecting)
+        if (!terminal_selecting())
                 return;
         terminal_select_span(&first_line, &first_column, &last_line, &last_column);
         if (line - first_line > last_line - first_line)
                 return;
         if (terminal.select_box)
         {
-                unsigned int left = terminal.select_anchor_column < terminal.select_active_column ? terminal.select_anchor_column
-                                                                                                 : terminal.select_active_column;
-                unsigned int right = terminal.select_anchor_column < terminal.select_active_column ? terminal.select_active_column
-                                                                                                  : terminal.select_anchor_column;
+                unsigned int left = TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_anchor)
+                                                                                                 : TERMINAL_COLUMN_OF(terminal.sel_active);
+                unsigned int right = TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_active)
+                                                                                                  : TERMINAL_COLUMN_OF(terminal.sel_anchor);
 
                 start = left, stop = right + 1;
         }
@@ -2408,7 +2394,7 @@ static positive terminal_select_text(p8 address_to address_to into, positive add
         positive length = 0;
 
         *into = null, *room = 0;
-        if (!terminal.selecting)
+        if (!terminal_selecting())
                 return 0;
         terminal_select_span(&first_line, &first_column, &last_line, &last_column);
         for (unsigned int line = first_line;; line++)
@@ -2419,8 +2405,8 @@ static positive terminal_select_text(p8 address_to address_to into, positive add
                 stored = stored < window->stride ? stored : window->stride;
                 if (terminal.select_box)
                 {
-                        start = terminal.select_anchor_column < terminal.select_active_column ? terminal.select_anchor_column : terminal.select_active_column;
-                        stop = (terminal.select_anchor_column < terminal.select_active_column ? terminal.select_active_column : terminal.select_anchor_column) + 1;
+                        start = TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_anchor) : TERMINAL_COLUMN_OF(terminal.sel_active);
+                        stop = (TERMINAL_COLUMN_OF(terminal.sel_anchor) < TERMINAL_COLUMN_OF(terminal.sel_active) ? TERMINAL_COLUMN_OF(terminal.sel_active) : TERMINAL_COLUMN_OF(terminal.sel_anchor)) + 1;
                 }
                 else
                 {
@@ -2474,7 +2460,7 @@ static fn terminal_menu_open(int x, int y, b32 touch)
         struct ui_popmenu address_to m = &terminal_menu.menu;
 
         m->count = 0;
-        ui_menu_clip_rows(m, TERMINAL_MENU_COPY, "Ctrl+Shift+C", terminal.selecting ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_PASTE,
+        ui_menu_clip_rows(m, TERMINAL_MENU_COPY, "Ctrl+Shift+C", terminal_selecting() ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_PASTE,
                           "Ctrl+Shift+V", 0, TERMINAL_MENU_ALL, null, 0);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(m, WORDS(menu_zoom_in), "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
@@ -2492,16 +2478,136 @@ static fn terminal_chose(int id)
         else if (id == TERMINAL_MENU_ALL)
         {
                 terminal.select_box = false;
-                terminal.select_anchor_line = terminal.select_press_line = terminal_oldest();
-                terminal.select_anchor_column = terminal.select_press_column = 0;
-                terminal.select_active_line = window->head - 1;
-                terminal.select_active_column = window->stride;
-                terminal.selecting = true;
-                terminal_copy(WINDOWS_CLIP_PRIMARY);
+                terminal_select_set(terminal_place(terminal_oldest(), 0), terminal_place(window->head - 1, window->stride));
         }
         else if (id >= TERMINAL_MENU_ZOOM_IN && id <= TERMINAL_MENU_ZOOM_RESET)
                 terminal_zoom(terminal.master, id == TERMINAL_MENU_ZOOM_IN ? 1 : id == TERMINAL_MENU_ZOOM_OUT ? -1 : 2);
         terminal.dirty = true;
+}
+
+/*
+        The terminal as the kit's selection controller's client (ui_select_ops): its places are ring places (terminal_place), its box is
+        the grid, its scroll is the view (a drag held past an edge, which goes back through the scrollback or forward to the live end),
+        and its selection is the two ends the ring keeps (sel_anchor, sel_active). Its touch and bar answers are in the touch part.
+*/
+static b32 terminal_selecting(void)
+{
+        return terminal.sel_anchor != terminal.sel_active;
+}
+
+static void terminal_select_set(p64 anchor, p64 active)
+{
+        terminal.sel_anchor = anchor, terminal.sel_active = active;
+}
+
+static void terminal_select_clear(void)
+{
+        terminal_select_set(0, 0);
+        terminal.select_touch = false;
+}
+
+static struct ui terminal_sel_kit(void)
+{
+        struct ui kit = terminal.ui;
+
+        kit.scale = terminal_scale();
+        return kit;
+}
+
+static void terminal_op_box(void address_to self, struct ui_select_box address_to b)
+{
+        (void)self;
+        b->left = 0, b->top = 0;
+        b->right = (int)(COLUMNS * terminal.cell_w), b->bottom = (int)(ROWS * terminal.cell_h);
+        b->line_height = (int)terminal.cell_h;
+        b->field = false;
+}
+
+static p64 terminal_op_place(struct ui address_to ui, void address_to self, int x, int y)
+{
+        unsigned int row = (unsigned int)(y < 0 ? 0 : y) / terminal.cell_h, column = (unsigned int)(x < 0 ? 0 : x) / terminal.cell_w, line, at;
+
+        (void)ui, (void)self;
+        row = row < ROWS ? row : ROWS - 1;
+        column = column < COLUMNS ? column : COLUMNS;
+        terminal_place_at(row, column, &line, &at);
+        return terminal_place(line, at);
+}
+
+static void terminal_op_span(void address_to self, int kind, p64 at, p64 address_to start, p64 address_to finish)
+{
+        (void)self;
+        terminal_select_span_of(kind, TERMINAL_LINE_OF(at), TERMINAL_COLUMN_OF(at), start, finish);
+}
+
+static void terminal_op_get(void address_to self, p64 address_to anchor, p64 address_to active)
+{
+        (void)self;
+        *anchor = terminal.sel_anchor, *active = terminal.sel_active;
+}
+
+static void terminal_op_set(void address_to self, p64 anchor, p64 active)
+{
+        (void)self;
+        terminal_select_set(anchor, active);
+}
+
+static b32 terminal_op_any(void address_to self)
+{
+        (void)self;
+        return terminal_selecting();
+}
+
+static b32 terminal_op_within(void address_to self, p64 at)
+{
+        p64 low = terminal.sel_anchor < terminal.sel_active ? terminal.sel_anchor : terminal.sel_active;
+        p64 high = terminal.sel_anchor < terminal.sel_active ? terminal.sel_active : terminal.sel_anchor;
+
+        (void)self;
+        return at >= low && at <= high;
+}
+
+static b32 terminal_op_inside(void address_to self, int x, int y)
+{
+        (void)self;
+        return x >= 0 && y >= 0 && x < (int)(COLUMNS * terminal.cell_w) && y < (int)(ROWS * terminal.cell_h);
+}
+
+// A drag held past the grid's top (lines < 0) scrolls the view back into the scrollback; past its bottom, forward to the live end.
+static void terminal_op_scroll(struct ui address_to ui, void address_to self, long lines, b32 edge)
+{
+        (void)ui, (void)self;
+        if (!edge || alternate || !lines)
+                return;
+        if (terminal_view_scroll(lines < 0 ? (int)-lines : -(int)lines))
+                terminal.dirty = true;
+}
+
+static void terminal_op_moved(struct ui address_to ui, void address_to self, b32 reveal)
+{
+        (void)ui, (void)self, (void)reveal;
+}
+
+static void terminal_op_copy(void address_to self, unsigned int which)
+{
+        (void)self;
+        terminal_copy(which);
+}
+
+static struct ui_select address_to terminal_sel(void);
+
+static const struct ui_select_ops terminal_select_ops = {
+        .box = terminal_op_box,       .place = terminal_op_place,   .span = terminal_op_span,   .where = 0,
+        .get = terminal_op_get,       .set = terminal_op_set,       .extend = terminal_op_set,  .any = terminal_op_any,
+        .shown = terminal_op_any,     .within = terminal_op_within, .inside = terminal_op_inside, .scroll = terminal_op_scroll,
+        .moved = terminal_op_moved,   .copy = terminal_op_copy,     .items = 0,               .item = 0,
+};
+
+static struct ui_select address_to terminal_sel(void)
+{
+        terminal.sel.ops = &terminal_select_ops;
+        terminal.sel.self = &terminal;
+        return &terminal.sel;
 }
 
 /*
@@ -2511,13 +2617,16 @@ static fn terminal_chose(int id)
 static b32 terminal_select_event(const struct window_event address_to event, b32 address_to dirty)
 {
         b32 shift = (terminal.modifiers & WINDOW_KEY_SHIFT) != 0, alt = (terminal.modifiers & WINDOW_KEY_ALT) != 0;
+        struct ui kit = terminal_sel_kit();
+        struct ui_select address_to s = terminal_sel();
         unsigned int row, column, line, at;
+        p64 place;
+        int clicks;
 
         // A program that asked for the pointer has its presses; one comes in while a selection is dragged, the drag ends.
-        if (mouse_mode && !shift && (event->type == WINDOW_EVENT_BUTTON ? (event->flags & WINDOW_KEY_DOWN) || !terminal.select_dragging
-                                                                        : !terminal.select_dragging))
+        if (mouse_mode && !shift && (event->type == WINDOW_EVENT_BUTTON ? (event->flags & WINDOW_KEY_DOWN) || !s->dragging : !s->dragging))
         {
-                terminal.select_dragging = false;
+                s->dragging = false;
                 return false;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_MIDDLE && (event->flags & WINDOW_KEY_DOWN))
@@ -2528,22 +2637,19 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT)
         {
                 if (event->flags & WINDOW_KEY_DOWN)
-                        terminal_menu_open(ui_kit.pointer_x, ui_kit.pointer_y,
-                                           ui_kit_touch);
+                        terminal_menu_open(ui_kit.pointer_x, ui_kit.pointer_y, ui_kit_touch);
                 return true;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
         {
                 if (!(event->flags & WINDOW_KEY_DOWN))
                 {
-                        if (!terminal.select_dragging)
+                        if (!s->dragging)
                                 return false;
-                        terminal.select_dragging = false;
-                        if (terminal.selecting && (terminal.select_anchor_line != terminal.select_active_line ||
-                                                   terminal.select_anchor_column != terminal.select_active_column))
+                        s->dragging = false;
+                        if (terminal_selecting())
                                 terminal_copy(WINDOWS_CLIP_PRIMARY);
-                        else
-                                terminal.selecting = false, address_to dirty = true;
+                        address_to dirty = true;
                         return true;
                 }
                 if (terminal_at_x() < 0 || terminal_at_y() < 0)
@@ -2553,44 +2659,28 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                 if (row >= ROWS || column >= COLUMNS)
                         return false;
                 terminal_place_at(row, column, &line, &at);
-                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, terminal_at_x(), terminal_at_y());
-                if (shift && terminal.selecting && terminal.clicks == 1)
-                {
-                        terminal.select_active_line = line, terminal.select_active_column = at;
-                        terminal_select_snap();
-                }
+                place = terminal_place(line, at);
+                clicks = ui_click_count(&kit, &s->click, terminal_at_x(), terminal_at_y());
+                if (shift && terminal_selecting() && clicks == 1)
+                        ui_select_shift(&kit, s, place);
                 else
                 {
-                        terminal.select_kind = ui_select_kind(terminal.clicks);
-                        terminal.select_box = alt && terminal.clicks == 1;
-                        terminal.select_press_line = terminal.select_active_line = line;
-                        terminal.select_press_column = terminal.select_active_column = at;
-                        terminal_select_snap();
-                        terminal.selecting = terminal.select_kind != UI_SELECT_CHARS;
+                        terminal.select_box = alt && clicks == 1;
+                        ui_select_start(s, place, clicks, true);
                 }
-                terminal.select_dragging = true;
-                terminal.select_edge.past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
+                s->dragging = true;
+                s->edge.past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
                 terminal.select_touch = false;
                 address_to dirty = true;
                 return true;
         }
-        if (event->type == WINDOW_EVENT_MOTION && terminal.select_dragging)
+        if (event->type == WINDOW_EVENT_MOTION && s->dragging)
         {
-                int y = terminal_at_y() < 0 ? 0 : terminal_at_y(), x = terminal_at_x() < 0 ? 0 : terminal_at_x();
+                p64 to = ui_select_track(&kit, s, terminal_at_x(), terminal_at_y(), terminal_at_x(), terminal_at_y(), 0, false);
 
-                terminal.select_edge.past = terminal_at_y() < 0 ? terminal_at_y()
-                                       : terminal_at_y() >= (int)ROWS * terminal.cell_h ? terminal_at_y() - (int)ROWS * terminal.cell_h + 1
-                                                                                           : 0;
-                row = (unsigned int)y / terminal.cell_h;
-                column = (unsigned int)x / terminal.cell_w;
-                row = row < ROWS ? row : ROWS - 1;
-                column = column < COLUMNS ? column : COLUMNS;
-                terminal_place_at(row, column, &line, &at);
-                if (line != terminal.select_active_line || at != terminal.select_active_column)
+                if (to != terminal.sel_active)
                 {
-                        terminal.select_active_line = line, terminal.select_active_column = at;
-                        terminal_select_snap();
-                        terminal.selecting = true;
+                        ui_select_drag_to(&kit, s, to, false);
                         address_to dirty = true;
                 }
                 return true;
@@ -2617,9 +2707,9 @@ static b32 terminal_select_key(const struct window_event address_to event, b32 a
                 }
                 return true;
         }
-        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && terminal.selecting && !ui_key_modifier(event->a))
+        if (event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN) && terminal_selecting() && !ui_key_modifier(event->a))
         {
-                terminal.selecting = false, terminal.select_touch = false;
+                terminal_select_clear();
                 address_to dirty = true;
         }
         return false;
@@ -2652,6 +2742,8 @@ static b32 terminal_clip_event(b32 master, const struct window_event address_to 
 */
 static b32 terminal_hold(const struct window_event address_to event, b32 address_to dirty)
 {
+        struct ui kit = terminal_sel_kit();
+        struct ui_select address_to s = terminal_sel();
         unsigned int row, column, line, at;
         b32 moved = false;
 
@@ -2670,18 +2762,14 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
                 terminal.touch_held = false;
                 if (terminal.bar.held)
                 {
-                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
-                                             ui_kit.pointer_y, false, &moved);
+                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false, &moved);
                         address_to dirty = address_to dirty || moved;
                 }
                 if (terminal.touch_select)
                 {
-                        terminal.touch_select = terminal.select_dragging = false;
-                        if (terminal.selecting && (terminal.select_anchor_line != terminal.select_active_line ||
-                                                   terminal.select_anchor_column != terminal.select_active_column))
+                        terminal.touch_select = s->dragging = false;
+                        if (terminal_selecting())
                                 terminal_copy(WINDOWS_CLIP_PRIMARY);
-                        else
-                                terminal.selecting = false;
                         address_to dirty = true;
                 }
                 return true;
@@ -2692,7 +2780,7 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
                 return !mouse_mode;
 
         // The right button's press: a program that asked for the pointer has it as a right button, and a bar's grab or its
-        // track is the bar's. Anywhere else the word under the finger is selected, and the drag after it extends it.
+        // track is the bar's. Anywhere else the word under the finger is selected, and the drag after it extends it by words.
         terminal.touch_held = true;
         if (mouse_mode)
                 return false;
@@ -2705,18 +2793,8 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
         if (row >= ROWS || column >= COLUMNS)
                 return true;
         terminal_place_at(row, column, &line, &at);
+        ui_select_pick(&kit, s, terminal_place(line, at), 2, false);
         terminal.select_box = false;
-        terminal.select_kind = UI_SELECT_WORDS;
-        terminal.select_press_line = terminal.select_active_line = line;
-        terminal.select_press_column = terminal.select_active_column = at;
-        terminal_select_snap();
-        // The word is the selection; from here a drag moves its far end by cells, from the word's first cell.
-        terminal.select_press_line = terminal.select_anchor_line;
-        terminal.select_press_column = terminal.select_anchor_column;
-        terminal.select_kind = UI_SELECT_CHARS;
-        terminal.selecting = true;
-        terminal.select_dragging = true;
-        terminal.select_edge.past = 0;
         terminal.touch_select = true;
         terminal.select_touch = true;
         address_to dirty = true;
@@ -3237,31 +3315,21 @@ static void terminal_leave(b32 show)
 */
 static positive terminal_select_autoscroll(positive now, b32 address_to dirty)
 {
-        long rows;
-        int row, column;
-        unsigned int line, at;
+        struct ui kit = terminal_sel_kit();
+        struct ui_select address_to s = terminal_sel();
+        b32 redraw = false;
+        positive due;
 
-        if (!terminal.select_dragging || !terminal.select_edge.past || alternate || terminal.cell_h <= 0)
+        (void)now;
+        if (alternate)
         {
-                terminal.select_edge.at = 0;
+                s->edge.at = 0;
                 return 0;
         }
-        rows = ui_edge_steps(&terminal.select_edge, terminal_scale(), 1000l * terminal.cell_h);
-        if (rows <= 0)
-                return now + UI_DRAG_FRAME_NS;
-        if (terminal_view_scroll(terminal.select_edge.past < 0 ? (int)rows : -(int)rows))
-                *dirty = true;
-        row = terminal.select_edge.past < 0 ? 0 : (int)ROWS - 1;
-        column = terminal_at_x() < 0 ? 0 : terminal_at_x() / terminal.cell_w;
-        column = column < (int)COLUMNS ? column : (int)COLUMNS;
-        terminal_place_at((unsigned int)row, (unsigned int)column, &line, &at);
-        if (line != terminal.select_active_line || at != terminal.select_active_column)
-        {
-                terminal.select_active_line = line, terminal.select_active_column = at;
-                terminal_select_snap();
-                *dirty = true;
-        }
-        return now + UI_DRAG_FRAME_NS;
+        due = ui_select_autoscroll(&kit, s, &redraw);
+        if (redraw)
+                address_to dirty = true;
+        return due;
 }
 
 static long terminal_tick(long timeout, long address_to other)

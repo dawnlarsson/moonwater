@@ -122780,55 +122780,55 @@ static void check_terminal_select_scroll(void)
 
     /* A mouse, above the grid: pressed on the third row, dragged up past the grid's top; the view goes back. */
     terminal_view_live();
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
-    line_before = terminal.select_active_line;
+    line_before = TERMINAL_LINE_OF(terminal.sel_active);
     at.b = top - 25;
     terminal_deliver(-1, &at, &dirty);
     for (int step = 0; step <= 40; step++)
         check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a mouse held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
-    check("terminal: and the selection's end follows the text up", terminal.select_active_line < line_before);
+    check("terminal: and the selection's end follows the text up", TERMINAL_LINE_OF(terminal.sel_active) < line_before);
     terminal_deliver(-1, &release, &dirty);
 
     /* A mouse, below the grid: from the scrollback, pressed mid-grid and dragged down past its bottom; the view goes forward. */
     terminal_view_live();
     terminal_view_scroll(20);
     back = terminal.view;
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
     at.a = x, at.b = top + (int)ROWS / 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
-    line_before = terminal.select_active_line;
+    line_before = TERMINAL_LINE_OF(terminal.sel_active);
     at.b = top + (int)ROWS * cell + 25;
     terminal_deliver(-1, &at, &dirty);
     for (int step = 0; step <= 40; step++)
         check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a mouse held below the grid scrolls the scrollback forward", terminal.view == TERMINAL_LIVE || terminal.view > back);
-    check("terminal: and the selection's end follows the text down", terminal.select_active_line > line_before);
+    check("terminal: and the selection's end follows the text down", TERMINAL_LINE_OF(terminal.sel_active) > line_before);
     terminal_deliver(-1, &release, &dirty);
 
     /* A finger: held on the third row for the long press (its word selected), then dragged up past the grid's top. */
     terminal_view_live();
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
     touch_at.a = x, touch_at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &touch_at, &dirty);
     terminal_deliver(-1, &land, &dirty);
     terminal_deliver(-1, &held, &dirty);
     terminal_deliver(-1, &right_down, &dirty);
     terminal_deliver(-1, &right_up, &dirty);
-    line_before = terminal.select_active_line;
+    line_before = TERMINAL_LINE_OF(terminal.sel_active);
     touch_at.b = top - 25;
     terminal_deliver(-1, &touch_at, &dirty);
     for (int step = 0; step <= 40; step++)
         check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a finger held above the grid scrolls the scrollback back", terminal.view != TERMINAL_LIVE);
-    check("terminal: and the held selection's end follows the text up", terminal.select_active_line < line_before);
+    check("terminal: and the held selection's end follows the text up", TERMINAL_LINE_OF(terminal.sel_active) < line_before);
     terminal_deliver(-1, &lift, &dirty);
     terminal_view_live();
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
 }
 
 /*
@@ -122851,7 +122851,7 @@ static void check_terminal_select_speed(void)
     for (int line = 0; line < 3 * (int)ROWS; line++)
         term_bytes("scrollback\r\n", 12);
     terminal_view_live();
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
@@ -122868,7 +122868,7 @@ static void check_terminal_select_speed(void)
           moved >= want - 1 && moved <= want + 1);
     terminal_deliver(-1, &release, &dirty);
     terminal_view_live();
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
 }
 
 /*
@@ -122891,7 +122891,7 @@ static void check_terminal_select_stale(void)
 
     /* A drag held past the grid's top, released; then a press in the grid, held still for two seconds of steps. */
     terminal_view_live();
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
@@ -122903,14 +122903,14 @@ static void check_terminal_select_stale(void)
     at.a = x, at.b = top + (int)ROWS / 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
-    line_after = terminal.select_active_line;
+    line_after = TERMINAL_LINE_OF(terminal.sel_active);
     for (int step = 0; step <= 120; step++)
         check_select_autoscroll_at(now + (positive)step * 16000000ull, &dirty);
     check("terminal: a press in the grid after a drag past its top does not scroll the view on its own",
-          terminal.view == before && terminal.select_active_line == line_after);
+          terminal.view == before && TERMINAL_LINE_OF(terminal.sel_active) == line_after);
     terminal_deliver(-1, &release, &dirty);
     terminal_view_live();
-    terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
 }
 
 /*
@@ -123201,7 +123201,7 @@ static fn check_pointer(void)
                 terminal_deliver(-1, &mouse_down, &dirty);
                 check("pointer: a mouse 8 pixels left of the bar is the grid's, and takes no thumb", !terminal.bar.held);
                 terminal_deliver(-1, &mouse_up, &dirty);
-                terminal.selecting = false;
+                terminal_select_clear();
                 terminal_view_live();
         }
 
@@ -123263,7 +123263,7 @@ static fn check_pointer(void)
                 p8 address_to text;
                 positive room, length;
 
-                terminal.selecting = terminal.select_dragging = terminal.touch_select = terminal.select_touch = false;
+                terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
                 terminal_view_live();
                 term_bytes("\x1b[H\x1b[2Jalpha bravo charlie\r\n", 28);
                 terminal_view_live();
@@ -123275,27 +123275,27 @@ static fn check_pointer(void)
                 terminal_deliver(-1, &right_up, &dirty);
                 length = terminal_select_text(&text, &room);
                 check("touch: a long press selects the word under the finger, and no menu opens",
-                      terminal.touch_select && terminal.selecting && length == 5 && !memory_compare(text, "bravo", 5) &&
+                      terminal.touch_select && terminal_selecting() && length == 5 && !memory_compare(text, "bravo", 5) &&
                           !terminal_menu.open && to_shell_length == 0);
                 array_store_release(text, room, length);
 
                 at.a = (int)(terminal.pad + 14 * terminal.cell_w + 1);
                 terminal_deliver(-1, &at, &dirty);
                 length = terminal_select_text(&text, &room);
-                check("touch: a drag after the long press extends the selection by cells, from the word's first cell",
-                      length == 8 && !memory_compare(text, "bravo ch", 8));
+                check("touch: a drag after the long press extends the selection by words, from the word's first cell",
+                      length == 13 && !memory_compare(text, "bravo charlie", 13));
                 array_store_release(text, room, length);
 
                 terminal_deliver(-1, &lift, &dirty);
                 check("touch: the lift ends the press and copies the selection, which stays marked",
-                      !terminal.touch_select && !terminal.select_dragging && terminal.selecting && to_shell_length == 0);
+                      !terminal.touch_select && !terminal.sel.dragging && terminal_selecting() && to_shell_length == 0);
 
-                terminal.selecting = terminal.select_touch = false;
+                terminal_select_clear(), terminal.touch_select = false;
                 at.a = (int)(terminal.pad + 8 * terminal.cell_w + terminal.cell_w / 2);
                 terminal_deliver(-1, &at, &dirty);
                 terminal_deliver(-1, &down, &dirty);
                 terminal_deliver(-1, &up, &dirty);
-                check("touch: a short touch with no movement selects nothing", !terminal.selecting && !terminal.touch_select &&
+                check("touch: a short touch with no movement selects nothing", !terminal_selecting() && !terminal.touch_select &&
                       to_shell_length == 0);
                 to_shell_length = 0;
         }
@@ -158347,17 +158347,14 @@ static fn terminal_selection_check(void)
                 terminal.view = TERMINAL_LIVE;
                 terminal_place_at(0, 0, &first, &column);
         }
-        terminal.selecting = true;
+        terminal_select_set(terminal_place(first, 6), terminal_place(first + 1, 3));
         terminal.select_box = false;
-        terminal.select_anchor_line = first, terminal.select_anchor_column = 6;
-        terminal.select_active_line = first + 1, terminal.select_active_column = 3;
         length = terminal_select_text(&text, &room);
         check("terminal: a selection's text has a line end between lines and no trailing blanks",
               length == 8 && text && !memory_compare(text, "beta\ngam", 8));
         array_store_release(text, room, length);
         terminal.select_box = true;
-        terminal.select_anchor_line = first, terminal.select_anchor_column = 1;
-        terminal.select_active_line = first + 2, terminal.select_active_column = 2;
+        terminal_select_set(terminal_place(first, 1), terminal_place(first + 2, 2));
         length = terminal_select_text(&text, &room);
         check("terminal: a rectangle takes its columns of each line", length == 8 && text && !memory_compare(text, "lp\nam\nel", 8));
         array_store_release(text, room, length);
@@ -158371,7 +158368,7 @@ static fn terminal_selection_check(void)
                         marked += (built[at].flags & WINDOW_CELL_SELECTED) != 0;
                 check("terminal: the selection is marked in the frame's cells", marked > 0);
         }
-        terminal.selecting = false;
+        terminal_select_clear();
         full_reset();
 }
 
@@ -158395,10 +158392,9 @@ static fn terminal_edge_check(void)
         terminal_view_set(0);
         terminal_place_at(0, 0, &top, &top_column);
         terminal_place_at(2, 5, &below, &below_column);
-        terminal.selecting = true;
         terminal.select_box = false;
-        terminal.select_anchor_line = top, terminal.select_anchor_column = 0;
-        terminal.select_active_line = below, terminal.select_active_column = below_column;
+        terminal.sel_anchor = terminal_place(top, 0);
+        terminal.sel_active = terminal_place(below, below_column);
         length = terminal_select_text(&text, &room);
         check("terminal edge: a selection from the top row of a view at the top copies its lines",
               length == 27 && text && !memory_compare(text, "alpha beta\nalpha beta\nalpha", 27));
@@ -158417,7 +158413,7 @@ static fn terminal_edge_check(void)
         // The grid narrows to 6 columns with the selection's end past the new edge and the cursor at column 10 of the old
         // grid: the text is the same, and the cursor is held in the 6 columns.
         term_bytes((const p8 address_to) "alpha beta", 10);
-        terminal.select_active_line = top, terminal.select_active_column = 10;
+        terminal.sel_active = terminal_place(top, 10);
         window->columns = 6;
         regrid(-1);
         terminal_view_clamp();
@@ -158429,7 +158425,7 @@ static fn terminal_edge_check(void)
         window->columns = saved;
         regrid(-1);
         terminal_view_clamp();
-        terminal.selecting = false;
+        terminal_select_clear();
         full_reset();
 }
 
@@ -158533,10 +158529,9 @@ static void terminal_theme_check(void)
         cursor_show();
         terminal.view = TERMINAL_LIVE;
         terminal_place_at(6, 4, &first, &column);
-        terminal.selecting = true;
         terminal.select_box = false;
-        terminal.select_anchor_line = first, terminal.select_anchor_column = 4;
-        terminal.select_active_line = first, terminal.select_active_column = 6;
+        terminal.sel_anchor = terminal_place(first, 4);
+        terminal.sel_active = terminal_place(first, 6);
 
         buffer = render_frame();
         terminal_build(before);
@@ -158611,7 +158606,7 @@ static void terminal_theme_check(void)
         check("terminal theme light again: the paper turns back", theme_pixel(buffer, 2, 0, 1, 1) == light_paper);
 
         cursor_hide();
-        terminal.selecting = false;
+        terminal_select_clear();
         full_reset();
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
 }
