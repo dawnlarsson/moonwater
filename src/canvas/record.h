@@ -42,7 +42,6 @@ static unsigned int compositor_record_seconds, compositor_record_frames, composi
     compositor_record_flips;
 static char compositor_record_text[COMPOSITOR_RECORD_TEXT];
 static unsigned int compositor_record_text_at;
-static char compositor_record_state[256];
 
 /*
         What a present is measured from: its damage's union (the rectangle the present would draw), whether it had any, whether a flip was waiting
@@ -183,6 +182,336 @@ static void compositor_record_write_file(const char *name, const char *bytes, un
 }
 
 /*
+        The frames of a recording. While one runs, each present that had damage has its scanout copied in full, into one of three buffers (frame
+        k in buffer k mod 3), so a frame is classified against the one before it and the one after it; and a quarter of it (every fourth pixel) goes
+        into a ring that the report counts. A frame is one of four classes, judged against P (before) and N (after) with S the frame:
+          tear    every row of S is a row of P or of N, both kinds present, and S is neither (a band written before the read, the rest after)
+          flash   S is neither P nor N while P and N are the same (a frame that was never on the screen between two that were)
+          size    the window pictures' sizes differ in S from P and N, which are the same (a window one frame the wrong size)
+          blank   a window's area is uniformly the ground colour in S, and not in P or N (a window cleared for a frame)
+        A frame in a class is written to /run/moonwater/record/frame-SEQ-CLASS.ppm (at most COMPOSITOR_RECORD_KEEP files a recording). The check
+        injects a tear: when /run/moonwater/record/inject is there (taken, and removed, by the classification of the next frame), the frame is
+        spliced (the rows of P in a band a quarter down the screen, the rows of N elsewhere), and only the classification sees it.
+*/
+#define COMPOSITOR_RECORD_KEEP 8
+#define COMPOSITOR_RECORD_RING 256
+#define COMPOSITOR_RECORD_WORK_MAX (32ul << 20)  // three full frames, at most
+#define COMPOSITOR_RECORD_RING_MAX (16ul << 20)  // the quarter frames, at most
+#define COMPOSITOR_RECORD_EVENTS 16
+enum compositor_record_class
+{
+        COMPOSITOR_RECORD_TEAR,
+        COMPOSITOR_RECORD_FLASH,
+        COMPOSITOR_RECORD_SIZE_JUMP,
+        COMPOSITOR_RECORD_BLANK,
+        COMPOSITOR_RECORD_CLASSES
+};
+static const char *compositor_record_class_name[COMPOSITOR_RECORD_CLASSES] = {"tear", "flash", "size", "blank"};
+
+struct compositor_record_shot
+{
+        unsigned int *pixels;           // width times height, the scanout's pixels
+        unsigned long long when;
+        unsigned int seq, sizes, rect_count;
+        int rects[WINDOWS][4];          // the window pictures: x1 y1 x2 y2
+};
+static struct compositor_record_shot compositor_record_shots[3];
+static unsigned int *compositor_record_block;     // the mapping of the three frames and the ring
+static unsigned long compositor_record_block_bytes;
+static unsigned int compositor_record_width, compositor_record_height, compositor_record_ring_w, compositor_record_ring_h;
+static unsigned int compositor_record_ring_cap, compositor_record_ring_at, compositor_record_ring_count;
+static unsigned int *compositor_record_ring_pixels;
+static unsigned int compositor_record_taken;      // frames copied in this recording
+static unsigned int compositor_record_classed[COMPOSITOR_RECORD_CLASSES], compositor_record_written;
+static unsigned int compositor_record_refused_size; // the screen is too large for the budget: nothing is classified
+static unsigned int compositor_record_events[COMPOSITOR_RECORD_EVENTS][3]; // seq, bits (1 << class), kept
+static unsigned int compositor_record_event_count;
+static int compositor_record_pending[WINDOWS][4];   // the window pictures of the present in hand (compositor_record_scene)
+static unsigned int compositor_record_pending_count, compositor_record_pending_sizes;
+
+// The window pictures of the present in hand, from compositor_present_frames: their rectangles and their sizes (a hash).
+static void compositor_record_scene(const struct compositor_frame *frames, unsigned int windows)
+{
+        unsigned int sizes = 2166136261u;
+
+        compositor_record_pending_count = windows < WINDOWS ? windows : WINDOWS;
+        for (unsigned int at = 0; at < compositor_record_pending_count; at++)
+        {
+                compositor_record_pending[at][0] = frames[at].x;
+                compositor_record_pending[at][1] = frames[at].y;
+                compositor_record_pending[at][2] = frames[at].x + frames[at].width;
+                compositor_record_pending[at][3] = frames[at].y + frames[at].height;
+                sizes = (sizes ^ (unsigned int)frames[at].width) * 16777619u;
+                sizes = (sizes ^ (unsigned int)frames[at].height) * 16777619u;
+        }
+        compositor_record_pending_sizes = sizes;
+}
+
+static void compositor_record_free(void)
+{
+        if (compositor_record_block)
+                compositor_call(syscall(munmap), (positive)compositor_record_block, compositor_record_block_bytes, 0, 0, 0, 0);
+        compositor_record_block = 0;
+        compositor_record_block_bytes = 0;
+        compositor_record_ring_pixels = 0;
+        for (unsigned int at = 0; at < 3; at++)
+                compositor_record_shots[at].pixels = 0;
+}
+
+// The mapping for the three frames and the ring, made at the first frame of a recording; false when the screen is too large for the budget.
+static int compositor_record_alloc(void)
+{
+        unsigned long bytes, ring_bytes, ring_cap, total;
+        long got;
+
+        if (compositor_record_block)
+                return 1;
+        if (!compositor.width || !compositor.height)
+                return 0;
+        bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
+        if (3 * bytes > COMPOSITOR_RECORD_WORK_MAX)
+                return 0;
+        compositor_record_ring_w = compositor.width / 4 ? compositor.width / 4 : 1;
+        compositor_record_ring_h = compositor.height / 4 ? compositor.height / 4 : 1;
+        ring_bytes = (unsigned long)compositor_record_ring_w * compositor_record_ring_h * 4;
+        ring_cap = COMPOSITOR_RECORD_RING_MAX / ring_bytes;
+        ring_cap = ring_cap < COMPOSITOR_RECORD_RING ? ring_cap : COMPOSITOR_RECORD_RING;
+        total = 3 * bytes + ring_cap * ring_bytes;
+        got = (long)compositor_call(syscall(mmap), 0, total, 3, 0x22, (positive)-1, 0);
+        if (got < 0 && got > -4096)
+                return 0;
+        compositor_record_block = (unsigned int *)(unsigned long)got;
+        compositor_record_block_bytes = total;
+        compositor_record_width = compositor.width;
+        compositor_record_height = compositor.height;
+        for (unsigned int at = 0; at < 3; at++)
+                compositor_record_shots[at].pixels = compositor_record_block + at * (bytes / 4);
+        compositor_record_ring_pixels = compositor_record_block + 3 * (bytes / 4);
+        compositor_record_ring_cap = (unsigned int)ring_cap;
+        return 1;
+}
+
+// Whether the rows of two frames are the same, and whether the whole frames are.
+static int compositor_record_row_same(const unsigned int *a, const unsigned int *b, unsigned int width)
+{
+        for (unsigned int x = 0; x < width; x++)
+                if (a[x] != b[x])
+                        return 0;
+        return 1;
+}
+
+static int compositor_record_same(const unsigned int *a, const unsigned int *b, unsigned int width, unsigned int height)
+{
+        return compositor_record_row_same(a, b, width * height);
+}
+
+// The tear: every row of S is one of P's or N's, both kinds present, and the frame is neither P nor N.
+static int compositor_record_torn(const unsigned int *s, const unsigned int *p, const unsigned int *n, unsigned int width, unsigned int height)
+{
+        int has_p = 0, has_n = 0;
+
+        if (compositor_record_same(s, p, width, height) || compositor_record_same(s, n, width, height))
+                return 0;
+        for (unsigned int y = 0; y < height; y++)
+        {
+                const unsigned int *row = s + (unsigned long)y * width;
+
+                if (compositor_record_row_same(row, p + (unsigned long)y * width, width))
+                        has_p = 1;
+                else if (compositor_record_row_same(row, n + (unsigned long)y * width, width))
+                        has_n = 1;
+                else
+                        return 0;
+        }
+        return has_p && has_n;
+}
+
+// Whether a rectangle (x1 y1 x2 y2, clipped to the screen) of a frame is the ground colour throughout.
+static int compositor_record_ground(const unsigned int *pixels, unsigned int width, unsigned int height, const int *rect)
+{
+        int x1 = rect[0] < 0 ? 0 : rect[0], y1 = rect[1] < 0 ? 0 : rect[1];
+        int x2 = rect[2] > (int)width ? (int)width : rect[2], y2 = rect[3] > (int)height ? (int)height : rect[3];
+
+        if (x2 <= x1 || y2 <= y1)
+                return 0;
+        for (int y = y1; y < y2; y++)
+                for (int x = x1; x < x2; x++)
+                        if ((pixels[(unsigned long)y * width + (unsigned long)x] & 0xffffffu) != (compositor_ground & 0xffffffu))
+                                return 0;
+        return 1;
+}
+
+static int compositor_record_blank(const struct compositor_record_shot *s, const struct compositor_record_shot *p,
+                                   const struct compositor_record_shot *n, unsigned int width, unsigned int height)
+{
+        for (unsigned int at = 0; at < s->rect_count; at++)
+                if (compositor_record_ground(s->pixels, width, height, s->rects[at]) && !compositor_record_ground(p->pixels, width, height, s->rects[at]) &&
+                    !compositor_record_ground(n->pixels, width, height, s->rects[at]))
+                        return 1;
+        return 0;
+}
+
+static unsigned int compositor_record_cat(char *to, unsigned int at, unsigned int room, const char *text)
+{
+        while (*text && at + 1 < room)
+                to[at++] = *text++;
+        to[at] = 0;
+        return at;
+}
+
+static unsigned int compositor_record_number(char *to, unsigned int at, unsigned int room, unsigned long long value)
+{
+        char digits[24];
+        unsigned int count = 0;
+
+        do
+        {
+                digits[count++] = (char)('0' + value % 10);
+                value /= 10;
+        } while (value && count < sizeof(digits));
+        while (count && at + 1 < room)
+                to[at++] = digits[--count];
+        to[at] = 0;
+        return at;
+}
+
+// frame-SEQ-CLASS.ppm: the frame as a binary PPM (P6), its pixels' red, green and blue; written a row at a time, in chunks.
+static void compositor_record_write_ppm(const unsigned int *pixels, unsigned int width, unsigned int height, unsigned int seq, const char *cls)
+{
+        char path[160], head[64];
+        unsigned char chunk[768];
+        long handle;
+        unsigned int at;
+
+        at = compositor_record_cat(path, 0, sizeof(path), COMPOSITOR_RECORD_DIR "/frame-");
+        at = compositor_record_number(path, at, sizeof(path), seq);
+        at = compositor_record_cat(path, at, sizeof(path), "-");
+        at = compositor_record_cat(path, at, sizeof(path), cls);
+        at = compositor_record_cat(path, at, sizeof(path), ".ppm");
+        handle = (long)system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+        if (handle < 0)
+                return;
+        at = compositor_record_cat(head, 0, sizeof(head), "P6\n");
+        at = compositor_record_number(head, at, sizeof(head), width);
+        at = compositor_record_cat(head, at, sizeof(head), " ");
+        at = compositor_record_number(head, at, sizeof(head), height);
+        at = compositor_record_cat(head, at, sizeof(head), "\n255\n");
+        system_write_once(handle, head, at);
+        for (unsigned long y = 0; y < height; y++)
+                for (unsigned long x = 0; x < width;)
+                {
+                        unsigned int count = 0;
+
+                        while (count < 256 && x < width)
+                        {
+                                unsigned int pixel = pixels[y * width + x++];
+
+                                chunk[3 * count] = (unsigned char)(pixel >> 16);
+                                chunk[3 * count + 1] = (unsigned char)(pixel >> 8);
+                                chunk[3 * count + 2] = (unsigned char)pixel;
+                                count++;
+                        }
+                        system_write_once(handle, chunk, 3 * count);
+                }
+        system_close(handle);
+        compositor_record_written++;
+}
+
+// The four classes of frame S, against P and N. Each class found is counted, and written when there are files left to write.
+static void compositor_record_classify(struct compositor_record_shot *s, const struct compositor_record_shot *p, const struct compositor_record_shot *n)
+{
+        unsigned int width = compositor_record_width, height = compositor_record_height, bits = 0;
+        const char *inject = COMPOSITOR_RECORD_DIR "/inject";
+        long handle;
+
+        // The check's tear: the rows of P in a band a quarter down, the rows of N elsewhere. The file is taken with it.
+        handle = (long)system_open_at(AT_FDCWD, (string_address)inject, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle >= 0)
+        {
+                system_close(handle);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)inject, 0, 0, 0, 0);
+                for (unsigned int y = 0; y < height; y++)
+                        memory_copy(s->pixels + (unsigned long)y * width, (y >= height / 4 && y < height / 2 ? p : n)->pixels + (unsigned long)y * width,
+                                    (unsigned long)width * 4);
+        }
+        if (compositor_record_torn(s->pixels, p->pixels, n->pixels, width, height))
+                bits |= 1u << COMPOSITOR_RECORD_TEAR;
+        if (!compositor_record_same(s->pixels, p->pixels, width, height) && !compositor_record_same(s->pixels, n->pixels, width, height) &&
+            compositor_record_same(p->pixels, n->pixels, width, height))
+                bits |= 1u << COMPOSITOR_RECORD_FLASH;
+        if (p->sizes == n->sizes && s->sizes != p->sizes)
+                bits |= 1u << COMPOSITOR_RECORD_SIZE_JUMP;
+        if (compositor_record_blank(s, p, n, width, height))
+                bits |= 1u << COMPOSITOR_RECORD_BLANK;
+        if (!bits)
+                return;
+        for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
+                if (bits & (1u << c))
+                {
+                        unsigned int kept = compositor_record_written < COMPOSITOR_RECORD_KEEP;
+
+                        compositor_record_classed[c]++;
+                        if (kept)
+                                compositor_record_write_ppm(s->pixels, width, height, s->seq, compositor_record_class_name[c]);
+                        if (compositor_record_event_count < COMPOSITOR_RECORD_EVENTS)
+                        {
+                                unsigned int *e = compositor_record_events[compositor_record_event_count++];
+
+                                e[0] = s->seq, e[1] = bits, e[2] = kept;
+                        }
+                }
+}
+
+// A frame of the recording: the scanout, copied in full, its window pictures, and a quarter of it into the ring. Classified once the frame after
+// it is copied too.
+static void compositor_record_capture(unsigned long long when)
+{
+        unsigned int width = compositor.width, height = compositor.height, stride = compositor.scanout_pitch / 4;
+        struct compositor_record_shot *cur;
+
+        if (!compositor.scanout || !compositor_record_alloc())
+        {
+                compositor_record_refused_size = 1;
+                return;
+        }
+        cur = &compositor_record_shots[compositor_record_taken % 3];
+        for (unsigned int y = 0; y < height; y++)
+                memory_copy(cur->pixels + (unsigned long)y * width, compositor.scanout + (unsigned long)y * stride, (unsigned long)width * 4);
+        cur->when = when;
+        cur->seq = compositor_record_taken;
+        cur->sizes = compositor_record_pending_sizes;
+        cur->rect_count = compositor_record_pending_count;
+        memory_copy(cur->rects, compositor_record_pending, sizeof(cur->rects));
+        compositor_record_taken++;
+        if (compositor_record_ring_cap && compositor_record_ring_pixels)
+        {
+                unsigned int rw = compositor_record_ring_w, rh = compositor_record_ring_h;
+                unsigned int *slot = compositor_record_ring_pixels + (unsigned long)compositor_record_ring_at * rw * rh;
+
+                for (unsigned int y = 0; y < rh; y++)
+                        for (unsigned int x = 0; x < rw; x++)
+                                slot[(unsigned long)y * rw + x] = compositor.scanout[(unsigned long)(4 * y < height ? 4 * y : height - 1) * stride +
+                                                                                    (4 * x < width ? 4 * x : width - 1)];
+                compositor_record_ring_at = (compositor_record_ring_at + 1) % compositor_record_ring_cap;
+                if (compositor_record_ring_count < compositor_record_ring_cap)
+                        compositor_record_ring_count++;
+        }
+        if (compositor_record_taken >= 3)
+                compositor_record_classify(&compositor_record_shots[(compositor_record_taken - 2) % 3],
+                                           &compositor_record_shots[(compositor_record_taken - 3) % 3],
+                                           &compositor_record_shots[(compositor_record_taken - 1) % 3]);
+}
+
+// A recording starts: its counts are its own.
+static void compositor_record_reset(void)
+{
+        compositor_record_taken = compositor_record_written = compositor_record_refused_size = 0;
+        compositor_record_ring_at = compositor_record_ring_count = compositor_record_event_count = 0;
+        for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
+                compositor_record_classed[c] = 0;
+}
+
+/*
         The report: the totals of the ring, its per-path counts, the flips and their vblanks, the presents late, and the recording's counts
         when one has run. Written to report.txt, and its one-line state to state.
 */
@@ -235,8 +564,30 @@ static void compositor_record_report(void)
         }
         else
                 compositor_record_put_text("recording    none yet (moonwater canvas record SECONDS)\n");
-        // The events, oldest first: the late presents, the refused flips, the held presents (at most forty lines).
+        compositor_record_put_text("frames       "), compositor_record_put_number(compositor_record_taken), compositor_record_put_text(" copied in the recording, ");
+        compositor_record_put_number(compositor_record_ring_count), compositor_record_put_text(" in the quarter ring\n");
+        if (compositor_record_refused_size)
+                compositor_record_put_text("classes      not made: the screen is larger than the record's budget\n");
+        else
+        {
+                compositor_record_put_text("classes      tear "), compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_TEAR]);
+                compositor_record_put_text(", flash "), compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_FLASH]);
+                compositor_record_put_text(", size jump "), compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_SIZE_JUMP]);
+                compositor_record_put_text(", blank "), compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_BLANK]);
+                compositor_record_put_text("; "), compositor_record_put_number(compositor_record_written), compositor_record_put_text(" frames written to record/frame-*.ppm\n");
+        }
+        // The events, oldest first: the frames of the classes, then the late presents, the refused flips, the held presents (at most forty lines).
         compositor_record_put_text("events\n");
+        for (unsigned int at = 0; at < compositor_record_event_count; at++)
+        {
+                const unsigned int *e = compositor_record_events[at];
+
+                compositor_record_put_text("  frame "), compositor_record_put_number(e[0]), compositor_record_put_text(": ");
+                for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
+                        if (e[1] & (1u << c))
+                                compositor_record_put_text(compositor_record_class_name[c]), compositor_record_put_text(" ");
+                compositor_record_put_text(e[2] ? "(written)\n" : "(not written: the files are used up)\n");
+        }
         for (unsigned int at = 0, shown = 0; at < count && shown < 40; at++)
         {
                 const struct compositor_record *r = &compositor_records[(first + at) % COMPOSITOR_RECORD_SIZE];
@@ -259,7 +610,11 @@ static void compositor_record_report(void)
         compositor_record_put_number(compositor_record_late), compositor_record_put_text(" late, ");
         compositor_record_put_number(compositor_record_refused), compositor_record_put_text(" refused flips, ");
         compositor_record_put_number(compositor_record_held), compositor_record_put_text(" held; ");
-        compositor_record_put_number(compositor_records_all), compositor_record_put_text(" presents in all\n");
+        compositor_record_put_number(compositor_records_all), compositor_record_put_text(" presents in all, tear ");
+        compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_TEAR]), compositor_record_put_text(", flash ");
+        compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_FLASH]), compositor_record_put_text(", size ");
+        compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_SIZE_JUMP]), compositor_record_put_text(", blank ");
+        compositor_record_put_number(compositor_record_classed[COMPOSITOR_RECORD_BLANK]), compositor_record_put_text("\n");
         compositor_record_write_file("state", compositor_record_text, compositor_record_text_at);
 }
 
@@ -289,6 +644,7 @@ static void compositor_record_look(unsigned long long now)
                         compositor_record_until = now + secs * 1000000000ull;
                         compositor_record_frames = compositor_record_late = compositor_record_refused = compositor_record_held = 0;
                         compositor_record_flips = 0;
+                        compositor_record_reset();
                 }
         }
         handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/report", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
@@ -309,9 +665,12 @@ static void compositor_record_present(unsigned long long began, unsigned long lo
         compositor_record_end(began, ended, path);
         if (compositor_record_polls++ % COMPOSITOR_RECORD_POLL == 0)
                 compositor_record_look(ended);
+        if (compositor_record_until && compositor_record_mark.damaged)
+                compositor_record_capture(ended);
         if (compositor_record_until && ended >= compositor_record_until)
         {
                 compositor_record_until = 0;
                 compositor_record_report();
+                compositor_record_free();
         }
 }

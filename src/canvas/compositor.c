@@ -8617,6 +8617,7 @@ static void compositor_present_frames(void)
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
                 }
         windows = count;
+        compositor_record_scene(frames, windows); // the window pictures of this present, for the record's frames
         // The snap preview is over every window and the tabs: it leaves its window's frame for one of its own, after the tabs.
         tinted = compositor_preview_lift(frames, windows, &preview);
         // A window the card shows straight has what the tabs covered put back, so the glass is made from the window.
