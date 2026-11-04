@@ -217656,17 +217656,24 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         }
                         else if (which == 8)
                         {
-                                // The editor: its file (opened by editor_open from a path, written here: lines, a tab, a long line, non-ASCII);
-                                // group 0 is the plain text area, group 1 the code view (every tab is code, and the code view's cells set lost).
-                                static const char text[] = "first line\n\tindented with a tab\n"
-                                                           "a long line that goes on for a while past the width of the window and beyond it, so the view has to cut it, over and over, to the end\n"
-                                                           "na\xc3\xafve caf\xc3\xa9 \xe2\x80\x94 \xc3\xbcnicode \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e text\n"
-                                                           "last\n";
+                                // The editor: its file (opened by editor_open from a path, written here). Group 0 is the plain text area with lines, a tab,
+                                // a long line, accented and wide text; group 1 the code view (every tab's mode) on the same file without the wide text, which
+                                // the recorder takes (tabs skipped, accents as cells); group 2 the code view with the wide text, a named loss (font_draw on
+                                // the ground: font_blend, the wide cell).
+                                static const char text_wide[] = "first line\n\tindented with a tab\n"
+                                                                "a long line that goes on for a while past the width of the window and beyond it, so the view has to cut it, over and over, to the end\n"
+                                                                "na\xc3\xafve caf\xc3\xa9 \xe2\x80\x94 \xc3\xbcnicode \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e text\n"
+                                                                "last\n";
+                                static const char text_code[] = "first line\n\tindented with a tab\n"
+                                                               "a long line that goes on for a while past the width of the window and beyond it, so the view has to cut it, over and over, to the end\n"
+                                                               "na\xc3\xafve caf\xc3\xa9 \xe2\x80\x94 \xc3\xbcnicode text\n"
+                                                               "last\n";
+                                const char address_to content = app_group == 1 ? text_code : text_wide;
                                 int handle = (int)system_open_at_mode(AT_FDCWD, (string_address)"/tmp/mw-editor-rows.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 
                                 if (handle >= 0)
                                 {
-                                        system_write_once(handle, (void *)text, sizeof(text) - 1);
+                                        system_write_once(handle, (void *)content, string_length((string_address)content));
                                         system_close(handle);
                                 }
                                 editor.own.stride = (unsigned int)pitch;
@@ -217781,8 +217788,8 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         launcher.ui.scene = null, mixer.ui.scene = null, settings.ui.scene = null, editor.ui.scene = null;
                         if (app_scene.lost)
                         {
-                                string_format(log, "  known diff: app %p (%p%%, %p) set lost (%p ops recorded): %s\n", (positive)which, (positive)s, (positive)mode,
-                                              (positive)app_scene.count, (positive)(which == 8 ? "the code view's cell branch (ui_text_draw_line, R4)" : "a painter that is not recorded (R3 or R4)"));
+                                string_format(log, "  known diff: app %p group %p (%p%%, %p) set lost (%p ops recorded): %s\n", (positive)which, (positive)app_group, (positive)s, (positive)mode,
+                                              (positive)app_scene.count, (positive)(which == 8 ? "a wide (CJK) cell: font_draw on the ground, font_blend, not recorded" : "a painter that is not recorded (R3 or R4)"));
                                 continue;
                         }
                         for (positive i = 0; i < (positive)pitch * H; i++)
@@ -219656,7 +219663,7 @@ b32 main(void)
                         {
                                 static const int editor_scales[4] = {100, 150, 200, 300};
 
-                                for (app_group = 0; app_group < 2; app_group++)
+                                for (app_group = 0; app_group < 3; app_group++)
                                         app_rows(8, big, kops, kbins, kbins + (4 << 20), 4u << 20, editor_scales, 4, 0);
                         }
                 }
