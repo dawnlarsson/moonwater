@@ -693,8 +693,6 @@ static struct
         char choice_label[UI_MENU_ITEMS][SETTINGS_VALUE], choice_mark[UI_MENU_ITEMS][2 * SETTINGS_VALUE];
         struct ui_scroll card;
         int editing;             // the row typed in, -1 none
-        int group;               // the group whose rows are at the right
-        b32 pane;                // where the keys are: 0 the column of groups, 1 the rows
         char head[SETTINGS_VALUE]; // the verb of a command being typed, as its row's label
         char accents[SETTINGS_VALUE]; // the accents' colours, a blank apart, as the swatches' words
         struct battery_name battery_menu[BATTERY_LIST]; // the batteries a picker list was opened with
@@ -1263,7 +1261,7 @@ static b32 settings_map_on(void)
 {
         int row = settings_output_row(SETTINGS_OUT_SCREEN);
 
-        return row >= 0 && !settings.page.card && !settings.filter_length && settings_group_of(row) == settings.group;
+        return row >= 0 && !settings.page.card && !settings.filter_length && settings_group_of(row) == settings.page.chosen;
 }
 
 static int settings_map_height(void)
@@ -1555,7 +1553,7 @@ static fn settings_reveal(void)
 // The chosen group kept in sight in a column that does not fit.
 static fn settings_side_reveal(void)
 {
-        if (ui_page_column_reveal(&settings.ui, &settings.page, settings.group))
+        if (ui_page_column_reveal(&settings.ui, &settings.page, settings.page.chosen))
                 settings_changed(settings.page.top, settings.page.bottom);
 }
 
@@ -1570,7 +1568,7 @@ static fn settings_rebuild(void)
 
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
         for (positive row = 0; row < settings_rows_count(); row++)
-                if (settings.filter_length ? settings_matches((int)row) : settings_group_of((int)row) == settings.group)
+                if (settings.filter_length ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen)
                         settings.list.id[count++] = (unsigned short)row;
         // The rows of a list come after, each in the group of its feed.
         for (int list = 0; list < SETTINGS_LISTS; list++)
@@ -1578,7 +1576,7 @@ static fn settings_rebuild(void)
                 {
                         int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
 
-                        if (settings.filter_length ? settings_matches(row) : settings_group_of(row) == settings.group)
+                        if (settings.filter_length ? settings_matches(row) : settings_group_of(row) == settings.page.chosen)
                                 settings.list.id[count++] = (unsigned short)row;
                 }
         settings.list.count = count;
@@ -2539,7 +2537,7 @@ static int settings_feed_owner(int feed)
 static int settings_feed_of_group(void)
 {
         for (positive feed = 0; feed < SETTINGS_FEEDS; feed++)
-                if (string_equals((string_address)settings_feeds[feed].group, (string_address)settings_group_name(settings.group)))
+                if (string_equals((string_address)settings_feeds[feed].group, (string_address)settings_group_name(settings.page.chosen)))
                         return (int)feed;
         return -1;
 }
@@ -2605,7 +2603,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
 static fn settings_feed_rows(void)
 {
         for (positive at = 0; at < SETTINGS_ROWS; at++)
-                if ((settings_rows[at].flags & SETTINGS_TICK) && settings_group_of((int)at) == settings.group &&
+                if ((settings_rows[at].flags & SETTINGS_TICK) && settings_group_of((int)at) == settings.page.chosen &&
                     settings.editing != (int)at)
                         settings_unread_set(at, 1);
 }
@@ -3424,13 +3422,13 @@ static b32 settings_filter_typed(void);
 
 static fn settings_group_choose(int group)
 {
-        int last = settings_groups() - 1, before = settings.group;
+        int last = settings_groups() - 1, before = settings.page.chosen;
         b32 typed = settings.filter_length != 0 || settings_filter_typed();
 
         group = group < 0 ? 0 : group > last ? last : group;
         if (group == before && !typed)
                 return;
-        settings.group = group;
+        settings.page.chosen = group;
         settings.map.keys = false;
         settings.feed_due = 0;
         settings_filter_clear();
@@ -3447,7 +3445,7 @@ static fn settings_group_choose(int group)
 // The keys go to the rows of the group chosen.
 static fn settings_rows_enter(void)
 {
-        settings.pane = 1;
+        settings.page.pane = 1;
         if (settings_pos(settings.list.focus) < 0 && settings.list.count)
                 settings.list.focus = settings.list.id[0];
         settings_reveal();
@@ -3587,7 +3585,7 @@ static fn settings_filter_asked(p32 asks)
                 return;
         }
         ui_scroll_set(&settings.list.scroll, 0);
-        settings.pane = 1;
+        settings.page.pane = 1;
         settings_refilter();
         if (settings.list.count)
         {
@@ -3801,7 +3799,7 @@ static b32 settings_key(const struct window_event address_to event)
                 }
                 if ((asks & UI_TEXT_SUBMIT) && settings_pos(settings.list.focus) >= 0)
                 {
-                        settings.pane = 1;
+                        settings.page.pane = 1;
                         settings_activate(settings.list.focus, 1);
                 }
                 if (asks)
@@ -3811,7 +3809,7 @@ static b32 settings_key(const struct window_event address_to event)
         // The map has the keys while it has the focus (settings_map_key); what it does not take goes on to the rows below.
         if (settings.map.keys)
         {
-                if (settings_map_on() && settings.pane && settings_map_key(event))
+                if (settings_map_on() && settings.page.pane && settings_map_key(event))
                         return true;
                 settings.map.keys = false;
         }
@@ -3821,8 +3819,8 @@ static b32 settings_key(const struct window_event address_to event)
                 return settings_stop();
         case UI_KEY_TAB:
                 // Between the column of groups and the rows, whichever row or group is there.
-                settings.pane = !settings.pane;
-                if (settings.pane)
+                settings.page.pane = !settings.page.pane;
+                if (settings.page.pane)
                         settings_rows_enter();
                 settings_dirty();
                 break;
@@ -3833,7 +3831,7 @@ static b32 settings_key(const struct window_event address_to event)
         case UI_KEY_PAGE_UP:
         case UI_KEY_PAGE_DOWN:
                 // Up from the first row of the Display group goes up to the map above it, which has the keys then.
-                if (settings.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
+                if (settings.page.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
                     settings_map_count())
                 {
                         settings.map.keys = true;
@@ -3841,7 +3839,7 @@ static b32 settings_key(const struct window_event address_to event)
                         break;
                 }
                 // The kit's moves: a row at a time, a view, an end in the rows; a group, three, an end in the column.
-                if (settings.pane)
+                if (settings.page.pane)
                 {
                         int before = settings.list.focus;
                         b32 moved = false;
@@ -3851,19 +3849,19 @@ static b32 settings_key(const struct window_event address_to event)
                                 settings_said_of(before);
                 }
                 else
-                        settings_group_choose(ui_page_column_key(&settings.page, (int)event->a, settings.group));
+                        settings_group_choose(ui_page_column_key(&settings.page, (int)event->a, settings.page.chosen));
                 break;
         case UI_KEY_SPACE:
                 // With something in the filter a blank was typed in it, above; with nothing, Space works the row as Enter does.
         case UI_KEY_ENTER:
         case UI_KEY_ENTER_PAD:
-                if (!settings.pane)
+                if (!settings.page.pane)
                         settings_rows_enter();
                 else if (settings_pos(settings.list.focus) >= 0)
                         settings_activate(settings.list.focus, 1);
                 break;
         case UI_KEY_DELETE:
-                if (settings.pane)
+                if (settings.page.pane)
                         settings_forget();
                 break;
         case UI_KEY_LEFT:
@@ -3872,15 +3870,15 @@ static b32 settings_key(const struct window_event address_to event)
                 // moves down, and on a switch and on any other row it goes back to the column, which is at the start. The other goes on.
                 if (ui_arrow((int)event->a) < 0)
                 {
-                        if (settings.pane && settings_steps(settings.list.focus))
+                        if (settings.page.pane && settings_steps(settings.list.focus))
                                 settings_activate(settings.list.focus, -1);
-                        else if (settings.pane)
+                        else if (settings.page.pane)
                         {
-                                settings.pane = 0;
+                                settings.page.pane = 0;
                                 settings_dirty();
                         }
                 }
-                else if (!settings.pane)
+                else if (!settings.page.pane)
                         settings_rows_enter();
                 else if (settings_steps(settings.list.focus))
                         settings_activate(settings.list.focus, 1);
@@ -4482,7 +4480,7 @@ static fn settings_press_at(void)
         if (row >= 0)
         {
                 settings_edit_end();
-                settings.pane = 0;
+                settings.page.pane = 0;
                 settings_group_choose(row);
                 settings_dirty();
                 return;
@@ -4498,7 +4496,7 @@ static fn settings_press_at(void)
                 ui_confirm_drop(&settings.confirm);
                 settings_said_of(before);
         }
-        settings.pane = 1;
+        settings.page.pane = 1;
         settings_dirty();
         // A segment or a swatch is set where it is pressed.
         if (settings.list.part >= 0 && row < SETTINGS_ANY && settings.state[row] == SETTINGS_READ)
@@ -4564,13 +4562,13 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         else
         {
                 ui_page_groups(ui, &settings.page, settings_group_text, settings_groups());
-                ui_page_column(ui, &settings.page, settings.group, settings.focused && !settings.pane, settings.filter_length != 0);
+                ui_page_column(ui, &settings.page, settings.focused && !settings.page.pane, settings.filter_length != 0);
                 if (settings_map_on())
                         settings_map_draw(ui);
                 // A row typed in is a field on the page, not a band: its well is the only thing lit there.
                 // The map has the keys while it is focused, so no row is lit or has the focus then.
-                settings.list.lit = (settings.pane || settings.filter_length) && settings.editing < 0 && !settings.map.keys;
-                settings.list.keys = settings.focused && settings.pane && !settings.map.keys;
+                settings.list.lit = (settings.page.pane || settings.filter_length) && settings.editing < 0 && !settings.map.keys;
+                settings.list.keys = settings.focused && settings.page.pane && !settings.map.keys;
                 ui_list_draw(ui, &settings.list);
                 ui_page_column_bar(ui, &settings.page);
         }
@@ -4795,7 +4793,7 @@ static b32 settings_main()
         settings.editing = -1;
         ui_buffers_start(&settings.buffers);
         settings.output = -1;
-        settings.pane = 1; // the keys start in the rows, on the first of them
+        settings.page.pane = 1; // the keys start in the rows, on the first of them
         settings.choice = -1;
 
         for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)

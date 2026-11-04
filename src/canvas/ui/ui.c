@@ -9244,6 +9244,8 @@ struct ui_page
         struct ui_press press;             // a mouse's press on the page: what it went down on, done on its release (ui_page_pointer)
         struct ui_finger finger;           // a finger on the page: its press and the region it drags
         b32 card;                          // the body is a card, not a list: no row is hit and a press on it is its one target
+        int chosen;                        // the column's group chosen (the body's rows are its rows)
+        b32 pane;                          // where the keys are: 0 the column of groups, 1 the body
         // The app's: what scrolls in the body (its list's region, or a page of text's), and where a change is drawn again
         // (rows of the window, device pixels).
         struct ui_scroll address_to body;
@@ -9361,9 +9363,10 @@ static int ui_page_column_key(const struct ui_page address_to p, int key, int gr
         The column drawn: the chosen group under the accent's pip, which slides to another however it is chosen, ringed
         while the keys are in it; none chosen (disabled) while a search lists the rows of every group.
 */
-static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, int chosen, b32 keys, b32 disabled)
+static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b32 keys, b32 disabled)
 {
         struct ui_control address_to c = &p->column;
+        int chosen = p->chosen;
 
         if (!p->column_on)
                 return;
