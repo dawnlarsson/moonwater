@@ -58,6 +58,13 @@ mixer_playback	110c	Afspelen
 mixer_recording	f20c	Opnemen
 mixer_recording_off	9c09	Opnemen staat uit
 mixer_unmute	72bb	Dempen opheffen
+mixer_unplugged	3ed9	Niets aangesloten
+mixer_why_analog	b797	Gekozen: luidspreker of analoog
+mixer_why_chosen	5e67	Gekozen: uw keuze
+mixer_why_display	fd9f	Gekozen: scherm aangesloten
+mixer_why_hdmi	f5eb	Gekozen: HDMI, scherm onbekend
+mixer_why_named	0295	Gekozen: zo gestart
+mixer_why_nothing	ff66	Gekozen: de eerste die er is
 settings_already_joined	71fb	al verbonden met %s
 settings_any_text	89dc	elke opdracht, als de woorden na moonwater: het werkwoord, dan de argumenten
 settings_asks_first	e9bd	vraagt eerst

@@ -58,6 +58,13 @@ mixer_playback	110c	Odtwarzanie
 mixer_recording	f20c	Nagrywanie
 mixer_recording_off	9c09	Nagrywanie jest wyłączone
 mixer_unmute	72bb	Włącz dźwięk
+mixer_unplugged	3ed9	Nic nie podłączono
+mixer_why_analog	b797	Wybrane: głośnik lub analog
+mixer_why_chosen	5e67	Wybrane: twój wybór
+mixer_why_display	fd9f	Wybrane: podłączony ekran
+mixer_why_hdmi	f5eb	Wybrane: HDMI, ekran nieznany
+mixer_why_named	0295	Wybrane: tak uruchomiono
+mixer_why_nothing	ff66	Wybrane: pierwsze dostępne
 settings_already_joined	71fb	już połączono z %s
 settings_any_text	89dc	dowolne polecenie, jak słowa po moonwater: czasownik, potem argumenty
 settings_asks_first	e9bd	pyta najpierw

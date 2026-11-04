@@ -58,6 +58,13 @@ mixer_playback	110c	Playback
 mixer_recording	f20c	Recording
 mixer_recording_off	9c09	Recording is off
 mixer_unmute	72bb	Unmute
+mixer_unplugged	3ed9	Nothing plugged in
+mixer_why_analog	b797	Picked: speaker or analog
+mixer_why_chosen	5e67	Picked: you chose it
+mixer_why_display	fd9f	Picked: a display is plugged in
+mixer_why_hdmi	f5eb	Picked: HDMI, display unknown
+mixer_why_named	0295	Picked: started with it
+mixer_why_nothing	ff66	Picked: the first one there is
 settings_already_joined	71fb	already joined to %s
 settings_any_text	89dc	any command, as the words after moonwater: its verb, then its arguments
 settings_asks_first	e9bd	asks first

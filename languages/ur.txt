@@ -59,6 +59,13 @@ mixer_playback	110c	پلے بیک
 mixer_recording	f20c	ریکارڈنگ
 mixer_recording_off	9c09	ریکارڈنگ بند ہے
 mixer_unmute	72bb	آواز بحال کریں
+mixer_unplugged	3ed9	کچھ لگا ہوا نہیں
+mixer_why_analog	b797	منتخب: اسپیکر یا اینالاگ
+mixer_why_chosen	5e67	منتخب: آپ کی پسند
+mixer_why_display	fd9f	منتخب: ڈسپلے لگا ہے
+mixer_why_hdmi	f5eb	منتخب: HDMI، ڈسپلے نامعلوم
+mixer_why_named	0295	منتخب: اسی کے ساتھ شروع ہوا
+mixer_why_nothing	ff66	منتخب: پہلا دستیاب
 settings_already_joined	71fb	پہلے سے %s سے منسلک ہے
 settings_any_text	89dc	کوئی بھی کمانڈ، moonwater کے بعد آنے والے الفاظ کی صورت میں: پہلے فعل، پھر آرگیومنٹس
 settings_asks_first	e9bd	پہلے پوچھتا ہے

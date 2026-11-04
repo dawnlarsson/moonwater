@@ -149,6 +149,31 @@ static int mixer_percent(unsigned int volume)
 }
 
 /*
+        What the page says of the output that plays, under its strip: nothing is plugged into it (and then the strip is dim), and why it is
+        the one that plays (not said when the server plays to a clock, which is no output to be picked).
+*/
+static fn mixer_device_notes(const struct audio_state address_to page)
+{
+        struct ui_strips address_to strips = &mixer.big->strips;
+        unsigned int why = page->output_why;
+        b32 unplugged = false;
+
+        for (unsigned int k = 0; k < page->devices && k < AUDIO_STATE_DEVICES; k++)
+                unplugged |= (page->device_list[k].flags & AUDIO_STATE_DEVICE_ACTIVE) && (page->device_list[k].flags & AUDIO_STATE_DEVICE_UNPLUGGED);
+        ui_strips_dim(strips, unplugged);
+        ui_strips_note(strips, 0, unplugged ? WORDS(mixer_unplugged) : "");
+        ui_strips_note(strips, 1,
+                       (page->output_state & AUDIO_STATE_OUT_CLOCK) ? ""
+                       : why == AUDIO_STATE_WHY_CHOSEN  ? WORDS(mixer_why_chosen)
+                       : why == AUDIO_STATE_WHY_NAMED   ? WORDS(mixer_why_named)
+                       : why == AUDIO_STATE_WHY_ANALOG  ? WORDS(mixer_why_analog)
+                       : why == AUDIO_STATE_WHY_DISPLAY ? WORDS(mixer_why_display)
+                       : why == AUDIO_STATE_WHY_HDMI    ? WORDS(mixer_why_hdmi)
+                       : why == AUDIO_STATE_WHY_NOTHING ? WORDS(mixer_why_nothing)
+                                                        : "");
+}
+
+/*
         The strips from the page copied: the device, then the programs in the order the page has them, the streams of one
         program together as one strip with the loudest of their volumes, muted when all of them are and playing when
         any is, and the greatest of their peaks. The members of each are kept for what is sent.
@@ -178,6 +203,7 @@ static fn mixer_list(b64 now)
                 ui_strips_add(&big->strips, 0xfffffffffffffffeul, page->device[0] ? page->device : page->name[0] ? page->name : "?", mixer_percent(page->volume),
                               page->muted != 0, 1, 0, page->peak_left, page->peak_right, now);
                 string_copy_bounded((string_address)big->sink, (string_address)page->name, sizeof(big->sink));
+                mixer_device_notes(page);
         }
         else if (programs && page->input[0])
         {

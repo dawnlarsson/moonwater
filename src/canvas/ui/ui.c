@@ -3263,6 +3263,57 @@ static int ui_kit_baseline(struct ui address_to ui, int top, int type)
 }
 
 /*
+        A text in a block width device pixels wide, broken at blanks into lines of the role's height from top, each centred on centre,
+        at most lines of them (a word wider than the block is cut at its edges). Answers the lines drawn.
+*/
+static int ui_kit_text_block(struct ui address_to ui, int centre, int top, int width, const char address_to text, int type, unsigned int argb, int lines)
+{
+        int at = 0, drawn = 0, height = ui_types[type].line * ui->scale / 100;
+        char line[96];
+
+        while (text[at] == ' ')
+                at++;
+        while (text[at] && drawn < lines)
+        {
+                int taken = at, stop = at, measured;
+
+                // The longest run of whole words that fits; the first word is taken whatever its width.
+                for (;;)
+                {
+                        int word = stop;
+
+                        while (text[word] && text[word] != ' ')
+                                word++;
+                        if (word - at >= (int)sizeof(line))
+                                break;
+                        memory_copy(line, text + at, (positive)(word - at));
+                        line[word - at] = 0;
+                        if (taken > at && ui_kit_measure(ui, line, type) > width)
+                                break;
+                        taken = word;
+                        for (stop = word; text[stop] == ' ';)
+                                stop++;
+                        if (!text[stop])
+                                break;
+                }
+                if (taken == at)
+                {
+                        taken = at + (int)sizeof(line) - 1;
+                        while (taken > at && (((unsigned char)text[taken]) & 0xc0) == 0x80)
+                                taken--;
+                }
+                memory_copy(line, text + at, (positive)(taken - at));
+                line[taken - at] = 0;
+                measured = ui_kit_measure(ui, line, type);
+                ui_kit_text_in(ui, centre - measured / 2, ui_kit_baseline(ui, top + drawn * height, type), line, type, argb, 0, centre - width / 2, centre + width / 2);
+                drawn++;
+                for (at = taken; text[at] == ' ';)
+                        at++;
+        }
+        return drawn;
+}
+
+/*
         The press channel, --press-x/-y and --press-tx/-ty: a drag holds the
         pull (KB), a release springs it home (pressSpring), and a new press
         freezes a spring where it is (cancelSprings leaves the last values
@@ -8078,6 +8129,8 @@ static fn ui_meter_draw(struct ui address_to ui, int x, int top, int bottom, con
 #define UI_STRIP_MUTE_W 76
 #define UI_STRIP_MUTE_H 32
 #define UI_STRIP_LEAST 60     // the shortest a slider is, before the strips are too short to be used
+#define UI_STRIP_NOTES 2      // the notes a strip may have under its volume (ui_strips_note), each broken to the strip's width,
+#define UI_STRIP_NOTE_ROWS 4  // in this many lines in all, which every slider gives room for when any strip has a note
 #define UI_STRIPS_HOLD_NS 600000000ll
 #define UI_STRIPS_WHEEL 2     // percent a notch
 #define UI_STRIPS_DRAW 1u     // the strips' picture is due again
@@ -8093,6 +8146,8 @@ struct ui_strip
         char initial[8];
         int percent;          // 0 to 100
         b32 muted, master, playing;
+        b32 dim;              // drawn in the quiet ink: a device that is there and cannot be heard (ui_strips_note)
+        char note[UI_STRIP_NOTES][96]; // what is said of it under its volume, in the quiet ink
         struct ui_level level[2];
         b64 changed_at;       // ns: when the person last changed it
 };
@@ -8101,6 +8156,7 @@ struct ui_strips
 {
         struct ui_strip item[UI_STRIPS_MOST], before[UI_STRIPS_MOST];
         int count, before_count, changed, focus;
+        b32 noted;                                     // some strip has a note: the sliders start lower for it
         unsigned long focus_id;
         struct ui_control control[2 * UI_STRIPS_MOST]; // strip k's slider is 2k and its mute button 2k + 1
         struct ui_control face;                        // the disc of a program
@@ -8161,6 +8217,7 @@ static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const c
         else
                 memory_zero(strip, sizeof(*strip));
         strip->id = id;
+        strip->dim = 0, strip->note[0][0] = strip->note[1][0] = 0;
         string_copy_bounded((string_address)strip->name, (string_address)name, sizeof(strip->name));
         ui_strip_initial(strip->initial, sizeof(strip->initial), name);
         strip->master = master, strip->playing = playing;
@@ -8173,9 +8230,25 @@ static fn ui_strips_add(struct ui_strips address_to s, unsigned long id, const c
         ui_level_feed(&strip->level[1], right, now);
 }
 
+// Of the strip added last: a note under its volume (which of the UI_STRIP_NOTES, its words) and whether it is dim. Both are said again at each listing.
+static fn ui_strips_note(struct ui_strips address_to s, int which, const char address_to text)
+{
+        if (s->listing && s->count > 0 && which >= 0 && which < UI_STRIP_NOTES)
+                string_copy_bounded((string_address)s->item[s->count - 1].note[which], (string_address)text, sizeof(s->item[0].note[0]));
+}
+
+static fn ui_strips_dim(struct ui_strips address_to s, b32 dim)
+{
+        if (s->listing && s->count > 0)
+                s->item[s->count - 1].dim = dim != 0;
+}
+
 static fn ui_strips_end(struct ui_strips address_to s)
 {
         s->listing = 0;
+        s->noted = 0;
+        for (int k = 0; k < s->count; k++)
+                s->noted |= s->item[k].note[0][0] || s->item[k].note[1][0];
         // The keys stay on the strip they were on, by its number, and else on the one in its place.
         for (int k = 0; k < s->count; k++)
                 if (s->item[k].id == s->focus_id)
@@ -8241,7 +8314,7 @@ static fn ui_strips_place(struct ui address_to ui, struct ui_strips address_to s
 
         s->x = x, s->y = y, s->w = w, s->h = h;
         shift = ui_strips_shift(ui, s);
-        track_top = 16 + UI_STRIP_FACE + 8 + 16 + 24;
+        track_top = 16 + UI_STRIP_FACE + 8 + 16 + 24 + (s->noted ? UI_STRIP_NOTE_ROWS * 16 : 0);
         track_bottom = h * 100 / ui->scale - 16 - UI_STRIP_MUTE_H - 12;
         if (track_bottom - track_top < UI_STRIP_LEAST)
                 track_bottom = track_top + UI_STRIP_LEAST;
@@ -8316,7 +8389,8 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
                 int room = ui_dev(ui, UI_STRIP_W - 8), width, group = (UI_STRIP_W - UI_STRIP_GROUP) / 2;
                 string_address name;
                 b64 shown[2], hold[2];
-                unsigned int ink = ui_text_colour(ui, strip->muted ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE);
+                unsigned int ink = ui_text_colour(ui, strip->muted || strip->dim ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE);
+                int lines = UI_STRIP_NOTE_ROWS, note_top = s->y + ui_dev(ui, 16 + UI_STRIP_FACE + 8 + 16 + 20);
 
                 if (left + ui_dev(ui, UI_STRIP_W) <= s->x || left >= s->x + s->w)
                         continue;
@@ -8348,6 +8422,13 @@ static fn ui_strips_draw(struct ui address_to ui, struct ui_strips address_to s,
                 width = ui_kit_measure(ui, (string_address)text, UI_BODY_MEDIUM);
                 ui_kit_text(ui, centre - width / 2, ui_kit_baseline(ui, s->y + ui_dev(ui, 16 + UI_STRIP_FACE + 8 + 16), UI_BODY_MEDIUM), (string_address)text,
                             UI_BODY_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0);
+                // What is said of it, in the quiet ink, broken to the strip.
+                for (int note = 0; note < UI_STRIP_NOTES && lines > 0; note++)
+                {
+                        int drawn = strip->note[note][0] ? ui_kit_text_block(ui, centre, note_top, room, strip->note[note], UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), lines) : 0;
+
+                        note_top += drawn * ui_dev(ui, 16), lines -= drawn;
+                }
                 // The meter beside the slider, the length of its track.
                 for (int channel = 0; channel < 2; channel++)
                         ui_level_now(&strip->level[channel], ui_kit.now, &shown[channel], &hold[channel]);

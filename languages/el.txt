@@ -58,6 +58,13 @@ mixer_playback	110c	Αναπαραγωγή
 mixer_recording	f20c	Εγγραφή
 mixer_recording_off	9c09	Η εγγραφή είναι απενεργοποιημένη
 mixer_unmute	72bb	Επαναφορά ήχου
+mixer_unplugged	3ed9	Δεν υπάρχει σύνδεση
+mixer_why_analog	b797	Επιλογή: ηχείο ή αναλογική
+mixer_why_chosen	5e67	Επιλογή: δική σας
+mixer_why_display	fd9f	Επιλογή: συνδέθηκε οθόνη
+mixer_why_hdmi	f5eb	Επιλογή: HDMI, άγνωστη οθόνη
+mixer_why_named	0295	Επιλογή: έναρξη με αυτό
+mixer_why_nothing	ff66	Επιλογή: η πρώτη διαθέσιμη
 settings_already_joined	71fb	ήδη συνδεδεμένο με %s
 settings_any_text	89dc	οποιαδήποτε εντολή, ως οι λέξεις μετά το moonwater: το ρήμα και μετά τα ορίσματα
 settings_asks_first	e9bd	ρωτά πρώτα

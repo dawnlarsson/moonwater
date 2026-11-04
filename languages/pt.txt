@@ -58,6 +58,13 @@ mixer_playback	110c	Reprodução
 mixer_recording	f20c	Gravação
 mixer_recording_off	9c09	A gravação está desativada
 mixer_unmute	72bb	Ativar som
+mixer_unplugged	3ed9	Nada conectado
+mixer_why_analog	b797	Escolhido: alto-falante ou analógico
+mixer_why_chosen	5e67	Escolhido: por você
+mixer_why_display	fd9f	Escolhido: há uma tela ligada
+mixer_why_hdmi	f5eb	Escolhido: HDMI, tela incerta
+mixer_why_named	0295	Escolhido: iniciado com ele
+mixer_why_nothing	ff66	Escolhido: o primeiro que existe
 settings_already_joined	71fb	já conectado a %s
 settings_any_text	89dc	qualquer comando, como as palavras depois de moonwater: o verbo e os argumentos
 settings_asks_first	e9bd	pergunta antes

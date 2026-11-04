@@ -59,6 +59,13 @@ mixer_playback	110c	التشغيل
 mixer_recording	f20c	التسجيل
 mixer_recording_off	9c09	التسجيل متوقف
 mixer_unmute	72bb	إلغاء الكتم
+mixer_unplugged	3ed9	لا شيء متصل
+mixer_why_analog	b797	مختار: مكبر صوت أو تناظري
+mixer_why_chosen	5e67	مختار: اخترته أنت
+mixer_why_display	fd9f	مختار: شاشة متصلة
+mixer_why_hdmi	f5eb	مختار: HDMI، الشاشة غير معروفة
+mixer_why_named	0295	مختار: بدأ الخادم به
+mixer_why_nothing	ff66	مختار: أول جهاز متاح
 settings_already_joined	71fb	متصل بالفعل بالشبكة %s
 settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط
 settings_asks_first	e9bd	يسأل أولا

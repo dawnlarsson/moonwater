@@ -147173,6 +147173,46 @@ static fn check_mixer_with(struct ui address_to ui, unsigned int address_to pixe
                 mixer.width = 640, mixer.height = 400;
         }
 
+        // The output that plays, as the page says it: with nothing plugged into it the strip is dim and says so, under its volume, and the reason it plays is
+        // there too (not for a server that plays to a clock); a plugged output says only why; the programs' strips say nothing.
+        {
+                mixer.recording = false;
+                mixer_fixture_streams();
+                mixer_fixture_page.devices = 2;
+                string_copy_bounded((string_address)mixer_fixture_page.device_list[0].name, (string_address) "alsa_output.pci.analog", sizeof(mixer_fixture_page.device_list[0].name));
+                mixer_fixture_page.device_list[0].flags = AUDIO_STATE_DEVICE_ACTIVE | AUDIO_STATE_DEVICE_UNPLUGGED;
+                mixer_fixture_page.device_list[1].flags = 0;
+                mixer_fixture_page.output_why = AUDIO_STATE_WHY_NOTHING;
+                mixer_fixture_page.seq += 2;
+                mixer.listed = false;
+                mixer_poll(mixer_t0 + 1400000000ll);
+                check("mixer: an output with nothing plugged into it is a dim strip that says so, with the reason it plays; the programs say nothing",
+                      s->item[0].dim && string_equals((string_address)s->item[0].note[0], (string_address)WORDS(mixer_unplugged)) &&
+                          string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_nothing)) && !s->item[1].dim && !s->item[1].note[0][0] && s->noted);
+                mixer_fixture_page.device_list[0].flags = AUDIO_STATE_DEVICE_ACTIVE;
+                mixer_fixture_page.output_why = AUDIO_STATE_WHY_DISPLAY;
+                mixer_fixture_page.seq += 2;
+                mixer_poll(mixer_t0 + 1500000000ll);
+                check("mixer: one that is plugged in is not dim and says only why it plays", !s->item[0].dim && !s->item[0].note[0][0] &&
+                                                                                                  string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_display)));
+                mixer_fixture_page.output_state = AUDIO_STATE_OUT_CLOCK;
+                mixer_fixture_page.seq += 2;
+                mixer_poll(mixer_t0 + 1600000000ll);
+                check("mixer: a server that plays to a clock has picked nothing, and says nothing of it", !s->item[0].note[1][0] && !s->noted);
+                mixer_fixture_page.output_state = 0;
+                for (unsigned int why = 1; why <= 6; why++)
+                {
+                        mixer_fixture_page.output_why = why;
+                        mixer_fixture_page.seq += 2;
+                        mixer_poll(mixer_t0 + 1700000000ll + (b64)why * 1000000ll);
+                        check("mixer: each reason it plays is a line of its own", s->item[0].note[1][0] != 0 && (why == 1 || !string_equals((string_address)s->item[0].note[1], (string_address)WORDS(mixer_why_chosen))));
+                }
+                mixer_fixture_page.output_why = 0;
+                mixer_fixture_page.seq += 2;
+                mixer_poll(mixer_t0 + 1800000000ll);
+                check("mixer: and none known is none said", !s->item[0].note[1][0]);
+        }
+
         // A second start of the mixer with -i asks the first for its Recording page, as a window is lifted (ui_lift_page): the app is told once, by the kit's
         // loop, and the mixer shows the page a press on its tab would.
         {
@@ -147749,6 +147789,84 @@ static fn check_kit_strips(void)
                 }
                 check("kit strips: the microphone's disc has a capsule in its middle, and muted a diagonal past the foot that unmuted has none of",
                       capsule[0] > 20 && capsule[1] > 20 && past[0] == 0 && past[1] > 4);
+        }
+
+        // A text in a block (the notes under a strip's volume): broken at blanks into as many lines as it needs, never more than it is allowed,
+        // centred, and nothing drawn outside the block.
+        {
+                int narrow = ui_kit_measure(&ui, (string_address) "three", UI_LABEL_MEDIUM) + 1, wide = ui_kit_measure(&ui, (string_address) "one two three", UI_LABEL_MEDIUM) + 4;
+                int centre = 320, lines[4], inside = 0, outside = 0;
+
+                for (int k = 0; k < 640 * 400; k++)
+                        strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                lines[0] = ui_kit_text_block(&ui, centre, 100, wide, "one two three", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 4);
+                lines[1] = ui_kit_text_block(&ui, centre, 200, narrow, "one two three", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 4);
+                lines[2] = ui_kit_text_block(&ui, centre, 300, narrow, "one two three", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 2);
+                lines[3] = ui_kit_text_block(&ui, centre, 350, narrow, "", UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE) | 0xff000000u, 2);
+                for (int y = 200; y < 248; y++)
+                        for (int x = 0; x < 640; x++)
+                                if (strips_pixel(x, y) != (ui_role(UI_SURFACE) & 0xffffffu))
+                                {
+                                        if (x >= centre - narrow / 2 - 1 && x <= centre + narrow / 2 + 1)
+                                                inside++;
+                                        else
+                                                outside++;
+                                }
+                check("kit strips: a text in a block is one line when it fits, a line a word when it does not, at most as many as allowed, and none for none",
+                      lines[0] == 1 && lines[1] == 3 && lines[2] == 2 && lines[3] == 0);
+                check("kit strips: and is drawn in the block, centred, and nowhere else", inside > 30 && outside == 0);
+        }
+
+        // Notes under a strip's volume, and a strip that is dim: the sliders of every strip start lower to make room when any has a note; a dim strip is drawn in the quiet ink.
+        {
+                int plain_top, noted_top, bright = 0, dim = 0;
+
+                for (int pass = 0; pass < 2; pass++)
+                {
+                        ui_kit.now += 5000000000ll;
+                        ui_strips_begin(s);
+                        ui_strips_add(s, 0xfffffffeul, "Speakers", 50, 0, 1, 0, 0, 0, ui_kit.now);
+                        if (pass)
+                        {
+                                ui_strips_note(s, 0, "Nothing plugged in");
+                                ui_strips_note(s, 1, "Picked: you chose it");
+                                ui_strips_dim(s, 1);
+                        }
+                        ui_strips_add(s, 7, "Firefox", 50, 0, 0, 0, 0, 0, ui_kit.now);
+                        ui_strips_end(s);
+                        ui_strips_place(&ui, s, 0, 0, 640, 400);
+                        if (!pass)
+                                plain_top = s->control[0].y;
+                        else
+                                noted_top = s->control[0].y;
+                }
+                check("kit strips: when any strip has a note every slider starts lower, by the room for four lines, the one that has none as well",
+                      noted_top == plain_top + UI_STRIP_NOTE_ROWS * 16 && s->control[2].y == noted_top && s->noted);
+                for (int dimmed = 0; dimmed < 2; dimmed++)
+                {
+                        int count = 0;
+                        unsigned int ink = ui_role(dimmed ? UI_ON_SURFACE_VARIANT : UI_ON_SURFACE) & 0xffffffu;
+
+                        for (int k = 0; k < 640 * 400; k++)
+                                strips_pixels[k] = ui_role(UI_SURFACE) | 0xff000000u;
+                        ui_kit.now += 5000000000ll;
+                        ui_strips_begin(s);
+                        ui_strips_add(s, 0xfffffffeul, "Speakers", 50, 0, 1, 0, 0, 0, ui_kit.now);
+                        ui_strips_dim(s, dimmed);
+                        ui_strips_end(s);
+                        ui_strips_place(&ui, s, 0, 0, 640, 400);
+                        ui_strips_draw(&ui, s, false);
+                        for (int y = 16; y < 16 + UI_STRIP_FACE; y++)
+                                for (int x = ui_strip_at(&ui, s, 0, 0); x < ui_strip_at(&ui, s, 0, 0) + UI_STRIP_W; x++)
+                                        count += strips_pixel(x, y) == ink;
+                        if (dimmed)
+                                dim = count;
+                        else
+                                bright = count;
+                }
+                check("kit strips: a dim strip's speaker is drawn in the quiet ink and a strip that is not dim's in the ink", dim > 20 && bright > 20);
+                ui_strips_begin(s);
+                ui_strips_end(s);
         }
 
         // A message instead of strips: written in the middle of the window, or of the room beside the device.
