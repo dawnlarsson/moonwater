@@ -122780,7 +122780,7 @@ static void check_terminal_select_scroll(void)
 
     /* A mouse, above the grid: pressed on the third row, dragged up past the grid's top; the view goes back. */
     terminal_view_live();
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
@@ -122797,7 +122797,7 @@ static void check_terminal_select_scroll(void)
     terminal_view_live();
     terminal_view_scroll(20);
     back = terminal.view;
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
     at.a = x, at.b = top + (int)ROWS / 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
@@ -122812,7 +122812,7 @@ static void check_terminal_select_scroll(void)
 
     /* A finger: held on the third row for the long press (its word selected), then dragged up past the grid's top. */
     terminal_view_live();
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
     touch_at.a = x, touch_at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &touch_at, &dirty);
     terminal_deliver(-1, &land, &dirty);
@@ -122828,7 +122828,7 @@ static void check_terminal_select_scroll(void)
     check("terminal: and the held selection's end follows the text up", TERMINAL_LINE_OF(terminal.sel_active) < line_before);
     terminal_deliver(-1, &lift, &dirty);
     terminal_view_live();
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
 }
 
 /*
@@ -122851,7 +122851,7 @@ static void check_terminal_select_speed(void)
     for (int line = 0; line < 3 * (int)ROWS; line++)
         term_bytes("scrollback\r\n", 12);
     terminal_view_live();
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
@@ -122868,7 +122868,7 @@ static void check_terminal_select_speed(void)
           moved >= want - 1 && moved <= want + 1);
     terminal_deliver(-1, &release, &dirty);
     terminal_view_live();
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
 }
 
 /*
@@ -122891,7 +122891,7 @@ static void check_terminal_select_stale(void)
 
     /* A drag held past the grid's top, released; then a press in the grid, held still for two seconds of steps. */
     terminal_view_live();
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
     at.a = x, at.b = top + 2 * cell + cell / 2;
     terminal_deliver(-1, &at, &dirty);
     terminal_deliver(-1, &press, &dirty);
@@ -122910,7 +122910,7 @@ static void check_terminal_select_stale(void)
           terminal.view == before && TERMINAL_LINE_OF(terminal.sel_active) == line_after);
     terminal_deliver(-1, &release, &dirty);
     terminal_view_live();
-    terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+    terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
 }
 
 /*
@@ -123263,7 +123263,7 @@ static fn check_pointer(void)
                 p8 address_to text;
                 positive room, length;
 
-                terminal_select_clear(), terminal.sel.dragging = terminal.touch_select = false;
+                terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
                 terminal_view_live();
                 term_bytes("\x1b[H\x1b[2Jalpha bravo charlie\r\n", 28);
                 terminal_view_live();
@@ -123275,7 +123275,7 @@ static fn check_pointer(void)
                 terminal_deliver(-1, &right_up, &dirty);
                 length = terminal_select_text(&text, &room);
                 check("touch: a long press selects the word under the finger, and no menu opens",
-                      terminal.touch_select && terminal_selecting() && length == 5 && !memory_compare(text, "bravo", 5) &&
+                      terminal.sel.handles && terminal_selecting() && length == 5 && !memory_compare(text, "bravo", 5) &&
                           !terminal_menu.open && to_shell_length == 0);
                 array_store_release(text, room, length);
 
@@ -123287,15 +123287,16 @@ static fn check_pointer(void)
                 array_store_release(text, room, length);
 
                 terminal_deliver(-1, &lift, &dirty);
-                check("touch: the lift ends the press and copies the selection, which stays marked",
-                      !terminal.touch_select && !terminal.sel.dragging && terminal_selecting() && to_shell_length == 0);
+                check("touch: the lift ends the press and copies the selection, which stays marked, with its handles and the bar (the text widget's)",
+                      terminal.sel.handles && terminal.sel.bar && !terminal.sel.dragging && terminal_selecting() && to_shell_length == 0);
 
-                terminal_select_clear(), terminal.touch_select = false;
+                terminal_select_clear(), terminal.sel.handles = false;
+                terminal.sel.click.at = 0, terminal.sel.click.count = 0; // a tap a moment after the last is not a double tap
                 at.a = (int)(terminal.pad + 8 * terminal.cell_w + terminal.cell_w / 2);
                 terminal_deliver(-1, &at, &dirty);
                 terminal_deliver(-1, &down, &dirty);
                 terminal_deliver(-1, &up, &dirty);
-                check("touch: a short touch with no movement selects nothing", !terminal_selecting() && !terminal.touch_select &&
+                check("touch: a short touch with no movement selects nothing", !terminal_selecting() && !terminal.sel.handles &&
                       to_shell_length == 0);
                 to_shell_length = 0;
         }

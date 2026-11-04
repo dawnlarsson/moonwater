@@ -328,8 +328,6 @@ static inline unsigned int window_cell_colour(unsigned int index)
 #define WINDOW_CELL_SELECTED 1024u
 
 /* The first and the last cell of a touch selection, a frame's copy only: each is drawn with a flat handle on its outer edge. */
-#define WINDOW_CELL_HANDLE_START 2048u
-#define WINDOW_CELL_HANDLE_END 4096u
 
 /* Which colours a program set. Without INK_SET the ink is the theme's default ink, and without PAPER_SET the paper is the
    theme's default paper: the index is then not looked at. SWAP is a cell written in reverse video, where the defaults trade

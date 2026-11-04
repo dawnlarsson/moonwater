@@ -198,13 +198,12 @@ static struct
 
         // The selection (terminal_select_*): the kit's controller (sel: the drag, its click count, the finger, the handles and the
         // bar), and its two ends as ring places (TERMINAL_PLACE per line): where the press was, and where the drag is. select_box is
-        // an Alt press's rectangle, which the two ends make.
+        // an Alt press's rectangle, which the two ends make. overlay_top and overlay_bottom are the grid rows (pixels) the handles
+        // and the bar covered in each buffer when it was last drawn: those rows are drawn again before the next frame's diff.
         struct ui_select sel;
         p64 sel_anchor, sel_active;
         b32 select_box;
-        // A finger's long press selected it (terminal_hold): its ends are drawn as handles, and the press is still held
-        // (touch_select) or was (touch_held, until the lift that ends it).
-        b32 select_touch, touch_select, touch_held;
+        int overlay_top[2], overlay_bottom[2];
         // The caret's blink (ui_caret_cover, as a field's): its phase and the last key or move (ui_caret_wake); the caret's place
         // and whether it was shown when last seen; and the frame cell and cover each buffer holds, so a frame draws a caret whose
         // cover changed, as one whose cells changed.
@@ -903,14 +902,6 @@ static void terminal_decorate(unsigned int address_to pixels, const struct windo
                 terminal_fill(pixels, x, y, caret ? caret : terminal.cell_w / 8 ? terminal.cell_w / 8 : 1,
                               terminal.cell_h, ink);
 
-        // A touch selection's end: a flat handle, a quarter cell wide, down the outer edge of its cell in the selection's colour.
-        if (cell->flags & (WINDOW_CELL_HANDLE_START | WINDOW_CELL_HANDLE_END))
-        {
-                unsigned int handle = terminal.cell_w / 4 ? terminal.cell_w / 4 : 1;
-
-                terminal_fill(pixels, cell->flags & WINDOW_CELL_HANDLE_START ? x : x + (int)(width - handle), y, handle,
-                              terminal.cell_h, ui_role(UI_SELECTION) & 0xffffffu);
-        }
 }
 
 /*
@@ -962,8 +953,7 @@ static void terminal_blanks(unsigned int address_to pixels, unsigned int from, u
 //      as a space when codes is set; with codes null (a run of blanks) a glyph ends the scan and a blank is counted.
 //      The count is what terminal_row adds to its run, so each cell it takes is the one its own path would have taken.
 #define TERMINAL_PLAIN_OUT (WINDOW_CELL_WIDE | WINDOW_CELL_WIDE_RIGHT | WINDOW_CELL_HIDDEN | WINDOW_CELL_SELECTED | \
-                            WINDOW_CELL_DIM | WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR |        \
-                            WINDOW_CELL_HANDLE_START | WINDOW_CELL_HANDLE_END)
+                            WINDOW_CELL_DIM | WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR)
 #define TERMINAL_STYLE_BITS (WINDOW_CELL_BOLD | WINDOW_CELL_ITALIC)
 
 struct terminal_plain
@@ -1073,8 +1063,7 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                 unsigned int cells = pair ? 2 : 1;
                 b32 glyph = cell->character > ' ' && !(cell->flags & WINDOW_CELL_HIDDEN) &&
                             !(cell->flags & (WINDOW_CELL_WIDE | WINDOW_CELL_WIDE_RIGHT) && !pair);
-                b32 decor = (cell->flags & (WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR | WINDOW_CELL_HANDLE_START |
-                                            WINDOW_CELL_HANDLE_END)) != 0;
+                b32 decor = (cell->flags & (WINDOW_CELL_UNDERLINE | WINDOW_CELL_STRIKE | WINDOW_CELL_BAR)) != 0;
 
                 // The same as the buffer has, and so are the halves it pairs with: a half whose other half changed
                 // is drawn again, whole or blank as it now is.
@@ -1496,6 +1485,10 @@ static void terminal_paint_theme(void)
         the compositor has to read again named, and the picture shown.
         False when there is no buffer to draw into yet, and nothing was done.
 */
+static b32 terminal_overlay_wanted(void);
+static void terminal_overlay_spoil(struct window_cell address_to drawn, int slot);
+static void terminal_overlay(unsigned int address_to whole, int slot);
+
 static b32 terminal_frame(void)
 {
         int slot = terminal_next();
@@ -1532,7 +1525,10 @@ static b32 terminal_frame(void)
         pixels = windows_buffer(table, own, slot);
         drawn = terminal.valid[slot] ? terminal.frame[slot] : null;
         if (drawn)
+        {
                 terminal_spoiled(drawn, slot);
+                terminal_overlay_spoil(drawn, slot);
+        }
 
         // The cells are drawn through the grid's own top left, the paper round them through the buffer's.
         whole = pixels;
@@ -1549,7 +1545,7 @@ static b32 terminal_frame(void)
         // A top margin a spoil reached is drawn again, which makes the frame whether or not a cell changed.
         b32 margin = terminal.margin_spoiled[slot];
 
-        any = bar || bar_told || margin;
+        any = bar || bar_told || margin || terminal_overlay_wanted() || terminal.overlay_bottom[slot] > terminal.overlay_top[slot];
 
         positive changed = 0;
         unsigned int rows = ROWS < TERMINAL_SPAN_ROWS ? ROWS : TERMINAL_SPAN_ROWS, from = terminal_bar_from();
@@ -1639,6 +1635,9 @@ static b32 terminal_frame(void)
                 terminal.bar_total[slot] = total;
                 terminal.bar_drawn[slot] = terminal_bar_key();
         }
+
+        // The handles and the bar go over the cells and the scrollbar, last in the buffer.
+        terminal_overlay(whole, slot);
 
         // What the compositor reads again: one rectangle round the rows and the bar that differ from what
         // it shows. With nothing on the screen to differ from, all of it (a width of 0); with nothing
@@ -2142,7 +2141,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
 {
         struct window_key key;
         struct ui kit;
-        b32 moved, sent, dragged, clicked;
+        b32 moved, sent, dragged;
 
         *handled = false;
         if (!ui_kit_touch || mouse_mode || terminal.bar.held)
@@ -2192,7 +2191,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         // A grid that stopped scrolling under the drag still lets the bar go, which does nothing when the bar is not dragging.
         if (!alternate && !terminal.finger.region)
                 terminal.finger.region = &terminal.bar;
-        clicked = ui_finger_up(&terminal.finger, (event->flags & WINDOW_KEY_CANCEL) != 0) >= 0;
+        ui_finger_up(&terminal.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
         if (dragged)
         {
                 if (!alternate)
@@ -2203,12 +2202,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 ui_drag_throw_let_go(&terminal.finger.drag, terminal_scale()); // the event's own time (ui_event_context)
                 return true;
         }
-        if (!clicked)
-                return true;
-        terminal_pointer_key(0, WINDOW_KEY_DOWN, &key);
-        sent = term_input(master, &key);
-        terminal_pointer_key(0, 0, &key);
-        return sent && term_input(master, &key);
+        return true;
 }
 
 /* ---- the selection: what the hand marked, and the clipboard ---- */
@@ -2220,6 +2214,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
 #define TERMINAL_COLUMN_OF(p) ((unsigned int)((p) % TERMINAL_PLACE))
 static b32 terminal_selecting(void);
 static void terminal_select_set(p64 anchor, p64 active);
+static struct ui_select address_to terminal_sel(void);
 
 /*
         A selection is two places in the ring, each a line (as the ring counts them, which only grows) and a column in
@@ -2376,15 +2371,6 @@ static void terminal_select_mark(struct window_cell address_to out, unsigned int
         }
         for (unsigned int column = start > from ? start - from : 0; column < COLUMNS && from + column < stop; column++)
                 out[column].flags |= WINDOW_CELL_SELECTED;
-
-        // A touch selection's ends are drawn with handles: the first and the last cell of a span that is not empty.
-        if (terminal.select_touch && !terminal.select_box && (first_line != last_line || first_column != last_column))
-        {
-                if (line == first_line && first_column >= from && first_column - from < COLUMNS)
-                        out[first_column - from].flags |= WINDOW_CELL_HANDLE_START;
-                if (line == last_line && last_column > from && last_column - from <= COLUMNS)
-                        out[last_column - 1 - from].flags |= WINDOW_CELL_HANDLE_END;
-        }
 }
 
 // The selected text, a line end between lines and each line's trailing blanks left off, into a buffer the caller frees.
@@ -2479,6 +2465,7 @@ static fn terminal_chose(int id)
         {
                 terminal.select_box = false;
                 terminal_select_set(terminal_place(terminal_oldest(), 0), terminal_place(window->head - 1, window->stride));
+                terminal.sel.handles = true;
         }
         else if (id >= TERMINAL_MENU_ZOOM_IN && id <= TERMINAL_MENU_ZOOM_RESET)
                 terminal_zoom(terminal.master, id == TERMINAL_MENU_ZOOM_IN ? 1 : id == TERMINAL_MENU_ZOOM_OUT ? -1 : 2);
@@ -2490,6 +2477,105 @@ static fn terminal_chose(int id)
         the grid, its scroll is the view (a drag held past an edge, which goes back through the scrollback or forward to the live end),
         and its selection is the two ends the ring keeps (sel_anchor, sel_active). Its touch and bar answers are in the touch part.
 */
+// The grid row a ring place is drawn on and its x in the row (grid pixels), as the controller's handles and bar need it: 0 when it is on
+// the grid, -1 above the view and 1 below it.
+static int terminal_op_where(struct ui address_to ui, void address_to self, p64 at, int address_to x, int address_to top)
+{
+        unsigned int want_line = TERMINAL_LINE_OF(at), want_column = TERMINAL_COLUMN_OF(at), skip, line, row = 0;
+
+        (void)ui, (void)self;
+        line = terminal_top(terminal.view, &skip);
+        while (line != window->head)
+        {
+                unsigned int slot = line % window->history, length = window_lengths(window)[slot];
+                unsigned int folds = length ? ((length < window->stride ? length : window->stride) + COLUMNS - 1) / COLUMNS : 1;
+                unsigned int at_fold = want_column / COLUMNS < folds ? want_column / COLUMNS : folds - 1;
+
+                for (unsigned int fold = skip; fold < folds; fold++, row++)
+                        if (line == want_line && fold == at_fold)
+                        {
+                                if (row >= ROWS)
+                                        return 1;
+                                *x = (int)((want_column - fold * COLUMNS) * terminal.cell_w);
+                                *top = (int)(row * terminal.cell_h);
+                                return 0;
+                        }
+                skip = 0;
+                line++;
+        }
+        return want_line < terminal_top(terminal.view, &skip) ? -1 : 1;
+}
+
+static b32 terminal_op_shown(void address_to self)
+{
+        (void)self;
+        return terminal_selecting();
+}
+
+// The bar's items the terminal can do: Copy when something is selected, Paste always, and Select All unless the whole ring is.
+static int terminal_op_items(void address_to self, int address_to ids)
+{
+        int count = 0;
+
+        (void)self;
+        if (terminal_selecting())
+                ids[count++] = UI_SELECT_COPY;
+        ids[count++] = UI_SELECT_PASTE;
+        if (!(terminal.sel_anchor == terminal_place(terminal_oldest(), 0) && terminal.sel_active == terminal_place(window->head - 1, window->stride)))
+                ids[count++] = UI_SELECT_ALL;
+        return count;
+}
+
+// What an item of the bar does: Copy and Paste are done and the bar goes; Select All selects the ring, and the bar stays over it.
+static p32 terminal_op_item(struct ui address_to ui, void address_to self, int id)
+{
+        (void)ui, (void)self;
+        if (id == UI_SELECT_COPY)
+                terminal_copy(WINDOWS_CLIP_CLIPBOARD);
+        else if (id == UI_SELECT_PASTE)
+                windows_clip_ask(&terminal.own, WINDOWS_CLIP_CLIPBOARD);
+        else if (id == UI_SELECT_ALL)
+        {
+                terminal.select_box = false;
+                terminal_select_set(terminal_place(terminal_oldest(), 0), terminal_place(window->head - 1, window->stride));
+                terminal.sel.handles = true;
+        }
+        terminal.dirty = true;
+        return UI_TEXT_MOVED;
+}
+
+// Whether the handles or the bar are to be drawn this frame.
+static b32 terminal_overlay_wanted(void)
+{
+        return (terminal.sel.handles && terminal_selecting()) || terminal.sel.bar;
+}
+
+// The rows the handles and the bar covered when this buffer was last drawn are drawn again, as a spoil does: the cells in them are
+// not what the buffer holds any more.
+static void terminal_overlay_spoil(struct window_cell address_to drawn, int slot)
+{
+        int top = terminal.overlay_top[slot], bottom = terminal.overlay_bottom[slot], first, last;
+
+        if (bottom <= top)
+                return;
+        first = top / (int)terminal.cell_h, last = (bottom + (int)terminal.cell_h - 1) / (int)terminal.cell_h;
+        first = first < 0 ? 0 : first;
+        last = last > (int)ROWS ? (int)ROWS : last;
+        if (last > first)
+                memory_fill_u64_aligned(drawn + (positive)first * COLUMNS, (positive)(last - first) * COLUMNS, ~0ull);
+}
+
+// The handles and the bar, drawn over the grid's cells and the scrollbar in this buffer; the rows they cover are kept for the next frame.
+static void terminal_overlay(unsigned int address_to whole, int slot)
+{
+        struct ui kit = terminal_kit(terminal_grid(whole));
+        struct ui_select address_to s = terminal_sel();
+
+        s->over_top = s->over_bottom = 0;
+        ui_select_overlay(&kit, s);
+        terminal.overlay_top[slot] = s->over_top, terminal.overlay_bottom[slot] = s->over_bottom;
+}
+
 static b32 terminal_selecting(void)
 {
         return terminal.sel_anchor != terminal.sel_active;
@@ -2503,7 +2589,7 @@ static void terminal_select_set(p64 anchor, p64 active)
 static void terminal_select_clear(void)
 {
         terminal_select_set(0, 0);
-        terminal.select_touch = false;
+        terminal.sel.handles = terminal.sel.bar = false;
 }
 
 static struct ui terminal_sel_kit(void)
@@ -2597,10 +2683,10 @@ static void terminal_op_copy(void address_to self, unsigned int which)
 static struct ui_select address_to terminal_sel(void);
 
 static const struct ui_select_ops terminal_select_ops = {
-        .box = terminal_op_box,       .place = terminal_op_place,   .span = terminal_op_span,   .where = 0,
+        .box = terminal_op_box,       .place = terminal_op_place,   .span = terminal_op_span,   .where = terminal_op_where,
         .get = terminal_op_get,       .set = terminal_op_set,       .extend = terminal_op_set,  .any = terminal_op_any,
-        .shown = terminal_op_any,     .within = terminal_op_within, .inside = terminal_op_inside, .scroll = terminal_op_scroll,
-        .moved = terminal_op_moved,   .copy = terminal_op_copy,     .items = 0,               .item = 0,
+        .shown = terminal_op_shown,   .within = terminal_op_within, .inside = terminal_op_inside, .scroll = terminal_op_scroll,
+        .moved = terminal_op_moved,   .copy = terminal_op_copy,     .items = terminal_op_items, .item = terminal_op_item,
 };
 
 static struct ui_select address_to terminal_sel(void)
@@ -2670,7 +2756,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                 }
                 s->dragging = true;
                 s->edge.past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
-                terminal.select_touch = false;
+                terminal.sel.handles = terminal.sel.bar = false;
                 address_to dirty = true;
                 return true;
         }
@@ -2734,71 +2820,53 @@ static b32 terminal_clip_event(b32 master, const struct window_event address_to 
 }
 
 /*
-        A long press on a terminal no program asked the pointer of: a finger held still (WINDOW_KEY_HOLD on the right button)
-        selects the word under it, and the moves after it extend the selection by cells (terminal_select_event); its lift,
-        the left release that ends the press (CANCEL and HOLD), copies it as a mouse's release does. The left press's cancel
-        that came with the hold is no lift, and a grab of the bar that finger landed on goes on through it. Answers whether
-        the event was the long press's, and so is taken here; a program that asked for the pointer has the right button.
+        A finger on a terminal no program asked the pointer of: the controller's (ui_select_finger) for its tap, its long press (the
+        word under the finger, held until the lift), its handles and its bar; the finger's scroll is terminal_finger's, which goes on
+        after it. A right button's long press is the selection's, not a menu, and a press on the scrollbar is the bar's. Answers
+        whether the event was the selection's and is taken here.
 */
-static b32 terminal_hold(const struct window_event address_to event, b32 address_to dirty)
+static b32 terminal_touch_select(const struct window_event address_to event, b32 address_to dirty)
 {
         struct ui kit = terminal_sel_kit();
         struct ui_select address_to s = terminal_sel();
-        unsigned int row, column, line, at;
-        b32 moved = false;
+        p32 asks;
 
-        if (event->type != WINDOW_EVENT_BUTTON || !ui_kit_touch)
+        if (!ui_kit_touch || mouse_mode)
                 return false;
-        if (event->a == UI_POINTER_LEFT && (event->flags & WINDOW_KEY_DOWN))
+        if (event->type == WINDOW_EVENT_MOTION)
         {
-                terminal.touch_held = false;
+                if (s->finger)
+                {
+                        asks = ui_select_finger(&kit, s, event, terminal_at_x(), terminal_at_y());
+                        terminal.sel.quiet_at = (positive)ui_kit.now + UI_SELECT_BAR_AFTER_NS;
+                        if (asks & UI_TEXT_MOVED)
+                                address_to dirty = true;
+                }
                 return false;
         }
-        if (event->a == UI_POINTER_LEFT && (event->flags & WINDOW_KEY_HOLD) && !(event->flags & WINDOW_KEY_DOWN))
+        if (event->type != WINDOW_EVENT_BUTTON)
+                return false;
+        if (event->a == UI_POINTER_LEFT)
         {
-                // The hold's cancel comes before its right button, and it is no lift: the lift comes after the right button.
-                if (!terminal.touch_held)
-                        return terminal.bar.held;
-                terminal.touch_held = false;
-                if (terminal.bar.held)
-                {
-                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false, &moved);
-                        address_to dirty = address_to dirty || moved;
-                }
-                if (terminal.touch_select)
-                {
-                        terminal.touch_select = s->dragging = false;
-                        if (terminal_selecting())
-                                terminal_copy(WINDOWS_CLIP_PRIMARY);
+                // A press on the scrollbar is the bar's, and a press that is not held is the scroll's as well as the selection's.
+                if ((event->flags & WINDOW_KEY_DOWN) && (terminal.bar.held || terminal_bar_takes()))
+                        return false;
+                if (!(event->flags & WINDOW_KEY_DOWN) && !s->finger && !(event->flags & WINDOW_KEY_HOLD))
+                        return false;
+                asks = ui_select_finger(&kit, s, event, terminal_at_x(), terminal_at_y());
+                if (asks & UI_TEXT_MOVED)
                         address_to dirty = true;
-                }
+                return (event->flags & WINDOW_KEY_HOLD) != 0 && !(event->flags & WINDOW_KEY_DOWN);
+        }
+        if (event->a == UI_POINTER_RIGHT && (event->flags & WINDOW_KEY_HOLD))
+        {
+                // A long press: the word under the finger, selected and held until the lift (the controller's).
+                asks = ui_select_finger(&kit, s, event, terminal_at_x(), terminal_at_y());
+                if (asks & UI_TEXT_MOVED)
+                        address_to dirty = true;
                 return true;
         }
-        if (event->a != UI_POINTER_RIGHT || !(event->flags & WINDOW_KEY_HOLD))
-                return false;
-        if (!(event->flags & WINDOW_KEY_DOWN))
-                return !mouse_mode;
-
-        // The right button's press: a program that asked for the pointer has it as a right button, and a bar's grab or its
-        // track is the bar's. Anywhere else the word under the finger is selected, and the drag after it extends it by words.
-        terminal.touch_held = true;
-        if (mouse_mode)
-                return false;
-        if (terminal.bar.held || terminal_bar_takes())
-                return true;
-        if (terminal_at_x() < 0 || terminal_at_y() < 0)
-                return true;
-        row = (unsigned int)terminal_at_y() / terminal.cell_h;
-        column = (unsigned int)terminal_at_x() / terminal.cell_w;
-        if (row >= ROWS || column >= COLUMNS)
-                return true;
-        terminal_place_at(row, column, &line, &at);
-        ui_select_pick(&kit, s, terminal_place(line, at), 2, false);
-        terminal.select_box = false;
-        terminal.touch_select = true;
-        terminal.select_touch = true;
-        address_to dirty = true;
-        return true;
+        return false;
 }
 
 /*
@@ -2812,7 +2880,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
         // A finger drags the view where the mouse would select; a program that asked for the pointer has it as a mouse. The
         // pointer is the kit's (ui_event_context records a motion's place before this runs).
-        if (event->type == WINDOW_EVENT_BUTTON && terminal_hold(event, dirty))
+        if (terminal_touch_select(event, dirty))
                 return true;
         if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
         {
@@ -3434,6 +3502,17 @@ static long terminal_tick(long timeout, long address_to other)
                         timeout = timeout < 0 || timeout > UI_DRAG_FRAME_NS ? UI_DRAG_FRAME_NS : timeout;
         }
 
+        // The actions bar comes back when the view has been still for a while (ui_select_bar_tick).
+        {
+                positive bar_due = ui_select_bar_tick(terminal_sel(), &terminal.dirty), bar_now = (positive)ui_kit.now;
+
+                if (bar_due)
+                {
+                        long left = bar_due > bar_now ? (long)(bar_due - bar_now) : 0;
+
+                        timeout = timeout < 0 || left < timeout ? left : timeout;
+                }
+        }
         // A selection drag held past the grid scrolls the scrollback a step at a time (terminal_select_autoscroll).
         {
                 positive scroll_due = terminal_select_autoscroll((positive)ui_kit.now, &terminal.dirty), scroll_now;
