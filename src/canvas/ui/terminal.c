@@ -2828,7 +2828,13 @@ static void terminal_overlay_spoil(struct window_cell address_to drawn, int slot
 // The handles and the bar, drawn over the grid's cells and the scrollbar in this buffer; the rows they cover are kept for the next frame.
 static void terminal_overlay(unsigned int address_to whole, int slot)
 {
-        struct ui kit = terminal_kit(terminal_grid(whole));
+        struct ui kit;
+
+        // The kit's text (the bar's labels) is drawn through a scratch picture, which only ui_scratch_fit makes: a kit with none
+        // draws no text at all, so the labels were blank. The scratch is the terminal kit's own, so every copy of it has it.
+        terminal.ui.scale = terminal_scale();
+        ui_scratch_fit(&terminal.ui, terminal.width);
+        kit = terminal_kit(terminal_grid(whole));
         struct ui_select address_to s = terminal_sel();
 
         // The kit's origin is the grid's, pad right and pad_y down from the window's corner, so the picture it may write is the

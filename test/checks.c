@@ -123558,6 +123558,38 @@ static fn check_pointer(void)
                         }
                         check("touch: the actions bar is drawn over the selection, its labels in the terminal's faces",
                               terminal_sel()->bar_up && terminal_selecting());
+                        {
+                                // The labels at each scale: the terminal's kit at that scale (its scratch fitted, as a frame does it), the bar
+                                // drawn at full alpha, and its box's pixels counted against the bar's ground.
+                                static const int scales[4] = {100, 150, 200, 300};
+                                int was_scale = terminal.ui.scale;
+
+                                for (int k = 0; k < 4; k++)
+                                {
+                                        struct ui_select address_to bs = terminal_sel();
+                                        int inked = 0;
+                                        unsigned int ground;
+                                        b64 clock = ui_kit.test_clock;
+
+                                        // The frame's own overlay (terminal_overlay, the kit made from the grid's origin), so the path that fits the
+                                        // scratch is the one measured; the bar's box is in the grid's coordinates.
+                                        unsigned int base = terminal.pad_y * terminal.pitch + terminal.pad;
+
+                                        terminal.ui.scale = scales[k];
+                                        bs->bar_up = false;
+                                        ui_kit.test_clock = (b64)bs->quiet_at + 1;
+                                        terminal_overlay(bar_scratch, 0);
+                                        ui_kit.test_clock = (b64)bs->quiet_at + UI_SELECT_BAR_FADE_NS + 1;
+                                        terminal_overlay(bar_scratch, 0);
+                                        ui_kit.test_clock = clock;
+                                        ground = bar_scratch[base + (positive)(bs->bar_y + 2) * terminal.pitch + (positive)(bs->bar_x + 2)];
+                                        for (int yy = bs->bar_y + 1; yy < bs->bar_y + bs->bar_h - 1; yy++)
+                                                for (int xx = bs->bar_x + 1; xx < bs->bar_x + bs->bar_w - 1; xx++)
+                                                        inked += bar_scratch[base + (positive)yy * terminal.pitch + (positive)xx] != ground;
+                                        check("touch: the actions bar's labels are drawn at every scale (pixels in the bar differ from its ground)", bs->bar_up && inked >= 100 * scales[k] / 100);
+                                }
+                                terminal.ui.scale = was_scale;
+                        }
                 }
 
                 terminal_select_clear(), terminal.sel.handles = false;
