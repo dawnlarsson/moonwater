@@ -2051,7 +2051,8 @@ static struct ui_kit
         unsigned int wheel_off;            // 1 when a notch of the wheel moves a row at once (canvas wheel smooth off), 0 the glide
         unsigned int caret_speed;          // UI_CARET_SLOW, _NORMAL, _FAST or _OFF: the caret's blink (canvas caret blink)
         unsigned int caret_thick;          // UI_CARET_THIN, _MID or _THICK: the caret's width (canvas caret thickness)
-        unsigned int rtl;                  // 1 when the language taken reads from the right: every window is laid out mirrored
+        unsigned int rtl;                  // 1 to lay every window out mirrored whatever the language says (a check draws a page both ways)
+        unsigned int read_rtl;             // the way the language read when the controls were last placed
         b64 wheel_clock;                   // a test's clock for the wheel's rate, ns; 0 the monotonic clock
         unsigned int themed;               // the table's theme count as last taken
         b64 now;                           // the frame's time, ns
@@ -2073,14 +2074,16 @@ static fn ui_kit_caret_take(const struct windows address_to table)
         ui_kit.caret_thick = table->caret_thick ? table->caret_thick - 1 : UI_CARET_MID;
 }
 
+// The window reads from the right when the language taken says so, read from the language itself (so the apps' language listeners, which run
+// as it is taken, lay out the new way) or when the kit is told to (ui_kit.rtl: a check's, to draw the same page both ways).
 static inline b32 ui_rtl(void)
 {
-        return ui_kit.rtl;
+        return ui_kit.rtl || language_rtl();
 }
 
 static inline int ui_dir(void)
 {
-        return ui_kit.rtl ? -1 : 1;
+        return ui_rtl() ? -1 : 1;
 }
 
 // A horizontal arrow key, as the way it goes along what is read: +1 toward the end (Right, or Left reading from the right), -1 toward the start.
@@ -2093,25 +2096,25 @@ static inline int ui_arrow(int key)
 // A box w wide at x (as laid out left to right) inside the container [left, left + width), mirrored in it when the window reads from the right.
 static inline int ui_mirror(int x, int w, int left, int width)
 {
-        return ui_kit.rtl ? 2 * left + width - x - w : x;
+        return ui_rtl() ? 2 * left + width - x - w : x;
 }
 
 // A device pixel x of the container [left, left + width) where it is across the container from the other end, when the window reads from the right.
 static inline int ui_point(int x, int left, int width)
 {
-        return ui_kit.rtl ? 2 * left + width - 1 - x : x;
+        return ui_rtl() ? 2 * left + width - 1 - x : x;
 }
 
 // A box w wide that is `in` from the start edge of the container [left, left + width): the left one reading from the left, the right one from the right.
 static inline int ui_start_x(int left, int width, int in, int w)
 {
-        return ui_kit.rtl ? left + width - in - w : left + in;
+        return ui_rtl() ? left + width - in - w : left + in;
 }
 
 // And `in` from its end edge.
 static inline int ui_end_x(int left, int width, int in, int w)
 {
-        return ui_kit.rtl ? left + in : left + width - in - w;
+        return ui_rtl() ? left + in : left + width - in - w;
 }
 
 static fn ui_kit_settle(void);
@@ -2120,9 +2123,10 @@ static fn ui_kit_settle(void);
 static fn ui_kit_language_take(const struct windows address_to table)
 {
         language_take(table->language);
-        if (ui_kit.rtl != (unsigned int)language_rtl())
+        // A language that reads the other way places every control again, as if it had just appeared.
+        if (ui_kit.read_rtl != (unsigned int)language_rtl())
         {
-                ui_kit.rtl = language_rtl();
+                ui_kit.read_rtl = (unsigned int)language_rtl();
                 ui_kit_settle();
         }
 }
@@ -2285,7 +2289,7 @@ struct ui_box
 // A box (device 256ths) turned over the vertical middle of a container whose left and right edges (256ths) add to sum, when the window reads from the right.
 static inline void ui_flip(struct ui_box address_to box, b32 sum)
 {
-        if (ui_kit.rtl)
+        if (ui_rtl())
         {
                 b32 x0 = sum - box->x1;
 
@@ -7493,10 +7497,10 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                 for (positive at = 0; at < length; at++)
                         hash = (hash ^ (unsigned char)text[at]) * 16777619u;
                 hash = (((hash ^ (unsigned int)type) * 16777619u ^ (unsigned int)room) * 16777619u ^ (unsigned int)ui->scale) * 16777619u;
-                hash = (hash ^ (unsigned int)ui_kit.rtl) * 16777619u;
+                hash = (hash ^ (unsigned int)ui_rtl()) * 16777619u;
                 memo = &ui_cuts[(hash ^ hash >> 15) & (UI_CUTS - 1)];
                 if (memo->kind && memo->length == length && memo->type == type && memo->room == room && memo->scale == ui->scale &&
-                    memo->rtl == ui_kit.rtl && memo->capacity == capacity && !memory_compare(memo->text, text, length))
+                    memo->rtl == (unsigned char)ui_rtl() && memo->capacity == capacity && !memory_compare(memo->text, text, length))
                         kind = memo->kind, cut = memo->cut;
         }
         if (!kind)
@@ -7507,7 +7511,7 @@ static string_address ui_fit(struct ui address_to ui, string_address text, int t
                 if (memo)
                 {
                         memory_copy(memo->text, text, length);
-                        memo->length = length, memo->type = type, memo->room = room, memo->scale = ui->scale, memo->rtl = (unsigned char)ui_kit.rtl;
+                        memo->length = length, memo->type = type, memo->room = room, memo->scale = ui->scale, memo->rtl = (unsigned char)ui_rtl();
                         memo->capacity = capacity, memo->cut = cut, memo->kind = kind;
                 }
         }

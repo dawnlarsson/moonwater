@@ -1102,6 +1102,8 @@ static fn launcher_anchor_take(void)
 static fn launcher_language(void)
 {
         launcher.search.kind = 0;
+        if (launcher.width > 0 && launcher.height > 0)
+                launcher_layout();
 }
 
 static int launcher_open(void)

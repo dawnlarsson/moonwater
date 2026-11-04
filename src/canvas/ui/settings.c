@@ -4865,6 +4865,9 @@ static fn settings_size(unsigned int width, unsigned int height)
 static fn settings_language(void)
 {
         settings_say((string_address) "");
+        // A language that reads the other way is a page laid out the other way: the column, the bars and the rows' extent are placed again.
+        if (settings.width > 0 && settings.height > 0)
+                settings_layout();
         settings_dirty();
 }
 

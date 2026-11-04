@@ -137195,6 +137195,24 @@ static fn check_rtl_mirror(void)
                         groups &= rtl_view(settings_group_name(group), group, scale);
         check("rtl mirror: the kit's gallery, every control of it, right to left is its picture left to right flipped", gallery);
         check("rtl mirror: every group of the Settings window, its card, a menu and the launcher, right to left is its picture left to right flipped", groups);
+        // A language that reads from the right, taken while the window is open, places it the other way at once: no resize, no other group.
+        {
+                static struct windows language_table;
+                int seam;
+
+                language_directory = "languages/";
+                language_listen(settings_language);
+                rtl_draw(0, 1, false);
+                seam = settings.page.seam;
+                memory_zero(&language_table, sizeof(language_table));
+                language_table.language = 'a' | 'r' << 8;
+                ui_kit_language_take(&language_table);
+                check("rtl mirror: Arabic taken while the Settings window is open puts its column at the right, at once",
+                      language_rtl() && ui_rtl() && seam < settings.width / 2 && settings.page.seam > settings.width / 2 && settings.page.left < settings.page.seam);
+                language_table.language = 0;
+                ui_kit_language_take(&language_table);
+                check("rtl mirror: and English puts it back at the left", !language_rtl() && !ui_rtl() && settings.page.seam < settings.width / 2);
+        }
         ui_kit.rtl = 0;
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
