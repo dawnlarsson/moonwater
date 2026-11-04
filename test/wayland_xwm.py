@@ -30,6 +30,8 @@ WM = "/run/moonwater/xwm/wm-0"
 LOG = os.path.join(work, "compositor.log")
 BLUE = bytes((0xcc, 0x66, 0x33))   # the client's colour, 0x3366cc, in the screen's byte order either way round
 GREEN = bytes((0x22, 0xaa, 0x22))  # the popup's, 0x22aa22
+DIALOG = bytes((0xcc, 0x44, 0x88))  # the dialog's, 0x8844cc
+TOOLTIP = bytes((0xaa, 0xaa, 0x22))  # the tooltip's, 0x22aaaa
 EV_SYN, EV_KEY, EV_REL = 0, 1, 2
 KEY_A, KEY_LEFTALT, KEY_F4, BTN_LEFT = 30, 56, 62, 272
 clock = [1_000_000_000]
@@ -332,6 +334,64 @@ row(ok, "the screen shows the X window's colour over the whole output", f"{count
 command(xclient, "unfullscreen")
 ok, (count, box) = wait_colour(BLUE, lambda c, b: size_is(b, 400, 250) and c >= 0.8 * 400 * 250, 8.0)
 row(ok, "leaving fullscreen gives the window its size back", f"{count} pixels, box {box}")
+
+# What Steam's windows (CEF) need. A dialog that is transient for the window is a window of the compositor and stays over its parent,
+# a window of a popup's type is a popup where it asks and takes no keys, and a window of 32 bits is blended with what is behind it.
+def pointer_to(x, y):
+    move(-3000, -3000)
+    time.sleep(0.2)
+    while x > 0 or y > 0:
+        dx, dy = min(x, 10), min(y, 10)
+        move(dx, dy)
+        x, y = x - dx, y - dy
+
+
+def pixel(x, y):
+    raw = screen()
+    if len(raw) < WIDTH * HEIGHT * 4:
+        return None
+    at = (y * WIDTH + x) * 4
+    return raw[at + 2], raw[at + 1], raw[at]  # red, green, blue of the screen's blue-green-red pixel
+
+
+command(xclient, "dialog")
+ok, (count, box) = wait_colour(DIALOG, lambda c, b: c >= 0.9 * 100 * 80 and size_is(b, 100, 80, 4))
+row(ok, "a dialog transient for the window is a window of the compositor", f"{count} pixels, box {box}")
+dialog_table = b""
+try:
+    with open("/run/moonwater/windows", "rb") as f:
+        dialog_table = f.read()
+except OSError:
+    pass
+row(b"moonwater xwm dialog\0" in dialog_table, "the dialog's title is in the compositor's window table")
+ok, (parent_count, parent_box) = wait_colour(BLUE, lambda c, b: size_is(b, 400, 250))
+if parent_box:
+    pointer_to(parent_box[2] - 20, parent_box[3] - 20)
+    send(record(EV_KEY, BTN_LEFT, 1))
+    time.sleep(0.05)
+    send(record(EV_KEY, BTN_LEFT, 0))
+    time.sleep(1.0)
+ok, (count, box) = wait_colour(DIALOG, lambda c, b: c >= 0.9 * 100 * 80 and size_is(b, 100, 80, 4), 3.0)
+row(ok and parent_box is not None, "the dialog is still over its parent after the parent is clicked", f"{count} pixels, box {box}, parent {parent_box}")
+
+keys_before = read(client_log).count("key 61")
+command(xclient, "tooltip")
+ok, (count, box) = wait_colour(TOOLTIP, lambda c, b: c >= 0.9 * 100 * 60 and size_is(b, 100, 60, 4))
+row(ok and box and abs(box[0] - 200) <= 3 and abs(box[1] - 120) <= 3, "a window of the tooltip type is a popup at the place it asks",
+    f"{count} pixels, box {box}")
+key(KEY_A)
+time.sleep(0.5)
+row(read(client_log).count("key 61") == keys_before + 1, "the popup takes no keys: the window that had them still has them",
+    f"key 61 count {read(client_log).count('key 61')} before {keys_before}")
+
+behind = pixel(550, 150)
+command(xclient, "argb")
+time.sleep(1.5)
+got = pixel(550, 150)
+# The compositor blends no window over the scene but a glass one: a window of 32 bits is shown with its premultiplied colour over black
+# (half of 0xff red is 0x80 red), not over what is behind it, and its colour is whole.
+row(got is not None and abs(got[0] - 0x80) <= 3 and got[1] <= 3 and got[2] <= 3 and behind != got,
+    "a window of 32 bits with an alpha is shown, its premultiplied colour whole (it is not blended over the scene)", f"behind {behind} got {got}")
 
 # Close: Alt-F4 is the compositor's, and it reaches the client as WM_DELETE_WINDOW.
 key(KEY_F4, hold=(KEY_LEFTALT,))

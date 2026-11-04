@@ -46,7 +46,7 @@
 #define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)     // what the server has sent and no message is whole yet: one whole message and more
 #define COMPOSITOR_XWM_OUT 16384                     // what is queued for the server; a queue that would overflow closes the connection
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
-#define COMPOSITOR_XWM_ATOMS 11
+#define COMPOSITOR_XWM_ATOMS 18
 #define COMPOSITOR_XWM_A_PROTOCOLS 0
 #define COMPOSITOR_XWM_A_DELETE 1
 #define COMPOSITOR_XWM_A_NET_STATE 2
@@ -58,6 +58,11 @@
 #define COMPOSITOR_XWM_A_NET_NAME 8
 #define COMPOSITOR_XWM_A_UTF8 9
 #define COMPOSITOR_XWM_A_TAKE_FOCUS 10
+#define COMPOSITOR_XWM_A_TYPE 11              // _NET_WM_WINDOW_TYPE, then the types that are popups: tooltip, drop-down menu, popup menu,
+#define COMPOSITOR_XWM_A_TYPE_FIRST 12        // combo, notification, drag and drop
+#define COMPOSITOR_XWM_A_TYPE_LAST 17
+#define COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR 68
+#define COMPOSITOR_XWM_XA_WINDOW 33
 #define COMPOSITOR_XWM_XA_WM_NAME 39          // predefined atoms: WM_NAME, and the types STRING and ATOM
 #define COMPOSITOR_XWM_XA_STRING 31
 #define COMPOSITOR_XWM_TITLE 128              // a title's bytes, its NUL included (the shim takes fewer)
@@ -65,6 +70,8 @@
 #define COMPOSITOR_XWM_PROP_NET_NAME 1
 #define COMPOSITOR_XWM_PROP_NAME 2
 #define COMPOSITOR_XWM_PROP_PROTOCOLS 3
+#define COMPOSITOR_XWM_PROP_TRANSIENT 4
+#define COMPOSITOR_XWM_PROP_TYPE 5
 #define COMPOSITOR_XWM_PROTO_DELETE 1u
 #define COMPOSITOR_XWM_PROTO_FOCUS 2u
 #define COMPOSITOR_XWM_NO_PLACE (-100000)
@@ -88,6 +95,10 @@
 #define COMPOSITOR_XWM_ADOPTED 64u            // the shim has the window's surface and has been told what the window is
 #define COMPOSITOR_XWM_PROTO_KNOWN 128u       // WM_PROTOCOLS has been read
 #define COMPOSITOR_XWM_TITLE_AGAIN 256u       // the title changed while its requests were in flight
+#define COMPOSITOR_XWM_POPUPTYPE 512u         // its _NET_WM_WINDOW_TYPE is a popup's: it is shown as an override-redirect window is
+#define COMPOSITOR_XWM_PROPS_READ 1024u       // the properties asked for at the map (the last is the type) have come
+#define COMPOSITOR_XWM_RAISED 2048u           // a transient window has been raised over its parent once
+#define COMPOSITOR_XWM_POPUPISH (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE)
 #define COMPOSITOR_XWM_EAGAIN (-11)
 #define COMPOSITOR_XWM_MSG_DONTWAIT 0x40
 #define COMPOSITOR_XWM_MSG_NOSIGNAL 0x4000
@@ -100,6 +111,7 @@ struct compositor_xwm_window
         unsigned long long serial;     // the X11 serial its WL_SURFACE_SERIAL gave, when COMPOSITOR_XWM_SERIAL is set
         int row;                       // the shim's row for the window, -1 until the shim has one
         unsigned int protocols;        // COMPOSITOR_XWM_PROTO_* from WM_PROTOCOLS
+        unsigned int transient;        // the window it is transient for (WM_TRANSIENT_FOR), 0 for none
         int x, y;                      // the X window's place and size, as the server last said (CreateNotify, ConfigureNotify)
         unsigned int width, height;
         int sent_x, sent_y;            // what the compositor last asked of its place and size
@@ -279,7 +291,10 @@ static void compositor_xwm_intern(unsigned int at)
         static const char *const names[COMPOSITOR_XWM_ATOMS] = {"WM_PROTOCOLS", "WM_DELETE_WINDOW", "_NET_WM_STATE",
                                                                 "_NET_WM_STATE_FULLSCREEN", "WL_SURFACE_SERIAL",
                                                                 "_XWAYLAND_ALLOW_COMMITS", "WM_S0", "WM_STATE", "_NET_WM_NAME",
-                                                                "UTF8_STRING", "WM_TAKE_FOCUS"};
+                                                                "UTF8_STRING", "WM_TAKE_FOCUS", "_NET_WM_WINDOW_TYPE",
+                                                                "_NET_WM_WINDOW_TYPE_TOOLTIP", "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
+                                                                "_NET_WM_WINDOW_TYPE_POPUP_MENU", "_NET_WM_WINDOW_TYPE_COMBO",
+                                                                "_NET_WM_WINDOW_TYPE_NOTIFICATION", "_NET_WM_WINDOW_TYPE_DND"};
         unsigned char req[64];
         unsigned long length = 0;
         long n;
@@ -463,6 +478,17 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                         compositor_xwm_ask_title(w);
                 }
         }
+        else if (p->what == COMPOSITOR_XWM_PROP_TRANSIENT)
+                w->transient = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != w->id ? xwm_get32(r.value) : 0;
+        else if (p->what == COMPOSITOR_XWM_PROP_TYPE)
+        {
+                // A window of a popup's type (a tooltip, a menu, a combo's list, a notification, a drag) is shown as a popup.
+                for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
+                        for (unsigned int type = COMPOSITOR_XWM_A_TYPE_FIRST; type <= COMPOSITOR_XWM_A_TYPE_LAST; type++)
+                                if (x->atoms[type] && xwm_get32(r.value + at) == x->atoms[type])
+                                        w->state |= COMPOSITOR_XWM_POPUPTYPE;
+                w->state |= COMPOSITOR_XWM_PROPS_READ;
+        }
         else if (p->what == COMPOSITOR_XWM_PROP_PROTOCOLS && r.format == XWM_FORMAT_32)
         {
                 w->protocols = 0;
@@ -507,6 +533,7 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
         free->serial = 0;
         free->row = -1;
         free->protocols = 0;
+        free->transient = 0;
         free->x = free->y = 0;
         free->width = free->height = 0;
         free->sent_x = free->sent_y = COMPOSITOR_XWM_NO_PLACE;
@@ -537,9 +564,12 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
 
         if (!(w->state & COMPOSITOR_XWM_SERIAL))
                 return;
+        // What kind of window it is waits for what the client says of it at the map (the shim waits for the word a moment).
+        if (!(w->state & COMPOSITOR_XWM_OVERRIDE) && !(w->state & COMPOSITOR_XWM_PROPS_READ))
+                return;
         if (!(w->state & COMPOSITOR_XWM_ADOPTED) || w->dirty)
         {
-                row = wayland_xwindow_adopt(w->serial, !!(w->state & COMPOSITOR_XWM_OVERRIDE), w->x, w->y, w->title);
+                row = wayland_xwindow_adopt(w->serial, !!(w->state & COMPOSITOR_XWM_POPUPISH), w->x, w->y, w->title);
                 if (row == -2)
                         return;
                 w->state |= COMPOSITOR_XWM_ADOPTED;
@@ -668,11 +698,13 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 }
                 compositor_xwm_ask_title(w);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_PROTOCOLS, compositor_xwm.atoms[COMPOSITOR_XWM_A_PROTOCOLS], COMPOSITOR_XWM_ATOM_TYPE);
+                compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_TRANSIENT, COMPOSITOR_XWM_XA_WM_TRANSIENT_FOR, COMPOSITOR_XWM_XA_WINDOW);
+                // The type is asked last: its reply says the others have come.
+                compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_TYPE, compositor_xwm.atoms[COMPOSITOR_XWM_A_TYPE], COMPOSITOR_XWM_ATOM_TYPE);
                 compositor_xwm_window_op(XWM_OP_MAP_WINDOW, e->window);
                 compositor_xwm_allow_commits(e->window);
                 compositor_xwm_wm_state(e->window);
-                if (!(w->state & COMPOSITOR_XWM_OVERRIDE))
-                        compositor_xwm_focus(e->window);
+                // The keys: the X focus follows the window that has them (the pass), and a window the compositor gives none is given none.
                 break;
         case XWM_EV_CONFIGURE_REQUEST:
         {
@@ -684,8 +716,10 @@ static void compositor_xwm_event(const struct xwm_event *e)
                                           XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
                 if (w && (w->state & COMPOSITOR_XWM_FULLSCREEN))
                         c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
-                // The compositor places a window (its place is sent when it changes): the place a client asks is not taken.
-                c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y);
+                // The compositor places a window (its place is sent when it changes): the place a client asks is not taken. A popup's
+                // is where it is.
+                if (!w || !(w->state & COMPOSITOR_XWM_POPUPTYPE))
+                        c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y);
                 c.x = e->x;
                 c.y = e->y;
                 // A size within the output.
@@ -1172,7 +1206,7 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 if ((compositor.state[w->row] & WINDOW_CLOSING) && !(w->state & COMPOSITOR_XWM_DELETE_SENT))
                 {
                         w->state |= COMPOSITOR_XWM_DELETE_SENT;
-                        if (w->state & COMPOSITOR_XWM_OVERRIDE)
+                        if (w->state & COMPOSITOR_XWM_POPUPISH)
                                 compositor_xwm_window_op(XWM_OP_UNMAP_WINDOW, w->id);
                         else
                         {
@@ -1181,8 +1215,21 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                                         compositor_xwm_window_op(XWM_OP_DESTROY_WINDOW, w->id);
                         }
                 }
-                if (!(w->state & COMPOSITOR_XWM_OVERRIDE))
+                if (!(w->state & COMPOSITOR_XWM_POPUPISH))
                         compositor_xwm_sync(w);
+                // A dialog that is transient for a window is over it when it is shown, and takes the keys from it if it has them.
+                if (w->transient && !(w->state & COMPOSITOR_XWM_RAISED))
+                {
+                        struct compositor_xwm_window *parent = compositor_xwm_find(w->transient, 0);
+
+                        if (parent && parent->row >= 0 && parent->row < WINDOWS)
+                        {
+                                w->state |= COMPOSITOR_XWM_RAISED;
+                                compositor_raise(w->row);
+                                if ((int)compositor.focus == parent->row)
+                                        compositor_focus(w->row);
+                        }
+                }
         }
         // The window that has the keys has the X focus (and is told, if it asked to be: WM_TAKE_FOCUS).
         if (x->fd >= 0 && (int)compositor.focus != x->focus_row)
@@ -1192,12 +1239,21 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
                 {
                         struct compositor_xwm_window *w = &x->window[at];
 
-                        if (w->id && w->row >= 0 && w->row == x->focus_row && !(w->state & COMPOSITOR_XWM_OVERRIDE))
+                        if (w->id && w->row >= 0 && w->row == x->focus_row && !(w->state & COMPOSITOR_XWM_POPUPISH))
                         {
                                 compositor_xwm_focus(w->id);
                                 if (w->protocols & COMPOSITOR_XWM_PROTO_FOCUS)
                                         compositor_xwm_protocol(w->id, x->atoms[COMPOSITOR_XWM_A_TAKE_FOCUS]);
                         }
+                }
+                // The window that took the keys has its transient dialogs over it, as it had them.
+                for (unsigned int at = 0; at < COMPOSITOR_XWM_WINDOWS; at++)
+                {
+                        struct compositor_xwm_window *w = &x->window[at], *parent;
+
+                        if (w->id && w->transient && w->row >= 0 && (w->state & COMPOSITOR_XWM_RAISED) &&
+                            (parent = compositor_xwm_find(w->transient, 0)) && parent->row >= 0 && parent->row == x->focus_row)
+                                compositor_raise(w->row);
                 }
         }
         compositor_xwm_flush();

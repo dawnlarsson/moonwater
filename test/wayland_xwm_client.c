@@ -12,9 +12,12 @@
                 button N X Y         a button press, in root coordinates
                 delete               WM_DELETE_WINDOW arrived: the client goes (exit 0)
                 popup 0xID           the override-redirect popup, mapped at 100,100 (commanded by "popup")
+                dialog 0xID          a window transient for the top-level (_NET_WM_WINDOW_TYPE_DIALOG), 100x80 ("dialog")
+                tooltip 0xID         a window of the tooltip type at 200,120, 100x60 ("tooltip")
+                argb 0xID            an override-redirect window of 32 bits at 500,100, 100x100, half red with an alpha ("argb")
                 fullscreen-request   _NET_WM_STATE_FULLSCREEN sent to the root (commanded by "fullscreen")
 
-        Commands: "popup", "fullscreen", "unfullscreen", "resize W H", "quit". The client is started with -w W -h H (the
+        Commands: "popup", "dialog", "tooltip", "argb", "fullscreen", "unfullscreen", "resize W H", "attrs", "quit". The client is started with -w W -h H (the
         window's size) and -t SECONDS (how long it waits for the server before it goes).
 */
 #include <stdio.h>
@@ -31,10 +34,14 @@
 
 #define CLIENT_COLOUR 0x3366ccUL
 #define POPUP_COLOUR 0x22aa22UL
+#define DIALOG_COLOUR 0x8844ccUL
+#define TOOLTIP_COLOUR 0x22aaaaUL
+#define ARGB_PIXEL 0x80800000UL // premultiplied: half of 0xff red, at half alpha
 
 static Display *display;
-static Window top, popup;
-static GC gc;
+static Window top, popup, dialog, tooltip, argb;
+static GC gc, argb_gc;
+static Atom net_wm_window_type, type_dialog, type_tooltip;
 static int width = 800, height = 600;
 static Atom wm_protocols, wm_delete, net_wm_state, net_fullscreen;
 
@@ -96,12 +103,66 @@ static void make_popup(void)
         fflush(stdout);
 }
 
+static void make_dialog(void)
+{
+        if (dialog)
+                return;
+        dialog = XCreateSimpleWindow(display, DefaultRootWindow(display), 0, 0, 100, 80, 0, 0, 0);
+        XStoreName(display, dialog, "moonwater xwm dialog");
+        XSetTransientForHint(display, dialog, top);
+        XChangeProperty(display, dialog, net_wm_window_type, XA_ATOM, 32, PropModeReplace, (unsigned char *)&type_dialog, 1);
+        XSelectInput(display, dialog, ExposureMask);
+        XMapWindow(display, dialog);
+        XFlush(display);
+        printf("dialog 0x%lx\n", (unsigned long)dialog);
+        fflush(stdout);
+}
+
+static void make_tooltip(void)
+{
+        if (tooltip)
+                return;
+        tooltip = XCreateSimpleWindow(display, DefaultRootWindow(display), 200, 120, 100, 60, 0, 0, 0);
+        XChangeProperty(display, tooltip, net_wm_window_type, XA_ATOM, 32, PropModeReplace, (unsigned char *)&type_tooltip, 1);
+        XSelectInput(display, tooltip, ExposureMask);
+        XMapWindow(display, tooltip);
+        XFlush(display);
+        printf("tooltip 0x%lx\n", (unsigned long)tooltip);
+        fflush(stdout);
+}
+
+static void make_argb(void)
+{
+        XVisualInfo info;
+        XSetWindowAttributes a;
+
+        if (argb || !XMatchVisualInfo(display, DefaultScreen(display), 32, TrueColor, &info))
+                return;
+        memset(&a, 0, sizeof a);
+        a.colormap = XCreateColormap(display, DefaultRootWindow(display), info.visual, AllocNone);
+        a.override_redirect = True;
+        a.event_mask = ExposureMask;
+        argb = XCreateWindow(display, DefaultRootWindow(display), 500, 100, 100, 100, 0, 32, InputOutput, info.visual,
+                             CWColormap | CWBorderPixel | CWBackPixel | CWOverrideRedirect | CWEventMask, &a);
+        argb_gc = XCreateGC(display, argb, 0, NULL);
+        XMapWindow(display, argb);
+        XFlush(display);
+        printf("argb 0x%lx\n", (unsigned long)argb);
+        fflush(stdout);
+}
+
 static void command(const char *line)
 {
         int w, h;
 
         if (strncmp(line, "popup", 5) == 0)
                 make_popup();
+        else if (strncmp(line, "dialog", 6) == 0)
+                make_dialog();
+        else if (strncmp(line, "tooltip", 7) == 0)
+                make_tooltip();
+        else if (strncmp(line, "argb", 4) == 0)
+                make_argb();
         else if (strncmp(line, "fullscreen", 10) == 0)
                 say_fullscreen_request();
         else if (strncmp(line, "unfullscreen", 12) == 0)
@@ -138,6 +199,16 @@ static void event(XEvent *e)
                 }
                 else if (e->xexpose.count == 0 && e->xexpose.window == popup)
                         fill(popup, POPUP_COLOUR, 120, 80);
+                else if (e->xexpose.count == 0 && e->xexpose.window == dialog)
+                        fill(dialog, DIALOG_COLOUR, 100, 80);
+                else if (e->xexpose.count == 0 && e->xexpose.window == tooltip)
+                        fill(tooltip, TOOLTIP_COLOUR, 100, 60);
+                else if (e->xexpose.count == 0 && e->xexpose.window == argb)
+                {
+                        XSetForeground(display, argb_gc, ARGB_PIXEL);
+                        XFillRectangle(display, argb, argb_gc, 0, 0, 100, 100);
+                        XFlush(display);
+                }
                 break;
         case ConfigureNotify:
                 if (e->xconfigure.window == top && (e->xconfigure.width != width || e->xconfigure.height != height))
@@ -204,6 +275,9 @@ int main(int argc, char **argv)
         wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", False);
         net_wm_state = XInternAtom(display, "_NET_WM_STATE", False);
         net_fullscreen = XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", False);
+        net_wm_window_type = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+        type_dialog = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DIALOG", False);
+        type_tooltip = XInternAtom(display, "_NET_WM_WINDOW_TYPE_TOOLTIP", False);
         top = XCreateSimpleWindow(display, DefaultRootWindow(display), 0, 0, (unsigned int)width, (unsigned int)height, 0, 0, 0);
         XStoreName(display, top, "moonwater xwm client");
         XSetWMProtocols(display, top, &wm_delete, 1);
