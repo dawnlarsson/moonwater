@@ -140793,6 +140793,8 @@ static fn check_kit_motion(void)
                                 ui_ripple_exit(&ripple, first + 120000000ll);
                         if (!ui_ripple_at(&ripple, first + r->t, &cx, &cy, &radius, &opacity))
                                 cx = cy = radius = opacity = -UI_ONE;
+                        else
+                                radius = ui_qdiv(ui_qmul(radius, ripple.mid), ripple.reach); // the curve at NB's own size; the kit's size covers the clip
                         got = r->kind == KIT_RIPPLE_X ? cx : r->kind == KIT_RIPPLE_Y ? cy : r->kind == KIT_RIPPLE_R ? radius : opacity;
                         break;
                 }
@@ -141649,6 +141651,38 @@ static fn check_kit_place(void)
                 reached = pixels[244 * 600 + 14] != paper && pixels[222 * 600 + 300] != paper;
                 kept = pixels[244 * 600 + 5] == paper && pixels[214 * 600 + 300] == paper;
                 check("kit row: a press ripples across the whole row, edge to edge, and not past it", reached && kept);
+        }
+
+        // A press at an end of a long row covers the row from end to end once the ripple has grown (225 ms at the row's pace of 1.6
+        // is 360 ms), and every pixel of the row is lit, its far corners too, whatever the circle's middle has reached: held 400 ms,
+        // before the middle has travelled the row's half. The row is 10 to 590 by 220 to 268 and the press is 3 px in from its left.
+        {
+                struct ui_control sw;
+                unsigned int paper = 0xff111113u;
+                int unlit = 0, outside = 0, worst_x = -1, worst_y = -1;
+
+                memory_zero(&sw, sizeof(sw));
+                sw.kind = UI_SWITCH, sw.x = 520, sw.y = 220, sw.w = 52, sw.h = 48, sw.label = "";
+                sw.row_x = 10, sw.row_y = 220, sw.row_w = 580, sw.row_h = 48;
+                ui_control_start(&sw);
+                ui_kit.now += 1000000000ll;
+                ui_control_draw(&ui, &sw);
+                ui_list_row_press(&ui, &sw, 13, 244);
+                for (int frame = 0; frame < 24; frame++)
+                {
+                        ui_kit.now += 16666667, ui_kit.busy = 0;
+                        ui_fill(&ui, 0, 210, 600, 70, paper);
+                        ui_control_draw(&ui, &sw);
+                }
+                for (int y = 220; y < 268; y++)
+                        for (int x = 10; x < 590; x++)
+                                if (pixels[y * 600 + x] == paper)
+                                        unlit++, worst_x = x, worst_y = y;
+                for (int x = 0; x < 600; x++)
+                        outside += (x < 10 || x >= 590) && pixels[244 * 600 + x] != paper;
+                string_format(log, "  kit row cover: %p pixels of the row unlit 400 ms into a press at its left end (last at %b, %b), %p outside it lit\n", (positive)unlit,
+                              (bipolar)worst_x, (bipolar)worst_y, (positive)outside);
+                check("kit row: a press at the end of a long row has lit every pixel of the row once the ripple has grown, and none past it", unlit == 0 && outside == 0);
         }
 
         // A switch's hover is its row's state layer, the ink at .06 over the whole row (the box of the row, not the pill):
@@ -142854,6 +142888,98 @@ static fn check_kit_ripple_pace(void)
                     opacity == ui_qmul(UI_ONE, UI_Q2(20));
         gone = !ui_ripple_at(&middle, first + ui_qmul(225 * UI_MS, middle.pace) + ui_qmul(150 * UI_MS, middle.pace) + 5 * UI_MS, &cx, &cy, &radius, &opacity);
         check("kit ripple pace: a ripple let go early is held to its own grown time, fades over its own 150 ms, and is gone", hold_kept && gone);
+}
+
+/*
+        A ripple covers the whole region it is cut to, once grown, wherever the press landed: the circle's edge is never inside the
+        clip while the ripple still shows. The circle starts at the press and travels to the box's middle while it grows (the middle
+        is reached after the growth ends), so a radius that reached only the farthest corner from the middle left the far corner
+        outside the circle when it was full grown, and the circle's edge was seen as a disc. Six boxes (a button inside its margin, a
+        row of 600 and of 1200 and a short one, a column's item, a tiny control) and nine presses on each (the four corners, the
+        middles of the sides, the middle and a quarter point): from the grown time on, to three seconds, every 5 ms, each of the clip's
+        four corners lies inside the circle, whenever the press is let go; and a ripple let go at once fades only as a circle that
+        covers the clip (it is held to its grown time).
+*/
+struct ripple_box
+{
+        b64 across, down;
+};
+
+// How far the circle at cx, cy is from the farthest corner of the clip, Q30 pixels.
+static b64 ripple_farthest(const struct ripple_box address_to box, b64 cx, b64 cy)
+{
+        b64 far = 0;
+
+        for (int corner = 0; corner < 4; corner++)
+        {
+                b64 dx = cx - (corner & 1 ? box->across : 0), dy = cy - (corner & 2 ? box->down : 0), d;
+
+                dx = dx < 0 ? -dx : dx, dy = dy < 0 ? -dy : dy;
+                d = ui_qsqrt(ui_qmul(dx, dx) + ui_qmul(dy, dy));
+                far = d > far ? d : far;
+        }
+        return far;
+}
+
+static fn check_kit_ripple_cover(void)
+{
+        static const struct { int w, h, margin; } boxes[] = {{61, 34, 8}, {600, 40, 0}, {1200, 40, 0}, {160, 40, 8}, {380, 40, 0}, {12, 12, 8}};
+        static const int presses[][2] = {{0, 0}, {1000, 0}, {0, 1000}, {1000, 1000}, {500, 0}, {0, 500}, {1000, 500}, {250, 750}, {500, 500}};
+        static const int goes[] = {0, 50, 200, 1500}; // ms into the ripple when the press is let go
+        const b64 first = 5000000000ll;
+        long samples = 0, uncovered = 0, faded_open = 0, worst_at = 0;
+        b64 worst = 0;
+
+        for (positive b = 0; b < sizeof(boxes) / sizeof(boxes[0]); b++)
+                for (positive p = 0; p < sizeof(presses) / sizeof(presses[0]); p++)
+                {
+                        struct ripple_box box = {ui_q(boxes[b].w + 2 * boxes[b].margin), ui_q(boxes[b].h + 2 * boxes[b].margin)};
+                        b64 x = ui_q(boxes[b].w) * presses[p][0] / 1000, y = ui_q(boxes[b].h) * presses[p][1] / 1000;
+
+                        for (positive go = 0; go < sizeof(goes) / sizeof(goes[0]); go++)
+                        {
+                                struct ui_ripple r;
+                                b64 cx, cy, radius, opacity;
+
+                                ui_ripple_go(&r, x, y, ui_q(boxes[b].w), ui_q(boxes[b].h), ui_q(boxes[b].margin));
+                                ui_ripple_at(&r, first, &cx, &cy, &radius, &opacity);
+                                for (int ms = 5; ms < 3000; ms += 5)
+                                {
+                                        b64 now = first + (b64)ms * UI_MS, far;
+
+                                        if (ms == goes[go] || (!goes[go] && ms == 5))
+                                                ui_ripple_exit(&r, now);
+                                        if (!ui_ripple_at(&r, now, &cx, &cy, &radius, &opacity))
+                                                break;
+                                        if (now - first < ui_ripple_ns(&r, 225))
+                                                continue;
+                                        far = ripple_farthest(&box, cx, cy);
+                                        samples++;
+                                        if (far > radius)
+                                                uncovered++, worst = far - radius > worst ? far - radius : worst, worst_at = ms;
+                                }
+                        }
+                        {
+                                struct ui_ripple r;
+                                b64 cx, cy, radius, opacity;
+
+                                ui_ripple_go(&r, x, y, ui_q(boxes[b].w), ui_q(boxes[b].h), ui_q(boxes[b].margin));
+                                ui_ripple_at(&r, first, &cx, &cy, &radius, &opacity);
+                                ui_ripple_exit(&r, first + 10 * UI_MS);
+                                for (int ms = 85; ms < 3000; ms += 5)
+                                {
+                                        if (!ui_ripple_at(&r, first + (b64)ms * UI_MS, &cx, &cy, &radius, &opacity))
+                                                break;
+                                        if (opacity < ui_qmul(UI_ONE, UI_Q2(20)))
+                                                faded_open += ripple_farthest(&box, cx, cy) > radius;
+                                }
+                        }
+                }
+        string_format(log, "  kit ripple cover: %p samples from the grown time on, %p with a corner outside the circle (worst %b px at %b ms), %p fading with a corner outside\n",
+                      (positive)samples, (positive)uncovered, (bipolar)(worst >> 30), (bipolar)worst_at, (positive)faded_open);
+        check("kit ripple cover: once grown, the circle holds every corner of the clip it is cut to, for a press anywhere in six boxes, to the end of the ripple",
+              samples > 5000 && uncovered == 0);
+        check("kit ripple cover: a ripple let go is held to its grown time, so it fades only as a circle that covers the clip (no disc fades)", faded_open == 0);
 }
 
 /* ---- the scroll matrix: a trackpad's and a finger's streams, at every report rate and delivery ---- */
@@ -152093,6 +152219,7 @@ b32 main()
         check_kit_scroll_ends();
         check_kit_scroll_robust();
         check_kit_ripple_pace();
+        check_kit_ripple_cover();
         check_kit_event_context();
         check_kit_finger_pull();
         check_kit_confirm_repeat();

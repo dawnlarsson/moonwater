@@ -1791,13 +1791,24 @@ static b64 ui_keyframes_at(const struct ui_stop address_to stops, int count, con
 /*
         NB()'s ripple, for a press at x, y (Q30 logical pixels) in a box of w by
         h whose clip reaches margin past it on every side (8 for a button). Its
-        size reaches the clip's farthest corner from the box's middle. The clock
-        starts at the first frame; exit is when the pointer went up or away.
+        curve is ui.js's. Its size is the clip's farthest corner from the press
+        (and a little over): the circle starts at the press and moves to the
+        box's middle as it grows, and a circle that reached only the farthest
+        corner from the middle had its edge inside the clip when it was full
+        grown (the middle was not reached yet), so a ripple that began at an end
+        of a wide row ended as a disc. The distance to the farthest corner is
+        the largest over every place the circle's middle passes (it is a convex
+        function of the place, and the middle minimises it), so a circle that
+        reaches that far from the press covers the clip once grown, whatever
+        the middle has reached. The clock starts at the first frame; exit is
+        when the pointer went up or away.
 */
+#define UI_RIPPLE_OVER 2 // logical pixels past the corner: its pixel is wholly inside the circle, not on its edge
 struct ui_ripple
 {
         b64 x, y, w, h, margin;   // the press and the box, Q30 logical pixels
-        b64 reach;                // the radius at full size
+        b64 reach;                // the radius at full size: the circle covers the whole clip, from the press and from every place on its way to the middle
+        b64 mid;                  // the radius ui.js's ripple grows to, from the clip's middle to its farthest corner: what the pace is made of
         b64 pace;                 // how much longer than ui.js's times it takes (Q30; 0 is 1): by its reach, so a wide row's is seen
         b64 start, exit, hold;    // ns: the first frame, the exit (0 before it), what the exit waits
         b32 live;
@@ -1808,13 +1819,22 @@ static fn ui_ripple_go(struct ui_ripple address_to r, b64 x, b64 y, b64 w, b64 h
 {
         b64 f = margin + w / 2, v = margin + h / 2, across = w + 2 * margin, down = h + 2 * margin;
         b64 rx = f > across - f ? f : across - f, ry = v > down - v ? v : down - v;
+        b64 px = x + margin, py = y + margin; // the press in the clip, held inside it
 
+        px = px < 0 ? 0 : px > across ? across : px;
+        py = py < 0 ? 0 : py > down ? down : py;
         r->x = x, r->y = y, r->w = w, r->h = h, r->margin = margin;
-        r->reach = ui_qsqrt(ui_qmul(rx, rx) + ui_qmul(ry, ry));
-        // Slower than ui.js's by a touch on a small control and by more on a wide row, where the same 225 ms flew past: 1.2 at a
-        // reach of 80 px or less, rising to 1.6 at 300 px and over.
+        r->mid = ui_qsqrt(ui_qmul(rx, rx) + ui_qmul(ry, ry));
         {
-                b64 over = r->reach - ui_q(80), span = ui_q(220);
+                b64 fx = px > across - px ? px : across - px, fy = py > down - py ? py : down - py;
+
+                r->reach = ui_qsqrt(ui_qmul(fx, fx) + ui_qmul(fy, fy)) + ui_q(UI_RIPPLE_OVER);
+        }
+        // Slower than ui.js's by a touch on a small control and by more on a wide row, where the same 225 ms flew past: 1.2 at a
+        // reach of 80 px or less, rising to 1.6 at 300 px and over. The reach is the control's (from its middle), not the press's:
+        // a press at an end of a row grows to cover it in the row's own time.
+        {
+                b64 over = r->mid - ui_q(80), span = ui_q(220);
 
                 over = over < 0 ? 0 : over > span ? span : over;
                 r->pace = UI_Q2(120) + ui_qmul(UI_Q2(40), ui_qdiv(over, span));
