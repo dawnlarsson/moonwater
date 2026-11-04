@@ -133478,14 +133478,14 @@ static b32 launcher_typed(unsigned int code)
 {
         struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, (int)code};
 
-        return launcher_key(&event);
+        return launcher_event(&event); // as the loop sends it: the layout of the list first
 }
 
 static b32 launcher_pressed(int key, unsigned int flags)
 {
         struct window_event event = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | flags, key, 0};
 
-        return launcher_key(&event);
+        return launcher_event(&event);
 }
 
 /*
@@ -133739,9 +133739,14 @@ static fn check_launcher(void)
         check("launcher: Down moves to the next row", launcher.list.focus == 1);
         launcher_pressed(UI_KEY_UP, 0);
         launcher_pressed(UI_KEY_UP, 0);
-        check("launcher: Up from the first row goes round to the last", launcher.list.focus == (int)launcher.entries - 1);
+        check("launcher: Up from the first row stays on it: the kit's list keys are held at the ends, they do not go round", launcher.list.focus == 0);
         launcher_pressed(UI_KEY_N, WINDOW_KEY_CONTROL);
-        check("launcher: Control-N is Down", launcher.list.focus == 0);
+        check("launcher: Control-N is Down", launcher.list.focus == 1);
+        for (int at = 0; at < 2 * LAUNCHER_ROWS; at++)
+                launcher_pressed(UI_KEY_DOWN, 0);
+        check("launcher: Down on the last row stays on it", launcher.list.focus == (int)launcher.entries - 1);
+        launcher_pressed(UI_KEY_UP, 0);
+        check("launcher: Up from the last row is the row above it", launcher.list.focus == (int)launcher.entries - 2);
         launcher_pressed(UI_KEY_DOWN, 0);
         launcher_typed('x');
         check("launcher: a key typed starts the list again from its top", launcher.list.focus == 0 && string_equals((string_address)launcher.text, (string_address) "lsx"));

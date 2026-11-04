@@ -700,15 +700,6 @@ static fn launcher_changed(void)
         launcher.dirty = true;
 }
 
-static fn launcher_move(int way)
-{
-        int count = (int)launcher.entries;
-
-        if (count)
-                launcher.list.focus = (launcher.list.focus + way + count) % count;
-        launcher.dirty = true;
-}
-
 // The field, made the first time it is wanted: one line of the engine, its clipboard this window's, the list's room.
 static struct ui_text address_to launcher_field(void)
 {
@@ -769,7 +760,13 @@ static b32 launcher_key(const struct window_event address_to event)
                 return launcher_asked(asks);
         if (event->a == UI_KEY_UP || event->a == UI_KEY_DOWN ||
             ((event->flags & WINDOW_KEY_CONTROL) && (event->a == UI_KEY_P || event->a == UI_KEY_N)))
-                launcher_move(event->a == UI_KEY_UP || event->a == UI_KEY_P ? -1 : 1);
+        {
+                // Control-P and Control-N are Up and Down: the list's own keys (ui_list_key, a row each way, held at the ends).
+                int key = event->a == UI_KEY_P ? UI_KEY_UP : event->a == UI_KEY_N ? UI_KEY_DOWN : event->a;
+                b32 moved;
+
+                ui_list_key(&launcher.ui, &launcher.list, key, &moved);
+        }
         else if (event->a == UI_KEY_TAB && launcher.entries)
         {
                 // The highlighted name into the field, where it is a name.
