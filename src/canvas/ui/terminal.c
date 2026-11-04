@@ -1849,6 +1849,10 @@ static b32 terminal_fonts(string_address address_to paths, unsigned int count, s
                         terminal.bold[terminal.bold_count++] = terminal.plain[at];
 
         terminal_painters[0].ui.engine = terminal.ui.engine;
+        // The kit's own text (the actions bar's labels, the menu) is drawn in the faces the grid is: a kit with no regular face faults
+        // in the first label it draws.
+        terminal.ui.regular = terminal.plain[0];
+        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];
         terminal.size = size << 6;
         terminal.grid = font_metrics_at(terminal.plain[0], terminal.size);
         terminal.cell_w = (unsigned int)terminal.grid.cell_width;

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Mutation proofs for the mixer's pieces of the kit (src/canvas/ui/ui.c: the level meter, the vertical slider, the strips) and the mixer program
-(src/canvas/ui/mixer.c).
+(src/canvas/ui/mixer.c), and the terminal's kit faces (src/canvas/ui/terminal.c).
 
 Each mutation is one edit to a copy of one of those files, built into CHECK_terminal with gcc and run from the tree's root; the check must turn red.
 A mutation that survives is a hole in the check. The mutant's tree is the real one with the one file changed (symbolic links for every other),
@@ -21,6 +21,7 @@ U = "src/canvas/ui/ui.c"
 X = "src/canvas/ui/mixer.c"
 T = "src/canvas/ui/taskbar.c"
 C = "src/canvas/compositor.c"
+TM = "src/canvas/ui/terminal.c"
 
 M = [
     # ---- the level meter ----
@@ -141,6 +142,8 @@ M = [
     (U, "a text block that never breaks", "if (taken > at && ui_kit_measure(ui, line, type) > width)", "if (0)"),
     (U, "a text block with no limit of lines", "while (text[at] && drawn < lines)", "while (text[at])"),
     (X, "the off message missing", "ui_strips_message(ui, strips, WORDS(mixer_off), false);", "(void)strips;"),
+    # ---- the terminal's kit: its faces are the grid's, so the actions bar's labels measure and draw ----
+    (TM, "terminal kit has no faces (the bar's labels fault)", "        terminal.ui.regular = terminal.plain[0];\n        terminal.ui.bold = terminal.bold_count ? terminal.bold[0] : terminal.plain[0];\n", ""),
 ]
 
 check = os.path.join(root, "test/checks.c")

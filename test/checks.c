@@ -123391,6 +123391,33 @@ static fn check_pointer(void)
                 terminal_deliver(-1, &lift, &dirty);
                 check("touch: the lift ends the press and copies the selection, which stays marked, with its handles and the bar (the text widget's)",
                       terminal.sel.handles && terminal.sel.bar && !terminal.sel.dragging && terminal_selecting() && to_shell_length == 0);
+                /*
+                        The bar's labels are the kit's text, drawn in the faces the terminal's kit holds: terminal.ui's regular and bold, which
+                        terminal_fonts sets when the faces load (as a program's own grid is drawn with terminal.plain). A frame with the bar
+                        shown is drawn: before the faces were set, the label's pen read a null face and the program faulted.
+                */
+                check("touch: the terminal's kit has the faces its own text is drawn with (the bar's labels)",
+                      terminal.ui.regular && terminal.ui.bold);
+                {
+                        static unsigned int bar_scratch[1 << 21];
+                        struct ui kit = terminal_kit(bar_scratch);
+
+                        // The overlay a frame draws (terminal_overlay), into a scratch picture so the frames the rows after it count stay as they were.
+                        // The bar comes back once the view has been still (the clock is stepped to it), fading in: drawn at the start of the
+                        // fade, then when it is in, with its labels at full alpha.
+                        if ((positive)terminal.pitch * terminal.height <= sizeof bar_scratch / sizeof bar_scratch[0])
+                        {
+                                b64 clock = ui_kit.test_clock;
+
+                                ui_kit.test_clock = (b64)terminal.sel.quiet_at + 1;
+                                ui_select_overlay(&kit, terminal_sel());
+                                ui_kit.test_clock = (b64)terminal.sel.quiet_at + UI_SELECT_BAR_FADE_NS + 1;
+                                ui_select_overlay(&kit, terminal_sel());
+                                ui_kit.test_clock = clock;
+                        }
+                        check("touch: the actions bar is drawn over the selection, its labels in the terminal's faces",
+                              terminal_sel()->bar_up && terminal_selecting());
+                }
 
                 terminal_select_clear(), terminal.sel.handles = false;
                 terminal.sel.click.at = 0, terminal.sel.click.count = 0; // a tap a moment after the last is not a double tap
