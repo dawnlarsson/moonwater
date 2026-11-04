@@ -15642,6 +15642,8 @@ this line is eaten by the console
 for wait in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -S /run/moonwater/pulse/native ] && break; sleep 1; done
 sleep 1
 moonwater audio test 2>&1 | tr a-z A-Z
+sleep 9
+moonwater audio test 2>&1 | tr a-z A-Z
 sleep 2
 moonwater audio 2>&1 | tr a-z A-Z
 poweroff
@@ -15705,6 +15707,15 @@ best = max(range(380, 501), key=amplitude)
 print('SOUND-SINE-%s' % ('OK' if 0.66 <= rms / top <= 0.75 else 'WRONG-%.3f' % (rms / top)))
 print('SOUND-440-%s' % ('OK' if abs(best - 440) <= 1 and amplitude(best) >= 0.2 else 'WRONG-%d-%.3f' % (best, amplitude(best))))
 print('SOUND-SECOND-%s' % ('OK' if 0.9 <= (last - first) / rate <= 1.1 else 'WRONG-%.2f' % ((last - first) / rate)))
+#       The second tone comes after the output was suspended: a loud stretch at least half a second after the first one, a
+#       quarter of full scale and a second long.
+later = [k for k in range(last + rate // 2, count) if abs(left[k]) > 0.05]
+if later:
+    s0, s1 = later[0], later[-1]
+    peak2 = max(abs(x) for x in left[s0:s1 + 1])
+    print('SOUND-AFTER-SUSPEND-%s' % ('OK' if 0.20 <= peak2 <= 0.30 and 0.9 <= (s1 - s0) / rate <= 1.1 else 'WRONG-%.4f' % peak2))
+else:
+    print('SOUND-AFTER-SUSPEND-MISSING')
 WAV
 
 says transcript "the tone is played on the card"        "PLAYED A SECOND OF 440 HZ ON HDA INTEL"
@@ -15715,6 +15726,7 @@ says wav "the wav has sound in it, a quarter of full scale" "SOUND-PEAK-OK"
 says wav "and it is a sine"                              "SOUND-SINE-OK"
 says wav "at 440 Hz"                                     "SOUND-440-OK"
 says wav "for a second"                                  "SOUND-SECOND-OK"
+says wav "a tone after the output was suspended is played too" "SOUND-AFTER-SUSPEND-OK"
 
 counted
 )

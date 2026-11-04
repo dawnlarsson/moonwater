@@ -184984,6 +184984,7 @@ int main(void)
 #include <fcntl.h>
 #include <math.h>
 #include <sched.h>
+#include <sys/timerfd.h>
 #if defined(__x86_64__)
 #include <x86intrin.h>
 #endif
@@ -185143,6 +185144,10 @@ static void sv_start(void)
         audio_service.pcm.fd = -1;
         audio_service.no_card = 1;
         audio_service.notify = -1;
+        audio_service.suspended = 0;
+        audio_service.idle_since = 0;
+        audio_service.devices_due = 0;
+        audio_service.resume_at = 0;
         audio_service.rate = 48000;
         audio_output_open(48000);
 }
@@ -185695,15 +185700,15 @@ static void sv_test_notify(void)
         if (audio_service.notify < 0)
                 return;
         sv_write_file("audio.volume", "50\n");
-        SVCHECK(audio_notify_drain() == 1, "a settings file written is an event");
+        SVCHECK((audio_notify_drain() & 1) == 1, "a settings file written is an event");
         sv_write_file("other.txt", "x");
-        SVCHECK(audio_notify_drain() == 0, "a file that is not a setting is not an event");
+        SVCHECK((audio_notify_drain() & 1) == 0, "a file that is not a setting is not an event");
         /* a save is a rename into place: the file is written under another name and moved over the setting */
         sv_path(tmp, sizeof tmp, "tmp.file");
         sv_path(moved, sizeof moved, "audio.mute");
         sv_write_file("tmp.file", "on\n");
         SVCHECK(rename(tmp, moved) == 0, "a setting is moved into place");
-        SVCHECK(audio_notify_drain() == 1, "a setting moved into place is an event");
+        SVCHECK((audio_notify_drain() & 1) == 1, "a setting moved into place is an event");
         SVCHECK(audio_notify_drain() == 0, "an empty queue answers at once");
         system_close(audio_service.notify);
         audio_service.notify = -1;
@@ -185792,6 +185797,48 @@ static void sv_bench_clients(int cpu)
         }
 }
 
+/* ---- the output's power: the state machine on a fake clock, and the clock's timer and the page through a suspend and a resume ---- */
+static void sv_test_power(void)
+{
+        char path[300];
+        struct audio_state copy;
+        struct itimerspec its;
+        const positive t0 = 1000000000ull;
+        int action;
+
+        sv_setup();
+        sv_path(path, sizeof path, "state-power");
+        audio_service.page_path = path;
+        audio_page_open();
+        SVCHECK(audio_power_decide(t0, 0) == AUDIO_POWER_KEEP, "an output that has just gone idle is kept for now");
+        SVCHECK(audio_power_decide(t0 + 4900000000ull, 0) == AUDIO_POWER_KEEP, "4.9 s idle keeps the output");
+        action = audio_power_decide(t0 + 5000000000ull, 0);
+        SVCHECK(action == AUDIO_POWER_SUSPEND, "five seconds idle suspends it");
+        audio_power_apply(action);
+        SVCHECK(audio_service.suspended == 1, "the output is suspended");
+        SVCHECK(timerfd_gettime(audio_service.timer, &its) == 0 && its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0,
+                "the clock's timer is stopped while suspended");
+        SVCHECK(audio_power_decide(t0 + 6000000000ull, 0) == AUDIO_POWER_KEEP, "a suspended output is not suspended again");
+        audio_page_write();
+        SVCHECK(audio_state_read(audio_service.page, &copy) && (copy.output_state & AUDIO_STATE_OUT_SUSPENDED), "the page says suspended");
+        action = audio_power_decide(t0 + 7000000000ull, 1);
+        SVCHECK(action == AUDIO_POWER_RESUME, "a stream that plays resumes it");
+        audio_power_apply(action);
+        SVCHECK(audio_service.suspended == 0, "the output is resumed");
+        SVCHECK(timerfd_gettime(audio_service.timer, &its) == 0 && (its.it_value.tv_sec != 0 || its.it_value.tv_nsec != 0),
+                "the clock's timer runs again after the resume");
+        audio_page_write();
+        SVCHECK(audio_state_read(audio_service.page, &copy) && !(copy.output_state & AUDIO_STATE_OUT_SUSPENDED), "the page no longer says suspended");
+        /* a burst inside the five seconds does not suspend: the idle count starts again after it */
+        (void)audio_power_decide(t0 + 8000000000ull, 0);
+        SVCHECK(audio_power_decide(t0 + 11000000000ull, 0) == AUDIO_POWER_KEEP, "three seconds idle keep the output");
+        SVCHECK(audio_power_decide(t0 + 11500000000ull, 1) == AUDIO_POWER_KEEP, "a burst of play keeps it");
+        SVCHECK(audio_power_decide(t0 + 12000000000ull, 0) == AUDIO_POWER_KEEP, "idle starts again after the burst");
+        SVCHECK(audio_power_decide(t0 + 15000000000ull, 0) == AUDIO_POWER_KEEP, "three seconds of it after the burst keep the output");
+        SVCHECK(audio_power_decide(t0 + 17000000000ull, 0) == AUDIO_POWER_SUSPEND, "five seconds after the burst suspends it");
+        audio_service.page_path = "/tmp/unused";
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -185805,6 +185852,7 @@ static int sv_main_checks(void)
         sv_test_text();
         sv_test_notify();
         sv_test_clients();
+        sv_test_power();
         sv_test_socket();
         sv_test_card();
         sv_test_file();
@@ -185846,8 +185894,39 @@ static void sv_bench_text(int cpu)
         printf("compare of two 36-byte names: median %llu, p90 %llu (ticks, %d)\n", samples[PASSES / 2], samples[PASSES * 9 / 10], same);
 }
 
+/* the card open, in its parts, on a pinned core (`open CARD DEVICE`): the PCM open, the close, and the card's mixer preparation */
+static void sv_bench_open(long card, long device)
+{
+        cpu_set_t set;
+        struct audio_pcm pcm;
+        __typeof__(audio_service.hw) hw;
+        unsigned long long t0, t1, t2, t3;
+        long result;
+
+        CPU_ZERO(&set);
+        CPU_SET(8, &set);
+        sched_setaffinity(0, sizeof set, &set);
+        for (int round = 0; round < 3; round++)
+        {
+                t0 = sv_now();
+                result = audio_pcm_open(&pcm, card, device, AUDIO_ALSA_PLAYBACK, 48000, AUDIO_PERIOD, -1);
+                t1 = sv_now();
+                if (result == 0)
+                        audio_pcm_close(&pcm);
+                t2 = sv_now();
+                audio_mixer_prepare(card, 1, &hw);
+                t3 = sv_now();
+                printf("round %d, card %ld:%ld: pcm open %llu ticks (result %ld), pcm close %llu, mixer prepare %llu\n", round, card, device, t1 - t0, result, t2 - t1, t3 - t2);
+        }
+}
+
 int main(int argc, char **argv)
 {
+        if (argc > 2 && strcmp(argv[1], "open") == 0)
+        {
+                sv_bench_open(atol(argv[2]), argc > 3 ? atol(argv[3]) : 0);
+                return 0;
+        }
         if (argc > 1 && strcmp(argv[1], "clients") == 0)
         {
                 sv_bench_clients(argc > 2 ? atoi(argv[2]) : 8);

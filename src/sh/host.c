@@ -21561,7 +21561,9 @@ static b32 locale_audio_status(string_address address_to arguments)
         host_say(log, host_label "playing on %s, %p percent%s\n", (string_address)state->device, locale_audio_percent(state->volume),
                  state->muted ? (string_address) ", muted" : (string_address) "");
         // What the output really is: said when it is not a card that will be heard.
-        if (state->output_state & AUDIO_STATE_OUT_CLOCK)
+        if (state->output_state & AUDIO_STATE_OUT_SUSPENDED)
+                host_say(log, "  the output is suspended: no stream has played for five seconds, so the sound card is released; the next sound opens it again (a delay of about a period, or the card's prepare time: `moonwater audio` shows it once it plays)\n");
+        else if (state->output_state & AUDIO_STATE_OUT_CLOCK)
                 host_say(log, "  no sound card is open: the server plays to a clock, and nothing is heard (a card that could not be opened is named in the server's log)\n");
         if (state->output_state & AUDIO_STATE_OUT_HW_OFF)
                 host_say(log, "  the card's own mixer has \"%s\" off and would not take it on: nothing may be heard\n", (string_address)state->hw_note);

@@ -58,6 +58,7 @@
 #define AUDIO_STATE_IDLE_NS 500000000ull // and this often when all is quiet
 #define AUDIO_SETTINGS_NS 500000000ull   // the settings files are read again this often
 #define AUDIO_DEVICES_NS 3000000000ull   // and the cards looked at again
+#define AUDIO_SUSPEND_NS 5000000000ull   // the output is released after this long with no stream playing and no program recording
 #define AUDIO_SAVE_NS 1000000000ull      // a change is written to the settings this long after the last
 #define AUDIO_POLLIN 1
 #define AUDIO_POLLOUT 4
@@ -81,6 +82,9 @@ static struct
         struct pulse pulse;
         int listen, signals, timer;
         int live[PULSE_CLIENTS], live_count, live_dirty; // the connected clients, in a list the passes visit (rebuilt when one came or went)
+        int snd_wd, devices_due, suspended; // the watch on /dev/snd; a device rescan is due; the output is released (no card, no clock)
+        positive idle_since, resume_at;     // since when nothing plays (0: something does); the resume being timed (0: none)
+        unsigned long long resume_frames;
         int notify, settings_due;       // inotify on the settings directory (-1 when refused: the look is then every half second), and a look it asked for
         int fd[PULSE_CLIENTS];
         positive stalled[PULSE_CLIENTS];
@@ -1046,7 +1050,8 @@ static void audio_page_write(void)
         }
         build.streams = (unsigned int)streams;
         // The output: a card or a clock, and what the card's mixer was found to be.
-        build.output_state = audio_service.pcm.fd >= 0 ? AUDIO_STATE_OUT_CARD : AUDIO_STATE_OUT_CLOCK;
+        build.output_state = audio_service.suspended ? (AUDIO_STATE_OUT_SUSPENDED | (audio_service.no_card ? AUDIO_STATE_OUT_CLOCK : AUDIO_STATE_OUT_CARD))
+                                                     : (audio_service.pcm.fd >= 0 ? AUDIO_STATE_OUT_CARD : AUDIO_STATE_OUT_CLOCK);
         build.output_why = audio_service.why;
         if (audio_service.hw_done)
         {
@@ -1161,6 +1166,11 @@ static void audio_devices_pass(void)
 
         if (audio_service.no_card)
                 return;
+        if (audio_service.suspended) // a card is opened by the stream that plays, not by a look at the cards
+        {
+                audio_inputs_pass(0);
+                return;
+        }
         audio_inputs_pass(0);
         have = audio_card_pick(&card, &device, name, sizeof(name), description, sizeof(description));
         if (!have)
@@ -2135,17 +2145,21 @@ static int audio_notify_drain(void)
                 for (long at = 0; at + 16 <= got;)
                 {
                         unsigned int mask = 0, length = 0;
+                        int wd = 0;
                         long next;
 
+                        memory_copy(&wd, buffer + at, 4);
                         memory_copy(&mask, buffer + at + 4, 4);
                         memory_copy(&length, buffer + at + 12, 4);
                         next = at + 16 + (long)length;
                         if (next > got)
                                 break;
                         if (mask & 0x4000) // IN_Q_OVERFLOW
-                                hit = 1;
+                                hit |= 3;
+                        else if (wd == audio_service.snd_wd && audio_service.snd_wd >= 0)
+                                hit |= 2; // a device node came or went: the cards are looked at
                         else if (length >= 6 && memory_compare(buffer + at + 16, "audio.", 6) == 0)
-                                hit = 1;
+                                hit |= 1;
                         at = next;
                 }
         }
@@ -2158,7 +2172,9 @@ static void audio_notify_open(const char *directory)
 {
         long fd = audio_call(syscall(inotify_init1), 0x800 | 0x80000, 0, 0, 0, 0, 0);
         unsigned long mask = 0x8 | 0x40 | 0x80 | 0x100 | 0x200; // IN_CLOSE_WRITE, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE
+        long snd;
 
+        audio_service.snd_wd = -1;
         if (fd < 0)
                 return;
         if (audio_call(syscall(inotify_add_watch), (positive)fd, (positive)directory, mask, 0, 0, 0) < 0)
@@ -2166,7 +2182,97 @@ static void audio_notify_open(const char *directory)
                 system_close((int)fd);
                 return;
         }
+        // The device nodes too: a card that comes or goes is an event, so the cards need no look every few seconds.
+        snd = audio_call(syscall(inotify_add_watch), (positive)fd, (positive)"/dev/snd", mask, 0, 0, 0);
+        if (snd >= 0)
+                audio_service.snd_wd = (int)snd;
         audio_service.notify = (int)fd;
+}
+
+/* ---- the output's power: released after five seconds with no stream playing and no program recording (PulseAudio's suspend on idle).
+        Playing is a stream that is made and not corked, or a program that records; a corked stream is not running, as in PulseAudio.
+        Suspended, the card is closed (or the clock's timer stopped), the loop sleeps on its descriptors alone, and the first stream
+        that plays opens the output again. ---- */
+enum { AUDIO_POWER_KEEP, AUDIO_POWER_SUSPEND, AUDIO_POWER_RESUME };
+
+// A stream plays or a program records: the output is wanted.
+static int audio_playing_now(void)
+{
+        struct pulse *p = &audio_service.pulse;
+
+        if (p->records_made != p->records_freed)
+                return 1;
+        if (p->streams_made == p->streams_freed)
+                return 0;
+        for (int i = 0; i < PULSE_STREAMS; i++)
+                if (p->stream[i].used && !p->stream[i].dying && !p->stream[i].corked)
+                        return 1;
+        return 0;
+}
+
+// What the output should do: a stream that plays resumes a suspended one, and an output idle for five seconds is suspended. Pure of the
+// card: the apply below does the work.
+static int audio_power_decide(positive now, int busy)
+{
+        if (busy)
+        {
+                audio_service.idle_since = 0;
+                return audio_service.suspended ? AUDIO_POWER_RESUME : AUDIO_POWER_KEEP;
+        }
+        if (!audio_service.idle_since)
+                audio_service.idle_since = now;
+        if (!audio_service.suspended && now - audio_service.idle_since >= AUDIO_SUSPEND_NS)
+                return AUDIO_POWER_SUSPEND;
+        return AUDIO_POWER_KEEP;
+}
+
+static void audio_power_apply(int action)
+{
+        if (action == AUDIO_POWER_SUSPEND)
+        {
+                if (audio_service.pcm.fd >= 0)
+                {
+                        audio_pcm_close(&audio_service.pcm);
+                        audio_service.pcm.fd = -1;
+                }
+                audio_timer_stop();
+                audio_service.suspended = 1;
+                audio_service.stats.due = 0;
+                string_format(log, "audio: no stream for five seconds: the output is suspended, and the card is released\n");
+                log_flush();
+                audio_page_write();
+        }
+        else if (action == AUDIO_POWER_RESUME)
+        {
+                positive began = clock_monotonic_nanoseconds();
+
+                audio_service.suspended = 0;
+                audio_service.resume_at = began;
+                audio_service.resume_frames = audio_service.frames_played;
+                audio_service.stats.due = 0;
+                if (audio_service.no_card)
+                        audio_timer_set(audio_service.rate);
+                else
+                        audio_output_open(audio_service.rate);
+                string_format(log, "audio: a stream plays: the output resumes\n");
+                log_flush();
+                audio_page_write();
+        }
+}
+
+// The first sound after a resume, said in the log: from the resume to the first frames the output took (the open, the prepare and the
+// first fill of the card, or the clock's first tick).
+static void audio_resume_said(void)
+{
+        if (audio_service.resume_at && audio_service.frames_played > audio_service.resume_frames)
+        {
+                positive took = clock_monotonic_nanoseconds() - audio_service.resume_at;
+
+                string_format(log, "audio: the first sound after the resume: %p us (%s)\n", (positive)(took / 1000),
+                              audio_service.pcm.fd >= 0 ? "a card" : "the clock");
+                log_flush();
+                audio_service.resume_at = 0;
+        }
 }
 
 static b32 audio_main()
@@ -2244,6 +2350,19 @@ static b32 audio_main()
                         audio_live_relist();
                 positive now;
                 long awaited, wait[2] = {0, audio_busy() ? 16000000 : 250000000};
+                int forever = 0;
+
+                if (audio_service.suspended && audio_service.notify >= 0)
+                {
+                        if (audio_service.dirty && audio_service.dirty_since)
+                        {
+                                positive at = clock_monotonic_nanoseconds(), due = audio_service.dirty_since + AUDIO_SAVE_NS;
+
+                                wait[1] = due > at ? (long)(due - at) : 0;
+                        }
+                        else
+                                forever = 1; // the poll sleeps until a descriptor is ready
+                }
 
                 // The card (or the clock) is first in the list and so first in the pass: whatever the clients have sent waits behind the sound.
                 if (audio_service.pcm.fd >= 0)
@@ -2287,7 +2406,7 @@ static b32 audio_main()
                                 owner[count++] = slot;
                         }
                 }
-                awaited = audio_call(syscall(ppoll), (positive)wanted, count, (positive)wait, 0, 0, 0);
+                awaited = audio_call(syscall(ppoll), (positive)wanted, count, (positive)(forever ? 0 : wait), 0, 0, 0);
                 now = clock_monotonic_nanoseconds();
                 audio_service.budget = 4 * AUDIO_READ;
                 if (awaited >= 0)
@@ -2314,7 +2433,12 @@ static b32 audio_main()
                                 else if (owner[at] == -5)
                                         audio_job_finish();
                                 else if (owner[at] == -7)
-                                        audio_service.settings_due |= audio_notify_drain();
+                                {
+                                        int hit = audio_notify_drain();
+
+                                        audio_service.settings_due |= (hit & 1) != 0;
+                                        audio_service.devices_due |= (hit & 2) != 0;
+                                }
                                 else if (owner[at] <= -10)
                                         audio_capture_pass((int)(-10 - owner[at]));
                                 else if (audio_service.fd[owner[at]] >= 0)
@@ -2325,6 +2449,9 @@ static b32 audio_main()
                                                 audio_client_drop(slot);
                                 }
                         }
+                // The output follows the streams: one that plays resumes it, and none for five seconds suspends it.
+                audio_power_apply(audio_power_decide(now, audio_playing_now()));
+                audio_resume_said();
                 // Whatever the pass queued is sent, the drains are answered, and a client that never says who it is, or never reads, is dropped.
                 pulse_tick(&audio_service.pulse);
                 audio_inputs_run(now);
@@ -2344,9 +2471,10 @@ static b32 audio_main()
                         audio_service.settings_at = now;
                         audio_settings_read(0);
                 }
-                if (audio_service.devices_at == 1 || now - audio_service.devices_at >= AUDIO_DEVICES_NS)
+                if (audio_service.devices_at == 1 || audio_service.devices_due || now - audio_service.devices_at >= AUDIO_DEVICES_NS)
                 {
                         audio_service.devices_at = now;
+                        audio_service.devices_due = 0;
                         audio_devices_pass();
                 }
                 if (audio_service.dirty && audio_service.dirty_since && now - audio_service.dirty_since >= AUDIO_SAVE_NS)
@@ -2361,7 +2489,7 @@ static b32 audio_main()
                         audio_service.dirty_since = 0;
                 }
                 // A card that went is looked for again.
-                if (audio_service.pcm.fd < 0 && !audio_service.no_card && audio_service.rescan_at && now >= audio_service.rescan_at)
+                if (audio_service.pcm.fd < 0 && !audio_service.no_card && !audio_service.suspended && audio_service.rescan_at && now >= audio_service.rescan_at)
                 {
                         audio_service.rescan_at = now + AUDIO_RESCAN_NS;
                         if (audio_output_open(audio_service.rate))

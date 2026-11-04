@@ -47,6 +47,7 @@
 #define AUDIO_STATE_OUT_HW_SET 4u   // the server set the card's output controls (unmuted, raised) when it opened it
 #define AUDIO_STATE_OUT_HW_OFF 8u   // and some switch would not stay on: hw_note names the first
 #define AUDIO_STATE_OUT_NO_MIXER 16u // the card has no mixer controls of the kinds that matter
+#define AUDIO_STATE_OUT_SUSPENDED 32u // no stream has played for five seconds: the card (or the clock) is released; the first stream opens it again
 
 #define AUDIO_STATE_DEVICE_ACTIVE 1u
 #define AUDIO_STATE_DEVICE_MONITOR 2u // an input: the monitor of a sink (what the machine plays), not a microphone
