@@ -46284,7 +46284,7 @@ def harness_moonwater_cli(argv):
                                      r'\.help = "([^"]*)"', registry_source, re.S)
             menu = keyboard_row.group(1).split() if keyboard_row else []
             helped = [word for word in keyboard_row.group(2).split() if not word.startswith("[")] if keyboard_row else []
-            check(len(layouts) == 13 and sorted(helped) == sorted(layouts) and set(menu) < set(layouts) and
+            check(len(layouts) == 16 and sorted(helped) == sorted(layouts) and set(menu) < set(layouts) and
                   set(layouts) - set(menu) == {"gb", "sv", "nb"} and len(menu) == len(set(menu)),
                   "the keyboard row's help names the layouts keyboard list does, and its menu all but the spellings gb, sv and nb",
                   repr((layouts, menu, helped)))

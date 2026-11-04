@@ -1954,7 +1954,7 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
         A pure function of a state and a key: the checks drive it with no
         card and no compositor.
 */
-#define CK_DEAD 0x8000u
+#define CK_DEAD 0x10000u // above the Basic Multilingual Plane's last character: the presentation forms of Arabic (U+FExx) are characters too
 #define CK_TABLE 99
 #define CK_LEVELS 4
 #define CK_102ND 86
@@ -1978,7 +1978,7 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
 struct compositor_patch
 {
         unsigned char code;
-        unsigned short level[CK_LEVELS];
+        unsigned int level[CK_LEVELS];
 };
 
 // Backspace is DEL and Return a line feed, as every window has read them.
@@ -2076,6 +2076,40 @@ static const struct compositor_patch compositor_it[] = {
     {18, {'e', 'E', 0x20AC}},
 };
 
+// Arabic: the letters of the standard 101-key layout (XKB's ara) on the keys of their place, the marks (the vowel signs, shadda, sukun) and
+// the signs of the script at Shift, the digits left as they are: the person's numbers are the Western ones until they choose others.
+static const struct compositor_patch compositor_ar[] = {
+    {41, {0x630, 0x651}},   {16, {0x636, 0x64E}},   {17, {0x635, 0x64B}},   {18, {0x62B, 0x64F}},   {19, {0x642, 0x64C}},
+    {20, {0x641, 0xFEF9}},  {21, {0x63A, 0x625}},   {22, {0x639, '`'}},     {23, {0x647, 0xF7}},    {24, {0x62E, 0xD7}},
+    {25, {0x62D, 0x61B}},   {26, {0x62C, '<'}},     {27, {0x62F, '>'}},     {30, {0x634, 0x650}},   {31, {0x633, 0x64D}},
+    {32, {0x64A, ']'}},     {33, {0x628, '['}},     {34, {0x644, 0xFEF7}},  {35, {0x627, 0x623}},   {36, {0x62A, 0x640}},
+    {37, {0x646, 0x60C}},   {38, {0x645, '/'}},     {39, {0x643, ':'}},     {40, {0x637, '"'}},     {44, {0x626, '~'}},
+    {45, {0x621, 0x652}},   {46, {0x624, '}'}},     {47, {0x631, '{'}},     {48, {0xFEFB, 0xFEF5}}, {49, {0x649, 0x622}},
+    {50, {0x629, '\''}},    {51, {0x648, ','}},     {52, {0x632, '.'}},     {53, {0x638, 0x61F}},
+};
+
+// Hebrew: the standard layout (XKB's il, SI 1452); a letter has no other case, so Shift on one is the letter.
+static const struct compositor_patch compositor_il[] = {
+    {41, {';', '~'}},       {16, {'/', '/'}},       {17, {'\'', '\''}},     {18, {0x5E7}},          {19, {0x5E8}},
+    {20, {0x5D0}},          {21, {0x5D8}},          {22, {0x5D5}},          {23, {0x5DF}},          {24, {0x5DD}},
+    {25, {0x5E4}},          {26, {']', '}'}},       {27, {'[', '{'}},       {30, {0x5E9}},          {31, {0x5D3}},
+    {32, {0x5D2}},          {33, {0x5DB}},          {34, {0x5E2}},          {35, {0x5D9}},          {36, {0x5D7}},
+    {37, {0x5DC}},          {38, {0x5DA}},          {39, {0x5E3, ':'}},     {40, {',', '"'}},       {44, {0x5D6}},
+    {45, {0x5E1}},          {46, {0x5D1}},          {47, {0x5D4}},          {48, {0x5E0}},          {49, {0x5DE}},
+    {50, {0x5E6}},          {51, {0x5EA, '<'}},     {52, {0x5E5, '>'}},     {53, {'.', '?'}},
+};
+
+// Persian: the standard layout (XKB's ir): the Arabic letters of the 101-key layout, with the four Persian ones (pe, che, ke, ge) and ye.
+static const struct compositor_patch compositor_ir[] = {
+    {16, {0x636}},          {17, {0x635}},          {18, {0x62B}},          {19, {0x642}},          {20, {0x641}},
+    {21, {0x63A}},          {22, {0x639}},          {23, {0x647}},          {24, {0x62E}},          {25, {0x62D}},
+    {26, {0x62C}},          {27, {0x686}},          {30, {0x634}},          {31, {0x633}},          {32, {0x6CC}},
+    {33, {0x628}},          {34, {0x644}},          {35, {0x627}},          {36, {0x62A}},          {37, {0x646}},
+    {38, {0x645}},          {39, {0x6A9, ':'}},     {40, {0x6AF, '"'}},     {44, {0x638}},          {45, {0x637}},
+    {46, {0x632}},          {47, {0x631}},          {48, {0x630}},          {49, {0x62F}},          {50, {0x67E}},
+    {51, {0x648, '<'}},     {52, {'.', '>'}},       {53, {'/', '?'}},
+};
+
 #define CK_LAYOUT(name, table) {name, table, sizeof(table) / sizeof((table)[0])}
 static const struct
 {
@@ -2088,6 +2122,7 @@ static const struct
     CK_LAYOUT("se", compositor_se), CK_LAYOUT("sv", compositor_se), CK_LAYOUT("fi", compositor_se),
     CK_LAYOUT("no", compositor_no), CK_LAYOUT("nb", compositor_no), CK_LAYOUT("dk", compositor_no),
     CK_LAYOUT("fr", compositor_fr), CK_LAYOUT("es", compositor_es), CK_LAYOUT("it", compositor_it),
+    CK_LAYOUT("ar", compositor_ar), CK_LAYOUT("il", compositor_il), CK_LAYOUT("ir", compositor_ir),
 };
 
 // A dead accent and the letters it goes on, and what they make (Latin-1).
@@ -2146,7 +2181,7 @@ struct compositor_keymap
 {
         unsigned char layout;    // an index into compositor_layouts
         unsigned char caps;      // Caps Lock is on
-        unsigned short dead;     // the accent that waits for a letter, or 0
+        unsigned int dead;       // the accent that waits for a letter, or 0
         unsigned int hidden[4];  // keys whose press was taken and so whose release is
 };
 
@@ -2176,7 +2211,7 @@ static unsigned int compositor_keymap_character(const struct compositor_keymap *
 {
         const struct compositor_patch *patch = compositor_layouts[map->layout].patch;
         unsigned int count = compositor_layouts[map->layout].count;
-        unsigned short level[CK_LEVELS] = {0, 0, 0, 0};
+        unsigned int level[CK_LEVELS] = {0, 0, 0, 0};
         unsigned int at, want = 0, c;
 
         if (code >= CK_TABLE)
@@ -2203,6 +2238,10 @@ static unsigned int compositor_keymap_character(const struct compositor_keymap *
                 c = level[0];
         if (!c)
                 return 0;
+
+        // A chord with Control is the key's Latin letter, whatever the layout types: Ctrl+C copies on an Arabic or a Hebrew keyboard.
+        if ((modifiers & WINDOW_KEY_CONTROL) && c > 0x7f && !(c & CK_DEAD))
+                c = compositor_us[code][(modifiers & WINDOW_KEY_SHIFT) != 0];
 
         if (map->caps && !(c & CK_DEAD))
                 c = compositor_letter_flip(c);
@@ -2276,7 +2315,7 @@ static int compositor_keymap_event(struct compositor_keymap *map, unsigned int c
                 unsigned int accent = c & ~CK_DEAD, was = map->dead;
 
                 map->hidden[code >> 5] |= bit;
-                map->dead = (unsigned short)accent;
+                map->dead = accent;
                 if (!was)
                         return -1;
 

@@ -278,8 +278,8 @@ static const struct settings_row settings_rows[] = {
      .usage = "brightness [N%|+N|-N]", .help = "the screen backlight"},
     //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
     //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
-    {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it", 0, null,
-     .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it [us]"},
+    {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it ar il ir", 0, null,
+     .usage = "keyboard [LAYOUT|list|xkb]", .help = "us uk gb de se sv no nb dk fi fr es it ar il ir [us]"},
     SETTING_PLAIN_ROW(null, "Key repeat delay (ms, or default)", SETTINGS_FIELD, 0, ("keyboard", "repeat", "delay"), "delay ", null,
                       .type = SETTING_NUMBER, .live = SETTING_LIVE_COMPOSITOR, .path = SETTING_REPEAT_DELAY_PATH,
                       .standard = "250", .unit = "ms", .low = 100, .high = 2000,

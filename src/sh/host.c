@@ -20796,7 +20796,7 @@ static const struct
 } locale_keyboards[] = {
         {"us", "us"}, {"uk", "gb"}, {"gb", "gb"}, {"de", "de"}, {"se", "se"},
         {"sv", "se"}, {"no", "no"}, {"nb", "no"}, {"dk", "dk"}, {"fi", "fi"},
-        {"fr", "fr"}, {"es", "es"}, {"it", "it"},
+        {"fr", "fr"}, {"es", "es"}, {"it", "it"}, {"ar", "ara"}, {"il", "il"}, {"ir", "ir"},
 };
 
 static bool locale_keyboard_ok(string_address name)

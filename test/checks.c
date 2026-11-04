@@ -133479,7 +133479,7 @@ static fn check_settings(string_address regular, string_address bold)
 "  ntp nts [on|off|only]             authenticated time (RFC 8915) first; only refuses plain [on]\n"
 "  ntp nts servers [NAME[:PORT]...|default]\n"
 "                                    who is asked for it, up to four\n"
-"  keyboard [LAYOUT|list|xkb]        us uk gb de se sv no nb dk fi fr es it [us]\n"
+"  keyboard [LAYOUT|list|xkb]        us uk gb de se sv no nb dk fi fr es it ar il ir [us]\n"
 "  name [NEW|random]                 what this machine is called, like space-wizard\n"
 "  dns [ADDRESS...|auto]             up to three servers names are asked of, or the network gives them [auto]\n"
 "  dns tls [on|off|only]             names over TLS to 1.1.1.1 and 9.9.9.9 first; only sends none in the clear [off]\n"
@@ -134023,20 +134023,20 @@ static fn check_settings(string_address regular, string_address bold)
 
                         settings_press(UI_KEY_ENTER);
                         check("settings: Enter on a choice opens a list of every choice, the one it has now the one the keys are on",
-                              settings.choice == kb && settings.popup.menu.count == 10 && settings.popup.menu.hot == 1 && settings.popup.menu.top == 0 &&
+                              settings.choice == kb && settings.popup.menu.count == 13 && settings.popup.menu.hot == 1 && settings.popup.menu.top == 0 &&
                                   settings.popup.menu.width >= ui_px(&settings.ui, UI_MENU_LEAST) && settings.popup.menu.height > 0);
                         settings_menu_press(UI_KEY_DOWN);
                         check("settings: Down in the list goes to the next choice", settings.popup.menu.hot == 2);
                         settings_menu_press(UI_KEY_END);
-                        check("settings: End goes to the last choice", settings.popup.menu.hot == 9);
+                        check("settings: End goes to the last choice", settings.popup.menu.hot == 12);
                         settings_menu_press(UI_KEY_DOWN);
                         check("settings: Down past the last goes round to the first, as every menu's keys do", settings.popup.menu.hot == 0);
                         settings_menu_press(UI_KEY_UP);
-                        check("settings: Up from the first goes round to the last", settings.popup.menu.hot == 9);
+                        check("settings: Up from the first goes round to the last", settings.popup.menu.hot == 12);
                         settings_menu_press(UI_KEY_HOME);
                         check("settings: Home goes to the first, and Up past it wraps", settings.popup.menu.hot == 0);
                         settings_menu_press(UI_KEY_PAGE_DOWN);
-                        check("settings: Page Down goes a list's height on, to the last when it all shows", settings.popup.menu.hot == 9);
+                        check("settings: Page Down goes a list's height on, to the last when it all shows", settings.popup.menu.hot == 12);
                         settings_menu_press(UI_KEY_PAGE_UP);
                         check("settings: and Page Up back to the first", settings.popup.menu.hot == 0);
                         settings_menu_type('d');
@@ -134133,7 +134133,9 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_event(&lift);
                                 check("settings: lifted there, it opens the list, its choices a finger's 44 pixels high",
                                       settings.choice == kb && settings.popup.menu.touch && !ui_pressed(&settings.finger.press, kb) &&
-                                          settings.popup.menu.height == 10 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD));
+                                          settings.popup.menu.height == (13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD) > settings.height
+                                                                         ? settings.height
+                                                                         : 13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD)));
                                 row = ui_popmenu_row(&settings.ui, &settings.popup.menu);
                                 settings_menu_point(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, 0x110, 0},
                                                     settings.popup.menu.width / 2, ui_px(&settings.ui, UI_MENU_PAD) + 3 * row + row / 2);
@@ -134183,10 +134185,10 @@ static fn check_settings(string_address regular, string_address bold)
                         settings_refilter();
                         settings_press(UI_KEY_ENTER);
                         check("settings: a list with less room than it needs shows what fits, within the window",
-                              settings.popup.menu.rows_shown >= 1 && settings.popup.menu.rows_shown < 10 && settings.popup.menu.height <= settings.height);
+                              settings.popup.menu.rows_shown >= 1 && settings.popup.menu.rows_shown < 13 && settings.popup.menu.height <= settings.height);
                         settings_menu_press(UI_KEY_END);
                         check("settings: End on it scrolls to the last, which then shows",
-                              settings.popup.menu.hot == 9 && settings.popup.menu.top == 10 - settings.popup.menu.rows_shown);
+                              settings.popup.menu.hot == 12 && settings.popup.menu.top == 13 - settings.popup.menu.rows_shown);
                         settings_menu_press(UI_KEY_HOME);
                         check("settings: Home scrolls back to the first", settings.popup.menu.hot == 0 && settings.popup.menu.top == 0);
                         settings_menu_gone();
@@ -158776,6 +158778,14 @@ static void check_compositor_pointer(void) {
         for(int sign=-1;sign<=1;sign+=2) {
             int remainder=0;long long pixels=0;
             for(int step=0;step<100;step++)pixels+=compositor_accel(sign,&remainder,gain);
+    /* Arabic, Hebrew and Persian: the letters of their keys, the digits as they are, and a chord with Control is the Latin key. */
+    ck_ok(ck_layout(&m,"ar")>0&&ck_one(&m,35,0)==0x627&&ck_one(&m,30,0)==0x634&&ck_one(&m,16,0)==0x636&&ck_one(&m,53,0)==0x638&&
+             ck_one(&m,53,KEY_SHIFT)==0x61F&&ck_one(&m,2,0)=='1'&&ck_one(&m,16,KEY_SHIFT)==0x64E&&ck_one(&m,34,KEY_SHIFT)==0xFEF7);
+    ck_ok(ck_one(&m,46,KEY_CTRL)==3&&ck_one(&m,45,KEY_CTRL)==24&&ck_one(&m,47,KEY_CTRL)==22&&ck_one(&m,35,KEY_CTRL|KEY_SHIFT)==8);
+    ck_ok(ck_layout(&m,"il")>0&&ck_one(&m,20,0)==0x5D0&&ck_one(&m,20,KEY_SHIFT)==0x5D0&&ck_one(&m,30,0)==0x5E9&&ck_one(&m,53,0)=='.'&&
+             ck_one(&m,51,0)==0x5EA&&ck_one(&m,46,KEY_CTRL)==3);
+    ck_ok(ck_layout(&m,"ir")>0&&ck_one(&m,32,0)==0x6CC&&ck_one(&m,27,0)==0x686&&ck_one(&m,50,0)==0x67E&&ck_one(&m,40,0)==0x6AF&&
+             ck_one(&m,35,0)==0x627);
             ck_ok(pixels*1024+remainder==(long long)sign*100*gain&&remainder>-1024&&remainder<1024);
         }
     { int remainder=0; ck_ok(compositor_accel(0,&remainder,2560)==0&&remainder==0); }
