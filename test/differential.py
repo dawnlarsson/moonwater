@@ -49342,10 +49342,11 @@ while True:
         table = {name for name, xkb in pairs}
         #       And each has the name XKB gives it, which a compositor from a
         #       bowl reads as XKB_DEFAULT_LAYOUT: the country's code where the
-        #       machine's layout name is another (uk is gb, sv is se, nb is no).
+        #       machine's layout name is another (uk is gb, sv is se, nb is no,
+        #       ar is ara; il and ir are Hebrew and Persian under their own codes).
         check(dict(pairs) == {"us": "us", "uk": "gb", "gb": "gb", "de": "de", "se": "se", "sv": "se",
                               "no": "no", "nb": "no", "dk": "dk", "fi": "fi", "fr": "fr", "es": "es",
-                              "it": "it"},
+                              "it": "it", "ar": "ara", "il": "il", "ir": "ir"},
               "every layout moonwater keyboard offers has the XKB name a compositor wants", sorted(dict(pairs).items()))
         #       moonwater desktop is a setting like the keyboard's: bare it says
         #       what is chosen, a word is saved when it is on, off or a
@@ -51178,6 +51179,16 @@ def snapshot():
     return seen
 
 
+def settle():
+    """A pair that was killed while it waited leaves taking its code back to a
+    process of its own, which can still be mid-write when the next command has
+    ended: the stage it writes through is looked for until it goes (three
+    seconds at most), so a stage that stays is a stage left."""
+    until = time.monotonic() + 3
+    while time.monotonic() < until and any(".moonwater-stage-" in path for path in snapshot()):
+        time.sleep(0.02)
+
+
 def head(path):
     try:
         with open(path, "rb") as handle:
@@ -51458,6 +51469,8 @@ def main():
             before = snapshot()
             runs += [run([bytes.fromhex(a) for a in argv], job["limit"], "/tmp/plant/state")
                      for argv in chain[at:]]
+            if any(done.get("waited") for done in runs):
+                settle()
             after = snapshot()
             strays()
             results.write(json.dumps({"chain": number, "runs": runs,
@@ -51835,6 +51848,10 @@ def fuzz_vectors(commands, descriptions, rng, count, files=()):
         low, high = int(found.group(1)), int(found.group(2))
         for value, kind in ((low - 1, "range-bad"), (low, "range-ok"), (high, "range-ok"), (high + 1, "range-bad"),
                             (0, "range-bad"), (-1, "range-bad"), (2 ** 32 + low, "range-bad"), (2 ** 64 + low, "range-bad")):
+            #   0 is refused by a row that starts above it, not by one whose range holds it
+            #   (the clipboard's history is 0 to 32: 0 is its default, and none kept).
+            if kind == "range-bad" and low <= value <= high:
+                continue
             for _ in range(40):
                 made = fuzz_expand(tree, rng, lambda name, value=value: str(value).encode()
                                    if name in names else good_for(command.split()[0])(name))
@@ -52708,7 +52725,9 @@ PYEOF
         lines, finished = session(script)
         races = [line.split(None, 3) for line in lines if line.startswith("@@race ")]
         reads = [line.split(None, 3) for line in lines if line.startswith("@@read ")]
-        check(finished and len(races) == 30 and len(reads) == 6,
+        #       28 pairs and the four verbs of /root/tune at once (the global scale's pair went
+        #       with the scale), and six readers.
+        check(finished and len(races) == 29 and len(reads) == 6,
               "every pair and every reader ran", (finished, len(races), len(reads), lines[-6:]))
         for found in races:
             check(len(found) > 2 and found[2] == "0",
