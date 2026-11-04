@@ -2948,6 +2948,7 @@ static int pulse_command_upload(struct pulse *p, long slot, unsigned long comman
         unsigned long channel = pulse_r_u32(r);
         struct pulse_upload *u;
         struct pulse_sample *old, *s = 0;
+        unsigned long index = 0;
 
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
@@ -2971,6 +2972,15 @@ static int pulse_command_upload(struct pulse *p, long slot, unsigned long comman
                 pulse_upload_free(p, u);
                 return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
         }
+        // A replacement takes the place of the sound it replaces when nothing plays that one, which gives its memory back now,
+        // so a full cache takes it. A sound that is still played keeps its place until it is done, and needs a free one.
+        if (old)
+                index = old->index;
+        if (old && old->playing == 0)
+        {
+                old->condemned = 1;
+                pulse_sample_release(p, old);
+        }
         for (int i = 0; i < PULSE_SAMPLES && !s; i++)
                 if (!p->sample[i].used)
                         s = p->sample + i;
@@ -2981,7 +2991,7 @@ static int pulse_command_upload(struct pulse *p, long slot, unsigned long comman
         }
         __builtin_memset(s, 0, sizeof(*s));
         s->used = 1;
-        s->index = old ? old->index : p->next_sample++;
+        s->index = old ? index : p->next_sample++;
         pulse_copy(s->name, PULSE_NAME, u->name);
         s->format = u->format;
         s->channels = u->channels;
@@ -2997,7 +3007,9 @@ static int pulse_command_upload(struct pulse *p, long slot, unsigned long comman
         p->upload_total -= u->length;
         u->used = 0;
         u->data = 0;
-        if (old)
+        // The old one, if it was not released above and did not give its place to the new one, is condemned: its memory goes when
+        // the last stream that plays it has ended.
+        if (old && old != s)
         {
                 old->condemned = 1;
                 pulse_sample_release(p, old);

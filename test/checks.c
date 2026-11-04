@@ -178042,6 +178042,37 @@ static void pt_test_feed_cut(void)
                 PTCHECK(single[i] == whole[i], "fed a byte at a time, answer %ld is the same tag", i);
 }
 
+/* ---- a sound replaced while the cache is full: the one it replaces gives its place to the new one ---- */
+
+static void pt_test_samples_full(void)
+{
+        static unsigned char data[16];
+        unsigned long channel, asked, index = 0;
+        char name[32];
+        long slot, used = 0;
+
+        pt_reset();
+        slot = pt_connect(1000, 4600, 35, "fill");
+        memset(data, 0x11, sizeof(data));
+        for (int i = 0; i < PULSE_SAMPLES; i++)
+        {
+                snprintf(name, sizeof(name), "sound.%02d", i);
+                PTCHECK(pt_upload(slot, 35, 10 + (unsigned long)i, name, AUDIO_FORMAT_S16LE, 2, 48000, 16, &channel, &asked) == 0, "sound %d is uploaded", i);
+                PTCHECK(pt_upload_send(slot, 1000 + (unsigned long)i, channel, data, 16, 16) == 0, "sound %d is finished", i);
+        }
+        for (int i = 0; i < PULSE_SAMPLES; i++)
+                used += pt_engine.sample[i].used;
+        PTCHECK(used == PULSE_SAMPLES, "the cache is full: %ld sounds", used);
+        PTCHECK(pulse_sample_named(&pt_engine, "sound.07") && (index = pulse_sample_named(&pt_engine, "sound.07")->index) == 7, "sound.07 is in its place");
+
+        // The cache has no free place: a sound of a name that is there replaces it in its place, and nothing is left over.
+        pt_upload(slot, 35, 500, "sound.07", AUDIO_FORMAT_S16LE, 2, 48000, 16, &channel, &asked);
+        PTCHECK(pt_upload_send(slot, 501, channel, data, 16, 16) == 0, "a full cache takes a replacement of one of its sounds");
+        PTCHECK(pulse_sample_named(&pt_engine, "sound.07") && pulse_sample_named(&pt_engine, "sound.07")->index == index, "and the replacement keeps its index");
+        PTCHECK(pt_engine.sample_total == PULSE_SAMPLES * 16ul, "and no memory is left of the one it replaced (%lu bytes)", pt_engine.sample_total);
+        pulse_client_close(&pt_engine, slot);
+}
+
 int main(void)
 {
         pt_make_source();
@@ -178051,6 +178082,7 @@ int main(void)
         pt_test_info();
         pt_test_list_bounds();
         pt_test_feed_cut();
+        pt_test_samples_full();
         pt_test_stream();
         pt_test_requests();
         pt_test_control();
