@@ -6373,6 +6373,7 @@ static char compositor_scan_name[512], compositor_spare_name[512]; // headless: 
 static int compositor_headless_flip(void);
 static void compositor_flip_done(void);
 static void compositor_plate_make(void);
+#include "record.h" // the present record: a ring of the last presents, and moonwater canvas record (its files under /run/moonwater/record)
 
 // What is missed of a buffer, joined with more: the bounding rectangle, and whether there is any.
 static void compositor_stale_join(int *rect, int *any, const int *add)
@@ -6453,6 +6454,7 @@ static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks
 
 static void compositor_flip_done(void)
 {
+        compositor_record_vblank(clock_monotonic_nanoseconds());
         compositor.flip_pending = 0;
         for (int row = 0; row < WINDOWS; row++)
         {
@@ -8524,12 +8526,16 @@ static void compositor_metric_note(unsigned long long nanoseconds)
 static void compositor_present(void)
 {
         unsigned long long began = clock_monotonic_nanoseconds();
+        enum compositor_record_path path;
 
+        compositor_record_begin();
         compositor_present_on_card = 0;
         compositor_wl_lent_sync(1);
         compositor_present_frames();
         compositor_wl_lent_sync(0);
         compositor_metric_note(clock_monotonic_nanoseconds() - began);
+        path = compositor_present_on_card ? COMPOSITOR_RECORD_CARD : compositor.plane_row >= 0 ? COMPOSITOR_RECORD_PLANE : COMPOSITOR_RECORD_PROCESSOR;
+        compositor_record_present(began, clock_monotonic_nanoseconds(), path);
 }
 
 static void compositor_present_frames(void)
@@ -8844,6 +8850,7 @@ static void compositor_present_frames(void)
                 compositor_overlay_off();
         if (flip_own && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
+                compositor_record_refuse();
                 if (compositor.card < 0)
                 {
                         // The scan image was not exchanged: the composed frame is not shown, so the buffers are both whole again from the next present.
@@ -8874,6 +8881,7 @@ static void compositor_present_frames(void)
         }
         else if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
+                compositor_record_refuse();
                 struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
                                               0, 0, 0, 1, compositor.mode};
 

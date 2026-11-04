@@ -6712,6 +6712,11 @@ lane_gpuanim()
         sh test/gpu_anim_flicker.sh "$work/shell" "$work/anim" > "$work/lane.out" 2>&1
         status=$?
         cat "$work/lane.out"
+        # the present record's rows (moonwater canvas record, src/canvas/record.h): hostile arguments, a recording, a report, the ring's wraparound
+        sh test/gpu_record.sh "$work/shell" "$work/record" > "$work/record.out" 2>&1
+        recstatus=$?
+        cat "$work/record.out"
+        [ "$recstatus" = 0 ] || status=$((status + recstatus))
         if [ "$status" = 0 ]; then
                 tally gpuanim 1 1
         else

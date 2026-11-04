@@ -5536,6 +5536,75 @@ static b32 host_canvas_identify(positive count);
 /* moonwater canvas [scale [N|auto]|modes [largest|preferred]|arrange [NAME[@X,Y|@off]...|default]|
    display NAME rotation DEGREES|refresh HZ|preferred|place X Y|
    identify|background [COLOUR|default]|cursor [size [N|auto]|look [light|dark|auto]]] */
+/*
+        moonwater canvas record [SECONDS] and moonwater canvas record report: the compositor's present record (src/canvas/record.h). A recording
+        of SECONDS (1 to 10, three by default) is asked for by the file /run/moonwater/record/start, and the compositor takes it at its next look
+        (every eighth present) and writes its report when the seconds have run and a present has come after them. The report is asked for by
+        /run/moonwater/record/report: this waits up to three seconds for the compositor to take the request, then prints report.txt. The
+        compositor is the only writer of report.txt and state; this writes the two requests, and only as root.
+*/
+#define HOST_RECORD_DIR "/run/moonwater/record"
+#define HOST_RECORD_TEXT 8192
+
+static b32 host_canvas_record(string_address address_to arguments, positive count)
+{
+        p8 request[] = "report\n", report[HOST_RECORD_TEXT + 1], start[4];
+        positive seconds = 3, at = 0;
+        bipolar got;
+
+        if (count == 4 && string_equals(arguments[3], "report"))
+        {
+                if (host_write_file((string_address)HOST_RECORD_DIR "/report", request, 7, 0644, false) < 0)
+                        return host_usage();
+                for (positive wait = 0; wait < 30; wait++)
+                {
+                        if (host_read_state((string_address)HOST_RECORD_DIR "/report", report, 16) < 0)
+                                break;
+                        host_pause(100000000);
+                }
+                got = host_read_state((string_address)HOST_RECORD_DIR "/report.txt", report, HOST_RECORD_TEXT);
+                if (got < 0)
+                {
+                        host_say(log, "no report yet: the compositor has not made one (its record is kept while the desktop runs)\n");
+                        return 0;
+                }
+                report[got] = 0;
+                host_say(log, "%s", (string_address)report);
+                return 0;
+        }
+        if (count == 4)
+        {
+                string_address word = arguments[3];
+                positive value = 0, digit = 0;
+
+                for (; word[digit] && digit < 3; digit++)
+                {
+                        if (word[digit] < '0' || word[digit] > '9')
+                                return host_usage();
+                        value = value * 10 + (positive)(word[digit] - '0');
+                }
+                if (!digit || word[digit] || value < 1 || value > 10)
+                        return host_usage();
+                seconds = value;
+        }
+        else if (count != 3)
+                return host_usage();
+        if (seconds == 10)
+                start[at++] = '1', start[at++] = '0';
+        else
+                start[at++] = (p8)('0' + seconds);
+        start[at++] = '\n';
+        if (host_write_file((string_address)HOST_RECORD_DIR "/start", start, at, 0644, false) < 0)
+        {
+                host_say(log, "the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
+                return 0;
+        }
+        host_say(log, "recording %p s; the compositor takes it at its next look and writes its report when the seconds have run and a present follows\n",
+                 (positive)seconds);
+        host_say(log, "the report: moonwater canvas record report\n");
+        return 0;
+}
+
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
@@ -5555,6 +5624,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return locale_canvas_display(arguments, count);
         if (count >= 3 && string_equals(arguments[2], "identify"))
                 return host_canvas_identify(count);
+        if (count >= 3 && string_equals(arguments[2], "record"))
+                return host_canvas_record(arguments, count);
 
         return_if(count > 3, host_usage());
 
@@ -22428,6 +22499,19 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 if (board.refused)
                         host_say(log, "  issue           %p more not shown: the board is full\n", (positive)board.refused);
         }
+        //      The compositor's present record: the last state it wrote (moonwater canvas record), or none.
+        {
+                p8 state[256];
+                bipolar got = host_read_state((string_address)HOST_RECORD_DIR "/state", state, sizeof(state) - 1);
+
+                if (got > 0)
+                {
+                        state[got] = 0;
+                        host_say(log, "  last record     %s", (string_address)state);
+                }
+                else
+                        host_say(log, "  last record     none yet (moonwater canvas record SECONDS)\n");
+        }
         //      The apps' draw lists: the windows drawn from their lists (list state 1) and the lists the compositor refused.
         {
                 unsigned int from_lists = 0;
@@ -24641,6 +24725,8 @@ static const host_row host_rows[] = {
     {null, "canvas arrange [NAME[@X,Y|@off]...|default]", "where each screen is: names left to right, the first the primary [default]", 'b'},
     {null, "canvas windows [forget]", "where windows open again, from where the hand put them; forget empties it", 'b'},
     {null, "canvas identify", "show the number of each screen for three seconds", 'b'},
+    {null, "canvas record [SECONDS]", "record the compositor's presents for SECONDS (1 to 10, 3 by default)", 'b'},
+    {null, "canvas record report", "the report of the presents: the paths, flips, late and held presents", 'b'},
     {null, "desktop [on|off|PROFILE]", "the desktop, now and at every start; off leaves the text console [on]", 'b'},
     {null, "desktop start|stop", "begin the chosen desktop now, or end its session", 'b'},
     {null, "keyboard start", "exit 0 when the desktop starts the on-screen keyboard: the setting on, or auto with a touch screen plugged in or no keyboard", 'b'},
