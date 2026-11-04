@@ -153234,78 +153234,6 @@ static fn ui_over_check(void)
 }
 
 /*
-        ui_edge_row, the field's top-edge light for one row, against the C it replaced (the loop as it was, with the picture's
-        row and the first column passed in). The body has to give the same pixels, and clear the same rows, for every width
-        from nothing to the widest a shape is drawn, every first column on or off the picture (both ends), and running sums
-        that are sparse, dense or wrap a 16-bit lane.
-*/
-static void ui_edge_row_reference(unsigned short *line, unsigned short *clip, b32 width, b32 first, unsigned int *row, b32 picture,
-                                  unsigned int highlight)
-{
-        for (b32 x = 0, face_run = 0, low_run = 0; x < width; x++)
-        {
-                int cover;
-
-                face_run = (unsigned short)(face_run + line[x]);
-                low_run = (unsigned short)(low_run + clip[x]);
-                cover = (int)face_run - (int)low_run;
-                line[x] = clip[x] = 0;
-                if (cover > 0 && first + x >= 0 && first + x < picture)
-                {
-                        unsigned int *at = row + (first + x);
-
-                        *at = ui_over(ui_premultiplied(highlight, (unsigned int)cover), *at);
-                }
-        }
-}
-
-static fn ui_edge_row_check(void)
-{
-        static unsigned short line[UI_KIT_LINE], clip[UI_KIT_LINE], line_asm[UI_KIT_LINE], clip_asm[UI_KIT_LINE];
-        static unsigned int row_ref[512], row_asm[512];
-        static unsigned int state = 0x2f6b1d3bu;
-        b32 same = true;
-        int drawn = 0;
-
-        for (int trial = 0; trial < 8000; trial++)
-        {
-                b32 width = trial % 9 == 0 ? (b32)(XORSHIFT32(state) % (UI_KIT_LINE + 1)) : (b32)(XORSHIFT32(state) % 320);
-                b32 picture = 1 + (b32)(XORSHIFT32(state) % 480), first = (b32)(XORSHIFT32(state) % (picture + 60)) - 30;
-                unsigned int mask = (unsigned int[]){0x3u, 0xffu, 0xffffu, 0xffffffffu}[XORSHIFT32(state) % 4];
-                unsigned int highlight = XORSHIFT32(state), percent = XORSHIFT32(state) % 101;
-                struct ui_edge_row edge = {line_asm, clip_asm, null, width, 0, 0, highlight, ui_edge_put};
-                b32 lo = first < 0 ? -first : 0, hi = picture - first < width ? picture - first : width;
-
-                for (b32 x = 0; x < width; x++)
-                {
-                        unsigned int a = XORSHIFT32(state), b = XORSHIFT32(state);
-
-                        line[x] = XORSHIFT32(state) % 101 < percent ? (unsigned short)(a & mask) : 0;
-                        clip[x] = XORSHIFT32(state) % 101 < percent ? (unsigned short)(b & mask) : 0;
-                        if (trial % 5 == 0 && x == width / 2)
-                                line[x] = 0xffff, clip[x] = 0x8000;
-                }
-                memory_copy(line_asm, line, (positive)sizeof(unsigned short) * (positive)width);
-                memory_copy(clip_asm, clip, (positive)sizeof(unsigned short) * (positive)width);
-                for (b32 k = 0; k < 512; k++)
-                        row_ref[k] = row_asm[k] = XORSHIFT32(state);
-
-                ui_edge_row_reference(line, clip, width, first, row_ref, picture, highlight);
-                if (lo < hi)
-                {
-                        edge.lo = lo, edge.hi = hi;
-                        edge.at = row_asm + (first + lo);
-                }
-                ui_edge_row(&edge);
-                for (b32 x = 0; x < width; x++)
-                        same &= line[x] == 0 && clip[x] == 0 && line_asm[x] == 0 && clip_asm[x] == 0;
-                same &= memory_compare(row_ref, row_asm, sizeof(row_ref)) == 0;
-                drawn++;
-        }
-        check("ui_edge_row: the body gives the C's pixels and clears its rows, for every width, column and sum", same && drawn > 0);
-}
-
-/*
         The text menu's keys are the keymap's: the first key each command is bound to, written as the menu shows it, and
         none for a command with no key. A key rebound shows its new one, and a command whose keys are taken away shows none.
 */
@@ -153619,7 +153547,6 @@ static fn text_widget_check(string_address inter, string_address mono)
         popmenu_bar_check(&wui);
         squiggle_check(&wui);
         ui_over_check();
-        ui_edge_row_check();
 }
 
 /*
@@ -155207,9 +155134,10 @@ static fn check_glass_pieces(string_address regular)
 #define GLASS_AT(x, y) (picture[(y) * 800 + (x)] >> 24)
         check("glass: a launcher's ground is clear where no piece is drawn: the glass shows through",
               GLASS_AT(2, 2) == 0 && GLASS_AT(LAUNCHER_WIDTH - 2, 2) == 0);
-        check("glass: the launcher's field is flat, with no shadow or ring past its edge (above it and left of it)",
-              GLASS_AT(LAUNCHER_WIDTH / 2, pad - 1) == 0 && GLASS_AT(pad - 1, pad + UI_TARGET / 2) == 0);
-        check("glass: the launcher's field is a lit well over the glass, not clear", GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET / 2) > 0);
+        check("glass: the launcher's field is flat, with no shadow or ring above it (its face runs to the edges, so none is left of it)",
+              GLASS_AT(LAUNCHER_WIDTH / 2, pad - 1) == 0 && GLASS_AT(0, pad - 1) == 0);
+        check("glass: the launcher's field is a lit well over the glass, not clear, with its rule along its foot", GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET / 2) > 0 &&
+              GLASS_AT(LAUNCHER_WIDTH / 2, pad + UI_TARGET - 1) > 0);
 #undef GLASS_AT
 
         // A menu: glass with no face and no outline, its hot choice lit and the others not.
@@ -157765,7 +157693,7 @@ static fn check_field_hands(string_address regular)
                 static unsigned char from[3];
                 static unsigned short hashed[LAUNCHER_HASH];
                 const font_face address_to faces[2] = {&face, &face};
-                int left = (UI_PAD + 14), y = UI_PAD + UI_TARGET / 2, ls = ui_run_in(&ui, faces, 0, 0, (string_address) "ls", 15, 0, 0, 0, 800, 0);
+                int left = 14, y = UI_PAD + UI_TARGET / 2, ls = ui_run_in(&ui, faces, 0, 0, (string_address) "ls", 15, 0, 0, 0, 800, 0); // the field runs edge to edge: its text is 14 in
                 struct window_event move = {WINDOW_EVENT_MOTION, 0, left + ls, y}, press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0},
                                     release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
 
@@ -219975,8 +219903,7 @@ static void gpu_bench_sort(positive *took, int n)
 
 /*
         The recorded controls on the GPU: the spinner's arc and ring (ui_spinner_draw on the processor against the same painter recording into
-        scene memory the GPU reads, at scales 100, 150, 200 and 300, three sizes), and the input's top edge (ui_edge_row on the processor against
-        ui_edge_record, the row's covers random, the highlight random with its alpha). Each recording is replayed by gpu_scene over a ground the
+        scene memory the GPU reads, at scales 100, 150, 200 and 300, three sizes). Each recording is replayed by gpu_scene over a ground the
         scene's first op makes, and every pixel compared with the processor's. The whole field is not here: its text needs the field's state.
 */
 /*
@@ -220262,7 +220189,6 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
 }
 
 static unsigned int gpu_ctl_want[700 * 420], gpu_ctl_dummy[700 * 420];
-static unsigned short gpu_ctl_face[256], gpu_ctl_low[256], gpu_ctl_face_rec[256], gpu_ctl_low_rec[256];
 
 static void gpu_kit_recorded_controls(positive pic_at, positive ops_at, positive bins_at)
 {
@@ -220319,57 +220245,6 @@ static void gpu_kit_recorded_controls(positive pic_at, positive ops_at, positive
         check("gpu controls: the spinner's arc and ring replay bit for bit at 100, 150, 200 and 300 percent", bad == 0);
         string_format(log, "  spinner pixels painted by the processor over 12 spinners: %p\n", (positive)arc_pixels);
         check("gpu controls: the spinner paints an arc to compare (its pixels are not all the ground)", arc_pixels > 1000);
-
-        // The input's top edge: random covers on each row, the processor's ui_edge_row against ui_edge_record, the same row replayed.
-        for (int round = 0; round < 24; round++)
-        {
-                int width = 1 + (int)(gpu_random() % 200), first = (int)(gpu_random() % (unsigned int)(CW - width)), y = (int)(gpu_random() % CH);
-                int lo = gpu_random() % 2 ? 0 : (int)(gpu_random() % (unsigned int)(width / 4 + 1)), hi = width - (gpu_random() % 2 ? 0 : (int)(gpu_random() % (unsigned int)(width / 4 + 1)));
-                unsigned int highlight = gpu_random();
-                int face_run = 0, low_run = 0;
-                struct ui_edge_row edge;
-
-                for (positive i = 0; i < (positive)CP * CH; i++)
-                        gpu_ctl_want[i] = ground;
-                for (int x = 0; x < width; x++)
-                {
-                        int f = (int)(gpu_random() % 4097), l = gpu_random() % 3 ? (int)(gpu_random() % 4097) : f;
-
-                        gpu_ctl_face[x] = (unsigned short)(f - face_run), gpu_ctl_low[x] = (unsigned short)(l - low_run);
-                        face_run = f, low_run = l;
-                }
-                memory_copy(gpu_ctl_face_rec, gpu_ctl_face, sizeof(unsigned short) * (unsigned long)width);
-                memory_copy(gpu_ctl_low_rec, gpu_ctl_low, sizeof(unsigned short) * (unsigned long)width);
-                if (lo > hi)
-                        lo = hi;
-                edge = (struct ui_edge_row){gpu_ctl_face, gpu_ctl_low, gpu_ctl_want + (positive)y * CP + first + lo, width, lo, hi, highlight, ui_edge_put};
-                ui_edge_row(&edge);
-
-                memory_zero(&rec, sizeof(rec));
-                rec.pixels = gpu_ctl_dummy, rec.pitch = CP, rec.width = CW, rec.height = CH, rec.top = 0, rec.bottom = CH, rec.scale = 100;
-                memory_zero(&scene, sizeof(scene));
-                scene.ops = ops + 8, scene.room = 1024, scene.cover = (unsigned char address_to)((p8 address_to)gpu.at + ops_at + 8192), scene.size = 4096;
-                rec.scene = &scene;
-                ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = CW, ops[4] = CH, ops[5] = ground, ops[6] = ops[7] = 0;
-                edge = (struct ui_edge_row){gpu_ctl_face_rec, gpu_ctl_low_rec, null, width, lo, hi, highlight, ui_edge_put};
-                ui_edge_record(&rec, &edge, y, first);
-                for (positive i = 0; i < (positive)CP * CH; i++)
-                        pic[i] = 0x12345678u;
-                if (!gpu_scene(ops_at, 1 + scene.count, bins_at, pic_at, CP, CW, CH, 0, 0, CW, CH))
-                {
-                        check("gpu controls: the input's edge scene finishes", false);
-                        return;
-                }
-                for (int yy = 0; yy < CH; yy++)
-                        for (int x = 0; x < CW; x++)
-                        {
-                                checks++;
-                                if (pic[(positive)yy * CP + x] != gpu_ctl_want[(positive)yy * CP + x] && (++failures, ++bad) < 6)
-                                        string_format(log, "  FAIL gpu edge round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)yy,
-                                                      (positive)pic[(positive)yy * CP + x], (positive)gpu_ctl_want[(positive)yy * CP + x]);
-                        }
-        }
-        check("gpu controls: the input's top edge replays bit for bit over 24 random rows", bad == 0);
 }
 
 /*

@@ -942,7 +942,8 @@ static fn launcher_draw(unsigned int address_to pixels)
                         search->edit = launcher_field();
                 }
                 search->focused = (launcher.focused || !launcher_app.had_keys) && !launcher.power.keys;
-                search->x = pad * 100 / ui->scale, search->y = pad * 100 / ui->scale, search->w = (launcher.width - 2 * pad) * 100 / ui->scale, search->h = UI_TARGET;
+                // The field runs edge to edge, as the list's rows do: its text keeps its inset, and it sits pad below the top.
+                search->x = 0, search->y = pad * 100 / ui->scale, search->w = launcher.width * 100 / ui->scale, search->h = UI_TARGET;
                 ui_control_draw(ui, search);
         }
         // The rows: the kit's list, the highlighted one the row the keys are on (the keys themselves stay in the field).
