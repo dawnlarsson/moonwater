@@ -1890,7 +1890,8 @@ static void bind_stop(void)
         state it is in, and the line only while it is the event's default --
         which is public, it is in this file. A line somebody set reads as
         empty to them, with the DEFAULT flag clear, so that they can still
-        tell that it was changed.
+        tell that it was changed. Empty is every byte of it: the line was
+        copied in whole to be compared, and the answer is the whole field.
 */
 static void bind_answer(struct bind_control *request, struct bind_row *row,
                         _Bool reveal)
@@ -1909,7 +1910,7 @@ static void bind_answer(struct bind_control *request, struct bind_row *row,
         if (!strcmp(request->command, row->def))
                 request->flags |= SPARK_BIND_DEFAULT;
         else if (!reveal)
-                request->command[0] = 0;
+                memset(request->command, 0, sizeof(request->command));
         if (atomic_read(&row->busy))
                 request->flags |= SPARK_BIND_RUNNING;
         if (work_pending(&row->work) ||

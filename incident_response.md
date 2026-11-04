@@ -41,6 +41,26 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-160: any user read root's bound command lines from /dev/spark, all but the first byte
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Kernel information disclosure to an unprivileged caller (a secret the caller was meant to read as empty) |
+| Moonwater exposure window | 2026-09-16 07:19 +02:00 (`fc1ad81b`, the whole line readable by anyone) to 2026-09-29 12:34 +02:00 (`75d016d0`, meant to hide it), then all but byte 0 to the fix: 49 days in all |
+| Fixed by | the commit that adds this entry |
+| Tests that fail without it | `--harness core_state`, `a refusal does not hand the line back to the caller it refused, not one byte of it` and `a line somebody set reads as empty, and not the default, without CAP_SYS_ADMIN` (87,425 of 87,427 with the one-byte clear put back) |
+
+**How it was exposed.** `SPARK_IOCTL_BIND` on `/dev/spark` (mode 0666) answers a GET, and a refused SET, with
+`bind_answer` (src/moonwater/moonwater.c). It copied the row's whole line into `request->command` with `strscpy` to
+compare it with the event's default, and for a caller without CAP_SYS_ADMIN cleared `command[0]` only; `copy_to_user`
+then sent the whole 312-byte struct back. A bound line runs as root and is the text the settings' GET is
+CAP_SYS_ADMIN for ("a command can carry a secret"): a booted kernel gave uid 65534 with no capabilities the bytes
+`pa_cli set_network 0 psk "hunter2-SECRET-psk"` of a line root bound to volume_up. Lines the image's settings
+apply at boot were exposed on every boot, and bowls mount devtmpfs at /dev, so a bowl program could read them too.
+The harness rows tested `!request.command[0]` and passed. Now the whole field is zeroed; the two rows compare all 256
+bytes with zero.
+
 ### MW-2026-121: a window's least size could win over its buffer's room, and the stretch wrote past the buffer
 
 | | |

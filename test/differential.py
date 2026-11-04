@@ -29751,6 +29751,7 @@ static void check_console_keyboard(void) {
           "giving the keys back twice restores once, and a late VT event mutes nothing");
     vt_modes[0]=vt_modes[1]=vt_modes[2]=vt_modes[3]=K_UNICODE;
 }
+static const char bind_no_line[SPARK_BIND_COMMAND_MAX];
 static void check_bind(void) {
     struct bind_control request;
     struct bind_row *power,*reset,*cad,*sleep,*vol,*on,*off;
@@ -29949,8 +29950,9 @@ static void check_bind(void) {
     check(report_bind(&request)==-EPERM && !strcmp(power->command,"echo set") &&
           !strcmp(request.name,"poweroff"),
           "setting with CAP_SYS_BOOT but not CAP_SYS_ADMIN is refused: it runs with every capability");
-    check(report_bind(&request)==-EPERM && !request.command[0],
-          "a refusal does not hand the line back to the caller it refused");
+    check(report_bind(&request)==-EPERM &&
+          !memcmp(request.command,bind_no_line,sizeof(request.command)),
+          "a refusal does not hand the line back to the caller it refused, not one byte of it");
     power_capable=0; power_admin=1;
     memset(&request,0,sizeof(request));
     request.event=SPARK_BIND_POWEROFF;
@@ -29963,7 +29965,8 @@ static void check_bind(void) {
     power_capable=1; power_admin=0;
     memset(&request,0,sizeof(request));
     request.event=SPARK_BIND_POWEROFF;
-    check(!report_bind(&request) && !request.command[0] &&
+    check(!report_bind(&request) &&
+          !memcmp(request.command,bind_no_line,sizeof(request.command)) &&
           !(request.flags & SPARK_BIND_DEFAULT) && !strcmp(request.name,"poweroff") &&
           request.count==SPARK_BIND_EVENTS && (request.flags & SPARK_BIND_BOOT),
           "a line somebody set reads as empty, and not the default, without CAP_SYS_ADMIN");
