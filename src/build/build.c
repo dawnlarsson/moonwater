@@ -6935,10 +6935,12 @@ static b32 build_boot(string_address image, bool console, string_address arch,
         //      first of pipewire, pa, alsa and sdl this QEMU has), so the guest has a card to play to; output only, so a VM never
         //      opens the host's microphone. With no device the guest's sound server had nothing to open: its mixer showed a volume
         //      and a device, and nothing was heard. No backend here, no device.
+        //      timer-period=1000: QEMU's own audio timer ticks every 10 ms by default, longer than the server's card buffer
+        //      (10.7 ms), which starved it and put holes in the tone.
         {
                 string_address ask[4];
                 string_address drivers[5] = {"coreaudio", "pipewire", "pa", "alsa", "sdl"};
-                string_address arguments[5] = {"coreaudio,id=snd0", "pipewire,id=snd0", "pa,id=snd0", "alsa,id=snd0", "sdl,id=snd0"};
+                string_address arguments[5] = {"coreaudio,id=snd0,timer-period=1000", "pipewire,id=snd0,timer-period=1000", "pa,id=snd0,timer-period=1000", "alsa,id=snd0,timer-period=1000", "sdl,id=snd0,timer-period=1000"};
 
                 ask[0] = emulator;
                 ask[1] = "-audiodev";

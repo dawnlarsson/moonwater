@@ -893,7 +893,9 @@ set -- "$@" \
 
 #       Sound: a card for the guest to play to, an HDA controller with an output-only codec on the host's own audio backend
 #       (coreaudio on a Mac, otherwise the first of pipewire, pa, alsa and sdl this QEMU has). Output only, so the VM never opens
-#       the host's microphone. The line before this one had no audio device at all, and the guest's sound server had nothing to
+#       the host's microphone.
+#       QEMU's own audio timer ticks every 10 ms, which is longer than the sound server's card buffer (10.7 ms): it starved
+#       the buffer and the tone had holes in it. timer-period=1000 (microseconds) ticks every millisecond. The line before this one had no audio device at all, and the guest's sound server had nothing to
 #       open: its mixer showed a volume and a device, and nothing was heard. No backend here, no device, as before.
 audio_drivers=$("$emulator" -audiodev help 2>/dev/null || true)
 if [ "$(uname)" = Darwin ]; then
@@ -903,7 +905,7 @@ else
 fi
 for candidate in $audio_wanted; do
         if echo "$audio_drivers" | grep -qw "$candidate"; then
-                set -- "$@" -audiodev "$candidate,id=snd0" -device intel-hda -device hda-output,audiodev=snd0
+                set -- "$@" -audiodev "$candidate,id=snd0,timer-period=1000" -device intel-hda -device hda-output,audiodev=snd0
                 break
         fi
 done
