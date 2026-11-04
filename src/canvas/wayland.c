@@ -350,6 +350,10 @@ struct wayland_surface
         // wp_tearing_control's presentation hint, asynchronous (tearing allowed) or not, pending and as the commit shows it.
         unsigned char pending_async, async_hint;
         unsigned char attention;     // an xdg-activation asked for the window that was not vouched for: it wants attention
+        // wp_fifo (a commit waits for the barrier: the next frame latched) and wp_commit_timing (the time the commit is for, in
+        // nanoseconds on the monotonic clock, 0 for none): pending, and as the commit took them.
+        unsigned char pending_fifo, fifo_wait;
+        unsigned long pending_timestamp, timestamp;
         // xdg.
         unsigned int xdg_id, role_id;
         unsigned int serial[WAYLAND_SERIALS];
@@ -941,6 +945,8 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wp_content_type_manager_v1, 1},
     {WLI_wp_alpha_modifier_v1, 1},
     {WLI_xdg_activation_v1, 1},
+    {WLI_wp_fifo_manager_v1, 1},
+    {WLI_wp_commit_timing_manager_v1, 1},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -2323,6 +2329,10 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         // protocol's double buffering).
         s->alpha = s->pending_alpha;
         s->async_hint = s->pending_async;
+        s->fifo_wait = s->pending_fifo;
+        s->pending_fifo = 0;
+        s->timestamp = s->pending_timestamp;
+        s->pending_timestamp = 0;
 
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time.
         if (!wayland_budget_left(c))
@@ -5234,6 +5244,42 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 else if (op == WLQ_wp_alpha_modifier_surface_v1_destroy && s)
                         s->pending_alpha = 0xffffffffu;
                 return WAYLAND_OK;
+        case WLI_wp_fifo_manager_v1:
+                if (op != WLQ_wp_fifo_manager_v1_get_fifo)
+                        return WAYLAND_OK;
+                s = wayland_surface_of(c, a[1].slot);
+                if (!s)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                wayland_hint_bind(c, a[0].slot, s);
+                return WAYLAND_OK;
+        case WLI_wp_fifo_v1:
+                // The barrier is the next commit's (wait_barrier); set_barrier is the one the compositor's latch releases.
+                s = wayland_surface_of(c, self - c->objects);
+                if (op == WLQ_wp_fifo_v1_wait_barrier && s)
+                        s->pending_fifo = 1;
+                return WAYLAND_OK;
+        case WLI_wp_commit_timing_manager_v1:
+                if (op != WLQ_wp_commit_timing_manager_v1_get_timer)
+                        return WAYLAND_OK;
+                s = wayland_surface_of(c, a[1].slot);
+                if (!s)
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                wayland_hint_bind(c, a[0].slot, s);
+                return WAYLAND_OK;
+        case WLI_wp_commit_timer_v1:
+                s = wayland_surface_of(c, self - c->objects);
+                if (op != WLQ_wp_commit_timer_v1_set_timestamp || !s)
+                        return WAYLAND_OK;
+                {
+                        unsigned long seconds = ((unsigned long)a[0].u << 32) | (unsigned long)a[1].u;
+
+                        if (a[2].u >= 1000000000ul || seconds > 18000000000ul)
+                                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the timestamp is not a time");
+                        s->pending_timestamp = seconds * 1000000000ul + (unsigned long)a[2].u;
+                        if (!s->pending_timestamp)
+                                s->pending_timestamp = 1;
+                }
+                return WAYLAND_OK;
         default: // xdg_system_bell: a ring is taken
                 return WAYLAND_OK;
         }
@@ -5719,6 +5765,12 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_xdg_activation_v1:
                 case WLI_xdg_activation_token_v1:
                         status = wayland_activation_request(c, o, op, a);
+                        break;
+                case WLI_wp_fifo_manager_v1:
+                case WLI_wp_fifo_v1:
+                case WLI_wp_commit_timing_manager_v1:
+                case WLI_wp_commit_timer_v1:
+                        status = wayland_hints_request(c, o, op, a);
                         break;
                 case WLI_xdg_wm_dialog_v1:
                 case WLI_xdg_dialog_v1:
@@ -6430,6 +6482,27 @@ WAYLAND_API long wayland_row_content(long row)
         struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
 
         return s ? (long)s->content : WLN_wp_content_type_v1_type_none;
+}
+
+/*
+        Whether the window's commit waits for the barrier (wp_fifo), and the time its commit is for (wp_commit_timing, nanoseconds
+        on the monotonic clock, 0 for none). The compositor shows a commit at its next frame whatever these say, so they are read
+        for what they are and not yet for a hold: a frame is already the barrier, and a commit cannot be held to a future time.
+*/
+WAYLAND_API long wayland_row_fifo(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->fifo_wait : 0;
+}
+
+WAYLAND_API unsigned long wayland_row_timestamp(long row)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
+
+        return s ? s->timestamp : 0;
 }
 
 /* Whether a window was asked for by an xdg-activation it was not vouched for (it wants attention, until it is focused). */

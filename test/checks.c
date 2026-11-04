@@ -167459,6 +167459,50 @@ static void test_hints(void)
         its window when it is used (once), with the serial still recent; a token with no serial, or one that is ten seconds old,
         only marks the window as wanting attention; an unknown token is nothing.
 */
+/*
+        wp_fifo and wp_commit_timing: a wait_barrier applies to the commit that follows it only, and a set_timestamp gives the time
+        of that commit (nanoseconds, seconds in two words); a second of nanoseconds or more is a protocol error.
+*/
+static void test_pacing(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long fifos, timers, fifo, timer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        fifos = wl_global(c, s.registry, WLI_wp_fifo_manager_v1, 1);
+        timers = wl_global(c, s.registry, WLI_wp_commit_timing_manager_v1, 1);
+        WLCHECK(fifos && timers, "the fifo and commit timing managers are offered");
+        wlc_forget(c);
+
+        fifo = wlc_id(c, WLI_wp_fifo_v1, 1);
+        wlc_send(c, fifos, WLQ_wp_fifo_manager_v1_get_fifo, fifo, s.surface);
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
+        WLCHECK(wayland_row_fifo(0) == 0, "a barrier applies from the commit after it");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_row_fifo(0) == 1, "a commit that waits for the barrier is kept as waiting");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wayland_row_fifo(0) == 0, "and the next commit does not wait unless it is told to");
+
+        timer = wlc_id(c, WLI_wp_commit_timer_v1, 1);
+        wlc_send(c, timers, WLQ_wp_commit_timing_manager_v1_get_timer, timer, s.surface);
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 7ul);
+        WLCHECK(wayland_row_timestamp(0) == 0, "a timestamp is for the commit after it is set");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_row_timestamp(0) == 5000000007ul, "and it is the commit's time, in nanoseconds");
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wayland_row_timestamp(0) == 0, "and it is for that commit only");
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 1000000000ul);
+        WLCHECK(c->errors == 1, "a second of nanoseconds or more is a protocol error");
+        wlc_end(c);
+        leak_check("pacing");
+        wayland_stop();
+}
+
 static void test_activation(void)
 {
         struct session s;
@@ -171347,6 +171391,7 @@ int main(int argc, char **argv)
         test_hints();
         test_inhibit_state();
         test_activation();
+        test_pacing();
         test_text();
         test_popups();
         test_surface_rules();

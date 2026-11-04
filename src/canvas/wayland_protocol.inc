@@ -71,6 +71,10 @@ enum {
         WLI_wp_content_type_v1,
         WLI_wp_alpha_modifier_v1,
         WLI_wp_alpha_modifier_surface_v1,
+        WLI_wp_fifo_manager_v1,
+        WLI_wp_fifo_v1,
+        WLI_wp_commit_timing_manager_v1,
+        WLI_wp_commit_timer_v1,
         WLI_COUNT
 };
 
@@ -142,6 +146,10 @@ enum {
 #define WLV_wp_content_type_v1 1
 #define WLV_wp_alpha_modifier_v1 1
 #define WLV_wp_alpha_modifier_surface_v1 1
+#define WLV_wp_fifo_manager_v1 1
+#define WLV_wp_fifo_v1 1
+#define WLV_wp_commit_timing_manager_v1 1
+#define WLV_wp_commit_timer_v1 1
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -660,6 +668,21 @@ enum {
 #define WLQ_wp_alpha_modifier_surface_v1_destroy 0
 #define WLQ_wp_alpha_modifier_surface_v1_set_multiplier 1
 #define WLN_wp_alpha_modifier_surface_v1_error_no_surface 0
+#define WLQ_wp_fifo_manager_v1_destroy 0
+#define WLQ_wp_fifo_manager_v1_get_fifo 1
+#define WLN_wp_fifo_manager_v1_error_already_exists 0
+#define WLQ_wp_fifo_v1_set_barrier 0
+#define WLQ_wp_fifo_v1_wait_barrier 1
+#define WLQ_wp_fifo_v1_destroy 2
+#define WLN_wp_fifo_v1_error_surface_destroyed 0
+#define WLQ_wp_commit_timing_manager_v1_destroy 0
+#define WLQ_wp_commit_timing_manager_v1_get_timer 1
+#define WLN_wp_commit_timing_manager_v1_error_commit_timer_exists 0
+#define WLQ_wp_commit_timer_v1_set_timestamp 0
+#define WLQ_wp_commit_timer_v1_destroy 1
+#define WLN_wp_commit_timer_v1_error_invalid_timestamp 0
+#define WLN_wp_commit_timer_v1_error_timestamp_exists 1
+#define WLN_wp_commit_timer_v1_error_surface_destroyed 2
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -968,6 +991,15 @@ static const unsigned char wl_q_wp_alpha_modifier_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_wp_alpha_modifier_v1_get_surface[] = {'n', WLI_wp_alpha_modifier_surface_v1, 'o', WLI_wl_surface, 0, 0};
 static const unsigned char wl_q_wp_alpha_modifier_surface_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_wp_alpha_modifier_surface_v1_set_multiplier[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_wp_fifo_manager_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_fifo_manager_v1_get_fifo[] = {'n', WLI_wp_fifo_v1, 'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_q_wp_fifo_v1_set_barrier[] = {0, 0};
+static const unsigned char wl_q_wp_fifo_v1_wait_barrier[] = {0, 0};
+static const unsigned char wl_q_wp_fifo_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_commit_timing_manager_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_wp_commit_timing_manager_v1_get_timer[] = {'n', WLI_wp_commit_timer_v1, 'o', WLI_wl_surface, 0, 0};
+static const unsigned char wl_q_wp_commit_timer_v1_set_timestamp[] = {'u', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_wp_commit_timer_v1_destroy[] = {0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1456,6 +1488,23 @@ static const struct wl_message wl_requests_wp_alpha_modifier_surface_v1[] = {
         {1, 1, wl_q_wp_alpha_modifier_surface_v1_destroy},
         {1, 0, wl_q_wp_alpha_modifier_surface_v1_set_multiplier},
 };
+static const struct wl_message wl_requests_wp_fifo_manager_v1[] = {
+        {1, 1, wl_q_wp_fifo_manager_v1_destroy},
+        {1, 0, wl_q_wp_fifo_manager_v1_get_fifo},
+};
+static const struct wl_message wl_requests_wp_fifo_v1[] = {
+        {1, 0, wl_q_wp_fifo_v1_set_barrier},
+        {1, 0, wl_q_wp_fifo_v1_wait_barrier},
+        {1, 1, wl_q_wp_fifo_v1_destroy},
+};
+static const struct wl_message wl_requests_wp_commit_timing_manager_v1[] = {
+        {1, 1, wl_q_wp_commit_timing_manager_v1_destroy},
+        {1, 0, wl_q_wp_commit_timing_manager_v1_get_timer},
+};
+static const struct wl_message wl_requests_wp_commit_timer_v1[] = {
+        {1, 0, wl_q_wp_commit_timer_v1_set_timestamp},
+        {1, 1, wl_q_wp_commit_timer_v1_destroy},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -1526,4 +1575,8 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_wp_content_type_v1] = {"wp_content_type_v1", 1, 2, 0, wl_requests_wp_content_type_v1, 0},
         [WLI_wp_alpha_modifier_v1] = {"wp_alpha_modifier_v1", 1, 2, 0, wl_requests_wp_alpha_modifier_v1, 0},
         [WLI_wp_alpha_modifier_surface_v1] = {"wp_alpha_modifier_surface_v1", 1, 2, 0, wl_requests_wp_alpha_modifier_surface_v1, 0},
+        [WLI_wp_fifo_manager_v1] = {"wp_fifo_manager_v1", 1, 2, 0, wl_requests_wp_fifo_manager_v1, 0},
+        [WLI_wp_fifo_v1] = {"wp_fifo_v1", 1, 3, 0, wl_requests_wp_fifo_v1, 0},
+        [WLI_wp_commit_timing_manager_v1] = {"wp_commit_timing_manager_v1", 1, 2, 0, wl_requests_wp_commit_timing_manager_v1, 0},
+        [WLI_wp_commit_timer_v1] = {"wp_commit_timer_v1", 1, 2, 0, wl_requests_wp_commit_timer_v1, 0},
 };

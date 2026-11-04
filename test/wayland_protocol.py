@@ -95,6 +95,12 @@ CONFIG = [
     ("protocols", "staging/alpha-modifier/alpha-modifier-v1.xml", [
         "wp_alpha_modifier_v1", "wp_alpha_modifier_surface_v1",
     ]),
+    ("protocols", "staging/fifo/fifo-v1.xml", [
+        "wp_fifo_manager_v1", "wp_fifo_v1",
+    ]),
+    ("protocols", "staging/commit-timing/commit-timing-v1.xml", [
+        "wp_commit_timing_manager_v1", "wp_commit_timer_v1",
+    ]),
 ]
 
 
