@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Ядро отказалось отображать �
 settings_issue_gpu_refused	f29c	Видеокарта отказалась от %1$d кадров: %2$s
 settings_issue_gpu_scanout	1379	Видеокарта отказалась от framebuffer окна для прямого вывода (ошибка %1$d)
 settings_issue_gpu_untrusted	14ea	Самотест видеокарты нарисовал неверно, поэтому ей не доверяют (семейство %1$d)
-settings_issue_gpu_userptr	ff23	Ядро без userptr для GPU (CONFIG_DRM_AMDGPU_USERPTR): видеокарта не читает картинки окон. Пересоберите ядро с ним
+settings_issue_gpu_userptr	08a6	ядро не отображает страницу для видеокарты: пересоберите с CONFIG_DRM_AMDGPU_USERPTR=y (ошибка 19 как раз у такого ядра)
 settings_issue_unknown	e812	Проблема, которую эта версия не называет (код %1$d)
 settings_item_add	fbef	Enter запоминает имя устройства; радио включается для того, что соединяется
 settings_item_ask	6aad	Enter спросит пароль и подключится
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater отказал
 settings_refused_place	9632	%s (его положение в файле не прочитано)
 settings_refused_rate	97bc	%1$s (%2$d Гц не предлагается)
 settings_refused_turn	7b3a	%1$s (не удалось: %2$s)
+settings_req_context	a233	видеокарта не выделяет буфер, VM-отображение или контекст: кольцо amdgpu или его прошивка не запущены
+settings_req_driver	9d2d	драйвер видеокарты не amdgpu: для него пока нет пути GPU (i915, virtio_gpu и nouveau остаются на процессоре)
+settings_req_family	ddcf	для этого семейства AMD нет ядер (только RDNA2: 144, 146, 149, 151); видеокарта остаётся на процессоре
+settings_req_node	a362	узел рендеринга не открылся: проверьте режим, владельца и загружен ли драйвер (группа render или режим 0666)
+settings_req_prime	a63c	dma-buf не импортируется в узел рендеринга: видеокарта не может читать memfd окна (CONFIG_DRM_AMDGPU с PRIME)
+settings_req_ring	29f2	кольцо вычислений не завершило самотест: прошивка, частоты или сброс кольца (строки ядра скажут какие)
+settings_req_selftest	0061	видеокарта неверно нарисовала самотест: её ядра не совпадают с ISA семейства; остаётся на процессоре
+settings_req_udmabuf	420f	/dev/udmabuf не создаёт dma-buf из страницы memfd: нужен CONFIG_UDMABUF=y и открывающийся /dev/udmabuf
 settings_run_any	3ffd	Выполнить любую команду moonwater
 settings_running	d0e2	выполняется %s (Escape останавливает)
 settings_saved	9f44	сохранено

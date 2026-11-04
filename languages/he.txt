@@ -95,7 +95,7 @@ settings_issue_gpu_map	f52f	הליבה סירבה למפות את תמונות �
 settings_issue_gpu_refused	f29c	הכרטיס סירב ל-%1$d פריימים: %2$s
 settings_issue_gpu_scanout	1379	הכרטיס סירב למאגר המסגרת של חלון ליציאה ישירה (שגיאה %1$d)
 settings_issue_gpu_untrusted	14ea	בדיקת העצמי של הכרטיס צייר לא נכון, ולכן לא נותנים בו אמון (משפחה %1$d)
-settings_issue_gpu_userptr	ff23	הליבה נבנתה בלי userptr ל-GPU (CONFIG_DRM_AMDGPU_USERPTR), והכרטיס לא קורא תמונות חלונות: בנה אותה מחדש
+settings_issue_gpu_userptr	08a6	הליבה לא ממפה דף לכרטיס: בנו אותה מחדש עם CONFIG_DRM_AMDGPU_USERPTR=y (שגיאה 19 היא הליבה הזו)
 settings_issue_unknown	e812	בעיה שהגרסה הזו אינה מכנה (קוד %1$d)
 settings_item_add	fbef	Enter שומר את שם ההתקן; הרדיו נדלק עבור מה שמזווגים
 settings_item_ask	6aad	Enter מבקש את הסיסמה ומתחבר
@@ -129,6 +129,14 @@ settings_refused	454b	moonwater סירב
 settings_refused_place	9632	%s (מקומו בקובץ לא נקרא)
 settings_refused_rate	97bc	%1$s (%2$d הרץ אינו מוצע)
 settings_refused_turn	7b3a	%1$s (לא ניתן היה לבצע %2$s)
+settings_req_context	a233	הכרטיס לא מספק מאגר, מיפוי VM או הקשר חישוב: טבעת החישוב של amdgpu או הקושחה שלה אינן פעילות
+settings_req_driver	9d2d	מנהל ההתקן של הכרטיס אינו amdgpu: אין עדיין נתיב GPU עבורו (i915, virtio_gpu ו-nouveau נשארים במעבד)
+settings_req_family	ddcf	למשפחת AMD זו אין ליבות (רק RDNA2: 144, 146, 149, 151); הכרטיס נשאר במעבד
+settings_req_node	a362	לא נפתח צומת הרינדור של הכרטיס: בדקו מצב, בעלים וטעינת מנהל ההתקן (קבוצה render או מצב 0666)
+settings_req_prime	a63c	dma-buf לא מיובא לצומת הרינדור: הכרטיס לא קורא את ה-memfd של חלון (CONFIG_DRM_AMDGPU עם PRIME)
+settings_req_ring	29f2	טבעת החישוב לא סיימה את הבדיקה העצמית: קושחה, שעונים או איפוס הטבעת (שורות הליבה אומרות איזו)
+settings_req_selftest	0061	הכרטיס צייר את תמונת הבדיקה העצמית לא נכון: הליבות שלו אינן תואמות את ה-ISA של המשפחה; הוא נשאר במעבד
+settings_req_udmabuf	420f	/dev/udmabuf לא יוצר dma-buf מדף memfd: נדרש CONFIG_UDMABUF=y וש-/dev/udmabuf ייפתח (הכרטיס עדיין מרכיב)
 settings_run_any	3ffd	הרץ כל פקודת moonwater
 settings_running	d0e2	מריץ את %s (Escape עוצר)
 settings_saved	9f44	שמורה

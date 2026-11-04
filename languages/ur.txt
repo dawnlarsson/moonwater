@@ -95,7 +95,7 @@ settings_issue_gpu_map	f52f	کرنل نے کارڈ کے لیے ونڈو کی ت�
 settings_issue_gpu_refused	f29c	کارڈ نے %1$d فریم رد کیے: %2$s
 settings_issue_gpu_scanout	1379	کارڈ نے براہ راست آؤٹ پٹ کے لیے ایک ونڈو کا فریم بفر رد کیا (خرابی %1$d)
 settings_issue_gpu_untrusted	14ea	کارڈ کا خود ٹیسٹ غلط بنا، اس لیے اس پر بھروسا نہیں (فیملی %1$d)
-settings_issue_gpu_userptr	ff23	کرنل GPU کے userptr کے بغیر بنا ہے (CONFIG_DRM_AMDGPU_USERPTR): کارڈ ونڈو کی تصاویر نہیں پڑھتا، کرنل دوبارہ بنائیں
+settings_issue_gpu_userptr	08a6	کرنل کارڈ کے لیے ایک صفحہ میپ نہیں کرتا: CONFIG_DRM_AMDGPU_USERPTR=y کے ساتھ دوبارہ بنائیں (خرابی 19 یہی کرنل ہے)
 settings_issue_unknown	e812	ایک مسئلہ جسے یہ ورژن نام نہیں دیتا (کوڈ %1$d)
 settings_item_add	fbef	Enter ڈیوائس کا نام محفوظ رکھتا ہے؛ جو جوڑا جائے اس کے لیے ریڈیو چل پڑتا ہے
 settings_item_ask	6aad	Enter پاس ورڈ مانگتا ہے اور منسلک ہو جاتا ہے
@@ -129,6 +129,14 @@ settings_refused	454b	moonwater نے انکار کیا
 settings_refused_place	9632	%s (فائل میں اس کی جگہ پڑھی نہیں جاتی)
 settings_refused_rate	97bc	%1$s (%2$d ہرٹز دستیاب نہیں)
 settings_refused_turn	7b3a	%1$s (%2$s نہیں ہو سکا)
+settings_req_context	a233	کارڈ بفر، VM میپ یا کمپیوٹ کانٹیکسٹ نہیں دیتا: amdgpu کمپیوٹ رنگ یا اس کا فرم ویئر چالو نہیں
+settings_req_driver	9d2d	کارڈ کا درائیور amdgpu نہیں: اس کے لیے ابھی GPU راستہ نہیں (i915، virtio_gpu اور nouveau پروسیسر پر رہتے ہیں)
+settings_req_family	ddcf	اس AMD فیملی کے کرنل نہیں (صرف RDNA2: 144، 146، 149، 151)؛ کارڈ پروسیسر پر رہتا ہے
+settings_req_node	a362	کارڈ کا رینڈر نوڈ نہیں کھلا: موڈ، مالک اور ڈرائیور کا لوڈ ہونا دیکھیں (render گروپ یا موڈ 0666)
+settings_req_prime	a63c	dma-buf رینڈر نوڈ میں درآمد نہیں ہوتا: کارڈ کسی ونڈو کا memfd نہیں پڑھ سکتا (CONFIG_DRM_AMDGPU اور PRIME کے ساتھ)
+settings_req_ring	29f2	کمپیوٹ رنگ نے سیلف ٹیسٹ پورا نہیں کیا: فرم ویئر، کلاک یا رنگ ری سیٹ (کرنل کی لائنیں بتاتی ہیں کون سی)
+settings_req_selftest	0061	کارڈ نے سیلف ٹیسٹ کی تصویر غلط بنائی: اس کے کرنل اس فیملی کے ISA سے نہیں ملتے؛ پروسیسر پر رہتا ہے
+settings_req_udmabuf	420f	/dev/udmabuf memfd صفحے سے dma-buf نہیں بناتا: CONFIG_UDMABUF=y درکار ہے اور /dev/udmabuf کھلنا چاہیے (کارڈ پھر بھی ترکیب کرتا ہے)
 settings_run_any	3ffd	کوئی بھی moonwater کمانڈ چلائیں
 settings_running	d0e2	%s چل رہا ہے (Escape اسے روکتا ہے)
 settings_saved	9f44	محفوظ شدہ

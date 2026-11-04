@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Le noyau a refusé de mapper les images des fenêtre
 settings_issue_gpu_refused	f29c	La carte a refusé %1$d présentations : %2$s
 settings_issue_gpu_scanout	1379	La carte a refusé le framebuffer d'une fenêtre pour l'affichage direct (erreur %1$d)
 settings_issue_gpu_untrusted	14ea	L'autotest de la carte a mal dessiné, elle n'est donc pas fiable (famille %1$d)
-settings_issue_gpu_userptr	ff23	Le noyau a été compilé sans prise en charge userptr pour le GPU (CONFIG_DRM_AMDGPU_USERPTR), donc la carte ne peut pas lire les images des fenêtres : recompilez le noyau avec cette option
+settings_issue_gpu_userptr	08a6	le noyau ne mappe pas de page pour la carte : recompilez-le avec CONFIG_DRM_AMDGPU_USERPTR=y (l'erreur 19 est ce noyau)
 settings_issue_unknown	e812	Un problème que cette version ne nomme pas (code %1$d)
 settings_item_add	fbef	Enter garde le nom d'un appareil ; la radio s'active pour ce qui s'appaire
 settings_item_ask	6aad	Enter demande son mot de passe et rejoint
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater a refusé
 settings_refused_place	9632	%s (sa place dans le fichier n'est pas lue)
 settings_refused_rate	97bc	%1$s (%2$d Hz n'est pas proposé)
 settings_refused_turn	7b3a	%1$s (%2$s n'a pas pu être fait)
+settings_req_context	a233	la carte ne fournit ni tampon, ni mappage VM, ni contexte de calcul : l'anneau de calcul amdgpu ou son micrologiciel n'est pas prêt
+settings_req_driver	9d2d	le pilote de la carte n'est pas amdgpu : il n'existe pas encore de voie GPU pour lui (i915, virtio_gpu et nouveau restent sur le processeur)
+settings_req_family	ddcf	cette famille AMD n'a pas de noyaux (RDNA2 seulement : 144, 146, 149, 151) ; la carte reste sur le processeur
+settings_req_node	a362	aucun nœud de rendu de la carte ne s'est ouvert : vérifiez mode et propriétaire, et que le pilote est chargé (groupe render ou mode 0666)
+settings_req_prime	a63c	un dma-buf ne s'importe pas dans le nœud de rendu : la carte ne peut pas lire le memfd d'une fenêtre (CONFIG_DRM_AMDGPU avec PRIME)
+settings_req_ring	29f2	l'anneau de calcul n'a pas fini l'autotest : micrologiciel, horloges ou réinitialisation de l'anneau (lignes du noyau)
+settings_req_selftest	0061	la carte a mal dessiné l'image d'autotest : ses noyaux ne correspondent pas à l'ISA de cette famille ; elle reste sur le processeur
+settings_req_udmabuf	420f	/dev/udmabuf ne crée pas de dma-buf depuis une page memfd : il faut CONFIG_UDMABUF=y et que /dev/udmabuf s'ouvre (la carte compose encore)
 settings_run_any	3ffd	Exécuter une commande moonwater
 settings_running	d0e2	exécution de %s (Escape l'arrête)
 settings_saved	9f44	enregistré

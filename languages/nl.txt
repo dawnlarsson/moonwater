@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	De kernel weigerde de vensterbeelden voor de kaart t
 settings_issue_gpu_refused	f29c	De kaart weigerde %1$d presentaties: %2$s
 settings_issue_gpu_scanout	1379	De kaart weigerde de framebuffer van een venster voor directe uitvoer (fout %1$d)
 settings_issue_gpu_untrusted	14ea	De zelftest van de kaart tekende verkeerd, dus die wordt niet vertrouwd (familie %1$d)
-settings_issue_gpu_userptr	ff23	De kernel is gebouwd zonder userptr-ondersteuning voor de GPU (CONFIG_DRM_AMDGPU_USERPTR), dus de kaart kan de vensterbeelden niet lezen: bouw de kernel opnieuw met die optie
+settings_issue_gpu_userptr	08a6	de kernel koppelt geen pagina voor de kaart: hercompileer met CONFIG_DRM_AMDGPU_USERPTR=y (fout 19 is precies die kernel)
 settings_issue_unknown	e812	Een probleem dat deze versie niet benoemt (code %1$d)
 settings_item_add	fbef	Enter bewaart de naam van een apparaat; de radio gaat aan voor wat koppelt
 settings_item_ask	6aad	Enter vraagt om het wachtwoord en verbindt
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater weigerde
 settings_refused_place	9632	%s (de plaats in het bestand wordt niet gelezen)
 settings_refused_rate	97bc	%1$s (%2$d Hz wordt niet aangeboden)
 settings_refused_turn	7b3a	%1$s (%2$s kon niet worden gedaan)
+settings_req_context	a233	de kaart levert geen buffer, geen VM-koppeling en geen rekencontext: de amdgpu-rekenring of zijn firmware draait niet
+settings_req_driver	9d2d	het stuurprogramma van de kaart is niet amdgpu: er is nog geen GPU-route ervoor (i915, virtio_gpu en nouveau blijven op de processor)
+settings_req_family	ddcf	deze AMD-familie heeft geen kernels (alleen RDNA2: 144, 146, 149, 151); de kaart blijft op de processor
+settings_req_node	a362	geen render-knoop van de kaart geopend: controleer modus, eigenaar en of het stuurprogramma geladen is (groep render of modus 0666)
+settings_req_prime	a63c	een dma-buf importeert niet in de render-knoop: de kaart kan het memfd van een venster niet lezen (CONFIG_DRM_AMDGPU met PRIME)
+settings_req_ring	29f2	de rekenring heeft de zelftest niet afgerond: firmware, kloks of een ringreset (de kernelregels zeggen welke)
+settings_req_selftest	0061	de kaart tekende de zelftestafbeelding verkeerd: de kernels passen niet bij de ISA van deze familie; ze blijft op de processor
+settings_req_udmabuf	420f	/dev/udmabuf maakt geen dma-buf van een memfd-pagina: CONFIG_UDMABUF=y is nodig en /dev/udmabuf moet opengaan (de kaart composeert nog)
 settings_run_any	3ffd	Een willekeurige moonwater-opdracht uitvoeren
 settings_running	d0e2	%s wordt uitgevoerd (Escape stopt het)
 settings_saved	9f44	opgeslagen

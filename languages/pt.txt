@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	O kernel recusou mapear as imagens das janelas para 
 settings_issue_gpu_refused	f29c	A placa recusou %1$d apresentações: %2$s
 settings_issue_gpu_scanout	1379	A placa recusou o framebuffer de uma janela para a saída direta (erro %1$d)
 settings_issue_gpu_untrusted	14ea	O autoteste da placa desenhou errado, por isso ela não é confiável (família %1$d)
-settings_issue_gpu_userptr	ff23	O kernel foi compilado sem suporte a userptr para a GPU (CONFIG_DRM_AMDGPU_USERPTR), por isso a placa não consegue ler as imagens das janelas: recompile o kernel com ele
+settings_issue_gpu_userptr	08a6	o kernel não mapeia uma página para a placa: recompile com CONFIG_DRM_AMDGPU_USERPTR=y (o erro 19 é esse kernel)
 settings_issue_unknown	e812	Um problema que esta versão não nomeia (código %1$d)
 settings_item_add	fbef	Enter guarda o nome de um dispositivo; o rádio liga para o que for emparelhado
 settings_item_ask	6aad	Enter pede a senha e conecta
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater recusou
 settings_refused_place	9632	%s (sua posição no arquivo não é lida)
 settings_refused_rate	97bc	%1$s (%2$d Hz não é oferecido)
 settings_refused_turn	7b3a	%1$s (não foi possível: %2$s)
+settings_req_context	a233	a placa não dá buffer, mapa de VM nem contexto de computação: o anel de computação amdgpu ou seu firmware não está ativo
+settings_req_driver	9d2d	o driver da placa não é amdgpu: ainda não há caminho de GPU para ele (i915, virtio_gpu e nouveau ficam no processador)
+settings_req_family	ddcf	esta família AMD não tem kernels (só RDNA2: 144, 146, 149, 151); a placa fica no processador
+settings_req_node	a362	nenhum nó de renderização da placa abriu: verifique modo e dono e se o driver está carregado (grupo render ou modo 0666)
+settings_req_prime	a63c	um dma-buf não importa para o nó de renderização: a placa não lê o memfd de uma janela (CONFIG_DRM_AMDGPU com PRIME)
+settings_req_ring	29f2	o anel de computação não terminou o autoteste: firmware, clocks ou reinício do anel (as linhas do kernel dizem qual)
+settings_req_selftest	0061	a placa desenhou errado a imagem de autoteste: seus kernels não batem com a ISA desta família; ela fica no processador
+settings_req_udmabuf	420f	/dev/udmabuf não cria dma-buf de uma página memfd: é preciso CONFIG_UDMABUF=y e que /dev/udmabuf abra (a placa ainda compõe)
 settings_run_any	3ffd	Executar qualquer comando do moonwater
 settings_running	d0e2	executando %s (Escape interrompe)
 settings_saved	9f44	salva

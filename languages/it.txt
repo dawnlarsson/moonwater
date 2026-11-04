@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Il kernel ha rifiutato di mappare le immagini delle 
 settings_issue_gpu_refused	f29c	La scheda ha rifiutato %1$d presentazioni: %2$s
 settings_issue_gpu_scanout	1379	La scheda ha rifiutato il framebuffer di una finestra per l'uscita diretta (errore %1$d)
 settings_issue_gpu_untrusted	14ea	L'autotest della scheda ha disegnato male, quindi non è affidabile (famiglia %1$d)
-settings_issue_gpu_userptr	ff23	Il kernel è stato compilato senza il supporto userptr per la GPU (CONFIG_DRM_AMDGPU_USERPTR), quindi la scheda non può leggere le immagini delle finestre: ricompilare il kernel con esso
+settings_issue_gpu_userptr	08a6	il kernel non mappa una pagina per la scheda: ricompilarlo con CONFIG_DRM_AMDGPU_USERPTR=y (l'errore 19 è quel kernel)
 settings_issue_unknown	e812	Un problema che questa versione non nomina (codice %1$d)
 settings_item_add	fbef	Enter conserva il nome di un dispositivo; la radio si accende per ciò che si associa
 settings_item_ask	6aad	Enter chiede la password e si connette
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater ha rifiutato
 settings_refused_place	9632	%s (la sua posizione nel file non viene letta)
 settings_refused_rate	97bc	%1$s (%2$d Hz non è offerto)
 settings_refused_turn	7b3a	%1$s (%2$s non è stato possibile)
+settings_req_context	a233	la scheda non fornisce buffer, mappa VM né contesto di calcolo: l'anello di calcolo amdgpu o il suo firmware non è attivo
+settings_req_driver	9d2d	il driver della scheda non è amdgpu: non esiste ancora un percorso GPU per esso (i915, virtio_gpu e nouveau restano sul processore)
+settings_req_family	ddcf	questa famiglia AMD non ha kernel (solo RDNA2: 144, 146, 149, 151); la scheda resta sul processore
+settings_req_node	a362	nessun nodo di rendering della scheda si è aperto: controllare modalità, proprietario e che il driver sia caricato (gruppo render o modo 0666)
+settings_req_prime	a63c	un dma-buf non si importa nel nodo di rendering: la scheda non legge il memfd di una finestra (CONFIG_DRM_AMDGPU con PRIME)
+settings_req_ring	29f2	l'anello di calcolo non ha completato l'autotest: firmware, clock o un reset dell'anello (lo dicono le righe del kernel)
+settings_req_selftest	0061	la scheda ha disegnato male l'immagine di autotest: i suoi kernel non corrispondono all'ISA di questa famiglia; resta sul processore
+settings_req_udmabuf	420f	/dev/udmabuf non crea un dma-buf da una pagina memfd: serve CONFIG_UDMABUF=y e che /dev/udmabuf si apra (la scheda compone ancora)
 settings_run_any	3ffd	Esegui un comando moonwater qualsiasi
 settings_running	d0e2	esecuzione di %s (Escape la ferma)
 settings_saved	9f44	salvata

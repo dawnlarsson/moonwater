@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Ο πυρήνας αρνήθηκε να αντιστ
 settings_issue_gpu_refused	f29c	Η κάρτα αρνήθηκε %1$d καρέ: %2$s
 settings_issue_gpu_scanout	1379	Η κάρτα αρνήθηκε το framebuffer ενός παραθύρου για άμεση έξοδο (σφάλμα %1$d)
 settings_issue_gpu_untrusted	14ea	Το αυτοτέστ της κάρτας σχεδίασε λάθος, γι' αυτό δεν είναι αξιόπιστη (οικογένεια %1$d)
-settings_issue_gpu_userptr	ff23	Ο πυρήνας δεν έχει userptr για την GPU (CONFIG_DRM_AMDGPU_USERPTR): η κάρτα δεν διαβάζει τις εικόνες παραθύρων. Ξαναχτίστε τον
+settings_issue_gpu_userptr	08a6	ο πυρήνας δεν αντιστοιχίζει σελίδα: μεταγλωττίστε με CONFIG_DRM_AMDGPU_USERPTR=y (το σφάλμα 19 είναι αυτός ο πυρήνας)
 settings_issue_unknown	e812	Ένα πρόβλημα που αυτή η έκδοση δεν ονομάζει (κωδικός %1$d)
 settings_item_add	fbef	το Enter κρατά το όνομα μιας συσκευής· η ασύρματη λειτουργία ενεργοποιείται για ό,τι ζευγαρώνει
 settings_item_ask	6aad	το Enter ζητά τον κωδικό και συνδέεται
@@ -128,6 +128,14 @@ settings_refused	454b	το moonwater αρνήθηκε
 settings_refused_place	9632	%s (η θέση του στο αρχείο δεν διαβάζεται)
 settings_refused_rate	97bc	%1$s (το %2$d Hz δεν προσφέρεται)
 settings_refused_turn	7b3a	%1$s (δεν έγινε: %2$s)
+settings_req_context	a233	η κάρτα δεν δίνει μπάφερ, χάρτη VM ή πλαίσιο: ο δακτύλιος amdgpu ή το υλικολογισμικό του δεν είναι ενεργά
+settings_req_driver	9d2d	το πρόγραμμα οδήγησης δεν είναι amdgpu: δεν υπάρχει ακόμη διαδρομή GPU (i915, virtio_gpu, nouveau στον επεξεργαστή)
+settings_req_family	ddcf	αυτή η οικογένεια AMD δεν έχει πυρήνες (μόνο RDNA2: 144, 146, 149, 151)· η κάρτα μένει στον επεξεργαστή
+settings_req_node	a362	δεν άνοιξε κόμβος απόδοσης: ελέγξτε λειτουργία, ιδιοκτήτη και πρόγραμμα οδήγησης (ομάδα render ή 0666)
+settings_req_prime	a63c	ένα dma-buf δεν εισάγεται στον κόμβο απόδοσης: η κάρτα δεν διαβάζει το memfd ενός παραθύρου (CONFIG_DRM_AMDGPU με PRIME)
+settings_req_ring	29f2	ο δακτύλιος υπολογισμού δεν ολοκλήρωσε το αυτοτέστ: υλικολογισμικό, ρολόγια ή επαναφορά (δείτε τον πυρήνα)
+settings_req_selftest	0061	η κάρτα σχεδίασε λάθος το αυτοτέστ: οι πυρήνες της δεν ταιριάζουν στο ISA· μένει στον επεξεργαστή
+settings_req_udmabuf	420f	το /dev/udmabuf δεν φτιάχνει dma-buf από σελίδα memfd: χρειάζεται CONFIG_UDMABUF=y και ανοιχτό /dev/udmabuf
 settings_run_any	3ffd	Εκτέλεση οποιασδήποτε εντολής moonwater
 settings_running	d0e2	εκτελείται το %s (το Escape το σταματά)
 settings_saved	9f44	αποθηκευμένο

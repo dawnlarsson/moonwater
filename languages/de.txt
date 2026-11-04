@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Der Kernel hat das Abbilden der Fensterbilder für d
 settings_issue_gpu_refused	f29c	Die Grafikkarte hat %1$d Bilder abgelehnt: %2$s
 settings_issue_gpu_scanout	1379	Die Grafikkarte hat den Framebuffer eines Fensters für die direkte Ausgabe abgelehnt (Fehler %1$d)
 settings_issue_gpu_untrusted	14ea	Der Selbsttest der Grafikkarte hat falsch gezeichnet, daher wird ihr nicht vertraut (Familie %1$d)
-settings_issue_gpu_userptr	ff23	Der Kernel wurde ohne userptr-Unterstützung für die GPU gebaut (CONFIG_DRM_AMDGPU_USERPTR), daher kann die Grafikkarte die Fensterbilder nicht lesen: den Kernel damit neu bauen
+settings_issue_gpu_userptr	08a6	der Kernel bildet keine Seite für die Karte ab: mit CONFIG_DRM_AMDGPU_USERPTR=y neu bauen (Fehler 19 ist genau dieser Kernel)
 settings_issue_unknown	e812	Ein Problem, das diese Version nicht benennt (Code %1$d)
 settings_item_add	fbef	Enter merkt sich den Namen eines Geräts; das Funkmodul schaltet sich für Kopplungen ein
 settings_item_ask	6aad	Enter fragt nach dem Passwort und verbindet
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater hat abgelehnt
 settings_refused_place	9632	%s (seine Position in der Datei wird nicht gelesen)
 settings_refused_rate	97bc	%1$s (%2$d Hz wird nicht angeboten)
 settings_refused_turn	7b3a	%1$s (%2$s ließ sich nicht ausführen)
+settings_req_context	a233	die Karte liefert keinen Puffer, keine VM-Abbildung und keinen Compute-Kontext: der amdgpu-Compute-Ring oder seine Firmware läuft nicht
+settings_req_driver	9d2d	der Treiber der Grafikkarte ist nicht amdgpu: dafür gibt es noch keinen GPU-Pfad (i915, virtio_gpu und nouveau bleiben beim Prozessor)
+settings_req_family	ddcf	diese AMD-Familie hat keine Kernel (nur RDNA2: 144, 146, 149, 151); die Karte bleibt beim Prozessor
+settings_req_node	a362	kein Render-Knoten der Grafikkarte geöffnet: Modus und Besitzer prüfen und ob der Treiber geladen ist (Gruppe render oder Modus 0666)
+settings_req_prime	a63c	ein dma-buf lässt sich nicht in den Render-Knoten importieren: die Karte kann das memfd eines Fensters nicht lesen (CONFIG_DRM_AMDGPU mit PRIME)
+settings_req_ring	29f2	der Compute-Ring hat den Selbsttest nicht beendet: Firmware, Takte oder ein Ring-Reset (die Kernelzeilen sagen, welches)
+settings_req_selftest	0061	die Karte hat das Selbsttestbild falsch gezeichnet: ihre Kernel passen nicht zur ISA dieser Familie; sie bleibt beim Prozessor
+settings_req_udmabuf	420f	/dev/udmabuf erzeugt aus einer memfd-Seite keinen dma-buf: CONFIG_UDMABUF=y nötig und /dev/udmabuf muss sich öffnen (die Karte rechnet weiter)
 settings_run_any	3ffd	Beliebigen moonwater-Befehl ausführen
 settings_running	d0e2	%s läuft (Escape bricht ab)
 settings_saved	9f44	gespeichert

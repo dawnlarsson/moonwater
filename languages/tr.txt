@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Çekirdek, pencere görüntülerini kart için eşle
 settings_issue_gpu_refused	f29c	Kart %1$d sunumu reddetti: %2$s
 settings_issue_gpu_scanout	1379	Kart, bir pencerenin framebuffer'ını doğrudan çıkış için reddetti (hata %1$d)
 settings_issue_gpu_untrusted	14ea	Kartın öz testi yanlış çizdi, bu yüzden güvenilmiyor (aile %1$d)
-settings_issue_gpu_userptr	ff23	Çekirdek, GPU için userptr desteği olmadan derlenmiş (CONFIG_DRM_AMDGPU_USERPTR), bu yüzden kart pencere görüntülerini okuyamıyor: çekirdeği bu seçenekle yeniden derleyin
+settings_issue_gpu_userptr	08a6	çekirdek kart için bir sayfa eşlemiyor: CONFIG_DRM_AMDGPU_USERPTR=y ile yeniden derleyin (hata 19 bu çekirdek)
 settings_issue_unknown	e812	Bu sürümün adlandırmadığı bir sorun (kod %1$d)
 settings_item_add	fbef	Enter bir aygıtın adını saklar; radyo eşleşenler için açılır
 settings_item_ask	6aad	Enter parolasını sorar ve bağlanır
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater reddetti
 settings_refused_place	9632	%s (dosyadaki konumu okunmuyor)
 settings_refused_rate	97bc	%1$s (%2$d Hz sunulmuyor)
 settings_refused_turn	7b3a	%1$s (%2$s yapılamadı)
+settings_req_context	a233	kart bir arabellek, VM eşlemesi ya da hesaplama bağlamı vermiyor: amdgpu hesaplama halkası ya da yazılımı çalışmıyor
+settings_req_driver	9d2d	kartın sürücüsü amdgpu değil: onun için henüz GPU yolu yok (i915, virtio_gpu ve nouveau işlemcide kalır)
+settings_req_family	ddcf	bu AMD ailesinin çekirdekleri yok (yalnızca RDNA2: 144, 146, 149, 151); kart işlemcide kalır
+settings_req_node	a362	kartın render düğümü açılamadı: kipi, sahibi ve sürücünün yüklü olup olmadığını denetleyin (render grubu veya 0666 kipi)
+settings_req_prime	a63c	dma-buf render düğümüne aktarılamıyor: kart bir pencerenin memfd'sini okuyamıyor (CONFIG_DRM_AMDGPU ve PRIME)
+settings_req_ring	29f2	hesaplama halkası öz testi bitirmedi: yazılım, saatler ya da halka sıfırlaması (çekirdek satırları hangisini söyler)
+settings_req_selftest	0061	kart öz test görüntüsünü yanlış çizdi: çekirdekleri bu ailenin ISA'sına uymuyor; işlemcide kalır
+settings_req_udmabuf	420f	/dev/udmabuf bir memfd sayfasından dma-buf yapmıyor: CONFIG_UDMABUF=y gerekli ve /dev/udmabuf açılmalı (kart yine birleştirir)
 settings_run_any	3ffd	Herhangi bir moonwater komutunu çalıştır
 settings_running	d0e2	%s çalışıyor (Escape durdurur)
 settings_saved	9f44	kayıtlı

@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	El kernel rechazó mapear las imágenes de las venta
 settings_issue_gpu_refused	f29c	La tarjeta rechazó %1$d presentaciones: %2$s
 settings_issue_gpu_scanout	1379	La tarjeta rechazó el framebuffer de una ventana para la salida directa (error %1$d)
 settings_issue_gpu_untrusted	14ea	La autoprueba de la tarjeta dibujó mal, así que no es de confianza (familia %1$d)
-settings_issue_gpu_userptr	ff23	El kernel se compiló sin soporte userptr para la GPU (CONFIG_DRM_AMDGPU_USERPTR), así que la tarjeta no puede leer las imágenes de las ventanas: recompile el kernel con él
+settings_issue_gpu_userptr	08a6	el kernel no mapea una página para la tarjeta: recompílelo con CONFIG_DRM_AMDGPU_USERPTR=y (el error 19 es ese kernel)
 settings_issue_unknown	e812	Un problema que esta versión no nombra (código %1$d)
 settings_item_add	fbef	Enter guarda el nombre de un dispositivo; la radio se activa para lo que se empareje
 settings_item_ask	6aad	Enter pide su contraseña y se conecta
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater lo rechazó
 settings_refused_place	9632	%s (su lugar en el archivo no se lee)
 settings_refused_rate	97bc	%1$s (%2$d Hz no se ofrece)
 settings_refused_turn	7b3a	%1$s (no se pudo hacer: %2$s)
+settings_req_context	a233	la tarjeta no da búfer, mapa de VM ni contexto de cómputo: el anillo de cómputo amdgpu o su firmware no están activos
+settings_req_driver	9d2d	el controlador de la tarjeta no es amdgpu: aún no hay ruta de GPU para él (i915, virtio_gpu y nouveau siguen en el procesador)
+settings_req_family	ddcf	esta familia AMD no tiene núcleos de GPU (solo RDNA2: 144, 146, 149, 151); la tarjeta sigue en el procesador
+settings_req_node	a362	no se abrió ningún nodo de render de la tarjeta: revise modo y propietario, y que el controlador esté cargado (el grupo render o el modo 0666 permiten abrirlo)
+settings_req_prime	a63c	un dma-buf no se importa al nodo de render: la tarjeta no puede leer el memfd de una ventana (CONFIG_DRM_AMDGPU con PRIME)
+settings_req_ring	29f2	el anillo de cómputo no terminó la autoprueba: firmware, relojes o un reinicio del anillo (las líneas del kernel lo dicen)
+settings_req_selftest	0061	la tarjeta dibujó mal la imagen de autoprueba: sus núcleos no coinciden con el ISA de esta familia; sigue en el procesador
+settings_req_udmabuf	420f	/dev/udmabuf no crea un dma-buf de una página memfd: se necesita CONFIG_UDMABUF=y y que /dev/udmabuf abra (la tarjeta sigue componiendo)
 settings_run_any	3ffd	Ejecutar cualquier comando de moonwater
 settings_running	d0e2	ejecutando %s (Escape lo detiene)
 settings_saved	9f44	guardada

@@ -94,7 +94,7 @@ settings_issue_gpu_map	f52f	Kärnan vägrade mappa fönsterbilderna för grafikk
 settings_issue_gpu_refused	f29c	Grafikkortet vägrade %1$d bildrutor: %2$s
 settings_issue_gpu_scanout	1379	Grafikkortet vägrade ett fönsters framebuffer för direkt utmatning (fel %1$d)
 settings_issue_gpu_untrusted	14ea	Grafikkortets självtest ritade fel, så det litar vi inte på (familj %1$d)
-settings_issue_gpu_userptr	ff23	Kärnan byggdes utan userptr-stöd för grafikkortet (CONFIG_DRM_AMDGPU_USERPTR), så det kan inte läsa fönsterbilderna: bygg om kärnan med det
+settings_issue_gpu_userptr	08a6	kärnan kan inte mappa en sida för grafikkortet: bygg om med CONFIG_DRM_AMDGPU_USERPTR=y (fel 19 är just den kärnan)
 settings_issue_unknown	e812	Ett problem som den här versionen inte namnger (kod %1$d)
 settings_item_add	fbef	Enter sparar namnet på en enhet; radion slås på för det som paras
 settings_item_ask	6aad	Enter frågar efter lösenordet och ansluter
@@ -128,6 +128,14 @@ settings_refused	454b	moonwater avvisade
 settings_refused_place	9632	%s (dess plats i filen läses inte)
 settings_refused_rate	97bc	%1$s (%2$d Hz erbjuds inte)
 settings_refused_turn	7b3a	%1$s (%2$s gick inte att göra)
+settings_req_context	a233	grafikkortet ger ingen buffert, ingen VM-mappning och inget beräkningssammanhang: amdgpu-beräkningsringen eller firmware är inte igång
+settings_req_driver	9d2d	grafikkortets drivrutin är inte amdgpu: det finns ingen GPU-väg för den än (i915, virtio_gpu och nouveau stannar på processorn)
+settings_req_family	ddcf	den här AMD-familjen har inga kärnor (bara RDNA2: 144, 146, 149, 151); grafikkortet stannar på processorn
+settings_req_node	a362	ingen renderingsnod för grafikkortet öppnades: kontrollera läge, ägare och att drivrutinen är laddad (grupp render eller läge 0666)
+settings_req_prime	a63c	en dma-buf importeras inte i renderingsnoden: grafikkortet kan inte läsa ett fönsters memfd (CONFIG_DRM_AMDGPU med PRIME)
+settings_req_ring	29f2	beräkningsringen slutförde inte självtestet: firmware, klockor eller en ringåterställning (kärnraderna säger vilken)
+settings_req_selftest	0061	grafikkortet ritade självtestbilden fel: dess kärnor passar inte familjens ISA; det stannar på processorn
+settings_req_udmabuf	420f	/dev/udmabuf skapar ingen dma-buf av en memfd-sida: CONFIG_UDMABUF=y krävs och /dev/udmabuf måste kunna öppnas (grafikkortet sammanställer ändå)
 settings_run_any	3ffd	Kör valfritt moonwater-kommando
 settings_running	d0e2	kör %s (Escape stoppar)
 settings_saved	9f44	sparad

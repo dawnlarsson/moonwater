@@ -95,7 +95,7 @@ settings_issue_gpu_map	f52f	رفض النواة تعيين صور النوافذ
 settings_issue_gpu_refused	f29c	رفضت البطاقة %1$d إطارًا: %2$s
 settings_issue_gpu_scanout	1379	رفضت البطاقة المخزن الإطاري لنافذة للإخراج المباشر (الخطأ %1$d)
 settings_issue_gpu_untrusted	14ea	اختبار البطاقة الذاتي رسم بشكل خاطئ، لذلك لا يُوثق بها (العائلة %1$d)
-settings_issue_gpu_userptr	ff23	النواة بُنيت دون userptr للمعالج الرسومي (CONFIG_DRM_AMDGPU_USERPTR) فلا تقرأ البطاقة صور النوافذ: أعد بناءها به
+settings_issue_gpu_userptr	08a6	لا تربط النواة صفحة للبطاقة: أعد بناءها مع CONFIG_DRM_AMDGPU_USERPTR=y (الخطأ 19 يعني هذه النواة)
 settings_issue_unknown	e812	مشكلة لا تسمّيها هذه النسخة (الرمز %1$d)
 settings_item_add	fbef	Enter يحفظ اسم الجهاز؛ ويعمل الراديو لإقران ما يقترن
 settings_item_ask	6aad	Enter يطلب كلمة المرور ويتصل
@@ -129,6 +129,14 @@ settings_refused	454b	رفض moonwater
 settings_refused_place	9632	%s (موضعه في الملف غير مقروء)
 settings_refused_rate	97bc	%1$s (%2$d هرتز غير متاح)
 settings_refused_turn	7b3a	%1$s (تعذر تنفيذ %2$s)
+settings_req_context	a233	لا تعطي البطاقة مخزنًا ولا خريطة VM ولا سياق حوسبة: حلقة الحوسبة في amdgpu أو برنامجها الثابت غير جاهز
+settings_req_driver	9d2d	مشغّل البطاقة ليس amdgpu: لا يوجد مسار للمعالج الرسومي له بعد (i915 وvirtio_gpu وnouveau تبقى على المعالج)
+settings_req_family	ddcf	لا توجد نوى لهذه العائلة من AMD (RDNA2 فقط: 144 و146 و149 و151)، وتبقى البطاقة على المعالج
+settings_req_node	a362	لم يُفتح عقدة العرض للبطاقة: تحقّق من وضعها ومالكها وتحميل التعريف (مجموعة render أو الوضع 0666)
+settings_req_prime	a63c	لا يُستورد dma-buf إلى عقدة العرض: البطاقة لا تستطيع قراءة memfd النافذة (CONFIG_DRM_AMDGPU مع PRIME)
+settings_req_ring	29f2	لم تُنهِ حلقة الحوسبة الاختبار الذاتي: البرنامج الثابت أو الساعات أو إعادة الضبط (سطور النواة تبيّن أيّها)
+settings_req_selftest	0061	رسمت البطاقة صورة الاختبار الذاتي بشكل خاطئ: نواتها لا تطابق ISA لهذه العائلة، وتبقى على المعالج
+settings_req_udmabuf	420f	لا ينشئ /dev/udmabuf dma-buf من صفحة memfd: يلزم CONFIG_UDMABUF=y وأن يُفتح /dev/udmabuf (البطاقة ما زالت تركّب)
 settings_run_any	3ffd	تنفيذ أي أمر moonwater
 settings_running	d0e2	قيد التنفيذ: %s (Escape يوقفه)
 settings_saved	9f44	محفوظة

@@ -95,7 +95,7 @@ settings_issue_gpu_map	f52f	هسته از نگاشت تصویر پنجره‌ه�
 settings_issue_gpu_refused	f29c	کارت %1$d فریم را رد کرد: %2$s
 settings_issue_gpu_scanout	1379	کارت فریم‌بافر یک پنجره را برای خروجی مستقیم رد کرد (خطای %1$d)
 settings_issue_gpu_untrusted	14ea	خودآزمایی کارت اشتباه کشید، پس به آن اعتماد نمی‌شود (خانواده %1$d)
-settings_issue_gpu_userptr	ff23	هسته بدون userptr برای GPU ساخته شده (CONFIG_DRM_AMDGPU_USERPTR) و کارت تصاویر پنجره را نمی‌خواند: هسته را دوباره بسازید
+settings_issue_gpu_userptr	08a6	هسته یک صفحه را برای کارت نگاشت نمی‌کند: با CONFIG_DRM_AMDGPU_USERPTR=y دوباره بسازید (خطای 19 همین هسته است)
 settings_issue_unknown	e812	مشکلی که این نسخه نام ندارد (کد %1$d)
 settings_item_add	fbef	Enter نام دستگاه را نگه می‌دارد؛ رادیو برای آنچه جفت می‌شود روشن می‌شود
 settings_item_ask	6aad	Enter گذرواژه را می‌پرسد و متصل می‌شود
@@ -129,6 +129,14 @@ settings_refused	454b	moonwater رد کرد
 settings_refused_place	9632	%s (جایگاه آن در پرونده خوانده نمی‌شود)
 settings_refused_rate	97bc	%1$s (%2$d هرتز ارائه نمی‌شود)
 settings_refused_turn	7b3a	%1$s (%2$s انجام نشد)
+settings_req_context	a233	کارت بافر، نگاشت VM یا بستر محاسبه نمی‌دهد: حلقه محاسبه amdgpu یا سخت‌افزار نرم آن بالا نیست
+settings_req_driver	9d2d	درایور کارت amdgpu نیست: هنوز مسیر GPU برای آن نیست (i915، virtio_gpu و nouveau روی پردازنده می‌مانند)
+settings_req_family	ddcf	این خانواده AMD هسته ندارد (فقط RDNA2: 144، 146، 149، 151)؛ کارت روی پردازنده می‌ماند
+settings_req_node	a362	گره رندر کارت باز نشد: حالت، مالک و بارگذاری درایور را بررسی کنید (گروه render یا حالت 0666)
+settings_req_prime	a63c	dma-buf به گره رندر وارد نمی‌شود: کارت memfd یک پنجره را نمی‌خواند (CONFIG_DRM_AMDGPU با PRIME)
+settings_req_ring	29f2	حلقه محاسبه خودآزمایی را تمام نکرد: سخت‌افزار نرم، کلاک‌ها یا بازنشانی حلقه (خط‌های کرنل می‌گویند کدام)
+settings_req_selftest	0061	کارت تصویر خودآزمایی را اشتباه کشید: هسته‌هایش با ISA این خانواده نمی‌خوانند؛ روی پردازنده می‌ماند
+settings_req_udmabuf	420f	/dev/udmabuf از یک صفحه memfd هیچ dma-buf نمی‌سازد: CONFIG_UDMABUF=y لازم است و /dev/udmabuf باید باز شود (کارت هنوز ترکیب می‌کند)
 settings_run_any	3ffd	اجرای هر فرمان moonwater
 settings_running	d0e2	در حال اجرای %s (Escape آن را متوقف می‌کند)
 settings_saved	9f44	ذخیره‌شده

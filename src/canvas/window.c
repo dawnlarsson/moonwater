@@ -569,7 +569,8 @@ typedef char windows_issue_codes_fit[WINDOWS_ISSUE_COUNT <= 256 ? 1 : -1];
 static const string_address windows_issue_names[WINDOWS_ISSUE_COUNT] = {
         "none", "the kernel refused to map window pictures", "the card refused presents", "the lists are off", "the card is cooling down",
         "the card's self-test drew wrong", "the GPU family is not supported", "apps lost frames to the processor", "the card refused direct scan-out",
-        "the kernel has no userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR)", "the audio sink did not open", "the audio sink refused the rate"};
+        "the kernel has no userptr for the GPU (CONFIG_DRM_AMDGPU_USERPTR)", "the audio sink did not open", "the audio sink refused the rate",
+        "a prerequisite of the GPU path failed"};
 
 struct windows_issue
 {
@@ -2539,12 +2540,12 @@ static void window_trace_flush(void)
 }
 
 // The reasons a release throws or does not, as the trace names them (ui_throw_reason answers one).
-static const char address_to window_trace_reason_thrown = "thrown";
-static const char address_to window_trace_reason_below = "below the floor";
-static const char address_to window_trace_reason_late = "late lift, decayed";
-static const char address_to window_trace_reason_rested = "rested before the lift";
-static const char address_to window_trace_reason_samples = "no samples";
-static const char address_to window_trace_reason_slope = "no slope";
+static const char address_to __attribute__((unused)) window_trace_reason_thrown = "thrown";
+static const char address_to __attribute__((unused)) window_trace_reason_below = "below the floor";
+static const char address_to __attribute__((unused)) window_trace_reason_late = "late lift, decayed";
+static const char address_to __attribute__((unused)) window_trace_reason_rested = "rested before the lift";
+static const char address_to __attribute__((unused)) window_trace_reason_samples = "no samples";
+static const char address_to __attribute__((unused)) window_trace_reason_slope = "no slope";
 
 // A word of text (a reason), appended as it is. string_format's %s does not come out through this writer, so a line with a word in it
 // is made of parts: WINDOW_TRACE_START, WINDOW_TRACE_PART (the formatter's numbers), window_trace_word, WINDOW_TRACE_END.

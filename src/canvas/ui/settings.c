@@ -879,12 +879,37 @@ static int settings_sub_put(int section, b32 detail, const char address_to words
         return count + 1;
 }
 
+// The words of a prerequisite of the GPU path that failed (gpu.c's enum gpu_req, the step the board's a number is): the fix, in the reader's
+// language. None for a step this version does not name.
+static const char address_to settings_req_words(unsigned int step)
+{
+        switch (step)
+        {
+        case 1: return WORDS(settings_req_node);
+        case 2: return WORDS(settings_req_driver);
+        case 3: return WORDS(settings_req_family);
+        case 4: return WORDS(settings_issue_gpu_userptr);
+        case 5: return WORDS(settings_req_context);
+        case 6: return WORDS(settings_req_ring);
+        case 7: return WORDS(settings_req_selftest);
+        case 8: return WORDS(settings_req_udmabuf);
+        case 9: return WORDS(settings_req_prime);
+        default: return null;
+        }
+}
+
 // The text of an issue's message, in the reader's language: its code's words, with its numbers, or the words that say a code this version
 // does not name.
 static void settings_issue_text(const struct windows_issue address_to issue, char address_to into, positive room)
 {
         switch (issue->code)
         {
+        case WINDOWS_ISSUE_GPU_REQUIRES:
+                if (settings_req_words(issue->a))
+                        language_format(into, room, settings_req_words(issue->a));
+                else
+                        language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code);
+                break;
         case WINDOWS_ISSUE_GPU_MAP: language_format(into, room, WORDS(settings_issue_gpu_map), (long)issue->a, (long)issue->b); break;
         case WINDOWS_ISSUE_GPU_USERPTR: language_format(into, room, WORDS(settings_issue_gpu_userptr)); break;
         case WINDOWS_ISSUE_GPU_REFUSED: language_format(into, room, WORDS(settings_issue_gpu_refused), (long)issue->a, issue->detail); break;
@@ -923,7 +948,8 @@ static int settings_sub_rows(int row, int count)
                 settings_issue_text(issue, text, sizeof(text));
                 count = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
                                          text, count);
-                if (issue->detail[0])
+                // The detail of a prerequisite is its fix, which the message already says in the reader's language: no English copy of it.
+                if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES)
                         count = settings_sub_put(section, true, null, issue->detail, count);
         }
         return count;
