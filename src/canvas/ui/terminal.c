@@ -171,10 +171,8 @@ static struct
         struct ui_press finger_press;
         int finger_left;
         // A selection drag past the grid's top (negative) or bottom, in pixels: the view scrolls while it is held there
-        // (terminal_select_autoscroll), by its own clock and the thousandths of a pixel it owes.
-        int select_past;
-        positive select_scroll_at;
-        long select_owed;
+        // (terminal_select_autoscroll, the kit's edge scroll).
+        struct ui_edge select_edge;
         struct ui_drag fling;
         b32 focused;
         int group;                      // the pty's foreground process group the title was taken from
@@ -2578,7 +2576,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                         terminal.selecting = terminal.select_kind != TERMINAL_SELECT_CHARS;
                 }
                 terminal.select_dragging = true;
-                terminal.select_past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
+                terminal.select_edge.past = 0; // the press is on the grid: the edge a drag before it held past is not this drag's
                 terminal.select_touch = false;
                 address_to dirty = true;
                 return true;
@@ -2587,7 +2585,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         {
                 int y = terminal.pointer_y < 0 ? 0 : terminal.pointer_y, x = terminal.pointer_x < 0 ? 0 : terminal.pointer_x;
 
-                terminal.select_past = terminal.pointer_y < 0 ? terminal.pointer_y
+                terminal.select_edge.past = terminal.pointer_y < 0 ? terminal.pointer_y
                                        : terminal.pointer_y >= (int)ROWS * terminal.cell_h ? terminal.pointer_y - (int)ROWS * terminal.cell_h + 1
                                                                                            : 0;
                 row = (unsigned int)y / terminal.cell_h;
@@ -2741,7 +2739,7 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
         terminal.select_kind = TERMINAL_SELECT_CHARS;
         terminal.selecting = true;
         terminal.select_dragging = true;
-        terminal.select_past = 0;
+        terminal.select_edge.past = 0;
         terminal.touch_select = true;
         terminal.select_touch = true;
         address_to dirty = true;
@@ -3270,29 +3268,20 @@ static void terminal_leave(b32 show)
 static positive terminal_select_autoscroll(positive now, b32 address_to dirty)
 {
         long rows;
-        int scale = terminal_scale(), row, column;
+        int row, column;
         unsigned int line, at;
 
-        if (!terminal.select_dragging || !terminal.select_past || alternate || terminal.cell_h <= 0)
+        if (!terminal.select_dragging || !terminal.select_edge.past || alternate || terminal.cell_h <= 0)
         {
-                terminal.select_scroll_at = 0;
+                terminal.select_edge.at = 0;
                 return 0;
         }
-        if (!terminal.select_scroll_at || now < terminal.select_scroll_at)
-        {
-                terminal.select_scroll_at = now, terminal.select_owed = 0;
-                return now + UI_DRAG_FRAME_NS;
-        }
-        // Device pixels a second over the time since the last step: thousandths of a device pixel owed.
-        terminal.select_owed += ui_edge_speed(terminal.select_past, scale) * (long)(now - terminal.select_scroll_at) / 1000000l;
-        terminal.select_scroll_at = now;
-        rows = terminal.select_owed / (1000l * terminal.cell_h);
+        rows = ui_edge_steps(&terminal.select_edge, now, terminal_scale(), 1000l * terminal.cell_h);
         if (rows <= 0)
                 return now + UI_DRAG_FRAME_NS;
-        terminal.select_owed -= rows * 1000l * terminal.cell_h;
-        if (terminal_view_scroll(terminal.select_past < 0 ? (int)rows : -(int)rows))
+        if (terminal_view_scroll(terminal.select_edge.past < 0 ? (int)rows : -(int)rows))
                 *dirty = true;
-        row = terminal.select_past < 0 ? 0 : (int)ROWS - 1;
+        row = terminal.select_edge.past < 0 ? 0 : (int)ROWS - 1;
         column = terminal.pointer_x < 0 ? 0 : terminal.pointer_x / terminal.cell_w;
         column = column < (int)COLUMNS ? column : (int)COLUMNS;
         terminal_place_at((unsigned int)row, (unsigned int)column, &line, &at);

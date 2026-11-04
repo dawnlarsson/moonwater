@@ -121934,7 +121934,7 @@ static void check_terminal_select_speed(void)
 }
 
 /*
-        A press in the grid is a press of its own: the edge a drag last held past (select_past) is the drag's, and the press that
+        A press in the grid is a press of its own: the edge a drag last held past (select_edge.past) is the drag's, and the press that
         follows a release has none. Held still in the grid, the selection does not scroll, and its end stays where the press put it.
 */
 static void check_terminal_select_stale(void)
@@ -121973,6 +121973,26 @@ static void check_terminal_select_stale(void)
     terminal_deliver(-1, &release, &dirty);
     terminal_view_live();
     terminal.selecting = terminal.select_dragging = terminal.select_touch = terminal.touch_select = false;
+}
+
+/*
+        The kit's edge scroll (ui_edge_steps) owes what the speed says and keeps the rest: 25 pixels past an edge at scale 100 is 270
+        pixels a second, 4320 thousandths a 16 ms step, so 40 steps owe 172800 thousandths, which is ten rows of 17000 and 2800 over.
+        The first call after the drag starts owes none, and a time before the last step restarts it.
+*/
+static void check_edge_steps(void)
+{
+    struct ui_edge edge = {-25, 0, 0};
+    positive now = 1000000000ull;
+    long total = 0, first;
+
+    first = ui_edge_steps(&edge, now, 100, 1000l * 17);
+    for (int step = 1; step <= 40; step++)
+        total += ui_edge_steps(&edge, now + (positive)step * 16000000ull, 100, 1000l * 17);
+    check("kit: an edge scroll owes nothing at its first call, and 25 pixels past an edge at scale 100 is ten rows of 17 in 40 steps",
+          first == 0 && total == 10 && edge.owed == 2800);
+    check("kit: an edge scroll's clock that goes back restarts it: no step, and nothing owed",
+          ui_edge_steps(&edge, now, 100, 1000l * 17) == 0 && edge.owed == 0 && edge.at == now);
 }
 
 static fn check_keys(void)
@@ -131210,8 +131230,8 @@ static void scroll_code(struct ui address_to wui, struct ui_text address_to t, i
     t->focused = true;
     t->top_line = (p64)top;
     t->dragging = false;
-    t->scroll_past = 0;
-    t->scroll_at = 0;
+    t->edge.past = 0;
+    t->edge.at = 0;
     ui_text_draw(wui, t, SCROLL_CODE_LEFT, SCROLL_CODE_TOP, SCROLL_CODE_WIDTH, SCROLL_CODE_HEIGHT, 0);
 }
 
@@ -131224,8 +131244,8 @@ static void scroll_field(struct ui address_to wui, struct ui_text address_to t, 
     t->focused = true;
     doc_select_set(&t->doc, at_end ? length : 0, at_end ? length : 0);
     t->dragging = false;
-    t->scroll_past = 0;
-    t->scroll_at = 0;
+    t->edge.past = 0;
+    t->edge.at = 0;
     ui_text_draw(wui, t, SCROLL_FIELD_LEFT, SCROLL_FIELD_TOP, SCROLL_FIELD_WIDTH, SCROLL_FIELD_HEIGHT, 0);
 }
 
@@ -149108,8 +149128,8 @@ static fn touch_scroll_open(struct ui address_to wui, struct ui_text address_to 
         view->focused = true;
         view->top_line = (p64)top;
         view->dragging = false;
-        view->scroll_past = 0;
-        view->scroll_at = 0;
+        view->edge.past = 0;
+        view->edge.at = 0;
         ui_text_draw(wui, view, 20, 20, 300, 100, 0);
 }
 
@@ -155344,6 +155364,7 @@ b32 main()
         check_terminal_select_scroll();
         check_terminal_select_speed();
         check_terminal_select_stale();
+        check_edge_steps();
         check_take();
         check_land();
         check_glass();

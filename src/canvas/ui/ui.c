@@ -9903,6 +9903,19 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_FINGER_SELECT 4
 #define UI_TEXT_BAR_ITEMS 4
 
+/*
+        An edge scroll (ui_edge_steps): a drag held past an edge scrolls what it is in, a step at a time as the time passes. past is
+        how far past the edge the drag is in device pixels (negative past the top or left, 0 inside, which stops it), at when the last
+        step was (0 before the first), and owed the scroll that step owes and has not made, in thousandths of a device pixel. The text
+        widget and the terminal's selection keep one each.
+*/
+struct ui_edge
+{
+        int past;
+        positive at;
+        long owed;
+};
+
 struct ui_text
 {
         struct doc doc;
@@ -9936,9 +9949,8 @@ struct ui_text
         int bar_at[UI_TEXT_BAR_ITEMS + 1];      // each item's left edge from bar_x, then the bar's right
         int bar_id[UI_TEXT_BAR_ITEMS];          // each item's UI_TEXT_MENU_* id
         int over_top, over_bottom;              // the rows its handles and bar covered: an app that draws in bands draws them again
-        int drag_x, drag_y, scroll_past;        // a selection drag's last point, and how far past the box's top (-) or bottom it is (0 inside)
-        positive scroll_at;                     // when the last autoscroll step was (ui_text_autoscroll), 0 before the first
-        long scroll_owed;                       // the scroll that step owes and has not made, in thousandths of a device pixel
+        int drag_x, drag_y;                     // a selection drag's last point
+        struct ui_edge edge;                    // the drag's edge: how far past the box it is, and its autoscroll (ui_text_autoscroll)
         int drag_kind;                          // 1 characters, 2 words, 3 lines
         p64 drag_start, drag_end;
         p64 box_line, box_column;
@@ -11205,7 +11217,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 {
                         b32 was = t->dragging;
 
-                        t->dragging = false, t->scroll_past = 0;
+                        t->dragging = false, t->edge.past = 0;
                         if (was && doc_any_selected(&t->doc))
                                 ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
                         return 0;
@@ -11291,7 +11303,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
 
                 // A field's edge is its left and right: past them the field scrolls sideways, as a code view does up and down.
                 t->drag_x = x, t->drag_y = y;
-                t->scroll_past = t->mode == UI_TEXT_FIELD ? (x < t->left ? x - t->left : x >= t->right ? x - t->right + 1 : 0)
+                t->edge.past = t->mode == UI_TEXT_FIELD ? (x < t->left ? x - t->left : x >= t->right ? x - t->right + 1 : 0)
                                  : y < t->top ? y - t->top : y >= t->bottom ? y - t->bottom + 1 : 0;
                 if (t->drag_box)
                 {
@@ -11299,7 +11311,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         return UI_TEXT_MOVED;
                 }
                 // Past the edge the view is the tick's to move, a step at a time: the reveal waits for the drag to come back.
-                ui_text_extend(ui, t, at, t->scroll_past == 0);
+                ui_text_extend(ui, t, at, t->edge.past == 0);
                 return UI_TEXT_MOVED;
         }
         return 0;
@@ -11337,6 +11349,31 @@ static long ui_edge_speed(long past, int scale)
         return speed * scale / 100;
 }
 
+/*
+        The steps an edge scroll owes at now (ui_edge_speed for the drag's edge), each unit thousandths of a device pixel: a line
+        (its height times 1000) for a text widget's lines and the terminal's rows, 1000 for a field's pixels. Zero for none, and the
+        first call after the drag starts (or after it stopped) owes none and takes its time as the step's start. The caller is the
+        one that knows the drag is on, and what a step does.
+*/
+static long ui_edge_steps(struct ui_edge address_to e, positive now, int scale, long unit)
+{
+        long steps;
+
+        if (!e->at || now < e->at)
+        {
+                e->at = now, e->owed = 0;
+                return 0;
+        }
+        // Device pixels a second over the time since the last step: thousandths of a device pixel owed.
+        e->owed += ui_edge_speed(e->past, scale) * (long)(now - e->at) / 1000000l;
+        e->at = now;
+        steps = e->owed / unit;
+        if (steps <= 0)
+                return 0;
+        e->owed -= steps * unit;
+        return steps;
+}
+
 // The most a field's view scrolls: its line's end past the box, with a little room after it (ui_text_reveal's rule).
 static b64 ui_text_scroll_most(struct ui address_to ui, struct ui_text address_to t)
 {
@@ -11355,26 +11392,17 @@ static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text addre
         long steps;
         int edge_x, edge_y;
 
-        if (!t->dragging || !t->scroll_past || t->drag_box || (field ? t->right <= t->left : t->line_height <= 0))
+        if (!t->dragging || !t->edge.past || t->drag_box || (field ? t->right <= t->left : t->line_height <= 0))
         {
-                t->scroll_at = 0;
+                t->edge.at = 0;
                 return 0;
         }
-        if (!t->scroll_at || now < t->scroll_at)
-        {
-                t->scroll_at = now, t->scroll_owed = 0;
+        steps = ui_edge_steps(&t->edge, now, ui->scale, field ? 1000l : 1000l * t->line_height);
+        if (steps <= 0)
                 return now + UI_DRAG_FRAME_NS;
-        }
-        // Device pixels a second over the time since the last step: thousandths of a device pixel owed.
-        t->scroll_owed += ui_edge_speed(t->scroll_past, ui->scale) * (long)(now - t->scroll_at) / 1000000l;
-        t->scroll_at = now;
         if (field)
         {
-                steps = t->scroll_owed / 1000l;
-                if (steps <= 0)
-                        return now + UI_DRAG_FRAME_NS;
-                t->scroll_owed -= steps * 1000l;
-                if (t->scroll_past < 0)
+                if (t->edge.past < 0)
                         t->scroll_x = t->scroll_x > (b64)steps ? t->scroll_x - (b64)steps : 0;
                 else
                 {
@@ -11385,11 +11413,7 @@ static positive ui_text_autoscroll(struct ui address_to ui, struct ui_text addre
         }
         else
         {
-                steps = t->scroll_owed / (1000l * t->line_height);
-                if (steps <= 0)
-                        return now + UI_DRAG_FRAME_NS;
-                t->scroll_owed -= steps * 1000l * t->line_height;
-                if (t->scroll_past < 0)
+                if (t->edge.past < 0)
                         t->top_line = (p64)steps < t->top_line ? t->top_line - (p64)steps : 0;
                 else
                         t->top_line = t->top_line + (p64)steps < lines ? t->top_line + (p64)steps : lines - 1;
@@ -11841,9 +11865,9 @@ static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_t
                 if (handle)
                         ui_press_move(ui, &t->tap, x, y);
                 t->drag_x = ex, t->drag_y = ey;
-                t->scroll_past = t->mode == UI_TEXT_FIELD ? (x < t->left + band ? x - (t->left + band) : x >= t->right - band ? x - (t->right - band) + 1 : 0)
+                t->edge.past = t->mode == UI_TEXT_FIELD ? (x < t->left + band ? x - (t->left + band) : x >= t->right - band ? x - (t->right - band) + 1 : 0)
                                  : y < t->top + band ? y - (t->top + band) : y >= t->bottom - band ? y - (t->bottom - band) + 1 : 0;
-                ui_text_extend(ui, t, ui_text_hit(ui, t, edge_x, edge_y), t->scroll_past == 0);
+                ui_text_extend(ui, t, ui_text_hit(ui, t, edge_x, edge_y), t->edge.past == 0);
                 return UI_TEXT_MOVED;
         }
 }
@@ -11865,7 +11889,7 @@ static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to 
                 }
                 return 0;
         }
-        t->finger = 0, t->dragging = false, t->holding = false, t->scroll_past = 0;
+        t->finger = 0, t->dragging = false, t->holding = false, t->edge.past = 0;
         if (finger == UI_TEXT_FINGER_TEXT)
         {
                 tapped = ui_press_end(&t->tap, cancelled);
@@ -12339,7 +12363,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 t->top = y + (height - t->line_height) / 2, t->bottom = t->top + t->line_height;
                 // A drag past the field's edge is the tick's to scroll (ui_text_autoscroll): a draw in the middle of it does not
                 // reveal the point, which sits past the edge, or the view would jump a quarter of the field at every draw.
-                if (!(t->dragging && t->scroll_past))
+                if (!(t->dragging && t->edge.past))
                         ui_text_reveal(ui, t);
         }
         // A code view's caret is in sight in the box it is drawn in: a box that changed size since the last draw (a window
