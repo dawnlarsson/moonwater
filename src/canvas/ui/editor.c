@@ -482,16 +482,16 @@ static b32 editor_tabs_event(const struct window_event address_to event)
 {
         struct ui_control address_to strip = &editor.strip;
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, band = editor.count > 1 && ui_kit.pointer_y >= 0 && ui_kit.pointer_y < ui_px(&editor.ui, UI_TABS_H);
-        int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
+        p32 bits;
 
-        if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
-                return false;
-        if (event->type == WINDOW_EVENT_BUTTON && (down ? !band : !strip->down))
+        // The strip's own: a left press in its band (or the release of a press it holds), and a motion over it. The kit's tabs take the rest.
+        if (event->type == WINDOW_EVENT_BUTTON && (event->a != UI_POINTER_LEFT || (down ? !band : !strip->down)))
                 return false;
         if (event->type == WINDOW_EVENT_MOTION && !band && !strip->hover)
                 return false;
         editor_tabs_layout(&editor.ui);
-        if (ui_kit_pointer(&editor.ui, strip, 1, event->type, x, y, down, event->flags) && strip->at != editor.tab)
+        bits = ui_tabs_pointer(&editor.ui, strip, event, ui_kit.pointer_x, ui_kit.pointer_y);
+        if ((bits & UI_TABS_CHOSEN) && strip->at != editor.tab)
                 editor_show_tab(strip->at);
         editor.dirty = true;
         return event->type == WINDOW_EVENT_BUTTON;
