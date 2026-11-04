@@ -948,7 +948,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wp_tearing_control_manager_v1, 1},
     {WLI_wp_viewporter, 1},
     {WLI_wp_fractional_scale_manager_v1, 1},
-    {WLI_wp_presentation, 1},
+    {WLI_wp_presentation, 2},
     {WLI_xdg_wm_dialog_v1, 1},
     {WLI_xdg_system_bell_v1, 1},
     {WLI_wp_content_type_manager_v1, 1},

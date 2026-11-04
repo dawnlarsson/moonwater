@@ -168178,8 +168178,8 @@ static void test_presentation(void)
         session_open(&s);
         session_window(&s, 0xff223344);
         c = s.c;
-        presentation = wl_global(c, s.registry, WLI_wp_presentation, 1);
-        WLCHECK(presentation != 0, "wp_presentation is offered");
+        presentation = wl_global(c, s.registry, WLI_wp_presentation, 2);
+        WLCHECK(presentation != 0 && c->errors == 0, "wp_presentation is offered at version 2, the version clients bind (weston-presentation-shm), and a bind at it is no error");
         a = event_at(c, WLI_wp_presentation, WLE_wp_presentation_clock_id, 0);
         WLCHECK(a >= 0 && c->ev[a].u[0] == 1, "its clock is CLOCK_MONOTONIC (1), told when it is bound");
         wlc_forget(c);
