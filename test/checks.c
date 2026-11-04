@@ -152700,7 +152700,7 @@ static fn check_one_blink(void)
                 if (!bytes)
                         continue;
                 read++;
-                asked += check_hits(text, size, "ui_text_timeout(") > 0;
+                asked += check_hits(text, size, "ui_text_timeout(") + check_hits(text, size, "ui_findbar_timeout(") > 0;
                 for (positive i = 0; i < sizeof(hand) / sizeof(hand[0]); i++)
                         hand_found += check_hits(text, size, hand[i]);
                 compositor_call(syscall(munmap), bytes, size, 0, 0, 0, 0);
@@ -153006,11 +153006,12 @@ static fn check_one_cut(void)
 /*
         One decimal reader for every window's number: the library's string_digits_max reads a number's digits, and no window
         of Canvas folds the digits into a number by hand (the value * 10 + digit loop, or the digit's byte less '0'). The four
-        windows that read a number say so, and the scan reads their sources from the repository's root.
+        windows that read a number say so, and the scan reads their sources from the repository's root (the editor's line number is
+        the kit's find bar's, read in ui.c).
 */
 static fn check_one_digits(void)
 {
-        static const char address_to const files[] = {"src/canvas/ui/identify.c", "src/canvas/ui/battery.c", "src/canvas/ui/editor.c",
+        static const char address_to const files[] = {"src/canvas/ui/identify.c", "src/canvas/ui/battery.c", "src/canvas/ui/ui.c",
                                                       "src/canvas/ui/terminal.c"};
         static const char address_to const hand[] = {"* 10 + (", "- '0')"};
         positive read = 0, hand_found = 0, reads = 0;
@@ -153465,6 +153466,7 @@ static fn check_kit_defaults(struct ui address_to wui)
         {
                 unsigned int pixels[600 * 300];
                 b32 open_ok, goto_ok;
+                positive goto_count;
 
                 editor.ui = ui;
                 editor.width = 600, editor.height = 300, editor.own.stride = 600;
@@ -153473,12 +153475,12 @@ static fn check_kit_defaults(struct ui address_to wui)
                 editor_open(null);
                 editor.tab = 0;
                 editor_draw(pixels);
-                editor_find_open(1);
-                open_ok = !editor_now()->view.focused && editor.find.focused;
-                editor_find_open(3);
-                ui_text_set(&editor.find, (const p8 address_to) "2", 1);
-                editor_find_enter(false);
-                goto_ok = editor.finding == 0 && !editor.find.focused && editor_now()->view.focused && editor.focused;
+                editor_command(DOC_CMD_FIND);
+                open_ok = !editor_now()->view.focused && editor.find.field.focused;
+                editor_command(DOC_CMD_GOTO_LINE);
+                ui_text_set(&editor.find.field, (const p8 address_to) "2", 1);
+                ui_findbar_enter(&editor.ui, &editor.find, &editor_now()->view, false, editor.focused, &goto_count);
+                goto_ok = editor.find.mode == UI_FINDBAR_CLOSED && !editor.find.field.focused && editor_now()->view.focused && editor.focused;
                 editor.count = 0;
                 check("editor focus: the find bar takes the keys from the code view, and a line's Enter gives them back to it", open_ok && goto_ok);
         }
@@ -153891,7 +153893,7 @@ static struct ui_text address_to inputs_target(const struct inputs_input address
         case INPUTS_FILTER: return settings_filter_field();
         case INPUTS_ROW: return &settings.edit;
         case INPUTS_GALLERY: return &settings_gallery.field[in->arg];
-        case INPUTS_FIND: return &editor.find;
+        case INPUTS_FIND: return &editor.find.field;
         case INPUTS_VIEW: return &editor_now()->view;
         }
         return &inputs_plain;
@@ -153967,15 +153969,15 @@ static fn inputs_open(const struct inputs_input address_to in)
                 break;
         case INPUTS_FIND:
                 inputs_editor_ensure(inputs_windows);
-                editor.finding = 0;
-                editor_find_open(in->arg);
-                ui_text_set(&editor.find, (const p8 address_to) "", 0);
-                editor.find.focused = true;
+                editor.find.mode = UI_FINDBAR_CLOSED;
+                ui_findbar_open(&editor.own, &editor.find, &editor_now()->view, in->arg, editor.focused);
+                ui_text_set(&editor.find.field, (const p8 address_to) "", 0);
+                editor.find.field.focused = true;
                 break;
         case INPUTS_VIEW:
                 inputs_editor_ensure(inputs_windows);
-                editor.finding = 0;
-                editor.find.focused = false;
+                editor.find.mode = UI_FINDBAR_CLOSED;
+                editor.find.field.focused = false;
                 ui_text_set(&editor_now()->view, (const p8 address_to) "", 0);
                 editor_now()->view.focused = true;
                 break;
@@ -155340,7 +155342,7 @@ static fn editor_edge_check(struct ui address_to wui)
         editor.count = 0;
         editor.own.stride = 800;
         check("editor edge: two files open for the tabs", editor_open((string_address)one) && editor_open((string_address)two) && editor.count == 2);
-        editor_find_open(1);
+        editor_command(DOC_CMD_FIND);
         for (positive at = 0; at < sizeof(sizes) / sizeof(sizes[0]); at++)
         {
                 for (positive i = 0; i < 800 * 600; i++)

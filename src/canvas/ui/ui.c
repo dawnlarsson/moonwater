@@ -12652,6 +12652,241 @@ static fn ui_text_focus_under(struct ui_text address_to t, b32 window, const str
         t->focused = window && !(above && above->focused);
 }
 
+// The keymap's command for a key, whoever has the keys: none for AltGr (it types), and none for a key the map does not bind.
+static p32 ui_key_command(const struct window_event address_to event)
+{
+        p32 flags = event->flags;
+        p32 modifiers = (flags & WINDOW_KEY_SHIFT ? DOC_MOD_SHIFT : 0) | (flags & WINDOW_KEY_CONTROL ? DOC_MOD_CONTROL : 0) |
+                        (flags & WINDOW_KEY_ALT ? DOC_MOD_ALT : 0) | (flags & WINDOW_KEY_SUPER ? DOC_MOD_SUPER : 0);
+
+        return flags & WINDOW_KEY_ALTGR ? DOC_CMD_NONE : doc_keymap_find(ui_text_keymap(), (p32)event->a, (p32)event->b, modifiers);
+}
+
+/*
+        The find bar: the kit's field that finds, replaces every match, and goes to a line, and says so. It is a field in a band above
+        a code view (ui_findbar_band), with the flags that say how a query matches (case, whole words, a pattern: Alt+C, Alt+W, Alt+R
+        while it has the keys). An app opens it (ui_findbar_command for the commands find, replace and go to a line), forwards each
+        event to it (ui_findbar_event, which answers what the view must still have, and the bar's commands that are the app's), and
+        shows what it said (the UI_FINDBAR_SAID_* codes, for the app's words). The app keeps the window, and its status words.
+*/
+#define UI_FINDBAR_QUERY 1024                  // the bytes the bar's query holds
+#define UI_FINDBAR_H (UI_FIELD_H + 2 * UI_GAP1) // the band: the field, a gap of UI_GAP1 above and below (logical pixels)
+#define UI_FINDBAR_CLOSED 0
+#define UI_FINDBAR_FIND 1
+#define UI_FINDBAR_REPLACE 2
+#define UI_FINDBAR_LINE 3
+
+#define UI_FINDBAR_SAID_NONE 0
+#define UI_FINDBAR_SAID_CLEAR 1      // a match was found: the status says nothing
+#define UI_FINDBAR_SAID_NO_MATCH 2
+#define UI_FINDBAR_SAID_BAD_PATTERN 3
+#define UI_FINDBAR_SAID_REPLACED 4   // the count of matches replaced
+#define UI_FINDBAR_SAID_USAGE 5      // a replace without a / after the query
+#define UI_FINDBAR_SAID_REFUSED 6    // the field refused a key: its refusal is the text (field.refused)
+
+struct ui_findbar
+{
+        struct ui_text field;        // the query, or the line's number
+        struct ui_control control;   // its drawing
+        int mode;                    // UI_FINDBAR_CLOSED, _FIND, _REPLACE or _LINE
+        p32 flags;                   // DOC_FIND_CASE, DOC_FIND_WORD, DOC_FIND_REGEX
+        struct doc_find search;      // the query as it was last set for its flags
+};
+
+struct ui_findbar_said
+{
+        b32 took;                    // the event was the bar's: the view does not have it
+        int said;                    // UI_FINDBAR_SAID_*
+        positive count;              // for UI_FINDBAR_SAID_REPLACED
+        p32 command;                 // a command the bar does not do: the app's (the files, the tabs, save)
+};
+
+// The keys go to the view when the window has them and the bar does not (ui_text_focus_under).
+static fn ui_findbar_keys(struct ui_findbar address_to bar, struct ui_text address_to view, b32 window)
+{
+        ui_text_focus_under(view, window, &bar->field);
+}
+
+// The band's height in device pixels, 0 while the bar is closed.
+static int ui_findbar_band(const struct ui address_to ui, const struct ui_findbar address_to bar)
+{
+        return bar->mode != UI_FINDBAR_CLOSED ? ui_px(ui, UI_FINDBAR_H) : 0;
+}
+
+// Opened for mode: its field emptied for a line, holding the view's selection for a find; the bar has the keys.
+static fn ui_findbar_open(const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view, int mode,
+                          b32 window)
+{
+        p8 selected[256];
+        positive length = 0;
+
+        if (!bar->field.doc.selections)
+                ui_field_open(&bar->field, own, "");
+        // A line is asked for by its number: the field takes digits only, and says so of anything else.
+        bar->field.accept = mode == UI_FINDBAR_LINE ? ui_field_digits : null;
+        bar->field.most = mode == UI_FINDBAR_LINE ? 19 : UI_FINDBAR_QUERY - 1;
+        if (mode != UI_FINDBAR_LINE && doc_any_selected(&view->doc))
+        {
+                const struct doc_selection address_to s = &view->doc.selections[view->doc.primary];
+
+                length = doc_sel_end(s) - doc_sel_start(s) < sizeof(selected) ? doc_read(&view->doc, doc_sel_start(s), selected, (positive)(doc_sel_end(s) - doc_sel_start(s))) : 0;
+        }
+        if (mode == UI_FINDBAR_LINE || length)
+                ui_text_set(&bar->field, selected, length);
+        doc_select_all(&bar->field.doc);
+        bar->mode = mode;
+        bar->field.focused = true;
+        ui_findbar_keys(bar, view, window);
+}
+
+// The next match of the query from the caret (back: before it), selected and shown; what it said.
+static int ui_findbar_step(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, b32 back)
+{
+        p8 query[UI_FINDBAR_QUERY];
+        positive length = ui_text_string(&bar->field, query, sizeof(query));
+        p64 start, finish, from = back ? doc_sel_start(&view->doc.selections[view->doc.primary]) : doc_sel_end(&view->doc.selections[view->doc.primary]);
+
+        if (!doc_find_set(&bar->search, query, length, bar->flags))
+                return UI_FINDBAR_SAID_BAD_PATTERN;
+        if (doc_find_next(&view->doc, &bar->search, from, back, true, &start, &finish))
+        {
+                doc_select_set(&view->doc, start, finish);
+                ui_text_reveal(ui, view);
+                return UI_FINDBAR_SAID_CLEAR;
+        }
+        return UI_FINDBAR_SAID_NO_MATCH;
+}
+
+// What the bar's Enter does: find (back: the match before), replace every match with what follows a / in the query (count the
+// number), or go to its line; the bar closes for a line, and the view has the keys again.
+static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, b32 back, b32 window,
+                            positive address_to count)
+{
+        p8 text[UI_FINDBAR_QUERY];
+        positive length = ui_text_string(&bar->field, text, sizeof(text));
+
+        *count = 0;
+        if (bar->mode == UI_FINDBAR_LINE)
+        {
+                p64 line = (p64)string_digits_max((string_address)text, length, null);
+
+                doc_goto_line(&view->doc, line ? line - 1 : 0);
+                ui_text_reveal(ui, view);
+                bar->mode = UI_FINDBAR_CLOSED;
+                bar->field.focused = false;
+                ui_findbar_keys(bar, view, window);
+                return UI_FINDBAR_SAID_NONE;
+        }
+        if (bar->mode == UI_FINDBAR_REPLACE)
+        {
+                // The text before the first / is found, the rest replaces every match, as one undo.
+                positive slash = 0;
+
+                while (slash < length && text[slash] != '/')
+                        slash++;
+                if (slash < length && doc_find_set(&bar->search, text, slash, bar->flags))
+                {
+                        *count = doc_replace_all(&view->doc, &bar->search, text + slash + 1, length - slash - 1);
+                        return UI_FINDBAR_SAID_REPLACED;
+                }
+                return UI_FINDBAR_SAID_USAGE;
+        }
+        return ui_findbar_step(ui, bar, view, back);
+}
+
+// The bar's own commands: find, replace, go to a line, the next match and the one before. Anything else is the app's.
+static b32 ui_findbar_is_command(p32 command)
+{
+        return command == DOC_CMD_FIND || command == DOC_CMD_REPLACE || command == DOC_CMD_GOTO_LINE || command == DOC_CMD_FIND_NEXT ||
+               command == DOC_CMD_FIND_PREVIOUS;
+}
+
+// The bar's command, from the keys, the menu or the app's keys: it opens the bar, or finds (what it said, and its count).
+static int ui_findbar_command(struct ui address_to ui, const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view,
+                              p32 command, b32 window, positive address_to count)
+{
+        *count = 0;
+        if (command == DOC_CMD_FIND || command == DOC_CMD_REPLACE || command == DOC_CMD_GOTO_LINE)
+        {
+                ui_findbar_open(own, bar, view, command == DOC_CMD_FIND ? UI_FINDBAR_FIND : command == DOC_CMD_REPLACE ? UI_FINDBAR_REPLACE : UI_FINDBAR_LINE, window);
+                return UI_FINDBAR_SAID_NONE;
+        }
+        return ui_findbar_step(ui, bar, view, command == DOC_CMD_FIND_PREVIOUS);
+}
+
+// Every event of the window while the bar has the keys or the pointer's press is in it (the view's are the view's). The view's keys
+// follow the bar's (ui_findbar_keys) after each. The answer says whether the event was the bar's, what it said, and a command for the app.
+static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view,
+                                               struct ui_popup address_to menu, const struct window_row address_to own, const struct window_event address_to event, b32 window)
+{
+        struct ui_findbar_said said = {0};
+        p32 asks;
+
+        if (bar->mode == UI_FINDBAR_CLOSED || (event->type == WINDOW_EVENT_KEY ? !bar->field.focused : event->type == WINDOW_EVENT_WHEEL))
+                return said;
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
+                bar->field.focused = ui_text_reach(ui, &bar->field, ui_kit.pointer_x, ui_kit.pointer_y);
+        asks = ui_field_send(ui, &bar->field, menu, event);
+        // A press outside the bar is the view's: the bar's answer to it (commit or cancel) changes nothing.
+        if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
+                asks = 0;
+        if (asks & UI_TEXT_REFUSED)
+                said.said = UI_FINDBAR_SAID_REFUSED;
+        if (asks & UI_TEXT_SUBMIT)
+                said.said = ui_findbar_enter(ui, bar, view, (event->flags & WINDOW_KEY_SHIFT) != 0, window, &said.count);
+        else if (asks & UI_TEXT_CANCEL)
+        {
+                bar->mode = UI_FINDBAR_CLOSED;
+                bar->field.focused = false;
+        }
+        else if (!asks && event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
+        {
+                p32 c = (p32)event->b | 0x20, command = ui_key_command(event);
+
+                if ((event->flags & WINDOW_KEY_ALT) && memory_first_of((address_any) "cwr", (b8)c, 3))
+                        bar->flags ^= c == 'c' ? DOC_FIND_CASE : c == 'w' ? DOC_FIND_WORD : DOC_FIND_REGEX;
+                else if (ui_findbar_is_command(command))
+                        said.said = ui_findbar_command(ui, own, bar, view, command, window, &said.count);
+                else if (command >= DOC_CMD_FIND && command <= DOC_CMD_PREVIOUS_TAB && command != DOC_CMD_ZOOM_IN &&
+                         command != DOC_CMD_ZOOM_OUT && command != DOC_CMD_ZOOM_RESET && command != DOC_CMD_WRAP &&
+                         command != DOC_CMD_OVERWRITE)
+                        said.command = command;
+        }
+        ui_findbar_keys(bar, view, window);
+        said.took = asks || event->type == WINDOW_EVENT_KEY;
+        return said;
+}
+
+// The bar's frames with the view's: the view's (its throw, its blink, its drag), and the bar's while it is open or has the keys.
+static long ui_findbar_timeout(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, long timeout, positive now,
+                               b32 address_to redraw)
+{
+        timeout = ui_text_timeout(ui, view, timeout, now, redraw);
+        if (bar->mode != UI_FINDBAR_CLOSED || bar->field.focused)
+                timeout = ui_text_timeout(ui, &bar->field, timeout, now, redraw);
+        return timeout;
+}
+
+// The band, its field the width of the window less the gaps, and the hint the app has for its mode (the words are the app's).
+static fn ui_findbar_draw(struct ui address_to ui, struct ui_findbar address_to bar, int top, int width, const char address_to hint)
+{
+        struct ui_control address_to c = &bar->control;
+
+        c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
+        c->x = UI_GAP2, c->y = (top + ui_px(ui, UI_GAP1)) * 100 / ui->scale, c->w = width * 100 / ui->scale - 2 * UI_GAP2, c->h = UI_FIELD_H;
+        c->items[0] = hint;
+        c->focused = bar->field.focused;
+        c->edit = &bar->field;
+        ui_control_draw(ui, c);
+}
+
+// The bar's field over the view's picture, when it is open (the selection's handles and bar of a finger, drawn last).
+static fn ui_findbar_overlay(struct ui address_to ui, struct ui_findbar address_to bar)
+{
+        if (bar->mode != UI_FINDBAR_CLOSED)
+                ui_text_overlay(ui, &bar->field);
+}
+
 /* ---- drawing ---- */
 /*
         The text painters: ui_text_draw paints a text widget, ui_text_field_draw a field, ui_text_draw_line one line. The colours

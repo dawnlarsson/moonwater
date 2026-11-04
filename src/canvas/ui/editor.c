@@ -30,8 +30,6 @@
 #define EDITOR_READ_MOST (64u << 20)
 #define EDITOR_PATH 512
 #define EDITOR_BAR UI_PAGE_FOOT // the status bar: the kit's status line band, logical pixels
-#define EDITOR_FIND (UI_FIELD_H + 2 * UI_GAP1) // the find bar: the kit's field (UI_FIELD_H), a gap of UI_GAP1 above and below
-#define EDITOR_QUERY 1024 // the bytes of what the find bar holds
 
 struct editor_tab
 {
@@ -53,12 +51,8 @@ static struct
         b32 dirty, focused;
         unsigned int ground;
         int width, height, shown;
-        // The find bar: its field, what it does (0 closed, 1 find, 2 replace, 3 go to a line), and its flags.
-        struct ui_text find;
-        struct ui_control find_control, strip; // the find bar's field; the file tabs, the kit's segmented tabs
-        int finding;
-        p32 find_flags;
-        struct doc_find search;
+        struct ui_findbar find; // the kit's find bar: its field, its mode (find, replace, go to a line) and its flags
+        struct ui_control strip; // the file tabs, the kit's segmented tabs
         char status[160];
         struct ui_popup menu;
         struct ui_confirm confirm; // the kit's press again to confirm: Ctrl+W of a file with changes, Ctrl+S of one changed on disk
@@ -70,10 +64,10 @@ static struct editor_tab address_to editor_now(void)
         return &editor.tabs[editor.tab];
 }
 
-// The code view has the keys when the window has them and the find bar does not (the kit's rule, ui_text_focus_under).
+// The code view has the keys when the window has them and the find bar does not (the kit's rule, ui_findbar_keys).
 static fn editor_keys(void)
 {
-        ui_text_focus_under(&editor_now()->view, editor.focused, &editor.find);
+        ui_findbar_keys(&editor.find, &editor_now()->view, editor.focused);
 }
 
 // A file's bytes: mapped when large, read when small, refused when it is not a regular file. False with a status.
@@ -365,90 +359,30 @@ static b32 editor_done(void)
         return editor.leaving;
 }
 
-// The find bar opened for what (1 find, 2 replace, 3 go to a line), its field emptied for a line, holding the selection for a find.
-static fn editor_find_open(int what)
+// What the find bar said, in the editor's words for it: the status line (the kit says what happened, the app says it).
+static fn editor_said(int said, positive count)
 {
-        struct ui_text address_to view = &editor_now()->view;
-        p8 selected[256];
-        positive length = 0;
-
-        if (!editor.find.doc.selections)
-                ui_field_open(&editor.find, &editor.own, "");
-        // A line is asked for by its number: the field takes digits only, and says so of anything else.
-        editor.find.accept = what == 3 ? ui_field_digits : null;
-        editor.find.most = what == 3 ? 19 : EDITOR_QUERY - 1;
-        if (what != 3 && doc_any_selected(&view->doc))
-        {
-                const struct doc_selection address_to s = &view->doc.selections[view->doc.primary];
-
-                length = doc_sel_end(s) - doc_sel_start(s) < sizeof(selected) ? doc_read(&view->doc, doc_sel_start(s), selected, (positive)(doc_sel_end(s) - doc_sel_start(s))) : 0;
-        }
-        if (what == 3 || length)
-                ui_text_set(&editor.find, selected, length);
-        doc_select_all(&editor.find.doc);
-        editor.finding = what;
-        editor.find.focused = true;
-        editor_keys();
-}
-
-// The next match of the find bar's text from the caret (back: before it), selected and shown.
-static fn editor_find_step(b32 back)
-{
-        struct ui_text address_to view = &editor_now()->view;
-        p8 query[EDITOR_QUERY];
-        positive length = ui_text_string(&editor.find, query, sizeof(query));
-        p64 start, finish, from = back ? doc_sel_start(&view->doc.selections[view->doc.primary]) : doc_sel_end(&view->doc.selections[view->doc.primary]);
-
-        if (!doc_find_set(&editor.search, query, length, editor.find_flags))
-        {
-                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_pattern_bad), sizeof(editor.status));
-                return;
-        }
-        if (doc_find_next(&view->doc, &editor.search, from, back, true, &start, &finish))
-        {
-                doc_select_set(&view->doc, start, finish);
-                ui_text_reveal(&editor.ui, view);
+        if (said == UI_FINDBAR_SAID_CLEAR)
                 editor.status[0] = 0;
-        }
-        else
+        else if (said == UI_FINDBAR_SAID_NO_MATCH)
                 string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_no_match), sizeof(editor.status));
+        else if (said == UI_FINDBAR_SAID_BAD_PATTERN)
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_pattern_bad), sizeof(editor.status));
+        else if (said == UI_FINDBAR_SAID_REPLACED)
+                language_format((char address_to)editor.status, sizeof(editor.status), WORDS(editor_replaced), (long)count);
+        else if (said == UI_FINDBAR_SAID_USAGE)
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_replace_usage), sizeof(editor.status));
+        else if (said == UI_FINDBAR_SAID_REFUSED)
+                string_copy_bounded((string_address)editor.status, (string_address)editor.find.field.refused, sizeof(editor.status));
 }
 
-// What the find bar's Enter does: find, replace every match with what follows a / in the field, or go to its line.
-static fn editor_find_enter(b32 back)
+// The find bar's command (find, replace, go to a line, the next match, the one before), and what it said of it.
+static fn editor_bar(p32 command)
 {
-        struct ui_text address_to view = &editor_now()->view;
-        p8 text[EDITOR_QUERY];
-        positive length = ui_text_string(&editor.find, text, sizeof(text));
+        positive count = 0;
+        int said = ui_findbar_command(&editor.ui, &editor.own, &editor.find, &editor_now()->view, command, editor.focused, &count);
 
-        if (editor.finding == 3)
-        {
-                p64 line = (p64)string_digits_max((string_address)text, length, null);
-
-                doc_goto_line(&view->doc, line ? line - 1 : 0);
-                ui_text_reveal(&editor.ui, view);
-                editor.finding = 0;
-                editor.find.focused = false;
-                editor_keys();
-                return;
-        }
-        if (editor.finding == 2)
-        {
-                // FIND/REPLACE: the text before the first / is found, the rest replaces every match, as one undo.
-                positive slash = 0, replaced;
-
-                while (slash < length && text[slash] != '/')
-                        slash++;
-                if (slash < length && doc_find_set(&editor.search, text, slash, editor.find_flags))
-                {
-                        replaced = doc_replace_all(&view->doc, &editor.search, text + slash + 1, length - slash - 1);
-                        language_format((char address_to)editor.status, sizeof(editor.status), WORDS(editor_replaced), (long)replaced);
-                }
-                else
-                        string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_replace_usage), sizeof(editor.status));
-                return;
-        }
-        editor_find_step(back);
+        editor_said(said, count);
 }
 
 /* ---- the context menu ---- */
@@ -479,10 +413,10 @@ static fn editor_chose(int id)
         struct ui_text address_to view = &editor_now()->view, address_to field = editor.menu.field;
 
         if (id == EDITOR_MENU_FIND || id == EDITOR_MENU_LINE)
-                editor_find_open(id == EDITOR_MENU_FIND ? 1 : 3);
+                editor_bar(id == EDITOR_MENU_FIND ? DOC_CMD_FIND : DOC_CMD_GOTO_LINE);
         else if (id == EDITOR_MENU_COMMENT)
                 ui_text_command(&editor.ui, view, DOC_CMD_COMMENT);
-        else if (field == &editor.find || field == view)
+        else if (field == &editor.find.field || field == view)
                 ui_text_menu_do(&editor.ui, field, id);
         editor.dirty = true;
 }
@@ -596,7 +530,7 @@ static fn editor_draw(unsigned int address_to pixels)
 {
         struct ui address_to ui = &editor.ui;
         struct editor_tab address_to tab = editor_now();
-        int bar = ui_px(ui, EDITOR_BAR), find = editor.finding ? ui_px(ui, EDITOR_FIND) : 0, tabs = editor.count > 1 ? ui_px(ui, UI_TABS_H) : 0;
+        int bar = ui_px(ui, EDITOR_BAR), find = ui_findbar_band(ui, &editor.find), tabs = editor.count > 1 ? ui_px(ui, UI_TABS_H) : 0;
         unsigned int paper = ui_role(UI_SURFACE) & 0xffffffu;
 
         // ui_begin clears the window to the kit's surface (the editor is an opaque app), so the ground is not painted again here.
@@ -605,15 +539,9 @@ static fn editor_draw(unsigned int address_to pixels)
                 editor_tabs_draw(ui, tabs);
         if (find)
         {
-                struct ui_control address_to c = &editor.find_control;
                 const char address_to hints[4] = {"", WORDS(editor_find_hint), WORDS(editor_find_replace_hint), WORDS(editor_line_hint)};
 
-                c->kind = UI_INPUT, c->variant = UI_FIELD_BARE;
-                c->x = UI_GAP2, c->y = (tabs + ui_px(ui, UI_GAP1)) * 100 / ui->scale, c->w = editor.width * 100 / ui->scale - 2 * UI_GAP2, c->h = UI_FIELD_H;
-                c->items[0] = hints[editor.finding];
-                c->focused = editor.find.focused;
-                c->edit = &editor.find;
-                ui_control_draw(ui, c);
+                ui_findbar_draw(ui, &editor.find, tabs, editor.width, hints[editor.find.mode]);
         }
         ui_text_draw(ui, &tab->view, 0, tabs + find, editor.width, editor.height - tabs - find - bar, paper);
         // The status bar.
@@ -636,8 +564,7 @@ static fn editor_draw(unsigned int address_to pixels)
                 }
         }
         // A finger's selection: its handles and actions bar, over everything, the find bar's and then the code view's.
-        if (find)
-                ui_text_overlay(ui, &editor.find);
+        ui_findbar_overlay(ui, &editor.find);
         ui_text_overlay(ui, &tab->view);
 }
 
@@ -664,26 +591,14 @@ static fn editor_command(p32 command)
 {
         if (command == DOC_CMD_SAVE || command == DOC_CMD_SAVE_AS)
                 editor_save_asked();
-        else if (command == DOC_CMD_FIND || command == DOC_CMD_REPLACE || command == DOC_CMD_GOTO_LINE)
-                editor_find_open(command == DOC_CMD_FIND ? 1 : command == DOC_CMD_REPLACE ? 2 : 3);
-        else if (command == DOC_CMD_FIND_NEXT || command == DOC_CMD_FIND_PREVIOUS)
-                editor_find_step(command == DOC_CMD_FIND_PREVIOUS);
+        else if (ui_findbar_is_command(command))
+                editor_bar(command);
         else if (command == DOC_CMD_NEW)
                 editor_open(null);
         else if (command == DOC_CMD_CLOSE)
                 editor_close_tab_asked();
         else if (command == DOC_CMD_NEXT_TAB || command == DOC_CMD_PREVIOUS_TAB)
                 editor.tab = (editor.tab + (command == DOC_CMD_NEXT_TAB ? 1 : editor.count - 1)) % editor.count;
-}
-
-// The command the keymap names for a key, whoever has the keys (AltGr types: it is no chord).
-static p32 editor_key_command(const struct window_event address_to event)
-{
-        p32 flags = event->flags;
-        p32 modifiers = (flags & WINDOW_KEY_SHIFT ? DOC_MOD_SHIFT : 0) | (flags & WINDOW_KEY_CONTROL ? DOC_MOD_CONTROL : 0) |
-                        (flags & WINDOW_KEY_ALT ? DOC_MOD_ALT : 0) | (flags & WINDOW_KEY_SUPER ? DOC_MOD_SUPER : 0);
-
-        return flags & WINDOW_KEY_ALTGR ? DOC_CMD_NONE : doc_keymap_find(ui_text_keymap(), (p32)event->a, (p32)event->b, modifiers);
 }
 
 static b32 editor_event(const struct window_event address_to event)
@@ -693,7 +608,7 @@ static b32 editor_event(const struct window_event address_to event)
 
         // A key or a press other than the one that asked is a change of mind: the next such key asks again.
         if ((event->flags & WINDOW_KEY_DOWN) &&
-            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && editor_key_command(event) != editor.confirm.what)))
+            (event->type == WINDOW_EVENT_BUTTON || (event->type == WINDOW_EVENT_KEY && ui_key_command(event) != editor.confirm.what)))
                 ui_confirm_drop(&editor.confirm);
         if (editor_tabs_event(event))
                 return true;
@@ -705,46 +620,22 @@ static b32 editor_event(const struct window_event address_to event)
                 return true;
         }
         /*
-                The find bar is the kit's field: it has the keys while it is open and was the last pressed, and the
-                pointer on its well (a press there gives it the keys, a press on the view gives them back). Enter does
-                what it is for (Shift: the match before), Escape closes it, and of what the field does not take, Alt
-                with C, W or R turns case, whole words and a pattern, and a command of the files or the bar (save, find
-                the next, another tab) is done as from the view.
+                The find bar takes the keys while it is open and has them, and the pointer's presses in its band; what it does is the kit's
+                (ui_findbar_event), and what it asks of the app is a command (save, the files, the tabs) or what it said.
         */
-        if (editor.finding && (event->type == WINDOW_EVENT_KEY ? editor.find.focused : event->type != WINDOW_EVENT_WHEEL))
         {
-                if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
-                        editor.find.focused = ui_text_reach(&editor.ui, &editor.find, ui_kit.pointer_x, ui_kit.pointer_y);
-                asks = ui_field_send(&editor.ui, &editor.find, &editor.menu, event);
-                // A press outside the find bar is the view's: the bar's answer to it (commit or cancel) changes nothing here.
-                if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
-                        asks = 0;
-                if (asks & UI_TEXT_REFUSED)
-                        string_copy_bounded((string_address)editor.status, (string_address)editor.find.refused, sizeof(editor.status));
-                if (asks & UI_TEXT_SUBMIT)
-                        editor_find_enter((event->flags & WINDOW_KEY_SHIFT) != 0);
-                else if (asks & UI_TEXT_CANCEL)
-                {
-                        editor.finding = 0;
-                        editor.find.focused = false;
-                }
-                else if (!asks && event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
-                {
-                        p32 c = (p32)event->b | 0x20, command = editor_key_command(event);
+                struct ui_findbar_said said = ui_findbar_event(&editor.ui, &editor.find, &tab->view, &editor.menu, &editor.own, event, editor.focused);
 
-                        if ((event->flags & WINDOW_KEY_ALT) && memory_first_of((address_any) "cwr", (b8)c, 3))
-                                editor.find_flags ^= c == 'c' ? DOC_FIND_CASE : c == 'w' ? DOC_FIND_WORD : DOC_FIND_REGEX;
-                        else if (command >= DOC_CMD_FIND && command <= DOC_CMD_PREVIOUS_TAB && command != DOC_CMD_ZOOM_IN &&
-                                 command != DOC_CMD_ZOOM_OUT && command != DOC_CMD_ZOOM_RESET && command != DOC_CMD_WRAP &&
-                                 command != DOC_CMD_OVERWRITE)
-                                editor_command(command);
-                }
-                tab = editor_now();
-                editor_keys();
-                editor.dirty = true;
-                if (asks || event->type == WINDOW_EVENT_KEY)
+                if (said.said)
+                        editor_said(said.said, said.count);
+                if (said.command)
+                        editor_command(said.command);
+                if (said.took || said.said || said.command)
+                        editor.dirty = true;
+                if (said.took)
                         return true;
         }
+        tab = editor_now();
         editor_keys();
         asks = ui_text_send(&editor.ui, &tab->view, event);
         if (asks & UI_TEXT_COMMAND)
@@ -781,10 +672,8 @@ static long editor_tick(long timeout, long address_to other)
         b32 redraw = false;
 
         (void)other;
-        // The code view's frames and, while the find bar is open or has the keys, the bar's (ui_text_timeout: its throw, its blink, its drag).
-        timeout = ui_text_timeout(&editor.ui, &editor_now()->view, timeout, now, &redraw);
-        if (editor.finding || editor.find.focused)
-                timeout = ui_text_timeout(&editor.ui, &editor.find, timeout, now, &redraw);
+        // The code view's frames and the find bar's (ui_findbar_timeout: its throw, its blink, its drag).
+        timeout = ui_findbar_timeout(&editor.ui, &editor.find, &editor_now()->view, timeout, now, &redraw);
         if (redraw)
                 editor.dirty = true;
         return timeout;
