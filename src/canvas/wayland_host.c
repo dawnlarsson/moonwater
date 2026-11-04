@@ -773,6 +773,9 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                 compositor_raise(row);
                 compositor_focus(row);
                 break;
+        case WAYLAND_DO_PINCH_WANT:
+                compositor.table->pinch_wanted[row] = a ? 1u : 0u;
+                break;
         case WAYLAND_DO_CURSOR:
                 // The shape the window's client asked for over the pointer: its CP_ shape, stored +1 (0 for none).
                 compositor_wl.cursor_asked[row] = (unsigned char)(a == WAYLAND_CURSOR_HIDDEN ? COMPOSITOR_WL_HIDDEN
@@ -2070,6 +2073,14 @@ static void compositor_wl_drain(int row)
                 {
                         if (!(flags & WINDOW_KEY_REPEAT))
                                 wayland_key(row, a, (flags & WINDOW_KEY_DOWN) ? 1 : 0);
+                        continue;
+                }
+                if (type == WINDOW_EVENT_PINCH)
+                {
+                        // A trackpad's pinch: its phase, its scale (1024ths) and its focal point, packed as the window's pixels.
+                        long phase = flags & WINDOW_PINCH_BEGIN ? 1 : flags & WINDOW_PINCH_END ? 2 : 0;
+
+                        wayland_pointer_pinch(row, phase, a, (long)(((unsigned int)b >> 16) & 0xffffu), (long)((unsigned int)b & 0xffffu));
                         continue;
                 }
                 if (type != WINDOW_EVENT_MOTION && type != WINDOW_EVENT_BUTTON && type != WINDOW_EVENT_WHEEL)

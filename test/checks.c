@@ -168359,6 +168359,63 @@ static void test_activation(void)
         wp_cursor_shape: the shape a client asks for is given to the window it is over, when its serial is one of its recent inputs
         (a stale one is nothing); a shape the compositor lacks is the arrow; the shape is none again on enter and on leave.
 */
+/*
+        zwp_pointer_gestures_v1: a client that asks for a pinch gets it for its windows (they take the pinch, not Ctrl and a wheel),
+        and a pinch of the pointer's window is begin (two fingers), updates (the focal point's move, the scale in 256ths of 1.0) and
+        end, each for the pinch objects of that client only.
+*/
+static void test_pinch(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long seat, pointer, gestures, pinch;
+        long a, before;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        seat = wl_global(c, s.registry, WLI_wl_seat, 9);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        gestures = wl_global(c, s.registry, WLI_zwp_pointer_gestures_v1, 3);
+        wlc_forget(c);
+        wlc_send(c, seat, WLQ_wl_seat_get_pointer, pointer);
+        wayland_pointer_to(0, 10, 10);
+        wlc_pump(c);
+        wlc_forget(c);
+        pinch = wlc_id(c, WLI_zwp_pointer_gesture_pinch_v1, 3);
+        before = fake.row[0].did_count;
+        wlc_send(c, gestures, WLQ_zwp_pointer_gestures_v1_get_pinch_gesture, pinch, pointer);
+        WLCHECK(gestures && c->errors == 0, "the pointer gestures are offered, and a pinch object is no error");
+        {
+                int asked = 0;
+
+                for (long at = before; at < fake.row[0].did_count && at < 16; at++)
+                        asked |= fake.row[0].did[at] == WAYLAND_DO_PINCH_WANT;
+                WLCHECK(asked, "a client that asks for a pinch takes it for its window");
+        }
+
+        wayland_pointer_pinch(0, 1, 1024, 20, 12);
+        wlc_pump(c);
+        a = event_at(c, WLI_zwp_pointer_gesture_pinch_v1, WLE_zwp_pointer_gesture_pinch_v1_begin, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[2] == s.surface && c->ev[a].u[3] == 2, "a pinch begins with two fingers on the window it began on");
+        wlc_forget(c);
+        wayland_pointer_pinch(0, 0, 2048, 25, 12);
+        wlc_pump(c);
+        a = event_at(c, WLI_zwp_pointer_gesture_pinch_v1, WLE_zwp_pointer_gesture_pinch_v1_update, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[1] == 5 * 256 && c->ev[a].u[2] == 0 && c->ev[a].u[3] == 512 && c->ev[a].u[4] == 0,
+                "an update is the focal point's move, the scale (2.0 is 512 in fixed point) and no rotation");
+        wlc_forget(c);
+        wayland_pointer_pinch(0, 2, 0, 25, 12);
+        wlc_pump(c);
+        a = event_at(c, WLI_zwp_pointer_gesture_pinch_v1, WLE_zwp_pointer_gesture_pinch_v1_end, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[2] == 0 && c->errors == 0, "a pinch ends, not cancelled");
+        wlc_end(c);
+        leak_check("pinch");
+        wayland_stop();
+}
+
 static void test_cursor_shape(void)
 {
         struct session s;
@@ -172224,6 +172281,7 @@ int main(int argc, char **argv)
         test_activation();
         test_pacing();
         test_cursor_shape();
+        test_pinch();
         test_text();
         test_popups();
         test_surface_rules();

@@ -101,6 +101,9 @@ CONFIG = [
     ("protocols", "staging/commit-timing/commit-timing-v1.xml", [
         "wp_commit_timing_manager_v1", "wp_commit_timer_v1",
     ]),
+    ("protocols", "unstable/pointer-gestures/pointer-gestures-unstable-v1.xml", [
+        "zwp_pointer_gestures_v1", "zwp_pointer_gesture_swipe_v1", "zwp_pointer_gesture_pinch_v1", "zwp_pointer_gesture_hold_v1",
+    ]),
 ]
 
 

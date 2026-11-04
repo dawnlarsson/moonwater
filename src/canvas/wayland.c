@@ -162,6 +162,7 @@ struct wayland_rect
 #define WAYLAND_DO_RESIZE 7
 #define WAYLAND_DO_CLOSE 8
 #define WAYLAND_DO_FOCUS 9      // raise and focus the window: an xdg-activation token that the person's input vouches for
+#define WAYLAND_DO_PINCH_WANT 11 // the window takes the pinch gesture (1) rather than Ctrl and a wheel (0): a client asked for a pinch object
 #define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
 #define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
 #define WAYLAND_CURSOR_TEXT 1
@@ -564,6 +565,7 @@ static struct
         long idle_inhibitors;                  // idle inhibitors held by every client (each counted once, while it lives)
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
         struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
+        long pinch_x, pinch_y;                       // the focal point the last pinch update was at
 } wayland;
 
 /* ---- the wire ---- */
@@ -960,6 +962,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_xdg_activation_v1, 1},
     {WLI_wp_fifo_manager_v1, 1},
     {WLI_wp_commit_timing_manager_v1, 1},
+    {WLI_zwp_pointer_gestures_v1, 3},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -5648,6 +5651,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
 }
 
 /* ---- one request ---- */
+static int wayland_gestures_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a);
 
 /*
         Reads a request's arguments by the table. A new id becomes an object here, of the interface the table names
@@ -5861,6 +5865,12 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_xdg_activation_v1:
                 case WLI_xdg_activation_token_v1:
                         status = wayland_activation_request(c, o, op, a);
+                        break;
+                case WLI_zwp_pointer_gestures_v1:
+                case WLI_zwp_pointer_gesture_swipe_v1:
+                case WLI_zwp_pointer_gesture_pinch_v1:
+                case WLI_zwp_pointer_gesture_hold_v1:
+                        status = wayland_gestures_request(c, o, op, a);
                         break;
                 case WLI_wp_fifo_manager_v1:
                 case WLI_wp_fifo_v1:
@@ -6599,6 +6609,91 @@ WAYLAND_API unsigned long wayland_row_timestamp(long row)
         struct wayland_surface *s = row >= 0 && row < WAYLAND_ROWS ? wayland_row_surface(row, &c) : 0;
 
         return s ? s->timestamp : 0;
+}
+
+/*
+        zwp_pointer_gestures_v1 (pointer-gestures, version 3). A pinch object is asked for per pointer: the client's windows take the
+        pinch from then on (the compositor sends a window that does not take it Ctrl and a wheel). Swipe and hold are accepted and
+        never sent: the compositor has no swipe or hold gesture to send.
+*/
+static int wayland_gestures_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        (void)a;
+        if (self->iface == WLI_zwp_pointer_gestures_v1 && op == WLQ_zwp_pointer_gestures_v1_get_pinch_gesture)
+                for (long at = 0; at < WAYLAND_ROWS; at++)
+                        if (wayland.row_client[at] == c->slot)
+                                wayland.host->row_do(wayland.host->context, (int)at, WAYLAND_DO_PINCH_WANT, 1, 0);
+        return WAYLAND_OK;
+}
+
+/*
+        A pinch of the pointer's window (the host's WINDOW_EVENT_PINCH): phase 1 begins it, 0 updates it, 2 ends it. scale is in
+        1024ths of the span it began at (1024 is 1.0), (fx, fy) the focal point in the row's pixels. Every pinch object of the
+        pointer's client is sent it: begin with the fingers (two), an update with the focal point's move and the scale (fixed, 1.0
+        is 256), no rotation, and an end that is not cancelled.
+*/
+WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx, long fy)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s;
+        long time, dx = 0, dy = 0;
+        unsigned long serial = 0;
+
+        if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)))
+                return;
+        time = wayland.host->now(wayland.host->context);
+        if (phase == 1)
+        {
+                wayland.pinch_x = fx;
+                wayland.pinch_y = fy;
+                serial = wayland_input_serial(c);
+        }
+        else if (phase == 2)
+                serial = wayland_input_serial(c);
+        else
+        {
+                dx = fx - wayland.pinch_x;
+                dy = fy - wayland.pinch_y;
+                wayland.pinch_x = fx;
+                wayland.pinch_y = fy;
+        }
+        for (long at = 0; at < WAYLAND_OBJECTS; at++)
+        {
+                struct wayland_object *o = &c->objects[at];
+
+                if (o->iface != WLI_zwp_pointer_gesture_pinch_v1 || o->id == 0)
+                        continue;
+                if (phase == 1)
+                {
+                        struct wayland_event e = wayland_begin(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_begin);
+
+                        wayland_word(&e, serial);
+                        wayland_word(&e, (unsigned long)time);
+                        wayland_word(&e, s->id);
+                        wayland_word(&e, 2);
+                        wayland_end(&e);
+                }
+                else if (phase == 2)
+                {
+                        struct wayland_event e = wayland_begin(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_end);
+
+                        wayland_word(&e, serial);
+                        wayland_word(&e, (unsigned long)time);
+                        wayland_word(&e, 0);
+                        wayland_end(&e);
+                }
+                else
+                {
+                        struct wayland_event e = wayland_begin(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_update);
+
+                        wayland_word(&e, (unsigned long)time);
+                        wayland_word(&e, wayland_fixed(dx, s->scale120));
+                        wayland_word(&e, wayland_fixed(dy, s->scale120));
+                        wayland_word(&e, (unsigned long)(scale > 0 ? scale / 4 : 0)); // 1024ths to fixed (256 is 1.0)
+                        wayland_word(&e, 0);
+                        wayland_end(&e);
+                }
+        }
 }
 
 /* Whether a window was asked for by an xdg-activation it was not vouched for (it wants attention, until it is focused). */
