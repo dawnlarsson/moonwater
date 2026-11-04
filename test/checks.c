@@ -217256,6 +217256,14 @@ static struct ui_scene app_scene;
 // fixed_pitch: 0 for the picture's own width as its pitch, else that pitch (the kit's 700 buffer for 100 percent).
 static struct mixer_big app_mixer;
 static int app_group; // which Settings page (its group) app 4 paints
+static struct ui_popmenu app_menu;
+
+// The popup menu: its picture is the window's, begun as the window is, with the menu drawn in its top left (ui_popmenu_draw).
+static void app_popmenu_paint(unsigned int address_to pixels)
+{
+        ui_begin(&settings.ui, pixels, settings.own.table->stride, settings.width, settings.height);
+        ui_popmenu_draw(&settings.ui, &app_menu);
+}
 
 static void app_settings_paint(unsigned int address_to pixels)
 {
@@ -217288,8 +217296,8 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
         positive need = 0;
         for (int k = 0; k < count; k++)
         {
-                int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : MIXER_WIDTH) * s / 100;
-                int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
+                int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : MIXER_WIDTH) * s / 100;
+                int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
 
                 if ((positive)pitch * H > need)
                         need = (positive)pitch * H;
@@ -217300,10 +217308,10 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                 ui_kit_theme(mode ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
                 for (int k = 0; k < count; k++)
                 {
-                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : MIXER_WIDTH) * s / 100;
-                        int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
+                        int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : MIXER_WIDTH) * s / 100;
+                        int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
                         int bad = 0;
-                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : mixer_draw;
+                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : which == 6 ? app_popmenu_paint : mixer_draw;
 
                         // The app as its window has it, set up here and not by its start: the scale, the faces, the window's table, the picture's size.
                         memory_zero(&app_table, sizeof(app_table));
@@ -217320,6 +217328,24 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                         launcher.entry[i].kind = LAUNCHER_WINDOW, launcher.entry[i].index = (unsigned short)i;
                                 launcher.focused = 1;
                                 launcher.search.kind = 0;
+                        }
+                        else if (which == 6)
+                        {
+                                // A popup menu: its items (a checked one, a disabled one, a separator, a submenu) and its hot item (the group's variant).
+                                settings.own.table = &app_table;
+                                settings.width = W, settings.height = H;
+                                settings.ui.scale = s, settings.ui.engine = &app_engine, settings.ui.regular = settings.ui.bold = settings.ui.mono = &app_face;
+                                settings.ui.scratch = app_scratch, settings.ui.scratch_width = 2000, settings.ui.opaque = 1, settings.ui.glass = 0;
+                                gallery.on = 0;
+                                memory_zero(&app_menu, sizeof(app_menu));
+                                ui_popmenu_add(&app_menu, "Copy", "Ctrl+C", 0, 0);
+                                ui_popmenu_add(&app_menu, "Paste", "Ctrl+V", UI_MENU_DISABLED, 1);
+                                ui_popmenu_add(&app_menu, null, null, UI_MENU_SEPARATOR, 2);
+                                ui_popmenu_add(&app_menu, "Wrap lines", null, UI_MENU_CHECK | UI_MENU_ON, 3);
+                                ui_popmenu_add(&app_menu, "Font size", null, UI_MENU_RADIO, 4);
+                                ui_popmenu_add(&app_menu, "Open with", null, UI_MENU_SUBMENU, 5);
+                                ui_popmenu_size(&settings.ui, &app_menu, H);
+                                app_menu.hot = app_group == 1 ? 0 : app_group == 2 ? 5 : -1;
                         }
                         else if (which == 5)
                         {
@@ -217366,7 +217392,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         app_scene.size = cover_size, app_scene.at = cover_at;
                         if (which == 0)
                                 launcher.ui.scene = &app_scene;
-                        else if (which == 4 || which == 5)
+                        else if (which == 4 || which == 5 || which == 6)
                                 settings.ui.scene = &app_scene;
                         else
                                 mixer.ui.scene = &app_scene;
@@ -217395,7 +217421,9 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                                 string_format(log, "  FAIL gpu app %p %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)which, (positive)s, (positive)mode,
                                                               (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)cpu[(positive)y * pitch + x]);
                                 }
-                        if (which == 5)
+                        if (which == 6)
+                                check("gpu apps: the popup menu replays bit for bit", bad == 0);
+                        else if (which == 5)
                                 check("gpu apps: the gallery showcase replays bit for bit", bad == 0);
                         else if (which == 4)
                                 check("gpu apps: the settings page replays bit for bit", bad == 0);
@@ -218870,6 +218898,12 @@ b32 main(void)
                                 static const int gallery_scales[4] = {100, 150, 200, 300};
 
                                 app_rows(5, big, kops, kbins, kbins + (4 << 20), 4u << 20, gallery_scales, 4, 0);
+                        }
+                        {
+                                static const int popmenu_scales[4] = {100, 150, 200, 300};
+
+                                for (app_group = 0; app_group < 3; app_group++)
+                                        app_rows(6, big, kops, kbins, kbins + (4 << 20), 4u << 20, popmenu_scales, 4, 0);
                         }
                 }
         }
