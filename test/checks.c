@@ -128378,15 +128378,15 @@ static void check_compositor_touch_hold_gone(void)
     compositor.touchscreen[0] = 1;
     compositor.screen_touch[0] = (struct compositor_touch_screen){0};
     compositor.screen_touch[0].slots = 1;
-    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+    for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
     table->x[1] = table->y[1] = 20;
     life_paint(1, 100, 80, GLASS_SIDE);
 
     // Held on the window in row 1, as compositor_touch_tick leaves a long press; then the window goes and the next program takes row 1.
-    compositor.touch.mode = COMPOSITOR_TOUCH_HELD;
+    compositor.touch.gesture.mode = UI_TOUCH_HELD;
     compositor.touch.device = 0;
-    compositor.touch.first = 0;
+    compositor.touch.gesture.first = 0;
     compositor.touch.hold_row = 1;
     life_close(1);
     table->x[1] = table->y[1] = 20;
@@ -128397,7 +128397,7 @@ static void check_compositor_touch_hold_gone(void)
     // The finger lifts.
     compositor_touch_report(0, clock_monotonic_nanoseconds());
     check("touch hold gone: the lift of a press held on a window that went is posted to no program in its row",
-          table->event_head[1] == head && compositor.touch.mode == COMPOSITOR_TOUCH_NONE);
+          table->event_head[1] == head && compositor.touch.gesture.mode == UI_TOUCH_NONE);
     check("touch hold gone: and the next program in the row is given no gesture of the person's for the clipboard",
           compositor_clip.gesture[1] == 0);
     life_close(1);
@@ -131696,7 +131696,7 @@ static void check_compositor_touch_hold(void)
     compositor.input_count = 1;
     compositor.touchscreen[0] = 1;
     compositor.screen_touch[0] = (struct compositor_touch_screen){0};
-    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+    for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
     compositor.screen_touch[0].slots = 1;
     compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1024;
@@ -131801,7 +131801,7 @@ static void check_touch_path(struct ui address_to wui)
     touch_down = 0;
     compositor.touchscreen[0] = 1;
     compositor.screen_touch[0] = (struct compositor_touch_screen){0};
-    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+    for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
     compositor.screen_touch[0].slots = 1;
     compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1020;
@@ -131830,7 +131830,7 @@ static void check_touch_path(struct ui address_to wui)
     asks = 0;
     touch_one(TOUCH_PATH_LEFT + bx, TOUCH_PATH_TOP + by, false);
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
-    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
     touch_path_drain(wui, &t, &own, &px, &py, &asks);
     check("touch path: a long press selects the word under the finger", doc_sel_start(&t.doc.selections[0]) == 6 && doc_sel_end(&t.doc.selections[0]) == 10);
     check("touch path: and the long press asks for no menu", !(asks & UI_TEXT_MENU));
@@ -131922,7 +131922,7 @@ static void scroll_setup(int touch)
     {
         compositor.touchscreen[0] = 1;
         compositor.screen_touch[0] = (struct compositor_touch_screen){0};
-        for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
             compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
         compositor.screen_touch[0].slots = 1;
         compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1020;
@@ -132040,7 +132040,7 @@ static void scroll_code_touch(struct ui address_to wui, struct ui_text address_t
     row = t->top + 2 * t->line_height + t->line_height / 2;
     touch_one(SCROLL_LEFT + x, SCROLL_TOP + row, false);
     scroll_drain(wui, t, own, &px, &py, 0);
-    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
     scroll_drain(wui, t, own, &px, &py, 0);
     touch_one(SCROLL_LEFT + x, SCROLL_TOP + target_y, false);
     scroll_drain(wui, t, own, &px, &py, 0);
@@ -132085,7 +132085,7 @@ static void scroll_field_touch(struct ui address_to wui, struct ui_text address_
     a->before = (int)t->scroll_x;
     touch_one(SCROLL_LEFT + x, SCROLL_TOP + y, false);
     scroll_drain(wui, t, own, &px, &py, 1);
-    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
     scroll_drain(wui, t, own, &px, &py, 1);
     touch_one(SCROLL_LEFT + target_x, SCROLL_TOP + y, false);
     scroll_drain(wui, t, own, &px, &py, 1);
@@ -132564,7 +132564,7 @@ static void check_compositor_touch(void)
 #else
     compositor.touchscreen[0] = 1;
     compositor.screen_touch[0] = (struct compositor_touch_screen){0};
-    for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+    for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         compositor.screen_touch[0].id[slot] = compositor.screen_touch[0].was[slot] = -1;
     compositor.screen_touch[0].slots = 1;
     compositor.screen_touch[0].range[1] = compositor.screen_touch[0].range[3] = 1020;
@@ -132868,15 +132868,15 @@ static void check_compositor_touch(void)
     }
 
     /*
-        Held still for a long press (COMPOSITOR_TOUCH_HOLD_NS), a finger is the right button there, flagged as a long press;
+        Held still for a long press (UI_TOUCH_HOLD_NS), a finger is the right button there, flagged as a long press;
         its left press is taken back first. The finger may move on from there, the pointer following it, and its lift is
         the release that ends the press (cancelled, touch and held), told to the window it landed on.
     */
     head1 = table->event_head[1];
     touch_one(100, 80, false);
-    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS - 1000000);
+    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS - 1000000);
     unchanged = touch_buttons(1, head1) == 0x1101;
-    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
     check("touch: held still a long press's time, a finger is the right button, its left press taken back first",
           unchanged && touch_buttons(1, head1) == 0x1101110211111110ul);
     flags = 0;
@@ -132903,7 +132903,7 @@ static void check_compositor_touch(void)
     */
     table->hover_off[1] = 1;
     touch_one(100, 80, false);
-    compositor_touch_tick(touch_clock * 1000 + COMPOSITOR_TOUCH_HOLD_NS);
+    compositor_touch_tick(touch_clock * 1000 + UI_TOUCH_HOLD_NS);
     head2 = table->event_head[1];
     touch_one(120, 80, false);
     unchanged = touch_seen(1, head2, WINDOW_EVENT_MOTION, -1, null) > 0;
@@ -146469,6 +146469,228 @@ static fn check_kit_anchor_flip(void)
         check("kit anchor: an exact place is clamped to the screen and not flipped", x == 800 && y == 500);
 }
 
+/*
+        The touch recogniser (ui/touch.h) fed with recorded point streams: each frame is the slots' ids and points, applied as the
+        compositor applies it (begin, its events, then the report with the frame as it then is, its events). The events are written
+        as letters: S START, M MOVE, P PRESS, R RELEASE, C CANCEL, X CLOSE, U RESUME, r RIGHT, w WHEEL (its v120 summed apart),
+        H HOLD, E HOLD_END, I IDLE. Each row is one stream and the letters it must give.
+*/
+struct touch_rig
+{
+        struct ui_touch t;
+        int id[UI_TOUCH_SLOTS], was[UI_TOUCH_SLOTS], x[UI_TOUCH_SLOTS], y[UI_TOUCH_SLOTS];
+        int px, py, wheel, sideways, close_on_press, busy, scale;
+        char log[64];
+        int n;
+};
+
+static void touch_rig_apply(struct touch_rig *r, const struct ui_touch_out *out)
+{
+        for (unsigned int at = 0; at < out->count && r->n < (int)sizeof(r->log) - 1; at++)
+        {
+                const struct ui_touch_event *e = &out->event[at];
+                char c = '?';
+
+                switch (e->kind)
+                {
+                case UI_TOUCH_START: c = 'S', r->px = e->x, r->py = e->y; break;
+                case UI_TOUCH_MOVE: c = 'M', r->px = e->x, r->py = e->y; break;
+                case UI_TOUCH_PRESS: c = 'P', r->close_on_press ? ui_touch_pend(&r->t, 1) : (void)0; break;
+                case UI_TOUCH_RELEASE: c = 'R'; break;
+                case UI_TOUCH_CANCEL: c = 'C'; break;
+                case UI_TOUCH_CLOSE: c = 'X'; break;
+                case UI_TOUCH_RESUME: c = 'U'; break;
+                case UI_TOUCH_RIGHT: c = 'r'; break;
+                case UI_TOUCH_WHEEL: c = 'w', r->wheel += e->horizontal ? 0 : e->v120, r->sideways += e->horizontal ? e->v120 : 0; break;
+                case UI_TOUCH_HOLD: c = 'H'; break;
+                case UI_TOUCH_HOLD_END: c = 'E'; break;
+                case UI_TOUCH_IDLE: c = 'I'; break;
+                }
+                r->log[r->n++] = c;
+        }
+        r->log[r->n] = 0;
+}
+
+// One frame: slots the caller set in r->id and r->x, r->y; the begin, then the report, each applied; then the ids are kept.
+static void touch_rig_frame(struct touch_rig *r, b64 now)
+{
+        struct ui_touch_frame f;
+        struct ui_touch_out out;
+
+        memory_zero(&f, sizeof(f));
+        memory_copy(f.id, r->id, sizeof(f.id));
+        memory_copy(f.was, r->was, sizeof(f.was));
+        memory_copy(f.x, r->x, sizeof(f.x));
+        memory_copy(f.y, r->y, sizeof(f.y));
+        f.pointer_x = r->px, f.pointer_y = r->py, f.scale = r->scale, f.now = now, f.busy = r->busy;
+        ui_touch_begin(&r->t, &f, &out);
+        touch_rig_apply(r, &out);
+        f.pointer_x = r->px, f.pointer_y = r->py, f.busy = r->busy;
+        ui_touch_report(&r->t, &f, &out);
+        touch_rig_apply(r, &out);
+        memory_copy(r->was, r->id, sizeof(r->was));
+}
+
+static void touch_rig_down(struct touch_rig *r, int slot, int x, int y)
+{
+        r->id[slot] = slot + 1, r->x[slot] = x, r->y[slot] = y;
+}
+
+static void touch_rig_up(struct touch_rig *r, int slot)
+{
+        r->id[slot] = -1;
+}
+
+static void touch_rig_tick(struct touch_rig *r, b64 now, int pressed)
+{
+        struct ui_touch_out out;
+
+        ui_touch_tick(&r->t, now, pressed, &out);
+        touch_rig_apply(r, &out);
+}
+
+static void touch_rig_reset(struct touch_rig *r, int close_on_press)
+{
+        memory_zero(r, sizeof(*r));
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                r->id[slot] = r->was[slot] = -1;
+        r->scale = 100;
+        r->close_on_press = close_on_press;
+        r->px = 500, r->py = 500;
+}
+
+static void touch_row(const char *what, const struct touch_rig *r, const char *letters, int wheel)
+{
+        int same = 1;
+
+        for (int at = 0; r->log[at] || letters[at]; at++)
+                if (r->log[at] != letters[at])
+                {
+                        same = 0;
+                        break;
+                }
+        checks++;
+        if (!(same && (wheel < 0 || r->wheel == wheel)))
+        {
+                failures++;
+                string_format(log, "  FAIL %s (got %s, wheel %b)\n", (string_address)what, (string_address)r->log, (bipolar)r->wheel);
+                log_flush();
+        }
+}
+
+static fn check_kit_touch_gestures(void)
+{
+        static struct touch_rig r;
+        b64 t0 = 1000000000ll;
+
+        // A tap: a finger down and up where it landed.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 100000000ll);
+        touch_row("kit touch: a tap is a press where the finger landed and a release where it lifts", &r, "SPIR", -1);
+
+        // A drag: past the slop it moves the pointer, and not before.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 0, 100, 107), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 100, 108), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_down(&r, 0, 100, 130), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 40000000ll);
+        touch_row("kit touch: a finger 7 px off is still a tap, and 8 px (the slop, at or past it) is the drag, moved on to 130 and lifted",
+                  &r, "SPMMIR", -1);
+
+        // Under the slop, a tap: a finger that wobbles 7 px and lifts is a click where it landed.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 0, 100, 107), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_row("kit touch: a wobble of 7 px does not move the pointer: the finger is a tap", &r, "SPIR", -1);
+
+        // A long press: still for UI_TOUCH_HOLD_NS (not before it), the hold; moved on while held, the pointer follows; lifted, the end.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_tick(&r, t0 + 399000000ll, 1);
+        touch_rig_tick(&r, t0 + 400000000ll, 1);
+        touch_rig_down(&r, 0, 100, 140), touch_rig_frame(&r, t0 + 500000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 600000000ll);
+        touch_row("kit touch: a finger still for 400 ms is a long press (at 399 ms it is not), which follows the finger and ends on the lift",
+                  &r, "SPHMIE", -1);
+
+        // A long press with no button taken (pressed 0 at the tick): nothing, the lift is a tap.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_tick(&r, t0 + 500000000ll, 0);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 600000000ll);
+        touch_row("kit touch: a long press that took no button (none under the finger) is no hold: the lift is a tap", &r, "SPIR", -1);
+
+        // A close button under the finger (pending): a hold is not asked for, and a lift unmoved closes; a move resumes the press.
+        touch_rig_reset(&r, 1);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_tick(&r, t0 + 500000000ll, 1);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 600000000ll);
+        touch_row("kit touch: a pending press (a close button) is no long press, and a lift unmoved closes the window", &r, "SPIX", -1);
+
+        touch_rig_reset(&r, 1);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 0, 100, 112), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_row("kit touch: a pending press moved past the slop resumes (the press made again), then is a drag and not a close", &r, "SPUMIR", -1);
+
+        // Two fingers: the first's press is taken back, and the two turn the wheel from their middle.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 0, 100, 112), touch_rig_down(&r, 1, 200, 112), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 30000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 40000000ll);
+        touch_row("kit touch: a second finger takes the press back (a cancel), and the two moved 12 px down are a wheel of 30 notches' 120ths (48 px a notch at 100%), and lifted they are nothing",
+                  &r, "SPCwI", 30);
+
+        // Two fingers lifted soon, neither moved: a right click, at the pointer, on the second finger's landing's time.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 50000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 300000000ll);
+        touch_row("kit touch: two fingers lifted within 400 ms of the second, neither moved, are a right click", &r, "SPCIr", -1);
+
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 50000000ll);
+        touch_rig_up(&r, 1), touch_rig_frame(&r, t0 + 411000000ll);
+        touch_row("kit touch: and 401 ms after the second landed, the two are no right click", &r, "SPCI", -1);
+
+        // Two fingers in one frame from nothing: the press, then the two take it back.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0);
+        touch_row("kit touch: two fingers down in one frame are a press taken back at once (a cancel)", &r, "SPC", -1);
+
+        // A drag holds the hand: a second finger while busy does not turn the press into the two.
+        touch_rig_reset(&r, 0);
+        r.busy = 1;
+        touch_rig_down(&r, 0, 100, 100), touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0);
+        touch_row("kit touch: a second finger while a drag or a resize holds the hand is nothing: the first finger goes on", &r, "SP", -1);
+
+        // A finger that has moved on: a second finger is no wheel and no click.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        touch_rig_down(&r, 0, 100, 112), touch_rig_frame(&r, t0 + 10000000ll);
+        touch_rig_down(&r, 1, 200, 100), touch_rig_frame(&r, t0 + 20000000ll);
+        touch_row("kit touch: a second finger after the first has moved is nothing", &r, "SPM", -1);
+
+        // The device drops: the drop cancels a finger down, and the reset is nothing.
+        touch_rig_reset(&r, 0);
+        touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
+        {
+                struct ui_touch_out out;
+
+                ui_touch_drop(&r.t, &out);
+                touch_rig_apply(&r, &out);
+        }
+        touch_row("kit touch: an event drop ends a finger down as a cancel", &r, "SPC", -1);
+}
+
 // The panel's cells as data (taskbar_cell_rules): what each button does on each cell, and the tray's pair by its timing and place.
 static fn check_kit_cell_rules(void)
 {
@@ -157246,6 +157468,7 @@ b32 main()
         check_kit_notch_take();
         check_kit_double_press();
         check_kit_cell_rules();
+        check_kit_touch_gestures();
         check_kit_anchor_flip();
         check_kit_spring_fresh();
         check_kit_wheel_burst();
@@ -163704,7 +163927,7 @@ static void check_compositor_touch_backend(void) {
                  compositor_edges_at(5,50,10,20,110,80,17,8,2,24)==CP_EDGE_LEFT&&
                  compositor_edges_at(100,85,10,20,110,80,17,8,2,24)==(CP_EDGE_RIGHT|CP_EDGE_BOTTOM)&&
                  compositor_edges_at(60,25,10,20,110,80,17,8,2,24)==0&&compositor_edges_at(60,0,10,20,110,80,17,8,2,24)==0);
-        cc_check(compositor_past_slop(0,0,5,6,8)==0&&compositor_past_slop(0,0,0,8,8)==1&&compositor_past_slop(10,10,4,4,8)==1);
+        cc_check(ui_touch_past(0,0,5,6,8)==0&&ui_touch_past(0,0,0,8,8)==1&&ui_touch_past(10,10,4,4,8)==1);
         cc_check(compositor_builtin_panel("eDP-1")&&compositor_builtin_panel("LVDS-1")&&compositor_builtin_panel("DSI-2")&&
                  !compositor_builtin_panel("DP-1")&&!compositor_builtin_panel("HDMI-A-1")&&!compositor_builtin_panel("Virtual-1"));
     }

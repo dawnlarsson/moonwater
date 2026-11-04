@@ -121,6 +121,7 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #include "ui/theme.h"
 #include "ui/motion.h"
 #include "ui/taskbar.h"
+#include "ui/touch.h"
 #include "../audio/state.c" // the sound server's page: the tray's volume cell and the volume keys
 #include "../audio/control.c" // and its socket, which the keys and the wheel tell the volume to at once
 #if !defined(SHELL_NO_GPU) && !defined(MOONWATER_BUILD_TOOL)
@@ -2706,14 +2707,6 @@ static unsigned int compositor_edges_at(int px, int py, int x1, int y1, int x2, 
         return edges;
 }
 
-// Whether a finger moved from x0, y0 to x, y is past slop: a drag, where a finger's shake is not.
-static int compositor_past_slop(int x0, int y0, int x, int y, int slop)
-{
-        long long dx = (long long)x - x0, dy = (long long)y - y0;
-
-        return dx * dx + dy * dy >= (long long)slop * slop;
-}
-
 /* ---- end of the pointer ---- */
 
 /* ---- outputs: the screens one desktop spans ---- */
@@ -3316,14 +3309,14 @@ struct compositor_pad
 #define COMPOSITOR_ABS_MT_TRACKING_ID 0x39u
 #define COMPOSITOR_BTN_TOOL_PEN 0x140u
 // The fingers a touch screen says at once that are followed.
-#define COMPOSITOR_TOUCH_SLOTS 10
+#define UI_TOUCH_SLOTS 10
 
 struct compositor_touch_screen
 {
         int slot, slots;   // the slot the events are about, and whether it has slots at all
         int range[4];      // x from and to, y from and to, in its units
         int dropped;       // the kernel dropped events: what comes until the report's end is not to be trusted
-        int id[COMPOSITOR_TOUCH_SLOTS], was[COMPOSITOR_TOUCH_SLOTS], x[COMPOSITOR_TOUCH_SLOTS], y[COMPOSITOR_TOUCH_SLOTS];
+        int id[UI_TOUCH_SLOTS], was[UI_TOUCH_SLOTS], x[UI_TOUCH_SLOTS], y[UI_TOUCH_SLOTS];
 };
 
 /*
@@ -3335,23 +3328,18 @@ struct compositor_touch_screen
         the right button (mode 3, nothing more until every finger is up). hidden: a finger was the last thing used, so
         the pointer is not shown under it.
 */
-#define COMPOSITOR_TOUCH_NONE 0
-#define COMPOSITOR_TOUCH_ONE 1
-#define COMPOSITOR_TOUCH_TWO 2
-#define COMPOSITOR_TOUCH_HELD 3
-
+/*
+        The fingers' gesture is the kit's (ui/touch.h: the modes, the slop, the hold, the wheel, the taps); here are the compositor's
+        parts of it: the device it is on, the windows its events land on, and the close and hold rows.
+*/
 struct compositor_touch
 {
-        int device, first, mode, moved, count;
-        int start_x, start_y;    // where the first finger went down, in the space
-        positive start_ns, two_ns;
+        struct ui_touch gesture; // what the fingers mean (ui/touch.h)
+        int device;              // the touch screen the gesture is on
+        int hidden;              // a finger was the last thing used, so the pointer is not shown under it
         int closing;             // the window whose close button the finger went down on, which a tap closes
         int resumed;             // the press is being made again without the close button (compositor_touch_resume)
-        int mid_x, mid_y;        // two fingers: their middle, where the wheel last counted from
-        int left_x, left_y;      // and what the wheel has not yet turned, in 120ths times the pixels of a notch
-        int two_moved;
-        int hidden;
-        int hold_row;            // the window a long press (COMPOSITOR_TOUCH_HOLD_NS) landed on, which its lift is told, or COMPOSITOR_NONE
+        int hold_row;            // the window a long press landed on, which its lift is told, or COMPOSITOR_NONE
         int holding;             // the long press's right button is being sent: its events carry WINDOW_KEY_HOLD
 };
 
@@ -3414,11 +3402,11 @@ struct compositor_poll
         either side, and the close and the minimise button are the finger's within COMPOSITOR_TOUCH_BUTTON_SLOP of their disc
         (the window goes when the finger lifts from the X: one that moves past the slop was making the press the corner or the
         titlebar gives, and makes it). It moves nothing until it is UI_SLOP from where it went down, so a tap is a click
-        where it landed and not a drag. Held COMPOSITOR_TOUCH_HOLD_NS without moving it is a long press: the right button,
+        where it landed and not a drag. Held UI_TOUCH_HOLD_NS without moving it is a long press: the right button,
         flagged WINDOW_KEY_HOLD, and then the finger may move on, the pointer following it, until it lifts, which ends the
-        press with a release (CANCEL and HOLD) in the window it landed on. Two fingers lifted within COMPOSITOR_TOUCH_TAP_NS
+        press with a release (CANCEL and HOLD) in the window it landed on. Two fingers lifted within UI_TOUCH_TAP_NS
         of the second landing, neither moved, are the right button too; two that move are the wheel, a notch to
-        COMPOSITOR_TOUCH_WHEEL, what is under them following them.
+        UI_TOUCH_NOTCH, what is under them following them.
 */
 #define COMPOSITOR_TOUCH_GRIP 16
 #define COMPOSITOR_TOUCH_GRIP_IN 8
@@ -3426,9 +3414,6 @@ struct compositor_poll
 // The close and the minimise button of a window, to a finger: the disc and this much more on every side, in logical pixels. The
 // corner is a finger's UI_TARGET, and wins everywhere in it but the disc (compositor_corner_reach, compositor_on_close).
 #define COMPOSITOR_TOUCH_BUTTON_SLOP 4
-#define COMPOSITOR_TOUCH_HOLD_NS 400000000ull
-#define COMPOSITOR_TOUCH_TAP_NS 400000000ull
-#define COMPOSITOR_TOUCH_WHEEL 48
 /*
         The prediction a frame ahead, for a touch screen's fingers and a tablet or pen. The mouse is not predicted: its lead is
         always zero and it is never sampled, so its pointer is its real place. The pointer is a finger's or a pen's real place
@@ -3835,7 +3820,7 @@ static struct
                 positive lifted;
                 unsigned int alpha;
                 int drawn[3];
-        } spot[COMPOSITOR_TOUCH_SLOTS];
+        } spot[UI_TOUCH_SLOTS];
         unsigned int *spot_scratch; // what a mark is composed over before it goes to a scanout that is only written
         // The window whose line is lit (lit_row, COMPOSITOR_NONE for none), what of it, and whether held (else hovered).
         int lit_row;
@@ -9289,7 +9274,7 @@ static void compositor_touch_screen_open(unsigned int at, bipolar handle, int sl
         struct compositor_absinfo x = {0}, y = {0};
 
         memory_zero(screen, sizeof(*screen));
-        for (unsigned int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 screen->id[slot] = screen->was[slot] = -1;
         if (!compositor.touchscreen[at])
                 return;
@@ -13372,10 +13357,8 @@ static void compositor_motion(void)
                 // half a double click with a shaking hand -- and nothing moves.
                 if (compositor.arranged[row] != COMPOSITOR_FLOATING)
                 {
-                        long dx = compositor.pointer_x - compositor.press_x, dy = compositor.pointer_y - compositor.press_y;
-                        long slop = (long)UI_SLOP * compositor_row_scale(row) / 100;
-
-                        if (dx * dx + dy * dy < slop * slop)
+                        if (!ui_touch_past(compositor.press_x, compositor.press_y, compositor.pointer_x, compositor.pointer_y,
+                                           ui_touch_slop(compositor_row_scale(row))))
                                 return;
                         compositor_float_for_drag(row);
                 }
@@ -13397,7 +13380,7 @@ static void compositor_motion(void)
                 compositor_pointer_to(compositor.grab);
         // A finger that was held for a long press has no button down (its press was taken back), and what it selects follows it as
         // a held button's drag does, to the window it landed on, whether or not that window asked for the pointer's motion.
-        else if (compositor.touch.mode == COMPOSITOR_TOUCH_HELD && compositor.touch.hold_row >= 0)
+        else if (compositor.touch.gesture.mode == UI_TOUCH_HELD && compositor.touch.hold_row >= 0)
                 compositor_pointer_to(compositor.touch.hold_row);
         else if (under >= 0 && !__atomic_load_n(&compositor.table->hover_off[under], __ATOMIC_ACQUIRE))
                 compositor_pointer_to(under);
@@ -13827,6 +13810,7 @@ static void compositor_button(unsigned int code, int down)
                 {
                         compositor.press = COMPOSITOR_NONE;
                         compositor.touch.closing = under;
+                        ui_touch_pend(&compositor.touch.gesture, 1);
                         return;
                 }
 
@@ -14446,7 +14430,7 @@ static void compositor_spot_redraw(int slot)
 // A finger down at x, y: its mark follows it.
 static void compositor_spot_set(int slot, int x, int y)
 {
-        if (!compositor.spots_on || slot < 0 || slot >= COMPOSITOR_TOUCH_SLOTS)
+        if (!compositor.spots_on || slot < 0 || slot >= UI_TOUCH_SLOTS)
                 return;
         if (compositor.spot[slot].on == 1 && compositor.spot[slot].x == x && compositor.spot[slot].y == y)
                 return;
@@ -14462,7 +14446,7 @@ static void compositor_spot_set(int slot, int x, int y)
 // Its finger lifted: the mark fades from now (compositor_spots_tick).
 static void compositor_spot_lift(int slot, positive now)
 {
-        if (slot < 0 || slot >= COMPOSITOR_TOUCH_SLOTS || compositor.spot[slot].on != 1)
+        if (slot < 0 || slot >= UI_TOUCH_SLOTS || compositor.spot[slot].on != 1)
                 return;
         compositor.spot[slot].on = 2;
         compositor.spot[slot].lifted = now;
@@ -14478,7 +14462,7 @@ static int compositor_spots_any(int fading)
 // The fading marks at now: each fainter by the time since its finger lifted, and gone after COMPOSITOR_SPOT_FADE_NS.
 static void compositor_spots_tick(positive now)
 {
-        for (unsigned int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         {
                 positive since;
                 unsigned int alpha;
@@ -14507,7 +14491,7 @@ static void compositor_spots_tick(positive now)
 // Every mark taken off at once: the setting was turned off.
 static void compositor_spots_clear(void)
 {
-        for (unsigned int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         {
                 compositor_spot_undraw((int)slot);
                 compositor.spot[slot].on = 0;
@@ -14529,7 +14513,7 @@ static void compositor_spots_draw(const struct compositor_target *t)
 {
         if (!compositor.spots_shown)
                 return;
-        for (unsigned int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 if (compositor.spot[slot].on)
                         compositor_spot_draw(t, compositor.spot[slot].x, compositor.spot[slot].y, compositor.scale,
                                              compositor.spot[slot].alpha);
@@ -14544,7 +14528,7 @@ static void compositor_spots_compose(const struct compositor_target *t, const st
 {
         int radius = compositor_spot_radius(compositor.scale);
 
-        for (unsigned int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        for (unsigned int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
         {
                 int box[4] = {compositor.spot[slot].x - radius, compositor.spot[slot].y - radius,
                               compositor.spot[slot].x + radius, compositor.spot[slot].y + radius};
@@ -14622,7 +14606,7 @@ static void compositor_touch_event(unsigned int at, const struct compositor_inpu
                 return;
         if (event->type == COMPOSITOR_EV_ABS && event->code == COMPOSITOR_ABS_MT_SLOT)
                 screen->slot = event->value;
-        else if (slot < 0 || slot >= COMPOSITOR_TOUCH_SLOTS)
+        else if (slot < 0 || slot >= UI_TOUCH_SLOTS)
                 return;
         else if (event->type == COMPOSITOR_EV_ABS && screen->slots && event->code == COMPOSITOR_ABS_MT_TRACKING_ID)
                 screen->id[slot] = event->value < 0 ? -1 : event->value;
@@ -14680,241 +14664,176 @@ static void compositor_touch_right(void)
         compositor_touch_button(COMPOSITOR_BTN_RIGHT, 0);
 }
 
-// The fingers on screen at, from the first slot: how many are down, and the lowest slot down other than skip (-1 none).
-static int compositor_touch_fingers(unsigned int at, int skip, int *other)
+/*
+        The events of the touch recogniser (ui/touch.h) applied to the windows, the pointer and the buttons: what the fingers mean is
+        the kit's, what they do here is the compositor's.
+*/
+static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *out, positive now)
 {
-        const struct compositor_touch_screen *screen = &compositor.screen_touch[at];
-        int count = 0;
+        int wheel = 0;
 
-        *other = -1;
-        for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
-                if (screen->id[slot] >= 0)
+        for (unsigned int index = 0; index < out->count; index++)
+        {
+                const struct ui_touch_event *e = &out->event[index];
+
+                switch (e->kind)
                 {
-                        count++;
-                        if (slot != skip && *other < 0)
-                                *other = slot;
+                case UI_TOUCH_START:
+                        compositor.touch.device = (int)at;
+                        compositor.touch.hidden = 1;
+                        compositor.touch.closing = COMPOSITOR_NONE;
+                        compositor.touch.hold_row = COMPOSITOR_NONE;
+                        compositor_touch_motion(e->x, e->y, now);
+                        break;
+                case UI_TOUCH_MOVE:
+                        compositor_touch_motion(e->x, e->y, now);
+                        break;
+                case UI_TOUCH_PRESS:
+                        compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
+                        break;
+                case UI_TOUCH_RELEASE:
+                        compositor.touch.closing = COMPOSITOR_NONE;
+                        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+                        compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
+                        break;
+                case UI_TOUCH_CANCEL:
+                        compositor_touch_cancel();
+                        break;
+                case UI_TOUCH_CLOSE:
+                        // Lifted unmoved on the close button it went down on: the window goes.
+                        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+                        if (compositor.touch.closing >= 0)
+                        {
+                                compositor.press = COMPOSITOR_NONE;
+                                compositor_close(compositor.touch.closing);
+                        }
+                        compositor.touch.closing = COMPOSITOR_NONE;
+                        break;
+                case UI_TOUCH_RESUME:
+                        // A press on the X that moves is no press of it: the press it was under the X is made.
+                        compositor.touch.closing = COMPOSITOR_NONE;
+                        compositor_touch_resume();
+                        break;
+                case UI_TOUCH_RIGHT:
+                        compositor_touch_right();
+                        break;
+                case UI_TOUCH_WHEEL:
+                        compositor.touching = 1;
+                        compositor_wheel(e->v120, e->horizontal);
+                        wheel = 1;
+                        break;
+                case UI_TOUCH_HOLD:
+                        // The left press taken back and the right button sent are both the long press's: the cancel carries WINDOW_KEY_HOLD too.
+                        {
+                                int tab;
+
+                                compositor.touch.holding = 1;
+                                compositor_touch_cancel();
+                                compositor.touch.hold_row = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+                                compositor_touch_right();
+                                compositor.touch.holding = 0;
+                        }
+                        break;
+                case UI_TOUCH_HOLD_END:
+                        // Lifted after a long press: the release that ends it, in the window it landed on (a terminal copies its selection).
+                        if (compositor.touch.hold_row >= 0)
+                                compositor_post(compositor.touch.hold_row, WINDOW_EVENT_BUTTON,
+                                                WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, COMPOSITOR_BTN_LEFT, 0);
+                        compositor.touch.hold_row = COMPOSITOR_NONE;
+                        break;
+                case UI_TOUCH_IDLE:
+                        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+                        break;
                 }
-        return count;
+        }
+        if (wheel)
+                compositor.touching = 0;
 }
 
 /*
-        A report of a touch screen over: the fingers as they are now against the last report. The first finger down is
-        the pointer, put where it is before its press goes (the press is never where the last finger was); a finger
-        that is not the first one's never moves the pointer; two fingers are the wheel or a right click. Another
-        touch screen's fingers wait until this one's are all up.
+        A report of a touch screen over: the marks follow the fingers, and then the kit's gesture is told the fingers as they
+        are, begun on the first finger down (ui_touch_begin), and each report's events are applied as they come. A report of
+        another touch screen waits until this one's gesture is over.
 */
 static void compositor_touch_report(unsigned int at, positive now)
 {
         struct compositor_touch_screen *screen = &compositor.screen_touch[at];
         struct compositor_touch *touch = &compositor.touch;
-        int other, count, x, y;
+        struct ui_touch_frame frame;
+        struct ui_touch_out out;
 
         // Events were lost: no finger is trusted, and what they were doing ends as if they were lifted, no click made.
         if (screen->dropped)
         {
                 screen->dropped = 0;
-                for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+                for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 {
                         if (screen->id[slot] >= 0)
                                 compositor_spot_lift(slot, now);
                         screen->id[slot] = screen->was[slot] = -1;
                 }
-                if (touch->mode != COMPOSITOR_TOUCH_NONE && touch->device == (int)at)
+                if (touch->gesture.mode != UI_TOUCH_NONE && touch->device == (int)at)
                 {
-                        if (touch->mode == COMPOSITOR_TOUCH_ONE)
-                                compositor_touch_cancel();
-                        touch->mode = COMPOSITOR_TOUCH_NONE;
+                        ui_touch_drop(&touch->gesture, &out);
+                        compositor_touch_apply(at, &out, now);
                 }
                 return;
         }
-        if (touch->mode != COMPOSITOR_TOUCH_NONE && touch->device != (int)at)
+        if (touch->gesture.mode != UI_TOUCH_NONE && touch->device != (int)at)
         {
                 memory_copy(screen->was, screen->id, sizeof(screen->was));
                 return;
         }
 
         // The marks follow the fingers, and fade from those lifted.
-        for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 if (screen->id[slot] >= 0)
                 {
+                        int x, y;
+
                         compositor_touch_point(at, slot, &x, &y);
                         compositor_spot_set(slot, x, y);
                 }
                 else if (screen->was[slot] >= 0)
                         compositor_spot_lift(slot, now);
 
-        count = compositor_touch_fingers(at, -1, &other);
-        if (!count)
-                compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
+        memory_zero(&frame, sizeof(frame));
+        memory_copy(frame.id, screen->id, sizeof(frame.id));
+        memory_copy(frame.was, screen->was, sizeof(frame.was));
+        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                if (screen->id[slot] >= 0)
+                        compositor_touch_point(at, slot, &frame.x[slot], &frame.y[slot]);
+        frame.scale = compositor.scale;
+        frame.now = now;
+        frame.pointer_x = compositor.pointer_x, frame.pointer_y = compositor.pointer_y;
+        frame.busy = compositor.drag >= 0 || compositor.resize >= 0;
 
-        // The first finger down: the pointer is where it is, hidden, and the left button goes down there.
-        if (touch->mode == COMPOSITOR_TOUCH_NONE && count)
-        {
-                touch->device = (int)at;
-                touch->first = other;
-                touch->mode = COMPOSITOR_TOUCH_ONE;
-                touch->moved = touch->two_moved = 0;
-                touch->closing = COMPOSITOR_NONE;
-                touch->hold_row = COMPOSITOR_NONE;
-                touch->start_ns = now;
-                compositor_touch_point(at, other, &touch->start_x, &touch->start_y);
-                touch->hidden = 1;
-                compositor_touch_motion(touch->start_x, touch->start_y, now);
-                compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
-        }
+        // The first finger down: the pointer goes to it, hidden, and its left press is made there (the kit's START and PRESS).
+        ui_touch_begin(&touch->gesture, &frame, &out);
+        compositor_touch_apply(at, &out, now);
 
-        if (touch->mode == COMPOSITOR_TOUCH_ONE)
-        {
-                int first = touch->first;
-
-                if (screen->id[first] < 0 || (screen->was[first] >= 0 && screen->id[first] != screen->was[first]))
-                {
-                        // Lifted: a release where it is, or on the close button it went down on, unmoved, the window goes.
-                        int closing = touch->closing;
-
-                        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
-
-                        touch->closing = COMPOSITOR_NONE;
-                        if (closing >= 0 && !touch->moved)
-                        {
-                                compositor.press = COMPOSITOR_NONE;
-                                compositor_close(closing);
-                        }
-                        else
-                                compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
-                        touch->mode = count ? COMPOSITOR_TOUCH_HELD : COMPOSITOR_TOUCH_NONE;
-                }
-                else if (count >= 2 && !touch->moved && compositor.drag < 0 && compositor.resize < 0 && touch->closing < 0)
-                {
-                        // A second finger: the press is taken back, and the two are the wheel or the right button.
-                        compositor_touch_fingers(at, first, &other);
-                        compositor_touch_cancel();
-                        touch->mode = COMPOSITOR_TOUCH_TWO;
-                        touch->two_ns = now;
-                        touch->count = count;
-                        compositor_touch_point(at, first, &x, &y);
-                        compositor_touch_point(at, other, &touch->mid_x, &touch->mid_y);
-                        touch->mid_x = (touch->mid_x + x) / 2;
-                        touch->mid_y = (touch->mid_y + y) / 2;
-                        touch->left_x = touch->left_y = 0;
-                }
-                else
-                {
-                        // Moved past the slop it is the pointer's motion, a window's drag or edge, from where it is now.
-                        compositor_touch_point(at, first, &x, &y);
-                        if (!touch->moved &&
-                            compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale / 100))
-                        {
-                                int pending = touch->closing;
-
-                                touch->moved = 1;
-                                touch->closing = COMPOSITOR_NONE;
-                                // A press on the X that moves is no press of it: the press it was under the X is made.
-                                if (pending >= 0)
-                                        compositor_touch_resume();
-                        }
-                        if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
-                                compositor_touch_motion(x, y, now);
-                }
-        }
-        else if (touch->mode == COMPOSITOR_TOUCH_TWO)
-        {
-                if (!count)
-                {
-                        // Lifted soon and not moved: the right button, where the first finger went down.
-                        if (!touch->two_moved && now - touch->two_ns <= COMPOSITOR_TOUCH_TAP_NS)
-                                compositor_touch_right();
-                        touch->mode = COMPOSITOR_TOUCH_NONE;
-                }
-                else if (count >= 2)
-                {
-                        int one = screen->id[touch->first] >= 0 ? touch->first : other, mid_x, mid_y;
-                        int per = COMPOSITOR_TOUCH_WHEEL * compositor.scale / 100;
-
-                        compositor_touch_fingers(at, one, &other);
-                        compositor_touch_point(at, one, &x, &y);
-                        compositor_touch_point(at, other, &mid_x, &mid_y);
-                        mid_x = (mid_x + x) / 2;
-                        mid_y = (mid_y + y) / 2;
-                        // A finger more or less: the middle is somewhere else, and the wheel counts from it again.
-                        if (count != touch->count)
-                        {
-                                touch->count = count;
-                                touch->mid_x = mid_x, touch->mid_y = mid_y;
-                        }
-                        else if (touch->two_moved ||
-                                 compositor_past_slop(touch->mid_x, touch->mid_y, mid_x, mid_y, UI_SLOP * compositor.scale / 100))
-                        {
-                                // What is under them follows them: fingers down are the wheel up, to the right it left.
-                                long down = (long)touch->left_y + (long)(mid_y - touch->mid_y) * 120;
-                                long right = (long)touch->left_x - (long)(mid_x - touch->mid_x) * 120;
-                                int turn_y = (int)(down / per), turn_x = (int)(right / per);
-
-                                touch->two_moved = 1;
-                                touch->left_y = (int)(down - (long)turn_y * per);
-                                touch->left_x = (int)(right - (long)turn_x * per);
-                                touch->mid_x = mid_x, touch->mid_y = mid_y;
-                                compositor.touching = 1;
-                                if (turn_y)
-                                        compositor_wheel(turn_y, 0);
-                                if (turn_x)
-                                        compositor_wheel(turn_x, 1);
-                                compositor.touching = 0;
-                        }
-                }
-                else
-                        touch->count = count;
-        }
-        else if (touch->mode == COMPOSITOR_TOUCH_HELD && !count)
-        {
-                // Lifted after a long press: the release that ends it, in the window it landed on (a terminal copies its selection).
-                if (touch->hold_row >= 0)
-                        compositor_post(touch->hold_row, WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD,
-                                        COMPOSITOR_BTN_LEFT, 0);
-                touch->hold_row = COMPOSITOR_NONE;
-                touch->mode = COMPOSITOR_TOUCH_NONE;
-        }
-        else if (touch->mode == COMPOSITOR_TOUCH_HELD && count == 1 && screen->id[touch->first] >= 0)
-        {
-                // Held, then moved on: the pointer follows the finger as it does before a hold, so what it drags (a selection)
-                // follows it too. Nothing is pressed; the press was taken back when the hold came.
-                compositor_touch_point(at, touch->first, &x, &y);
-                if (!touch->moved && compositor_past_slop(touch->start_x, touch->start_y, x, y, UI_SLOP * compositor.scale / 100))
-                        touch->moved = 1;
-                if (touch->moved && (x != compositor.pointer_x || y != compositor.pointer_y))
-                        compositor_touch_motion(x, y, now);
-        }
+        // The report as it is then: a press may have begun a drag, or marked a close, or moved the pointer to the landing.
+        frame.pointer_x = compositor.pointer_x, frame.pointer_y = compositor.pointer_y;
+        frame.busy = compositor.drag >= 0 || compositor.resize >= 0;
+        ui_touch_report(&touch->gesture, &frame, &out);
+        compositor_touch_apply(at, &out, now);
 
         memory_copy(screen->was, screen->id, sizeof(screen->was));
 }
 
-/*
-        A finger held still on a window, COMPOSITOR_TOUCH_HOLD_NS from when it went down: the right button there, what
-        a long press is on a touch screen. Its left press is taken back first. When the loop is to look again, or 0.
-*/
+// When the first finger is a long press, or 0: the kit's time for it (a press still for UI_TOUCH_HOLD_NS, the left button down there).
 static positive compositor_touch_due(void)
 {
-        const struct compositor_touch *touch = &compositor.touch;
-
-        return touch->mode == COMPOSITOR_TOUCH_ONE && !touch->moved && touch->closing < 0 && (compositor.button_down & 1)
-                   ? touch->start_ns + COMPOSITOR_TOUCH_HOLD_NS
-                   : 0;
+        return ui_touch_due(&compositor.touch.gesture, compositor.button_down & 1);
 }
 
+// The long press's time has come: the kit's hold, applied (the left press taken back and the right button held at the pointer).
 static void compositor_touch_tick(positive now)
 {
-        positive due = compositor_touch_due();
-        int tab;
+        struct ui_touch_out out;
 
-        if (!due || now < due)
-                return;
-        // The left press taken back and the right button sent are both the long press's: the cancel carries WINDOW_KEY_HOLD too.
-        compositor.touch.holding = 1;
-        compositor_touch_cancel();
-        compositor.touch.hold_row = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
-        compositor_touch_right();
-        compositor.touch.holding = 0;
-        compositor.touch.mode = COMPOSITOR_TOUCH_HELD;
+        ui_touch_tick(&compositor.touch.gesture, now, compositor.button_down & 1, &out);
+        compositor_touch_apply((unsigned int)compositor.touch.device, &out, now);
 }
 
 /* ---- end of touch ---- */
@@ -14940,11 +14859,11 @@ static void compositor_input_read(unsigned int at)
                         // What it held down will never be let go of: not a key, not a button, not a finger.
                         compositor.held[at] = 0;
                         compositor_release(COMPOSITOR_BTN_LEFT, 0);
-                        if (compositor.touchscreen[at] && compositor.touch.mode != COMPOSITOR_TOUCH_NONE &&
+                        if (compositor.touchscreen[at] && compositor.touch.gesture.mode != UI_TOUCH_NONE &&
                             compositor.touch.device == (int)at)
-                                compositor.touch.mode = COMPOSITOR_TOUCH_NONE;
+                                ui_touch_reset(&compositor.touch.gesture);
                         if (compositor.touchscreen[at])
-                                for (int slot = 0; slot < COMPOSITOR_TOUCH_SLOTS; slot++)
+                                for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                                         compositor_spot_lift(slot, clock_monotonic_nanoseconds());
                         compositor.touchscreen[at] = 0;
                 }
