@@ -47558,8 +47558,8 @@ def harness_moonwater_cli(argv):
               any("input mute off" in line for line in bare) and any("source default" in line for line in bare),
               "bare audio says the recording rows too", repr(bare))
 
-        def audio_page(volume, muted, device, name, cards, programs, capture=1, source=(b"", b"", 0, 0), sources=(), records=()):
-            body = struct.pack("<4I", 0x5341574d, 2, 4, 10776)
+        def audio_page(volume, muted, device, name, cards, programs, capture=1, source=(b"", b"", 0, 0), sources=(), records=(), output=1, mixer=(0, 0, 0), note=b""):
+            body = struct.pack("<4I", 0x5341574d, 3, 4, 10840)
             body += struct.pack("<11I", volume, muted, 0, 0, 0, 0, 48000, 256, 5000, len(programs), len(cards))
             body += device.ljust(96, b"\0") + name.ljust(64, b"\0")
             for at in range(8):
@@ -47586,7 +47586,10 @@ def harness_moonwater_cli(argv):
                     body += app.ljust(48, b"\0") + media.ljust(48, b"\0") + b"\0" * 32
                 else:
                     body += struct.pack("<6I", 0xffffffff, 0, 0, 0, 0, 0) + struct.pack("<iI", 0, 0) + b"\0" * 128
-            assert len(body) == 10776
+            # The output's own state (version 3): a card or a clock (1, 2), what the server did to the card's mixer (4 set, 8 a switch would
+            # not stay on, 16 no controls), the controls looked at, written and still off, and the first of those still off.
+            body += struct.pack("<4I", output, mixer[0], mixer[1], mixer[2]) + note.ljust(48, b"\0")
+            assert len(body) == 10840
             return body
 
         (sandbox / "run/moonwater/pulse").mkdir(parents=True, exist_ok=True)
@@ -47626,6 +47629,44 @@ def harness_moonwater_cli(argv):
         lines, finished = session(say("audio"))
         bare = answers(lines)["audio"]["out"]
         check(finished and any("no microphone" in line for line in bare), "and with none, that there is no microphone", repr(bare))
+        # What the output is: a card plays and is heard; a clock plays to nothing; a card whose mixer was set says so; one whose switch
+        # would not stay on says which; and a volume of 0 or a mute is said to be why nothing is heard.
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(52429, 0, b"Speakers (Realtek)", b"alsa_output.pci", [], [], output=1))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("playing on Speakers (Realtek), 80 percent" in line for line in bare) and not any("no sound card is open" in line for line in bare) and
+              not any("mixer" in line for line in bare) and not any("nothing is heard" in line for line in bare),
+              "a card that plays and whose mixer was right says nothing more", repr(bare))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(52429, 0, b"Dummy Output", b"auto_null", [], [], output=2))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("no sound card is open" in line and "nothing is heard" in line for line in bare),
+              "a server that plays to its clock says that no sound card is open and nothing is heard", repr(bare))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(52429, 0, b"Speakers (Realtek)", b"alsa_output.pci", [], [], output=1 | 4, mixer=(6, 3, 0)))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("card's own mixer was set for sound when it was opened (3 of its 6 output controls were off)" in line for line in bare) and
+              not any("nothing may be heard" in line for line in bare),
+              "a card whose mixer was set says how many of its controls were off", repr(bare))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(52429, 0, b"Speakers (Realtek)", b"alsa_output.pci", [], [], output=1 | 4 | 8, mixer=(6, 3, 1), note=b"Master Playback Switch"))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("\"Master Playback Switch\" off and would not take it on: nothing may be heard" in line for line in bare),
+              "a card with a switch that would not stay on names it and says nothing may be heard", repr(bare))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(0, 0, b"Speakers (Realtek)", b"alsa_output.pci", [], [], output=1))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("nothing is heard while the volume is 0" in line and "moonwater audio volume 100" in line for line in bare),
+              "a volume of 0 is said to be why nothing is heard, with the word that mends it", repr(bare))
+        (sandbox / "run/moonwater/pulse/state").write_bytes(audio_page(52429, 1, b"Speakers (Realtek)", b"alsa_output.pci", [], [], output=1))
+        lines, finished = session(say("audio"))
+        bare = answers(lines)["audio"]["out"]
+        check(finished and any("nothing is heard while the volume is muted" in line and "moonwater audio mute off" in line for line in bare),
+              "a mute is said to be why nothing is heard, with the word that mends it", repr(bare))
+        # moonwater audio test is a client of the server: with none to answer it says so, and fails.
+        lines, finished = session(say("audio test"))
+        got_test = answers(lines)["audio test"]
+        check(finished and got_test["status"] == 1, "audio test with no server answering fails", repr(got_test))
         old = bytearray((sandbox / "run/moonwater/pulse/state").read_bytes())
         old[4:8] = struct.pack("<I", 1)
         (sandbox / "run/moonwater/pulse/state").write_bytes(bytes(old))

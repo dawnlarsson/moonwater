@@ -21442,12 +21442,13 @@ static b32 host_setting_verb(string_address address_to arguments, positive count
 }
 
 /*
-        moonwater audio [volume|mute|server|device|source|capture|input ...]: the sound server's settings (src/audio). The volume,
+        moonwater audio [volume|mute|server|device|source|capture|input ...|test]: the sound server's settings (src/audio). The volume,
         the mute, the server's switch, the switch for recording and the microphone's volume and mute are plain rows of the table,
         found before this; the card and the microphone are names that are kept as they are typed and that the server, which
         reads /root/audio.device and /root/audio.source again twice a second, plays on or records from when it finds them, else it
         takes what it would have chosen. A name is what the page of the server lists (letters, digits and . _ - : @ +, at
-        most 63), or default. Bare, it says them all.
+        most 63), or default. Bare, it says them all. `test` plays a second of 440 Hz through the server and says in words what
+        became of it (no server, no card, a card's mixer off, muted, or played on this card).
 */
 #define LOCALE_AUDIO_NAME 64
 
@@ -21559,6 +21560,15 @@ static b32 locale_audio_status(string_address address_to arguments)
         }
         host_say(log, host_label "playing on %s, %p percent%s\n", (string_address)state->device, locale_audio_percent(state->volume),
                  state->muted ? (string_address) ", muted" : (string_address) "");
+        // What the output really is: said when it is not a card that will be heard.
+        if (state->output_state & AUDIO_STATE_OUT_CLOCK)
+                host_say(log, "  no sound card is open: the server plays to a clock, and nothing is heard (a card that could not be opened is named in the server's log)\n");
+        if (state->output_state & AUDIO_STATE_OUT_HW_OFF)
+                host_say(log, "  the card's own mixer has \"%s\" off and would not take it on: nothing may be heard\n", (string_address)state->hw_note);
+        else if (state->output_state & AUDIO_STATE_OUT_HW_SET)
+                host_say(log, "  the card's own mixer was set for sound when it was opened (%p of its %p output controls were off)\n", (positive)state->hw_changed, (positive)state->hw_controls);
+        if (state->muted || !state->volume)
+                host_say(log, "  nothing is heard while the volume is %s: `moonwater audio %s`\n", state->muted ? (string_address) "muted" : (string_address) "0", state->muted ? (string_address) "mute off" : (string_address) "volume 100");
         for (positive at = 0; at < state->devices && at < AUDIO_STATE_DEVICES; at++)
                 host_say(log, "  %s %s  %s\n", (state->device_list[at].flags & AUDIO_STATE_DEVICE_ACTIVE) ? (string_address) "*" : (string_address) " ",
                          (string_address)state->device_list[at].name, (string_address)state->device_list[at].description);
@@ -21598,12 +21608,17 @@ static b32 locale_audio_status(string_address address_to arguments)
         return 0;
 }
 
+static b32 audio_test_run(void);
+
 static b32 host_audio(string_address address_to arguments, positive count)
 {
         if (count >= 3 && string_equals(arguments[2], "device"))
                 return locale_audio_pick(arguments, count, "audio device", SETTING_AUDIO_DEVICE_PATH);
         if (count >= 3 && string_equals(arguments[2], "source"))
                 return locale_audio_pick(arguments, count, "audio source", SETTING_AUDIO_SOURCE_PATH);
+        // A second of 440 Hz through the sound server, and what happened in words (src/audio/service.c).
+        if (count == 3 && string_equals(arguments[2], "test"))
+                return audio_test_run();
         return_if(count != 2, host_usage());
         return locale_audio_status(arguments);
 }
@@ -24401,6 +24416,7 @@ static const host_row host_rows[] = {
     {null, "@mouse", null, 'r'},
     {null, "@taskbar", null, 'r'},
     {null, "audio", "the volume and the mute, the sound card and the cards there are, the programs that play, the microphone and the programs that record, and whether the sound server starts", 'b'},
+    {null, "audio test", "play a second of 440 Hz through the sound server and say what became of it: no server, no card, a mixer that is off, muted, or played on this card", 'b'},
     {null, "@audio", null, 'r'},
     {null, "@name", null, 'r'},
     {null, "@language", null, 'r'},

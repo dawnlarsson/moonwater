@@ -723,4 +723,375 @@ AUDIO_API long audio_cards_scan(struct audio_card *cards, long room)
         return found;
 }
 
+/* ---- the card's mixer ---- */
+
+/*
+        A sound card is more than its PCM. The hardware has switches and gains of its own (Master, Speaker, Headphone, PCM,
+        Line Out, the S/PDIF and HDMI outputs), and the kernel starts a card with them as the hardware powers up, which on a
+        codec is muted: nothing plays on a fresh machine until something unmutes them, which on other systems is alsactl's
+        restore and PulseAudio's path files and here is this. At the card's open the controls of the outputs are put where a
+        sound can be heard (switches on, gains at the hardware's 0 dB, or at its top where it has no scale) and auto-mute
+        is on where it exists; the controls of what is only listened to (Line, Mic, CD, Aux: the pass-through monitors of
+        the inputs) are left as they are. The mixer file is /dev/snd/controlC<n>; the calls are ELEM_LIST, ELEM_INFO,
+        ELEM_READ, ELEM_WRITE and TLV_READ on it, no library. The volume of the person is the server's, in software, so
+        the hardware is not followed by it and is never left muted by the server.
+*/
+
+struct audio_ctl_id
+{
+        unsigned int numid, iface, device, subdevice;
+        unsigned char name[44];
+        unsigned int index;
+};
+
+struct audio_ctl_list
+{
+        unsigned int offset, space, used, count;
+        struct audio_ctl_id *pids;
+        unsigned char reserved[50];
+};
+
+struct audio_ctl_info
+{
+        struct audio_ctl_id id;
+        int type;
+        unsigned int access, count;
+        int owner;
+        union
+        {
+                struct
+                {
+                        long min, max, step;
+                } integer;
+                struct
+                {
+                        long long min, max, step;
+                } integer64;
+                struct
+                {
+                        unsigned int items, item;
+                        char name[64];
+                        unsigned long long names_ptr;
+                        unsigned int names_length;
+                } enumerated;
+                unsigned char reserved[128];
+        } value;
+        union
+        {
+                unsigned short d[4];
+                unsigned short *d_ptr;
+        } dimen;
+        unsigned char reserved[56];
+};
+
+struct audio_ctl_value
+{
+        struct audio_ctl_id id;
+        unsigned int indirect;
+        union
+        {
+                long integer[128];
+                long long integer64[64];
+                unsigned int enumerated[128];
+                unsigned char bytes[512];
+        } value;
+        unsigned char reserved[128];
+};
+
+struct audio_ctl_tlv
+{
+        unsigned int numid, length;
+        unsigned int tlv[32];
+};
+
+_Static_assert(sizeof(struct audio_ctl_id) == 64, "snd_ctl_elem_id");
+_Static_assert(sizeof(struct audio_ctl_list) == 80, "snd_ctl_elem_list");
+_Static_assert(sizeof(struct audio_ctl_info) == 272, "snd_ctl_elem_info");
+_Static_assert(sizeof(struct audio_ctl_value) == 1224, "snd_ctl_elem_value");
+
+#define AUDIO_CTL_ELEM_LIST AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x10, sizeof(struct audio_ctl_list))
+#define AUDIO_CTL_ELEM_INFO AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x11, sizeof(struct audio_ctl_info))
+#define AUDIO_CTL_ELEM_READ AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x12, sizeof(struct audio_ctl_value))
+#define AUDIO_CTL_ELEM_WRITE AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x13, sizeof(struct audio_ctl_value))
+#define AUDIO_CTL_TLV_READ AUDIO_IOC(AUDIO_IOC_READ | AUDIO_IOC_WRITE, 'U', 0x1a, 8)
+
+#define AUDIO_CTL_IFACE_MIXER 2
+#define AUDIO_CTL_TYPE_BOOLEAN 1
+#define AUDIO_CTL_TYPE_INTEGER 2
+#define AUDIO_CTL_TYPE_ENUMERATED 3
+#define AUDIO_CTL_ACCESS_READ 1u
+#define AUDIO_CTL_ACCESS_WRITE 2u
+#define AUDIO_CTL_ACCESS_INACTIVE 0x100u
+#define AUDIO_CTL_ACCESS_TLV_READ 0x10u
+#define AUDIO_CTL_TLVT_DB_SCALE 1
+#define AUDIO_CTL_TLVT_DB_MINMAX 4
+#define AUDIO_CTL_TLVT_DB_MINMAX_MUTE 5
+#define AUDIO_MIXER_MAX 768 // controls looked at on one card
+
+/* What was done to a card's mixer, for the log and for the page. */
+struct audio_mixer_report
+{
+        long controls;       // the card has this many
+        long output, capture; // and of them these were ours to set
+        long changed;        // of those, written (they were not already as wanted)
+        long failed;         // and written without it taking
+        long left_off;       // switches still off after (the card did not take them: read-only, or inactive)
+        char first_off[48];  // the name of the first
+};
+
+static int audio_mixer_text_equal(const unsigned char *name, const char *text)
+{
+        long i = 0;
+
+        for (; text[i]; i++)
+                if (name[i] != (unsigned char)text[i])
+                        return 0;
+        return name[i] == 0;
+}
+
+// Does the name end with the suffix; if so, how long is what comes before it.
+static int audio_mixer_ends(const unsigned char *name, const char *suffix, long *before)
+{
+        long n = 0, k = 0;
+
+        while (n < 44 && name[n])
+                n++;
+        while (suffix[k])
+                k++;
+        if (n < k)
+                return 0;
+        for (long i = 0; i < k; i++)
+                if (name[n - k + i] != (unsigned char)suffix[i])
+                        return 0;
+        *before = n - k;
+        return 1;
+}
+
+// The outputs: what comes before " Playback Switch" or " Playback Volume" in the name of a control that is a way out, as ALSA's drivers name them.
+static int audio_mixer_output_base(const unsigned char *name, long length)
+{
+        static const char *const bases[] = {"Master",     "Speaker",    "Headphone",    "Headset",         "PCM",     "Front",    "Line Out", "Surround",
+                                            "Center",     "LFE",        "Side",         "Bass Speaker",    "Mono",    "Digital",  "CLFE",     "Headphone+LO",
+                                            "Speaker+LO", "IEC958",     "IEC958 Default PCM", "Front Speaker", "Speaker Front", "Speaker Surround", "Line-Out", "Master Mono"};
+
+        for (unsigned i = 0; i < sizeof(bases) / sizeof(bases[0]); i++)
+        {
+                long k = 0;
+
+                while (bases[i][k])
+                        k++;
+                if (k != length)
+                        continue;
+                for (long j = 0; j < k; j++)
+                        if (name[j] != (unsigned char)bases[i][j])
+                                goto next;
+                return 1;
+        next:;
+        }
+        return 0;
+}
+
+// What a control is for the mixer's purposes: 1 a switch of an output, 2 a gain of one, 3 a switch of the capture, 4 its gain, 5 auto-mute, 0 not ours.
+static int audio_mixer_kind(const unsigned char *name)
+{
+        long before;
+
+        if (audio_mixer_ends(name, " Playback Switch", &before))
+                return audio_mixer_output_base(name, before) ? 1 : 0;
+        if (audio_mixer_ends(name, " Playback Volume", &before))
+                return audio_mixer_output_base(name, before) ? 2 : 0;
+        if (audio_mixer_text_equal(name, "Capture Switch") || audio_mixer_ends(name, " Capture Switch", &before))
+                return 3;
+        if (audio_mixer_text_equal(name, "Capture Volume") || audio_mixer_ends(name, " Capture Volume", &before))
+                return 4;
+        if (audio_mixer_text_equal(name, "Auto-Mute Mode"))
+                return 5;
+        return 0;
+}
+
+/*
+        The step of an integer control that the hardware means as 0 dB, when the control says (a scale in hundredths of a
+        dB in its TLV: the first word 1 is a scale, 4 and 5 a line between two ends): the highest step at or under 0 dB. A
+        control with no scale, or one that is not a scale or a line, has none (-1) and the caller takes its top. The
+        top is kept when the whole range is under 0 dB.
+*/
+static long audio_mixer_zero_db(int fd, const struct audio_ctl_info *info)
+{
+        struct audio_ctl_tlv tlv;
+        long min = info->value.integer.min, max = info->value.integer.max, low, high, step;
+
+        if (!(info->access & AUDIO_CTL_ACCESS_TLV_READ))
+                return -1;
+        __builtin_memset(&tlv, 0, sizeof(tlv));
+        tlv.numid = info->id.numid;
+        tlv.length = sizeof(tlv.tlv);
+        if (audio_sys_ioctl(fd, AUDIO_CTL_TLV_READ, &tlv) < 0 || tlv.tlv[1] < 8)
+                return -1;
+        if (tlv.tlv[0] == AUDIO_CTL_TLVT_DB_SCALE)
+        {
+                low = (int)tlv.tlv[2];
+                step = (long)(tlv.tlv[3] & 0xffff);
+                high = low + step * (max - min);
+        }
+        else if (tlv.tlv[0] == AUDIO_CTL_TLVT_DB_MINMAX || tlv.tlv[0] == AUDIO_CTL_TLVT_DB_MINMAX_MUTE)
+        {
+                low = (int)tlv.tlv[2];
+                high = (int)tlv.tlv[3];
+                step = max > min ? (high - low) / (max - min) : 0;
+        }
+        else
+                return -1;
+        if (high <= 0 || step <= 0)
+                return -1;
+        if (low >= 0)
+                return min;
+        return min + (0 - low) / step;
+}
+
+// One control as it is wanted: written when it is not already so. Answers 1 when it is written, 0 when it was as wanted, -1 when it would not be written.
+static int audio_mixer_set(int fd, const struct audio_ctl_info *info, long want, int enumerated)
+{
+        struct audio_ctl_value now, put;
+        int changed = 0;
+        unsigned int count = info->count < 128 ? info->count : 128;
+
+        __builtin_memset(&now, 0, sizeof(now));
+        now.id = info->id;
+        if (audio_sys_ioctl(fd, AUDIO_CTL_ELEM_READ, &now) < 0)
+                return -1;
+        put = now;
+        for (unsigned int i = 0; i < count; i++)
+        {
+                if (enumerated)
+                {
+                        if (now.value.enumerated[i] != (unsigned int)want)
+                                changed = 1;
+                        put.value.enumerated[i] = (unsigned int)want;
+                }
+                else
+                {
+                        if (now.value.integer[i] != want)
+                                changed = 1;
+                        put.value.integer[i] = want;
+                }
+        }
+        if (!changed)
+                return 0;
+        if (audio_sys_ioctl(fd, AUDIO_CTL_ELEM_WRITE, &put) < 0)
+                return -1;
+        return 1;
+}
+
+// The step of the enumerated control named, or -1.
+static long audio_mixer_item(int fd, struct audio_ctl_info *info, const char *name)
+{
+        for (unsigned int item = 0; item < info->value.enumerated.items && item < 64; item++)
+        {
+                struct audio_ctl_info ask = *info;
+                long i = 0;
+
+                ask.value.enumerated.item = item;
+                if (audio_sys_ioctl(fd, AUDIO_CTL_ELEM_INFO, &ask) < 0)
+                        return -1;
+                for (; name[i] && (unsigned char)ask.value.enumerated.name[i] == (unsigned char)name[i]; i++)
+                        ;
+                if (!name[i] && !ask.value.enumerated.name[i])
+                        return item;
+        }
+        return -1;
+}
+
+/*
+        The mixer of a card made fit to be heard (which has bit 1: the outputs) or to hear with (bit 2: the capture): see
+        above. The report says what there was and what was done. Answers 0, or a negative errno when the mixer cannot be
+        opened or listed (a card with none is a card that needs nothing here).
+*/
+AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_report *report)
+{
+        struct audio_ctl_id ids[AUDIO_MIXER_MAX];
+        struct audio_ctl_list list;
+        char path[40];
+        long fd, result;
+
+        __builtin_memset(report, 0, sizeof(*report));
+        audio_alsa_path(path, card, 0, 0, 1);
+        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);
+        if (fd < 0)
+                return fd;
+        __builtin_memset(&list, 0, sizeof(list));
+        list.space = AUDIO_MIXER_MAX;
+        list.pids = ids;
+        result = audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_LIST, &list);
+        if (result < 0)
+        {
+                audio_sys_close((int)fd);
+                return result;
+        }
+        report->controls = list.count;
+        for (unsigned int k = 0; k < list.used && k < AUDIO_MIXER_MAX; k++)
+        {
+                struct audio_ctl_info info;
+                int kind, changed;
+                long want;
+
+                if (ids[k].iface != AUDIO_CTL_IFACE_MIXER)
+                        continue;
+                kind = audio_mixer_kind(ids[k].name);
+                if (!kind || !(which & (kind == 3 || kind == 4 ? 2 : 1)))
+                        continue;
+                __builtin_memset(&info, 0, sizeof(info));
+                info.id = ids[k];
+                if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_INFO, &info) < 0 || !(info.access & AUDIO_CTL_ACCESS_WRITE) || (info.access & AUDIO_CTL_ACCESS_INACTIVE))
+                        continue;
+                if (kind == 1 || kind == 3)
+                {
+                        if (info.type != AUDIO_CTL_TYPE_BOOLEAN)
+                                continue;
+                        want = 1;
+                }
+                else if (kind == 2 || kind == 4)
+                {
+                        if (info.type != AUDIO_CTL_TYPE_INTEGER)
+                                continue;
+                        want = audio_mixer_zero_db((int)fd, &info);
+                        if (want < 0)
+                                want = info.value.integer.max;
+                }
+                else
+                {
+                        if (info.type != AUDIO_CTL_TYPE_ENUMERATED)
+                                continue;
+                        want = audio_mixer_item((int)fd, &info, "Enabled");
+                        if (want < 0)
+                                continue;
+                }
+                if (kind == 3 || kind == 4)
+                        report->capture++;
+                else
+                        report->output++;
+                changed = audio_mixer_set((int)fd, &info, want, kind == 5);
+                if (changed > 0)
+                        report->changed++;
+                else if (changed < 0)
+                        report->failed++;
+                // A switch that is still off is said: the sound will not be heard however it is played.
+                if ((kind == 1 || kind == 3) && changed != 0)
+                {
+                        struct audio_ctl_value now;
+
+                        __builtin_memset(&now, 0, sizeof(now));
+                        now.id = info.id;
+                        if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_READ, &now) == 0 && now.value.integer[0] == 0)
+                        {
+                                if (!report->left_off)
+                                        for (long i = 0; i < 47 && ids[k].name[i]; i++)
+                                                report->first_off[i] = (char)ids[k].name[i];
+                                report->left_off++;
+                        }
+                }
+        }
+        audio_sys_close((int)fd);
+        return 0;
+}
+
 #endif // AUDIO_ALSA_INCLUDED

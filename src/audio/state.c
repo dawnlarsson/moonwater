@@ -28,7 +28,7 @@
 
 #define AUDIO_STATE_PATH "/run/moonwater/pulse/state"
 #define AUDIO_STATE_MAGIC 0x5341574du // "MWAS"
-#define AUDIO_STATE_VERSION 2u
+#define AUDIO_STATE_VERSION 3u
 #define AUDIO_STATE_STREAMS 32
 #define AUDIO_STATE_DEVICES 8
 #define AUDIO_STATE_INPUTS 8
@@ -39,6 +39,14 @@
 #define AUDIO_STATE_CORKED 2u
 #define AUDIO_STATE_PLAYING 4u
 #define AUDIO_STATE_MONITOR 8u // a record stream: what it records is what a sink plays, not a capture device
+
+// What the output is (output_state): a card the sound goes to, or a clock of the server's own because there was none to open, and
+// what the server found of the card's own mixer (the switches and gains of the hardware, which start muted).
+#define AUDIO_STATE_OUT_CARD 1u     // the sound is played on a sound card
+#define AUDIO_STATE_OUT_CLOCK 2u    // there is no card: the sound goes to nothing, at the pace of a clock, and is not heard
+#define AUDIO_STATE_OUT_HW_SET 4u   // the server set the card's output controls (unmuted, raised) when it opened it
+#define AUDIO_STATE_OUT_HW_OFF 8u   // and some switch would not stay on: hw_note names the first
+#define AUDIO_STATE_OUT_NO_MIXER 16u // the card has no mixer controls of the kinds that matter
 
 #define AUDIO_STATE_DEVICE_ACTIVE 1u
 #define AUDIO_STATE_DEVICE_MONITOR 2u // an input: the monitor of a sink (what the machine plays), not a microphone
@@ -89,6 +97,12 @@ struct audio_state
         char input_name[64];           // and as programs name it
         struct audio_state_device input_list[AUDIO_STATE_INPUTS]; // AUDIO_STATE_DEVICE_ACTIVE is the default
         struct audio_state_stream record[AUDIO_STATE_RECORDS];
+        // The output's own state (version 3).
+        unsigned int output_state;     // AUDIO_STATE_OUT_*
+        unsigned int hw_controls;      // output controls of the card's mixer the server looked at
+        unsigned int hw_changed;       // and wrote, because they were not as a sound needs them
+        unsigned int hw_off;           // and found still off after (the card would not take them)
+        char hw_note[48];              // the first of those, as the card names it
 };
 
 _Static_assert(sizeof(struct audio_state) <= AUDIO_STATE_BYTES, "the state page fits its file");

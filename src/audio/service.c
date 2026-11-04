@@ -2,12 +2,19 @@
         The sound server of Moonwater's desktop, `audio`: the process that listens on a socket for programs that play
         sound, mixes them (mix.c, pulse.c) and plays the mix on a sound card (alsa.c).
 
-            audio [-S SOCKET] [-C DIRECTORY] [-d CARD:DEVICE] [-o FILE] [-n] [-r RATE]
+            audio [-S SOCKET] [-C DIRECTORY] [-d CARD:DEVICE] [-o FILE] [-n] [-r RATE] [-M]
+            audio -t [-S SOCKET]
 
         It is a process of its own and not a part of the compositor: the compositor holds the display and every input
         device, and a parser of what any program may send has no place in it; the compositor's frame can take longer
         than the period of a sound card; and sound should outlive a desktop that is restarted. The machine script
         starts it with the desktop and starts it again when it ends.
+
+        A sound card starts with its own mixer muted (the hardware does, and nothing else sets it here: no alsactl, no
+        PulseAudio), so when the card is opened its output controls are put where a sound is heard (alsa.c,
+        audio_mixer_prepare: the switches on, the gains at 0 dB, auto-mute on), and what was found and done is on the page
+        and in the log. -M leaves the card's mixer as it is (to see what a card does without it). `audio -t` is a client: a
+        second of 440 Hz played through the running server and what happened said in words (`moonwater audio test`).
 
         The socket is /run/moonwater/pulse/native (mode 0666: what a program on the machine is allowed to do there is
         decided by who it is, pulse.c, and by the caps), and a program reaches it with PULSE_SERVER=unix:PATH. The card
@@ -127,8 +134,11 @@ static struct
                 long card, device, result;
                 thread address_to handle;
                 positive took;
+                struct audio_mixer_report mix; // what the open did to the card's capture controls
         } job;
         int wake[2];
+        struct audio_mixer_report hw;   // what was found and done to the output card's mixer when it was opened
+        int hw_done, leave_mixer, test; // the report is of this open; -M leaves the mixer as the card has it; -t is the tone
         int input_internal;             // set while the service itself changes the sources, so the host's notice of it is not taken for the person's choice
         char wanted_source[PULSE_NAME]; // the person's choice of default source, "" for the best there is
         char applied_source[PULSE_NAME];
@@ -411,12 +421,29 @@ static int audio_output_open(long asked_rate)
                         audio_say_text("playing on", description);
                         string_format(log, "audio: the card runs at %p Hz in %p bytes a frame, a period of %p frames, a buffer of %p, filled to %p\n", (positive)pcm.rate, (positive)pcm.frame_bytes,
                                       (positive)pcm.period, (positive)pcm.buffer, (positive)pcm.target);
+                        // The card's own mixer starts muted: its outputs are put where a sound is heard.
+                        audio_service.hw_done = 0;
+                        if (!audio_service.leave_mixer)
+                        {
+                                long mixed = audio_mixer_prepare(card, 1, &audio_service.hw);
+
+                                if (mixed == 0)
+                                {
+                                        audio_service.hw_done = 1;
+                                        string_format(log, "audio: the card's mixer has %p controls, %p of its outputs; %p were not as a sound needs them and are set, %p would not be%s%s\n", (positive)audio_service.hw.controls,
+                                                      (positive)audio_service.hw.output, (positive)audio_service.hw.changed, (positive)audio_service.hw.failed + (positive)audio_service.hw.left_off,
+                                                      audio_service.hw.left_off ? ", the first still off is " : "", audio_service.hw.left_off ? audio_service.hw.first_off : "");
+                                }
+                                else
+                                        string_format(log, "audio: the card's mixer could not be opened, error %b\n", (bipolar)mixed);
+                        }
                         log_flush();
                         return 1;
                 }
                 audio_say("the card could not be opened, error", result);
         }
         audio_service.pcm.fd = -1;
+        audio_service.hw_done = 0;
         audio_service.rate = asked_rate;
         audio_copy_text(audio_service.active_name, sizeof(audio_service.active_name), "auto_null");
         audio_copy_text(audio_service.active_description, sizeof(audio_service.active_description), "Dummy Output");
@@ -855,6 +882,16 @@ static void audio_page_write(void)
                 pulse_props_text(&c->props, "application.name", out->app, sizeof(out->app));
                 pulse_props_text(&s->props, "media.name", out->media, sizeof(out->media));
                 pulse_props_text(&c->props, "application.icon_name", out->icon, sizeof(out->icon));
+        }
+        // The output: a card or a clock, and what the card's mixer was found to be.
+        build.output_state = audio_service.pcm.fd >= 0 ? AUDIO_STATE_OUT_CARD : AUDIO_STATE_OUT_CLOCK;
+        if (audio_service.hw_done)
+        {
+                build.hw_controls = (unsigned int)audio_service.hw.output;
+                build.hw_changed = (unsigned int)audio_service.hw.changed;
+                build.hw_off = (unsigned int)audio_service.hw.left_off;
+                audio_copy_text(build.hw_note, sizeof(build.hw_note), audio_service.hw.first_off);
+                build.output_state |= (audio_service.hw.changed ? AUDIO_STATE_OUT_HW_SET : 0) | (audio_service.hw.left_off ? AUDIO_STATE_OUT_HW_OFF : 0) | (audio_service.hw.output ? 0 : AUDIO_STATE_OUT_NO_MIXER);
         }
         // The input half: the default source's level and peak, the capture devices, and the programs that record.
         {
@@ -1357,7 +1394,12 @@ static fn audio_job_entry(address_any argument)
 
         (void)argument;
         if (audio_service.job.kind == AUDIO_JOB_OPEN)
+        {
                 audio_service.job.result = audio_pcm_open(&audio_service.job.pcm, audio_service.job.card, audio_service.job.device, AUDIO_ALSA_CAPTURE, 48000, AUDIO_PERIOD, -1);
+                __builtin_memset(&audio_service.job.mix, 0, sizeof(audio_service.job.mix));
+                if (audio_service.job.result == 0 && !audio_service.leave_mixer)
+                        audio_mixer_prepare(audio_service.job.card, 2, &audio_service.job.mix);
+        }
         else
         {
                 audio_pcm_close(&audio_service.job.pcm);
@@ -1437,8 +1479,9 @@ static void audio_job_finish(void)
         audio_service.capture.opens++;
         if (audio_service.job.took > audio_service.capture.worst_open)
                 audio_service.capture.worst_open = audio_service.job.took;
-        string_format(log, "audio: capturing from %s at %p Hz, %p channels, a period of %p frames; opened in %p us\n", audio_service.input[k].description, (positive)audio_service.job.pcm.rate,
-                      (positive)audio_service.job.pcm.channels, (positive)audio_service.job.pcm.period, (positive)(audio_service.job.took / 1000));
+        string_format(log, "audio: capturing from %s at %p Hz, %p channels, a period of %p frames; opened in %p us; the card's capture controls: %p, %p set, %p still off\n", audio_service.input[k].description,
+                      (positive)audio_service.job.pcm.rate, (positive)audio_service.job.pcm.channels, (positive)audio_service.job.pcm.period, (positive)(audio_service.job.took / 1000),
+                      (positive)audio_service.job.mix.capture, (positive)audio_service.job.mix.changed, (positive)audio_service.job.mix.left_off);
         log_flush();
         if (audio_service.job.pcm.rate != audio_service.pulse.source[audio_service.input[k].slot].rate)
         {
@@ -1573,6 +1616,189 @@ static void audio_inputs_run(positive now)
         }
 }
 
+/* ---- a tone, to hear ---- */
+
+/*
+        `audio -t` (and `moonwater audio test`): a second of 440 Hz played through the server as a program of the desktop plays
+        its sound, and what happened said in words. It is a client like any other: it connects to the socket, makes a
+        playback stream, sends the samples, drains, and reads the server's page for what the server says of the output. Its
+        exit is 0 when a tone was sent and played out, and 1 when it could not be: the verdict is for the person, and says
+        what to look at.
+*/
+static int audio_test_page(struct audio_state *copy)
+{
+        static unsigned char raw[AUDIO_STATE_BYTES];
+        long fd = audio_call(syscall(openat), (positive)AT_FDCWD, (positive)audio_service.page_path, 0x80000, 0, 0, 0), got;
+
+        if (fd < 0)
+                return 0;
+        got = audio_call(syscall(read), (positive)fd, (positive)raw, sizeof(raw), 0, 0, 0);
+        audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+        if (got < (long)sizeof(*copy))
+                return 0;
+        __builtin_memcpy(copy, raw, sizeof(*copy));
+        return copy->magic == AUDIO_STATE_MAGIC && copy->version == AUDIO_STATE_VERSION && copy->bytes == sizeof(*copy) && !(copy->seq & 1u);
+}
+
+static b32 audio_test(void)
+{
+        static struct ctl c;
+        static struct audio_state page;
+        static unsigned char frame[20 + 65536];
+        static short samples[48000 * 2];
+        struct ctl_w w;
+        struct ctl_r r;
+        unsigned long channel;
+        long got, sent = 0, total = 48000 * 4;
+        short *tone = (short *)(frame + 20);
+        int have_page;
+        static const unsigned long both[2] = {0x10000, 0x10000};
+
+        c.timeout_ms = 4000;
+        if (ctl_connect(&c, audio_service.socket_path) < 0)
+        {
+                string_format(log, "audio: no sound server answers on %s: nothing can be heard. Start it with the desktop, or `moonwater audio server on`.\n", audio_service.socket_path);
+                log_flush();
+                return 1;
+        }
+        // The stream: 16 bits, two channels, 48000 Hz, a second of buffer which starts when it is full; the properties name it for the mixer.
+        ctl_begin(&c, &w, 3);
+        ctl_w_byte(&w, 'a');
+        ctl_w_byte(&w, 3);
+        ctl_w_byte(&w, 2);
+        ctl_w_be32(&w, 48000);
+        ctl_w_byte(&w, 'm');
+        ctl_w_byte(&w, 2);
+        ctl_w_byte(&w, 1);
+        ctl_w_byte(&w, 2);
+        ctl_w_u32(&w, CTL_NONE);
+        ctl_w_string(&w, 0);
+        ctl_w_u32(&w, CTL_NONE);
+        ctl_w_bool(&w, 0);
+        ctl_w_u32(&w, (unsigned long)total);
+        ctl_w_u32(&w, (unsigned long)total);
+        ctl_w_u32(&w, CTL_NONE);
+        ctl_w_u32(&w, 0);
+        ctl_w_cvolume(&w, both, 2);
+        for (int i = 0; i < 7; i++)
+                ctl_w_bool(&w, 0);
+        ctl_w_bool(&w, 0);
+        ctl_w_bool(&w, 0);
+        ctl_w_byte(&w, 'P');
+        ctl_w_string(&w, "media.name");
+        ctl_w_u32(&w, 5);
+        ctl_w_byte(&w, 'x');
+        ctl_w_be32(&w, 5);
+        ctl_w_raw(&w, "Test", 5);
+        ctl_w_string(&w, "media.role");
+        ctl_w_u32(&w, 5);
+        ctl_w_byte(&w, 'x');
+        ctl_w_be32(&w, 5);
+        ctl_w_raw(&w, "test", 5);
+        ctl_w_byte(&w, 'N');
+        ctl_w_bool(&w, 1);
+        ctl_w_bool(&w, 0);
+        ctl_w_bool(&w, 0);
+        ctl_w_bool(&w, 0);
+        ctl_w_bool(&w, 0);
+        ctl_w_bool(&w, 0);
+        ctl_w_bool(&w, 0);
+        ctl_w_byte(&w, 'B');
+        ctl_w_byte(&w, 0);
+        got = w.bad ? CTL_FAILED : ctl_exchange(&c, w.len);
+        if (got < 10)
+        {
+                string_format(log, "audio: the sound server refused a stream (%s): nothing can be heard.\n", got == CTL_ACCESS ? "access denied" : got == CTL_INVALID ? "not understood" : "no answer");
+                log_flush();
+                ctl_disconnect(&c);
+                return 1;
+        }
+        r = (struct ctl_r){c.frame + 20 + 10, got - 10, 0, 0};
+        channel = ctl_r_u32(&r);
+        // The tone: a quarter of full scale, with a short rise and fall so that it begins and ends without a click.
+        for (long i = 0; i < 48000; i++)
+        {
+                double amplitude = 8192.0, edge = i < 480 ? (double)i / 480.0 : i > 48000 - 480 ? (double)(48000 - i) / 480.0 : 1.0;
+                short v = (short)(amplitude * edge * audio_sin(2.0 * 3.14159265358979323846 * 440.0 * (double)i / 48000.0));
+
+                samples[2 * i] = v;
+                samples[2 * i + 1] = v;
+        }
+        ctl_budget(&c);
+        while (sent < total)
+        {
+                long n = total - sent < 65536 ? total - sent : 65536;
+
+                ctl_put_be(frame, (unsigned long)n);
+                ctl_put_be(frame + 4, channel);
+                ctl_put_be(frame + 8, 0), ctl_put_be(frame + 12, 0), ctl_put_be(frame + 16, 0);
+                __builtin_memcpy(tone, (unsigned char *)samples + sent, (unsigned long)n);
+                if (c.transport.send(c.transport.context, frame, 20 + n, ctl_left(&c)) < 0)
+                {
+                        string_format(log, "audio: the connection to the sound server broke while the tone was sent.\n");
+                        log_flush();
+                        ctl_disconnect(&c);
+                        return 1;
+                }
+                sent += n;
+        }
+        // Wait until it has been played out (drained), at most the connection's timeout.
+        ctl_begin(&c, &w, 12);
+        ctl_w_u32(&w, channel);
+        got = ctl_exchange(&c, w.len);
+        have_page = audio_test_page(&page);
+        ctl_begin(&c, &w, 4);
+        ctl_w_u32(&w, channel);
+        ctl_exchange(&c, w.len);
+        ctl_disconnect(&c);
+        if (got < 0)
+        {
+                string_format(log, "audio: the tone was sent but the server did not say it had played it (%s).\n", got == CTL_FAILED ? "no answer in time" : "refused");
+                log_flush();
+                return 1;
+        }
+        if (have_page)
+        {
+                if (page.output_state & AUDIO_STATE_OUT_CLOCK)
+                {
+                        string_format(log, "audio: the tone went to NOTHING: the server has no sound card open (it plays to a clock, \"%s\"), so there is no sound to hear. A card that is there but could not be opened is named in the server's log.\n",
+                                      (string_address)page.device);
+                        log_flush();
+                        return 1;
+                }
+                if (page.output_state & AUDIO_STATE_OUT_HW_OFF)
+                {
+                        string_format(log, "audio: the tone was played on %s, but the card's own mixer has \"%s\" off and would not take it on: nothing may be heard.\n", (string_address)page.device,
+                                      (string_address)page.hw_note);
+                        log_flush();
+                        return 1;
+                }
+                if (page.muted || page.volume == 0)
+                {
+                        string_format(log, "audio: the tone was played on %s, but its volume is %s: nothing can be heard until `moonwater audio %s`.\n", (string_address)page.device,
+                                      page.muted ? "muted" : "0 percent", page.muted ? (string_address) "mute off" : (string_address) "volume 100");
+                        log_flush();
+                        return 1;
+                }
+                string_format(log, "audio: played a second of 440 Hz on %s (%s), at %p percent%s. If nothing was heard, look at the speakers or the monitor: their power, their cable and their own volume.\n",
+                              (string_address)page.device, (string_address)page.name, ((positive)page.volume * 100 + 32768) / 65536,
+                              (page.output_state & AUDIO_STATE_OUT_HW_SET) ? (string_address) "; the card's own switches were set on when it was opened" : (string_address) "");
+                log_flush();
+                return 0;
+        }
+        string_format(log, "audio: played a second of 440 Hz through the sound server (its page is not readable here, so what it plays on is not said: ask `moonwater audio` as root).\n");
+        log_flush();
+        return 0;
+}
+
+// `moonwater audio test`: the tone, to the server at its own socket and page.
+static b32 audio_test_run(void)
+{
+        audio_service.socket_path = AUDIO_SOCKET;
+        audio_service.page_path = AUDIO_STATE_PATH;
+        return audio_test();
+}
+
 static void audio_start(void)
 {
         struct pulse_host host = {0};
@@ -1669,9 +1895,15 @@ static b32 audio_main()
                 }
                 else if (string_equals(option, "-n"))
                         audio_service.no_card = 1;
+                else if (string_equals(option, "-M"))
+                        audio_service.leave_mixer = 1;
+                else if (string_equals(option, "-t"))
+                        audio_service.test = 1;
         }
         if (rate < 8000 || rate > 384000)
                 rate = 48000;
+        if (audio_service.test)
+                return audio_test();
         audio_start();
         audio_listen();
         if (audio_service.listen < 0 || audio_service.signals < 0)

@@ -172391,6 +172391,7 @@ int main(void)
 #include <sys/ioctl.h>
 #ifdef __linux__
 #include <sound/asound.h>
+#include <sound/tlv.h>
 #define AL_HEADER 1
 #endif
 #ifndef EBADFD
@@ -172489,6 +172490,34 @@ static void al_test_layout(void)
         ALCHECK(AUDIO_ALSA_PCM_NEXT_DEVICE == SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE, "PCM_NEXT_DEVICE");
         ALCHECK(AUDIO_ALSA_PCM_INFO == SNDRV_CTL_IOCTL_PCM_INFO, "PCM_INFO");
         ALCHECK(AUDIO_ALSA_PCM_PREFER_SUBDEVICE == SNDRV_CTL_IOCTL_PCM_PREFER_SUBDEVICE, "PCM_PREFER_SUBDEVICE");
+        ALCHECK(sizeof(struct audio_ctl_id) == sizeof(struct snd_ctl_elem_id) && sizeof(struct audio_ctl_list) == sizeof(struct snd_ctl_elem_list) &&
+                    sizeof(struct audio_ctl_info) == sizeof(struct snd_ctl_elem_info) && sizeof(struct audio_ctl_value) == sizeof(struct snd_ctl_elem_value),
+                "the mixer's structures: %zu %zu %zu %zu", sizeof(struct snd_ctl_elem_id), sizeof(struct snd_ctl_elem_list), sizeof(struct snd_ctl_elem_info), sizeof(struct snd_ctl_elem_value));
+        ALCHECK(offsetof(struct audio_ctl_id, name) == offsetof(struct snd_ctl_elem_id, name) && offsetof(struct audio_ctl_id, index) == offsetof(struct snd_ctl_elem_id, index) &&
+                    offsetof(struct audio_ctl_id, iface) == offsetof(struct snd_ctl_elem_id, iface),
+                "the id's places");
+        ALCHECK(offsetof(struct audio_ctl_list, pids) == offsetof(struct snd_ctl_elem_list, pids) && offsetof(struct audio_ctl_list, count) == offsetof(struct snd_ctl_elem_list, count) &&
+                    offsetof(struct audio_ctl_list, used) == offsetof(struct snd_ctl_elem_list, used),
+                "the list's places");
+        ALCHECK(offsetof(struct audio_ctl_info, type) == offsetof(struct snd_ctl_elem_info, type) && offsetof(struct audio_ctl_info, access) == offsetof(struct snd_ctl_elem_info, access) &&
+                    offsetof(struct audio_ctl_info, count) == offsetof(struct snd_ctl_elem_info, count) && offsetof(struct audio_ctl_info, value) == offsetof(struct snd_ctl_elem_info, value) &&
+                    offsetof(struct audio_ctl_info, value.integer.max) == offsetof(struct snd_ctl_elem_info, value.integer.max) &&
+                    offsetof(struct audio_ctl_info, value.enumerated.name) == offsetof(struct snd_ctl_elem_info, value.enumerated.name) &&
+                    offsetof(struct audio_ctl_info, value.enumerated.items) == offsetof(struct snd_ctl_elem_info, value.enumerated.items),
+                "the info's places");
+        ALCHECK(offsetof(struct audio_ctl_value, value) == offsetof(struct snd_ctl_elem_value, value) && offsetof(struct audio_ctl_value, value.enumerated) == offsetof(struct snd_ctl_elem_value, value.enumerated.item),
+                "the value's places");
+        ALCHECK(offsetof(struct audio_ctl_tlv, tlv) == offsetof(struct snd_ctl_tlv, tlv), "the tlv's place");
+        ALCHECK(AUDIO_CTL_ELEM_LIST == SNDRV_CTL_IOCTL_ELEM_LIST && AUDIO_CTL_ELEM_INFO == SNDRV_CTL_IOCTL_ELEM_INFO && AUDIO_CTL_ELEM_READ == SNDRV_CTL_IOCTL_ELEM_READ &&
+                    AUDIO_CTL_ELEM_WRITE == SNDRV_CTL_IOCTL_ELEM_WRITE && AUDIO_CTL_TLV_READ == SNDRV_CTL_IOCTL_TLV_READ,
+                "the mixer's calls: %lx %lx %lx %lx %lx against %lx %lx %lx %lx %lx", (unsigned long)AUDIO_CTL_ELEM_LIST, (unsigned long)AUDIO_CTL_ELEM_INFO, (unsigned long)AUDIO_CTL_ELEM_READ,
+                (unsigned long)AUDIO_CTL_ELEM_WRITE, (unsigned long)AUDIO_CTL_TLV_READ, (unsigned long)SNDRV_CTL_IOCTL_ELEM_LIST, (unsigned long)SNDRV_CTL_IOCTL_ELEM_INFO,
+                (unsigned long)SNDRV_CTL_IOCTL_ELEM_READ, (unsigned long)SNDRV_CTL_IOCTL_ELEM_WRITE, (unsigned long)SNDRV_CTL_IOCTL_TLV_READ);
+        ALCHECK(AUDIO_CTL_IFACE_MIXER == SNDRV_CTL_ELEM_IFACE_MIXER && AUDIO_CTL_TYPE_BOOLEAN == SNDRV_CTL_ELEM_TYPE_BOOLEAN && AUDIO_CTL_TYPE_INTEGER == SNDRV_CTL_ELEM_TYPE_INTEGER &&
+                    AUDIO_CTL_TYPE_ENUMERATED == SNDRV_CTL_ELEM_TYPE_ENUMERATED && AUDIO_CTL_ACCESS_READ == SNDRV_CTL_ELEM_ACCESS_READ && AUDIO_CTL_ACCESS_WRITE == SNDRV_CTL_ELEM_ACCESS_WRITE &&
+                    AUDIO_CTL_ACCESS_INACTIVE == SNDRV_CTL_ELEM_ACCESS_INACTIVE && AUDIO_CTL_ACCESS_TLV_READ == SNDRV_CTL_ELEM_ACCESS_TLV_READ &&
+                    AUDIO_CTL_TLVT_DB_SCALE == SNDRV_CTL_TLVT_DB_SCALE && AUDIO_CTL_TLVT_DB_MINMAX == SNDRV_CTL_TLVT_DB_MINMAX && AUDIO_CTL_TLVT_DB_MINMAX_MUTE == SNDRV_CTL_TLVT_DB_MINMAX_MUTE,
+                "the mixer's numbers");
         ALCHECK(AUDIO_ALSA_ACCESS_RW_INTERLEAVED == SNDRV_PCM_ACCESS_RW_INTERLEAVED, "access");
         ALCHECK(AUDIO_ALSA_FORMAT_S16_LE == SNDRV_PCM_FORMAT_S16_LE && AUDIO_ALSA_FORMAT_S24_LE == SNDRV_PCM_FORMAT_S24_LE &&
                     AUDIO_ALSA_FORMAT_S32_LE == SNDRV_PCM_FORMAT_S32_LE && AUDIO_ALSA_FORMAT_S24_3LE == SNDRV_PCM_FORMAT_S24_3LE &&
@@ -172766,6 +172795,137 @@ static int al_refine(struct al_pcm_fake *pcm, struct audio_alsa_hw *hw, int choo
         return result;
 }
 
+/* ---- a card's mixer of the check's own ---- */
+
+struct al_ctl
+{
+        const char *name;
+        unsigned iface, type, access, count;
+        long min, max;
+        long value[2];
+        unsigned items;
+        const char *item[4];
+        int tlv_min, tlv_step; // in hundredths of a dB; a step of 0 is no scale (the step's 0x10000 is the scale's mute flag)
+        int write_fails;       // the card refuses the write
+        int ignores;           // the card takes the write and keeps what it had
+        unsigned writes;
+        int tlv_kind, tlv_max; // 4 or 5: a line between tlv_min and tlv_max (in hundredths of a dB), not a scale
+};
+
+static struct al_ctl al_ctls[48];
+static int al_ctl_count;
+
+static struct al_ctl *al_ctl_of(unsigned numid)
+{
+        return numid >= 1 && numid <= (unsigned)al_ctl_count ? al_ctls + numid - 1 : 0;
+}
+
+static void al_ctl_add(struct al_ctl ctl)
+{
+        al_ctls[al_ctl_count++] = ctl;
+}
+
+// The mixer calls of the kernel for the control file of a card, as far as the file uses them.
+static long al_mixer_ioctl(unsigned long request, void *argument)
+{
+        if (request == AUDIO_CTL_ELEM_LIST)
+        {
+                struct audio_ctl_list *list = argument;
+                unsigned used = 0;
+
+                ALCHECK(list->space <= AUDIO_MIXER_MAX, "the file asks for no more controls than its array holds: %u", list->space);
+                list->count = (unsigned)al_ctl_count;
+                for (unsigned i = list->offset; i < (unsigned)al_ctl_count && used < list->space; i++)
+                {
+                        memset(list->pids + used, 0, sizeof(list->pids[0]));
+                        list->pids[used].numid = i + 1;
+                        list->pids[used].iface = al_ctls[i].iface;
+                        strncpy((char *)list->pids[used].name, al_ctls[i].name, 43);
+                        used++;
+                }
+                list->used = used;
+                return 0;
+        }
+        if (request == AUDIO_CTL_ELEM_INFO)
+        {
+                struct audio_ctl_info *info = argument;
+                struct al_ctl *ctl = al_ctl_of(info->id.numid);
+
+                if (!ctl)
+                        return -ENOENT;
+                info->type = (int)ctl->type;
+                info->access = ctl->access | (ctl->tlv_step || ctl->tlv_kind ? AUDIO_CTL_ACCESS_TLV_READ : 0);
+                info->count = ctl->count;
+                if (ctl->type == AUDIO_CTL_TYPE_INTEGER)
+                {
+                        info->value.integer.min = ctl->min;
+                        info->value.integer.max = ctl->max;
+                        info->value.integer.step = 0;
+                }
+                if (ctl->type == AUDIO_CTL_TYPE_ENUMERATED)
+                {
+                        unsigned item = info->value.enumerated.item;
+
+                        info->value.enumerated.items = ctl->items;
+                        if (item >= ctl->items)
+                                return -EINVAL;
+                        memset(info->value.enumerated.name, 0, sizeof(info->value.enumerated.name));
+                        strncpy(info->value.enumerated.name, ctl->item[item], 63);
+                }
+                return 0;
+        }
+        if (request == AUDIO_CTL_ELEM_READ || request == AUDIO_CTL_ELEM_WRITE)
+        {
+                struct audio_ctl_value *value = argument;
+                struct al_ctl *ctl = al_ctl_of(value->id.numid);
+
+                if (!ctl)
+                        return -ENOENT;
+                if (request == AUDIO_CTL_ELEM_READ)
+                {
+                        for (unsigned i = 0; i < ctl->count && i < 2; i++)
+                        {
+                                if (ctl->type == AUDIO_CTL_TYPE_ENUMERATED)
+                                        value->value.enumerated[i] = (unsigned)ctl->value[i];
+                                else
+                                        value->value.integer[i] = ctl->value[i];
+                        }
+                        return 0;
+                }
+                if (!(ctl->access & AUDIO_CTL_ACCESS_WRITE))
+                        return -EPERM;
+                ctl->writes++;
+                if (ctl->write_fails)
+                        return -EPERM;
+                if (!ctl->ignores)
+                        for (unsigned i = 0; i < ctl->count && i < 2; i++)
+                        {
+                                long v = ctl->type == AUDIO_CTL_TYPE_ENUMERATED ? (long)value->value.enumerated[i] : value->value.integer[i];
+
+                                if (ctl->type == AUDIO_CTL_TYPE_INTEGER && (v < ctl->min || v > ctl->max))
+                                        return -EINVAL;
+                                ctl->value[i] = v;
+                        }
+                return 0;
+        }
+        if (request == AUDIO_CTL_TLV_READ)
+        {
+                struct audio_ctl_tlv *tlv = argument;
+                struct al_ctl *ctl = al_ctl_of(tlv->numid);
+
+                if (!ctl || (!ctl->tlv_step && !ctl->tlv_kind))
+                        return -ENOENT;
+                if (tlv->length < 16)
+                        return -ENOSPC;
+                tlv->tlv[0] = ctl->tlv_kind ? (unsigned)ctl->tlv_kind : AUDIO_CTL_TLVT_DB_SCALE;
+                tlv->tlv[1] = 8;
+                tlv->tlv[2] = (unsigned)ctl->tlv_min;
+                tlv->tlv[3] = ctl->tlv_kind ? (unsigned)ctl->tlv_max : (unsigned)ctl->tlv_step;
+                return 0;
+        }
+        return -ENOTTY;
+}
+
 static long al_fake_ioctl(int fd, unsigned long request, void *argument)
 {
         struct al_pcm_fake *pcm = al_fd(fd);
@@ -172815,7 +172975,7 @@ static long al_fake_ioctl(int fd, unsigned long request, void *argument)
                 }
                 if (request == AUDIO_ALSA_PCM_PREFER_SUBDEVICE)
                         return 0;
-                return -ENOTTY;
+                return al_mixer_ioctl(request, argument);
         }
         if (request == AUDIO_ALSA_HW_REFINE || request == AUDIO_ALSA_HW_PARAMS)
         {
@@ -173359,6 +173519,111 @@ static void al_test_scan(void)
         }
 }
 
+#define AL_RW (AUDIO_CTL_ACCESS_READ | AUDIO_CTL_ACCESS_WRITE)
+
+static void al_mixer_dell(void)
+{
+        memset(al_ctls, 0, sizeof(al_ctls));
+        al_ctl_count = 0;
+        // A codec as the hardware leaves it: everything off, every gain at nothing.
+        al_ctl_add((struct al_ctl){.name = "Master Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Master Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 127, .value = {0, 0}, .items = 0, .item = {0}, .tlv_min = -6350, .tlv_step = 50});
+        al_ctl_add((struct al_ctl){.name = "Headphone Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Headphone Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 42, .value = {0, 0}, .items = 0, .item = {0}, .tlv_min = -3000, .tlv_step = 100});
+        al_ctl_add((struct al_ctl){.name = "Speaker Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Speaker Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 31});
+        al_ctl_add((struct al_ctl){.name = "PCM Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 255, .value = {0, 0}, .items = 0, .item = {0}, .tlv_min = -10200, .tlv_step = 40});
+        al_ctl_add((struct al_ctl){.name = "Line Out Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Front Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "IEC958 Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 1});
+        al_ctl_add((struct al_ctl){.name = "Digital Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2, .min = 0, .max = 0, .value = {1, 1}});
+        al_ctl_add((struct al_ctl){.name = "Auto-Mute Mode", .iface = 2, .type = 3, .access = AL_RW, .count = 1, .min = 0, .max = 0, .value = {0, 0}, .items = 2, .item = {"Disabled", "Enabled"}});
+        // Not ours: what is only listened to (the monitors of the inputs), a beep, and the gains of the capture.
+        al_ctl_add((struct al_ctl){.name = "Line Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Mic Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Mic Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 31});
+        al_ctl_add((struct al_ctl){.name = "Beep Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 1});
+        al_ctl_add((struct al_ctl){.name = "Capture Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Capture Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 63, .value = {0, 0}, .items = 0, .item = {0}, .tlv_min = -1725, .tlv_step = 75});
+        // Ours and not to be written: inactive, read only, wrong type, the wrong interface.
+        al_ctl_add((struct al_ctl){.name = "Surround Playback Switch", .iface = 2, .type = 1, .access = AUDIO_CTL_ACCESS_READ | AUDIO_CTL_ACCESS_WRITE | AUDIO_CTL_ACCESS_INACTIVE, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Center Playback Switch", .iface = 2, .type = 1, .access = AUDIO_CTL_ACCESS_READ, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Side Playback Volume", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Bass Speaker Playback Switch", .iface = 3, .type = 1, .access = AL_RW, .count = 2});
+        // The card that will not: refuses the write, takes it and keeps its value.
+        al_ctl_add((struct al_ctl){.name = "CLFE Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2, .min = 0, .max = 0, .value = {0, 0}, .items = 0, .item = {0}, .tlv_min = 0, .tlv_step = 0, .write_fails = 1});
+        al_ctl_add((struct al_ctl){.name = "LFE Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2, .min = 0, .max = 0, .value = {0, 0}, .items = 0, .item = {0}, .tlv_min = 0, .tlv_step = 0, .write_fails = 0, .ignores = 1});
+        // Names that only look like ours.
+        al_ctl_add((struct al_ctl){.name = "Master Playback Switch Extra", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+        al_ctl_add((struct al_ctl){.name = "Super Master Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 9});
+        al_ctl_add((struct al_ctl){.name = "Headphone Jack", .iface = 2, .type = 1, .access = AUDIO_CTL_ACCESS_READ, .count = 1});
+        // The scales of the other makes: a step that carries the scale's mute flag (0 dB is step 30 of 60), a range that is all over 0 dB, a
+        // line between two ends with the mute and without it.
+        al_ctl_add((struct al_ctl){.name = "Front Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 60, .tlv_min = -3000, .tlv_step = 0x10000 | 100});
+        al_ctl_add((struct al_ctl){.name = "Digital Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 20, .value = {5, 5}, .tlv_min = 600, .tlv_step = 100});
+        al_ctl_add((struct al_ctl){.name = "Line Out Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 100, .tlv_min = -9000, .tlv_max = 3000, .tlv_kind = 5});
+        al_ctl_add((struct al_ctl){.name = "Center Playback Volume", .iface = 2, .type = 2, .access = AL_RW, .count = 2, .min = 0, .max = 40, .tlv_min = -2000, .tlv_max = 1000, .tlv_kind = 4});
+        // An auto-mute with no item called Enabled, a switch that is a number, and the monitor of an input named as an output is, and more.
+        al_ctl_add((struct al_ctl){.name = "Auto-Mute Mode", .iface = 2, .type = 3, .access = AL_RW, .count = 1, .items = 2, .item = {"Off", "On"}});
+        al_ctl_add((struct al_ctl){.name = "Mono Playback Switch", .iface = 2, .type = 2, .access = AL_RW, .count = 1, .min = 0, .max = 1});
+        al_ctl_add((struct al_ctl){.name = "Headphone Mic Playback Switch", .iface = 2, .type = 1, .access = AL_RW, .count = 2});
+}
+
+static void al_test_mixer(void)
+{
+        struct audio_mixer_report report;
+        struct al_ctl *c;
+
+        al_reset();
+        al_card_present[0] = 1;
+        al_cards[0] = (struct al_card_fake){"Generic", "HD-Audio Generic", "HD-Audio Generic", 1, {0}, {1}, {0}, {"ALC Analog"}, 0};
+        al_mixer_dell();
+        ALCHECK(audio_mixer_prepare(0, 1, &report) == 0, "the mixer of a card is prepared");
+        // The outputs: on, at 0 dB where the scale says (Master's top is 0 dB; the headphones' 0 dB is under their top, which is +12), else at the top.
+        ALCHECK(al_ctls[0].value[0] == 1 && al_ctls[0].value[1] == 1, "Master is on");
+        ALCHECK(al_ctls[1].value[0] == 127 && al_ctls[1].value[1] == 127, "Master at 0 dB, the top: %ld", al_ctls[1].value[0]);
+        ALCHECK(al_ctls[2].value[0] == 1 && al_ctls[4].value[0] == 1 && al_ctls[7].value[0] == 1 && al_ctls[8].value[0] == 1, "Headphone, Speaker, Line Out and Front are on");
+        ALCHECK(al_ctls[3].value[0] == 30 && al_ctls[3].value[1] == 30, "the headphones at 0 dB, which is step 30 of 42 and not their +12 dB top: %ld", al_ctls[3].value[0]);
+        ALCHECK(al_ctls[5].value[0] == 31, "a gain with no scale at its top: %ld", al_ctls[5].value[0]);
+        ALCHECK(al_ctls[6].value[0] == 255, "PCM at 0 dB, its top: %ld", al_ctls[6].value[0]);
+        ALCHECK(al_ctls[9].value[0] == 1, "the S/PDIF and HDMI output is on");
+        ALCHECK(al_ctls[10].writes == 0, "what was already on is not written");
+        ALCHECK(al_ctls[11].value[0] == 1, "auto-mute is on (the item called Enabled)");
+        // What is not the outputs' is as it was.
+        ALCHECK(al_ctls[12].writes == 0 && al_ctls[13].writes == 0 && al_ctls[14].writes == 0 && al_ctls[15].writes == 0, "the monitors of the inputs and the beep are not touched");
+        ALCHECK(al_ctls[16].writes == 0 && al_ctls[17].writes == 0, "nor is the capture, when the outputs are asked for");
+        ALCHECK(al_ctls[18].writes == 0 && al_ctls[19].writes == 0 && al_ctls[20].writes == 0 && al_ctls[21].writes == 0, "nor the inactive, the read-only, the wrong type, the wrong interface");
+        ALCHECK(al_ctls[24].writes == 0 && al_ctls[25].writes == 0 && al_ctls[26].writes == 0, "nor names that only look like the outputs'");
+        // The report.
+        ALCHECK(report.controls == al_ctl_count, "controls: %ld", report.controls);
+        ALCHECK(al_ctls[27].value[0] == 30 && al_ctls[27].value[1] == 30, "a scale whose step carries the mute flag has 0 dB at step 30 of 60: %ld", al_ctls[27].value[0]);
+        ALCHECK(al_ctls[28].value[0] == 0, "a range wholly over 0 dB is put at its bottom: %ld", al_ctls[28].value[0]);
+        ALCHECK(al_ctls[29].value[0] == 75, "a line between two ends with the mute, -90 to +30 dB in 100 steps, has 0 dB at 75: %ld", al_ctls[29].value[0]);
+        ALCHECK(al_ctls[30].value[0] == 26, "and without the mute, -20 to +10 dB in 40 steps, at 26: %ld", al_ctls[30].value[0]);
+        ALCHECK(al_ctls[31].writes == 0 && al_ctls[31].value[0] == 0, "an auto-mute with no item called Enabled is left as it is");
+        ALCHECK(al_ctls[32].writes == 0 && al_ctls[33].writes == 0, "a switch that is a number, and the monitor of an input named as an output is, are not touched");
+        ALCHECK(report.output == 18 && report.changed == 16 && report.failed == 1 && report.left_off == 2, "report: %ld ours, %ld written, %ld failed, %ld still off", report.output, report.changed, report.failed,
+                report.left_off);
+        ALCHECK(!strcmp(report.first_off, "CLFE Playback Switch"), "and which one is the first still off: %s", report.first_off);
+        // Again: nothing that took is written again.
+        for (int i = 0; i < al_ctl_count; i++)
+                al_ctls[i].writes = 0;
+        ALCHECK(audio_mixer_prepare(0, 1, &report) == 0, "again");
+        ALCHECK(report.changed == 1, "only the one that does not keep what it is given is written again: %ld", report.changed);
+        // The capture: asked for by itself.
+        ALCHECK(audio_mixer_prepare(0, 2, &report) == 0, "the capture");
+        ALCHECK(al_ctls[16].value[0] == 1 && al_ctls[16].value[1] == 1, "Capture Switch is on");
+        ALCHECK(al_ctls[17].value[0] == 23, "and its gain at 0 dB, which is step 23 of a scale from -17.25 dB in steps of 0.75 (its top is +30): %ld", al_ctls[17].value[0]);
+        ALCHECK(report.capture == 2 && report.output == 0, "two controls of the capture, none of the outputs: %ld %ld", report.capture, report.output);
+        // A card with no mixer, and one that is gone.
+        al_ctl_count = 0;
+        ALCHECK(audio_mixer_prepare(0, 1, &report) == 0 && report.controls == 0 && report.changed == 0, "a card with no controls needs nothing");
+        al_card_present[0] = 0;
+        ALCHECK(audio_mixer_prepare(0, 1, &report) < 0, "a card that is gone is an error");
+        ALCHECK(al_opens == al_closes, "every control file closed");
+        (void)c;
+}
+
 /* ---- a real card: the loopback ---- */
 
 static __attribute__((unused)) double al_now(void)
@@ -173591,6 +173856,7 @@ int main(void)
         al_test_negotiation();
         al_test_flow();
         al_test_scan();
+        al_test_mixer();
         al_test_loopback();
         printf("CHECK_audio_alsa: %u checks, %u failures\n", al_checks, al_failures);
         return al_failures ? 1 : 0;
