@@ -218095,6 +218095,68 @@ b32 main(void)
                 check("gpu list: lists of random words are refused or cut to what the card may draw", wrong == 0 && taken > 100 && refused > 100);
         }
 
+        // A glyph translated (op 10, font_cell's cell on its ground): coverage bytes through 256 tones, against the processor's translate, as a program's list through the cut
+        // (compositor_gpu_list_ops) with the base of the list the buffer's start; rectangles anywhere in the picture, pitches past the rectangle's width, three tables
+        // shared by the ops, coverage with zeros and full bytes, over a random picture, in order.
+        {
+                enum { TRW = 400, TRH = 100, TRP = 404, TRN = 24, TRROUNDS = 30 };
+                positive base_t = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (16 << 20), ops_t = base_t + (1 << 20), bins_t = ops_t + (1 << 20), cover_t = bins_t + (2 << 20);
+                unsigned int address_to tpic = (unsigned int address_to)((p8 address_to)gpu.at + base_t), address_to tops = (unsigned int address_to)((p8 address_to)gpu.at + ops_t);
+                unsigned int address_to cut = tops + 8 * 100, want_t[TRP * TRH];
+                p8 address_to cover = (p8 address_to)gpu.at + cover_t;
+                positive address_to tbases = (positive address_to)((p8 address_to)gpu.at + GPU_BASES_AT), translate_bad = 0;
+
+                tbases[7] = GPU_VA;
+                for (int round = 0; round < TRROUNDS; round++)
+                {
+                        positive used = 4096, tables[3];
+                        unsigned int made;
+
+                        for (int t = 0; t < 3; t++)
+                        {
+                                unsigned int address_to table = (unsigned int address_to)(cover + used);
+
+                                for (int i = 0; i < 256; i++)
+                                        table[i] = gpu_random();
+                                tables[t] = cover_t + used, used += 1024;
+                        }
+                        for (positive i = 0; i < (positive)TRP * TRH; i++)
+                                tpic[i] = want_t[i] = gpu_random();
+                        for (int k = 0; k < TRN; k++)
+                        {
+                                unsigned int address_to q = tops + 8 * k;
+                                int x0 = (int)(gpu_random() % (TRW - 1)), y0 = (int)(gpu_random() % (TRH - 1));
+                                int x1 = x0 + 1 + (int)(gpu_random() % (unsigned int)(TRW - x0 - 1 < 40 ? TRW - x0 - 1 : 40)), y1 = y0 + 1 + (int)(gpu_random() % (unsigned int)(TRH - y0 - 1 < 30 ? TRH - y0 - 1 : 30));
+                                positive cols = (positive)(x1 - x0), rows = (positive)(y1 - y0), pitch = cols + gpu_random() % 24, table = tables[gpu_random() % 3], at = cover_t + used;
+                                unsigned int address_to table_words = (unsigned int address_to)(cover + (table - cover_t));
+
+                                for (positive i = 0; i < rows * pitch + 16; i++)
+                                        cover[used + i] = (p8)(gpu_random() % 5 == 0 ? 0 : gpu_random() % 7 == 0 ? 255 : gpu_random());
+                                for (positive r = 0; r < rows; r++)
+                                        for (positive c = 0; c < cols; c++)
+                                                want_t[(positive)(y0 + (int)r) * TRP + (positive)(x0 + (int)c)] = table_words[cover[used + r * pitch + c]];
+                                q[0] = 10u | (unsigned int)pitch << 8, q[1] = (unsigned int)x0, q[2] = (unsigned int)y0, q[3] = (unsigned int)x1, q[4] = (unsigned int)y1;
+                                q[5] = (unsigned int)table, q[6] = 0, q[7] = (unsigned int)at;
+                                used += (rows * pitch + 16 + 15) & ~15ull;
+                        }
+                        made = compositor_gpu_list_ops(tops, TRN, cover_t, used, gpu.size, TRW, TRH, 7, cut, 1000);
+                        check("gpu translate: the glyphs of a frame are taken whole", made == TRN);
+                        if (made != TRN || !gpu_scene(ops_t + 32 * 100, made, bins_t, base_t, TRP, TRW, TRH, 0, 0, TRW, TRH))
+                        {
+                                check("gpu translate: the scene finishes", false);
+                                break;
+                        }
+                        for (int y = 0; y < TRH; y++)
+                                for (int x = 0; x < TRW; x++)
+                                {
+                                        checks++;
+                                        if (tpic[(positive)y * TRP + x] != want_t[(positive)y * TRP + x] && (++failures, ++translate_bad) < 6)
+                                                string_format(log, "  FAIL gpu translate round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
+                                                              (positive)tpic[(positive)y * TRP + x], (positive)want_t[(positive)y * TRP + x]);
+                                }
+                }
+        }
+
         // Rings, ripples and rows: the kit's own calls, ui_kit_ring and ui_kit_fill with a clip, on the processor and recorded (the box's record and the
         // records that change its cover), over rows a list is scrolled under (top and bottom of the ui), against a random picture; a width that is not a
         // multiple of 4 is for the kernels that cannot, and is refused.
@@ -218417,6 +218479,10 @@ b32 main(void)
                                         // wholly on the target: the processor walks a part of a scaled frame from the part's own position, and a frame's contents cut by the
                                         // target's edge is such a part (its columns can differ from the card's whole walk by a source cell)
                                         f->x = (int)(gpu_random() % (unsigned int)(696 - f->width + 1)), f->y = (int)(gpu_random() % (unsigned int)(PH - f->height + 1));
+                                        // square: a round corner splits the contents into the pieces the processor scales one by one, each from the position of its own left and top
+                                        // (memory_resample_u32_rect starts a part's walk half a cell in from the part's origin), which differs from the card's whole picture by a source
+                                        // cell here and there; the contents drawn as one piece are the card's to the bit
+                                        f->radius = 0;
                                 }
                                 if (gpu_random() % 4 == 0)
                                 {

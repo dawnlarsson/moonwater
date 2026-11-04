@@ -7588,7 +7588,7 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
 /*
         A program's list of ops (ui_draw_list), as the scene may have them. The list is written by a program the compositor does not trust, so nothing of it
         reaches the card as it stands: each op is read once into words of the compositor's own, and only the kinds a window is made of (a fill 0, a tone 1,
-        an anti-aliased box 2 with the records 8 and 9 that follow it, a text run 3) are taken; a rectangle of a fill or a tone is cut to the picture, so that a
+        an anti-aliased box 2 with the records 8 and 9 that follow it, a text run 3, a glyph translated through tones 10) are taken; a rectangle of a fill or a tone is cut to the picture, so that a
         card told to draw it draws in the picture alone; a text run must lie in the picture and its bitmap in the list's cover bytes (cover_at, cover_used), and
         its word 6 is made here: the alpha and stroke the program gave and the number of the base (slot) that is the list's address in the card's table, which
         the program does not name. The lanes of a text run read their neighbours by dwords, up to 64 pixels past the run's rows' ends and a row above and
@@ -7683,6 +7683,25 @@ static unsigned int compositor_gpu_list_ops(const unsigned int *from, unsigned i
                                 return COMPOSITOR_GPU_LIST_REFUSED;
                         to[8 * n] = 3u | (unsigned int)pitch << 8, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
                         to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = (w[6] & 0xffffu) | slot << 16, to[8 * n + 7] = w[7];
+                        n++;
+                }
+                else if (kind == 10)
+                {
+                        // A glyph translated through 256 tones (font_cell's cell on its ground): the rectangle in the picture, the coverage bytes (rows of pitch, the first
+                        // pixel's at word 7) and the tones (256 words at word 5, aligned) both in the cover bytes; the lanes read round the coverage as a text run's do.
+                        positive pitch = w[0] >> 8, cols, rows, table = w[5], at = w[7];
+                        int x0 = (int)w[1], y0 = (int)w[2], x1 = (int)w[3], y1 = (int)w[4];
+
+                        if (!text_room || x0 < 0 || y0 < 0 || x1 > width || y1 > height)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        if (x0 >= x1 || y0 >= y1)
+                                continue;
+                        cols = (positive)(x1 - x0), rows = (positive)(y1 - y0);
+                        if (n >= room || pitch < cols || pitch > 3500 || (table & 3) || table < cover_at || table + 1024 > cover_at + cover_used || at < cover_at ||
+                            at + (rows - 1) * pitch + cols > cover_at + cover_used)
+                                return COMPOSITOR_GPU_LIST_REFUSED;
+                        to[8 * n] = 10u | (unsigned int)pitch << 8, to[8 * n + 1] = (unsigned int)x0, to[8 * n + 2] = (unsigned int)y0, to[8 * n + 3] = (unsigned int)x1;
+                        to[8 * n + 4] = (unsigned int)y1, to[8 * n + 5] = w[5], to[8 * n + 6] = slot << 16, to[8 * n + 7] = w[7];
                         n++;
                 }
                 else

@@ -446,6 +446,8 @@ scene:
 	s_cbranch_scc1	.scene_close
 	s_cmp_eq_u32	s47, 7
 	s_cbranch_scc1	.scene_turn
+	s_cmp_eq_u32	s47, 10
+	s_cbranch_scc1	.scene_translate
 	s_cmp_le_u32	s59, s28
 	s_cbranch_scc1	.scene_loop
 	s_add_u32	s50, s28, 64
@@ -874,6 +876,73 @@ scene:
 	textpixel	v7, v72, v71, v73, v78, v82, s[86:87]
 	textpixel	v8, v73, v72, v75, v79, v83, s[88:89]
 .text_done:
+	s_mov_b64	exec, s[92:93]
+	s_branch	.scene_loop
+
+;
+; a glyph translated (10 | the coverage's pitch << 8, x0, y0, x1, y1, the tones' place, the base's number << 16, the coverage's place): font_cell's cell on its ground:
+; the pixel at x, y is the tone at index the coverage byte c at (y - y0) * pitch + (x - x0) from the coverage's place, the tones being 256 words at their place, both from the
+; base the number names (the buffer's start for none), which is a program's list when the number is the compositor's for it. No blend: memory_translate_u32_rect's translate,
+; the pixels of the cell's ground having been laid by a fill before it. Each lane reads four coverage bytes by a dword, as the text run does, and four tones.
+.scene_translate:
+	s_cmp_le_u32	s59, s28
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s50, s28, 64
+	s_cmp_ge_u32	s57, s50
+	s_cbranch_scc1	.scene_loop
+	s_cmp_le_u32	s60, s29
+	s_cbranch_scc1	.scene_loop
+	s_add_u32	s51, s29, 4
+	s_cmp_ge_u32	s58, s51
+	s_cbranch_scc1	.scene_loop
+	s_mov_b32	s45, 1
+	s_lshr_b32	s81, s56, 8
+	s_min_u32	s53, s59, s12
+	v_cmp_le_u32_e64 s[76:77], s58, v4
+	v_cmp_gt_u32	vcc, s60, v4
+	s_and_b64	s[76:77], s[76:77], vcc
+	s_and_saveexec_b64 s[92:93], s[76:77]
+	s_cbranch_execz	.translate_done
+	s_mov_b64	s[98:99], s[102:103]
+	s_bfe_u32	s100, s62, 0x80010
+	s_cmp_eq_u32	s100, 0
+	s_cbranch_scc1	.translate_based
+	s_load_dwordx2	s[98:99], s[4:5], 0x40
+	s_lshl_b32	s100, s100, 3
+	s_waitcnt	lgkmcnt(0)
+	s_add_u32	s98, s98, s100
+	s_addc_u32	s99, s99, 0
+	s_load_dwordx2	s[98:99], s[98:99], 0x0
+	s_waitcnt	lgkmcnt(0)
+.translate_based:
+	v_subrev_nc_u32	v30, s58, v4
+	v_mad_u32_u24	v30, v30, s81, s63
+	v_subrev_nc_u32	v31, s57, v3
+	v_add_nc_u32	v30, v30, v31
+	global_load_dword v34, v30, s[98:99]
+	s_waitcnt	vmcnt(0)
+	v_bfe_u32	v70, v34, 0, 8
+	v_bfe_u32	v71, v34, 8, 8
+	v_bfe_u32	v72, v34, 16, 8
+	v_bfe_u32	v73, v34, 24, 8
+	v_lshl_add_u32	v70, v70, 2, s61
+	v_lshl_add_u32	v71, v71, 2, s61
+	v_lshl_add_u32	v72, v72, 2, s61
+	v_lshl_add_u32	v73, v73, 2, s61
+	global_load_dword v74, v70, s[98:99]
+	global_load_dword v75, v71, s[98:99]
+	global_load_dword v76, v72, s[98:99]
+	global_load_dword v77, v73, s[98:99]
+	inside		s[82:83], v3
+	inside		s[84:85], v17
+	inside		s[86:87], v18
+	inside		s[88:89], v19
+	s_waitcnt	vmcnt(0)
+	v_cndmask_b32_e64 v5, v5, v74, s[82:83]
+	v_cndmask_b32_e64 v6, v6, v75, s[84:85]
+	v_cndmask_b32_e64 v7, v7, v76, s[86:87]
+	v_cndmask_b32_e64 v8, v8, v77, s[88:89]
+.translate_done:
 	s_mov_b64	exec, s[92:93]
 	s_branch	.scene_loop
 
