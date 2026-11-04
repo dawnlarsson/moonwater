@@ -9766,6 +9766,129 @@ void f32_rows_mix2(float *out0, float *out1, const float *rows, unsigned long st
 }
 #endif
 
+/*
+        The specifications of four loops of src/audio/pulse.c, each the loop the engine runs, moved here in the same meaning:
+        the text a name is shown as, the bytes a property key may have, the reversal of each sample of a big-endian format,
+        the 16-bit to 8-bit narrowing of the U8 format, and the greatest magnitude of each window of a peak stream. A library
+        body that takes one of them is held to it by CHECK_audiolib, and the engine's rows in CHECK_audio_pulse hold the
+        engine to it. Each is written so that a body may run on the arguments as they are: a count of zero does nothing, a
+        pointer may be the same as another where the comment says so.
+*/
+
+// The text of a name: bytes from[0..length) up to the first NUL, each shown as itself when it is printable ASCII
+// (0x20 to 0x7e) or as the whole of a valid UTF-8 sequence (C2..DF, E0..EF, F0..F4 with their continuation bytes, and the
+// forms that are not overlong, not surrogates, not C1 controls and not past U+10FFFF); every other byte is shown as '?'.
+// Each output is no longer than the input bytes it stands for, so to may be from. Answers the count written. Length may
+// be zero. (The engine's cap on output is the caller's: pulse_props_text is given a room.)
+static AUDIO_C_UNUSED long audio_c_text_clean(unsigned char *to, const unsigned char *from, long length)
+{
+        long n = 0;
+
+        for (long at = 0; at < length && from[at]; at++)
+        {
+                unsigned char c = from[at];
+                long extra = c >= 0xf0 && c < 0xf5 ? 3 : c >= 0xe0 ? 2 : c >= 0xc2 ? 1 : 0;
+
+                if (c >= 0x20 && c < 0x7f)
+                        to[n++] = c;
+                else if (c >= 0xc2 && c < 0xf5 && at + extra < length)
+                {
+                        int good = 1;
+
+                        for (long k = 1; k <= extra; k++)
+                                good &= (from[at + k] & 0xc0) == 0x80;
+                        if (good && extra == 1 && c == 0xc2 && from[at + 1] < 0xa0)
+                                good = 0;
+                        if (good && extra == 2 && c == 0xe0 && from[at + 1] < 0xa0)
+                                good = 0;
+                        if (good && extra == 2 && c == 0xed && from[at + 1] >= 0xa0)
+                                good = 0;
+                        if (good && extra == 3 && c == 0xf0 && from[at + 1] < 0x90)
+                                good = 0;
+                        if (good && extra == 3 && c == 0xf4 && from[at + 1] >= 0x90)
+                                good = 0;
+                        if (good)
+                        {
+                                for (long k = 0; k <= extra; k++)
+                                        to[n++] = from[at + k];
+                                at += extra;
+                        }
+                        else
+                                to[n++] = '?';
+                }
+                else
+                        to[n++] = '?';
+        }
+        return n;
+}
+
+// A property key: one to 63 bytes, each printable ASCII and not the space (0x21 to 0x7e). Answers 1 or 0.
+static AUDIO_C_UNUSED int audio_c_key_printable(const unsigned char *from, long length)
+{
+        if (length < 1 || length >= 64)
+                return 0;
+        for (long i = 0; i < length; i++)
+                if (from[i] <= ' ' || from[i] >= 127)
+                        return 0;
+        return 1;
+}
+
+// Each of count units of width bytes (2, 3 or 4) reversed in place: the big-endian form of the little-endian samples.
+static AUDIO_C_UNUSED void audio_c_reverse_units(unsigned char *dst, long count, long width)
+{
+        for (long i = 0; i < count; i++)
+                for (long k = 0; k < width / 2; k++)
+                {
+                        unsigned char t = dst[i * width + k];
+
+                        dst[i * width + k] = dst[i * width + width - 1 - k];
+                        dst[i * width + width - 1 - k] = t;
+                }
+}
+
+// count little-endian 16-bit samples at src (two bytes each) as unsigned 8-bit samples: the sample rounded to the top byte
+// (plus 128, arithmetic shift), clipped to 127 above, and biased by 128. dst may be src or lie below it: each pair is read
+// before any byte that would overwrite it is written.
+static AUDIO_C_UNUSED void audio_c_s16_to_u8(unsigned char *dst, const unsigned char *src, long count)
+{
+        for (long i = 0; i < count; i++)
+        {
+                int v = (short)(src[2 * i] | src[2 * i + 1] << 8);
+
+                v = (v + 128) >> 8;
+                dst[i] = (unsigned char)((v > 127 ? 127 : v) + 128);
+        }
+}
+
+// The window of a peak stream over a block of frames: state[0] and state[1] hold the greatest magnitude of the window so
+// far on each side, *count the frames of it so far, and window (at least 1) its length. A window that completes writes
+// one frame to out0 and out1 (a mono stream's both sides are the greater of the two) and clears the state. Answers the
+// frames written. The magnitude is x < 0 ? -x : x, so a NaN stays NaN and never becomes a peak.
+static AUDIO_C_UNUSED long audio_c_window_peaks(float *out0, float *out1, const float *left, const float *right, long frames, float *state,
+                                                long *count, long window, int mono)
+{
+        long made = 0;
+
+        for (long i = 0; i < frames; i++)
+        {
+                float a = left[i] < 0 ? -left[i] : left[i], b = right[i] < 0 ? -right[i] : right[i];
+
+                state[0] = a > state[0] ? a : state[0];
+                state[1] = b > state[1] ? b : state[1];
+                if (++*count >= window)
+                {
+                        out0[made] = state[0];
+                        out1[made] = state[1];
+                        if (mono)
+                                out0[made] = out1[made] = state[0] > state[1] ? state[0] : state[1];
+                        made++;
+                        state[0] = state[1] = 0;
+                        *count = 0;
+                }
+        }
+        return made;
+}
+
 #else /* the sections */
 
 #ifdef CHECK_standard
@@ -179065,11 +179188,208 @@ static void pt_test_samples_full(void)
         pulse_client_close(&pt_engine, slot);
 }
 
+/*
+        The engine's four loops against their specifications (the audio_c_ functions of the shared block above): the name
+        cleaner, the key test, the big-endian reversal and the U8 narrowing through the record encoder, and the peak window
+        through a peak stream. Each row is a fixed-seed run, so a failure is the same every time.
+*/
+static unsigned long pt_spec_state = 0x2545f4914f6cdd1dul;
+
+static unsigned long pt_spec_next(void)
+{
+        pt_spec_state ^= pt_spec_state << 13;
+        pt_spec_state ^= pt_spec_state >> 7;
+        pt_spec_state ^= pt_spec_state << 17;
+        return pt_spec_state;
+}
+
+// The bytes the text and key rules turn on: each boundary of their ranges, and the lead and continuation bytes of every form.
+static const unsigned char pt_spec_bytes[] = {0x00, 0x01, 0x1f, 0x20, 0x21, 0x2e, 0x7d, 0x7e, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0,
+                                              0xc1, 0xc2, 0xc3, 0xdf, 0xe0, 0xe1, 0xec, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf3, 0xf4, 0xf5, 0xfe,
+                                              0xff, 0x41, 0xe9};
+
+// Whole sequences of every form the text rule accepts or refuses, cut short at random, so the rows reach every branch.
+static const unsigned char *pt_spec_forms[] = {(const unsigned char *)"\xc2\xa0", (const unsigned char *)"\xc2\x9f", (const unsigned char *)"\xe0\xa0\x80",
+                                               (const unsigned char *)"\xe0\x9f\xbf", (const unsigned char *)"\xed\x9f\xbf", (const unsigned char *)"\xed\xa0\x80",
+                                               (const unsigned char *)"\xf0\x90\x80\x80", (const unsigned char *)"\xf0\x8f\xbf\xbf",
+                                               (const unsigned char *)"\xf4\x8f\xbf\xbf", (const unsigned char *)"\xf4\x90\x80\x80",
+                                               (const unsigned char *)"\xc3\xa9", (const unsigned char *)"\xe2\x82\xac", (const unsigned char *)"\xf0\x9f\x8e\xb5"};
+
+static void pt_test_reference_loops(void)
+{
+        int bad;
+
+        // The name cleaner: every value up to 120 bytes, a NUL inside some of them, the forms above and random bytes.
+        bad = 0;
+        for (int round = 0; round < 3000; round++)
+        {
+                unsigned char value[160], want[160], got[260];
+                long length = (long)(pt_spec_next() % 121), at = 0;
+                struct pulse_props props = {0};
+                long n, m;
+
+                while (at < length)
+                {
+                        unsigned long r = pt_spec_next();
+
+                        if (r % 4 == 0)
+                        {
+                                const unsigned char *form = pt_spec_forms[(r >> 8) % (sizeof(pt_spec_forms) / sizeof(pt_spec_forms[0]))];
+                                long take = (long)((r >> 20) % 5);
+
+                                for (long k = 0; k < take && form[k] && at < length; k++)
+                                        value[at++] = form[k];
+                                continue;
+                        }
+                        value[at++] = r % 3 == 0 ? (unsigned char)(r >> 16) : pt_spec_bytes[(r >> 16) % (sizeof(pt_spec_bytes) / sizeof(pt_spec_bytes[0]))];
+                }
+                pulse_props_set(&props, "media.name", value, length);
+                n = pulse_props_text(&props, "media.name", (char *)got, sizeof(got));
+                m = audio_c_text_clean(want, value, length);
+                if (n != m || memcmp(got, want, (size_t)n))
+                        bad++;
+        }
+        PTCHECK(bad == 0, "the name cleaner is the specification on 3000 values: %d differ", bad);
+
+        // The key test: lengths 0 to 69 over the boundary bytes and random ones.
+        bad = 0;
+        for (int round = 0; round < 2000; round++)
+        {
+                unsigned char key[80];
+                long length = (long)(pt_spec_next() % 70);
+
+                for (long i = 0; i < 70; i++)
+                {
+                        unsigned long r = pt_spec_next();
+
+                        key[i] = r % 2 ? pt_spec_bytes[(r >> 8) % (sizeof(pt_spec_bytes) / sizeof(pt_spec_bytes[0]))] : (unsigned char)(r >> 16);
+                }
+                if (pulse_key_ok((const char *)key, length) != audio_c_key_printable(key, length))
+                        bad++;
+        }
+        PTCHECK(bad == 0, "the key test is the specification on 2000 keys: %d differ", bad);
+
+        // The big-endian formats: the engine's bytes are the little-endian ones with each sample reversed.
+        {
+                static const long big[] = {AUDIO_FORMAT_S16BE, AUDIO_FORMAT_S24BE, AUDIO_FORMAT_S24_32BE, AUDIO_FORMAT_S32BE, AUDIO_FORMAT_F32BE};
+                static const long little[] = {AUDIO_FORMAT_S16LE, AUDIO_FORMAT_S24LE, AUDIO_FORMAT_S24_32LE, AUDIO_FORMAT_S32LE, AUDIO_FORMAT_F32LE};
+                static float left[64], right[64];
+                static unsigned char be[1024], want[1024];
+
+                bad = 0;
+                for (unsigned f = 0; f < 5; f++)
+                        for (int round = 0; round < 100; round++)
+                        {
+                                long frames = 1 + (long)(pt_spec_next() % 64), channels = 1 + (long)(pt_spec_next() % 2), bytes;
+
+                                for (int i = 0; i < 64; i++)
+                                {
+                                        left[i] = (float)(pt_spec_next() % 30001) / 10000.0f - 1.5f;
+                                        right[i] = (float)(pt_spec_next() % 30001) / 10000.0f - 1.5f;
+                                }
+                                bytes = pulse_record_encode(be, big[f], frames, channels, left, right);
+                                pulse_record_encode(want, little[f], frames, channels, left, right);
+                                audio_c_reverse_units(want, frames * channels, audio_format_bytes(little[f]));
+                                if (bytes != frames * channels * audio_format_bytes(little[f]) || memcmp(be, want, (size_t)bytes))
+                                        bad++;
+                        }
+        }
+        PTCHECK(bad == 0, "the big-endian formats are the little-endian samples reversed, 500 blocks: %d differ", bad);
+
+        // The U8 format: the engine's bytes are the 16-bit ones narrowed by the specification.
+        {
+                static float left[64], right[64];
+                static unsigned char u8[1024], sixteen[512], want[512];
+
+                bad = 0;
+                for (int round = 0; round < 300; round++)
+                {
+                        long frames = 1 + (long)(pt_spec_next() % 64), channels = 1 + (long)(pt_spec_next() % 2), samples;
+
+                        for (int i = 0; i < 64; i++)
+                        {
+                                left[i] = (float)(pt_spec_next() % 30001) / 10000.0f - 1.5f;
+                                right[i] = (float)(pt_spec_next() % 30001) / 10000.0f - 1.5f;
+                        }
+                        samples = frames * channels;
+                        pulse_record_encode(u8, AUDIO_FORMAT_U8, frames, channels, left, right);
+                        pulse_record_encode(sixteen, AUDIO_FORMAT_S16LE, frames, channels, left, right);
+                        audio_c_s16_to_u8(want, sixteen, samples);
+                        if (memcmp(u8, want, (size_t)samples))
+                                bad++;
+                }
+        }
+        PTCHECK(bad == 0, "the U8 format is the 16-bit samples narrowed, 300 blocks: %d differ", bad);
+
+        // The peak window: a peak stream's bytes are the window of the source's blocks, carried across them.
+        {
+                static const unsigned rates[] = {25, 7, 1000, 96000};
+                static const unsigned channel_counts[] = {1, 2, 1, 2};
+                static float left[AUDIO_BLOCK], right[AUDIO_BLOCK], out0[AUDIO_BLOCK], out1[AUDIO_BLOCK];
+                static unsigned char want[1 << 16];
+
+                bad = 0;
+                for (unsigned k = 0; k < 4; k++)
+                {
+                        struct pt_rec_args a = pt_rec_args();
+                        long window = 48000 / (long)rates[k], count = 0, total = 0, slot;
+                        float state[2] = {0, 0};
+                        unsigned long channel;
+
+                        if (window < 1)
+                                window = 1;
+                        pt_reset();
+                        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+                        slot = pt_connect(0, 120 + (long)k, 35, "Reference peaks");
+                        a.peak = 1;
+                        a.format = AUDIO_FORMAT_F32LE;
+                        a.channels = (long)channel_counts[k];
+                        a.rate = (long)rates[k];
+                        if (pt_rec_create(slot, 35, 40 + (long)k, &a) != 0)
+                        {
+                                bad++;
+                                continue;
+                        }
+                        channel = pt_rec_reply.channel;
+                        pt_rec_clear();
+                        for (int block = 0; block < 12; block++)
+                        {
+                                long frames = 1 + (long)(pt_spec_next() % AUDIO_BLOCK), made;
+
+                                // The source's bus is the block at its volume, clipped to +-1 (audio_gain_run): the window reads that.
+                                for (long i = 0; i < frames; i++)
+                                {
+                                        left[i] = (float)(pt_spec_next() % 20001) / 10000.0f - 1.0f;
+                                        right[i] = (float)(pt_spec_next() % 20001) / 10000.0f - 1.0f;
+                                }
+                                pulse_source_feed(&pt_engine, 0, left, right, frames);
+                                pt_rec_pull(slot, channel);
+                                made = audio_c_window_peaks(out0, out1, left, right, frames, state, &count, window, channel_counts[k] == 1);
+                                for (long j = 0; j < made; j++)
+                                {
+                                        memcpy(want + total, &out0[j], 4);
+                                        total += 4;
+                                        if (channel_counts[k] == 2)
+                                        {
+                                                memcpy(want + total, &out1[j], 4);
+                                                total += 4;
+                                        }
+                                }
+                        }
+                        if (pt_rec_len != total || memcmp(pt_rec_buf, want, (size_t)total))
+                                bad++;
+                        pulse_client_close(&pt_engine, slot);
+                }
+        }
+        PTCHECK(bad == 0, "the peak window is the specification at 25, 7, 1000 and 96000 Hz, mono and stereo: %d differ", bad);
+}
+
 int main(void)
 {
         pt_make_source();
         pt_make_session();
         pt_test_text();
+        pt_test_reference_loops();
         pt_test_handshake();
         pt_test_info();
         pt_test_list_bounds();

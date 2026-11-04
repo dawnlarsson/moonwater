@@ -217,6 +217,16 @@ M = [
     ("pulse", 'a list too large drops its client', 'if (w->bad)\n                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);\n        return pulse_reply_end(c, w);', 'return pulse_reply_end(c, w);'),
     ("pulse", 'a feed keeps the frames it has read', 'c->in_have -= at;', 'c->in_have -= 0;'),
     ("pulse", 'a replacement in a full cache needs a free place', 'if (old && old->playing == 0)\n        {\n                old->condemned = 1;\n                pulse_sample_release(p, old);\n        }\n        for (int i = 0; i < PULSE_SAMPLES && !s; i++)', 'for (int i = 0; i < PULSE_SAMPLES && !s; i++)'),
+    # ---- the four loops with specifications in checks.c (audio_c_text_clean, audio_c_key_printable, audio_c_reverse_units,
+    #      audio_c_s16_to_u8, audio_c_window_peaks): each engine loop edited, and the reference row must turn red ----
+    ("pulse", "name cleaner: tilde shown as '?'", "if (c >= 0x20 && c < 0x7f)", "if (c >= 0x20 && c < 0x7e)"),
+    ("pulse", "key test: DEL taken as a key byte", "(unsigned char)key[i] >= 127", "(unsigned char)key[i] >= 128"),
+    ("pulse", "key test: space taken as a key byte", "(unsigned char)key[i] <= ' ' ||", "(unsigned char)key[i] < ' ' ||"),
+    ("pulse", "big-endian: all but the last byte pair reversed", "for (long k = 0; k < width / 2; k++)", "for (long k = 0; k < width / 2 - 1; k++)"),
+    ("pulse", "U8: clip at 126", "v > 127 ? 127 : v", "v > 126 ? 126 : v"),
+    ("pulse", "U8: rounding at 127 not 128", "v = (v + 128) >> 8;", "v = (v + 127) >> 8;"),
+    ("pulse", "peak window one frame long", "++r->window_count >= window", "++r->window_count > window"),
+    ("pulse", "mono peaks never joined", "if (r->channels == 1)", "if (r->channels == 3)"),
     # ---- control.c (the mixer's client, checked in CHECK_audio_pulse against the engine) ----
     ("control", "a volume on the first channel only", "for (long i = 0; i < channels; i++)\n                all[i] = volume;", "for (long i = 0; i < 1; i++)\n                all[i] = volume;"),
     ("control", "a mute turned over", "ctl_w_bool(&w, muted != 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute", "ctl_w_bool(&w, muted == 0);\n        if (w.bad)\n                return CTL_FAILED;\n        got = ctl_exchange(c, w.len);\n        return got < 0 ? got : 0;\n}\n\nstatic long ctl_set_input_mute"),
