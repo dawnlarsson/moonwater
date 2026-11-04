@@ -151060,11 +151060,11 @@ static fn check_kit_standard(void)
         } ratchet[] = {
                 {"src/canvas/ui/settings.c", "WINDOW_KEY_TOUCH", 3},
                 {"src/canvas/ui/launcher.c", "WINDOW_KEY_TOUCH", 3},
-                {"src/canvas/ui/terminal.c", "WINDOW_KEY_TOUCH", 4},
+                {"src/canvas/ui/terminal.c", "WINDOW_KEY_TOUCH", 0},
                 {"src/canvas/ui/settings.c", "clock_monotonic_nanoseconds", 5},
                 {"src/canvas/ui/launcher.c", "clock_monotonic_nanoseconds", 1},
                 {"src/canvas/ui/editor.c", "clock_monotonic_nanoseconds", 1},
-                {"src/canvas/ui/terminal.c", "clock_monotonic_nanoseconds", 18},
+                {"src/canvas/ui/terminal.c", "clock_monotonic_nanoseconds", 15},
                 {"src/canvas/ui/identify.c", "clock_monotonic_nanoseconds", 3},
                 {"src/canvas/ui/mixer.c", "clock_monotonic_nanoseconds", 2},
                 {"src/canvas/ui/settings.c", ".press.down", 2},

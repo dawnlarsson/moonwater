@@ -164,7 +164,7 @@ static struct
         int wheel_remainder;
         int wheel_notches; // the wheel in 120ths of a notch, while a program has the pointer
         /*
-                A finger on the paper (WINDOW_KEY_TOUCH) with no program that asked for the pointer: the kit's finger (ui_finger), whose
+                A finger on the paper (a touch) with no program that asked for the pointer: the kit's finger (ui_finger), whose
                 region is the scrollback's bar where the grid scrolls and none where it fits. On the alternate screen it has no region:
                 its drag is the arrows', line by line as its pixels make lines (finger_left, what is under a line).
         */
@@ -2183,7 +2183,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         b32 moved, sent, dragged, clicked;
 
         *handled = false;
-        if (!(event->flags & WINDOW_KEY_TOUCH) || mouse_mode || terminal.bar.held)
+        if (!ui_kit_touch || mouse_mode || terminal.bar.held)
                 return true;
         if (event->type == WINDOW_EVENT_MOTION && ui_finger_held(&terminal.finger))
         {
@@ -2536,7 +2536,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
         {
                 if (event->flags & WINDOW_KEY_DOWN)
                         terminal_menu_open(terminal.pointer_x + (int)terminal.pad, terminal.pointer_y + (int)terminal.pad_y,
-                                           (event->flags & WINDOW_KEY_TOUCH) != 0);
+                                           ui_kit_touch);
                 return true;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
@@ -2560,7 +2560,7 @@ static b32 terminal_select_event(const struct window_event address_to event, b32
                 if (row >= ROWS || column >= COLUMNS)
                         return false;
                 terminal_place_at(row, column, &line, &at);
-                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, clock_monotonic_nanoseconds(), terminal.pointer_x, terminal.pointer_y);
+                terminal.clicks = ui_click_count(&terminal.ui, &terminal.click, ui_kit.now, terminal.pointer_x, terminal.pointer_y);
                 if (shift && terminal.selecting && terminal.clicks == 1)
                 {
                         terminal.select_active_line = line, terminal.select_active_column = at;
@@ -2679,7 +2679,7 @@ static b32 terminal_hold(const struct window_event address_to event, b32 address
         unsigned int row, column, line, at;
         b32 moved = false;
 
-        if (event->type != WINDOW_EVENT_BUTTON || !(event->flags & WINDOW_KEY_TOUCH))
+        if (event->type != WINDOW_EVENT_BUTTON || !ui_kit_touch)
                 return false;
         if (event->a == UI_POINTER_LEFT && (event->flags & WINDOW_KEY_DOWN))
         {
@@ -2781,7 +2781,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 if (terminal_select_key(event, dirty))
                         return true;
                 if (!terminal.modes_fresh)
-                        terminal_modes_read(master, clock_monotonic_nanoseconds());
+                        terminal_modes_read(master, (positive)ui_kit.now);
                 terminal_key(event, &key);
                 // Typing is a reason to look at what is being typed; a modifier alone is not typing, and
                 // Control held for a zoom or a copy keeps the place the view was scrolled back to.
@@ -2791,7 +2791,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                                 address_to dirty = true;
                         cursor_hide();
                         // A key restarts the caret's blink: solid as it is typed at.
-                        terminal_caret_restart(clock_monotonic_nanoseconds());
+                        terminal_caret_restart((positive)ui_kit.now);
                 }
                 return term_input(master, &key);
 
