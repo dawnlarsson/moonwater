@@ -183039,6 +183039,8 @@ static positive clock_monotonic_nanoseconds(void)
         return (positive)now.tv_sec * 1000000000ull + (positive)now.tv_nsec;
 }
 static void memory_zero(void *block, unsigned long size) { memset(block, 0, size); }
+static address_any memory_copy(address_any to, const address_any from, positive size) { return memcpy(to, from, size); }
+static b32 memory_compare(const address_any first, const address_any second, positive size) { return memcmp(first, second, size) != 0; }
 static b32 system_close(int fd) { return close(fd); }
 static thread sv_thread;
 static thread *thread_start(fn (*entry)(address_any), address_any argument) { (void)entry; (void)argument; return &sv_thread; }

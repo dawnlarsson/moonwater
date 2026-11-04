@@ -631,17 +631,17 @@ static int audio_file_moved(int slot, const char *name, int first)
         if (audio_call(syscall(newfstatat), (positive)AT_FDCWD, (positive)path, (positive)st, 0x100, 0, 0) == 0) // AT_SYMLINK_NOFOLLOW
         {
                 now.there = 1;
-                __builtin_memcpy(&now.inode, st + 8, 8);
-                __builtin_memcpy(&now.size, st + 48, 8);
-                __builtin_memcpy(&now.mtime_s, st + 88, 8);
-                __builtin_memcpy(&now.mtime_ns, st + 96, 8);
-                __builtin_memcpy(&now.ctime_s, st + 104, 8);
-                __builtin_memcpy(&now.ctime_ns, st + 112, 8);
+                memory_copy(&now.inode, st + 8, 8);
+                memory_copy(&now.size, st + 48, 8);
+                memory_copy(&now.mtime_s, st + 88, 8);
+                memory_copy(&now.mtime_ns, st + 96, 8);
+                memory_copy(&now.ctime_s, st + 104, 8);
+                memory_copy(&now.ctime_ns, st + 112, 8);
         }
         clock_gettime(CLOCK_REALTIME, address_of at);
         if (!first && now.there && now.mtime_s + 2 > (long long)at.tv_sec && now.ctime_s + 2 > (long long)at.tv_sec)
                 return 1; // changed a moment ago: not trusted to be the same as the look before
-        if (!first && __builtin_memcmp(&now, &stamps[slot], sizeof now) == 0)
+        if (!first && memory_compare(&now, &stamps[slot], sizeof now) == 0)
                 return 0;
         stamps[slot] = now;
         return 1;
@@ -957,9 +957,9 @@ static void audio_page_text(struct audio_text_cache *k, const struct pulse_clien
                 k->of = own_index;
                 k->of_version = own->version;
         }
-        __builtin_memcpy(out->app, k->app, sizeof(out->app));
-        __builtin_memcpy(out->media, k->media, sizeof(out->media));
-        __builtin_memcpy(out->icon, k->icon, sizeof(out->icon));
+        memory_copy(out->app, k->app, sizeof(out->app));
+        memory_copy(out->media, k->media, sizeof(out->media));
+        memory_copy(out->icon, k->icon, sizeof(out->icon));
 }
 
 #define AUDIO_PAGE_PIECE 64 // the page is compared and copied in pieces this long
@@ -1007,7 +1007,7 @@ static void audio_page_write(void)
                         build.device_list[i].flags |= AUDIO_STATE_DEVICE_ACTIVE;
         }
         for (long i = audio_service.device_count; i < (long)build.devices; i++)
-                __builtin_memset(build.device_list + i, 0, sizeof(build.device_list[0]));
+                memory_zero(build.device_list + i, sizeof(build.device_list[0]));
         devices = audio_service.device_count;
         build.devices = (unsigned int)devices;
         for (int i = 0; i < PULSE_STREAMS; i++)
@@ -1035,7 +1035,7 @@ static void audio_page_write(void)
         }
         for (long i = streams; i < (long)build.streams; i++)
         {
-                __builtin_memset(build.stream + i, 0, sizeof(build.stream[0]));
+                memory_zero(build.stream + i, sizeof(build.stream[0]));
                 build.stream[i].index = 0xffffffffu;
         }
         build.streams = (unsigned int)streams;
@@ -1074,7 +1074,7 @@ static void audio_page_write(void)
                                 inputs++;
                         }
                 for (long i = inputs; i < (long)build.inputs; i++)
-                        __builtin_memset(build.input_list + i, 0, sizeof(build.input_list[0]));
+                        memory_zero(build.input_list + i, sizeof(build.input_list[0]));
                 build.inputs = (unsigned int)inputs;
                 for (int i = 0; i < PULSE_RECORDS; i++)
                 {
@@ -1101,13 +1101,13 @@ static void audio_page_write(void)
                 }
                 for (long i = records; i < (long)build.records; i++)
                 {
-                        __builtin_memset(build.record + i, 0, sizeof(build.record[0]));
+                        memory_zero(build.record + i, sizeof(build.record[0]));
                         build.record[i].index = 0xffffffffu;
                 }
                 build.records = (unsigned int)records;
         }
         // Nothing differs from what the page holds: nothing is written, and the sequence number is the same as it was.
-        if (!audio_service.page_whole && __builtin_memcmp((char *)&build + 16, (char *)&held + 16, sizeof(build) - 16) == 0)
+        if (!audio_service.page_whole && memory_compare((char *)&build + 16, (char *)&held + 16, sizeof(build) - 16) == 0)
                 return;
         seq = __atomic_load_n(&page->seq, __ATOMIC_RELAXED);
         __atomic_store_n(&page->seq, seq + 1, __ATOMIC_RELAXED); // odd: being written
@@ -1118,10 +1118,10 @@ static void audio_page_write(void)
         {
                 long length = (long)sizeof(build) - off < AUDIO_PAGE_PIECE ? (long)sizeof(build) - off : AUDIO_PAGE_PIECE;
 
-                if (audio_service.page_whole || __builtin_memcmp((char *)&build + off, (char *)&held + off, length))
+                if (audio_service.page_whole || memory_compare((char *)&build + off, (char *)&held + off, length))
                 {
-                        __builtin_memcpy((char *)page + off, (char *)&build + off, length);
-                        __builtin_memcpy((char *)&held + off, (char *)&build + off, length);
+                        memory_copy((char *)page + off, (char *)&build + off, length);
+                        memory_copy((char *)&held + off, (char *)&build + off, length);
                 }
         }
         audio_service.page_whole = 0;
@@ -1586,7 +1586,7 @@ static void audio_inputs_pass(int first)
 
                         if (slot < 0)
                                 continue;
-                        __builtin_memset(&audio_service.input[free_at], 0, sizeof(audio_service.input[free_at]));
+                        memory_zero(&audio_service.input[free_at], sizeof(audio_service.input[free_at]));
                         audio_service.input[free_at].used = 1;
                         audio_service.input[free_at].slot = slot;
                         audio_service.input[free_at].card = found[f].card;
@@ -1618,7 +1618,7 @@ static fn audio_job_entry(address_any argument)
         if (audio_service.job.kind == AUDIO_JOB_OPEN)
         {
                 audio_service.job.result = audio_pcm_open(&audio_service.job.pcm, audio_service.job.card, audio_service.job.device, AUDIO_ALSA_CAPTURE, 48000, AUDIO_PERIOD, -1);
-                __builtin_memset(&audio_service.job.mix, 0, sizeof(audio_service.job.mix));
+                memory_zero(&audio_service.job.mix, sizeof(audio_service.job.mix));
                 if (audio_service.job.result == 0 && !audio_service.leave_mixer)
                         audio_mixer_prepare(audio_service.job.card, 2, &audio_service.job.mix);
         }
@@ -1858,7 +1858,7 @@ static int audio_test_page(struct audio_state *copy)
         audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
         if (got < (long)sizeof(*copy))
                 return 0;
-        __builtin_memcpy(copy, raw, sizeof(*copy));
+        memory_copy(copy, raw, sizeof(*copy));
         return copy->magic == AUDIO_STATE_MAGIC && copy->version == AUDIO_STATE_VERSION && copy->bytes == sizeof(*copy) && !(copy->seq & 1u);
 }
 
@@ -1954,7 +1954,7 @@ static b32 audio_test(void)
                 ctl_put_be(frame, (unsigned long)n);
                 ctl_put_be(frame + 4, channel);
                 ctl_put_be(frame + 8, 0), ctl_put_be(frame + 12, 0), ctl_put_be(frame + 16, 0);
-                __builtin_memcpy(tone, (unsigned char *)samples + sent, (unsigned long)n);
+                memory_copy(tone, (unsigned char *)samples + sent, (unsigned long)n);
                 if (c.transport.send(c.transport.context, frame, 20 + n, ctl_left(&c)) < 0)
                 {
                         string_format(log, "audio: the connection to the sound server broke while the tone was sent.\n");
