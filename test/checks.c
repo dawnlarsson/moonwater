@@ -216872,7 +216872,7 @@ b32 main(void)
         {
                 enum { FRAMES = 6, FROUNDS = 40 };
                 positive tables_at = bins_at + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (12 << 20) + (6 << 20);
-                struct compositor_frame frames[FRAMES];
+                struct compositor_frame frames[FRAMES + 1]; // the last one a snap preview lifted into a frame of no area, as the present makes it
                 long fd = system_call_2(syscall(memfd_create), (positive) "mw-window", 1), mapped = -1;
                 unsigned int address_to region;
                 struct compositor_target reference;
@@ -216930,9 +216930,45 @@ b32 main(void)
                                                 f->close = 0;
                                 }
                         }
+                        // the marks and the snap preview as the present has them: a shared edge's mark over some windows, and on some rounds the preview lifted
+                        // into a frame of no area after the tabs (zero size, the rest of its fields as compositor_preview_lift leaves them).
+                        // A round with a tint compares the channels only: compositor_mix leaves a pixel mixed at cover 0 with its top byte clear, where
+                        // the card keeps the byte (memory_mix_u32_row's rule, "a pixel with cover 0 is left"). The top byte is not shown (the scanout is
+                        // XRGB), and the card's rule is a kernel's to change (the mix record's cover 0), so this is the one place the rig is not whole-word.
+                        unsigned int frame_mask = 0xffffffffu;
+                        for (int k = 0; k < count; k++)
+                                if (gpu_random() % 3 == 0)
+                                {
+                                        frames[k].mark[0] = (int)(gpu_random() % 680) - 20, frames[k].mark[1] = (int)(gpu_random() % (PH + 20)) - 10;
+                                        frames[k].mark[2] = 1 + (int)(gpu_random() % 120), frames[k].mark[3] = 1 + (int)(gpu_random() % 90);
+                                        frames[k].mark_ink = gpu_random();
+                                        frame_mask = 0x00ffffffu;
+                                }
+                        if (gpu_random() % 2)
+                        {
+                                struct compositor_frame *lifted = &frames[count++];
+
+                                frame_mask = 0x00ffffffu;
+                                memory_zero(lifted, sizeof(*lifted));
+                                lifted->scale = 100;
+                                lifted->preview[0] = (int)(gpu_random() % 680) - 20, lifted->preview[1] = (int)(gpu_random() % (PH + 20)) - 10;
+                                lifted->preview[2] = 1 + (int)(gpu_random() % 200), lifted->preview[3] = 1 + (int)(gpu_random() % 150);
+                                lifted->preview_ink = gpu_random();
+                                lifted->preview_radius = gpu_random() % 4 ? (int)(gpu_random() % 40) : 0;
+                                lifted->preview_line = gpu_random() % 3 ? (int)(gpu_random() % 6) : 0;
+                                lifted->preview_edge = gpu_random();
+                        }
                         memory_fill_u32_rect(gpu_kit_want, PP, 696, PH, ground);
                         for (int k = 0; k < count; k++)
                                 compositor_draw(&reference, &frames[k]);
+                        // the processor's tints after the frames, as compositor_scene_banded draws them (compositor_preview_draw)
+                        {
+                                int radii[FRAMES + 1];
+
+                                for (int k = 0; k < count; k++)
+                                        radii[k] = compositor_radius(&frames[k]);
+                                compositor_preview_draw(&reference, frames, (unsigned int)count, radii);
+                        }
                         for (positive i = 0; i < (positive)PP * PH; i++)
                                 pic[i] = 0;
                         check("gpu frames: the frames are drawn by the GPU", compositor_gpu_frames(frames, (unsigned int)count, ground));
@@ -216954,7 +216990,7 @@ b32 main(void)
                                 for (int x = 0; x < 696; x++)
                                 {
                                         checks++;
-                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++failures, ++frame_bad) < 6)
+                                        if (((pic[(positive)y * PP + x] ^ gpu_kit_want[(positive)y * PP + x]) & frame_mask) && (++failures, ++frame_bad) < 6)
                                                 string_format(log, "  FAIL gpu frames round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
                                                               (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
                                 }
@@ -216974,7 +217010,7 @@ b32 main(void)
                                                 int inside = x >= rx0 && x < rx1 && y >= ry0 && y < ry1;
 
                                                 checks++;
-                                                if (pic[(positive)y * PP + x] != (inside ? gpu_kit_want[(positive)y * PP + x] : 0) && (++failures, ++frame_bad) < 6)
+                                                if (((pic[(positive)y * PP + x] ^ (inside ? gpu_kit_want[(positive)y * PP + x] : 0)) & frame_mask) && (++failures, ++frame_bad) < 6)
                                                         string_format(log, "  FAIL gpu frames part %p: pixel %p,%p is %p\n", (positive)round, (positive)x, (positive)y, (positive)pic[(positive)y * PP + x]);
                                         }
                         }
@@ -217456,6 +217492,23 @@ b32 main(void)
                 check("gpu why: the refusal is counted as an alignment reason", align0 == 1);
                 check("gpu why: and as the processor's present, not the card's", processor0 == 1 && drawn0 == 0);
                 check("gpu why: the table's counts are the compositor's", why_table.gpu_refused[COMPOSITOR_GPU_WHY_ALIGN] == compositor_gpu_counts.why[COMPOSITOR_GPU_WHY_ALIGN] && why_table.gpu_processor == compositor_gpu_counts.processor);
+                // A snap preview on a window itself (not lifted into a frame of its own) is the processor's: its ring and its hide are not records.
+                if (gpu.at)
+                {
+                        static unsigned int why_pixels[32 * 32];
+                        struct compositor_frame win;
+                        int refused_preview;
+
+                        memory_zero(&win, sizeof(win));
+                        win.x = 4, win.y = 4, win.width = 20, win.height = 20, win.scale = 100, win.pitch = 32, win.pixels = why_pixels, win.line = 1;
+                        win.preview[0] = 2, win.preview[1] = 2, win.preview[2] = 10, win.preview[3] = 10, win.preview_ink = 0x80ffffffu;
+                        gpu_map(why_pixels, sizeof(why_pixels));
+                        compositor_gscene.width = WW, compositor_gscene.height = WH;
+                        refused_preview = !compositor_gpu_frames(&win, 1, compositor_ground) && compositor_gscene.why == COMPOSITOR_GPU_WHY_PREVIEW;
+                        check("gpu why: a snap preview on a window itself is refused as a preview", refused_preview);
+                        win.preview[0] = 0, win.preview[1] = 0, win.preview[2] = 0, win.preview[3] = 0;
+                        check("gpu why: and the same window without it is composed", compositor_gpu_frames(&win, 1, compositor_ground));
+                }
                 if (gpu.at) // a card: the same present at the width it draws is the card's, and counted so
                 {
                         compositor.width = 696, compositor.scanout_pitch = 2784;

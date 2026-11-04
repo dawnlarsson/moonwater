@@ -1021,6 +1021,7 @@ struct compositor_gscene
 {
         unsigned int *ops;                  // the records, in the GPU's buffer
         unsigned int count, room, width, height; // and the picture they are for
+        int clip[4];                        // the rectangle the records are cut to: the picture, or a tint's while its frames are drawn over it (x0 y0 x1 y1)
         enum compositor_gpu_why why;        // why the frames were refused, when they were
         unsigned char *tables;              // the cover tables' pool, in the GPU's buffer, its size and its place from the buffer's start
         unsigned int tables_size, tables_at, tables_used, kept;
@@ -1101,7 +1102,7 @@ static unsigned int compositor_gpu_close_table(int side, int half, int which)
 static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y1, unsigned int colour, const struct compositor_frame *frame, unsigned int cover, int r)
 {
         struct compositor_gscene *g = &compositor_gscene;
-        int cx0 = x0 < 0 ? 0 : x0, cy0 = y0 < 0 ? 0 : y0, cx1 = x1 > (int)g->width ? (int)g->width : x1, cy1 = y1 > (int)g->height ? (int)g->height : y1;
+        int cx0 = x0 < g->clip[0] ? g->clip[0] : x0, cy0 = y0 < g->clip[1] ? g->clip[1] : y0, cx1 = x1 > g->clip[2] ? g->clip[2] : x1, cy1 = y1 > g->clip[3] ? g->clip[3] : y1;
         unsigned int *op = g->ops + 8 * g->count;
 
         if (cx1 <= cx0 || cy1 <= cy0)
@@ -1145,11 +1146,23 @@ static b32 compositor_gpu_buttons(const struct compositor_frame *f)
                 compositor_gscene.why = COMPOSITOR_GPU_WHY_POOL;
                 return false;
         }
-        at = compositor_gpu_va(f) + 4ull * ((positive)(by - f->y) * f->pitch + (positive)(bx - f->x));
-        op[0] = 6u | (unsigned int)side << 8 | (unsigned int)f->pitch << 16, op[1] = (unsigned int)bx, op[2] = (unsigned int)by, op[3] = (unsigned int)(bx + side);
-        op[4] = (unsigned int)(by + side), op[5] = halo, op[6] = (unsigned int)at, op[7] = (unsigned int)(at >> 32) | tone << 8;
-        compositor_gscene.count++;
-        compositor_gpu_rect(5, bx, by, bx + side, by + side, ink, 0, cross, side);
+        // The halo is cut to the clip the records are (a tint's redraw): its record starts at the clipped corner, and its cover and picture are read from
+        // there (the kernel reads both from the record's own origin, a row of the covers side bytes and of the picture its pitch). Nothing of it is in
+        // the clip when the rectangle is empty.
+        {
+                const int *c = compositor_gscene.clip;
+                int x0 = bx > c[0] ? bx : c[0], y0 = by > c[1] ? by : c[1], x1 = bx + side < c[2] ? bx + side : c[2], y1 = by + side < c[3] ? by + side : c[3];
+
+                if (x1 > x0 && y1 > y0)
+                {
+                        at = compositor_gpu_va(f) + 4ull * ((positive)(y0 - f->y) * f->pitch + (positive)(x0 - f->x));
+                        op[0] = 6u | (unsigned int)side << 8 | (unsigned int)f->pitch << 16, op[1] = (unsigned int)x0, op[2] = (unsigned int)y0;
+                        op[3] = (unsigned int)x1, op[4] = (unsigned int)y1, op[5] = halo + (unsigned int)((y0 - by) * side + (x0 - bx)), op[6] = (unsigned int)at;
+                        op[7] = (unsigned int)(at >> 32) | tone << 8;
+                        compositor_gscene.count++;
+                }
+                compositor_gpu_rect(5, bx, by, bx + side, by + side, ink, 0, cross, side);
+        }
         if (compositor_minimize_box(f, &mx, &my, &side))
                 compositor_gpu_rect(0, mx + in, my + side / 2 - half, mx + in + side - 2 * in, my + side / 2 + half, ink, 0, 0, 0);
         return true;
@@ -1193,12 +1206,11 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
 
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
-        if (!f->builtin && (!f->pixels || w <= 0 || h <= 0 || !compositor_gpu_va(f)))
+        // A frame of no area has no picture to read (a snap preview's lifted frame is one: its tint is in compositor_gpu_frames).
+        if (!f->builtin && w > 0 && h > 0 && (!f->pixels || !compositor_gpu_va(f)))
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (compositor_scaled(f))
                 return g->why = COMPOSITOR_GPU_WHY_SCALED, false;
-        if (f->preview[0] || f->preview[1] || f->preview[2] || f->preview[3] || f->mark[0] || f->mark[1] || f->mark[2] || f->mark[3])
-                return g->why = COMPOSITOR_GPU_WHY_PREVIEW, false;
         if (g->count + 40 > g->room - 400)
                 return g->why = COMPOSITOR_GPU_WHY_POOL, false;
         compositor_outline(f, &ox, &oy, &ow, &oh);
@@ -1245,7 +1257,11 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         return compositor_gpu_buttons(f);
 }
 
-// The frames, in order, over a ground: the scene's records; false (and none) if any is not one the GPU draws.
+static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, int edge_line, unsigned int edge);
+
+// The frames, in order, over a ground, then the tints as compositor_preview_draw draws them: every frame's snap preview, then every frame's mark, each
+// over the scene and the frames it lies under drawn again over it (from the frame itself when it is no window, the lifted preview, which has no area
+// and draws nothing; from the frame above it otherwise). The scene's records; false (and none) if any is not one the GPU draws.
 static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned int count, unsigned int ground)
 {
         struct compositor_gscene *g = &compositor_gscene;
@@ -1253,14 +1269,43 @@ static b32 compositor_gpu_frames(const struct compositor_frame *frames, unsigned
         g->count = 0, g->why = COMPOSITOR_GPU_WHY_DRAWN;
         if (g->kept > COMPOSITOR_GPU_TABLES / 2) // the tables of the last scenes let go when the pool is half full: a scene is under that
                 g->kept = 0, g->tables_used = 0;
+        g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
         compositor_gpu_rect(0, 0, 0, (int)g->width, (int)g->height, ground, 0, 0, 0);
         for (unsigned int k = 0; k < count; k++)
                 if (!compositor_gpu_frame(&frames[k]))
+                        goto refused;
+        for (unsigned int pass = 0; pass < 2; pass++)
+                for (unsigned int k = 0; k < count; k++)
                 {
-                        g->count = 0;
-                        return false;
+                        const struct compositor_frame *f = &frames[k];
+                        const int *rect = pass ? f->mark : f->preview;
+                        unsigned int from = pass ? k + 1 : k;
+
+                        if (rect[2] <= 0 || rect[3] <= 0)
+                                continue;
+                        // A window under a snap preview is the owner of its own ring and hide (compositor_tint), which these records do not make: a
+                        // preview lifted to a frame of no area and no line is the one case the owner draws nothing for.
+                        if (!pass && !f->builtin && ((f->width > 0 && f->height > 0) || f->line > 0 || compositor_radius(f) > 0))
+                        {
+                                g->why = COMPOSITOR_GPU_WHY_PREVIEW;
+                                goto refused;
+                        }
+                        if (!compositor_gpu_tint(rect, pass ? f->mark_ink : f->preview_ink, pass ? 0 : f->preview_radius, pass ? 0 : f->preview_line,
+                                                 pass ? 0 : f->preview_edge))
+                                goto refused;
+                        // the frames it lies over are drawn again inside its rectangle alone (compositor_tint's cell), then the scene is whole again
+                        g->clip[0] = rect[0] > 0 ? rect[0] : 0, g->clip[1] = rect[1] > 0 ? rect[1] : 0;
+                        g->clip[2] = rect[0] + rect[2] < (int)g->width ? rect[0] + rect[2] : (int)g->width;
+                        g->clip[3] = rect[1] + rect[3] < (int)g->height ? rect[1] + rect[3] : (int)g->height;
+                        for (unsigned int j = from; j < count; j++)
+                                if (!compositor_gpu_frame(&frames[j]))
+                                        goto refused;
+                        g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
                 }
         return true;
+refused:
+        g->count = 0, g->clip[0] = 0, g->clip[1] = 0, g->clip[2] = (int)g->width, g->clip[3] = (int)g->height;
+        return false;
 }
 #endif
 
@@ -1563,6 +1608,127 @@ static void compositor_tint(const struct compositor_target *t, const struct comp
                         compositor_draw_with(&cell, &frames[each], radii[each]);
         }
 }
+
+#ifdef MOONWATER_GPU_C
+/*
+        A constant cover of the scene's width at one alpha (a mix record of pitch 0 reads its cover from the left edge of its rectangle, so a row of this table
+        covers any rectangle of the scene at that alpha). Keyed by the alpha and the width; its place from the buffer's start, 0 for none.
+*/
+static unsigned int compositor_gpu_const(unsigned int alpha)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        unsigned char *table;
+        unsigned int at = compositor_gpu_slot(-1, (int)alpha, 12, (int)g->width, g->width, &table);
+
+        if (table)
+                memory_fill(table, (int)alpha, (positive)g->width);
+        return at;
+}
+
+// A rectangle of the scene mixed with one colour at one alpha, as compositor_mix_run does it (the colour's own top byte is not the cover: the alpha is).
+static b32 compositor_gpu_const_rect(int x0, int y0, int x1, int y1, unsigned int colour, unsigned int alpha)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        unsigned int at;
+
+        if (x0 < 0)
+                x0 = 0;
+        if (x1 > (int)g->width)
+                x1 = (int)g->width;
+        if (x1 <= x0 || y1 <= y0)
+                return true;
+        at = compositor_gpu_const(alpha);
+        if (!at)
+                return false;
+        compositor_gpu_rect(5, x0, y0, x1, y1, colour, 0, at, 0);
+        return true;
+}
+
+// The cover of one corner square of a round shape (compositor_shape_cover, read the way the processor reads it in the square's own corner): r by r bytes,
+// rows from the square's top, the corner 0 top left, 1 top right, 2 bottom left, 3 bottom right; its place from the buffer's start, 0 for none.
+static unsigned int compositor_gpu_shape(int r, int line, int fa, int ea, int corner)
+{
+        unsigned char *table;
+        unsigned int at = compositor_gpu_slot(r, line, 8 + corner, fa | ea << 8, (unsigned int)(r * r), &table);
+        struct compositor_shape s;
+        int right = corner & 1, down = (corner & 2) != 0;
+
+        if (!table)
+                return at;
+        // A square of its own, as the shape's corner: its outer mask (mirrored on the right) and its inner one where the line leaves one.
+        memory_zero(&s, sizeof(s));
+        s.x = 0, s.y = 0, s.w = 2 * r, s.h = 2 * r, s.r = r, s.line = line;
+        s.fill = (unsigned int)fa << 24, s.edge = (unsigned int)ea << 24;
+        s.outer = compositor_corner_mask(r), s.outer_right = compositor_corner_mirror(r);
+        if (r - line > 0)
+                s.inner = compositor_corner_mask(r - line), s.inner_right = compositor_corner_mirror(r - line);
+        for (int row = 0; row < r; row++)
+                for (int col = 0; col < r; col++)
+                {
+                        int my = down ? r - 1 - row : row, px = right ? r + col : col;
+
+                        table[row * r + col] = (unsigned char)compositor_shape_cover(&s, px, my, 1);
+                }
+        return at;
+}
+
+/*
+        A tint as compositor_tint draws it over the whole scene, with no owner (a snap preview lifted into a frame of its own, or a shared edge's mark), as
+        records. The clamps are compositor_tint's. A round tint's four corner squares are records with their covers' tables. Each run of rows that are alike
+        (round corner rows, the edge's rows, the rest) is one record for the middle of the run, mixed with the ink (the edge's on the edge rows), and, on the
+        rows past the corners, the line's two sides mixed with the fill at the edge's alpha, as compositor_shape_row does it. A flat tint is the middle alone.
+*/
+static b32 compositor_gpu_tint(const int *rect, unsigned int ink, int radius, int edge_line, unsigned int edge)
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        int x = rect[0], y = rect[1], w = rect[2], h = rect[3], r, line, fa, ea;
+        unsigned int fill = ink & 0xffffffu, ring = edge & 0xffffffu;
+
+        if (w <= 0 || h <= 0)
+                return true;
+        if (g->count + 64 > g->room - 400)
+                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+        radius = radius > rect[2] / 2 ? rect[2] / 2 : radius;
+        radius = radius > rect[3] / 2 ? rect[3] / 2 : radius;
+        radius = radius > COMPOSITOR_RADIUS_MOST ? COMPOSITOR_RADIUS_MOST : radius < 0 ? 0 : radius;
+        edge_line = edge_line < 0 || !(edge >> 24) ? 0 : edge_line > radius && radius ? radius : edge_line;
+        r = radius, line = edge_line, fa = (int)(ink >> 24), ea = (int)(edge >> 24);
+        if (r > 0)
+                for (int corner = 0; corner < 4; corner++)
+                {
+                        int cx = corner & 1 ? x + w - r : x, cy = corner & 2 ? y + h - r : y;
+                        unsigned int at = compositor_gpu_shape(r, line, fa, ea, corner);
+
+                        if (!at)
+                                return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                        compositor_gpu_rect(5, cx, cy, cx + r, cy + r, fill, 0, at, r);
+                }
+        for (int py = y; py < y + h;)
+        {
+                int top = py - y, bottom = y + h - 1 - py, my = top < bottom ? top : bottom, corner = my < r, edge_row = my < line, stop = py + 1;
+                // The middle of an edge row is compositor_shape_row's run of the edge's cover in the colour array, which compositor_tint filled with the FILL's
+                // colour: the edge's own colour only where the edge's alpha is none or all (compositor_mix_run's per-pixel case reads the ink itself).
+                unsigned int colour = edge_row && (ea == 0 || ea >= 255) ? ring : fill;
+                int alpha = edge_row ? ea : fa, from = corner ? x + r : x + line, to = corner ? x + w - r : x + w - line;
+
+                // the run of rows alike: the same corner and the same edge row
+                for (; stop < y + h; stop++)
+                {
+                        int t = stop - y, b = y + h - 1 - stop, m = t < b ? t : b;
+
+                        if ((m < r) != (corner != 0) || (m < line) != (edge_row != 0))
+                                break;
+                }
+                if (!compositor_gpu_const_rect(from, py, to, stop, colour, (unsigned int)alpha))
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                if (!corner && line > 0 && (!compositor_gpu_const_rect(x, py, x + line, stop, fill, (unsigned int)ea) ||
+                                            !compositor_gpu_const_rect(x + w - line, py, x + w, stop, fill, (unsigned int)ea)))
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+                py = stop;
+        }
+        return true;
+}
+#endif
 
 /*
         The tints of a scene, drawn after it is composed: a tint (frame->preview) over what lies under it, from its own
@@ -7082,9 +7248,9 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
 {
         positive bytes;
 
-        if (f->builtin)
+        if (f->builtin || f->width <= 0 || f->height <= 0) // no area: no picture to map
                 return 1;
-        if (!f->pixels || f->width <= 0 || f->height <= 0 || f->pitch >= 1ull << 29)
+        if (!f->pixels || f->pitch >= 1ull << 29)
                 return 0;
         // The kernels reach a picture's pixels by a 32-bit signed offset from the first they are given (gpu.asm's image, mix, close and turn ops):
         // a picture of 2 GiB or more would wrap to bytes before it, so it is the processor's.
