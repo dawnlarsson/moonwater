@@ -17,7 +17,7 @@
         a client that knows whole scales only, with no fractional scale or viewport), -b draw into dma-bufs from the GPU's render node (built with -DHAVE_DMABUF: gbm and the linux-dmabuf protocol), exit 2 where
         there are none, -C TEXT copy it to the clipboard at the first key, -P paste the clipboard at the first key (and say what came),
         -q quiet,
-        -D damage a rectangle of 128 by 64 that moves each frame (the card's copy, which is over its threshold), and -K keep the window once the frames are
+        -D damage a rectangle of most of the window (width - 16 by 5 sixths of the height, over the card copy's threshold) that moves a little each frame, and -K keep the window once the frames are
         drawn, until it is closed.
         -T cut the files of its buffers to nothing once five frames are drawn, and exit: the compositor reads the pool it was shown in.
         -v a line on standard output for each pointer, key and keymap event as it arrives (with -DHAVE_XKB, the keymap is
@@ -283,7 +283,7 @@ static void redraw(void)
         paint(b, frames);
         wl_surface_attach(surface, b->buffer, 0, 0);
         if (big_damage)
-                wl_surface_damage_buffer(surface, (frames * 7) % (width - 128), 20, 128, 64);
+                wl_surface_damage_buffer(surface, (frames * 7) % 8, (frames * 5) % (height / 6), width - 16, height * 5 / 6);
         else if (damage_only)
                 wl_surface_damage_buffer(surface, (frames * 3) % (width - 20) - 3, 10, 26, 20);
         else

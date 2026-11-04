@@ -220219,6 +220219,16 @@ static unsigned int gpu_random(void)
 static unsigned int gpu_kit_want[700 * 420];
 
 // The bench's samples sorted (insertion: a few runs), so that the median and the best are the middle one and the first.
+// The calling thread's CPU time (CLOCK_THREAD_CPUTIME_ID), in ns: a card job's wait is in its wall time, and this is what the job took of the processor.
+static positive thread_cpu_nanoseconds(void)
+{
+        timespec now = {0, 0};
+
+        if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, address_of now) < 0)
+                return 0;
+        return (positive)now.tv_sec * 1000000000 + (positive)now.tv_nsec;
+}
+
 static void gpu_bench_sort(positive *took, int n)
 {
         for (int i = 1; i < n; i++)
@@ -222895,6 +222905,83 @@ b32 main(void)
                 gpu_bench_sort(idle, IDLE_RUNS);
                 string_format(log, "  gpu bench: a tiny job back to back, median %p us (best %p); after half a second idle, median %p us (best %p)\n",
                               tiny[RUNS / 2] / 1000, tiny[0] / 1000, idle[IDLE_RUNS / 2] / 1000, idle[0] / 1000);
+                // The copy bench (wayland_host.c's card copy of a damage rectangle, against the processor's copy): a square of 64 to 1024 on a side, which
+                // is 4k to 1M pixels, at a pitch of 1024 pixels. Each is the processor's memory_copy_rect_u32 (the median of nine), the card's gpu_copy
+                // (its job's wait included) back to back, the card awake, and after half a second idle (the clock ramps up from idle), the median of five.
+                // The card's copy is compared with the processor's, byte for byte, for each size: a row of its own.
+                {
+                        enum { COPY_RUNS = 9, COPY_IDLE = 5, COPY_SIZES = 5, COPY_PITCH = 1024 };
+                        static const unsigned int side[COPY_SIZES] = {64, 128, 256, 512, 1024};
+                        positive copy_cpu[COPY_RUNS], copy_warm[COPY_RUNS], copy_idle[COPY_IDLE], warm_cpu[COPY_RUNS], cpu_mark;
+                        // The source is 128 MiB, and each copy reads a 4 MiB slot of it the last copy did not: cold on both sides (a client's buffer
+                        // is not in the cache either), not the one warm rectangle, which the processor would copy from its own cache.
+                        long area = system_call_6(syscall(mmap), 0, (128 + 8) << 20, 3, 0x22, (positive)-1, 0);
+                        unsigned int address_to from, address_to into;
+                        b32 same = true;
+                        unsigned int slot = 0;
+
+                        if (area < 0 && area > -4096)
+                                return 1;
+                        from = (unsigned int address_to)area, into = from + (128 << 20) / 4;
+                        memory_fill_u32(from, (128 << 20) / 4, 0x5a3c1e7fu);
+                        memory_fill_u32(into, (8 << 20) / 4, 0);
+                        gpu_map((const void address_to)from, 128 << 20);
+                        gpu_map_written((const void address_to)into, 8 << 20);
+                        for (int size = 0; size < COPY_SIZES; size++)
+                        {
+                                unsigned int w = side[size], h = side[size], bytes = 4 * (COPY_PITCH * (h - 1) + w);
+                                unsigned int address_to src;
+                                positive dva = gpu_va_written((const void address_to)into, bytes), sva;
+
+                                for (int run = 0; run < COPY_RUNS; run++)
+                                {
+                                        positive began;
+
+                                        src = from + (unsigned long)(slot++ % 32) * (1u << 20);
+                                        began = clock_monotonic_nanoseconds();
+                                        memory_copy_rect_u32(into, COPY_PITCH, src, COPY_PITCH, w, h);
+                                        copy_cpu[run] = clock_monotonic_nanoseconds() - began;
+                                }
+                                for (int run = 0; run < COPY_RUNS; run++)
+                                {
+                                        positive began;
+                                        b32 done;
+
+                                        src = from + (unsigned long)(slot++ % 32) * (1u << 20);
+                                        sva = gpu_va_bytes((const void address_to)src, bytes);
+                                        began = clock_monotonic_nanoseconds();
+                                        cpu_mark = thread_cpu_nanoseconds();
+                                        done = gpu_copy(sva, COPY_PITCH, dva, COPY_PITCH, w, h);
+                                        warm_cpu[run] = thread_cpu_nanoseconds() - cpu_mark;
+                                        copy_warm[run] = clock_monotonic_nanoseconds() - began;
+                                        check("gpu copy: the card copies a rectangle", done);
+                                }
+                                src = from + (unsigned long)(slot % 32) * (1u << 20), sva = gpu_va_bytes((const void address_to)src, bytes);
+                                gpu_copy(sva, COPY_PITCH, dva, COPY_PITCH, w, h); // the card's copy: its destination is the rectangle of the source
+                                for (unsigned int row = 0; row < h; row++)
+                                        same &= !memory_compare(into + row * COPY_PITCH, src + row * COPY_PITCH, 4 * w);
+                                check("gpu copy: the card's copy of the rectangle is the processor's, byte for byte", same);
+                                for (int run = 0; run < COPY_IDLE; run++)
+                                {
+                                        positive began;
+
+                                        for (began = clock_monotonic_nanoseconds(); clock_monotonic_nanoseconds() - began < 500000000ull;)
+                                                ;
+                                        src = from + (unsigned long)(slot++ % 32) * (1u << 20);
+                                        sva = gpu_va_bytes((const void address_to)src, bytes);
+                                        began = clock_monotonic_nanoseconds();
+                                        gpu_copy(sva, COPY_PITCH, dva, COPY_PITCH, w, h);
+                                        copy_idle[run] = clock_monotonic_nanoseconds() - began;
+                                }
+                                gpu_bench_sort(copy_cpu, COPY_RUNS);
+                                gpu_bench_sort(copy_warm, COPY_RUNS);
+                                gpu_bench_sort(copy_idle, COPY_IDLE);
+                                gpu_bench_sort(warm_cpu, COPY_RUNS);
+                                string_format(log, "  gpu copy bench: %p px (%p by %p): processor median %p us, card back to back median %p us (best %p) with %p us of the compositor's own CPU, card after half a second idle median %p us (best %p)\n",
+                                              (positive)w * h, (positive)w, (positive)h, copy_cpu[COPY_RUNS / 2] / 1000, copy_warm[COPY_RUNS / 2] / 1000,
+                                              copy_warm[0] / 1000, warm_cpu[COPY_RUNS / 2] / 1000, copy_idle[COPY_IDLE / 2] / 1000, copy_idle[0] / 1000);
+                        }
+                }
                 while (gpu_map_count)
                         gpu_drop(0);
         }

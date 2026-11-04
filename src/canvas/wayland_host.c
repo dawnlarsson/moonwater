@@ -132,9 +132,15 @@ static struct
         machine reads it all the same.
 */
 #define COMPOSITOR_WL_KEYMAP_ROOM 24576
-// A damage rectangle of at least this many pixels is copied by the card (a job, which is a wait for the card): smaller ones are the processor's
-// copy, which is cheaper than the job. The one constant the card copy's threshold is.
-#define COMPOSITOR_WL_CARD_COPY_PIXELS 4096
+/*
+        The card copies a commit's damage when the damage sums to at least this many pixels, and the processor copies all of a smaller one. Measured on
+        the box (gpu copy bench in test/checks.c, the card warm: a job back to back, cold source and destination): the processor copies a square of
+        4k, 16k, 64k, 256k and 1M pixels in 0, 2, 13, 49 and 179 us; the card's job takes 81, 101, 130, 139 and 326 us of wall time, which is longer at
+        every size (the card is never cheaper in time), but 50 to 60 us of the compositor's own CPU at every size (the wait is spun), 90 us at 1M.
+        So the card is the cheaper CPU from about 256k pixels (512 by 512, even there) and clearly cheaper from 1M. A card awake for the commit
+        (the job of its neighbour in the tick) is the same wall time, not less, so the threshold does not move with it. One constant.
+*/
+#define COMPOSITOR_WL_CARD_COPY_PIXELS 262144
 
 // The keys that are no characters, by Linux code: the symbol's name, and the type of key it is.
 static const struct
@@ -787,15 +793,14 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         refused), and a mapping the kernel refuses.
 */
 static int compositor_wl_card_rect(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch,
-                                   long dx, long dy, long sx, long sy, long w, long h)
+                                   long dx, long dy, long sx, long sy, long w, long h, int wanted)
 {
         unsigned long stride = (unsigned long)picture->stride, extent;
         const unsigned char *src;
         positive src_va, dst_va;
         volatile unsigned int probe;
 
-        if (!gpu_ready() || picture->blend || !picture->pixels || !picture->map || picture->map_bytes <= 0 || w <= 0 || h <= 0 ||
-            w * h < COMPOSITOR_WL_CARD_COPY_PIXELS || !gpu_idle())
+        if (!wanted || !gpu_ready() || picture->blend || !picture->pixels || !picture->map || picture->map_bytes <= 0 || w <= 0 || h <= 0 || !gpu_idle())
                 return 0;
         src = picture->pixels + (unsigned long)sy * stride + (unsigned long)sx * 4;
         extent = 4 * ((stride / 4) * (unsigned long)(h - 1) + (unsigned long)w);
@@ -904,8 +909,16 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         to = (unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer);
         if (picture->pixels)
         {
+                long summed = 0;
+                int card_wanted;
+
                 if (count > WAYLAND_DAMAGE)
                         count = WAYLAND_DAMAGE;
+                // The commit's damage, summed: the card copies all of it or none (COMPOSITOR_WL_CARD_COPY_PIXELS)
+                for (long at = 0; at < count; at++)
+                        summed += picture->full || !picture->damages ? (long)picture->width * (long)picture->height
+                                                                   : (long)picture->damage[at].width * (long)picture->damage[at].height;
+                card_wanted = summed >= COMPOSITOR_WL_CARD_COPY_PIXELS;
                 for (long at = 0; at < count; at++)
                 {
                         long left = 0, top = 0, right = picture->width, bottom = picture->height;
@@ -942,7 +955,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         for (long c = left; c < right; c++)
                                                 into[c] = compositor_wl_over(from[c], into[c]);
                                 }
-                        else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top))
+                        else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top, card_wanted))
                                 table->client_rects_card++;
                         else if (picture->sync_fd >= 0)
                         {

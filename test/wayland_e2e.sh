@@ -528,7 +528,7 @@ fi
 case $extra in
 *-G*)
         ln -sf "$compositor" "$work/bin/moonwater"
-        "$client" -D -K -n 20 -w 320 -h 240 -q > /dev/null 2>&1 &
+        "$client" -D -K -n 20 -w 640 -h 600 -q > /dev/null 2>&1 &
         held=$!
         sleep 2
         cp "$work/scan.img" "$work/card-damage.img"
@@ -538,7 +538,7 @@ case $extra in
         stop
         extra=
         if start; then
-                "$client" -D -K -n 20 -w 320 -h 240 -q > /dev/null 2>&1 &
+                "$client" -D -K -n 20 -w 640 -h 600 -q > /dev/null 2>&1 &
                 held=$!
                 sleep 2
                 cp "$work/scan.img" "$work/processor-damage.img"
