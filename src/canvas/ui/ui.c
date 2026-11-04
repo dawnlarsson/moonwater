@@ -2087,7 +2087,14 @@ static struct ui_kit
         b32 reached;
         int reach_top, reach_bottom;
         int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
+        b64 test_clock;                    // a check's clock, ns (0: the monotonic clock): the kit reads it for every time, so a row needs no real one
 } ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
+
+// The kit's clock, ns: the monotonic clock, or a check's (ui_kit.test_clock). Every kit read of the time is this one.
+static b64 ui_kit_clock(void)
+{
+        return ui_kit.test_clock ? ui_kit.test_clock : (b64)clock_monotonic_nanoseconds();
+}
 
 // The caret's settings as the table holds them, taken with the wheel's: a table nobody has set is the standard.
 static fn ui_kit_caret_take(const struct windows address_to table)
@@ -5529,7 +5536,7 @@ static fn ui_kit_track(const struct window_event address_to event)
 */
 static fn ui_kit_pass(void)
 {
-        ui_kit.now = (b64)clock_monotonic_nanoseconds();
+        ui_kit.now = (b64)ui_kit_clock();
 }
 
 static fn ui_event_context(const struct window_event address_to event)
@@ -5537,7 +5544,7 @@ static fn ui_event_context(const struct window_event address_to event)
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
         ui_kit_retract = event->type == WINDOW_EVENT_MOTION && (event->flags & WINDOW_KEY_SETTLE) != 0;
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
-        ui_kit.now = (b64)clock_monotonic_nanoseconds();
+        ui_kit.now = (b64)ui_kit_clock();
         ui_kit_track(event);
 }
 
@@ -6597,7 +6604,7 @@ static b32 ui_scroll_glide(const struct ui address_to ui, struct ui_scroll addre
 // The wheel's clock: a test's, when it has one, else the monotonic clock the notches arrive on.
 static b64 ui_wheel_clock(void)
 {
-        return ui_kit.wheel_clock ? ui_kit.wheel_clock : (b64)clock_monotonic_nanoseconds();
+        return ui_kit.wheel_clock ? ui_kit.wheel_clock : (b64)ui_kit_clock();
 }
 
 /*
@@ -7165,7 +7172,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 }
                 if (c > ' ' && c < 127)
                 {
-                        positive now = clock_monotonic_nanoseconds();
+                        positive now = ui_kit_clock();
                         p8 shown[96];
                         p32 mnemonic;
 
@@ -7401,7 +7408,7 @@ static int ui_popmenu_pump(struct ui_popup address_to p)
                 return UI_MENU_NOTHING;
         // The menu runs on the kit's clock as it is now: its ripples are timed from the press and drawn at the frame, and over an
         // idle window the last frame's clock is old, so a ripple would not age and the menu would stay busy with it.
-        ui_kit.now = (b64)clock_monotonic_nanoseconds();
+        ui_kit.now = (b64)ui_kit_clock();
         // A picture the compositor was not ready for goes now, when it has taken the one before (its knock wakes the app).
         if (p->pending && windows_ready(&p->own))
                 ui_popmenu_present(p);
@@ -11073,7 +11080,7 @@ static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_
         t->numbers = mode == UI_TEXT_CODE;
         t->wrap = mode == UI_TEXT_AREA;
         t->comment = "//";
-        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds());
+        ui_caret_wake(&t->caret, ui_kit_clock());
         return true;
 }
 
@@ -11249,7 +11256,7 @@ static b32 SPARE ui_text_preedit(struct ui_text address_to t, const p8 address_t
         memory_zero(t->preedit, sizeof(t->preedit));
         memory_copy(t->preedit, text, length);
         t->preedit_length = (p32)length;
-        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds()), t->caret_fade = 0;
+        ui_caret_wake(&t->caret, ui_kit_clock()), t->caret_fade = 0;
         return true;
 }
 
@@ -11263,13 +11270,13 @@ static p32 SPARE ui_text_preedit_end(struct ui_text address_to t, b32 commit)
         {
                 // A field's rules hold for a composition as for a key: it goes in whole or not at all.
                 refused = ui_text_admit(t, t->preedit, t->preedit_length, false) < t->preedit_length;
-                t->doc.now = clock_monotonic_nanoseconds();
+                t->doc.now = ui_kit_clock();
                 if (!refused)
                         doc_type(&t->doc, t->preedit, t->preedit_length);
         }
         memory_zero(t->preedit, sizeof(t->preedit));
         t->preedit_length = 0;
-        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds()), t->caret_fade = 0;
+        ui_caret_wake(&t->caret, ui_kit_clock()), t->caret_fade = 0;
         return (t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED) | (refused ? UI_TEXT_REFUSED : 0);
 }
 
@@ -11829,7 +11836,7 @@ static b64 ui_caret_until(b64 q, b64 cycle)
 // quarter of a cycle into the solid half, so the caret is solid at once and stays solid while the keys keep coming.
 static fn ui_text_wake(struct ui_text address_to t)
 {
-        ui_caret_wake(&t->caret, clock_monotonic_nanoseconds());
+        ui_caret_wake(&t->caret, ui_kit_clock());
         t->caret_fade = 0;
 }
 
@@ -12286,7 +12293,7 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
                         ui_text_wake(t);
                         return UI_TEXT_REFUSED | UI_TEXT_MOVED;
                 }
-                t->doc.now = clock_monotonic_nanoseconds();
+                t->doc.now = ui_kit_clock();
                 doc_type(&t->doc, bytes, size);
                 ui_text_wake(t);
                 ui_text_reveal(ui, t);
@@ -12372,7 +12379,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
 {
         b32 well = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0 && t->mode != UI_TEXT_FIELD;
-        positive now = clock_monotonic_nanoseconds();
+        positive now = ui_kit_clock();
 
         if (event->type == WINDOW_EVENT_WHEEL)
         {
@@ -12882,7 +12889,7 @@ static b32 ui_text_bar_place(struct ui address_to ui, struct ui_text address_to 
 static fn ui_text_overlay_draw(struct ui address_to ui, struct ui_text address_to t)
 {
         const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
-        positive now = clock_monotonic_nanoseconds();
+        positive now = ui_kit_clock();
         b32 was = t->bar_up;
         int radius = ui_dev(ui, UI_TEXT_HANDLE), stem = ui_dev(ui, 2) ? ui_dev(ui, 2) : 1;
 

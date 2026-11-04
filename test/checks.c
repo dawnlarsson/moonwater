@@ -136233,7 +136233,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.feed_due = 0;
                         settings_feed_read(true, false);
                         check("settings: a reading that was stopped changes no row, and the next is later", settings.item_count[0] == 2 &&
-                                  settings.feed_due > clock_monotonic_nanoseconds());
+                                  settings.feed_due > (positive)ui_kit.now);
                         memory_copy(settings_large->said, air, sizeof(air) - 1);
                         settings.said_length = sizeof(air) - 1;
                         settings_feed_read(false, false);
@@ -136397,7 +136397,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.help = 2;
                         settings.child = 0;
                         memory_zero(settings.unread, sizeof(settings.unread));
-                        settings.feed_due = (positive)ui_kit.now + 5000000000ull;
+                        ui_kit.now = 2000000000ull, settings.feed_due = ui_kit.now + 5000000000ull;
                         {
                                 long wait = settings_feed_tick();
 
@@ -136434,7 +136434,7 @@ static fn check_settings(string_address regular, string_address bold)
                               settings.child > 0 && settings.job == SETTINGS_JOB_FEED && !settings.job_sets && settings.feed_list == 1);
                         settings_feed_drop();
                         check("settings: a change that arrives drops a reading under way, which is had again later",
-                              settings.child <= 0 && settings.feed_due > clock_monotonic_nanoseconds());
+                              settings.child <= 0 && settings.feed_due > (positive)ui_kit.now);
                         settings.moonwater = (string_address) "/moonwater";
                         compositor_call(syscall(munmap), (positive)table, (sizeof(struct windows) + 4095) & ~(positive)4095, 0, 0, 0, 0);
                         settings.own.table = null, settings.page.buffers.shown = -1;
@@ -145869,7 +145869,8 @@ static fn check_kit_scroll_robust(void)
 static fn check_kit_event_context(void)
 {
         struct window_event finger = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 0, 0}, mouse = {WINDOW_EVENT_MOTION, 0, 0, 0}, key = {WINDOW_EVENT_KEY, 0, 0, 0};
-        b64 before = (b64)clock_monotonic_nanoseconds();
+        ui_kit.test_clock = 5000000000ull;
+        b64 before = ui_kit.test_clock;
         b32 touch, not_mouse, not_key;
 
         ui_kit.now = 1;
@@ -145882,6 +145883,7 @@ static fn check_kit_event_context(void)
         not_key = !ui_kit_touch;
         check("kit event context: a finger's event says so and a mouse's or a key's says not, and the time is the one it is handled at",
               touch && not_mouse && not_key);
+        ui_kit.test_clock = 0;
 }
 
 // The kit's two buffers' state (ui_buffers): rows add as a union with the empty one none, a window starts lacking the whole picture in
@@ -145938,7 +145940,7 @@ static fn check_kit_page_pointer(void)
         l.down = l.hover = l.focus = -1;
         ui.scale = 100;
         kit_pointer_done = 0, kit_pointer_touch = 0;
-        ui_kit.now = (positive)clock_monotonic_nanoseconds();
+        ui_kit.test_clock = 5000000000ull, ui_kit.now = ui_kit.test_clock;
         memory_zero(&p, sizeof(p));
         p.width = 400, p.height = 400, p.top = 0, p.bottom = 400;
         p.card = 1;
@@ -145990,6 +145992,7 @@ static fn check_kit_page_pointer(void)
         ui_page_pointer(&ui, &p, &l, &finger_up, check_kit_pointer_done);
         drag_done = kit_pointer_done == 0;
         check("kit page pointer: a finger that drags past the slop is no click", drag_held && drag_done);
+        ui_kit.test_clock = 0;
 }
 
 // A finger pulling a bounded region past an end holds it by at most a view, however far it goes, and the stretch springs home in
@@ -152228,6 +152231,83 @@ static fn check_kit_standard(void)
         check("kit: no app reads a touch flag, keeps a clock, holds a press or names a static with a kit's prefix beyond the ratchet", !found);
 }
 
+/*
+        A kit row reads no real clock: the kit's time is ui_kit.now (a pass or an event sets it) and the kit's clock is
+        ui_kit_clock, which a check sets with ui_kit.test_clock. A row that reads the monotonic clock is an oracle that the
+        load of the box can fail (the settings feed and the terminal's caret were, under load), so this scan refuses one in
+        a kit row: every check of this file whose name says a kit area. Strings are not read (the scan's own names are
+        strings). Read from the tree the check runs in; not run where the sources are not.
+*/
+static fn check_kit_clock(void)
+{
+        static const char address_to const kit[] = {"check_kit", "check_caret", "check_identify", "check_settings", "check_field",
+                                                    "check_text", "check_finger", "check_press", "check_scroll", "check_hand",
+                                                    "check_wheel", "check_menu", "check_drag"};
+        static const char address_to const idiom = "clock_monotonic_nanoseconds";
+        positive size = 0, bytes = compositor_map_file((string_address) "test/checks.c", &size), found = 0, at = 0;
+        const char address_to text = (const char address_to)bytes;
+        b32 inside = false, is_kit = false;
+        char name[96] = {0}, line[4096];
+
+        if (!bytes)
+        {
+                string_format(log, "  NOT RUN: the kit rows are read from test/checks.c, which is not here\n");
+                return;
+        }
+        while (at < size)
+        {
+                positive stop = at, n = 0;
+                b32 quoted = false;
+
+                while (stop < size && text[stop] != '\n')
+                        stop++;
+                if (!inside && text[at] == 's' && stop - at > 7 && memory_search((address_any)(text + at), 7, (address_any)"static ", 7))
+                {
+                        const char address_to call = (const char address_to)memory_search((address_any)(text + at), stop - at, (address_any)"check_", 6);
+
+                        if (call && memory_search((address_any)(text + at), stop - at, (address_any)"(", 1))
+                        {
+                                positive k = 0;
+
+                                while (call[k] && call[k] != '(' && k + 1 < sizeof(name))
+                                        name[k] = call[k], k++;
+                                name[k] = 0;
+                                is_kit = false;
+                                for (positive i = 0; i < sizeof(kit) / sizeof(kit[0]); i++)
+                                {
+                                        positive p = 0;
+
+                                        while (kit[i][p] && name[p] == kit[i][p])
+                                                p++;
+                                        if (!kit[i][p])
+                                                is_kit = true;
+                                }
+                                inside = is_kit;
+                        }
+                }
+                if (inside)
+                {
+                        for (positive k = at; k < stop && n < sizeof(line) - 1; k++)
+                        {
+                                if (text[k] == '"' && (k == at || text[k - 1] != '\\'))
+                                        quoted = !quoted;
+                                else if (!quoted)
+                                        line[n++] = text[k];
+                        }
+                        line[n] = 0;
+                        if (check_hits((const char address_to)line, n, idiom))
+                        {
+                                found++;
+                                string_format(log, "  kit clock: %s reads the monotonic clock in a kit row\n", (string_address)name);
+                        }
+                        if (stop == at + 1 && text[at] == '}')
+                                inside = false;
+                }
+                at = stop + 1;
+        }
+        check("kit rows: no kit row reads the real clock: a kit's time is ui_kit.now or the test clock ui_kit.test_clock", !found);
+}
+
 // How many times idiom is in the first size bytes of text.
 static positive check_hits(const char address_to text, positive size, const char address_to idiom)
 {
@@ -153798,7 +153878,8 @@ static fn check_caret_terminal(void)
                 struct windows address_to table = terminal.own.table;
                 unsigned int own = terminal.own.row, at_full, at_gone, at_mid, cover_full, cover_gone, cover_mid;
                 int index_full, index_gone, index_mid;
-                positive mid = clock_monotonic_nanoseconds();
+                positive mid = 10000000000ull;
+                ui_kit.test_clock = mid, ui_kit.now = mid;
                 positive quarter = (positive)cycle / 4;
                 b32 framed;
 
@@ -153837,7 +153918,7 @@ static fn check_caret_terminal(void)
         // A wait that ends where the cover changes repaints the caret: an idle terminal has no key or output to draw it, and the
         // caret stayed gone from the frame that drew it in its off phase.
         {
-                positive when = clock_monotonic_nanoseconds(), later = when + (positive)cycle / 2 + 5000000ull;
+                positive when = ui_kit.test_clock, later = when + (positive)cycle / 2 + 5000000ull;
                 long timeout = -1;
 
                 terminal_caret_step(when, &timeout);
@@ -153871,6 +153952,7 @@ static fn check_caret_terminal(void)
         terminal.focused = was_focused;
         terminal.caret.since = since, terminal.caret.awake = awake;
         ui_kit.caret_speed = saved_speed;
+        ui_kit.test_clock = 0;
 }
 #endif
 
@@ -156887,7 +156969,7 @@ static fn check_identify_events(void)
 // when it is reached.
 static fn check_identify_timing(void)
 {
-        positive now = clock_monotonic_nanoseconds();
+        positive now = 5000000000ull;
         long other = -1, timeout;
 
         ui_kit.now = (b64)now; // the pass's time: the kit owns the clock, and the overlay reads it (ui_kit_pass)
@@ -157520,6 +157602,7 @@ b32 main()
 #endif
         check_no_hand_typing();
         check_kit_standard();
+        check_kit_clock();
         check_one_blink();
 #if MOONWATER_UI_ANY
         language_directory = "languages/";
