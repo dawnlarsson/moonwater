@@ -9783,6 +9783,7 @@ static AUDIO_C_UNUSED void audio_c_pack24(unsigned char *dst, const unsigned *sr
 #ifdef AUDIO_C_AS_LIBRARY
 // The library's memory names as mix.c calls them, for a hosted build: the C library's own copy and fill (a shim of the test, which
 // is not the code being measured).
+#ifndef CHECK_audio_service // the service's section has its own memory_copy
 void *memory_copy_apart(void *destination, const void *source, unsigned long size)
 {
         return memcpy(destination, source, size);
@@ -9797,6 +9798,7 @@ void *memory_fill(void *destination, unsigned char value, unsigned long size)
 {
         return memset(destination, value, size);
 }
+#endif
 
 void pcm_widen(unsigned int *dst, const unsigned char *src, unsigned long samples, unsigned long kind)
 {
@@ -183566,23 +183568,34 @@ static void sv_test_table(void)
         audio_service.app_count = 0;
         for (int i = 0; i < AUDIO_APPS; i++)
         {
-                snprintf(name, sizeof name, "app%02d", i);
+                snprintf(name, sizeof name, "1000/app%02d", i);
                 audio_host_remember(0, name, (unsigned long)i + 1, 0);
         }
         SVCHECK(audio_service.app_count == AUDIO_APPS, "the table is full at %d", AUDIO_APPS);
-        audio_host_remember(0, "app00", 999, 1);
-        audio_host_remember(0, "fresh", 5, 0);
-        SVCHECK(audio_host_recall(0, "app00", &volume, &mute) && volume == 999 && mute == 1, "the updated program is kept (volume %lu)", volume);
-        SVCHECK(!audio_host_recall(0, "app01", &volume, &mute), "the program changed least recently is the one let go");
-        SVCHECK(audio_host_recall(0, "app02", &volume, &mute) && volume == 3, "the next one is still there");
-        SVCHECK(audio_host_recall(0, "fresh", &volume, &mute) && volume == 5, "the new program is remembered");
+        audio_host_remember(0, "1000/app00", 999, 1);
+        audio_host_remember(0, "1000/fresh", 5, 0);
+        SVCHECK(audio_host_recall(0, "1000/app00", &volume, &mute) && volume == 999 && mute == 1, "the updated program is kept (volume %lu)", volume);
+        SVCHECK(!audio_host_recall(0, "1000/app01", &volume, &mute), "the program changed least recently is the one let go");
+        SVCHECK(audio_host_recall(0, "1000/app02", &volume, &mute) && volume == 3, "the next one is still there");
+        SVCHECK(audio_host_recall(0, "1000/fresh", &volume, &mute) && volume == 5, "the new program is remembered");
         SVCHECK(audio_service.app_count == AUDIO_APPS, "the table stays at its size");
         /* the file is what the table was, and it is read back as that */
         audio_apps_save();
         audio_service.app_count = 0;
         audio_apps_load();
         SVCHECK(audio_service.app_count == AUDIO_APPS, "the saved table reads back whole (%d)", audio_service.app_count);
-        SVCHECK(audio_host_recall(0, "fresh", &volume, &mute) && volume == 5, "a saved program reads back");
+        SVCHECK(audio_host_recall(0, "1000/fresh", &volume, &mute) && volume == 5, "a saved program reads back");
+        /* a line from before the key carried the user (no uid/ in it) belongs to no user: it is not loaded, and no program can have it */
+        {
+                static const char legacy[] = "app99\t7\t0\n1000/keyed\t9\t1\n";
+
+                audio_file_write("audio.apps", legacy, sizeof(legacy) - 1);
+                audio_service.app_count = 0;
+                audio_apps_load();
+                SVCHECK(audio_service.app_count == 1, "only the keyed program is loaded (%d)", audio_service.app_count);
+                SVCHECK(!audio_host_recall(0, "app99", &volume, &mute), "a legacy program is not remembered for anyone");
+                SVCHECK(audio_host_recall(0, "1000/keyed", &volume, &mute) && volume == 9 && mute == 1, "a keyed program is loaded");
+        }
 }
 
 /* ---- a socket path that does not fit sun_path is refused, not cut short ---- */

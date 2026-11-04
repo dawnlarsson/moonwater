@@ -836,7 +836,13 @@ static void audio_apps_load(void)
                         }
                         at++;
                 }
-                if (tab1 > start && tab2 > tab1 && tab1 - start <= PULSE_VALUE)
+                // A name is "uid/name" (the engine's key, from pulse_app_key). A line from before the key carried no user: it belongs to
+                // no user, no program can have it, so it is not loaded, and the next save drops it.
+                long slash = start;
+
+                while (slash < tab1 && text[slash] != '/')
+                        slash++;
+                if (tab1 > start && tab2 > tab1 && tab1 - start <= PULSE_VALUE && slash < tab1)
                 {
                         long entry = audio_service.app_count++;
 
