@@ -2164,7 +2164,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                         // Where the grid fits there is no region to follow the finger: its reports are kept all the same, for a drag
                         // that finds the grid scrolling later.
                         if (!terminal.finger.region && ui_finger_dragged(&terminal.finger))
-                                ui_drag_follow(&terminal.finger.drag, terminal_at_y(), (positive)ui_kit.now);
+                                ui_drag_follow(&terminal.finger.drag, terminal_at_y());
                         if (terminal.finger.region && terminal_bar_out())
                                 *dirty = true;
                         return true;
@@ -2173,7 +2173,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 ui_finger_move(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
                 if (!ui_finger_dragged(&terminal.finger))
                         return true;
-                return terminal_finger_scroll(master, ui_drag_follow(&terminal.finger.drag, terminal_at_y(), (positive)ui_kit.now),
+                return terminal_finger_scroll(master, ui_drag_follow(&terminal.finger.drag, terminal_at_y()),
                                               dirty, &moved);
         }
         if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
@@ -2204,7 +2204,7 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                         terminal.dirty = true;
                         return true;
                 }
-                ui_drag_let_go(&terminal.finger.drag, (positive)ui_kit.now); // the event's own time (ui_event_context)
+                ui_drag_let_go(&terminal.finger.drag); // the event's own time (ui_event_context)
                 return true;
         }
         if (!clicked)
@@ -3328,7 +3328,7 @@ static long terminal_tick(long timeout, long address_to other)
         {
                 b32 moved = true;
 
-                if (!terminal_finger_scroll(terminal.master, ui_drag_step(&terminal.finger.drag, (positive)ui_kit.now),
+                if (!terminal_finger_scroll(terminal.master, ui_drag_step(&terminal.finger.drag),
                                             &terminal.dirty, &moved))
                         terminal.gone = true;
                 if (!moved)

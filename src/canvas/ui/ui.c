@@ -1122,12 +1122,14 @@ static b32 ui_hit(const struct ui address_to ui, b32 touch, int px, int py, int 
 
 /*
         A list dragged by a finger follows it, and let go while moving it goes on, slowing as a thing thrown does,
-        until it stops. Speeds are pixels a second, times are the monotonic clock's nanoseconds, all whole numbers.
+        until it stops. Speeds are pixels a second, times are the monotonic clock's nanoseconds, all whole numbers. The
+        time of a call is the kit's (ui_kit_time: the pass's, or the event's), except ui_drag_velocity and ui_drag_fling,
+        which take the time they are asked for (a hand's release reads the velocity at its last report, not now).
 
-            ui_drag_start(drag, at, now)   the finger took the list at at (a y, or an x)
-            ui_drag_follow(drag, at, now)  the finger is at at: how far the list moves, the finger's move since the last
-            ui_drag_let_go(drag, now)      the finger lifted: whether the list is thrown (ui_drag_step moves it then)
-            ui_drag_step(drag, now)        a throw's move since the last step, and 0 once it stopped (flying is false);
+            ui_drag_start(drag, at)   the finger took the list at at (a y, or an x)
+            ui_drag_follow(drag, at)  the finger is at at: how far the list moves, the finger's move since the last
+            ui_drag_let_go(drag)      the finger lifted: whether the list is thrown (ui_drag_step moves it then)
+            ui_drag_step(drag)        a throw's move since the last step, and 0 once it stopped (flying is false);
                                            the app steps it again UI_DRAG_FRAME_NS later while it flies
             ui_drag_stop(drag)             it stops at once: a press, a key, the end of the list
 */
@@ -1142,6 +1144,9 @@ static b64 ui_exp_neg(b64 x);
 #define UI_DRAG_SAMPLES 16
 #define UI_FLING_NS 40000000ul // the horizon a flick's velocity is fitted over: the reports of its last 40 ms (at least three)
 #define UI_FLING_STALE_NS 60000000ul // a lift this long after the last report is a finger that rested: it throws nothing
+
+// The kit's time as the pass or the event set it (ui_kit.now), for the motion functions that take none.
+static positive ui_kit_time(void);
 
 struct ui_drag
 {
@@ -1158,14 +1163,16 @@ struct ui_drag
         positive batch_at; // when the batch came
 };
 
-static fn ui_drag_start(struct ui_drag address_to drag, int at, positive now)
+static fn ui_drag_start(struct ui_drag address_to drag, int at)
 {
+        positive now = (positive)ui_kit_time();
         drag->last = at, drag->speed = 0, drag->owed = 0, drag->rate = 0, drag->at = now, drag->flying = false;
         drag->samples = 0, drag->batch = 0, drag->batch_at = 0;
 }
 
-static int ui_drag_follow(struct ui_drag address_to drag, int at, positive now)
+static int ui_drag_follow(struct ui_drag address_to drag, int at)
 {
+        positive now = (positive)ui_kit_time();
         int moved = at - drag->last;
         long gap = now > drag->at ? (long)(now - drag->at) : 0;
 
@@ -1302,8 +1309,9 @@ static long ui_drag_velocity(const struct ui_drag address_to drag, positive now)
         return ui_drag_fling(drag, now);
 }
 
-static b32 ui_drag_let_go(struct ui_drag address_to drag, positive now)
+static b32 ui_drag_let_go(struct ui_drag address_to drag)
 {
+        positive now = (positive)ui_kit_time();
         // A finger that stopped before it lifted throws nothing.
         if (now > drag->at && now - drag->at > 80000000ul)
                 drag->speed = 0;
@@ -1314,8 +1322,9 @@ static b32 ui_drag_let_go(struct ui_drag address_to drag, positive now)
         return drag->flying;
 }
 
-static int ui_drag_step(struct ui_drag address_to drag, positive now)
+static int ui_drag_step(struct ui_drag address_to drag)
 {
+        positive now = (positive)ui_kit_time();
         long gap = now > drag->at ? (long)(now - drag->at) : 0, whole;
         b64 e, moved;
 
@@ -2089,6 +2098,11 @@ static struct ui_kit
         int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
         b64 test_clock;                    // a check's clock, ns (0: the monotonic clock): the kit reads it for every time, so a row needs no real one
 } ui_kit = {.caret_speed = UI_CARET_NORMAL, .caret_thick = UI_CARET_MID};
+
+static positive ui_kit_time(void)
+{
+        return (positive)ui_kit.now;
+}
 
 // The kit's clock, ns: the monotonic clock, or a check's (ui_kit.test_clock). Every kit read of the time is this one.
 static b64 ui_kit_clock(void)
@@ -6500,12 +6514,12 @@ static void ui_scroll_hand(struct ui_scroll address_to s, b64 move, positive now
                 s->dragging = 1, s->gliding = 0, s->back.live = 0, s->speed = s->stamp = 0, s->flung = 0;
                 s->hand = 1;
                 s->pulled_at = now;
-                ui_drag_start(&s->hand_drag, (int)(s->at >> 8), now);
+                ui_drag_start(&s->hand_drag, (int)(s->at >> 8));
         }
         s->at += move;
         s->at = s->at < -lim ? -lim : s->at > most + lim ? most + lim : s->at;
         ui_scroll_show(s);
-        ui_drag_follow(&s->hand_drag, (int)(s->at >> 8), now);
+        ui_drag_follow(&s->hand_drag, (int)(s->at >> 8));
 }
 
 // A precise input (256ths of a device pixel, positive: the content moves down): one for one, with no notch and no glide.
@@ -9452,14 +9466,14 @@ static b32 ui_finger_move(const struct ui address_to ui, struct ui_finger addres
         if (!f->press.dragged && ui_press_move(ui, &f->press, x, y))
         {
                 // The drag follows from where the finger is when the slop is passed, so the list does not jump by the slop.
-                ui_drag_start(&f->drag, y, (positive)ui_kit.now);
+                ui_drag_start(&f->drag, y);
                 changed = true;
         }
         if (f->press.dragged && f->region)
         {
                 // A pull past an end gives as the hand's does, from its first pixel, whatever the finger's speed: a stretch that
                 // came and went with the speed popped in and out under a finger crossing the end.
-                int moved = ui_drag_follow(&f->drag, y, (positive)ui_kit.now);
+                int moved = ui_drag_follow(&f->drag, y);
 
                 changed |= ui_scroll_drag(f->region, -moved);
         }
@@ -12516,7 +12530,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
 // A thrown finger's scroll, a frame at a time: whether it still moves.
 static b32 ui_text_fling(struct ui_text address_to t, positive now)
 {
-        int moved = ui_drag_step(&t->grab.drag, now);
+        int moved = ui_drag_step(&t->grab.drag);
         long lines = ui_text_lines_moved(t, -moved);
         b64 to = (b64)t->top_line + lines;
 
@@ -13025,7 +13039,7 @@ static p32 ui_text_finger_down(struct ui address_to ui, struct ui_text address_t
         // a selection waits for the lift to do (the finger may be about to scroll).
         on = doc_any_selected(&t->doc) ? ui_text_selected(t, at) : at == t->doc.selections[t->doc.primary].active;
         t->finger = UI_TEXT_FINGER_TEXT, t->dragging = true, t->tap_at = at;
-        ui_drag_start(&t->grab.drag, y, now);
+        ui_drag_start(&t->grab.drag, y);
         t->finger_left = 0;
         ui_press_begin(&t->grab.press, x, y, on, true);
         if (!doc_any_selected(&t->doc) && !on)
@@ -13052,7 +13066,7 @@ static p32 ui_text_finger_move(struct ui address_to ui, struct ui_text address_t
         {
                 // The text follows the finger, a line at a time as its pixels make lines; the bar goes as the press turns to a drag.
                 b32 was = t->grab.press.dragged;
-                int moved = ui_drag_follow(&t->grab.drag, y, now);
+                int moved = ui_drag_follow(&t->grab.drag, y);
                 long lines = ui_text_lines_moved(t, -moved);
                 b64 to = (b64)t->top_line + lines;
 
@@ -13113,7 +13127,7 @@ static p32 ui_text_finger_up(struct ui address_to ui, struct ui_text address_to 
                         }
                         return asks;
                 }
-                return ui_drag_let_go(&t->grab.drag, now) ? asks : 0;
+                return ui_drag_let_go(&t->grab.drag) ? asks : 0;
         }
         if (finger == UI_TEXT_FINGER_HANDLE)
         {

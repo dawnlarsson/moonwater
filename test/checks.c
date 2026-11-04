@@ -132270,7 +132270,7 @@ static void check_field_flick(struct ui address_to wui)
     ui_field_event(wui, &field, null, &up, x, y - 400);
     thrown = field.grab.drag.flying;
     for (int step = 1; step <= 150; step++)
-        ui_text_timeout(wui, &field, -1, now += 16000000ull, &redraw);
+        ui_kit.now = now += 16000000ull, ui_text_timeout(wui, &field, -1, now, &redraw);
     check("field flick: a flick along a field throws it, and the app's ticks spend the throw", thrown && !field.grab.drag.flying);
     ui_text_close(&field);
 }
@@ -132305,7 +132305,7 @@ static void check_throw_last_step(struct ui address_to wui)
         p64 was = view.top_line;
         b32 redraw = false;
 
-        ui_text_timeout(wui, &view, -1, now += 16000000ull, &redraw);
+        ui_kit.now = now += 16000000ull, ui_text_timeout(wui, &view, -1, now, &redraw);
         if (view.top_line != was)
             moved = true, moved_unasked |= !redraw;
     }
@@ -132516,18 +132516,18 @@ static void check_flick_retract(void)
     positive start = 1000000000ull, ms = 1000000ull;
     long plain, flagged, unflagged;
 
-    ui_drag_start(&drag, 100, start);
+    (ui_kit.now = (b64)(start), ui_drag_start(&drag, 100));
     for (int k = 1; k <= 12; k++)
-        ui_drag_follow(&drag, 100 + 20 * k, start + (positive)k * 8 * ms);
+        (ui_kit.now = (b64)(start + (positive)k * 8 * ms), ui_drag_follow(&drag, 100 + 20 * k));
     plain = ui_drag_velocity(&drag, start + 104 * ms + 200000ull);
     ui_kit_retract = true;
-    ui_drag_follow(&drag, 100 + 20 * 12 - 4, start + 104 * ms);
+    (ui_kit.now = (b64)(start + 104 * ms), ui_drag_follow(&drag, 100 + 20 * 12 - 4));
     ui_kit_retract = false;
     flagged = ui_drag_velocity(&drag, start + 104 * ms + 200000ull);
-    ui_drag_start(&drag, 100, start);
+    (ui_kit.now = (b64)(start), ui_drag_start(&drag, 100));
     for (int k = 1; k <= 12; k++)
-        ui_drag_follow(&drag, 100 + 20 * k, start + (positive)k * 8 * ms);
-    ui_drag_follow(&drag, 100 + 20 * 12 - 4, start + 104 * ms);
+        (ui_kit.now = (b64)(start + (positive)k * 8 * ms), ui_drag_follow(&drag, 100 + 20 * k));
+    (ui_kit.now = (b64)(start + 104 * ms), ui_drag_follow(&drag, 100 + 20 * 12 - 4));
     unflagged = ui_drag_velocity(&drag, start + 104 * ms + 200000ull);
     check("flick: a lead's retraction flagged as a place leaves the velocity at the lift as it was (within a fifth)",
           plain > 2000 && flagged * 5 >= plain * 4 && flagged * 5 <= plain * 6);
@@ -133950,13 +133950,13 @@ static void check_ui_press(void)
                 check("ui press: a finger's press on a button dragged past the slop and back is no click", got_drag == null);
                 check("ui press: a finger's press and lift on a button, unmoved, clicks it", got_tap == &button);
         }
-        ui_drag_start(&drag, 0, now);
+        (ui_kit.now = (b64)(now), ui_drag_start(&drag, 0));
         for (int step = 1; step <= 5; step++)
-                moved += ui_drag_follow(&drag, step * 10, now += 10000000ull);
+                moved += (ui_kit.now = (b64)(now += 10000000ull), ui_drag_follow(&drag, step * 10));
         check("ui press: a dragged list follows the finger pixel for pixel", moved == 50);
-        check("ui press: let go moving, it is thrown", ui_drag_let_go(&drag, now));
+        check("ui press: let go moving, it is thrown", (ui_kit.now = (b64)(now), ui_drag_let_go(&drag)));
         while (drag.flying && steps < 1000)
-                total += ui_drag_step(&drag, now += UI_DRAG_FRAME_NS), steps++;
+                total += (ui_kit.now = (b64)(now += UI_DRAG_FRAME_NS), ui_drag_step(&drag)), steps++;
         check("ui press: and it goes on the way it went, slowing, and stops", total > 200 && total < 450 && steps < 200);
         // The same throw stepped at 60 Hz and at 120 Hz covers the same distance: the speed falls by its share of the time,
         // not by a floor per step, which made the faster steps slow down less.
@@ -133970,17 +133970,17 @@ static void check_ui_press(void)
 
                         memory_zero(&throw_at[which], sizeof(throw_at[which]));
                         throw_at[which].speed = 600;
-                        ui_drag_let_go(&throw_at[which], at);
+                        (ui_kit.now = (b64)(at), ui_drag_let_go(&throw_at[which]));
                         while (throw_at[which].flying && at < 5000000000ul)
-                                covered[which] += ui_drag_step(&throw_at[which], at += frame);
+                                covered[which] += (ui_kit.now = (b64)(at += frame), ui_drag_step(&throw_at[which]));
                 }
                 check("ui press: a throw of 600 pixels a second covers the same distance at 60 Hz steps and at 120 Hz",
                       covered[0] > 150 && covered[0] < 250 && (covered[0] > covered[1] ? covered[0] - covered[1] : covered[1] - covered[0]) <= 1);
         }
-        ui_drag_start(&drag, 0, now);
-        ui_drag_follow(&drag, 30, now += 10000000ull);
+        (ui_kit.now = (b64)(now), ui_drag_start(&drag, 0));
+        (ui_kit.now = (b64)(now += 10000000ull), ui_drag_follow(&drag, 30));
         check("ui press: a finger that stopped before it lifted throws nothing",
-              !ui_drag_let_go(&drag, now += 200000000ull) && ui_drag_step(&drag, now += UI_DRAG_FRAME_NS) == 0);
+              !(ui_kit.now = (b64)(now += 200000000ull), ui_drag_let_go(&drag)) && (ui_kit.now = (b64)(now += UI_DRAG_FRAME_NS), ui_drag_step(&drag)) == 0);
 }
 #endif
 
@@ -144808,9 +144808,9 @@ static fn check_kit_place(void)
                 b32 fitted = false, monotone = true;
 
                 memory_zero(&drag, sizeof(drag));
-                ui_drag_start(&drag, 0, base);
+                (ui_kit.now = (b64)(base), ui_drag_start(&drag, 0));
                 for (int k = 1; k <= 6; k++)
-                        ui_drag_follow(&drag, k * 16, base + (positive)k * 16000000ull);
+                        (ui_kit.now = (b64)(base + (positive)k * 16000000ull), ui_drag_follow(&drag, k * 16));
                 speed = ui_drag_fling(&drag, base + 6 * 16000000ull);
                 fitted = speed > 985 && speed < 1015;
 
