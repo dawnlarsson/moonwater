@@ -459,6 +459,7 @@ struct wayland_client
         long free_hint;
         unsigned int pointer_id[WAYLAND_SEATS], keyboard_id[WAYLAND_SEATS], touch_id[WAYLAND_SEATS];
         unsigned char pointers, keyboards, touches;
+        unsigned char finger_scroll; // a precise (finger) scroll was sent to this client and no axis_stop since
         unsigned int press_serial;  // the last button press this client was sent, which a move or a resize must name
         unsigned int device_id[2][WAYLAND_DEVICES]; // data devices (0) and primary selection devices (1)
         unsigned char devices[2];
@@ -3738,6 +3739,8 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
 
         if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || !v120)
                 return;
+        if (precise)
+                c->finger_scroll = 1;
         time = wayland.host->now(wayland.host->context);
         count = wayland_seats(c, WLI_wl_pointer, slots);
         for (long at = 0; at < count; at++)
@@ -3749,6 +3752,14 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
                 {
                         e = wayland_begin(c, o->id, WLE_wl_pointer_axis_source);
                         wayland_word(&e, precise ? WLN_wl_pointer_axis_source_finger : WLN_wl_pointer_axis_source_wheel);
+                        wayland_end(&e);
+                }
+                if (o->version >= 9)
+                {
+                        // The direction of the axis against the fingers or the wheel: a scroll is as it was given, not inverted.
+                        e = wayland_begin(c, o->id, WLE_wl_pointer_axis_relative_direction);
+                        wayland_word(&e, (unsigned long)axis);
+                        wayland_word(&e, WLN_wl_pointer_axis_relative_direction_identical);
                         wayland_end(&e);
                 }
                 if (!precise && o->version >= 8)
@@ -3781,6 +3792,33 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
                 wayland_pointer_frame(c, slots[at]);
         }
         (void)s;
+}
+
+/*
+        The fingers lifted off a pad that scrolled (the pad's last finger, WINDOW_WHEEL_STOP): each pointer of the client is sent
+        axis_stop on both axes (from version 5), which is what a toolkit ends kinetic scrolling on. Only a client that had a finger
+        scroll and no stop since is sent one; a wheel's scroll has none.
+*/
+WAYLAND_API void wayland_pointer_axis_stop(long row)
+{
+        struct wayland_client *c;
+        long time, slots[WAYLAND_SEATS], count;
+
+        if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c) || !c->finger_scroll)
+                return;
+        c->finger_scroll = 0;
+        time = wayland.host->now(wayland.host->context);
+        count = wayland_seats(c, WLI_wl_pointer, slots);
+        for (long at = 0; at < count; at++)
+                for (long axis = 0; axis < 2 && c->objects[slots[at]].version >= 5; axis++)
+                {
+                        struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_axis_stop);
+
+                        wayland_word(&e, (unsigned long)time);
+                        wayland_word(&e, axis ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll);
+                        wayland_end(&e);
+                        wayland_pointer_frame(c, slots[at]);
+                }
 }
 
 /* How fast a held key repeats, to one keyboard (from version 4): the rate a second and the delay in milliseconds. */

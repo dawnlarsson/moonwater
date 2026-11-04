@@ -2046,6 +2046,9 @@ static void compositor_wl_drain(int row)
                         wayland_pointer_motion(row, a, b);
                 else if (type == WINDOW_EVENT_BUTTON)
                         wayland_pointer_button(row, a, (flags & WINDOW_KEY_DOWN) ? 1 : 0);
+                else if (flags & WINDOW_WHEEL_STOP)
+                        // The last finger of a pad lifted: the precise scroll is over (axis_stop on both axes).
+                        wayland_pointer_axis_stop(row);
                 else
                         // A wheel's v120 is the evdev sign, up positive; the protocol's vertical axis is positive downward.
                         wayland_pointer_axis(row, b != 0, b ? a : -a, (flags & WINDOW_WHEEL_PRECISE) != 0);

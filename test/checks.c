@@ -167258,6 +167258,59 @@ static void test_touch(void)
         wayland_stop();
 }
 
+/*
+        wl_pointer.axis_stop: a finger scroll ends with axis_stop on both axes, once; a wheel's scroll has none; a version 9
+        pointer says each axis' direction, identical, and the finger source comes before the axis.
+*/
+static void test_axis_stop(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long seat, pointer;
+        long a, b;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff223344);
+        c = s.c;
+        seat = wl_global(c, s.registry, WLI_wl_seat, 9);
+        pointer = wlc_id(c, WLI_wl_pointer, 9);
+        wlc_forget(c);
+        wlc_send(c, seat, WLQ_wl_seat_get_pointer, pointer);
+        wayland_pointer_to(0, 10, 10);
+        wlc_pump(c);
+        wlc_forget(c);
+
+        wayland_pointer_axis(0, 0, 120, 1);
+        wlc_pump(c);
+        a = event_at(c, WLI_wl_pointer, WLE_wl_pointer_axis_source, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[0] == WLN_wl_pointer_axis_source_finger, "a finger scroll says its source is the finger");
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_relative_direction) == 1,
+                "a version 9 pointer says the direction of the axis, identical");
+        wlc_forget(c);
+        wayland_pointer_axis_stop(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_stop) == 2, "the end of a finger scroll is axis_stop on both axes");
+        b = event_at(c, WLI_wl_pointer, WLE_wl_pointer_axis_stop, 0);
+        WLCHECK(b >= 0 && c->ev[b].u[1] == WLN_wl_pointer_axis_vertical_scroll, "the vertical axis first");
+
+        wlc_forget(c);
+        wayland_pointer_axis_stop(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_stop) == 0, "a stop with no finger scroll before it goes to no one");
+
+        wlc_forget(c);
+        wayland_pointer_axis(0, 0, 120, 0);
+        wayland_pointer_axis_stop(0);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_pointer, WLE_wl_pointer_axis_stop) == 0, "a wheel's scroll has no stop");
+        WLCHECK(c->errors == 0, "none of it is a protocol error");
+        wlc_end(c);
+        leak_check("axis stop");
+        wayland_stop();
+}
+
 static void test_presentation(void)
 {
         struct session s;
@@ -171003,6 +171056,7 @@ int main(int argc, char **argv)
         test_frames();
         test_presentation();
         test_touch();
+        test_axis_stop();
         test_text();
         test_popups();
         test_surface_rules();
