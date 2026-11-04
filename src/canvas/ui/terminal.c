@@ -2676,6 +2676,10 @@ static void terminal_overlay(unsigned int address_to whole, int slot)
         struct ui kit = terminal_kit(terminal_grid(whole));
         struct ui_select address_to s = terminal_sel();
 
+        // The kit's origin is the grid's, pad right and pad_y down from the window's corner, so the picture it may write is the
+        // window less that much: a knob hung below the last line is clipped there, not at the window's bottom past the picture.
+        kit.width = (int)terminal.width - (int)terminal.pad;
+        kit.height = kit.bottom = (int)terminal.height - (int)terminal.pad_y;
         s->over_top = s->over_bottom = 0;
         ui_select_overlay(&kit, s);
         terminal.overlay_top[slot] = s->over_top, terminal.overlay_bottom[slot] = s->over_bottom;

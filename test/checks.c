@@ -123432,6 +123432,40 @@ static fn check_pointer(void)
                       to_shell_length == 0);
                 to_shell_length = 0;
         }
+        /*
+                The handles' overlay drawn into a picture the window's size (pitch by height): a selection on the last line, its handles
+                hung below it, draws nothing past the picture's end. The overlay's kit has the grid's origin (pad to the left and pad_y
+                down) and was given the window's whole height and width, so a knob hung below the last line wrote up to pad_y rows past
+                the picture: the buffer after it is the window's neighbour's memory, and the program faults later where it lands.
+        */
+        {
+                static unsigned int overlay_frame[1 << 21];
+                unsigned int pad_y_was = terminal.pad_y, height_was = terminal.height;
+                positive picture, guard = 16 * (positive)terminal.pitch, spoiled = 0;
+
+                // The window of a small text (cells 19 px, a margin of 6): the handle's knob reaches 2 * 6 px under the line, past the
+                // paper of 6 px below the grid, so the picture is the grid and that paper only.
+                terminal.pad_y = 6, terminal.height = ROWS * terminal.cell_h + 2 * terminal.pad_y;
+                picture = (positive)terminal.pitch * terminal.height;
+                if (picture + guard <= sizeof overlay_frame / sizeof overlay_frame[0])
+                {
+                        // The screen full, the cursor on its last row: the selection's line is the grid's bottom one.
+                        terminal_view_live();
+                        for (unsigned int line = 0; line < ROWS; line++)
+                                term_bytes("line\r\n", 6);
+                        terminal_view_live();
+                        for (positive at = picture; at < picture + guard; at++)
+                                overlay_frame[at] = 0xdeadbeefu;
+                        terminal_select_set(terminal_place(window->head - 1, 0), terminal_place(window->head - 1, 4));
+                        terminal.sel.handles = true, terminal.sel.bar = false;
+                        terminal_overlay(overlay_frame, 0);
+                        for (positive at = picture; at < picture + guard; at++)
+                                spoiled += overlay_frame[at] != 0xdeadbeefu;
+                }
+                terminal.pad_y = pad_y_was, terminal.height = height_was;
+                check("terminal: a handle on the last line draws nothing past the end of the picture", spoiled == 0);
+                terminal_select_clear(), terminal.sel.dragging = terminal.sel.handles = false;
+        }
 #endif
 }
 
