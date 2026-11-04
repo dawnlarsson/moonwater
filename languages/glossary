@@ -1,5 +1,5 @@
 # The fixed terms of the translations: one concept, one word, in every language, so a later pass says the same thing the same way.
-# A line is the English concept, then the word in es, fr, de, pt, it, nl, pl, tr, sv, ru, uk, el, separated by " | ".
+# A line is the English concept, then the word in es, fr, de, pt, it, nl, pl, tr, sv, ru, uk, el, ar, he, fa, ur, separated by " | ".
 # Add a line before using a new term twice; change a line only with every text that uses it.
 #
 # Rules that hold for every text:
@@ -7,48 +7,53 @@
 #     where they name a key, rrggbb, and every {name} of a format. A word a person types (default, auto, off, reset, on)
 #     stays English inside a label that tells them to type it, and is translated where the window only shows it.
 #   - Placeholders (%s, %d, %1$s) and {names} are kept whole; a translation may put them in another order, naming them (%2$s).
-#   - A mnemonic is & before one ASCII letter; Cyrillic and Greek texts have none, and no menu has two the same.
+#   - A mnemonic is & before one ASCII letter; Cyrillic, Greek, Arabic, Hebrew, Persian and Urdu texts have none, and no menu has two the same.
 #   - One line of UTF-8, short: the windows cut with "..." where it does not fit. German and Russian run 30 to 40 percent over English.
 #   - Brazilian Portuguese and Latin American neutral Spanish where the two regions differ. Formal "you" where a text addresses one.
 #   - Machine translations: marked @translated machine in the file, until a person who speaks the language has reviewed it.
+#   - ar, he, fa and ur read from the right: their files say @direction rtl, and no other file does. They keep ASCII digits 0-9 and the
+#     Latin of what the person types (moonwater, Ctrl+R, default); they write the language's own punctuation (ar, fa, ur: a comma, a semicolon
+#     and a question mark of their own, and ur ends a sentence with the Arabic full stop); no text ends in a Latin placeholder followed by punctuation,
+#     which the line would set on the wrong side. Persian puts a ZWNJ (U+200C) where its spelling has one (می‌خواند, ها). ar: modern standard
+#     Arabic; he: standard Modern Hebrew; fa: standard Iranian Persian; ur: standard Urdu of Pakistan.
 #
-# English | es | fr | de | pt | it | nl | pl | tr | sv | ru | uk | el
-machine | equipo | machine | Gerät | máquina | macchina | machine | maszyna | makine | maskin | компьютер | комп'ютер | μηχάνημα
-screen (a display) | pantalla | écran | Bildschirm | tela | schermo | scherm | ekran | ekran | skärm | экран | екран | οθόνη
-pointer (the mouse's) | puntero | pointeur | Mauszeiger | ponteiro | puntatore | aanwijzer | wskaźnik | işaretçi | pekare | указатель | вказівник | δείκτης
-caret (the text's) | cursor de texto | curseur de texte | Textcursor | cursor de texto | cursore di testo | tekstcursor | kursor tekstowy | metin imleci | textmarkör | текстовый курсор | текстовий курсор | δρομέας κειμένου
-taskbar | barra de tareas | barre des tâches | Taskleiste | barra de tarefas | barra delle applicazioni | taakbalk | pasek zadań | görev çubuğu | aktivitetsfält | панель задач | панель завдань | γραμμή εργασιών
-tray | bandeja | zone d'état | Infobereich | bandeja | area di notifica | systeemvak | obszar powiadomień | bildirim alanı | systemfält | область уведомлений | область сповіщень | περιοχή ειδοποιήσεων
-clipboard | portapapeles | presse-papiers | Zwischenablage | área de transferência | appunti | klembord | schowek | pano | urklipp | буфер обмена | буфер обміну | πρόχειρο
-theme | tema | thème | Design | tema | tema | thema | motyw | tema | tema | тема | тема | θέμα
-accent | acento | accent | Akzent | destaque | accento | accent | akcent | vurgu | accent | акцент | акцент | έμφαση
-refresh rate | frecuencia de actualización | fréquence de rafraîchissement | Bildwiederholrate | taxa de atualização | frequenza di aggiornamento | vernieuwingsfrequentie | częstotliwość odświeżania | yenileme hızı | uppdateringsfrekvens | частота обновления | частота оновлення | ρυθμός ανανέωσης
-scale | escala | échelle | Skalierung | escala | scala | schaal | skala | ölçek | skala | масштаб | масштаб | κλίμακα
-brightness | brillo | luminosité | Helligkeit | brilho | luminosità | helderheid | jasność | parlaklık | ljusstyrka | яркость | яскравість | φωτεινότητα
-battery | batería | batterie | Akku | bateria | batteria | batterij | bateria | pil | batteri | батарея | батарея | μπαταρία
-power (energy) | energía | alimentation | Energie | energia | alimentazione | energie | zasilanie | güç | ström | питание | живлення | ενέργεια
-setting (a preference) | ajuste | paramètre | Einstellung | configuração | impostazione | instelling | ustawienie | ayar | inställning | настройка | налаштування | ρύθμιση
-network | red | réseau | Netzwerk | rede | rete | netwerk | sieć | ağ | nätverk | сеть | мережа | δίκτυο
-wired | cableada | filaire | kabelgebunden | com fio | cablata | bekabeld | przewodowa | kablolu | trådbundet | проводная | дротова | ενσύρματη
-airplane mode | modo avión | mode avion | Flugmodus | modo avião | modalità aereo | vliegtuigmodus | tryb samolotowy | uçak modu | flygplansläge | режим полёта | режим польоту | λειτουργία πτήσης
-time zone | zona horaria | fuseau horaire | Zeitzone | fuso horário | fuso orario | tijdzone | strefa czasowa | saat dilimi | tidszon | часовой пояс | часовий пояс | ζώνη ώρας
-keyboard | teclado | clavier | Tastatur | teclado | tastiera | toetsenbord | klawiatura | klavye | tangentbord | клавиатура | клавіатура | πληκτρολόγιο
-mouse | ratón | souris | Maus | mouse | mouse | muis | mysz | fare | mus | мышь | миша | ποντίκι
-default (the standard value) | predeterminado | par défaut | Standard | padrão | predefinito | standaard | domyślny | varsayılan | standard | по умолчанию | типовий | προεπιλογή
-on / off (a state) | activado / desactivado | activé / désactivé | An / Aus | ativado / desativado | attivato / disattivato | aan / uit | włączone / wyłączone | açık / kapalı | på / av | включено / выключено | увімкнено / вимкнено | ενεργό / ανενεργό
-Copy | Copiar | Copier | Kopieren | Copiar | Copia | Kopiëren | Kopiuj | Kopyala | Kopiera | Копировать | Копіювати | Αντιγραφή
-Cut | Cortar | Couper | Ausschneiden | Recortar | Taglia | Knippen | Wytnij | Kes | Klipp ut | Вырезать | Вирізати | Αποκοπή
-Paste | Pegar | Coller | Einfügen | Colar | Incolla | Plakken | Wklej | Yapıştır | Klistra in | Вставить | Вставити | Επικόλληση
-Delete | Eliminar | Supprimer | Löschen | Excluir | Elimina | Verwijderen | Usuń | Sil | Ta bort | Удалить | Видалити | Διαγραφή
-Select All | Seleccionar todo | Tout sélectionner | Alles auswählen | Selecionar tudo | Seleziona tutto | Alles selecteren | Zaznacz wszystko | Tümünü Seç | Markera allt | Выделить всё | Вибрати все | Επιλογή όλων
-Undo | Deshacer | Annuler | Rückgängig | Desfazer | Annulla | Ongedaan maken | Cofnij | Geri Al | Ångra | Отменить | Скасувати | Αναίρεση
-Redo | Rehacer | Rétablir | Wiederholen | Refazer | Ripeti | Opnieuw | Ponów | Yinele | Gör om | Повторить | Повторити | Επανάληψη
-power off (turn the machine off) | apagar | éteindre | ausschalten | desligar | spegni | uitschakelen | wyłącz | kapat | stäng av | выключить | вимкнути | τερματισμός
-restart (start the machine again) | reiniciar | redémarrer | neu starten | reiniciar | riavvia | opnieuw opstarten | uruchom ponownie | yeniden başlat | starta om | перезагрузить | перезавантажити | επανεκκίνηση
-passphrase | contraseña | mot de passe | Passwort | senha | password | wachtwoord | hasło | parola | lösenord | пароль | пароль | κωδικός
-device (hardware) | dispositivo | appareil | Gerät | dispositivo | dispositivo | apparaat | urządzenie | aygıt | enhet | устройство | пристрій | συσκευή
-forget (a network, a device) | olvidar | oublier | vergessen | esquecer | dimenticare | vergeten | zapomnieć | unutmak | glömma | забыть | забути | ξεχνώ
-join (a network) | conectarse | rejoindre | verbinden | conectar | connettersi | verbinden | połączyć | bağlanmak | ansluta | подключиться | підключитися | συνδέομαι
-launcher | lanzador | lanceur | Starter | lançador | avviatore | starter | uruchamianie | başlatıcı | startare | запуск | запуск | εκκινητής
-terminal | terminal | terminal | Terminal | terminal | terminale | terminal | terminal | terminal | terminal | терминал | термінал | τερματικό
-kernel log | registro del kernel | journal du noyau | Kernel-Protokoll | registro do kernel | registro del kernel | kernellogboek | dziennik jądra | çekirdek günlüğü | kärnlogg | журнал ядра | журнал ядра | αρχείο καταγραφής πυρήνα
+# English | es | fr | de | pt | it | nl | pl | tr | sv | ru | uk | el | ar | he | fa | ur
+machine | equipo | machine | Gerät | máquina | macchina | machine | maszyna | makine | maskin | компьютер | комп'ютер | μηχάνημα | الحاسوب | מחשב | رایانه | کمپیوٹر
+screen (a display) | pantalla | écran | Bildschirm | tela | schermo | scherm | ekran | ekran | skärm | экран | екран | οθόνη | الشاشة | מסך | نمایشگر | اسکرین
+pointer (the mouse's) | puntero | pointeur | Mauszeiger | ponteiro | puntatore | aanwijzer | wskaźnik | işaretçi | pekare | указатель | вказівник | δείκτης | المؤشر | מצביע | نشانگر | پوائنٹر
+caret (the text's) | cursor de texto | curseur de texte | Textcursor | cursor de texto | cursore di testo | tekstcursor | kursor tekstowy | metin imleci | textmarkör | текстовый курсор | текстовий курсор | δρομέας κειμένου | مؤشر النص | סמן הטקסט | مکان‌نما | ٹیکسٹ کرسر
+taskbar | barra de tareas | barre des tâches | Taskleiste | barra de tarefas | barra delle applicazioni | taakbalk | pasek zadań | görev çubuğu | aktivitetsfält | панель задач | панель завдань | γραμμή εργασιών | شريط المهام | שורת המשימות | نوار وظیفه | ٹاسک بار
+tray | bandeja | zone d'état | Infobereich | bandeja | area di notifica | systeemvak | obszar powiadomień | bildirim alanı | systemfält | область уведомлений | область сповіщень | περιοχή ειδοποιήσεων | منطقة الإعلام | אזור ההודעות | ناحیه اعلان | ٹرے
+clipboard | portapapeles | presse-papiers | Zwischenablage | área de transferência | appunti | klembord | schowek | pano | urklipp | буфер обмена | буфер обміну | πρόχειρο | الحافظة | לוח גזירים | کلیپ‌بورد | کلپ بورڈ
+theme | tema | thème | Design | tema | tema | thema | motyw | tema | tema | тема | тема | θέμα | السمة | ערכת נושא | تم | تھیم
+accent | acento | accent | Akzent | destaque | accento | accent | akcent | vurgu | accent | акцент | акцент | έμφαση | لون التمييز | צבע הדגשה | رنگ تأکید | نمایاں رنگ
+refresh rate | frecuencia de actualización | fréquence de rafraîchissement | Bildwiederholrate | taxa de atualização | frequenza di aggiornamento | vernieuwingsfrequentie | częstotliwość odświeżania | yenileme hızı | uppdateringsfrekvens | частота обновления | частота оновлення | ρυθμός ανανέωσης | معدل التحديث | קצב רענון | نرخ تازه‌سازی | ریفریش ریٹ
+scale | escala | échelle | Skalierung | escala | scala | schaal | skala | ölçek | skala | масштаб | масштаб | κλίμακα | المقياس | קנה מידה | مقیاس | اسکیل
+brightness | brillo | luminosité | Helligkeit | brilho | luminosità | helderheid | jasność | parlaklık | ljusstyrka | яркость | яскравість | φωτεινότητα | السطوع | בהירות | روشنایی | چمک
+battery | batería | batterie | Akku | bateria | batteria | batterij | bateria | pil | batteri | батарея | батарея | μπαταρία | البطارية | סוללה | باتری | بیٹری
+power (energy) | energía | alimentation | Energie | energia | alimentazione | energie | zasilanie | güç | ström | питание | живлення | ενέργεια | الطاقة | צריכת חשמל | انرژی | پاور
+setting (a preference) | ajuste | paramètre | Einstellung | configuração | impostazione | instelling | ustawienie | ayar | inställning | настройка | налаштування | ρύθμιση | الإعداد | הגדרה | تنظیم | ترتیب
+network | red | réseau | Netzwerk | rede | rete | netwerk | sieć | ağ | nätverk | сеть | мережа | δίκτυο | الشبكة | רשת | شبکه | نیٹ ورک
+wired | cableada | filaire | kabelgebunden | com fio | cablata | bekabeld | przewodowa | kablolu | trådbundet | проводная | дротова | ενσύρματη | سلكية | קווית | سیمی | وائرڈ
+airplane mode | modo avión | mode avion | Flugmodus | modo avião | modalità aereo | vliegtuigmodus | tryb samolotowy | uçak modu | flygplansläge | режим полёта | режим польоту | λειτουργία πτήσης | وضع الطيران | מצב טיסה | حالت هواپیما | ہوائی جہاز موڈ
+time zone | zona horaria | fuseau horaire | Zeitzone | fuso horário | fuso orario | tijdzone | strefa czasowa | saat dilimi | tidszon | часовой пояс | часовий пояс | ζώνη ώρας | المنطقة الزمنية | אזור זמן | منطقه زمانی | ٹائم زون
+keyboard | teclado | clavier | Tastatur | teclado | tastiera | toetsenbord | klawiatura | klavye | tangentbord | клавиатура | клавіатура | πληκτρολόγιο | لوحة المفاتيح | מקלדת | صفحه‌کلید | کی بورڈ
+mouse | ratón | souris | Maus | mouse | mouse | muis | mysz | fare | mus | мышь | миша | ποντίκι | الماوس | עכבר | ماوس | ماؤس
+default (the standard value) | predeterminado | par défaut | Standard | padrão | predefinito | standaard | domyślny | varsayılan | standard | по умолчанию | типовий | προεπιλογή | افتراضي | ברירת מחדל | پیش‌فرض | ڈیفالٹ
+on / off (a state) | activado / desactivado | activé / désactivé | An / Aus | ativado / desativado | attivato / disattivato | aan / uit | włączone / wyłączone | açık / kapalı | på / av | включено / выключено | увімкнено / вимкнено | ενεργό / ανενεργό | تشغيل / إيقاف | מופעל / כבוי | روشن / خاموش | آن / آف
+Copy | Copiar | Copier | Kopieren | Copiar | Copia | Kopiëren | Kopiuj | Kopyala | Kopiera | Копировать | Копіювати | Αντιγραφή | نسخ | העתק | کپی | کاپی
+Cut | Cortar | Couper | Ausschneiden | Recortar | Taglia | Knippen | Wytnij | Kes | Klipp ut | Вырезать | Вирізати | Αποκοπή | قص | גזור | برش | کٹ
+Paste | Pegar | Coller | Einfügen | Colar | Incolla | Plakken | Wklej | Yapıştır | Klistra in | Вставить | Вставити | Επικόλληση | لصق | הדבק | چسباندن | پیسٹ
+Delete | Eliminar | Supprimer | Löschen | Excluir | Elimina | Verwijderen | Usuń | Sil | Ta bort | Удалить | Видалити | Διαγραφή | حذف | מחק | حذف | حذف کریں
+Select All | Seleccionar todo | Tout sélectionner | Alles auswählen | Selecionar tudo | Seleziona tutto | Alles selecteren | Zaznacz wszystko | Tümünü Seç | Markera allt | Выделить всё | Вибрати все | Επιλογή όλων | تحديد الكل | בחר הכול | انتخاب همه | سب منتخب کریں
+Undo | Deshacer | Annuler | Rückgängig | Desfazer | Annulla | Ongedaan maken | Cofnij | Geri Al | Ångra | Отменить | Скасувати | Αναίρεση | تراجع | בטל | واگرد | کالعدم کریں
+Redo | Rehacer | Rétablir | Wiederholen | Refazer | Ripeti | Opnieuw | Ponów | Yinele | Gör om | Повторить | Повторити | Επανάληψη | إعادة | בצע שוב | انجام دوباره | دوبارہ کریں
+power off (turn the machine off) | apagar | éteindre | ausschalten | desligar | spegni | uitschakelen | wyłącz | kapat | stäng av | выключить | вимкнути | τερματισμός | إيقاف التشغيل | כיבוי | خاموش کردن | بند کریں
+restart (start the machine again) | reiniciar | redémarrer | neu starten | reiniciar | riavvia | opnieuw opstarten | uruchom ponownie | yeniden başlat | starta om | перезагрузить | перезавантажити | επανεκκίνηση | إعادة التشغيل | הפעלה מחדש | راه‌اندازی مجدد | دوبارہ شروع کریں
+passphrase | contraseña | mot de passe | Passwort | senha | password | wachtwoord | hasło | parola | lösenord | пароль | пароль | κωδικός | كلمة المرور | סיסמה | گذرواژه | پاس ورڈ
+device (hardware) | dispositivo | appareil | Gerät | dispositivo | dispositivo | apparaat | urządzenie | aygıt | enhet | устройство | пристрій | συσκευή | جهاز | התקן | دستگاه | ڈیوائس
+forget (a network, a device) | olvidar | oublier | vergessen | esquecer | dimenticare | vergeten | zapomnieć | unutmak | glömma | забыть | забути | ξεχνώ | نسيان | שכח | فراموش کردن | بھول جائیں
+join (a network) | conectarse | rejoindre | verbinden | conectar | connettersi | verbinden | połączyć | bağlanmak | ansluta | подключиться | підключитися | συνδέομαι | اتصال | התחבר | اتصال | منسلک ہونا
+launcher | lanzador | lanceur | Starter | lançador | avviatore | starter | uruchamianie | başlatıcı | startare | запуск | запуск | εκκινητής | المشغل | משגר | راه‌انداز | لانچر
+terminal | terminal | terminal | Terminal | terminal | terminale | terminal | terminal | terminal | terminal | терминал | термінал | τερματικό | الطرفية | מסוף | پایانه | ٹرمینل
+kernel log | registro del kernel | journal du noyau | Kernel-Protokoll | registro do kernel | registro del kernel | kernellogboek | dziennik jądra | çekirdek günlüğü | kärnlogg | журнал ядра | журнал ядра | αρχείο καταγραφής πυρήνα | سجل النواة | יומן הליבה | گزارش هسته | کرنل لاگ

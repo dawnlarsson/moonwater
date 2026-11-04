@@ -1,0 +1,292 @@
+@language he
+@name עברית
+@translated machine
+@direction rtl
+action_copy	3664	העתק
+action_cut	5863	גזור
+action_paste	0288	הדבק
+action_select_all	3b12	בחר הכול
+editor_changed_on_disk	3e0f	השתנה בדיסק: Ctrl+R קורא אותו שוב
+editor_closes_unsaved	fcb8	סוגר ומשליך את השינויים שלא נשמרו
+editor_encoding_bom	c0d7	UTF-8 עם BOM
+editor_find_hint	d17a	חיפוש
+editor_find_replace_hint	3693	חיפוש/תחליף
+editor_indent_spaces	9db9	רווחים: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	שורה
+editor_no_file_name	c863	אין שם קובץ: הפעל את העורך עם שם קובץ
+editor_no_match	7de7	אין התאמה
+editor_not_regular	5955	לא קובץ רגיל: נדחה
+editor_pattern_bad	5d57	התבנית אינה תקינה
+editor_position	3696	שורה %1$d, עמודה %2$d
+editor_replace_usage	c677	תבנית ההחלפה: חיפוש/תחליף
+editor_replaced	1128	הוחלפו %d
+editor_save_failed	069d	השמירה נכשלה: הקובץ נשאר כפי שהיה
+editor_saved	9f44	נשמר
+editor_selected	a686	(%d נבחרו)
+editor_selected_carets	7e02	(%d נבחרו, סמנים)
+editor_unsaved	c014	שינויים שלא נשמרו: שמור אותם, או סגור כל קובץ באמצעות Ctrl+W פעמיים
+editor_untitled	8b58	ללא שם
+editor_write_beside	ec75	לא ניתן לכתוב לצד הקובץ
+editor_writes_over_changed	df15	יכתוב מעל שינוי הדיסק (Ctrl+R קורא שוב)
+editor_writes_over_readonly	e22f	יכתוב מעל קובץ לקריאה בלבד
+launcher_power_off	ae2f	כיבוי
+launcher_power_off_armed	a48f	כיבוי
+launcher_restart	ed8c	הפעלה מחדש
+launcher_restart_armed	11ec	הפעלה מחדש
+launcher_run	e05a	הרץ  %s
+launcher_search_hint	334b	חפש תוכנית או הקלד פקודה
+menu_copy	43e0	העתק
+menu_cut	5c17	גזור
+menu_delete	1e3e	מחק
+menu_find	1fa6	חפש
+menu_go_to_line	bc96	עבור לשורה
+menu_paste	6854	הדבק
+menu_redo	ac45	בצע שוב
+menu_reset_zoom	1b0f	אפס זום
+menu_select_all	f6f6	בחר הכול
+menu_toggle_comment	92ac	החלף הערה
+menu_undo	b9d3	בטל
+menu_zoom_in	5bcf	הגדל זום
+menu_zoom_out	9234	הקטן זום
+settings_already_joined	71fb	כבר מחובר אל %s
+settings_any_text	89dc	כל פקודה, כמילים שאחרי moonwater: הפעולה שלה ואז הארגומנטים
+settings_asks_first	e9bd	ישאל קודם
+settings_battery_charging	5116	, בטעינה
+settings_battery_discharging	7964	, בפריקה
+settings_battery_full	ded8	, מלאה
+settings_battery_idle	1635	, לא בטעינה
+settings_busy	34e0	moonwater עסוק: השינויים שלפני זה טרם הושלמו
+settings_cannot_join	dfa4	moonwater לא יכול לעמוד בדרישות הרשת הזאת להתחברות
+settings_cannot_run	954f	לא ניתן היה להריץ את פקודת moonwater
+settings_card_back	db52	Escape או לחיצה לחזרה
+settings_card_stopped	e24d	נעצר: Escape או לחיצה לחזרה
+settings_device_name	5f12	שם ההתקן
+settings_done	8071	בוצע
+settings_edit_keys	d161	Enter קובע, Escape משאיר כפי שהיה, ולחיצה בחוץ קובעת גם כן
+settings_filter_hint	4aa0	הקלד כדי לסנן
+settings_forget	5220	שכח את %s
+settings_help_more	93ec	moonwater help אומר יותר ממה ש"כל הפקודות" מציג: השורה הראשונה מריצה כל פקודה
+settings_identify_screens	8be8	זיהוי מסכים
+settings_item_add	fbef	Enter שומר את שם ההתקן; הרדיו נדלק עבור מה שמזווגים
+settings_item_ask	6aad	Enter מבקש את הסיסמה ומתחבר
+settings_item_cannot	e643	moonwater לא יכול לעמוד בדרישות הרשת הזאת להתחברות
+settings_item_joined	0fb8	מחוברת: Delete שוכח אותה
+settings_item_kept	33d9	נשמר לפי שמו: Delete שוכח אותו
+settings_item_open	4429	Enter מתחבר ושומר
+settings_item_saved	3ffd	שמורה: Enter מבקש שוב את הסיסמה, Delete שוכח אותה
+settings_joined	1050	מחוברת
+settings_kept	4759	שמור
+settings_map_drag	125f	שחרר כדי למקם את המסך
+settings_map_hint	9efb	גרור מסך כדי להזיז אותו.
+settings_map_keys	54c9	החצים בוחרים מסך. Shift וחץ מזיזים אותו. Enter מזהה. חץ למטה יוצא.
+settings_map_none	1b29	אין מסך מחובר.
+settings_map_one	7ff2	מחובר מסך אחד בלבד.
+settings_menu_keys	5546	חץ למעלה וחץ למטה בוחרים, Enter קובע, Escape יוצא
+settings_mode_largest	c7c4	התמונה הגדולה ביותר
+settings_mode_preferred	024c	מומלץ
+settings_name_chars	58a2	שם הוא אותיות לטיניות, ספרות ומקפים
+settings_name_long	f2c0	שם הוא פחות מ-32 תווים
+settings_no_rates	185b	המסך לא מציג קצבים
+settings_no_screen	55fd	אין מסך מחובר
+settings_not_here	4e20	לא קיים במחשב הזה
+settings_nothing_kept	85a2	לא הוקלד דבר: הערך נשמר
+settings_nothing_matches	14e9	אין התאמה למה שהוקלד
+settings_nothing_typed	edce	לא הוקלד דבר
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d הרץ (מומלץ)
+settings_rate_plain	743a	%d הרץ
+settings_refused	454b	moonwater סירב
+settings_refused_place	9632	%s (מקומו בקובץ לא נקרא)
+settings_refused_rate	97bc	%1$s (%2$d הרץ אינו מוצע)
+settings_refused_turn	7b3a	%1$s (לא ניתן היה לבצע %2$s)
+settings_run_any	3ffd	הרץ כל פקודת moonwater
+settings_running	d0e2	מריץ את %s (Escape עוצר)
+settings_saved	9f44	שמורה
+settings_scale_best	2ba0	%d%% (מומלץ)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	מסך %1$d: %2$s
+settings_screen_named	d918	מסך %1$d: %2$s [%3$s]
+settings_stopped	f34e	נעצר
+settings_too_long	fed7	moonwater לקח יותר מדי זמן ונעצר
+settings_too_many	db0e	אלו יותר מילים ממה שפקודה אחת מקבלת
+settings_turned_software	64d9	מסובב על ידי Moonwater (איטי יותר)
+settings_type_command	75f8	הקלד פקודה: קודם הפעולה ואז מה שאחריה
+settings_type_device	63e0	הקלד שם התקן: Enter שומר, Escape עוזב
+settings_type_passphrase	ca95	הקלד את הסיסמה: Enter מתחבר, Escape עוזב
+settings_unknown	9fb9	לא ידוע
+settings_verb_hint	05aa	פעולה [ארגומנטים]
+terminal_exited_press_to_close	a8cf	הסתיים בקוד יציאה %d, הקש על מקש כלשהו לסגירה
+terminal_press_to_close	080d	הקש על מקש כלשהו לסגירה
+tray_am	0d13	לפנה״צ
+tray_charging	60c2	בטעינה
+tray_day_fri	fbe8	ו׳
+tray_day_mon	82e1	ב׳
+tray_day_sat	2a77	ש׳
+tray_day_sun	d701	א׳
+tray_day_thu	308c	ה׳
+tray_day_tue	f425	ג׳
+tray_day_wed	5757	ד׳
+tray_discharging	41a0	בפריקה
+tray_month_apr	1df2	אפר׳
+tray_month_aug	8fd4	אוג׳
+tray_month_dec	7a73	דצמ׳
+tray_month_feb	4b82	פבר׳
+tray_month_jan	ceae	ינו׳
+tray_month_jul	2ebc	יולי
+tray_month_jun	31e2	יוני
+tray_month_mar	ed2b	מרץ
+tray_month_may	e226	מאי
+tray_month_nov	c404	נוב׳
+tray_month_oct	f3e9	אוק׳
+tray_month_sep	a4ef	ספט׳
+tray_pm	f466	אחה״צ
+ui_confirm_again	b3ff	לחץ שוב לאישור: 
+ui_field_digits	f52b	מספר הוא ספרות
+ui_field_full	fe02	זה המקסימום שהוא מכיל
+=Accent	ccd7	צבע הדגשה
+=Accent colour (rrggbb or reset)	53aa	צבע הדגשה (rrggbb או reset)
+=Airplane mode	3b8a	מצב טיסה
+=All commands	4a42	כל הפקודות
+=Audio	1439	שמע
+=Authenticated time (NTS)	e533	זמן מאומת (NTS)
+=Background	0abd	רקע
+=Background colour (rrggbb or default)	e2b2	צבע הרקע (rrggbb או default)
+=Battery	e12e	סוללה
+=Battery shown	2a23	הסוללה המוצגת
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	מתאמי Bluetooth
+=Boost	a6cc	Boost
+=Boot	38f5	אתחול
+=Brightness	324a	בהירות
+=Cameras	cea7	מצלמות
+=Canvas	5091	Canvas
+=Caret blink speed	4085	מהירות הבהוב סמן הטקסט
+=Caret thickness	1e9a	עובי סמן הטקסט
+=Charge limit (20 to 100, or off)	c92d	מגבלת טעינה (20 עד 100, או off)
+=Clipboard	99b1	לוח גזירים
+=Clipboard history (copies kept)	7423	היסטוריית לוח הגזירים (עותקים שנשמרו)
+=Clipboard limit (MiB)	a505	מגבלת לוח הגזירים (MiB)
+=Clock (Enter sets it now)	575e	שעון (Enter קובע אותו עכשיו)
+=Cursor look	34ce	מראה המצביע
+=Cursor size	65d4	גודל המצביע
+=Display	d9b5	מסך
+=Editor	bf98	עורך
+=GPU rendering	d4d5	רינדור ב-GPU
+=Gallery	4cdd	גלריה
+=Hubs	456d	רכזות
+=Identify	033d	זיהוי
+=In range and saved	7941	בטווח ושמורות
+=Input	e11b	קלט
+=Keep a device by its name	9c51	שמור התקן לפי שמו
+=Keep the lowest-delay sample	d8b9	שמור את הדגימה עם ההשהיה הנמוכה ביותר
+=Kernel log	e57a	יומן הליבה
+=Key repeat delay (ms, or default)	4eb7	השהיית חזרת מקש (ms או default)
+=Key repeat rate (per second, off or default)	1e94	קצב חזרת מקש (בשנייה, off או default)
+=Keyboard	a714	מקלדת
+=Keyboards and mice	c352	מקלדות ועכברים
+=Language	db9b	שפה
+=Large pointer stays (ms, or default)	5626	משך הישארות המצביע הגדול (ms או default)
+=Launcher	44b1	משגר
+=Machine	be0e	מחשב
+=Motion	7647	תנועה
+=Mount kept disks	f0c8	הרכבת הדיסקים השמורים
+=Mouse acceleration	c400	האצת העכבר
+=Mouse sensitivity (percent, or default)	8a23	רגישות העכבר (אחוזים או default)
+=NTS servers (or default)	9fd7	שרתי NTS (או default)
+=Name	7306	שם
+=Name servers (auto for the network)	695a	שרתי שמות (auto עבור הרשת)
+=Names over TLS	075a	שמות דרך TLS
+=Network	ad65	רשת
+=Network adapters	88ef	מתאמי רשת
+=New USB devices	c15c	התקני USB חדשים
+=Normal	2772	רגיל
+=Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
+=Other devices	8362	התקנים אחרים
+=Plain Text	2bbe	טקסט פשוט
+=Power	a5e6	צריכת חשמל
+=Power profile	8def	פרופיל צריכת חשמל
+=Predict touch and pen	e2b7	חיזוי מגע ועט
+=Refresh rate	bf6e	קצב רענון
+=Remembered devices	abbc	התקנים שמורים
+=Rotation	777f	סיבוב
+=Scale of this screen	e4ca	קנה המידה של המסך הזה
+=Screen	c631	מסך
+=Screen modes	85ad	מצבי מסך
+=Set the clock from the network	b2a3	קבע את השעון מהרשת
+=Settings	8728	הגדרות
+=Shake the pointer to find it	f508	נער את המצביע כדי למצוא אותו
+=Show touch area	9ca8	הצג אזור מגע
+=Side taskbar text faces	d115	כיוון הטקסט בשורת המשימות הצדדית
+=Simultaneous threads (SMT)	e836	תהליכונים בו-זמניים (SMT)
+=Smooth mouse wheel	0dab	גלגלת עכבר חלקה
+=Start the desktop	be4c	הפעל את שולחן העבודה
+=Storage	df06	אחסון
+=Taskbar	d759	שורת המשימות
+=Taskbar display	042b	מסך שורת המשימות
+=Taskbar launcher button	dd4d	כפתור המשגר בשורת המשימות
+=Taskbar position	81b8	מיקום שורת המשימות
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	אזור ההודעות בשורת המשימות (טקסט עם {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	מסוף
+=The internet prefers	3dbe	האינטרנט מעדיף
+=Theme	7c92	ערכת נושא
+=Time	e404	זמן
+=Time server (auto for the pool)	67e5	שרת זמן (auto עבור המאגר)
+=Time zone	741a	אזור זמן
+=Turned by the screen	ea45	מסובב על ידי המסך
+=Turned left	507c	מסובב שמאלה
+=Turned right	7a49	מסובב ימינה
+=USB	da81	USB
+=Upside down	9dc1	הפוך
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	רשת קווית
+=all	4bc4	הכול
+=allow	a832	אפשר
+=amber	bec0	ענבר
+=auto	a396	אוטומטי
+=balanced	b71d	מאוזן
+=black	4ba4	שחור
+=blue	f5cd	כחול
+=bottom	6b2a	למטה
+=center	4484	מרכז
+=dark	6945	כהה
+=dark-grey	bcb3	אפור כהה
+=default	5bde	ברירת מחדל
+=deny	6367	חסום
+=desktop	87b3	שולחן עבודה
+=edge	d83c	קצה
+=fast	02af	מהיר
+=forest	2a60	ירוק יער
+=full	b33c	מלא
+=graphite	dc8d	גרפיט
+=green	ecbc	ירוק
+=kernel log	415a	יומן הליבה
+=kernel log klog dmesg messages	1a8d	יומן ליבה klog dmesg הודעות
+=left	ec70	שמאל
+=light	1e2f	בהיר
+=light-grey	ed41	אפור בהיר
+=lock	7842	נעל
+=midnight-blue	4008	כחול חצות
+=normal	9c52	רגיל
+=off	8a0a	כבוי
+=on	2fd0	מופעל
+=only	89f7	בלבד
+=performance	8ca5	ביצועים
+=plum	b06b	שזיף
+=powersave	2283	חיסכון באנרגיה
+=primary	5fd9	ראשי
+=reduced	5839	מופחת
+=right	2de5	ימין
+=rose	1806	ורד
+=settings preferences options	8c78	הגדרות העדפות אפשרויות
+=slate	deee	צפחה
+=slow	42b8	איטי
+=terminal shell console	eaba	מסוף מעטפת קונסולה
+=thick	964e	עבה
+=thin	b172	דק
+=top	dc3c	למעלה
+=unlock	1f55	בטל נעילה
+=violet	57f2	סגול
+=white	0766	לבן
+=wifi	6448	Wi-Fi
+=wired	bfb4	קווי

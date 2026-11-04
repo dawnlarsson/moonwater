@@ -147504,7 +147504,8 @@ struct lcheck_file
         const char address_to code;
         const char address_to name;
         const char address_to translated;
-        positive code_length, name_length, translated_length;
+        const char address_to direction;
+        positive code_length, name_length, translated_length, direction_length;
         struct lcheck_entry entry[LCHECK_ENTRIES];
 };
 
@@ -147515,7 +147516,7 @@ static b32 lcheck_same(const char address_to a, positive a_length, const char ad
         return a_length == b_length && !memory_compare(a, b, a_length);
 }
 
-// The file parsed in place into its entries and its header (@language, @name, @translated); false when it is not there.
+// The file parsed in place into its entries and its header (@language, @name, @translated, @direction); false when it is not there.
 static b32 lcheck_load(string_address path, struct lcheck_file address_to file)
 {
         const char address_to text;
@@ -147543,6 +147544,8 @@ static b32 lcheck_load(string_address path, struct lcheck_file address_to file)
                                 file->name = text + start + 6, file->name_length = stop - start - 6;
                         else if (stop - start > 12 && !memory_compare(text + start, "@translated ", 12))
                                 file->translated = text + start + 12, file->translated_length = stop - start - 12;
+                        else if (stop - start > 11 && !memory_compare(text + start, "@direction ", 11))
+                                file->direction = text + start + 11, file->direction_length = stop - start - 11;
                         continue;
                 }
                 for (tab = start; tab < stop && text[tab] != '\t'; tab++)
@@ -147688,8 +147691,12 @@ static positive lcheck_characters(const char address_to text, positive length)
         return count;
 }
 
-// Whether every character of a text is well formed UTF-8 that the face draws (a glyph, not the notdef) and none is a control.
-static b32 lcheck_drawn(const font_face address_to face, const char address_to text, positive length)
+/*
+        Whether every character of a text is well formed UTF-8 that the face draws (a glyph, not the notdef) and none is a control.
+        A language of another script is drawn by the face of that script, and by the one behind it for what that lacks: the Latin of
+        a key name, a placeholder or a command, the digits and the marks (behind is none for the languages Inter alone draws).
+*/
+static b32 lcheck_drawn(const font_face address_to face, const font_face address_to behind, const char address_to text, positive length)
 {
         for (positive at = 0; at < length;)
         {
@@ -147705,7 +147712,7 @@ static b32 lcheck_drawn(const font_face address_to face, const char address_to t
                                 return false;
                         code = code << 6 | ((p8)text[at + k] & 0x3f);
                 }
-                if (code < 0x20 || code == 0x7f || !font_glyph(face, code))
+                if (code < 0x20 || code == 0x7f || !(font_glyph(face, code) || (behind && font_glyph(behind, code))))
                         return false;
                 at += more + 1;
         }
@@ -147753,9 +147760,32 @@ static positive lcheck_keyed_missing(const char address_to text, positive length
         return 1;
 }
 
+/*
+        The languages of languages/ besides English, in the order the Language row offers them, and which script each is written in.
+        ar, fa and ur are Arabic script (Noto Sans Arabic) and he is Hebrew (Noto Sans Hebrew): those four read from the right, their
+        file says @direction rtl and no other file does, and Inter draws the Latin they keep. The other twelve are Inter's alone.
+*/
+enum
+{
+        LCHECK_LATIN,
+        LCHECK_ARABIC,
+        LCHECK_HEBREW
+};
+
+static const struct
+{
+        const char address_to code;
+        unsigned int script;
+} lcheck_codes[] = {{"es", LCHECK_LATIN},  {"fr", LCHECK_LATIN},  {"de", LCHECK_LATIN},  {"pt", LCHECK_LATIN},
+                    {"it", LCHECK_LATIN},  {"nl", LCHECK_LATIN},  {"pl", LCHECK_LATIN},  {"tr", LCHECK_LATIN},
+                    {"sv", LCHECK_LATIN},  {"ru", LCHECK_LATIN},  {"uk", LCHECK_LATIN},  {"el", LCHECK_LATIN},
+                    {"ar", LCHECK_ARABIC}, {"he", LCHECK_HEBREW}, {"fa", LCHECK_ARABIC}, {"ur", LCHECK_ARABIC}};
+
+// The faces of the two other scripts, [script][regular, bold], read from the tree's fonts/ by language_check.
+static font_face lcheck_script_face[3][2];
+
 static fn language_files_check(const font_face address_to regular, const font_face address_to bold)
 {
-        static const char address_to const codes[] = {"es", "fr", "de", "pt", "it", "nl", "pl", "tr", "sv", "ru", "uk", "el"};
         const char address_to wanted = SETTINGS_LANGUAGE_CODES;
         positive missing_keys = 0, order = 0, absent = 0, bad_header = 0, bad_text = 0, bad_stamp = 0, bad_ids = 0, bad_keys = 0;
         positive bad_specs = 0, bad_menus = 0, bad_glyphs = 0, tab_words = 0;
@@ -147787,12 +147817,18 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                 wanted += length + (wanted[length] == ' ');
         }
         order += *wanted != 0;
-        for (positive l = 0; l < sizeof(codes) / sizeof(codes[0]); l++)
+        for (positive l = 0; l < sizeof(lcheck_codes) / sizeof(lcheck_codes[0]); l++)
         {
                 char path[24] = "languages/";
+                const char address_to code = lcheck_codes[l].code;
                 const char address_to name = null;
+                // The face of its script and the one behind it: Inter alone for the languages it draws, else the script's and Inter behind.
+                const font_face address_to face_regular = lcheck_codes[l].script ? &lcheck_script_face[lcheck_codes[l].script][0] : regular;
+                const font_face address_to face_bold = lcheck_codes[l].script ? &lcheck_script_face[lcheck_codes[l].script][1] : bold;
+                const font_face address_to behind_regular = lcheck_codes[l].script ? regular : null;
+                const font_face address_to behind_bold = lcheck_codes[l].script ? bold : null;
 
-                path[10] = codes[l][0], path[11] = codes[l][1], memory_copy(path + 12, ".txt", 5);
+                path[10] = code[0], path[11] = code[1], memory_copy(path + 12, ".txt", 5);
                 english_total = language_total = longest = 0;
                 if (!lcheck_load((string_address)path, &lcheck_other))
                 {
@@ -147800,13 +147836,16 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         continue;
                 }
                 for (positive at = 0; at < sizeof(language_names) / sizeof(language_names[0]); at++)
-                        if (!memory_compare(language_names[at].code, codes[l], 3))
+                        if (!memory_compare(language_names[at].code, code, 3))
                                 name = language_names[at].name;
-                bad_header += !lcheck_same(lcheck_other.code, lcheck_other.code_length, codes[l], 2) || !name ||
+                bad_header += !lcheck_same(lcheck_other.code, lcheck_other.code_length, code, 2) || !name ||
                               !lcheck_same(lcheck_other.name, lcheck_other.name_length, name, string_length((string_address)name)) ||
                               !(lcheck_same(lcheck_other.translated, lcheck_other.translated_length, "machine", 7) ||
                                 lcheck_same(lcheck_other.translated, lcheck_other.translated_length, "reviewed", 8)) ||
-                              lcheck_other.bad;
+                              lcheck_other.bad ||
+                              // A language that reads from the right says so in its header, and one that reads from the left says nothing.
+                              !(lcheck_codes[l].script ? lcheck_same(lcheck_other.direction, lcheck_other.direction_length, "rtl", 3)
+                                                       : !lcheck_other.direction);
                 // The same lines as English, each once: none missing, none over, none twice.
                 bad_ids += lcheck_other.count != lcheck_english.count;
                 for (positive at = 0; at < lcheck_english.count; at++)
@@ -147851,8 +147890,8 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                         bad_text += (said->text_length && said->text[said->text_length - 1] == ' ') !=
                                     (mine->text_length && mine->text[mine->text_length - 1] == ' ');
                         bad_text += (said->text_length && said->text[0] == ' ') != (mine->text_length && mine->text[0] == ' ');
-                        bad_glyphs += !lcheck_drawn(regular, mine->text, mine->text_length) ||
-                                      !lcheck_drawn(bold, mine->text, mine->text_length);
+                        bad_glyphs += !lcheck_drawn(face_regular, behind_regular, mine->text, mine->text_length) ||
+                                      !lcheck_drawn(face_bold, behind_bold, mine->text, mine->text_length);
                         // A word a row of tabs shows has no blank in it: the tabs are the words of a list a blank apart.
                         if (said->key_length > 1 && said->key[0] == '=' &&
                             (lcheck_same(said->key, said->key_length, "=light", 6) || lcheck_same(said->key, said->key_length, "=dark", 5) ||
@@ -147883,7 +147922,7 @@ static fn language_files_check(const font_face address_to regular, const font_fa
                 }
                 lcheck_close(&lcheck_other);
                 string_format(log, "  language %s: %p percent of the English in characters, the longest text %p percent\n",
-                              (string_address)codes[l], english_total ? language_total * 100 / english_total : 0, longest);
+                              (string_address)code, english_total ? language_total * 100 / english_total : 0, longest);
         }
         if (missing_keys + order + absent + bad_header + bad_text + bad_stamp + bad_ids + bad_keys + bad_specs + bad_menus + bad_glyphs)
                 string_format(log, "  languages: keys %p, order %p, absent %p, header %p, text %p, stamp %p, ids %p, lines %p, placeholders %p, mnemonics %p, glyphs %p\n",
@@ -147891,12 +147930,13 @@ static fn language_files_check(const font_face address_to regular, const font_fa
         check("languages: every group, label and choice word of the registry has its keyed line in English", !missing_keys);
         check("languages: the words the tabs of the theme and the motion show are single words in every language", !tab_words);
         check("languages: the Language row offers the table of names' codes in its order, and each is a file", !order && !absent);
-        check("languages: each file's header says its code, its own name and what made it, machine or reviewed", !bad_header);
+        check("languages: each file's header says its code, its own name, what made it, machine or reviewed, and @direction rtl if it reads from the right",
+              !bad_header);
         check("languages: each file has the ids and keyed lines English has, once each, stamped with the English it was made from",
               !bad_ids && !bad_keys && !bad_stamp);
         check("languages: placeholders and braces are English's one for one, mnemonics before ASCII letters and not twice in a menu",
               !bad_specs && !bad_menus);
-        check("languages: every text is one line of well formed UTF-8, never empty, every letter a glyph of the shipped faces",
+        check("languages: every text is one line of well formed UTF-8, never empty, every letter a glyph of the shipped face of its script",
               !bad_text && !bad_glyphs);
 }
 
@@ -148520,7 +148560,6 @@ static int lcheck_row(const char address_to label)
 */
 static fn settings_words_check(void)
 {
-        static const char address_to const codes[] = {"es", "fr", "de", "pt", "it", "nl", "pl", "tr", "sv", "ru", "uk", "el"};
         char word[SETTINGS_VALUE], back[SETTINGS_VALUE];
         positive english_wrong = 0, round = 0, tabs = 0, blank = 0, checked = 0;
         int theme = lcheck_row("Theme"), motion = lcheck_row("Motion"), name = lcheck_row("Name"), language_row = lcheck_row("Language");
@@ -148540,11 +148579,11 @@ static fn settings_words_check(void)
         english_wrong += theme < 0 || motion < 0 || settings_tab_words(&settings_rows[theme], 0) != settings_rows[theme].choices;
         check("settings words: in English a row's label, a group's name, a choice's word and the tabs' words are the registry's own",
               !english_wrong && theme >= 0 && motion >= 0 && name >= 0 && language_row >= 0);
-        for (positive l = 0; l < sizeof(codes) / sizeof(codes[0]); l++)
+        for (positive l = 0; l < sizeof(lcheck_codes) / sizeof(lcheck_codes[0]); l++)
         {
                 const char address_to tabs_said;
 
-                language_take((unsigned int)codes[l][0] | (unsigned int)codes[l][1] << 8);
+                language_take((unsigned int)lcheck_codes[l].code[0] | (unsigned int)lcheck_codes[l].code[1] << 8);
                 for (positive at = 0; at < SETTINGS_ROWS; at++)
                 {
                         blank += !settings_label_shown((int)at)[0];
@@ -148694,12 +148733,11 @@ static fn settings_display_check(void)
         }
         check("settings display: in German they say German, the modes' words come back as the verb's, and a sentence's places are filled in", !wrong);
         {
-                static const char address_to const codes[] = {"es", "fr", "de", "pt", "it", "nl", "pl", "tr", "sv", "ru", "uk", "el"};
                 positive broken = 0;
 
-                for (positive l = 0; l < sizeof(codes) / sizeof(codes[0]); l++)
+                for (positive l = 0; l < sizeof(lcheck_codes) / sizeof(lcheck_codes[0]); l++)
                 {
-                        language_take((unsigned int)codes[l][0] | (unsigned int)codes[l][1] << 8);
+                        language_take((unsigned int)lcheck_codes[l].code[0] | (unsigned int)lcheck_codes[l].code[1] << 8);
                         settings_scale_label(150, 1, label, sizeof(label));
                         broken += !memory_search((address_any)label, string_length((string_address)label), (address_any) "150", 3);
                         settings_rate_label(144, 0, label, sizeof(label));
@@ -148732,6 +148770,21 @@ static fn language_check(void)
         check("languages: the regular face loads", bytes && font_load(&regular, (const p8 address_to)bytes, size, 0) == 0);
         bytes = compositor_map_file(program_argument(4), &size);
         check("languages: the bold face loads", bytes && font_load(&bold, (const p8 address_to)bytes, size, 0) == 0);
+        {
+                // The faces the right to left languages are drawn in, from the tree's fonts/ as languages/ is read: Arabic, Hebrew.
+                static const string_address path[3][2] = {{null, null},
+                                                          {"fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf", "fonts/noto-sans-arabic/NotoSansArabic-Bold.ttf"},
+                                                          {"fonts/noto-sans-hebrew/NotoSansHebrew-Regular.ttf", "fonts/noto-sans-hebrew/NotoSansHebrew-Bold.ttf"}};
+                b32 loaded = 1;
+
+                for (unsigned int script = LCHECK_ARABIC; script <= LCHECK_HEBREW; script++)
+                        for (unsigned int weight = 0; weight < 2; weight++)
+                        {
+                                bytes = compositor_map_file(path[script][weight], &size);
+                                loaded = loaded && bytes && font_load(&lcheck_script_face[script][weight], (const p8 address_to)bytes, size, 0) == 0;
+                        }
+                check("languages: the Noto Sans Arabic and Hebrew faces, regular and bold, load", loaded);
+        }
         if (failures)
                 return;
         language_files_check(&regular, &bold);

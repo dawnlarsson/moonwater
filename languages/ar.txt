@@ -1,0 +1,292 @@
+@language ar
+@name العربية
+@translated machine
+@direction rtl
+action_copy	3664	نسخ
+action_cut	5863	قص
+action_paste	0288	لصق
+action_select_all	3b12	تحديد الكل
+editor_changed_on_disk	3e0f	تم تغييره على القرص: Ctrl+R يقرأه من جديد
+editor_closes_unsaved	fcb8	يغلق ويتجاهل التغييرات
+editor_encoding_bom	c0d7	UTF-8 مع BOM
+editor_find_hint	d17a	بحث
+editor_find_replace_hint	3693	بحث/البديل
+editor_indent_spaces	9db9	المسافات: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	السطر
+editor_no_file_name	c863	لا يوجد اسم ملف: ابدأ المحرر باسم ملف
+editor_no_match	7de7	لا يوجد تطابق
+editor_not_regular	5955	ليس ملفا عاديا: تم الرفض
+editor_pattern_bad	5d57	النمط غير صالح
+editor_position	3696	سطر %1$d، عمود %2$d
+editor_replace_usage	c677	صيغة الاستبدال: البحث/البديل
+editor_replaced	1128	تم استبدال %d
+editor_save_failed	069d	فشل الحفظ: الملف كما كان
+editor_saved	9f44	تم الحفظ
+editor_selected	a686	(%d محدد)
+editor_selected_carets	7e02	(%d محدد، مؤشرات)
+editor_unsaved	c014	تغييرات غير محفوظة: احفظها، أو أغلق كل ملف بالضغط على Ctrl+W مرتين
+editor_untitled	8b58	بدون عنوان
+editor_write_beside	ec75	تعذرت الكتابة بجوار الملف
+editor_writes_over_changed	df15	يكتب فوق تغيير القرص (Ctrl+R)
+editor_writes_over_readonly	e22f	يكتب فوق ملف للقراءة فقط
+launcher_power_off	ae2f	إيقاف التشغيل
+launcher_power_off_armed	a48f	إيقاف التشغيل
+launcher_restart	ed8c	إعادة التشغيل
+launcher_restart_armed	11ec	إعادة التشغيل
+launcher_run	e05a	تنفيذ  %s
+launcher_search_hint	334b	ابحث عن برنامج أو اكتب أمرا
+menu_copy	43e0	نسخ
+menu_cut	5c17	قص
+menu_delete	1e3e	حذف
+menu_find	1fa6	بحث
+menu_go_to_line	bc96	الانتقال إلى سطر
+menu_paste	6854	لصق
+menu_redo	ac45	إعادة
+menu_reset_zoom	1b0f	إعادة تعيين التكبير
+menu_select_all	f6f6	تحديد الكل
+menu_toggle_comment	92ac	تبديل التعليق
+menu_undo	b9d3	تراجع
+menu_zoom_in	5bcf	تكبير
+menu_zoom_out	9234	تصغير
+settings_already_joined	71fb	متصل بالفعل بالشبكة %s
+settings_any_text	89dc	أي أمر، بصيغة الكلمات بعد moonwater: الفعل ثم الوسائط
+settings_asks_first	e9bd	يسأل أولا
+settings_battery_charging	5116	، قيد الشحن
+settings_battery_discharging	7964	، قيد التفريغ
+settings_battery_full	ded8	، مشحونة بالكامل
+settings_battery_idle	1635	، لا يتم الشحن
+settings_busy	34e0	moonwater مشغول: لم تكتمل التغييرات السابقة بعد
+settings_cannot_join	dfa4	لا يستطيع moonwater تلبية ما تطلبه تلك الشبكة للاتصال
+settings_cannot_run	954f	تعذر تشغيل أمر moonwater
+settings_card_back	db52	Escape أو نقرة للرجوع
+settings_card_stopped	e24d	توقف: Escape أو نقرة للرجوع
+settings_device_name	5f12	اسم الجهاز
+settings_done	8071	تم
+settings_edit_keys	d161	Enter يضبطه، Escape يبقيه كما كان، والنقر خارجه يضبطه أيضا
+settings_filter_hint	4aa0	اكتب للتصفية
+settings_forget	5220	نسيان %s
+settings_help_more	93ec	يعرض moonwater help أكثر مما تسرده «كل الأوامر»: الصف الأول ينفذ أي أمر
+settings_identify_screens	8be8	تعريف الشاشات
+settings_item_add	fbef	Enter يحفظ اسم الجهاز؛ ويعمل الراديو لإقران ما يقترن
+settings_item_ask	6aad	Enter يطلب كلمة المرور ويتصل
+settings_item_cannot	e643	لا يستطيع moonwater تلبية ما تطلبه هذه الشبكة للاتصال
+settings_item_joined	0fb8	متصلة: Delete لنسيانها
+settings_item_kept	33d9	محفوظ باسمه: Delete لنسيانه
+settings_item_open	4429	Enter للاتصال بها وحفظها
+settings_item_saved	3ffd	محفوظة: Enter يطلب كلمة المرور من جديد، Delete لنسيانها
+settings_joined	1050	متصلة
+settings_kept	4759	محفوظ
+settings_map_drag	125f	أفلت لوضع الشاشة
+settings_map_hint	9efb	اسحب شاشة لتحريكها.
+settings_map_keys	54c9	الأسهم تختار شاشة. Shift مع سهم يحركها. Enter يعرفها. السهم لأسفل يخرج.
+settings_map_none	1b29	لا توجد شاشة متصلة.
+settings_map_one	7ff2	شاشة واحدة فقط متصلة.
+settings_menu_keys	5546	الأسهم لأعلى ولأسفل للاختيار، Enter للتعيين، Escape للخروج
+settings_mode_largest	c7c4	أكبر صورة
+settings_mode_preferred	024c	موصى به
+settings_name_chars	58a2	الاسم أحرف لاتينية وأرقام وشرطات
+settings_name_long	f2c0	الاسم أقل من 32 حرفا
+settings_no_rates	185b	لا تسرد الشاشة أي معدلات
+settings_no_screen	55fd	لا توجد شاشة متصلة
+settings_not_here	4e20	غير موجود على هذا الحاسوب
+settings_nothing_kept	85a2	لا شيء مكتوب: تبقى القيمة كما هي
+settings_nothing_matches	14e9	لا شيء يطابق ما كتبته
+settings_nothing_typed	edce	لا شيء مكتوب
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d هرتز (موصى به)
+settings_rate_plain	743a	%d هرتز
+settings_refused	454b	رفض moonwater
+settings_refused_place	9632	%s (موضعه في الملف غير مقروء)
+settings_refused_rate	97bc	%1$s (%2$d هرتز غير متاح)
+settings_refused_turn	7b3a	%1$s (تعذر تنفيذ %2$s)
+settings_run_any	3ffd	تنفيذ أي أمر moonwater
+settings_running	d0e2	قيد التنفيذ: %s (Escape يوقفه)
+settings_saved	9f44	محفوظة
+settings_scale_best	2ba0	%d%% (موصى به)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	الشاشة %1$d: %2$s
+settings_screen_named	d918	الشاشة %1$d: %2$s [%3$s]
+settings_stopped	f34e	توقف
+settings_too_long	fed7	استغرق moonwater وقتا طويلا فتم إيقافه
+settings_too_many	db0e	هذه كلمات أكثر مما يقبله أمر واحد
+settings_turned_software	64d9	التدوير بواسطة Moonwater (أبطأ)
+settings_type_command	75f8	اكتب أمرا: الفعل أولا ثم ما يليه
+settings_type_device	63e0	اكتب اسم الجهاز: Enter يحفظه، Escape يتركه
+settings_type_passphrase	ca95	اكتب كلمة المرور: Enter يتصل، Escape يتركه
+settings_unknown	9fb9	غير معروف
+settings_verb_hint	05aa	الفعل [الوسائط]
+terminal_exited_press_to_close	a8cf	انتهى برمز الخروج %d، اضغط أي مفتاح للإغلاق
+terminal_press_to_close	080d	اضغط أي مفتاح للإغلاق
+tray_am	0d13	ص
+tray_charging	60c2	قيد الشحن
+tray_day_fri	fbe8	الجمعة
+tray_day_mon	82e1	الاثنين
+tray_day_sat	2a77	السبت
+tray_day_sun	d701	الأحد
+tray_day_thu	308c	الخميس
+tray_day_tue	f425	الثلاثاء
+tray_day_wed	5757	الأربعاء
+tray_discharging	41a0	قيد التفريغ
+tray_month_apr	1df2	أبريل
+tray_month_aug	8fd4	أغسطس
+tray_month_dec	7a73	ديسمبر
+tray_month_feb	4b82	فبراير
+tray_month_jan	ceae	يناير
+tray_month_jul	2ebc	يوليو
+tray_month_jun	31e2	يونيو
+tray_month_mar	ed2b	مارس
+tray_month_may	e226	مايو
+tray_month_nov	c404	نوفمبر
+tray_month_oct	f3e9	أكتوبر
+tray_month_sep	a4ef	سبتمبر
+tray_pm	f466	م
+ui_confirm_again	b3ff	اضغط مرة أخرى للتأكيد: 
+ui_field_digits	f52b	العدد يتكون من أرقام
+ui_field_full	fe02	هذا أقصى ما يتسع له
+=Accent	ccd7	لون التمييز
+=Accent colour (rrggbb or reset)	53aa	لون التمييز (rrggbb أو reset)
+=Airplane mode	3b8a	وضع الطيران
+=All commands	4a42	كل الأوامر
+=Audio	1439	الصوت
+=Authenticated time (NTS)	e533	الوقت الموثق (NTS)
+=Background	0abd	الخلفية
+=Background colour (rrggbb or default)	e2b2	لون الخلفية (rrggbb أو default)
+=Battery	e12e	البطارية
+=Battery shown	2a23	البطارية المعروضة
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	محولات Bluetooth
+=Boost	a6cc	Boost
+=Boot	38f5	الإقلاع
+=Brightness	324a	السطوع
+=Cameras	cea7	الكاميرات
+=Canvas	5091	Canvas
+=Caret blink speed	4085	سرعة وميض مؤشر النص
+=Caret thickness	1e9a	سماكة مؤشر النص
+=Charge limit (20 to 100, or off)	c92d	حد الشحن (من 20 إلى 100 أو off)
+=Clipboard	99b1	الحافظة
+=Clipboard history (copies kept)	7423	سجل الحافظة (النسخ المحفوظة)
+=Clipboard limit (MiB)	a505	حد الحافظة (MiB)
+=Clock (Enter sets it now)	575e	الساعة (Enter يضبطها الآن)
+=Cursor look	34ce	شكل المؤشر
+=Cursor size	65d4	حجم المؤشر
+=Display	d9b5	الشاشة
+=Editor	bf98	المحرر
+=GPU rendering	d4d5	التصيير على GPU
+=Gallery	4cdd	المعرض
+=Hubs	456d	المحاور
+=Identify	033d	تعريف
+=In range and saved	7941	ضمن النطاق والمحفوظة
+=Input	e11b	الإدخال
+=Keep a device by its name	9c51	حفظ جهاز باسمه
+=Keep the lowest-delay sample	d8b9	الاحتفاظ بالعينة ذات أقل تأخير
+=Kernel log	e57a	سجل النواة
+=Key repeat delay (ms, or default)	4eb7	تأخير تكرار المفتاح (ms أو default)
+=Key repeat rate (per second, off or default)	1e94	معدل تكرار المفتاح (في الثانية، off أو default)
+=Keyboard	a714	لوحة المفاتيح
+=Keyboards and mice	c352	لوحات المفاتيح والماوس
+=Language	db9b	اللغة
+=Large pointer stays (ms, or default)	5626	مدة بقاء المؤشر الكبير (ms أو default)
+=Launcher	44b1	المشغل
+=Machine	be0e	الحاسوب
+=Motion	7647	الحركة
+=Mount kept disks	f0c8	تركيب الأقراص المحفوظة
+=Mouse acceleration	c400	تسارع الماوس
+=Mouse sensitivity (percent, or default)	8a23	حساسية الماوس (نسبة مئوية أو default)
+=NTS servers (or default)	9fd7	خوادم NTS (أو default)
+=Name	7306	الاسم
+=Name servers (auto for the network)	695a	خوادم الأسماء (auto للشبكة)
+=Names over TLS	075a	الأسماء عبر TLS
+=Network	ad65	الشبكة
+=Network adapters	88ef	محولات الشبكة
+=New USB devices	c15c	أجهزة USB الجديدة
+=Normal	2772	عادي
+=Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
+=Other devices	8362	أجهزة أخرى
+=Plain Text	2bbe	نص عادي
+=Power	a5e6	الطاقة
+=Power profile	8def	نمط الطاقة
+=Predict touch and pen	e2b7	توقع اللمس والقلم
+=Refresh rate	bf6e	معدل التحديث
+=Remembered devices	abbc	الأجهزة المحفوظة
+=Rotation	777f	الدوران
+=Scale of this screen	e4ca	مقياس هذه الشاشة
+=Screen	c631	الشاشة
+=Screen modes	85ad	أوضاع الشاشة
+=Set the clock from the network	b2a3	ضبط الساعة من الشبكة
+=Settings	8728	الإعدادات
+=Shake the pointer to find it	f508	هز المؤشر للعثور عليه
+=Show touch area	9ca8	إظهار منطقة اللمس
+=Side taskbar text faces	d115	اتجاه نص شريط المهام الجانبي
+=Simultaneous threads (SMT)	e836	الخيوط المتزامنة (SMT)
+=Smooth mouse wheel	0dab	عجلة الماوس السلسة
+=Start the desktop	be4c	تشغيل سطح المكتب
+=Storage	df06	التخزين
+=Taskbar	d759	شريط المهام
+=Taskbar display	042b	شاشة شريط المهام
+=Taskbar launcher button	dd4d	زر المشغل في شريط المهام
+=Taskbar position	81b8	موضع شريط المهام
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	منطقة الإعلام في شريط المهام (نص مع {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	الطرفية
+=The internet prefers	3dbe	يفضل الإنترنت
+=Theme	7c92	السمة
+=Time	e404	الوقت
+=Time server (auto for the pool)	67e5	خادم الوقت (auto للمجموعة)
+=Time zone	741a	المنطقة الزمنية
+=Turned by the screen	ea45	التدوير بواسطة الشاشة
+=Turned left	507c	مدار لليسار
+=Turned right	7a49	مدار لليمين
+=USB	da81	USB
+=Upside down	9dc1	مقلوب
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	الشبكة السلكية
+=all	4bc4	الكل
+=allow	a832	سماح
+=amber	bec0	كهرماني
+=auto	a396	تلقائي
+=balanced	b71d	متوازن
+=black	4ba4	أسود
+=blue	f5cd	أزرق
+=bottom	6b2a	أسفل
+=center	4484	الوسط
+=dark	6945	داكن
+=dark-grey	bcb3	رمادي داكن
+=default	5bde	افتراضي
+=deny	6367	منع
+=desktop	87b3	سطح المكتب
+=edge	d83c	الحافة
+=fast	02af	سريع
+=forest	2a60	أخضر الغابة
+=full	b33c	كامل
+=graphite	dc8d	جرافيت
+=green	ecbc	أخضر
+=kernel log	415a	سجل النواة
+=kernel log klog dmesg messages	1a8d	سجل النواة klog dmesg رسائل
+=left	ec70	يسار
+=light	1e2f	فاتح
+=light-grey	ed41	رمادي فاتح
+=lock	7842	قفل
+=midnight-blue	4008	أزرق منتصف الليل
+=normal	9c52	عادي
+=off	8a0a	إيقاف
+=on	2fd0	تشغيل
+=only	89f7	فقط
+=performance	8ca5	الأداء
+=plum	b06b	برقوقي
+=powersave	2283	توفير الطاقة
+=primary	5fd9	الرئيسية
+=reduced	5839	مخفض
+=right	2de5	يمين
+=rose	1806	وردي
+=settings preferences options	8c78	إعدادات تفضيلات خيارات
+=slate	deee	أردوازي
+=slow	42b8	بطيء
+=terminal shell console	eaba	الطرفية الصدفة وحدة التحكم
+=thick	964e	ضخيم
+=thin	b172	رفيع
+=top	dc3c	أعلى
+=unlock	1f55	إلغاء القفل
+=violet	57f2	بنفسجي
+=white	0766	أبيض
+=wifi	6448	Wi-Fi
+=wired	bfb4	سلكي

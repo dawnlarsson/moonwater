@@ -1,0 +1,292 @@
+@language fa
+@name فارسی
+@translated machine
+@direction rtl
+action_copy	3664	کپی
+action_cut	5863	برش
+action_paste	0288	چسباندن
+action_select_all	3b12	انتخاب همه
+editor_changed_on_disk	3e0f	روی دیسک تغییر کرده است: Ctrl+R دوباره آن را می‌خواند
+editor_closes_unsaved	fcb8	بدون ذخیره می‌بندد
+editor_encoding_bom	c0d7	UTF-8 با BOM
+editor_find_hint	d17a	جستجو
+editor_find_replace_hint	3693	جستجو/جایگزین
+editor_indent_spaces	9db9	فاصله‌ها: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	سطر
+editor_no_file_name	c863	نام پرونده وجود ندارد: ویرایشگر را با نام پرونده اجرا کنید
+editor_no_match	7de7	موردی یافت نشد
+editor_not_regular	5955	پرونده عادی نیست: رد شد
+editor_pattern_bad	5d57	الگو معتبر نیست
+editor_position	3696	سطر %1$d، ستون %2$d
+editor_replace_usage	c677	قالب جایگزینی: جستجو/جایگزین
+editor_replaced	1128	%d مورد جایگزین شد
+editor_save_failed	069d	ذخیره نشد: پرونده همان‌طور که بود مانده است
+editor_saved	9f44	ذخیره شد
+editor_selected	a686	(%d انتخاب‌شده)
+editor_selected_carets	7e02	(%d انتخاب‌شده، مکان‌نما)
+editor_unsaved	c014	تغییرات ذخیره‌نشده: آن‌ها را ذخیره کنید، یا هر پرونده را با دو بار فشردن Ctrl+W ببندید
+editor_untitled	8b58	بدون عنوان
+editor_write_beside	ec75	نوشتن در کنار پرونده ممکن نشد
+editor_writes_over_changed	df15	تغییر دیسک را بازنویسی می‌کند
+editor_writes_over_readonly	e22f	فقط‌خواندنی را بازنویسی می‌کند
+launcher_power_off	ae2f	خاموش کردن
+launcher_power_off_armed	a48f	خاموش کردن
+launcher_restart	ed8c	راه‌اندازی مجدد
+launcher_restart_armed	11ec	راه‌اندازی مجدد
+launcher_run	e05a	اجرا  %s
+launcher_search_hint	334b	جستجوی برنامه یا تایپ یک فرمان
+menu_copy	43e0	کپی
+menu_cut	5c17	برش
+menu_delete	1e3e	حذف
+menu_find	1fa6	جستجو
+menu_go_to_line	bc96	رفتن به سطر
+menu_paste	6854	چسباندن
+menu_redo	ac45	انجام دوباره
+menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
+menu_select_all	f6f6	انتخاب همه
+menu_toggle_comment	92ac	تغییر وضعیت توضیح
+menu_undo	b9d3	واگرد
+menu_zoom_in	5bcf	بزرگ‌نمایی
+menu_zoom_out	9234	کوچک‌نمایی
+settings_already_joined	71fb	از قبل به %s متصل است
+settings_any_text	89dc	هر فرمانی، به شکل واژه‌های پس از moonwater: ابتدا فعل، سپس آرگومان‌ها
+settings_asks_first	e9bd	ابتدا می‌پرسد
+settings_battery_charging	5116	، در حال شارژ
+settings_battery_discharging	7964	، در حال تخلیه
+settings_battery_full	ded8	، شارژ کامل
+settings_battery_idle	1635	، در حال شارژ نیست
+settings_busy	34e0	moonwater مشغول است: تغییرات پیش از این هنوز انجام نشده‌اند
+settings_cannot_join	dfa4	moonwater نمی‌تواند خواسته‌های آن شبکه را برای اتصال برآورده کند
+settings_cannot_run	954f	فرمان moonwater اجرا نشد
+settings_card_back	db52	Escape یا کلیک برای بازگشت
+settings_card_stopped	e24d	متوقف شد: Escape یا کلیک برای بازگشت
+settings_device_name	5f12	نام دستگاه
+settings_done	8071	انجام شد
+settings_edit_keys	d161	Enter آن را اعمال می‌کند، Escape مقدار قبلی را نگه می‌دارد، و کلیک بیرون هم اعمال می‌کند
+settings_filter_hint	4aa0	برای پالایش تایپ کنید
+settings_forget	5220	فراموش کردن %s
+settings_help_more	93ec	moonwater help بیش از «همه فرمان‌ها» می‌گوید: ردیف اول هر فرمانی را اجرا می‌کند
+settings_identify_screens	8be8	شناسایی نمایشگر‌ها
+settings_item_add	fbef	Enter نام دستگاه را نگه می‌دارد؛ رادیو برای آنچه جفت می‌شود روشن می‌شود
+settings_item_ask	6aad	Enter گذرواژه را می‌پرسد و متصل می‌شود
+settings_item_cannot	e643	moonwater نمی‌تواند خواسته‌های این شبکه را برای اتصال برآورده کند
+settings_item_joined	0fb8	متصل: Delete آن را فراموش می‌کند
+settings_item_kept	33d9	با نامش نگه داشته شده: Delete آن را فراموش می‌کند
+settings_item_open	4429	Enter متصل می‌شود و ذخیره می‌کند
+settings_item_saved	3ffd	ذخیره‌شده: Enter دوباره گذرواژه را می‌پرسد، Delete آن را فراموش می‌کند
+settings_joined	1050	متصل
+settings_kept	4759	نگه‌داشته‌شده
+settings_map_drag	125f	رها کنید تا نمایشگر جای‌گذاری شود
+settings_map_hint	9efb	برای جابه‌جا کردن یک نمایشگر، آن را بکشید.
+settings_map_keys	54c9	کلیدهای جهت: انتخاب نمایشگر. Shift و جهت: جابه‌جایی. Enter: شناسایی. پایین: خروج.
+settings_map_none	1b29	هیچ نمایشگری متصل نیست.
+settings_map_one	7ff2	فقط یک نمایشگر متصل است.
+settings_menu_keys	5546	بالا و پایین انتخاب می‌کنند، Enter اعمال می‌کند، Escape خارج می‌شود
+settings_mode_largest	c7c4	بزرگ‌ترین تصویر
+settings_mode_preferred	024c	پیشنهادی
+settings_name_chars	58a2	نام شامل حروف لاتین، رقم‌ها و خط تیره است
+settings_name_long	f2c0	نام کمتر از 32 نویسه است
+settings_no_rates	185b	نمایشگر نرخی را فهرست نکرده است
+settings_no_screen	55fd	هیچ نمایشگری متصل نیست
+settings_not_here	4e20	در این رایانه نیست
+settings_nothing_kept	85a2	چیزی تایپ نشد: مقدار حفظ می‌شود
+settings_nothing_matches	14e9	هیچ موردی با متن واردشده مطابقت ندارد
+settings_nothing_typed	edce	چیزی تایپ نشد
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d هرتز (پیشنهادی)
+settings_rate_plain	743a	%d هرتز
+settings_refused	454b	moonwater رد کرد
+settings_refused_place	9632	%s (جایگاه آن در پرونده خوانده نمی‌شود)
+settings_refused_rate	97bc	%1$s (%2$d هرتز ارائه نمی‌شود)
+settings_refused_turn	7b3a	%1$s (%2$s انجام نشد)
+settings_run_any	3ffd	اجرای هر فرمان moonwater
+settings_running	d0e2	در حال اجرای %s (Escape آن را متوقف می‌کند)
+settings_saved	9f44	ذخیره‌شده
+settings_scale_best	2ba0	%d%% (پیشنهادی)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	نمایشگر %1$d: %2$s
+settings_screen_named	d918	نمایشگر %1$d: %2$s [%3$s]
+settings_stopped	f34e	متوقف شد
+settings_too_long	fed7	moonwater زمان زیادی گرفت و متوقف شد
+settings_too_many	db0e	این بیش از تعداد واژه‌هایی است که یک فرمان می‌پذیرد
+settings_turned_software	64d9	چرخش توسط Moonwater (کندتر)
+settings_type_command	75f8	یک فرمان تایپ کنید: ابتدا فعل، سپس ادامه آن
+settings_type_device	63e0	نام دستگاه را تایپ کنید: Enter آن را نگه می‌دارد، Escape رها می‌کند
+settings_type_passphrase	ca95	گذرواژه را تایپ کنید: Enter متصل می‌شود، Escape رها می‌کند
+settings_unknown	9fb9	نامشخص
+settings_verb_hint	05aa	فعل [آرگومان‌ها]
+terminal_exited_press_to_close	a8cf	با کد خروج %d پایان یافت؛ برای بستن یک کلید را فشار دهید
+terminal_press_to_close	080d	برای بستن یک کلید را فشار دهید
+tray_am	0d13	ق.ظ
+tray_charging	60c2	در حال شارژ
+tray_day_fri	fbe8	جمعه
+tray_day_mon	82e1	دوشنبه
+tray_day_sat	2a77	شنبه
+tray_day_sun	d701	یکشنبه
+tray_day_thu	308c	پنجشنبه
+tray_day_tue	f425	سه‌شنبه
+tray_day_wed	5757	چهارشنبه
+tray_discharging	41a0	در حال تخلیه
+tray_month_apr	1df2	آوریل
+tray_month_aug	8fd4	اوت
+tray_month_dec	7a73	دسامبر
+tray_month_feb	4b82	فوریه
+tray_month_jan	ceae	ژانویه
+tray_month_jul	2ebc	ژوئیه
+tray_month_jun	31e2	ژوئن
+tray_month_mar	ed2b	مارس
+tray_month_may	e226	مه
+tray_month_nov	c404	نوامبر
+tray_month_oct	f3e9	اکتبر
+tray_month_sep	a4ef	سپتامبر
+tray_pm	f466	ب.ظ
+ui_confirm_again	b3ff	دوباره فشار دهید: 
+ui_field_digits	f52b	عدد از رقم‌ها تشکیل می‌شود
+ui_field_full	fe02	بیش از این جا ندارد
+=Accent	ccd7	رنگ تأکید
+=Accent colour (rrggbb or reset)	53aa	رنگ تأکید (rrggbb یا reset)
+=Airplane mode	3b8a	حالت هواپیما
+=All commands	4a42	همه فرمان‌ها
+=Audio	1439	صدا
+=Authenticated time (NTS)	e533	زمان احراز‌هویت‌شده (NTS)
+=Background	0abd	پس‌زمینه
+=Background colour (rrggbb or default)	e2b2	رنگ پس‌زمینه (rrggbb یا default)
+=Battery	e12e	باتری
+=Battery shown	2a23	باتری نمایش‌داده‌شده
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	آداپتورهای Bluetooth
+=Boost	a6cc	Boost
+=Boot	38f5	بوت
+=Brightness	324a	روشنایی
+=Cameras	cea7	دوربین‌ها
+=Canvas	5091	Canvas
+=Caret blink speed	4085	سرعت چشمک‌زدن مکان‌نما
+=Caret thickness	1e9a	ضخامت مکان‌نما
+=Charge limit (20 to 100, or off)	c92d	حد شارژ (20 تا 100 یا off)
+=Clipboard	99b1	کلیپ‌بورد
+=Clipboard history (copies kept)	7423	تاریخچه کلیپ‌بورد (کپی‌های نگه‌داشته‌شده)
+=Clipboard limit (MiB)	a505	حد کلیپ‌بورد (MiB)
+=Clock (Enter sets it now)	575e	ساعت (Enter همین حالا آن را تنظیم می‌کند)
+=Cursor look	34ce	ظاهر نشانگر
+=Cursor size	65d4	اندازه نشانگر
+=Display	d9b5	نمایشگر
+=Editor	bf98	ویرایشگر
+=GPU rendering	d4d5	رندر با GPU
+=Gallery	4cdd	گالری
+=Hubs	456d	هاب‌ها
+=Identify	033d	شناسایی
+=In range and saved	7941	در برد و ذخیره‌شده
+=Input	e11b	ورودی
+=Keep a device by its name	9c51	نگه‌داشتن دستگاه با نامش
+=Keep the lowest-delay sample	d8b9	نگه‌داشتن نمونه با کمترین تأخیر
+=Kernel log	e57a	گزارش هسته
+=Key repeat delay (ms, or default)	4eb7	تأخیر تکرار کلید (ms یا default)
+=Key repeat rate (per second, off or default)	1e94	نرخ تکرار کلید (در ثانیه، off یا default)
+=Keyboard	a714	صفحه‌کلید
+=Keyboards and mice	c352	صفحه‌کلیدها و ماوس‌ها
+=Language	db9b	زبان
+=Large pointer stays (ms, or default)	5626	مدت ماندن نشانگر بزرگ (ms یا default)
+=Launcher	44b1	راه‌انداز
+=Machine	be0e	رایانه
+=Motion	7647	حرکت
+=Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
+=Mouse acceleration	c400	شتاب ماوس
+=Mouse sensitivity (percent, or default)	8a23	حساسیت ماوس (درصد یا default)
+=NTS servers (or default)	9fd7	سرورهای NTS (یا default)
+=Name	7306	نام
+=Name servers (auto for the network)	695a	سرورهای نام (auto برای شبکه)
+=Names over TLS	075a	نام‌ها از طریق TLS
+=Network	ad65	شبکه
+=Network adapters	88ef	آداپتورهای شبکه
+=New USB devices	c15c	دستگاه‌های USB جدید
+=Normal	2772	عادی
+=Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
+=Other devices	8362	دستگاه‌های دیگر
+=Plain Text	2bbe	متن ساده
+=Power	a5e6	انرژی
+=Power profile	8def	نمایه انرژی
+=Predict touch and pen	e2b7	پیش‌بینی لمس و قلم
+=Refresh rate	bf6e	نرخ تازه‌سازی
+=Remembered devices	abbc	دستگاه‌های ذخیره‌شده
+=Rotation	777f	چرخش
+=Scale of this screen	e4ca	مقیاس این نمایشگر
+=Screen	c631	نمایشگر
+=Screen modes	85ad	حالت‌های نمایشگر
+=Set the clock from the network	b2a3	تنظیم ساعت از روی شبکه
+=Settings	8728	تنظیمات
+=Shake the pointer to find it	f508	تکان دادن نشانگر برای پیدا کردن آن
+=Show touch area	9ca8	نمایش ناحیه لمس
+=Side taskbar text faces	d115	جهت متن نوار وظیفه کناری
+=Simultaneous threads (SMT)	e836	رشته‌های هم‌زمان (SMT)
+=Smooth mouse wheel	0dab	چرخ ماوس نرم
+=Start the desktop	be4c	اجرای رومیزی
+=Storage	df06	ذخیره‌سازی
+=Taskbar	d759	نوار وظیفه
+=Taskbar display	042b	نمایشگر نوار وظیفه
+=Taskbar launcher button	dd4d	دکمه راه‌انداز در نوار وظیفه
+=Taskbar position	81b8	موقعیت نوار وظیفه
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ناحیه اعلان نوار وظیفه (متن با {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	پایانه
+=The internet prefers	3dbe	اینترنت ترجیح می‌دهد
+=Theme	7c92	تم
+=Time	e404	زمان
+=Time server (auto for the pool)	67e5	سرور زمان (auto برای مجموعه)
+=Time zone	741a	منطقه زمانی
+=Turned by the screen	ea45	چرخش توسط نمایشگر
+=Turned left	507c	چرخیده به چپ
+=Turned right	7a49	چرخیده به راست
+=USB	da81	USB
+=Upside down	9dc1	وارونه
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	شبکه سیمی
+=all	4bc4	همه
+=allow	a832	اجازه
+=amber	bec0	کهربایی
+=auto	a396	خودکار
+=balanced	b71d	متعادل
+=black	4ba4	مشکی
+=blue	f5cd	آبی
+=bottom	6b2a	پایین
+=center	4484	مرکز
+=dark	6945	تیره
+=dark-grey	bcb3	خاکستری تیره
+=default	5bde	پیش‌فرض
+=deny	6367	رد
+=desktop	87b3	رومیزی
+=edge	d83c	لبه
+=fast	02af	سریع
+=forest	2a60	سبز جنگلی
+=full	b33c	کامل
+=graphite	dc8d	گرافیتی
+=green	ecbc	سبز
+=kernel log	415a	گزارش هسته
+=kernel log klog dmesg messages	1a8d	گزارش هسته klog dmesg پیام‌ها
+=left	ec70	چپ
+=light	1e2f	روشن
+=light-grey	ed41	خاکستری روشن
+=lock	7842	قفل
+=midnight-blue	4008	آبی نیمه‌شب
+=normal	9c52	عادی
+=off	8a0a	خاموش
+=on	2fd0	روشن
+=only	89f7	فقط
+=performance	8ca5	عملکرد
+=plum	b06b	آلویی
+=powersave	2283	صرفه‌جویی در انرژی
+=primary	5fd9	اصلی
+=reduced	5839	کاهش‌یافته
+=right	2de5	راست
+=rose	1806	گلی
+=settings preferences options	8c78	تنظیمات ترجیحات گزینه‌ها
+=slate	deee	سربی
+=slow	42b8	کند
+=terminal shell console	eaba	پایانه پوسته کنسول
+=thick	964e	ضخیم
+=thin	b172	نازک
+=top	dc3c	بالا
+=unlock	1f55	بازکردن قفل
+=violet	57f2	بنفش
+=white	0766	سفید
+=wifi	6448	Wi-Fi
+=wired	bfb4	سیمی

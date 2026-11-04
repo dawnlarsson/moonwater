@@ -263,8 +263,11 @@ The words those windows say are one table of ids (src/canvas/ui/language.inc), E
 every other language is a file of `languages/` (the image carries them as /usr/share/moonwater/language/CODE.txt)
 with the same ids. `moonwater language CODE` picks one, and every open window says its words in it at once; bare, it
 lists the languages and marks the ones a machine translated and no person has reviewed. Es, fr, de, pt, it, nl, pl,
-tr, sv, ru, uk and el are the ones the shipped faces (Inter, IBM Plex Mono) draw; Hebrew, Arabic, the Indic scripts,
-Thai and the Chinese, Japanese and Korean ones need a face, shaping and a right-to-left layout that are not there.
+tr, sv, ru, uk and el are the ones the shipped faces (Inter, IBM Plex Mono) draw. Ar, he, fa and ur (Arabic, Hebrew,
+Persian, Urdu) read from the right: their files say `@direction rtl` in the header (no other file does), and they are
+drawn in the Noto Sans Arabic and Noto Sans Hebrew faces the image carries beside Inter, which draws the Latin they keep
+(moonwater, Ctrl+R, the digits 0-9). All sixteen besides English are machine translations. The Indic scripts, Thai and the
+Chinese, Japanese and Korean ones need a face and shaping that are not there.
 `languages/glossary` fixes the terms, and `languages/keep` the few English literals a converted file keeps.
 
 On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. With `moonwater taskbar launcher on` the taskbar has a button at its start (its left end, or the top of a side taskbar) that opens it beside the button, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the button while it is open puts it away. Under its list are two buttons, Power off and Restart: each asks for a second press before it powers the machine off or restarts it (a key held down is one press, and its repeats confirm nothing), and Shift-Tab puts the keys on them.

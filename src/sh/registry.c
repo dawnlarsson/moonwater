@@ -123,7 +123,7 @@
 // These are the codes the Language row offers, in the order of its menu; a check keeps them the languages/ directory's.
 #define SETTING_LANGUAGE_PATH "/root/language"
 #define SETTING_LANGUAGE_DIRECTORY "/usr/share/moonwater/language/"
-#define SETTINGS_LANGUAGE_CODES "en es fr de pt it nl pl tr sv ru uk el"
+#define SETTINGS_LANGUAGE_CODES "en es fr de pt it nl pl tr sv ru uk el ar he fa ur"
 
 struct settings_row
 {

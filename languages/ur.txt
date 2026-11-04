@@ -1,0 +1,292 @@
+@language ur
+@name اردو
+@translated machine
+@direction rtl
+action_copy	3664	کاپی
+action_cut	5863	کٹ
+action_paste	0288	پیسٹ
+action_select_all	3b12	سب منتخب کریں
+editor_changed_on_disk	3e0f	ڈسک پر تبدیل ہو گیا: Ctrl+R اسے دوبارہ پڑھتا ہے
+editor_closes_unsaved	fcb8	بغیر محفوظ کیے بند کرتا ہے
+editor_encoding_bom	c0d7	BOM کے ساتھ UTF-8
+editor_find_hint	d17a	تلاش
+editor_find_replace_hint	3693	تلاش/متبادل
+editor_indent_spaces	9db9	اسپیسز: %d
+editor_indent_tab	d9a7	Tab: %d
+editor_line_hint	f547	لائن
+editor_no_file_name	c863	فائل کا نام نہیں ہے: ایڈیٹر کو فائل کے نام کے ساتھ شروع کریں
+editor_no_match	7de7	کوئی مطابقت نہیں
+editor_not_regular	5955	عام فائل نہیں ہے: مسترد
+editor_pattern_bad	5d57	پیٹرن درست نہیں ہے
+editor_position	3696	لائن %1$d، کالم %2$d
+editor_replace_usage	c677	تبدیلی کی شکل: تلاش/متبادل
+editor_replaced	1128	%d تبدیل کیے گئے
+editor_save_failed	069d	محفوظ کرنا ناکام رہا: فائل جیسی تھی ویسی ہی ہے
+editor_saved	9f44	محفوظ ہو گیا
+editor_selected	a686	(%d منتخب)
+editor_selected_carets	7e02	(%d منتخب، کرسر)
+editor_unsaved	c014	غیر محفوظ شدہ تبدیلیاں: انہیں محفوظ کریں، یا ہر فائل کو Ctrl+W دو بار دبا کر بند کریں
+editor_untitled	8b58	بلا عنوان
+editor_write_beside	ec75	فائل کے ساتھ لکھنا ممکن نہ ہوا
+editor_writes_over_changed	df15	ڈسک کی تبدیلی پر لکھتا ہے (Ctrl+R)
+editor_writes_over_readonly	e22f	صرف پڑھنے والی فائل پر لکھتا ہے
+launcher_power_off	ae2f	بند کریں
+launcher_power_off_armed	a48f	بند کریں
+launcher_restart	ed8c	دوبارہ شروع کریں
+launcher_restart_armed	11ec	دوبارہ شروع کریں
+launcher_run	e05a	چلائیں  %s
+launcher_search_hint	334b	پروگرام تلاش کریں یا کمانڈ لکھیں
+menu_copy	43e0	کاپی
+menu_cut	5c17	کٹ
+menu_delete	1e3e	حذف کریں
+menu_find	1fa6	تلاش
+menu_go_to_line	bc96	لائن پر جائیں
+menu_paste	6854	پیسٹ
+menu_redo	ac45	دوبارہ کریں
+menu_reset_zoom	1b0f	زوم بحال کریں
+menu_select_all	f6f6	سب منتخب کریں
+menu_toggle_comment	92ac	تبصرہ بدلیں
+menu_undo	b9d3	کالعدم کریں
+menu_zoom_in	5bcf	بڑا کریں
+menu_zoom_out	9234	چھوٹا کریں
+settings_already_joined	71fb	پہلے سے %s سے منسلک ہے
+settings_any_text	89dc	کوئی بھی کمانڈ، moonwater کے بعد آنے والے الفاظ کی صورت میں: پہلے فعل، پھر آرگیومنٹس
+settings_asks_first	e9bd	پہلے پوچھتا ہے
+settings_battery_charging	5116	، چارج ہو رہی ہے
+settings_battery_discharging	7964	، ڈسچارج ہو رہی ہے
+settings_battery_full	ded8	، مکمل چارج
+settings_battery_idle	1635	، چارج نہیں ہو رہی
+settings_busy	34e0	moonwater مصروف ہے: اس سے پہلے کی تبدیلیاں ابھی مکمل نہیں ہوئیں
+settings_cannot_join	dfa4	moonwater اس نیٹ ورک کے مطالبے کے مطابق منسلک نہیں ہو سکتا
+settings_cannot_run	954f	moonwater کمانڈ چلائی نہ جا سکی
+settings_card_back	db52	Escape یا کلک واپسی کے لیے
+settings_card_stopped	e24d	رک گیا: Escape یا کلک واپسی کے لیے
+settings_device_name	5f12	ڈیوائس کا نام
+settings_done	8071	ہو گیا
+settings_edit_keys	d161	Enter اسے لاگو کرتا ہے، Escape پہلے جیسا رکھتا ہے، اور باہر کلک بھی لاگو کرتا ہے
+settings_filter_hint	4aa0	فلٹر کرنے کے لیے لکھیں
+settings_forget	5220	%s کو بھول جائیں
+settings_help_more	93ec	moonwater help «تمام کمانڈز» سے زیادہ بتاتا ہے: پہلی قطار کوئی بھی کمانڈ چلاتی ہے
+settings_identify_screens	8be8	اسکرینیں شناخت کریں
+settings_item_add	fbef	Enter ڈیوائس کا نام محفوظ رکھتا ہے؛ جو جوڑا جائے اس کے لیے ریڈیو چل پڑتا ہے
+settings_item_ask	6aad	Enter پاس ورڈ مانگتا ہے اور منسلک ہو جاتا ہے
+settings_item_cannot	e643	moonwater اس نیٹ ورک کے مطالبے کے مطابق منسلک نہیں ہو سکتا
+settings_item_joined	0fb8	منسلک: Delete اسے بھلا دیتا ہے
+settings_item_kept	33d9	نام سے رکھا گیا: Delete اسے بھلا دیتا ہے
+settings_item_open	4429	Enter منسلک کرتا ہے اور محفوظ کرتا ہے
+settings_item_saved	3ffd	محفوظ: Enter دوبارہ پاس ورڈ مانگتا ہے، Delete اسے بھلا دیتا ہے
+settings_joined	1050	منسلک
+settings_kept	4759	رکھا گیا
+settings_map_drag	125f	اسکرین رکھنے کے لیے چھوڑ دیں
+settings_map_hint	9efb	کسی اسکرین کو منتقل کرنے کے لیے اسے گھسیٹیں۔
+settings_map_keys	54c9	تیر کی کلیدیں: اسکرین کا انتخاب۔ Shift اور تیر: منتقلی۔ Enter: شناخت۔ نیچے: باہر۔
+settings_map_none	1b29	کوئی اسکرین منسلک نہیں۔
+settings_map_one	7ff2	صرف ایک اسکرین منسلک ہے۔
+settings_menu_keys	5546	اوپر اور نیچے منتخب کرتے ہیں، Enter لاگو کرتا ہے، Escape باہر نکلتا ہے
+settings_mode_largest	c7c4	سب سے بڑی تصویر
+settings_mode_preferred	024c	تجویز کردہ
+settings_name_chars	58a2	نام لاطینی حروف، ہندسوں اور ہائفن پر مشتمل ہوتا ہے
+settings_name_long	f2c0	نام 32 حروف سے کم ہوتا ہے
+settings_no_rates	185b	اسکرین کوئی ریٹ فہرست نہیں کرتی
+settings_no_screen	55fd	کوئی اسکرین منسلک نہیں
+settings_not_here	4e20	اس کمپیوٹر پر نہیں ہے
+settings_nothing_kept	85a2	کچھ نہیں لکھا: قدر برقرار رہتی ہے
+settings_nothing_matches	14e9	جو لکھا ہے اس سے کچھ مطابقت نہیں رکھتا
+settings_nothing_typed	edce	کچھ نہیں لکھا
+settings_percent	e76a	%d%%
+settings_rate_best	7450	%d ہرٹز (تجویز کردہ)
+settings_rate_plain	743a	%d ہرٹز
+settings_refused	454b	moonwater نے انکار کیا
+settings_refused_place	9632	%s (فائل میں اس کی جگہ پڑھی نہیں جاتی)
+settings_refused_rate	97bc	%1$s (%2$d ہرٹز دستیاب نہیں)
+settings_refused_turn	7b3a	%1$s (%2$s نہیں ہو سکا)
+settings_run_any	3ffd	کوئی بھی moonwater کمانڈ چلائیں
+settings_running	d0e2	%s چل رہا ہے (Escape اسے روکتا ہے)
+settings_saved	9f44	محفوظ شدہ
+settings_scale_best	2ba0	%d%% (تجویز کردہ)
+settings_scale_plain	e76a	%d%%
+settings_screen_bare	c945	اسکرین %1$d: %2$s
+settings_screen_named	d918	اسکرین %1$d: %2$s [%3$s]
+settings_stopped	f34e	رک گیا
+settings_too_long	fed7	moonwater نے بہت دیر لگائی اور اسے روک دیا گیا
+settings_too_many	db0e	یہ ایک کمانڈ کے قبول کردہ الفاظ سے زیادہ ہیں
+settings_turned_software	64d9	Moonwater کی طرف سے گھمایا گیا (سست)
+settings_type_command	75f8	کمانڈ لکھیں: پہلے اس کا فعل، پھر جو اس کے بعد آئے
+settings_type_device	63e0	ڈیوائس کا نام لکھیں: Enter اسے رکھتا ہے، Escape چھوڑ دیتا ہے
+settings_type_passphrase	ca95	پاس ورڈ لکھیں: Enter منسلک کرتا ہے، Escape چھوڑ دیتا ہے
+settings_unknown	9fb9	نامعلوم
+settings_verb_hint	05aa	فعل [آرگیومنٹس]
+terminal_exited_press_to_close	a8cf	ایگزٹ کوڈ %d کے ساتھ ختم ہوا، بند کرنے کے لیے کوئی کلید دبائیں
+terminal_press_to_close	080d	بند کرنے کے لیے کوئی کلید دبائیں
+tray_am	0d13	ص
+tray_charging	60c2	چارج ہو رہی ہے
+tray_day_fri	fbe8	جمعہ
+tray_day_mon	82e1	پیر
+tray_day_sat	2a77	ہفتہ
+tray_day_sun	d701	اتوار
+tray_day_thu	308c	جمعرات
+tray_day_tue	f425	منگل
+tray_day_wed	5757	بدھ
+tray_discharging	41a0	ڈسچارج ہو رہی ہے
+tray_month_apr	1df2	اپریل
+tray_month_aug	8fd4	اگست
+tray_month_dec	7a73	دسمبر
+tray_month_feb	4b82	فروری
+tray_month_jan	ceae	جنوری
+tray_month_jul	2ebc	جولائی
+tray_month_jun	31e2	جون
+tray_month_mar	ed2b	مارچ
+tray_month_may	e226	مئی
+tray_month_nov	c404	نومبر
+tray_month_oct	f3e9	اکتوبر
+tray_month_sep	a4ef	ستمبر
+tray_pm	f466	ش
+ui_confirm_again	b3ff	دوبارہ دبائیں: 
+ui_field_digits	f52b	نمبر ہندسوں پر مشتمل ہوتا ہے
+ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
+=Accent	ccd7	نمایاں رنگ
+=Accent colour (rrggbb or reset)	53aa	نمایاں رنگ (rrggbb یا reset)
+=Airplane mode	3b8a	ہوائی جہاز موڈ
+=All commands	4a42	تمام کمانڈز
+=Audio	1439	آڈیو
+=Authenticated time (NTS)	e533	تصدیق شدہ وقت (NTS)
+=Background	0abd	پس منظر
+=Background colour (rrggbb or default)	e2b2	پس منظر کا رنگ (rrggbb یا default)
+=Battery	e12e	بیٹری
+=Battery shown	2a23	دکھائی گئی بیٹری
+=Bluetooth	14bd	Bluetooth
+=Bluetooth adapters	3bb7	Bluetooth اڈاپٹرز
+=Boost	a6cc	Boost
+=Boot	38f5	بوٹ
+=Brightness	324a	چمک
+=Cameras	cea7	کیمرے
+=Canvas	5091	Canvas
+=Caret blink speed	4085	ٹیکسٹ کرسر کے جھپکنے کی رفتار
+=Caret thickness	1e9a	ٹیکسٹ کرسر کی موٹائی
+=Charge limit (20 to 100, or off)	c92d	چارج کی حد (20 سے 100 یا off)
+=Clipboard	99b1	کلپ بورڈ
+=Clipboard history (copies kept)	7423	کلپ بورڈ کی تاریخ (محفوظ کی گئی کاپیاں)
+=Clipboard limit (MiB)	a505	کلپ بورڈ کی حد (MiB)
+=Clock (Enter sets it now)	575e	گھڑی (Enter اسے ابھی سیٹ کرتا ہے)
+=Cursor look	34ce	پوائنٹر کی شکل
+=Cursor size	65d4	پوائنٹر کا سائز
+=Display	d9b5	اسکرین
+=Editor	bf98	ایڈیٹر
+=GPU rendering	d4d5	GPU رینڈرنگ
+=Gallery	4cdd	گیلری
+=Hubs	456d	ہبز
+=Identify	033d	شناخت
+=In range and saved	7941	رینج میں اور محفوظ
+=Input	e11b	ان پٹ
+=Keep a device by its name	9c51	ڈیوائس کو اس کے نام سے رکھیں
+=Keep the lowest-delay sample	d8b9	کم سے کم تاخیر والا نمونہ رکھیں
+=Kernel log	e57a	کرنل لاگ
+=Key repeat delay (ms, or default)	4eb7	کلید دہرانے کی تاخیر (ms یا default)
+=Key repeat rate (per second, off or default)	1e94	کلید دہرانے کی شرح (فی سیکنڈ، off یا default)
+=Keyboard	a714	کی بورڈ
+=Keyboards and mice	c352	کی بورڈز اور ماؤس
+=Language	db9b	زبان
+=Large pointer stays (ms, or default)	5626	بڑا پوائنٹر کتنی دیر رہے (ms یا default)
+=Launcher	44b1	لانچر
+=Machine	be0e	کمپیوٹر
+=Motion	7647	حرکت
+=Mount kept disks	f0c8	محفوظ ڈسکس ماؤنٹ کریں
+=Mouse acceleration	c400	ماؤس ایکسیلریشن
+=Mouse sensitivity (percent, or default)	8a23	ماؤس کی حساسیت (فیصد یا default)
+=NTS servers (or default)	9fd7	NTS سرورز (یا default)
+=Name	7306	نام
+=Name servers (auto for the network)	695a	نام کے سرورز (auto نیٹ ورک کے لیے)
+=Names over TLS	075a	TLS پر نام
+=Network	ad65	نیٹ ورک
+=Network adapters	88ef	نیٹ ورک اڈاپٹرز
+=New USB devices	c15c	نئی USB ڈیوائسز
+=Normal	2772	عام
+=Open windows where they were last put	8711	کھڑکیاں وہاں کھولیں جہاں آخری بار رکھی گئیں
+=Other devices	8362	دیگر ڈیوائسز
+=Plain Text	2bbe	سادہ متن
+=Power	a5e6	پاور
+=Power profile	8def	پاور پروفائل
+=Predict touch and pen	e2b7	ٹچ اور قلم کی پیشگوئی
+=Refresh rate	bf6e	ریفریش ریٹ
+=Remembered devices	abbc	محفوظ ڈیوائسز
+=Rotation	777f	گردش
+=Scale of this screen	e4ca	اس اسکرین کا اسکیل
+=Screen	c631	اسکرین
+=Screen modes	85ad	اسکرین کے موڈ
+=Set the clock from the network	b2a3	گھڑی نیٹ ورک سے سیٹ کریں
+=Settings	8728	ترتیبات
+=Shake the pointer to find it	f508	پوائنٹر ہلا کر اسے تلاش کریں
+=Show touch area	9ca8	ٹچ کا علاقہ دکھائیں
+=Side taskbar text faces	d115	سائیڈ ٹاسک بار کے متن کا رخ
+=Simultaneous threads (SMT)	e836	بیک وقت تھریڈز (SMT)
+=Smooth mouse wheel	0dab	ہموار ماؤس وہیل
+=Start the desktop	be4c	ڈیسک ٹاپ شروع کریں
+=Storage	df06	اسٹوریج
+=Taskbar	d759	ٹاسک بار
+=Taskbar display	042b	ٹاسک بار کی اسکرین
+=Taskbar launcher button	dd4d	ٹاسک بار میں لانچر کا بٹن
+=Taskbar position	81b8	ٹاسک بار کی جگہ
+=Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ٹاسک بار کی ٹرے ({names} والا متن: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Terminal	62d1	ٹرمینل
+=The internet prefers	3dbe	انٹرنیٹ ترجیح دیتا ہے
+=Theme	7c92	تھیم
+=Time	e404	وقت
+=Time server (auto for the pool)	67e5	ٹائم سرور (auto پول کے لیے)
+=Time zone	741a	ٹائم زون
+=Turned by the screen	ea45	اسکرین کی طرف سے گھمایا گیا
+=Turned left	507c	بائیں گھمایا گیا
+=Turned right	7a49	دائیں گھمایا گیا
+=USB	da81	USB
+=Upside down	9dc1	الٹا
+=Wi-Fi	0ec1	Wi-Fi
+=Wired	9a54	وائرڈ نیٹ ورک
+=all	4bc4	سب
+=allow	a832	اجازت
+=amber	bec0	عنبری
+=auto	a396	خودکار
+=balanced	b71d	متوازن
+=black	4ba4	کالا
+=blue	f5cd	نیلا
+=bottom	6b2a	نیچے
+=center	4484	درمیان
+=dark	6945	تاریک
+=dark-grey	bcb3	گہرا خاکستری
+=default	5bde	ڈیفالٹ
+=deny	6367	انکار
+=desktop	87b3	ڈیسک ٹاپ
+=edge	d83c	کنارہ
+=fast	02af	تیز
+=forest	2a60	جنگلی سبز
+=full	b33c	مکمل
+=graphite	dc8d	گریفائٹ
+=green	ecbc	سبز
+=kernel log	415a	کرنل لاگ
+=kernel log klog dmesg messages	1a8d	کرنل لاگ klog dmesg پیغامات
+=left	ec70	بائیں
+=light	1e2f	روشن
+=light-grey	ed41	ہلکا خاکستری
+=lock	7842	لاک
+=midnight-blue	4008	رات کا نیلا
+=normal	9c52	عام
+=off	8a0a	آف
+=on	2fd0	آن
+=only	89f7	صرف
+=performance	8ca5	کارکردگی
+=plum	b06b	آلو بخارا
+=powersave	2283	بجلی کی بچت
+=primary	5fd9	بنیادی
+=reduced	5839	کم
+=right	2de5	دائیں
+=rose	1806	گلابی
+=settings preferences options	8c78	ترتیبات ترجیحات اختیارات
+=slate	deee	سلیٹی
+=slow	42b8	آہستہ
+=terminal shell console	eaba	ٹرمینل شیل کنسول
+=thick	964e	موٹا
+=thin	b172	پتلا
+=top	dc3c	اوپر
+=unlock	1f55	ان لاک
+=violet	57f2	بنفشی
+=white	0766	سفید
+=wifi	6448	Wi-Fi
+=wired	bfb4	وائرڈ
