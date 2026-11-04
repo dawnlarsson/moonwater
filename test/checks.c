@@ -184003,7 +184003,7 @@ static void sv_test_clock(void)
 static void sv_test_settings(void)
 {
         struct pulse_sink *sink;
-        char text[64];
+        char text[300]; /* a path under TMPDIR can be long */
 
         sv_setup();
         sink = audio_service.pulse.sink + audio_service.sink;
