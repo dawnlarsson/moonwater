@@ -8298,6 +8298,72 @@ static fn ui_chevron_shut(struct ui address_to ui, int cx, int cy, int size, uns
         }
 }
 
+/*
+        One stroke of a chevron from a to b (Q8 device pixels, the strokes' corners): boxes of the stroke's width laid along it, one a pixel
+        of its length, so it is drawn at any angle.
+*/
+static fn ui_chevron_stroke(struct ui address_to ui, int ax, int ay, int bx, int by, int thick, unsigned int argb)
+{
+        int dx = bx - ax, dy = by - ay, length = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
+        int steps = length / 256 + 1;
+
+        for (int step = 0; step <= steps; step++)
+        {
+                int x = ax + dx * step / steps, y = ay + dy * step / steps;
+
+                ui_kit_fill(ui, &(struct ui_box){x, y, x + thick, y + thick, 0, 0}, argb, null);
+        }
+}
+
+/*
+        A row's expander chevron part way between shut (pointing right, or left reading from the right: flip) and open (down). Its three points
+        are carried from the one shape to the other by turn (Q30), so the arms swing as the spring moves them; at either end it is the chevron
+        drawn at rest, the same pixels. Centred on cx, cy, size to a side.
+*/
+static fn ui_chevron_turn(struct ui address_to ui, int cx, int cy, int size, unsigned int argb, b64 turn, b32 flip)
+{
+        // The points in half a size, from the centre (x right, y down): index 0 the point, 1 and 2 the arms' ends. The shut chevron (ui_chevron_shut)
+        // has its point at the centre and its arms at the left corners; the open one (ui_chevron) has its point below the centre and its arms at
+        // the top corners. Carried from one to the other by turn, and mirrored at the end for reading from the right (the open one is symmetric).
+        static const int shut[3][2] = {{0, 0}, {-2, -2}, {-2, 2}}, open[3][2] = {{0, 1}, {-2, -1}, {2, -1}};
+        int ends[2][2], point[2];
+        b32 thick = ui_stroke(ui) + 128;
+
+        if (turn <= 0 || turn >= UI_ONE)
+        {
+                if (turn <= 0)
+                        ui_chevron_shut(ui, cx, cy, size, argb, flip);
+                else
+                        ui_chevron(ui, cx, cy, size, argb);
+                return;
+        }
+        // One half size is 128 Q8 device pixels (size * 256 / 2).
+        for (int k = 0; k < 3; k++)
+        {
+                int from[2], to[2];
+
+                from[0] = shut[k][0] * size * 128, from[1] = shut[k][1] * size * 128;
+                to[0] = open[k][0] * size * 128, to[1] = open[k][1] * size * 128;
+                for (int c = 0; c < 2; c++)
+                {
+                        int at = from[c] + (int)ui_qmul(turn, (b64)(to[c] - from[c]));
+
+                        if (k)
+                                ends[k - 1][c] = at;
+                        else
+                                point[c] = at;
+                }
+        }
+        for (int k = 0; k < 2; k++)
+        {
+                int ex = ends[k][0], px = point[0];
+
+                if (flip)
+                        ex = -ex, px = -px;
+                ui_chevron_stroke(ui, cx * 256 + ex, cy * 256 + ends[k][1], cx * 256 + px, cy * 256 + point[1], thick, argb);
+        }
+}
+
 /* ---- a speaker, a level meter and strips of both: what a mixer is made of ---- */
 /*
         A speaker, a level meter and the strips of both (the mixer's composite): ui_speaker, ui_level_* (the meter's feed and
@@ -9102,6 +9168,8 @@ struct ui_row
         const char address_to badge_words; // what that badge says
         b32 sub;                           // a line under its option (an issue, its detail, a status): indented, in the quiet ink
         int expander;                      // UI_ROW_EXPANDER_*: a chevron at the row's right (left of its badge), and whether the lines under it show
+        b64 turn;                          // the expander's turn while it moves, Q30: 0 shut, UI_ONE open (the app's spring); -1 (the default): the flag decides
+        b64 reveal;                        // the row's height as a share of a row, Q30 (UI_ONE is a whole row, 0 none): a folding line is shown by its share
 };
 
 struct ui_list
@@ -9119,6 +9187,7 @@ struct ui_list
         int focus;                         // the row the keys are on, -1 none
         // The kit's.
         int top[UI_LIST_MOST];             // each place's top, from the list's
+        int tall[UI_LIST_MOST];            // each place's height in device pixels: a row, or its share of one while it folds (ui_row.reveal)
         unsigned char starts[UI_LIST_MOST]; // each place's first of a section, and with a header (UI_LIST_STARTS, _HEADED)
         int content;
         int x, y, w, h;                    // where it is in the window, device pixels: the box its words and controls keep to
@@ -9135,6 +9204,8 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
 {
         memory_zero(row, sizeof(*row));
         row->at = -1;
+        row->reveal = UI_ONE; // a whole row unless the app says it folds
+        row->turn = -1;       // the expander's flag decides its chevron unless the app says it is turning
         l->describe(id, row);
 }
 
@@ -9167,7 +9238,9 @@ static fn ui_list_layout(const struct ui address_to ui, struct ui_list address_t
                         y += ui_dev(ui, UI_SECTION);
                 section = row.section;
                 l->top[at] = y;
-                y += ui_dev(ui, UI_ROW);
+                // A row is its share of a row while it folds: a line under an option that is opening or shutting (the app's spring).
+                l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, ui_dev(ui, UI_ROW));
+                y += l->tall[at];
         }
         // A list in sections has the gap under its last one too; a list of rows alone ends with its last row.
         y += l->count && (l->starts[0] & UI_LIST_HEADED) ? ui_dev(ui, UI_SECTION_GAP) : 0;
@@ -9273,15 +9346,17 @@ static void ui_scroll_span(const struct ui_scroll address_to s, int y, int row, 
 // A row of a list, where it is drawn (ui_scroll_span).
 static void ui_list_row_span(const struct ui address_to ui, const struct ui_list address_to l, int at, int address_to top, int address_to height)
 {
-        ui_scroll_span(&l->scroll, ui_list_row_y(l, at), ui_dev(ui, UI_ROW), top, height);
+        (void)ui;
+        ui_scroll_span(&l->scroll, ui_list_row_y(l, at), l->tall[at], top, height);
 }
 
 static fn ui_list_damage(const struct ui address_to ui, const struct ui_list address_to l, int id)
 {
         int at = id >= 0 ? ui_list_at(l, id) : -1;
 
+        (void)ui;
         if (at >= 0 && l->damaged)
-                l->damaged(ui_list_row_y(l, at), ui_list_row_y(l, at) + ui_dev(ui, UI_ROW));
+                l->damaged(ui_list_row_y(l, at), ui_list_row_y(l, at) + l->tall[at]);
 }
 
 static fn ui_list_damage_all(const struct ui address_to ui, const struct ui_list address_to l)
@@ -9299,7 +9374,7 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
         if (x < across || x >= across + wide || y < l->y || y >= l->y + l->h)
                 return -1;
         for (int at = 0; at < l->count; at++)
-                if (inside >= l->top[at] && inside < l->top[at] + ui_dev(ui, UI_ROW))
+                if (inside >= l->top[at] && inside < l->top[at] + l->tall[at])
                         return l->id[at];
         return -1;
 }
@@ -9307,14 +9382,14 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
 // The row the keys are on kept in sight, the header with it when it is a section's first: true when the list moved.
 static b32 ui_list_reveal(const struct ui address_to ui, struct ui_list address_to l)
 {
-        int at = ui_list_at(l, l->focus), top, height = ui_dev(ui, UI_ROW);
+        int at = ui_list_at(l, l->focus), top, height;
 
         if (at < 0)
         {
                 ui_scroll_clamp(&l->scroll);
                 return false;
         }
-        top = l->top[at];
+        top = l->top[at], height = l->tall[at];
         if (l->starts[at] & UI_LIST_HEADED)
                 top -= ui_dev(ui, UI_SECTION), height += ui_dev(ui, UI_SECTION);
         if (!ui_scroll_reveal(&l->scroll, top, height))
@@ -9524,10 +9599,10 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 int size = ui_dev(ui, 4), edge = row.kind == UI_ROW_SWITCH ? right - ui_dev(ui, 52) - gap - badge_w : right;
 
                 chevron_w = 2 * size + gap;
-                if (row.expander == UI_ROW_EXPANDER_OPEN)
-                        ui_chevron(ui, ui_mirror(edge - 2 * size, 2 * size + 1, x, w) + size, y + height / 2, size, quiet);
-                else
-                        ui_chevron_shut(ui, ui_mirror(edge - 2 * size, 2 * size + 1, x, w) + size, y + height / 2, size, quiet, ui_rtl());
+                // Its turn is the app's while the lines fold (its spring), else the flag's rest: shut is 0, open UI_ONE.
+                b64 turn = row.turn < 0 ? (row.expander == UI_ROW_EXPANDER_OPEN ? UI_ONE : 0) : row.turn;
+
+                ui_chevron_turn(ui, ui_mirror(edge - 2 * size, 2 * size + 1, x, w) + size, y + height / 2, size, quiet, turn, ui_rtl());
                 if (row.kind != UI_ROW_SWITCH)
                         right -= chevron_w;
         }
@@ -9632,8 +9707,16 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
                                             (string_address)row.header, UI_TITLE_SMALL, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
                 }
-                if (y + height > l->y && y < l->y + l->h)
+                // A row folding is cut to its share: its words stay in it while it shows less than a row.
+                if (height > 0 && y + height > l->y && y < l->y + l->h)
+                {
+                        int band_top = ui->top, band_bottom = ui->bottom;
+
+                        if (height < ui_dev(ui, UI_ROW))
+                                ui->top = y > l->y ? y : l->y, ui->bottom = y + height < l->y + l->h ? y + height : l->y + l->h;
                         ui_list_row(ui, l, l->id[at], y, height);
+                        ui->top = band_top, ui->bottom = band_bottom;
+                }
         }
         ui_scroll_draw(ui, &l->scroll);
 }

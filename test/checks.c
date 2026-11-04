@@ -152608,6 +152608,196 @@ static fn frames_run(string_address name, const struct frames_step address_to st
         }
 }
 
+/*
+        The settings rows with issues fold (settings_toggle, settings_fold_step): the lines under an option open and shut on the kit's spring,
+        the rows under them move with it each frame, and the expander's chevron turns with it. The page is the window's, with the Canvas group,
+        the theme, the scale and the language's direction, and the board is the issues fold_issues gives: 1 a warning, 2 an error, 3 the GPU
+        row's three (a warning, an error and a warning, the error's line with a detail).
+*/
+static struct windows fold_table;
+static int fold_row = -1;
+static const b64 fold_frame_ns = 16666667;
+
+// The GPU row brought to the top of the list, so its lines show under it: the scroll is the row's top, held in range. The reveal of the
+// keys is a glide that frames move, and the shots are taken at once, so the scroll is set here.
+static void fold_scroll(void)
+{
+        int at = ui_list_at(&settings.list, fold_row);
+
+        if (at >= 0)
+                settings.list.scroll.scroll = settings.list.top[at];
+        settings.list.scroll.gliding = 0;
+        ui_scroll_clamp(&settings.list.scroll);
+}
+
+static void fold_setup(int scale, b32 dark, unsigned int language_code)
+{
+        language_directory = "languages/"; // the tree's files, as the language checks read them (the rig runs in the tree)
+        language_take(language_code);
+        memory_zero(settings_expanded, sizeof(settings_expanded));
+        memory_zero(settings_fold_at, sizeof(settings_fold_at));
+        memory_zero(settings_fold_live, sizeof(settings_fold_live));
+        memory_zero(&fold_table, sizeof(fold_table));
+        fold_table.stride = GALLERY_W, fold_table.output_width = 1920, fold_table.output_height = 1080;
+        settings.own.table = &fold_table;
+        settings.ui.scale = scale;
+        ui_kit_theme(dark ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_STANDARD, 0);
+        ui_kit_inks(&settings.ui);
+        settings.ui.pitch = GALLERY_W, settings.ui.opaque = 1, settings.ui.pixels = frames_pixels;
+        settings.ui.width = 700 * scale / 100, settings.ui.height = 520 * scale / 100;
+        settings.ui.width = settings.ui.width > GALLERY_W ? GALLERY_W : settings.ui.width;
+        gallery.on = 0;
+        settings_size((unsigned int)settings.ui.width, (unsigned int)settings.ui.height);
+        fold_row = -1;
+        for (int row = 0; row < SETTINGS_ANY && fold_row < 0; row++)
+        {
+                char key[WINDOWS_ISSUE_KEY];
+
+                if (settings_key_of(row, key, sizeof(key)) && string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU))
+                        fold_row = row;
+        }
+        settings_group_choose(settings_group_of(fold_row));
+        settings.list.focus = fold_row;
+        settings_gpu_sample(); // the GPU's status and metric lines say what the table counts (none yet: the card is idle)
+        settings_rebuild();
+        fold_scroll();
+}
+
+static void fold_issues(int which)
+{
+        windows_issue_clear(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_ANY);
+        if (which == 1 || which == 3)
+                windows_issue_set(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_LISTS, 0, 0, "");
+        if (which == 2 || which == 3)
+                windows_issue_set(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_MAP, 1, 2, "the kernel's own words");
+        if (which == 3)
+                windows_issue_set(&fold_table, WINDOWS_KEY_GPU, WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_COOLING, 3, 0, "");
+        windows_issues_read(&fold_table, &settings_board);
+        settings_rebuild();
+}
+
+// One frame at a time: the kit's clock at the frame, the fold's step, and the page's rows as the loop would lay them out.
+static void fold_frame(b64 at)
+{
+        ui_kit.now = at;
+        ui_kit.busy = 0;
+        settings_fold_step();
+}
+
+static void fold_run(b64 from, b64 until)
+{
+        for (b64 at = from; at <= until; at += fold_frame_ns)
+                fold_frame(at);
+}
+
+// The page as the window draws it at this moment, written as a frame named name (the settings' size at the scale).
+static void fold_shot(string_address name)
+{
+        settings_draw_rows(frames_pixels, 0, 0);
+        frames_write(name, 0, 0, 0, settings.width, settings.height);
+        frames_count++;
+}
+
+static void fold_checks(void)
+{
+        const b64 base = 1000000000ll, ms = 1000000ll;
+        positive unit;
+        int closed, lines, open, mid_content;
+        b64 mid;
+        struct ui_row row;
+
+        fold_setup(100, 0, 0);
+        check("settings fold: the GPU row is on the page", fold_row >= 0);
+        fold_issues(1);
+        check("settings fold: an option with a warning starts shut: a chevron, and no lines listed", settings_expander(fold_row) == UI_ROW_EXPANDER_SHUT && settings_sub_count == 0);
+        closed = settings.list.content;
+        unit = (positive)ui_dev(&settings.ui, UI_ROW);
+
+        ui_kit.motion = 0;
+        ui_kit.now = base;
+        settings_toggle(fold_row);
+        fold_frame(base);
+        lines = settings_sub_count;
+        check("settings fold: opening lists its lines, and the first frame has them at no height", lines > 0 && settings_fold_at[fold_row] == 0 && settings.list.content == closed);
+        fold_run(base + fold_frame_ns, base + 100 * ms);
+        mid = settings_fold_at[fold_row];
+        mid_content = settings.list.content;
+        check("settings fold: 100 ms in, the lines are part way open on the kit's spring", mid > 0 && mid < UI_ONE);
+        ui_list_describe(&settings.list, fold_row, &row);
+        check("settings fold: the chevron turns with the spring, part way between shut and open", row.turn == mid && row.expander == UI_ROW_EXPANDER_OPEN);
+        fold_run(base + 100 * ms + fold_frame_ns, base + 2000 * ms);
+        open = settings.list.content;
+        check("settings fold: at rest the lines are open at their height, and the rows under them moved down by it", settings_fold_at[fold_row] == UI_ONE && open == closed + lines * (int)unit);
+        check("settings fold: part way the rows under the lines were between shut and open (they move each frame)", mid_content > closed && mid_content < open);
+        check("settings fold: at rest the board has no fold running", !settings_fold_live[fold_row] && !(ui_kit.busy));
+
+        // Shutting: the lines fold away, and are no longer listed at rest.
+        ui_kit.now = base + 3000 * ms;
+        settings_toggle(fold_row);
+        fold_run(base + 3000 * ms + fold_frame_ns, base + 3100 * ms);
+        check("settings fold: shutting goes part way on the spring, the lines still listed", settings_fold_at[fold_row] > 0 && settings_fold_at[fold_row] < UI_ONE && settings_sub_count > 0);
+        fold_run(base + 3100 * ms + fold_frame_ns, base + 5000 * ms);
+        check("settings fold: at rest shut, with no lines listed and the list as it was shut", settings_fold_at[fold_row] == 0 && settings_sub_count == 0 && settings.list.content == closed);
+
+        // Reduced motion: at once, no spring.
+        ui_kit.motion = 1;
+        settings_toggle(fold_row);
+        check("settings fold: with reduced motion the lines are open at once, and no spring runs", settings_fold_at[fold_row] == UI_ONE && !settings_fold_live[fold_row] && settings.list.content == closed + lines * (int)unit);
+        settings_toggle(fold_row);
+        check("settings fold: with reduced motion they shut at once", settings_fold_at[fold_row] == 0 && settings_sub_count == 0 && settings.list.content == closed);
+        ui_kit.motion = 0;
+
+        // An option with an error, and one with none: the empty state is unchanged.
+        fold_issues(2);
+        check("settings fold: an error shows the expander shut, the same as a warning", settings_expander(fold_row) == UI_ROW_EXPANDER_SHUT && settings_sub_count == 0);
+        fold_issues(0);
+        check("settings fold: with no issues the GPU row keeps its chevron, shut, and lists no lines", settings_expander(fold_row) == UI_ROW_EXPANDER_SHUT && settings_sub_count == 0);
+}
+
+/*
+        The settings rows with issues, drawn at each state: the frames are written next to the rest of the kit's frames (fold-*.ppm). The shot of
+        a fold is its frame at its time: an opening at 100 ms (part way), and at rest after 2 s. Light and dark, four scales, and the right to left
+        language (Arabic) with the same rows.
+*/
+static void fold_frames(void)
+{
+        struct fold_shot_spec {
+                string_address name;
+                int scale, issues, turn; // turn: 0 none, 1 open at rest, 2 open part way (100 ms)
+                b32 dark;
+                unsigned int language_code;
+        } shots[] = {
+                {"fold-warning-shut", 100, 1, 0, false, 0},
+                {"fold-error-shut", 100, 2, 0, false, 0},
+                {"fold-three-open", 100, 3, 1, false, 0},
+                {"fold-three-mid", 100, 3, 2, false, 0},
+                {"fold-empty", 100, 0, 0, false, 0},
+                {"fold-three-dark", 100, 3, 1, true, 0},
+                {"fold-three-rtl", 100, 3, 1, false, ('a' | 'r' << 8)},
+                {"fold-three-75", 75, 3, 1, false, 0},
+                {"fold-three-125", 125, 3, 1, false, 0},
+                {"fold-three-150", 150, 3, 1, false, 0},
+                {"fold-three-dark-150", 150, 3, 1, true, 0},
+        };
+
+        for (positive at = 0; at < sizeof(shots) / sizeof(shots[0]); at++)
+        {
+                b64 base = 1000000000ll;
+
+                fold_setup(shots[at].scale, shots[at].dark, shots[at].language_code);
+                fold_issues(shots[at].issues);
+                ui_kit.motion = 0;
+                if (shots[at].turn == 1 || shots[at].turn == 2)
+                {
+                        ui_kit.now = base;
+                        settings_toggle(fold_row);
+                        fold_frame(base);
+                        fold_run(base + fold_frame_ns, base + (shots[at].turn == 2 ? 100 : 2000) * 1000000ll);
+                        fold_scroll();
+                }
+                fold_shot(shots[at].name);
+        }
+}
 
 b32 main()
 {
@@ -153050,6 +153240,8 @@ b32 main()
                         ui_field_close(&settings.edit);
                 }
         }
+        fold_checks();
+        fold_frames();
         // The launcher, dark, with ls typed: the kit's field, and the kit's list under it with the pointer over its third row.
         {
                 static char names[6][LAUNCHER_NAME];

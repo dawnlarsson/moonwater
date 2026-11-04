@@ -788,14 +788,20 @@ struct settings_sub
         const char address_to words; // what its badge says (Warning, Error), or none
         unsigned int code;           // a message line's issue code (a kernel notice's, for Delete to dismiss it), 0 for none
         unsigned int action;         // SETTINGS_SUB_COPY (the default), or SETTINGS_SUB_DISMISS_ALL (the line that clears every kernel notice)
+        int owner;                   // the row the line is under (its fold: how much of a row the line shows while the row opens or shuts)
         char text[SETTINGS_SUB_TEXT];
 };
 #define SETTINGS_SUB_COPY 0u
 #define SETTINGS_SUB_DISMISS_ALL 1u
 static struct settings_sub settings_sub[SETTINGS_SUBS];
-static int settings_sub_count;
+static int settings_sub_count, settings_sub_owner;
 static struct windows_issues settings_board;
 static unsigned char settings_expanded[SETTINGS_ALL]; // each row's expander: 1 when the lines under it show (the GPU's, or a row with an issue)
+// Each row's fold: how far its lines are open, Q30 (0 shut, UI_ONE open), moved by its own spring from where it was when it was turned, so
+// a turn in the middle of a fold carries on from there. settings_fold_live is 1 while that spring moves.
+static b64 settings_fold_at[SETTINGS_ALL];
+static struct ui_spring settings_fold_spring[SETTINGS_ALL];
+static unsigned char settings_fold_live[SETTINGS_ALL];
 static positive settings_board_due;
 static char settings_status[SETTINGS_SUB_TEXT], settings_metric_line[SETTINGS_SUB_TEXT];
 static char settings_notices_text[SETTINGS_SUB_TEXT];
@@ -844,12 +850,24 @@ static int settings_expander(int row)
         return settings_expanded[row] ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT;
 }
 
-// Opens or shuts a row's lines, and lists them again.
+// Opens or shuts a row's lines, and lists them again. They fold on the kit's spring (settings_fold_step moves them frame by frame); with
+// reduced motion they are at their place at once.
 static fn settings_toggle(int row)
 {
+        b64 target;
+
         if (row < 0 || row >= SETTINGS_ANY)
                 return;
         settings_expanded[row] = !settings_expanded[row];
+        target = settings_expanded[row] ? UI_ONE : 0;
+        if (ui_kit.motion)
+                settings_fold_at[row] = target, settings_fold_live[row] = 0;
+        else
+        {
+                // The spring's displacement from its target: it starts where the fold is now and comes to rest at the target.
+                ui_spring_go(&settings_fold_spring[row], settings_fold_at[row] - target, 0);
+                settings_fold_live[row] = 1;
+        }
         settings_rebuild();
 }
 
@@ -928,7 +946,7 @@ static int settings_sub_put(int section, b32 detail, const char address_to words
         if (settings_sub_count >= SETTINGS_SUBS || count >= UI_LIST_MOST - 1)
                 return count;
         sub = &settings_sub[settings_sub_count];
-        sub->section = section, sub->detail = detail, sub->words = words, sub->code = 0, sub->action = SETTINGS_SUB_COPY;
+        sub->section = section, sub->detail = detail, sub->words = words, sub->code = 0, sub->action = SETTINGS_SUB_COPY, sub->owner = settings_sub_owner;
         string_copy_bounded((string_address)sub->text, (string_address)text, sizeof(sub->text));
         settings.list.id[count] = (unsigned short)(SETTINGS_ALL + (positive)settings_sub_count++);
         return count + 1;
@@ -998,9 +1016,11 @@ static int settings_sub_rows(int row, int count)
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
         int section;
 
-        // The lines show when the row is open: each issue's message and its detail, and the GPU's status and metrics first.
-        if (!settings_key_of(row, key, sizeof(key)) || !settings_expanded[row] || !settings_expander(row))
+        // The lines show when the row is open, and while it shuts (they fold away on the spring): each issue's message and its detail, and the
+        // GPU's status and metrics first.
+        if (!settings_key_of(row, key, sizeof(key)) || !(settings_expanded[row] || settings_fold_at[row]) || !settings_expander(row))
                 return count;
+        settings_sub_owner = row;
         section = settings_section_start(row);
         if (string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU) && which && which->kind == SETTINGS_SWITCH)
         {
@@ -1042,6 +1062,8 @@ static fn settings_sub_describe(int at, struct ui_row address_to row)
 
         row->sub = 1, row->section = sub->section, row->label = sub->text, row->value = sub->words;
         row->dim = sub->detail;
+        // A line under its row is as tall as the row's fold: a share of a row while the row opens or shuts.
+        row->reveal = sub->owner >= 0 && sub->owner < (int)SETTINGS_ALL ? settings_fold_at[sub->owner] : UI_ONE;
 }
 
 // The board, read once a second while Settings is open (its due time is when it is read next): the GPU's sample, and when what the rows
@@ -4054,6 +4076,8 @@ static fn settings_describe(int id, struct ui_row address_to row)
         {
                 settings_badge(id, row);
                 row->expander = settings_expander(id);
+                // The chevron turns with the fold: pointing right shut, down open, and between them while the spring moves it.
+                row->turn = settings_fold_at[id];
         }
         if (id == settings_editing())
         {
@@ -4421,11 +4445,55 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
 }
 
 /*
+        The folds, one frame's step: each row whose spring moves takes its fold from it (ui_spring_at, the kit's spring), and the list is laid
+        out again, so the rows under a folding line move with it. The damage starts at the topmost row that moved (its own place does not
+        move, only what is under it). A row that has shut has no lines any more: the rows are listed again without them.
+*/
+static fn settings_fold_step(void)
+{
+        b32 moved = false, shut = false;
+        int first = -1;
+
+        for (int row = 0; row < SETTINGS_ANY; row++)
+        {
+                b64 target = settings_expanded[row] ? UI_ONE : 0, was = settings_fold_at[row], now;
+                b32 live;
+                int at;
+
+                if (!settings_fold_live[row])
+                        continue;
+                live = ui_spring_at(&settings_fold_spring[row]);
+                now = live ? target + settings_fold_spring[row].value[0] : target;
+                now = now < 0 ? 0 : now > UI_ONE ? UI_ONE : now;
+                settings_fold_at[row] = now;
+                settings_fold_live[row] = live;
+                ui_kit.busy |= live;
+                if (!live && !target)
+                        shut = true;
+                if (now == was)
+                        continue;
+                moved = true;
+                at = ui_list_at(&settings.list, row);
+                if (at >= 0 && (first < 0 || ui_list_row_y(&settings.list, at) < first))
+                        first = ui_list_row_y(&settings.list, at);
+        }
+        if (shut)
+                settings_rebuild();
+        else if (moved)
+        {
+                settings_layout();
+                if (first >= 0)
+                        settings_changed(first, settings.list.y + settings.list.h);
+        }
+}
+
+/*
         One picture into the kit's buffers (ui_buffers_present draws the rows that changed or were spoiled, and shows the
         buffer): the picture is due until the compositor has taken the last one, and clean after it.
 */
 static b32 settings_frame(void)
 {
+        settings_fold_step();
         if (!ui_buffers_present(&settings.page.buffers, &settings.own, settings.width, settings.height, settings_draw_rows, null))
                 return false;
         settings.page.dirty = false;
