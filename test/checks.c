@@ -122132,14 +122132,14 @@ static fn check_pointer(void)
                       quiet && !to_shell_length && first + 4 == before);
                 terminal_deliver(-1, &lift, &dirty);
                 check("pointer: let go moving, the view is thrown", ui_scroll_going(&terminal.bar));
-                ui_drag_stop(&terminal.fling);
+                ui_drag_stop(&terminal.finger.drag);
                 terminal_view_live();
                 finger.b = y;
                 terminal_deliver(-1, &finger, &dirty);
                 terminal_deliver(-1, &land, &dirty);
                 terminal_deliver(-1, &lift, &dirty);
                 check("pointer: a finger's tap is a click where it landed, the press and the release",
-                      to_shell_length == 0 && !terminal.finger_press.down && !terminal.finger_press.dragged);
+                      to_shell_length == 0 && !ui_finger_held(&terminal.finger) && !ui_finger_dragged(&terminal.finger));
                 to_shell_length = 0;
         }
 

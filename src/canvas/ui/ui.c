@@ -9205,6 +9205,17 @@ static int ui_finger_up(struct ui_finger address_to f, b32 cancelled)
         return f->press.down ? ui_press_end(&f->press, cancelled) : -1;
 }
 
+// Whether the finger is down on the widget it went down on, and whether it has moved past the slop as a drag (ui_finger_move).
+static b32 ui_finger_held(const struct ui_finger address_to f)
+{
+        return f->press.down;
+}
+
+static b32 ui_finger_dragged(const struct ui_finger address_to f)
+{
+        return f->press.dragged;
+}
+
 /* ---- a page ---- */
 /*
         A page: ui_page_layout and ui_page_draw (a title, a search field, a column of groups, a body and a status line), the
