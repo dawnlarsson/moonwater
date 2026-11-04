@@ -87,8 +87,9 @@ static void make_popup(void)
                 return;
         memset(&a, 0, sizeof a);
         a.override_redirect = True;
+        a.event_mask = ExposureMask;
         popup = XCreateWindow(display, DefaultRootWindow(display), 100, 100, 120, 80, 0, CopyFromParent, InputOutput,
-                              CopyFromParent, CWOverrideRedirect, &a);
+                              CopyFromParent, CWOverrideRedirect | CWEventMask, &a);
         XMapWindow(display, popup);
         XFlush(display);
         printf("popup 0x%lx\n", (unsigned long)popup);

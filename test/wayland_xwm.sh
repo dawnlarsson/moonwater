@@ -44,6 +44,7 @@ rm -f "$work/in.fifo"
 mkfifo "$work/in.fifo"
 "$work/bin/compositor" -H 800x600 "$work/scan.img" -i "$work/in.fifo" > "$work/compositor.log" 2>&1 &
 cpid=$!
+echo "$cpid" > "$work/cpid"
 i=0
 while [ ! -S /run/moonwater/xwm/wm-0 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 if [ ! -S /run/moonwater/xwm/wm-0 ]; then

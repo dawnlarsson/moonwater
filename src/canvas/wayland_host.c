@@ -253,6 +253,8 @@ static unsigned long compositor_wl_keymap_text(unsigned int layout, char *into, 
                 compositor_wl_number(&text, code + 8);
                 compositor_wl_put(&text, ";\n");
         }
+        // The lights: an X server (Xwayland) updates them when a modifier changes, and a keymap with none leaves it nothing to update.
+        compositor_wl_put(&text, "  indicator 1 = \"Caps Lock\";\n  indicator 2 = \"Num Lock\";\n");
         compositor_wl_put(&text, "};\n");
         compositor_wl_put(&text, "xkb_types \"canvas\" {\n  virtual_modifiers NumLock,LevelThree;\n");
         compositor_wl_put(&text, "  type \"ONE_LEVEL\" { modifiers = none; map[none] = Level1; };\n");
@@ -278,6 +280,8 @@ static unsigned long compositor_wl_keymap_text(unsigned int layout, char *into, 
         compositor_wl_put(&text, "  interpret Caps_Lock { action = LockMods(modifiers = Lock); };\n");
         compositor_wl_put(&text, "  interpret Num_Lock { virtualModifier = NumLock; action = LockMods(modifiers = NumLock); };\n");
         compositor_wl_put(&text, "  interpret ISO_Level3_Shift { virtualModifier = LevelThree; action = SetMods(modifiers = LevelThree); };\n");
+        compositor_wl_put(&text, "  indicator \"Caps Lock\" { !allowExplicit; whichModState = Locked; modifiers = Lock; };\n");
+        compositor_wl_put(&text, "  indicator \"Num Lock\" { !allowExplicit; whichModState = Locked; modifiers = NumLock; };\n");
         compositor_wl_put(&text, "};\n");
         compositor_wl_put(&text, "xkb_symbols \"canvas\" {\n  name[Group1] = \"Canvas\";\n");
         for (unsigned long at = 0; at < sizeof codes; at++)
@@ -2218,6 +2222,14 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
         if (wanted[1 + WAYLAND_CLIENTS].returned)
                 compositor_wl_transfers_done();
         compositor_xwm_pass(wanted);
+        // A commit that waited for the window manager to say what an X window is, made now that it has.
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+                if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
+                {
+                        wayland_resume(slot);
+                        if (wayland_dead(slot))
+                                compositor_wl_flush(slot);
+                }
 }
 
 /* ---- input: the pointer and the keys, as a client is told of them ---- */

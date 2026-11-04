@@ -152,6 +152,7 @@ struct wayland_rect
         into it and tells the compositor the picture is new, row_title gives the tab's text, and row_do asks it
         for something (WAYLAND_DO_*). row_facts reads what the compositor says of the window.
 */
+#define WAYLAND_XWAIT_MS 300      // a commit of an X window waits this long for its window manager to say what the window is
 #define WAYLAND_KIND_TOPLEVEL 1
 #define WAYLAND_KIND_POPUP 2
 
@@ -408,6 +409,11 @@ struct wayland_surface
         // A zwp_xwayland_keyboard_grab_v1 holds the keys as a shortcuts inhibitor does (xgrab).
         unsigned char xsurface, xserial_set, xgrab;
         unsigned long long xserial;
+        // The window manager's word on it (wayland_xwindow_adopt): xadopted once it has said what the X window is, xpopup for an
+        // override-redirect window at (xx, xy) of the output, xdead once its window manager is gone (never shown again), and xwait,
+        // the host's ms at which a commit that waited for the word is made without it.
+        unsigned char xadopted, xpopup, xdead;
+        long xx, xy, xwait;
         // The shortcuts inhibitor: its object, whether it is active (the surface has the keyboard and the inhibitor is not cancelled by
         // the escape chord), and the escape chord's Escape: held down, and since when (the host's ms).
         unsigned int shortcut_id;
@@ -2297,6 +2303,28 @@ static void wayland_surface_screens(struct wayland_client *c, struct wayland_sur
 }
 
 /*
+        The row an X popup hangs from: the first shown X window of the same Xwayland that is not a popup itself, and where the popup
+        is in relation to it (the popup's place in the output less the window's), -1 when there is none.
+*/
+static long wayland_xparent(struct wayland_client *c, const struct wayland_surface *s, long *px, long *py)
+{
+        for (long at = 0; at < WAYLAND_SURFACES; at++)
+        {
+                const struct wayland_surface *o = &c->surfaces[at];
+                struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
+
+                if (o == s || !o->live || !o->xsurface || !o->xadopted || o->xpopup || o->row < 0)
+                        continue;
+                if (wayland.host->row_facts(wayland.host->context, o->row, &facts) < 0)
+                        continue;
+                *px = s->xx - facts.x;
+                *py = s->xy - facts.y;
+                return o->row;
+        }
+        return -1;
+}
+
+/*
         The window of a surface that has a buffer: its row, opened by the first picture, and the buffer's damaged rows
         copied into it. A popup whose parent is not shown has nothing to be shown over, and is not shown.
 */
@@ -2310,10 +2338,10 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
 
         if (first)
         {
-                int parent = -1;
+                int parent = -1, popup = s->role == WAYLAND_ROLE_POPUP;
                 struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
 
-                if (s->role == WAYLAND_ROLE_POPUP)
+                if (popup)
                 {
                         struct wayland_surface *above = s->parent ? &c->surfaces[s->parent - 1] : 0;
 
@@ -2322,13 +2350,26 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                         if (parent < 0)
                                 return WAYLAND_OK;
                 }
-                s->row = wayland.host->row_open(wayland.host->context, c->slot,
-                                                s->role == WAYLAND_ROLE_POPUP ? WAYLAND_KIND_POPUP : WAYLAND_KIND_TOPLEVEL, parent,
+                else if (s->xsurface && s->xpopup)
+                {
+                        // An override-redirect X window is a popup of the window it is over, at its place in the output; with no
+                        // window to hang from it is shown as a window.
+                        long px = 0, py = 0;
+
+                        parent = (int)wayland_xparent(c, s, &px, &py);
+                        if (parent >= 0)
+                        {
+                                popup = 1;
+                                s->popup_x = px;
+                                s->popup_y = py;
+                        }
+                }
+                s->row = wayland.host->row_open(wayland.host->context, c->slot, popup ? WAYLAND_KIND_POPUP : WAYLAND_KIND_TOPLEVEL, parent,
                                                 s->popup_x, s->popup_y);
                 if (s->row < 0)
                 {
                         s->row = -1;
-                        return wayland_fail(c, s->role_id, WAYLAND_NO_MEMORY, "no window left");
+                        return wayland_fail(c, s->role_id ? s->role_id : self->id, WAYLAND_NO_MEMORY, "no window left");
                 }
                 wayland.row_client[s->row] = c->slot;
                 wayland.row_surface[s->row] = wayland_surface_index(c, s);
@@ -2461,6 +2502,18 @@ static int wayland_hold_wanted(struct wayland_client *c, struct wayland_surface 
 {
         struct wayland_surface *root = wayland_root_of(c, s);
 
+        // An X window's first picture waits for its window manager to say what the window is (a window or a popup, and its title),
+        // a moment at most: past it the window is shown as a window, as a client whose window manager never answered would be.
+        if (s->xsurface && !s->xadopted && !s->xdead && s->row < 0 && s->attach_made && s->attached)
+        {
+                long now = wayland.host->now(wayland.host->context);
+
+                if (!s->xwait)
+                        s->xwait = now + WAYLAND_XWAIT_MS;
+                if (now < s->xwait)
+                        return 1;
+                s->xadopted = 1;
+        }
         if (!root || root->row < 0 || (s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_sync))
                 return 0;
         if (s->pending_fifo && s->barrier && s->barrier_frame == wayland.frames)
@@ -2478,6 +2531,9 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
 {
         long buffer = -1;
         int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0;
+        // An X window the window manager has said is one is shown as the surface of an xdg toplevel (or popup) is, with no xdg
+        // object to configure: the window manager sizes it.
+        int shown;
 
         // wp_fifo and wp_commit_timing: a commit that is held is held as one that waits for its budget is: the client's stream waits
         // here, and the commit is made again when wayland_resume finds it no longer held. A barrier this commit sets is set once it is
@@ -2486,7 +2542,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         {
                 c->hold = 1;
                 c->hold_surface = wayland_surface_index(c, s);
-                c->hold_at = s->pending_timestamp ? (long)(s->pending_timestamp / 1000000ul) : 0;
+                c->hold_at = s->xwait && s->xsurface && !s->xadopted ? s->xwait : s->pending_timestamp ? (long)(s->pending_timestamp / 1000000ul) : 0;
                 c->stalled_fd = -1;
                 return WAYLAND_STALL;
         }
@@ -2513,6 +2569,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                 c->stalled_fd = -1;
                 return WAYLAND_STALL;
         }
+        shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
                 return wayland_sub_commit(c, self, s);
         if (xdg)
@@ -2567,14 +2624,14 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                                                                           : "the source is not whole units and there is no destination");
                 if (!wayland_viewport_used(s) && (b->width % s->pending_scale || b->height % s->pending_scale))
                         return wayland_fail(c, self->id, WLN_wl_surface_error_invalid_size, "the buffer is not a whole number of the scale");
-                if (xdg && wayland_show(c, self, s, b, scale120) < 0)
+                if (shown && wayland_show(c, self, s, b, scale120) < 0)
                         return WAYLAND_DEAD;
                 s->width = b->width;
                 s->height = b->height;
                 s->scale = s->pending_scale;
                 s->scale120 = scale120;
                 s->transform = s->pending_transform;
-                if (xdg && s->row >= 0 && wayland_has_children(c, wayland_surface_index(c, s)))
+                if (shown && s->row >= 0 && wayland_has_children(c, wayland_surface_index(c, s)))
                 {
                         // A window with subsurfaces keeps its picture, as they do, to lay them over again; they are laid on now.
                         struct wayland_rect window;
@@ -2600,7 +2657,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         else if (s->attach_made && !s->attached)
         {
                 // A null buffer: the window goes, and what it was told is not true any more.
-                if (xdg)
+                if (shown)
                 {
                         wayland_unhold(c, s);
                         wayland_row_release(c, s);
@@ -2612,7 +2669,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         }
 
         // A commit with no buffer of its own still lays on the subsurfaces that were waiting for it.
-        if (buffer < 0 && !initial && xdg && s->row >= 0 && (s->flags & WAYLAND_SURFACE_MAPPED) &&
+        if (buffer < 0 && !initial && shown && s->row >= 0 && (s->flags & WAYLAND_SURFACE_MAPPED) &&
             wayland_has_children(c, wayland_surface_index(c, s)))
         {
                 if (s->need_full)
@@ -7120,6 +7177,80 @@ WAYLAND_API long wayland_serial_row(unsigned long long serial)
                 }
         }
         return -2;
+}
+
+static struct wayland_surface *wayland_xserial_surface(unsigned long long serial)
+{
+        for (long at = 0; at < WAYLAND_CLIENTS; at++)
+        {
+                struct wayland_client *c = wayland.client[at];
+
+                for (long slot = 0; c && slot < WAYLAND_SURFACES; slot++)
+                {
+                        struct wayland_surface *s = &c->surfaces[slot];
+
+                        if (s->live && s->xserial_set && s->xserial == serial)
+                                return s;
+                }
+        }
+        return 0;
+}
+
+/*
+        The window manager's word on the X window whose surface set this serial: it is a window, or (popup) an override-redirect
+        window at (x, y) of the output, with this title (plain text, cut to what a title takes). A surface that waited for the word
+        is shown at the commit that follows. Answers the surface's row (-1 while it has none), or -2 when no surface has the serial
+        yet, which the window manager asks of again. Said again, it sets the title anew.
+*/
+WAYLAND_API long wayland_xwindow_adopt(unsigned long long serial, long popup, long x, long y, const char *title)
+{
+        struct wayland_surface *s = wayland_xserial_surface(serial);
+        char text[WAYLAND_TEXT];
+        long at = 0;
+
+        if (!s || !s->xsurface || s->xdead)
+                return -2;
+        s->xadopted = 1;
+        if (s->row < 0)
+        {
+                s->xpopup = popup ? 1 : 0;
+                s->xx = x;
+                s->xy = y;
+        }
+        for (; title && title[at] && at < WAYLAND_TEXT - 1; at++)
+                text[at] = title[at];
+        text[at] = 0;
+        for (long i = 0; i <= at; i++)
+                if (text[i] != s->title[i])
+                {
+                        for (long j = 0; j <= at; j++)
+                                s->title[j] = text[j];
+                        if (s->row >= 0 && wayland.host)
+                                wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
+                        break;
+                }
+        return s->row >= 0 ? s->row : -1;
+}
+
+/* The window manager of an X window is gone: its window is taken away, and its surface is shown no more. */
+WAYLAND_API void wayland_xwindow_gone(unsigned long long serial)
+{
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = wayland_xserial_surface(serial);
+
+        if (!s || !s->xsurface)
+                return;
+        for (long at = 0; at < WAYLAND_CLIENTS && !c; at++)
+        {
+                struct wayland_client *o = wayland.client[at];
+
+                if (o && s >= o->surfaces && s < o->surfaces + WAYLAND_SURFACES)
+                        c = o;
+        }
+        s->xdead = 1;
+        s->xadopted = 0;
+        if (c)
+                wayland_row_release(c, s);
 }
 
 /* Whether a window has a keyboard shortcuts inhibitor, and whether its tearing hint is asynchronous (allowed to tear). */
