@@ -7022,7 +7022,7 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         if (!compositor_gpu || compositor_gpu_state.dead || (compositor.card < 0 && !compositor_gpu_state.force) ||
             compositor_spots_any(0) || (compositor.width & 3) || (compositor.scanout_pitch & 15))
                 return 0;
-        if (!compositor_gpu_up())
+        if (!compositor_gpu_up() || !gpu_idle()) // a job given up on may still read the buffer: no record is written into it until it is done
                 return 0;
         // A present is a tick of the maps' (gpu_trim) whether the GPU draws it or not: a run of presents the processor draws (a window landing, scaled) made
         // maps of the pictures and let none go, and once all were held the GPU drew nothing again.

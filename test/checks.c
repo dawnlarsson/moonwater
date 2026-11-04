@@ -121670,6 +121670,8 @@ static string_address address_to bowl_environment(string_address address_to inhe
 #include "../src/canvas/font.c"
 #define SHELL_NO_WAYLAND 1 // the shim is on in a build, and these lanes are without the shell's signals it needs; CHECK_wayland holds it
 #ifdef CHECK_gpu_kit
+static int gpu_fake_busy; // the check's fake fence: while it is set, every job waited for is answered as still running (nothing on the card is held)
+#define GPU_WAIT_CS(wait) (gpu_fake_busy ? ((wait)[0] = 1, true) : gpu_io(3u, 9, 32, wait))
 #include "../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
 #include "../src/canvas/compositor.c"
@@ -212494,6 +212496,36 @@ b32 main(void)
                 if (!drew || wrong)
                         string_format(log, "  gpu presents: %s, %p pixels wrong, %p maps held\n", drew ? (string_address) "drawn" : (string_address) "not drawn", wrong, (positive)gpu_map_count);
                 check("gpu presents: a window grown through a hundred maps is composed by the GPU at its last size", drew && !wrong);
+
+                // A job given up on that may still run, by the check's fake fence (gpu_fake_busy: the wait answers "still running" while it is set; nothing on
+                // the card is held, the job itself is done in microseconds). While it may run, no present writes the buffer (a record already there stays) and
+                // no scene runs; once the wait says done the GPU composes again. A job the wait answers with an error (a queue's reset ended it; here a
+                // sequence never given) is over, and the jobs after it go to a new context.
+                {
+                        unsigned int address_to records = compositor_gscene.ops, was = gpu.ctx;
+                        b32 refused, kept = true, idle;
+
+                        ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0xff336699u, ops[6] = ops[7] = 0;
+                        gpu_fake_busy = 1;
+                        refused = !gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && gpu.pending;
+                        for (int i = 0; i < 8; i++)
+                                records[i] = 0xdeadbeefu;
+                        compositor.damages = 1;
+                        refused = refused && !compositor_gpu_present(&f, 1) && !gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && !gpu_idle();
+                        for (int i = 0; i < 8; i++)
+                                kept = kept && records[i] == 0xdeadbeefu;
+                        gpu_fake_busy = 0; // the real fence: the job may still be on the card for some microseconds
+                        for (positive began = clock_monotonic_nanoseconds(); !(idle = gpu_idle()) && clock_monotonic_nanoseconds() - began < 1000000000ull;)
+                                ;
+                        check("gpu pending: a scene whose job is not seen done is given up on, and the job held as pending", refused);
+                        check("gpu pending: while it may run, the present draws on the processor and writes no record", kept);
+                        check("gpu pending: once the wait says done the buffer is the processor's again", idle && !gpu.pending);
+                        check("gpu pending: and the GPU composes the next present", compositor_gpu_present(&f, 1) == 1);
+                        gpu.pending = 1ull << 40;
+                        check("gpu pending: a job the wait answers with an error is over, on a new context", gpu_idle() && !gpu.pending && gpu.ctx != was);
+                        pic[0] = 0;
+                        check("gpu pending: the new context runs a scene", gpu_scene(ops_at, 1, bins_at, pic_at, PP, 64, 4, 0, 0, 64, 4) && pic[0] == 0xff336699u);
+                }
                 compositor.damages = 0, compositor_gpu_state.up = 0;
         }
         return test_report(null);

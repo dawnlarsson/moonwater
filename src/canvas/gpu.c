@@ -7,7 +7,8 @@
 #define GPU_VA 0x1000000000ull
 #define GPU_DATA 40960 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024
 
-static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size; } gpu; // broken: the card is there and drew the self-test wrong
+// broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
+static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size, pending; } gpu;
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
 static const unsigned int gpu_cp[] = {
@@ -439,6 +440,9 @@ static unsigned int gpu_kernel_at[GPU_KERNELS];
 typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + 256 * 7 <= GPU_DATA - 1024 ? 1 : -1]; // they end before the pixels begin
 
 #define gpu_io(dir, n, size, a) (system_control(gpu.fd, GPU_IO(dir, n, size), a) == 0)
+#ifndef GPU_WAIT_CS
+#define GPU_WAIT_CS(wait) gpu_io(3u, 9, 32, wait) // a check puts a fake fence here
+#endif
 
 static b32 gpu_selftest(void);
 
@@ -632,7 +636,33 @@ static void gpu_unimport(positive at)
 struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, rows; };
 #define GPU_ARGS ((struct gpu_args address_to)(gpu.at + 128))
 
-// Run the kernel over the arguments' w by rows pixels; false if it did not finish.
+/*
+        Whether the buffer is the processor's again: no job that was given up on (gpu_run waits 2 s for each) can still read it. A job not seen done
+        is asked after again with a deadline already past; while it may run nothing may write the buffer (its arguments, lists and records would change
+        under it: a wave that starts late reads them as they are then), so the compositor draws on the processor. Answered with an error (the job ended
+        by the queue's reset, or the context the reset left guilty), it is over and the jobs after it go to a context of their own.
+*/
+static b32 gpu_idle(void)
+{
+        p64 wait[4] = {gpu.pending, clock_monotonic_nanoseconds(), 1, (positive)gpu.ctx << 32};
+        unsigned int ctx[4] = {1, 0, 0, 0}, old[4] = {2, 0, gpu.ctx, 0}; // AMDGPU_CTX_OP_ALLOC_CTX, and FREE_CTX of the one before
+
+        if (!gpu.pending)
+                return true;
+        if (GPU_WAIT_CS(wait))
+        {
+                if (wait[0])
+                        return false; // still running
+        }
+        else if (gpu_io(3u, 2, 16, ctx))
+                gpu_io(3u, 2, 16, old), gpu.ctx = ctx[0];
+        else
+                return false;
+        gpu.pending = 0;
+        return true;
+}
+
+// Run the kernel over the arguments' w by rows pixels; false if it did not finish (then gpu_idle holds the buffer until it has).
 static b32 gpu_run(void)
 {
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), address_to k = gpu_kernels[which].words;
@@ -652,6 +682,8 @@ static b32 gpu_run(void)
             list[2] = {(positive)chunk, (positive)(chunk + 2)}, cs[3] = {gpu.ctx, 2, (positive)list}, wait[4] = {0, 0, 1, (positive)gpu.ctx << 32};
         unsigned int named, tries = 0;
 
+        if (!gpu_idle())
+                return false;
         memory_copy(gpu.at, ib, sizeof(ib));
         for (;;)
         {
@@ -668,8 +700,11 @@ static b32 gpu_run(void)
                 if (++tries == 3 || gpu_drop_unmapped())
                         return false;
         }
-        wait[0] = cs[0], wait[1] = clock_monotonic_nanoseconds() + 2000000000ull;
-        return gpu_io(3u, 9, 32, wait) && wait[0] == 0;
+        wait[0] = gpu.pending = cs[0], wait[1] = clock_monotonic_nanoseconds() + 2000000000ull;
+        if (!GPU_WAIT_CS(wait) || wait[0])
+                return false;
+        gpu.pending = 0;
+        return true;
 }
 
 // ui_box_radii on a box record's rx and ry (words 6 and 7): where two corners come to more than a side, the one factor that fits them all.
@@ -702,6 +737,8 @@ static b32 gpu_scene(positive ops_at, unsigned int n, positive bins_at, positive
         unsigned int cw = (w + 63) >> 6, ch = (h + 63) >> 6, at = 0, hand = 0, i, c, address_to list = tab + 2 * cw * ch;
         struct gpu_args address_to a = GPU_ARGS;
 
+        if (!gpu_idle()) // the lists and the arguments are not to be written under a job that may still read them
+                return false;
         dx1 = dx1 > w ? w : dx1, dy1 = dy1 > h ? h : dy1;
         if (dx0 >= dx1 || dy0 >= dy1)
                 return true;
