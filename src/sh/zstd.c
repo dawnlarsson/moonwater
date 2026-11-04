@@ -5089,11 +5089,11 @@ zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
                 positive const next = zstd_hash_bytes(ip + 8, (p8)(e->p.hash_log - row_log + 8), mls) >> 8;
                 p8 address_to const ahead = chain + (next << row_log) + next;
 
-                __builtin_prefetch(ahead);
-                __builtin_prefetch(ahead + entries);
-                __builtin_prefetch(table + (next << row_log));
+                prefetch_read(ahead);
+                prefetch_read(ahead + entries);
+                prefetch_read(table + (next << row_log));
                 if (row_log > 4)
-                        __builtin_prefetch(table + (next << row_log) + 16);
+                        prefetch_read(table + (next << row_log) + 16);
         }
         cell = chain + (row << row_log) + row;
         slots = table + (row << row_log);
@@ -5112,7 +5112,7 @@ zstd_row_find(zstd_encoder address_to e, p8 address_to ip, p8 address_to iend,
                         break;
                 if (candidate >= cur)
                         continue;
-                __builtin_prefetch(base + candidate);
+                prefetch_read(base + candidate);
                 found[gathered++] = candidate;
                 attempts--;
         }

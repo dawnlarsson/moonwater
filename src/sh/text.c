@@ -300,7 +300,7 @@ static inline INLINE fn text_put_character(p8 character)
 
 static inline INLINE fn text_put_string(string_address value)
 {
-        text_put(value, (positive)__builtin_strlen((const char address_to)value));
+        text_put(value, (positive)string_length((const char address_to)value));
 }
 
 /*
@@ -6562,7 +6562,7 @@ static fn cat_walked()
                                 blank_before = blank;
                                 if ((cat_flags & CAT_NUMBER_FULL) ? !blank : (cat_flags & CAT_NUMBER))
                                 {
-                                        __builtin_memcpy(into, cat_numeral, sizeof(cat_numeral));
+                                        memory_copy_apart(into, cat_numeral, sizeof(cat_numeral));
                                         into += cat_numeral_length;
                                         number++;
                                         cat_numeral_step(number);
@@ -12927,7 +12927,7 @@ static positive text_tab_expand_one(p8 character, positive column)
 
                 if (into)
                 {
-                        __builtin_memcpy(into, "                ", 16);
+                        memory_copy_apart(into, "                ", 16);
                         text_out_used -= 16 - (after - column);
                         return after;
                 }
@@ -21731,8 +21731,8 @@ static inline INLINE p8 address_to cut_bytes_copy(p8 address_to out, p8 address_
 {
         if (size <= 32 && from + 32 <= room_in && out + 32 <= room_out)
         {
-                __builtin_memcpy(out, from, 16);
-                __builtin_memcpy(out + 16, from + 16, 16);
+                memory_copy_apart(out, from, 16);
+                memory_copy_apart(out + 16, from + 16, 16);
                 return out + size;
         }
 
@@ -37596,14 +37596,14 @@ static fn sort_items_load_range(positive from, positive to, b32 stage,
                 // asked for now.
                 if (at + 16 < to)
                 {
-                        __builtin_prefetch(sort_lines + sort_items[at + 16].line);
+                        prefetch_read(sort_lines + sort_items[at + 16].line);
 
                         if (sort_spans)
-                                __builtin_prefetch(sort_spans + sort_items[at + 16].line);
+                                prefetch_read(sort_spans + sort_items[at + 16].line);
                 }
 
                 if (at + 8 < to)
-                        __builtin_prefetch(sort_text + sort_lines[sort_items[at + 8].line].at +
+                        prefetch_read(sort_text + sort_lines[sort_items[at + 8].line].at +
                                            depth);
                 sort_view view = sort_view_of(item->line);
 
@@ -37723,14 +37723,14 @@ static fn sort_items_insert(positive from, positive to, b32 stage, positive dept
         {
                 for (positive at = from; at < to; at++)
                 {
-                        __builtin_prefetch(sort_lines + sort_items[at].line);
+                        prefetch_read(sort_lines + sort_items[at].line);
 
                         if (sort_spans)
-                                __builtin_prefetch(sort_spans + sort_items[at].line);
+                                prefetch_read(sort_spans + sort_items[at].line);
                 }
 
                 for (positive at = from; at < to; at++)
-                        __builtin_prefetch(sort_text + sort_lines[sort_items[at].line].at + skip);
+                        prefetch_read(sort_text + sort_lines[sort_items[at].line].at + skip);
         }
 
         for (positive at = from + 1; at < to; at++)
@@ -38590,7 +38590,7 @@ static inline INLINE fn sort_writer_line(sort_writer address_to out,
         // call was a function's worth of setup.
         if (length <= 64)
                 for (positive copied = 0; copied < length; copied += 16)
-                        __builtin_memcpy(into + copied, at + copied, 16);
+                        memory_copy_apart(into + copied, at + copied, 16);
         else
                 memory_copy_apart(into, at, length);
 
@@ -38996,10 +38996,10 @@ static fn sort_emit_serial(sort_writer address_to out)
                 // at all to the cache: fetch a record sixteen items ahead and
                 // the line it names eight ahead.
                 if (at + 16 < sort_lines_count)
-                        __builtin_prefetch(sort_lines + sort_items[at + 16].line);
+                        prefetch_read(sort_lines + sort_items[at + 16].line);
 
                 if (at + 8 < sort_lines_count)
-                        __builtin_prefetch(sort_text +
+                        prefetch_read(sort_text +
                                            sort_lines[sort_items[at + 8].line].at);
 
                 sort_view view = sort_view_of(sort_items[at].line);
@@ -39077,10 +39077,10 @@ static fn sort_emit_job(address_any context, positive index,
         for (positive at = from; at < to; at++)
         {
                 if (at + 16 < to)
-                        __builtin_prefetch(sort_lines + sort_items[at + 16].line);
+                        prefetch_read(sort_lines + sort_items[at + 16].line);
 
                 if (at + 8 < to)
-                        __builtin_prefetch(sort_text +
+                        prefetch_read(sort_text +
                                            sort_lines[sort_items[at + 8].line].at);
 
                 if (sort_unique && at)
@@ -39097,7 +39097,7 @@ static fn sort_emit_job(address_any context, positive index,
 
                 if (line->length <= 64)
                         for (positive copied = 0; copied < line->length; copied += 16)
-                                __builtin_memcpy(into + used + copied, text + copied, 16);
+                                memory_copy_apart(into + used + copied, text + copied, 16);
                 else
                         memory_copy_apart(into + used, text, line->length);
 
@@ -40441,7 +40441,7 @@ static fn sort_piece_line(sort_scratch address_to slot, positive address_to used
 
         if (line->length <= 64)
                 for (positive copied = 0; copied < line->length; copied += 16)
-                        __builtin_memcpy(into + copied, line->at + copied, 16);
+                        memory_copy_apart(into + copied, line->at + copied, 16);
         else
                 memory_copy_apart(into, line->at, line->length);
 

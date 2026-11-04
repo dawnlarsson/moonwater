@@ -2942,7 +2942,7 @@ static p32 xz_finder_find(xz_finder address_to e)
                 p32 cur_match = hash[hv];
                 p32 len_best = 2;
 
-                __builtin_prefetch(hash + XZ_HASH2_SIZE +
+                prefetch_read(hash + XZ_HASH2_SIZE +
                                    ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8)) & e->hash_mask));
 
                 hash[hv] = pos;
@@ -2970,7 +2970,7 @@ static p32 xz_finder_find(xz_finder address_to e)
                  ((temp ^ (hash_crc32_tab[cur[3]] << 5)) & e->hash_mask);
         //      The next position's bucket, a miss of its own, is fetched a
         //      whole walk ahead; its bytes lie within the block's slack.
-        __builtin_prefetch(hash + XZ_HASH2_SIZE + XZ_HASH3_SIZE +
+        prefetch_read(hash + XZ_HASH2_SIZE + XZ_HASH3_SIZE +
                            ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8) ^
                              (hash_crc32_tab[cur[4]] << 5)) & e->hash_mask));
         p32 delta3 = pos - hash[h3];
@@ -3121,7 +3121,7 @@ static fn xz_finder_skip(xz_finder address_to e, p32 amount)
                 {
                         p32 hv = XZ_HASH2_SIZE + (temp & e->hash_mask);
                         cur_match = hash[hv];
-                        __builtin_prefetch(hash + XZ_HASH2_SIZE +
+                        prefetch_read(hash + XZ_HASH2_SIZE +
                                            ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8)) & e->hash_mask));
                         hash[hv] = pos;
                 }
@@ -3129,7 +3129,7 @@ static fn xz_finder_skip(xz_finder address_to e, p32 amount)
                 {
                         p32 h4 = XZ_HASH2_SIZE + XZ_HASH3_SIZE +
                                  ((temp ^ (hash_crc32_tab[cur[3]] << 5)) & e->hash_mask);
-                        __builtin_prefetch(hash + XZ_HASH2_SIZE + XZ_HASH3_SIZE +
+                        prefetch_read(hash + XZ_HASH2_SIZE + XZ_HASH3_SIZE +
                                            ((xz_hash_head(cur + 1) ^ ((p32)cur[3] << 8) ^
                                              (hash_crc32_tab[cur[4]] << 5)) & e->hash_mask));
                         hash[XZ_HASH2_SIZE + (temp & (XZ_HASH3_SIZE - 1))] = pos;

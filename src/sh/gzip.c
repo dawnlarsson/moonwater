@@ -3161,8 +3161,8 @@ static inline INLINE fn gzip_chain_ahead(gzip_encoder address_to e, p32 address_
 
         address_to h3 = gzip_hash(seq << 8, GZIP_HASH3_BITS);
         address_to h4 = gzip_hash(seq, GZIP_HASH4_BITS);
-        __builtin_prefetch(e->head3 + address_to h3, 1);
-        __builtin_prefetch(e->head4 + address_to h4, 1);
+        prefetch_write(e->head3 + address_to h3);
+        prefetch_write(e->head4 + address_to h4);
 }
 
 /* Chain finder: pos goes in, and the longest match longer than best
@@ -3202,7 +3202,7 @@ static inline INLINE positive gzip_chain_find(gzip_encoder address_to e, positiv
         gzip_chain_ahead(e, h3, h4, here + 1);
         /* The window's line the next position's newest candidate is on,
            fetched now that the table's cell is on its way. */
-        __builtin_prefetch(window + e->head4[address_to h4]);
+        prefetch_read(window + e->head4[address_to h4]);
         if (best < 4)
         {
                 if (node3 <= floor)
@@ -3310,8 +3310,8 @@ static inline INLINE fn gzip_chain_skip(gzip_encoder address_to e, positive pos,
                         b = gzip_hash(seq, GZIP_HASH4_BITS);
                 }
         }
-        __builtin_prefetch(e->head3 + a, 1);
-        __builtin_prefetch(e->head4 + b, 1);
+        prefetch_write(e->head3 + a);
+        prefetch_write(e->head4 + b);
         address_to h3 = a;
         address_to h4 = b;
 }
@@ -3336,7 +3336,7 @@ static inline INLINE fn gzip_fast_skip(gzip_encoder address_to e, positive pos,
                 fast[2 * a] = (p32)(pos + 1);
                 a = gzip_hash(memory_load_unaligned(p32, base + pos + 1), GZIP_FAST_BITS);
         }
-        __builtin_prefetch(fast + 2 * a, 1);
+        prefetch_write(fast + 2 * a);
         address_to h = a;
 }
 
@@ -3436,7 +3436,7 @@ static __attribute__((noinline)) positive gzip_parse_fast(gzip_encoder address_t
                 fast[2 * h] = (p32)(pos + 1);
                 fast[2 * h + 1] = first;
                 h = gzip_hash(memory_load_unaligned(p32, here + 1), GZIP_FAST_BITS);
-                __builtin_prefetch(fast + 2 * h, 1);
+                prefetch_write(fast + 2 * h);
                 if (first >= floor && memory_load_unaligned(p32, base + first - 1) == seq)
                 {
                         best = gzip_extend(here, base + first - 1, 4, most);
@@ -3898,8 +3898,8 @@ static inline INLINE gzip_match address_to gzip_bt_advance(struct gzip_ultra add
 
         address_to h3 = gzip_hash(seq << 8, 16);
         address_to h4 = gzip_hash(seq, 16);
-        __builtin_prefetch(u->hash3 + 2 * address_to h3, 1);
-        __builtin_prefetch(u->hash4 + address_to h4, 1);
+        prefetch_write(u->hash3 + 2 * address_to h3);
+        prefetch_write(u->hash4 + address_to h4);
         node3 = u->hash3[2 * a];
         node3b = u->hash3[2 * a + 1];
         u->hash3[2 * a] = cur;

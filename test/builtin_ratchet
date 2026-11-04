@@ -9,10 +9,9 @@ src/canvas/font.c 24
 src/net/net.c 2
 src/sh/builtin.c 2
 src/sh/file.c 45
-src/sh/gzip.c 10
+src/sh/gzip.c 1
 src/sh/host.c 3
-src/sh/text.c 26
-src/sh/xz.c 4
-src/sh/zstd.c 7
+src/sh/text.c 8
+src/sh/zstd.c 2
 src/waterlink/nearby.c 1
 src/waterlink/service.c 1
