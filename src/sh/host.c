@@ -22289,6 +22289,20 @@ static b32 host_debug(string_address address_to arguments, positive count)
         for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)
                 if (table->gpu_refused[why])
                         host_say(log, "  gpu refused     %p, %s\n", (positive)table->gpu_refused[why], windows_gpu_reasons[why] ? windows_gpu_reasons[why] : (string_address) "?");
+        if (table->gpu_family)
+                host_say(log, "  gpu card        amdgpu family %p, device id %p\n", (positive)table->gpu_family, (positive)table->gpu_device);
+        if (table->gpu_map_why && table->gpu_map_probe)
+                host_say(log, "  gpu map probes  the node answers a plain question: %s; userptr over anonymous memory: error %p; over the refused page: error %p, without validating it: error %p (0 is taken)\n",
+                         table->gpu_map_probe & 1 ? (string_address) "yes" : (string_address) "no", (positive)(table->gpu_map_probe >> 8 & 255),
+                         (positive)(table->gpu_map_probe >> 16 & 255), (positive)(table->gpu_map_probe >> 24));
+        if (table->gpu_said[0])
+        {
+                char said[257];
+
+                memory_copy(said, (const char *)table->gpu_said, 256);
+                said[256] = 0;
+                host_say(log, "  gpu kernel said %s\n", (string_address)said);
+        }
         if (table->gpu_map_why)
                 host_say(log, "  gpu map         the last map of a picture for the card was refused: %s (error %p)\n",
                          (table->gpu_map_why & 255) == 1 ? (string_address) "all the maps are held" :

@@ -9,7 +9,7 @@
 #define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments at 512, the kernels from 1024, the bases from GPU_BASES_AT
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
-static struct { int fd, broken; unsigned int family, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size, pending; } gpu;
+static struct { int fd, broken; unsigned int family, device, ctx, handle, imported[8], imports; positive imported_va[8], imported_bytes[8]; unsigned int address_to at; positive size, pending; } gpu;
 static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
 
 // rsrc1, rsrc2, then the code of the one kernel (cv.c: copy, fill, tone over, glass over, scene; op in the arguments): clang -mcpu=gfx1036 -mwavefrontsize64 -O3, ld.lld -shared.
@@ -475,7 +475,7 @@ static b32 gpu_start(positive bytes)
                         continue;
                 if (system_control(gpu.fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && string_equals((string_address)name, (string_address)"amdgpu") && gpu_io(1u, 5, 32, ask) && GPU_FAMILIES(who[4]))
                 {
-                        gpu.family = who[4];
+                        gpu.family = who[4], gpu.device = who[0];
                         break;
                 }
                 system_close(gpu.fd), gpu.fd = -1;
@@ -544,6 +544,86 @@ static void gpu_drop(unsigned int i)
 // With every map held, the one used longest ago goes first (a window dragged larger makes a map at each size, faster than gpu_trim lets them go), unless all
 // are this tick's. The card may only read a map (a window's picture is a program's pages): a write of a kernel past what its records name faults there and
 // is dropped; gpu_map_written is for the one the GPU draws into (a headless scanout). No map can be run as code.
+// What a refused map leaves to say why, once for each way it was refused (gpu_map_why): the node asked a plain question (does it answer at all), a userptr over a page of
+// anonymous memory and over the first page of the refused range (whole, and without the validation that takes the pages at once) tried and their errors kept, and the
+// last lines the kernel's log has about the card (/dev/kmsg gives a record a read) kept. moonwater debug shows them, so a machine nobody can sit at can say why.
+static unsigned int gpu_map_probe, gpu_map_said;
+static char gpu_said[256];
+
+static unsigned int gpu_userptr_error(positive at, positive flags)
+{
+        p64 up[3] = {at, 4096, flags};
+        long r = system_control(gpu.fd, GPU_IO(3u, 0x11, 24), up);
+
+        if (r == 0)
+        {
+                p64 close[1] = {up[2] >> 32};
+
+                system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close);
+                return 0;
+        }
+        return (unsigned int)-r & 255;
+}
+
+static void gpu_say_kernel(void)
+{
+        static char record[8192], last[3][90];
+        unsigned int kept = 0, at;
+        long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+
+        if (handle < 0)
+                return;
+        for (unsigned int records = 0; records < 8192; records++)
+        {
+                bipolar got = system_read_once(handle, record, sizeof(record) - 1);
+                char *text, *finish;
+
+                if (got <= 0)
+                        break;
+                record[got] = 0;
+                text = (char *)string_find((string_address)record, (string_address) ";");
+                if (!text)
+                        continue;
+                text++;
+                for (finish = text; *finish && *finish != '\n'; finish++)
+                        ;
+                *finish = 0;
+                if (!string_find((string_address)text, (string_address) "amdgpu") && !string_find((string_address)text, (string_address) "drm"))
+                        continue;
+                string_copy_bounded((string_address)last[kept++ % 3], (string_address)text, sizeof(last[0]));
+        }
+        system_close(handle);
+        gpu_said[0] = 0;
+        for (unsigned int i = kept > 3 ? kept - 3 : 0; i < kept; i++)
+        {
+                at = (unsigned int)string_length((string_address)gpu_said);
+                if (at && at + 3 < sizeof(gpu_said))
+                        gpu_said[at++] = ' ', gpu_said[at++] = '|', gpu_said[at++] = ' ', gpu_said[at] = 0;
+                string_copy_bounded((string_address)gpu_said + at, (string_address)last[i % 3], sizeof(gpu_said) - at);
+        }
+}
+
+static void gpu_map_refused(positive from)
+{
+        static unsigned char *page;
+        unsigned int who[16] = {0};
+        p64 ask[4] = {(p64)who, sizeof(who) | 0x16ull << 32};
+
+        if (gpu_map_why == gpu_map_said)
+                return;
+        gpu_map_said = gpu_map_why;
+        if (!page)
+        {
+                long made = system_call_6(syscall(mmap), 0, 4096, 3, 0x22, (positive)-1, 0);
+
+                if (!(made < 0 && made > -4096))
+                        page = (unsigned char *)made, page[0] = 1;
+        }
+        gpu_map_probe = (gpu_io(1u, 5, 32, ask) ? 1u : 0u) | (page ? gpu_userptr_error((positive)page, 0xc) : 255u) << 8 | gpu_userptr_error(from, 0xc) << 16 |
+                        gpu_userptr_error(from, 0x8) << 24;
+        gpu_say_kernel();
+}
+
 #define gpu_map(addr, size) gpu_map_as(addr, size, 0)
 #define gpu_map_written(addr, size) gpu_map_as(addr, size, 1)
 static b32 gpu_map_as(const void *addr, positive size, b32 written)
@@ -568,7 +648,11 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
         if (!(at = gpu_place(to - from)))
                 return gpu_map_why = 2, false;
         if ((taken = system_control(gpu.fd, GPU_IO(3u, 0x11, 24), up)) != 0)
-                return gpu_map_why = 3 | (unsigned int)-taken << 8, false;
+        {
+                gpu_map_why = 3 | (unsigned int)-taken << 8;
+                gpu_map_refused(from);
+                return false;
+        }
         va[0] = close[0] = up[2] >> 32, va[2] = at;
         if ((taken = system_control(gpu.fd, GPU_IO(1u, 8, 64), va)) != 0)
                 return system_control(gpu.fd, 1u << 30 | 8u << 16 | 0x6409u, close), gpu_map_why = 4 | (unsigned int)-taken << 8, false; // the buffer with it

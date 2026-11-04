@@ -7381,6 +7381,9 @@ static void compositor_gpu_publish(void)
         compositor.table->gpu_drawn = compositor_gpu_counts.drawn, compositor.table->gpu_processor = compositor_gpu_counts.processor;
         memory_copy(compositor.table->gpu_refused, compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
         compositor.table->gpu_map_why = gpu_map_why;
+        compositor.table->gpu_family = gpu.family, compositor.table->gpu_device = gpu.device, compositor.table->gpu_map_probe = gpu_map_probe;
+        if (gpu_said[0] && memory_compare(compositor.table->gpu_said, gpu_said, sizeof(gpu_said)))
+                memory_copy(compositor.table->gpu_said, gpu_said, sizeof(gpu_said));
 }
 
 // A refusal of the card: the reason is counted, and said when it is first or due. A present the card is refused is the processor's (processor 1);

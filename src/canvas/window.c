@@ -900,6 +900,8 @@ struct windows
         unsigned int gpu_drawn, gpu_processor;
         unsigned int gpu_refused[WINDOWS_GPU_REASONS];
         unsigned int gpu_map_why; // why the last map of a picture for the card was refused (gpu.c's gpu_map_why), 0 for none yet
+        unsigned int gpu_family, gpu_device, gpu_map_probe; // the card's family and device id, and what the probes after a refused map found (gpu.c)
+        char gpu_said[256];                                 // the last lines the kernel's log had about the card when a map was refused, joined with ' | '
 
         /*
                 The window lists (window_list_of): WINDOWS lists of list_bytes each, after the pictures, row r's at lists + r * list_bytes from
