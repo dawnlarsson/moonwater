@@ -117788,7 +117788,7 @@ static fn check_turned(void)
         Surviving is the check; what the engine answers is not judged.
 */
 static p8 address_to guarded;
-static positive hostile_cases;
+static positive hostile_cases, hostile_loaded;
 
 static fn exercise(const p8 address_to bytes, positive size)
 {
@@ -117799,6 +117799,7 @@ static fn exercise(const p8 address_to bytes, positive size)
         hostile_cases++;
         if (font_load(&face, at, size, 0))
                 return;
+        hostile_loaded++;
 
         const font_face address_to chain[1] = {&face};
         font_target target = {canvas + 8 * 96 + 8, 96, 80, 80};
@@ -117834,7 +117835,7 @@ static p64 hostile_next(p64 below)
 static fn check_hostile(const p8 address_to font, positive size, p32 mutations)
 {
         static p8 copy[8192];
-        positive before = hostile_cases;
+        positive before = hostile_cases, loaded = hostile_loaded;
 
         for (positive cut = 0; cut <= size; cut++)
                 exercise(font, cut);
@@ -117864,6 +117865,9 @@ static fn check_hostile(const p8 address_to font, positive size, p32 mutations)
         }
         check("hostile: every cut and mutation survived against a guard page",
               hostile_cases == before + size + 1 + mutations);
+        //      Surviving a font that never loads is no check: once the face ids ran out (check_edges loads until the
+        //      load is refused), every one of these was refused at its first line and nothing was drawn.
+        check("hostile: most mutations still load and are drawn", hostile_loaded - loaded > mutations / 2);
 }
 
 /*
@@ -118066,13 +118070,14 @@ b32 main()
         check_copy_changed();
         check_first_differs();
         check_sweep();
-        check_edges(&one, &two);
 
         guarded = memory(9 * 4096);
         check("hostile: a guard page",
               guarded && system_call_3(syscall(mprotect), (positive)(guarded + 8 * 4096), 4096, 0) == 0);
         check_hostile(font_one, font_one_size, 20000);
         check_hostile(font_two, font_two_size, 20000);
+        //      Last: it loads faces until the 16-bit ids run out, and no face loads after it.
+        check_edges(&one, &two);
 
         return test_report(null);
 }
