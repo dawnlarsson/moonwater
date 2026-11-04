@@ -88,6 +88,8 @@ settings_filter_hint	4aa0	הקלד כדי לסנן
 settings_forget	5220	שכח את %s
 settings_help_more	93ec	moonwater help אומר יותר ממה ש"כל הפקודות" מציג: השורה הראשונה מריצה כל פקודה
 settings_identify_screens	8be8	זיהוי מסכים
+settings_issue_audio_open	d428	לא ניתן לפתוח את כרטיס הקול (שגיאה %1$d)
+settings_issue_audio_rate	d45e	כרטיס הקול השתמש ב-%2$d הרץ, ולא ב-%1$d הרץ שנתבקשו
 settings_issue_gpu_cooling	63ed	הכרטיס מתקרר אחרי תקיעות (%1$d ברציפות)
 settings_issue_gpu_family	6311	משפחת GPU זו אינה נתמכת (משפחה %1$d)
 settings_issue_gpu_lists	1433	הרשימות כבויות: הכרטיס אינו מרכיב בפועל

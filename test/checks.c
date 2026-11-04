@@ -222950,6 +222950,25 @@ static void iss_rows_metrics(void)
                       windows_issue_lines(&board, "canvas gpu", 1) == 4);
                 check("expander lines: another key's issues are none of these", windows_issue_lines(&board, "audio device", 1) == 0);
         }
+        // The sound card's issues (audio/service.c's audio_board_set and audio_board_clear, under the audio device row's key): a card that would not
+        // open is an error, a rate it did not take a warning, and a card that opens clears both.
+        {
+                struct windows audio;
+                struct windows_issues copy;
+
+                memory_zero(&audio, sizeof(audio));
+                check("audio board: a card that would not open is an error under the audio device key",
+                      windows_issue_set(&audio, "audio device", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_AUDIO_OPEN, (unsigned int)-5, 0, "") == 1);
+                check("audio board: a rate the card did not take is a warning with both rates",
+                      windows_issue_set(&audio, "audio device", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_AUDIO_RATE, 48000, 44100, "") == 1);
+                windows_issues_read(&audio, &copy);
+                check("audio board: both are read back, the worst is the error", windows_issues_worst(&copy, "audio device", null) == WINDOWS_ISSUE_ERROR &&
+                      windows_issues_worst(&copy, "audio device", null) == WINDOWS_ISSUE_ERROR && copy.count == 2);
+                check("audio board: a card that opens clears its open error and leaves the rate's warning when the rate is fine",
+                      windows_issue_clear(&audio, "audio device", WINDOWS_ISSUE_AUDIO_OPEN) == 1 && windows_issue_clear(&audio, "audio device", WINDOWS_ISSUE_AUDIO_RATE) == 1);
+                windows_issues_read(&audio, &copy);
+                check("audio board: with both cleared the device has no issue", windows_issues_worst(&copy, "audio device", null) == 0 && copy.count == 0);
+        }
 }
 
 b32 main(void)

@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Πληκτρολογήστε για φιλτράρισ
 settings_forget	5220	ξέχνα το %s
 settings_help_more	93ec	το moonwater help λέει περισσότερα από όσα δείχνει το «Όλες οι εντολές»: η πρώτη γραμμή εκτελεί οποιαδήποτε εντολή
 settings_identify_screens	8be8	Αναγνώριση οθονών
+settings_issue_audio_open	d428	Η κάρτα ήχου δεν μπόρεσε να ανοίξει (σφάλμα %1$d)
+settings_issue_audio_rate	d45e	Η κάρτα ήχου χρησιμοποίησε %2$d Hz, και όχι τα %1$d Hz που ζητήθηκαν
 settings_issue_gpu_cooling	63ed	Η κάρτα ψύχεται μετά από κολλήματα (%1$d στη σειρά)
 settings_issue_gpu_family	6311	Αυτή η οικογένεια GPU δεν υποστηρίζεται (οικογένεια %1$d)
 settings_issue_gpu_lists	1433	Οι λίστες είναι κλειστές: η κάρτα δεν συνθέτει στ' αλήθεια

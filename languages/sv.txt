@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Skriv för att filtrera
 settings_forget	5220	glöm %s
 settings_help_more	93ec	moonwater help säger mer än Alla kommandon listar: den första raden kör vilket kommando som helst
 settings_identify_screens	8be8	Identifiera skärmar
+settings_issue_audio_open	d428	Ljudkortet kunde inte öppnas (fel %1$d)
+settings_issue_audio_rate	d45e	Ljudkortet använde %2$d Hz, inte de %1$d Hz som begärdes
 settings_issue_gpu_cooling	63ed	Grafikkortet svalnar efter hängningar (%1$d i rad)
 settings_issue_gpu_family	6311	Den här GPU-familjen stöds inte (familj %1$d)
 settings_issue_gpu_lists	1433	Listorna är av: grafikkortet sammanställer inte på riktigt

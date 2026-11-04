@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Digite para filtrar
 settings_forget	5220	esquecer %s
 settings_help_more	93ec	moonwater help diz mais do que Todos os comandos lista: a primeira linha executa qualquer comando
 settings_identify_screens	8be8	Identificar telas
+settings_issue_audio_open	d428	A placa de som não pôde ser aberta (erro %1$d)
+settings_issue_audio_rate	d45e	A placa de som usou %2$d Hz, e não os %1$d Hz pedidos
 settings_issue_gpu_cooling	63ed	A placa está esfriando depois de travamentos (%1$d seguidos)
 settings_issue_gpu_family	6311	Esta família de GPU não é suportada (família %1$d)
 settings_issue_gpu_lists	1433	As listas estão desligadas: a placa não está compondo de fato

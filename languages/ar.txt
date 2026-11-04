@@ -88,6 +88,8 @@ settings_filter_hint	4aa0	اكتب للتصفية
 settings_forget	5220	نسيان %s
 settings_help_more	93ec	يعرض moonwater help أكثر مما تسرده «كل الأوامر»: الصف الأول ينفذ أي أمر
 settings_identify_screens	8be8	تعريف الشاشات
+settings_issue_audio_open	d428	تعذّر فتح بطاقة الصوت (الخطأ %1$d)
+settings_issue_audio_rate	d45e	استخدمت بطاقة الصوت %2$d هرتز، وليس %1$d هرتز المطلوبة
 settings_issue_gpu_cooling	63ed	البطاقة تبرد بعد التعليق (%1$d مرات متتالية)
 settings_issue_gpu_family	6311	هذه عائلة المعالجات الرسومية غير مدعومة (العائلة %1$d)
 settings_issue_gpu_lists	1433	القوائم مُعطّلة: البطاقة لا تركّب فعليًا

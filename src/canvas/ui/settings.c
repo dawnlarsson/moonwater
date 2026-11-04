@@ -963,6 +963,8 @@ static void settings_issue_text(const struct windows_issue address_to issue, cha
         case WINDOWS_ISSUE_GPU_FAMILY: language_format(into, room, WORDS(settings_issue_gpu_family), (long)issue->a); break;
         case WINDOWS_ISSUE_GPU_LOST: language_format(into, room, WORDS(settings_issue_gpu_lost), (long)issue->a, (long)issue->b); break;
         case WINDOWS_ISSUE_GPU_SCANOUT: language_format(into, room, WORDS(settings_issue_gpu_scanout), (long)issue->a); break;
+        case WINDOWS_ISSUE_AUDIO_OPEN: language_format(into, room, WORDS(settings_issue_audio_open), (long)issue->a); break;
+        case WINDOWS_ISSUE_AUDIO_RATE: language_format(into, room, WORDS(settings_issue_audio_rate), (long)issue->a, (long)issue->b); break;
         default: language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code); break;
         }
 }

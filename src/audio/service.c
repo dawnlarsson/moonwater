@@ -275,6 +275,49 @@ static positive audio_number(string_address text, positive fallback)
         return digits ? value : fallback;
 }
 
+// The sound card's trouble on the board, under the Settings key the audio device row has (window.c's windows_issue_*): a card that would not open,
+// and a rate the card did not take. Set and cleared where the open says which; a process without the table (or before the compositor made it)
+// has none to write to.
+#define AUDIO_BOARD_KEY "audio device"
+#ifdef AUDIO_BOARD
+#define AUDIO_ISSUE_OPEN WINDOWS_ISSUE_AUDIO_OPEN
+#define AUDIO_ISSUE_RATE WINDOWS_ISSUE_AUDIO_RATE
+#define AUDIO_WARNING WINDOWS_ISSUE_WARNING
+#define AUDIO_ERROR WINDOWS_ISSUE_ERROR
+#else
+#define AUDIO_ISSUE_OPEN 0u
+#define AUDIO_ISSUE_RATE 0u
+#define AUDIO_WARNING 0u
+#define AUDIO_ERROR 0u
+#endif
+#ifdef AUDIO_BOARD // the shell has window.c's table and the board's functions in the same program (shell.c defines it)
+static void audio_board_set(unsigned int severity, unsigned int code, long a, long b, string_address detail)
+{
+        struct windows *table = windows_board_map();
+
+        if (table)
+                windows_issue_set(table, AUDIO_BOARD_KEY, severity, code, (unsigned int)a, (unsigned int)b, detail);
+}
+
+static void audio_board_clear(unsigned int code)
+{
+        struct windows *table = windows_board_map();
+
+        if (table)
+                windows_issue_clear(table, AUDIO_BOARD_KEY, code);
+}
+#else
+static void audio_board_set(unsigned int severity, unsigned int code, long a, long b, string_address detail)
+{
+        (void)severity, (void)code, (void)a, (void)b, (void)detail;
+}
+
+static void audio_board_clear(unsigned int code)
+{
+        (void)code;
+}
+#endif
+
 static void audio_say(string_address what, bipolar value)
 {
         string_format(log, "audio: %s %b\n", what, value);
@@ -473,6 +516,11 @@ static int audio_output_open(long asked_rate, int low)
                         audio_service.pcm = pcm;
                         audio_service.why = audio_service.pick_why;
                         audio_service.rate = pcm.rate;
+                        audio_board_clear(AUDIO_ISSUE_OPEN);
+                        if (pcm.rate != asked_rate)
+                                audio_board_set(AUDIO_WARNING, AUDIO_ISSUE_RATE, asked_rate, pcm.rate, "");
+                        else
+                                audio_board_clear(AUDIO_ISSUE_RATE);
                         audio_service.low = low;
                         audio_service.period = period;
                         audio_copy_text(audio_service.active_name, sizeof(audio_service.active_name), name);
@@ -505,6 +553,7 @@ static int audio_output_open(long asked_rate, int low)
                         return 1;
                 }
                 audio_say("the card could not be opened, error", result);
+                audio_board_set(AUDIO_ERROR, AUDIO_ISSUE_OPEN, result, 0, "");
         }
         audio_service.pcm.fd = -1;
         audio_service.hw_done = 0;

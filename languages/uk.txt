@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Введіть для фільтрації
 settings_forget	5220	забути %s
 settings_help_more	93ec	moonwater help каже більше, ніж перелічено в «Усі команди»: перший рядок виконує будь-яку команду
 settings_identify_screens	8be8	Визначити екрани
+settings_issue_audio_open	d428	Звукову карту не вдалося відкрити (помилка %1$d)
+settings_issue_audio_rate	d45e	Звукова карта працює на %2$d Гц, а не на запитаних %1$d Гц
 settings_issue_gpu_cooling	63ed	Відеокарта охолоджується після зависань (підряд: %1$d)
 settings_issue_gpu_family	6311	Це сімейство GPU не підтримується (родина %1$d)
 settings_issue_gpu_lists	1433	Списки вимкнено: відеокарта насправді не збирає кадр

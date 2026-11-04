@@ -3477,6 +3477,32 @@ static void places_note(struct places *places, const struct place_kept *kept)
 */
 #define WINDOWS_TAKING 0x80000000u
 
+/*
+        The table for a program that is not a window and only writes the board (the audio service): mapped read-write from the table's file, once,
+        and kept. The table is root's (WINDOWS_MODE), so only a root process raises an issue; a process that cannot map it gets none (null), and its
+        issues are simply not shown.
+*/
+static struct windows *windows_board_cache;
+
+static struct windows *windows_board_map(void)
+{
+        long file, size, mapped;
+
+        if (windows_board_cache)
+                return windows_board_cache;
+        file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOW_OPEN_FLAGS, 0, 0, 0);
+        if (file < 0)
+                return null;
+        size = window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0);
+        // PROT_READ | PROT_WRITE, MAP_SHARED
+        mapped = size >= (long)sizeof(struct windows) ? window_call(WINDOW_SYS_MMAP, 0, size, 3, 1, file, 0) : -22;
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        if (mapped < 0 && mapped > -4096)
+                return null;
+        windows_board_cache = (struct windows *)mapped;
+        return windows_board_cache;
+}
+
 static long windows_take(struct window_row *own)
 {
         long spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);

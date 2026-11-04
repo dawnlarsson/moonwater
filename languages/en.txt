@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Type to filter
 settings_forget	5220	forget %s
 settings_help_more	93ec	moonwater help says more than All commands lists: the first row runs any command
 settings_identify_screens	8be8	Identify screens
+settings_issue_audio_open	d428	The sound card could not be opened (error %1$d)
+settings_issue_audio_rate	d45e	The sound card took %2$d Hz, not the %1$d Hz asked for
 settings_issue_gpu_cooling	63ed	The card is cooling down after hangs (%1$d in a row)
 settings_issue_gpu_family	6311	This GPU family is not supported (family %1$d)
 settings_issue_gpu_lists	1433	Lists are off: the card is not composing in earnest

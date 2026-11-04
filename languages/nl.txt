@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Typ om te filteren
 settings_forget	5220	%s vergeten
 settings_help_more	93ec	moonwater help vermeldt meer dan Alle opdrachten toont: de eerste rij voert elke opdracht uit
 settings_identify_screens	8be8	Schermen identificeren
+settings_issue_audio_open	d428	De geluidskaart kon niet worden geopend (fout %1$d)
+settings_issue_audio_rate	d45e	De geluidskaart gebruikte %2$d Hz, niet de gevraagde %1$d Hz
 settings_issue_gpu_cooling	63ed	De kaart koelt af na vastlopers (%1$d achter elkaar)
 settings_issue_gpu_family	6311	Deze GPU-familie wordt niet ondersteund (familie %1$d)
 settings_issue_gpu_lists	1433	Lijsten staan uit: de kaart stelt niet echt samen

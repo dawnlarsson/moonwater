@@ -88,6 +88,8 @@ settings_filter_hint	4aa0	فلٹر کرنے کے لیے لکھیں
 settings_forget	5220	%s کو بھول جائیں
 settings_help_more	93ec	moonwater help «تمام کمانڈز» سے زیادہ بتاتا ہے: پہلی قطار کوئی بھی کمانڈ چلاتی ہے
 settings_identify_screens	8be8	اسکرینیں شناخت کریں
+settings_issue_audio_open	d428	ساؤنڈ کارڈ نہیں کھل سکا (خرابی %1$d)
+settings_issue_audio_rate	d45e	ساؤنڈ کارڈ نے %2$d ہرٹز لیا، نہ کہ مانگے گئے %1$d ہرٹز
 settings_issue_gpu_cooling	63ed	کارڈ رکنے کے بعد ٹھنڈا ہو رہا ہے (%1$d مسلسل)
 settings_issue_gpu_family	6311	یہ GPU فیملی معاون نہیں (فیملی %1$d)
 settings_issue_gpu_lists	1433	فہرستیں بند ہیں: کارڈ اصل میں ترکیب نہیں کر رہا

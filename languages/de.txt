@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Zum Filtern tippen
 settings_forget	5220	%s vergessen
 settings_help_more	93ec	moonwater help nennt mehr, als Alle Befehle auflistet: die erste Zeile führt jeden Befehl aus
 settings_identify_screens	8be8	Bildschirme identifizieren
+settings_issue_audio_open	d428	Die Soundkarte konnte nicht geöffnet werden (Fehler %1$d)
+settings_issue_audio_rate	d45e	Die Soundkarte hat %2$d Hz verwendet, nicht die angeforderten %1$d Hz
 settings_issue_gpu_cooling	63ed	Die Grafikkarte kühlt nach Hängern ab (%1$d hintereinander)
 settings_issue_gpu_family	6311	Diese GPU-Familie wird nicht unterstützt (Familie %1$d)
 settings_issue_gpu_lists	1433	Listen sind aus: die Grafikkarte setzt nicht wirklich zusammen

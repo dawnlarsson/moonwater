@@ -88,6 +88,8 @@ settings_filter_hint	4aa0	برای پالایش تایپ کنید
 settings_forget	5220	فراموش کردن %s
 settings_help_more	93ec	moonwater help بیش از «همه فرمان‌ها» می‌گوید: ردیف اول هر فرمانی را اجرا می‌کند
 settings_identify_screens	8be8	شناسایی نمایشگر‌ها
+settings_issue_audio_open	d428	کارت صدا باز نشد (خطای %1$d)
+settings_issue_audio_rate	d45e	کارت صدا %2$d هرتز را گرفت، نه %1$d هرتز خواسته‌شده
 settings_issue_gpu_cooling	63ed	کارت بعد از قفل‌شدن‌ها خنک می‌شود (%1$d بار پشت سر هم)
 settings_issue_gpu_family	6311	این خانواده GPU پشتیبانی نمی‌شود (خانواده %1$d)
 settings_issue_gpu_lists	1433	فهرست‌ها خاموش‌اند: کارت واقعاً ترکیب نمی‌کند

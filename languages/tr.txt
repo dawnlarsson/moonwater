@@ -87,6 +87,8 @@ settings_filter_hint	4aa0	Süzmek için yazın
 settings_forget	5220	%s öğesini unut
 settings_help_more	93ec	moonwater help, Tüm komutlar'ın listelediğinden fazlasını söyler: ilk satır herhangi bir komutu çalıştırır
 settings_identify_screens	8be8	Ekranları tanımla
+settings_issue_audio_open	d428	Ses kartı açılamadı (hata %1$d)
+settings_issue_audio_rate	d45e	Ses kartı istenen %1$d Hz yerine %2$d Hz kullandı
 settings_issue_gpu_cooling	63ed	Kart, takılmalardan sonra soğuyor (art arda %1$d)
 settings_issue_gpu_family	6311	Bu GPU ailesi desteklenmiyor (aile %1$d)
 settings_issue_gpu_lists	1433	Listeler kapalı: kart gerçekten birleştirme yapmıyor
