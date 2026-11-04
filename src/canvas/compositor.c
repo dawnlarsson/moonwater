@@ -7583,15 +7583,16 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
 static void compositor_lists_set(int on);
 
 // List mode follows the card: on while it composes (started, not given up) and the setting has it, off otherwise, so that a program records its frames as lists only
-// while the compositor can draw them. Changed only when it changes (compositor_lists_set knocks every window); the card going away (a hang's cool-down, canvas gpu
-// off) puts every window back to painting its own pixels.
+// while the compositor can draw them. The table is changed when the card's state does (compositor_lists_set knocks every window), not made to agree with it at
+// every present: the card going away (a hang's cool-down, canvas gpu off) puts every window back to painting its own pixels, and a check that sets the mode itself
+// to draw lists with a renderer of its own is not undone by a present on a machine with no card.
 static void compositor_gpu_lists_sync(void)
 {
-        struct windows *table = compositor.table;
+        static int was;
         int want = compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead;
 
-        if (table && (__atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE) != 0) != (want != 0))
-                compositor_lists_set(want);
+        if (compositor.table && want != was)
+                was = want, compositor_lists_set(want);
 }
 
 // The present's damage drawn by the GPU: 1 when it is, 0 when the processor is to draw it (and the reason is counted).
