@@ -72,9 +72,6 @@ session()
         settle "$work/$mode.img"
         bin/moonwater debug > "$work/$mode.canvas.txt" 2>&1
         cp "$work/$mode.img" "$work/$mode.settled.img"
-        # the flicker detector: input over the fifo (hover, click, wheel, typing), every distinct screen kept in order; the card session
-        # with its lists on and the off session (the processor paints) are the same input and the same reference
-        python3 "$(dirname "$fonts")/test/gpu_lists_flicker.py" "$work/$mode.img" "$work/input.fifo" "$work/flicker-$mode" > "$work/flicker-$mode.txt" 2>&1
         if [ "$mode" = card ]; then
                 # canvas gpu off, then on, while the apps run: each repaints in the new mode, and the screen is the one before
                 bin/moonwater canvas gpu off > /dev/null 2>&1
@@ -94,6 +91,9 @@ session()
                 if kill -0 "$cpid" 2> /dev/null; then echo alive > "$work/killed.alive"; else echo dead > "$work/killed.alive"; fi
                 bin/moonwater debug > "$work/killed.canvas.txt" 2>&1
         fi
+        # the flicker detector, after the screens above (it leaves the filter focused and its caret blinking): input over the fifo (hover, click,
+        # wheel, typing), every distinct screen kept in order; the card session with its lists on and the off session (the processor paints) are the same input and the same reference
+        python3 "$(dirname "$fonts")/test/gpu_lists_flicker.py" "$work/$mode.img" "$work/input.fifo" "$work/flicker-$mode" > "$work/flicker-$mode.txt" 2>&1
         kill "$cpid" 2> /dev/null
         wait "$cpid" 2> /dev/null
         return 0
@@ -126,9 +126,9 @@ fonts=$(cd "$(dirname "$0")/../fonts" && pwd)
 unshare -rm sh "$self" session card "$work" "$fonts" > "$work/card.session.out" 2>&1
 unshare -rm sh "$self" session off "$work" "$fonts" > "$work/off.session.out" 2>&1
 
-lists_card=$(grep '^  lists ' "$work/card.canvas.txt" 2> /dev/null | sed 's/^  lists *\([0-9]*\) windows.*/\1/')
-refused_card=$(grep '^  lists ' "$work/card.canvas.txt" 2> /dev/null | sed 's/.*, \([0-9]*\) refused.*/\1/')
-lists_off=$(grep '^  lists ' "$work/off.canvas.txt" 2> /dev/null | sed 's/^  lists *\([0-9]*\) windows.*/\1/')
+lists_card=$(grep -m1 '^  lists .*windows' "$work/card.canvas.txt" 2> /dev/null | sed 's/^  lists *\([0-9]*\) windows.*/\1/')
+refused_card=$(grep -m1 '^  lists .*windows' "$work/card.canvas.txt" 2> /dev/null | sed 's/.*, \([0-9]*\) refused.*/\1/')
+lists_off=$(grep -m1 '^  lists .*windows' "$work/off.canvas.txt" 2> /dev/null | sed 's/^  lists *\([0-9]*\) windows.*/\1/')
 windows_card=$(grep -c '^  window' "$work/card.canvas.txt" 2> /dev/null)
 
 if [ "${windows_card:-0}" -ge "$napps_parent" ]; then row ok "the applets are windows of the desktop with the card"; else row FAIL "the applets are windows of the desktop with the card" "$windows_card windows ($(tail -1 "$work/card.session.out" 2> /dev/null))"; fi
