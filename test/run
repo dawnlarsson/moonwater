@@ -14313,6 +14313,8 @@ game_check()
                         "$(game_value INPUT_UINPUT "$work/game-$game_name/.config")"
                 same "$game_name: joydev" "$game_want" \
                         "$(game_value INPUT_JOYDEV "$work/game-$game_name/.config")"
+                same "$game_name: input group" "$game_want" \
+                        "$(game_value MOONWATER_INPUT_GROUP "$work/game-$game_name/.config")"
                 #       uinput is a member of the input menu: without the menu
                 #       the kernel drops it from the build (the build's own
                 #       configuration check names it), so the menu is asked for
@@ -14325,6 +14327,11 @@ game_check()
                         "$work/game-$game_name.h" > /dev/null 2>&1
                 same "$game_name: Canvas in the header" "$game_canvas" \
                         "$(grep -c '^#define SHELL_NO_CANVAS 1$' "$work/game-$game_name.h")"
+                if [ "$game_want" = y ]; then game_nogroup=0; else game_nogroup=1; fi
+                same "$game_name: no input group define" "$game_nogroup" \
+                        "$(grep -c '^#define SHELL_NO_INPUT_GROUP 1$' "$work/game-$game_name.h")"
+                same "$game_name: input group number" 1 \
+                        "$(grep -c '^#define MOONWATER_INPUT_GID 104$' "$work/game-$game_name.h")"
                 #       The GPU's userptr and the udmabuf the compositor's windows
                 #       use are on in every image (gpu and gpu.amd are always
                 #       composed), and the kernel selects their own symbols.
@@ -14339,6 +14346,12 @@ game_check()
                                         "$(game_value INPUT_UINPUT "$work/resolved-$game_name.config")"
                                 same "$game_name resolves INPUT_JOYDEV" "$game_want" \
                                         "$(game_value INPUT_JOYDEV "$work/resolved-$game_name.config")"
+                                same "$game_name resolves the input group" "$game_want" \
+                                        "$(game_value MOONWATER_INPUT_GROUP "$work/resolved-$game_name.config")"
+                                if [ "$game_want" = y ]; then
+                                        same "$game_name resolves the input group number" 1 \
+                                                "$(grep -c '^CONFIG_MOONWATER_INPUT_GID=104$' "$work/resolved-$game_name.config")"
+                                fi
                         else
                                 lost "$game_name resolves" "$(tail -2 "$work/resolved-$game_name.log" | tr '\n' ' ')"
                         fi
@@ -15884,11 +15897,11 @@ fi
 #       answer is the tier's and not the topology's. The locked tier also
 #       asks for page table isolation whatever the processor says.
 case $tier in
-reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=600 ;;
-default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=600 ;;
-workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=1048576 want_uinput=600 ;;
-hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=65530 want_uinput=none ;;
-locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 want_init=1-1 want_shuf=y want_smt=forceoff want_max=65530 want_uinput=none ;;
+reference)   want_sys=0-0-0-0-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=660:104 want_event=660:104 ;;
+default)     want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=0 want_iommu=0 want_hide=0 want_shm=0 want_init=0-0 want_shuf= want_smt=on want_max=1048576 want_uinput=660:104 want_event=660:104 ;;
+workstation) want_sys=1-1-1-1-1-0   want_rnd=28 want_lock=0 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=1048576 want_uinput=660:104 want_event=660:104 ;;
+hardened)    want_sys=2-2-2-2-2-0   want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=0 want_shm=0 want_init=1-0 want_shuf=y want_smt=on want_max=65530 want_uinput=none want_event=600:0 ;;
+locked)      want_sys=2-2-2--3-1    want_rnd=32 want_lock=1 want_wx=1 want_iommu=1 want_hide=1 want_shm=1 want_init=1-1 want_shuf=y want_smt=forceoff want_max=65530 want_uinput=none want_event=600:0 ;;
 esac
 
 work=$(mktemp -d)
@@ -15909,7 +15922,8 @@ printf 'lock-%s-end\n' "$(has 'Kernel is locked down')" | tr a-z A-Z
 printf 'wx-%s-end\n' "$(has 'Checked W+X mappings: passed')" | tr a-z A-Z
 printf 'iommu-%s-end\n' "$(has 'strict mode (set via kernel command line)')" | tr a-z A-Z
 printf 'dev-%s-%s-end\n' "$(stat -c %a /dev/spark)" "$(stat -c %a /dev/kmsg)" | tr a-z A-Z
-printf 'uinput-%s-end\n' "$(stat -c %a /dev/uinput 2> /dev/null || echo none)" | tr a-z A-Z
+printf 'uinput-%s-end\n' "$(stat -c %a:%g /dev/uinput 2> /dev/null || echo none)" | tr a-z A-Z
+printf 'event-%s-end\n' "$(stat -c %a:%g /dev/input/event0 2> /dev/null || echo none)" | tr a-z A-Z
 printf 'mmap-%s-end\n' "$(cat /proc/sys/vm/max_map_count)" | tr a-z A-Z
 printf 'init-%s-%s-end\n' "$(has 'heap alloc:on')" "$(has 'heap free:on')" | tr a-z A-Z
 printf 'shuf-%s-end\n' "$(cat /sys/module/page_alloc/parameters/shuffle 2> /dev/null)" | tr a-z A-Z
@@ -15964,7 +15978,8 @@ says transcript "$tier: lockdown"                  "$(rv "lock-$want_lock-end")"
 says transcript "$tier: W+X check"                 "$(rv "wx-$want_wx-end")"
 says transcript "$tier: strict IOMMU"              "$(rv "iommu-$want_iommu-end")"
 says transcript "$tier: /dev/spark and /dev/kmsg modes" "$(rv "dev-666-644-end")"
-says transcript "$tier: /dev/uinput mode (none: no game controllers)" "$(rv "uinput-$want_uinput-end")"
+says transcript "$tier: /dev/uinput mode and group (none: no game controllers)" "$(rv "uinput-$want_uinput-end")"
+says transcript "$tier: input event node mode and group" "$(rv "event-$want_event-end")"
 says transcript "$tier: vm.max_map_count (the desktop's count)" "$(rv "mmap-$want_max-end")"
 says transcript "$tier: memory zeroed on alloc and free" "$(rv "init-$want_init-end")"
 says transcript "$tier: the page allocator's shuffle" "$(rv "shuf-$want_shuf-end")"
@@ -16057,7 +16072,12 @@ fi
         echo '/tmp/input_probe; echo input-probe-exit $?'
         echo 'cp /mnt/stick/input_probe_clang /tmp/input_probe_clang 2> /dev/null && chmod 755 /tmp/input_probe_clang'
         echo '[ -x /tmp/input_probe_clang ] && /tmp/input_probe_clang; echo input-clang-exit $?'
-        echo 'echo input-uinput-mode $(stat -c %a /dev/uinput)'
+        echo 'echo input-bowl-start'
+        echo '/tmp/input_probe --bowl-user; echo input-bowl-exit $?'
+        echo '/tmp/input_probe --bowl-user-no-input > /tmp/input_denied 2>&1; echo input-denied-exit $?'
+        echo 'cat /tmp/input_denied'
+        echo 'echo input-uinput-mode $(stat -c %a:%g /dev/uinput)'
+        echo 'echo input-event-mode $(stat -c %a:%g /dev/input/event0)'
         echo 'echo input-end'
 } > "$work/stick/input.sh"
 {
@@ -16122,8 +16142,20 @@ says transcript 'gcc probe exit 0'                    'input-probe-exit 0'
 if command -v clang > /dev/null 2>&1; then
         says transcript 'clang probe exit 0'          'input-clang-exit 0'
 fi
-says transcript 'the uinput node is root only'       'input-uinput-mode 600'
-says transcript 'the joystick node is root only'     'joystick mode 600'
+#       The bowl user's run alone: the root run prints the same lines, so the
+#       rows read only what sits between the run's two markers.
+sed -n '/^input-bowl-start/,/^input-bowl-exit/p' "$work/transcript" > "$work/bowl"
+says bowl 'the bowl user runs as uid 1000'            'running as uid 1000 gid 1000'
+says bowl 'a bowl user creates a virtual pad'         'uinput device created ok'
+says bowl 'a bowl user finds the joystick node'       'joystick node appears ok'
+says bowl 'a bowl user presses and reads back'        'button press read back ok'
+says bowl 'the bowl user probe passed'                'probe passed'
+says bowl 'the bowl user probe exit 0'                'input-bowl-exit 0'
+says transcript 'no input group, no uinput'           'uinput open failed'
+says transcript 'no input group, refused'             'input-denied-exit 1'
+says transcript 'the uinput node is the input group'  'input-uinput-mode 660:104'
+says transcript 'the event node is the input group'   'input-event-mode 660:104'
+says transcript 'the joystick node is the input group' 'joystick mode 660'
 never transcript 'no kernel panic'                    'Kernel panic'
 never transcript 'nothing warned'                     'cut here'
 says transcript 'the machine came back'               'input-end'

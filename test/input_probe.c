@@ -14,6 +14,7 @@
  *      drm_syncobj_destroy). The lane checks them against the box's header.
  */
 #include <errno.h>
+#include <grp.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <linux/joystick.h>
@@ -115,7 +116,17 @@ static int read_press(int js)
         return 0;
 }
 
-int main(void)
+/*
+ *      --bowl-user: become uid 1000 in the input group (gid 104), as a bowl's
+ *      user is: the nodes the desktop image makes are 0660 in that group.
+ *      --bowl-user-no-input: the same user with no supplementary groups, which
+ *      must be refused /dev/uinput. The render node is root's and skipped as
+ *      the user; the root run checks it.
+ */
+#define PROBE_BOWL_UID 1000
+#define PROBE_INPUT_GID 104
+
+int main(int argc, char **argv)
 {
         int ui;
         struct uinput_user_dev device;
@@ -123,6 +134,25 @@ int main(void)
         int js = -1;
         int render = -1;
         char path[32];
+        int as_user = 0;
+        int with_input = 1;
+
+        if (argc > 1 && strcmp(argv[1], "--bowl-user") == 0)
+                as_user = 1;
+        else if (argc > 1 && strcmp(argv[1], "--bowl-user-no-input") == 0) {
+                as_user = 1;
+                with_input = 0;
+        }
+        if (as_user) {
+                gid_t groups[1] = {PROBE_INPUT_GID};
+
+                if (setgroups(with_input ? 1 : 0, with_input ? groups : NULL) != 0 ||
+                    setgid(PROBE_BOWL_UID) != 0 || setuid(PROBE_BOWL_UID) != 0) {
+                        printf("drop to the bowl user failed errno %d\n", errno);
+                        return 1;
+                }
+                printf("running as uid %u gid %u\n", (unsigned)getuid(), (unsigned)getgid());
+        }
 
         ui = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
         answer("uinput open", ui >= 0);
@@ -184,11 +214,13 @@ int main(void)
         ioctl(ui, UI_DEV_DESTROY);
         close(ui);
 
-        for (int number = 128; number < 136 && render < 0; number++) {
+        if (as_user) {
+                printf("render node skipped as the bowl user\n");
+        } else for (int number = 128; number < 136 && render < 0; number++) {
                 snprintf(path, sizeof path, "/dev/dri/renderD%d", number);
                 render = open(path, O_RDWR);
         }
-        answer("render node opened", render >= 0);
+        if (!as_user) answer("render node opened", render >= 0);
         if (render >= 0) {
                 struct drm_syncobj_create create;
                 struct drm_syncobj_destroy destroy;
