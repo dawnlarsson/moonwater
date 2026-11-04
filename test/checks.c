@@ -155705,7 +155705,7 @@ static fn check_identify_frame(void)
         identify.own.door = -1;
         table->glass[1] = WINDOW_NO_CLOSE | WINDOW_NO_TAB; // what ui_app_run writes for the overlay's own flags
         identify.screen = 0;
-        identify.shown = -1;
+        ui_buffers_start(&identify.buffers);
         identify.text[0] = '8', identify.text[1] = 0;
         identify_check_ui(1);
         identify_open();

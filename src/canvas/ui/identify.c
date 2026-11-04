@@ -48,7 +48,7 @@ static struct identify
         struct identify_badge badge;
         int width, height;     // the badge's size, the picture's
         unsigned int ground;   // the window's ground, as the compositor gives it (ui_app_run reads it)
-        int shown;             // the buffer the last picture went into, or -1 for none yet
+        struct ui_buffers buffers; // the badge's two buffers (the kit's): its picture is drawn whole each frame
         b32 dirty, focused;
         positive until;        // the monotonic clock's time the window goes at
 } identify;
@@ -123,22 +123,20 @@ static void identify_paint(struct ui address_to ui, unsigned int address_to pixe
         ui_run(ui, (width - wide) / 2, baseline, identify.text, identify.badge.size, true, IDENTIFY_INK, 255, 0, width);
 }
 
-// One picture: the badge, into the buffer the compositor is not reading. False when that buffer is still being read, and
-// the picture is due again.
+// The badge's picture, drawn whole into the buffer the kit gives (the badge has no rows to draw apart).
+static fn identify_picture(unsigned int address_to pixels, int top, int bottom)
+{
+        (void)top, (void)bottom;
+        identify_paint(&identify.ui, pixels, identify.own.table->stride, identify.width, identify.height);
+}
+
+// One picture: the badge, whole, into the buffer the compositor is not reading (ui_buffers_present). False when that buffer
+// is still being read, and the picture is due again.
 static b32 identify_frame(void)
 {
-        struct windows address_to table = identify.own.table;
-        unsigned int row = identify.own.row;
-        int slot = identify.shown < 0 ? 0 : 1 - identify.shown;
-
-        if (identify.shown >= 0 && !windows_ready(&identify.own))
+        ui_buffers_all(&identify.buffers);
+        if (!ui_buffers_present(&identify.buffers, &identify.own, identify.width, identify.height, identify_picture, null))
                 return false;
-        identify_paint(&identify.ui, windows_buffer(table, row, (unsigned int)slot), table->stride, identify.width, identify.height);
-        table->width[row] = (unsigned int)identify.width;
-        table->height[row] = (unsigned int)identify.height;
-        table->damage_width[row] = 0;
-        windows_show(&identify.own, (unsigned int)slot);
-        identify.shown = slot;
         identify.dirty = false;
         return true;
 }
@@ -215,7 +213,7 @@ static struct ui_app identify_app = {
 static b32 identify_main()
 {
         memory_zero(&identify, sizeof(identify));
-        identify.shown = -1;
+        ui_buffers_start(&identify.buffers);
         if (program_argument_count() > 1)
         {
                 string_address word = program_argument(1);
