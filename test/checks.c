@@ -122335,6 +122335,7 @@ static void rtl_keep_add(int x, int y, int w, int h);
 #include "../src/canvas/ui/battery.c"
 #endif
 #if MOONWATER_UI_SETTINGS
+#include "../src/canvas/ui/gallery.c"
 #include "../src/canvas/ui/settings.c"
 #endif
 #if MOONWATER_UI_LAUNCHER
@@ -138055,20 +138056,20 @@ static fn settings_frames_gallery(void)
 
         settings_frames.scenario = (string_address) "the gallery";
         settings_frames.wrong = false;
-        settings_gallery.on = 1;
-        settings_gallery_build();
-        settings_gallery.scroll.scroll = 0;
-        settings_size(SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
+        gallery.on = 1;
+        gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+        gallery.scroll.scroll = 0;
+        settings_size(GALLERY_W, GALLERY_H);
         settings_frames_until(settings_frames.now + 500 * SETTINGS_FRAMES_MS);
         start = settings_frames.now;
-        for (int at = 0; at < settings_gallery.count && !settings_frames.wrong; at++)
+        for (int at = 0; at < gallery.count && !settings_frames.wrong; at++)
         {
-                const struct ui_control address_to c = &settings_gallery.control[at];
+                const struct ui_control address_to c = &gallery.control[at];
                 int kind = c->kind, x = c->x + c->w / 2, y = c->y + (kind == UI_RADIOS ? UI_RADIO_PITCH * 2 : c->h) / 2;
 
                 if (kind != UI_BUTTON && kind != UI_SWITCH && kind != UI_CHECKBOX && kind != UI_RADIOS && kind != UI_SLIDER && kind != UI_TABS)
                         continue;
-                y -= settings_gallery.scroll.scroll;
+                y -= gallery.scroll.scroll;
                 settings_frames_until(start + (positive)pressed * 300 * SETTINGS_FRAMES_MS);
                 settings_frames_event(WINDOW_EVENT_MOTION, 0, x, y);
                 settings_frames_pass();
@@ -138101,7 +138102,7 @@ static fn settings_frames_gallery(void)
         string_format(log, "  settings frames (the gallery): %p controls pressed\n", (positive)pressed);
         check("settings frames: every buffer the gallery shows is the whole picture drawn at its time", !settings_frames.wrong && pressed > 10);
         settings_frames_event(WINDOW_EVENT_MOTION, 0, -100, -100);
-        settings_gallery.on = 0;
+        gallery.on = 0;
         settings_size(SETTINGS_WIDTH * settings.ui.scale / 100, SETTINGS_HEIGHT * settings.ui.scale / 100);
         settings_frames_until(settings_frames.now + 200 * SETTINGS_FRAMES_MS);
 }
@@ -138665,7 +138666,7 @@ static fn check_display_section(void)
 
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
-                settings_gallery.on = 0, settings.page.menu_row = -1, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear();
+                gallery.on = 0, settings.page.menu_row = -1, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear();
                 settings.map.display = settings.map.drag = -1, settings.list.down = -1;
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
                 settings_event_at(&touch);
@@ -139887,7 +139888,7 @@ static fn rtl_draw(int group, int scale, b32 rtl)
         ui_kit.rtl = rtl ? 1 : 0;
         ui_kit_settle();
         settings.ui.scale = scale * 100;
-        settings_gallery.on = group == -1;
+        gallery.on = group == -1;
         if (group == -2)
         {
                 // The page of a command's answer, the card: its lines from the right, its bar at the left.
@@ -139950,10 +139951,10 @@ static fn rtl_draw(int group, int scale, b32 rtl)
         }
         if (group == -1)
         {
-                settings_gallery_build();
-                settings.width = ui_px(&settings.ui, SETTINGS_GALLERY_W);
-                settings.height = ui_px(&settings.ui, SETTINGS_GALLERY_H);
-                settings_gallery.scroll.scroll = 0;
+                gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+                settings.width = ui_px(&settings.ui, GALLERY_W);
+                settings.height = ui_px(&settings.ui, GALLERY_H);
+                gallery.scroll.scroll = 0;
         }
         else if (group >= 0)
         {
@@ -150417,7 +150418,7 @@ static fn check_bar_cells(void)
 
         A frame is ui_kit.now at the frame's time, then the page drawn whole.
 */
-static unsigned int frames_pixels[SETTINGS_GALLERY_W * SETTINGS_GALLERY_H], frames_scratch[1400 * UI_SCRATCH_ROWS];
+static unsigned int frames_pixels[GALLERY_W * GALLERY_H], frames_scratch[1400 * UI_SCRATCH_ROWS];
 static p8 frames_atlas[1024 * 1024];
 static font_face frames_faces[3];
 static string_address frames_dir;
@@ -150430,7 +150431,7 @@ static fn frames_at(b64 ms_millionths) // a frame at a time in nanoseconds
         ui_kit.busy = 0;
         ui_kit_turn();
         settings.ui.band_top = settings.ui.band_bottom = 0;
-        settings_gallery_draw(&settings.ui);
+        gallery_draw(&settings.ui);
         frames_count++;
 }
 
@@ -150467,7 +150468,7 @@ static fn frames_write(string_address name, int ms, int x, int y, int w, int h)
         {
                 for (int xx = x; xx < x + w; xx++)
                 {
-                        unsigned int pixel = frames_pixels[(positive)yy * SETTINGS_GALLERY_W + (positive)xx];
+                        unsigned int pixel = frames_pixels[(positive)yy * GALLERY_W + (positive)xx];
 
                         row[(xx - x) * 3] = (p8)(pixel >> 16), row[(xx - x) * 3 + 1] = (p8)(pixel >> 8), row[(xx - x) * 3 + 2] = (p8)pixel;
                 }
@@ -150492,7 +150493,7 @@ static fn frames_run(string_address name, const struct frames_step address_to st
         int at = 0, since = steps[0].ms_x100; // since: the last event's time, which a shot is named after
         b64 next = (b64)steps[0].ms_x100 * 10000;
 
-        settings_gallery_build();
+        gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
         ui_kit.busy = 0;
         // An event at its own time; a frame every 1/60 s from the last event (a shot is the frame at its time).
         while (at < count)
@@ -150513,7 +150514,7 @@ static fn frames_run(string_address name, const struct frames_step address_to st
                         at++;
                         since = e->ms_x100;
                         ui_kit.now = when;
-                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count,
+                        ui_kit_pointer(&settings.ui, gallery.control, gallery.count,
                                        e->what == FRAMES_MOVE ? WINDOW_EVENT_MOTION : WINDOW_EVENT_BUTTON, e->x, e->y, e->what == FRAMES_DOWN, 0);
                         next = when + 16666667;
                         continue;
@@ -150552,11 +150553,11 @@ b32 main()
         settings.ui.scratch_width = 1400;
         settings.ui.scale = 100;
         settings.ui.pixels = frames_pixels;
-        settings.ui.pitch = SETTINGS_GALLERY_W;
-        settings.ui.width = SETTINGS_GALLERY_W;
-        settings.ui.height = settings.height = SETTINGS_GALLERY_H;
-        settings.width = SETTINGS_GALLERY_W;
-        settings_gallery.on = 1;
+        settings.ui.pitch = GALLERY_W;
+        settings.ui.width = GALLERY_W;
+        settings.ui.height = settings.height = GALLERY_H;
+        settings.width = GALLERY_W;
+        gallery.on = 1;
         ui_kit_theme(UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
 
         /*
@@ -150613,7 +150614,7 @@ b32 main()
 
                         if (!settings_map())
                                 return 1;
-                        settings_gallery.on = 0;
+                        gallery.on = 0;
                         ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1, settings.focused = 1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
@@ -150720,10 +150721,10 @@ b32 main()
                         return 0;
                 }
 
-                settings_gallery_build();
-                for (int k = 0; k < settings_gallery.count; k++)
+                gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+                for (int k = 0; k < gallery.count; k++)
                 {
-                        struct ui_control address_to each = &settings_gallery.control[k];
+                        struct ui_control address_to each = &gallery.control[k];
 
                         if ((string_equals(what, (string_address) "press") && each->kind == UI_BUTTON && each->label && string_equals((string_address)each->label, (string_address) "Deploy")) ||
                             (string_equals(what, (string_address) "drag") && each->kind == UI_SLIDER && each->label && string_equals((string_address)each->label, (string_address) "Log verbosity")) ||
@@ -150742,20 +150743,20 @@ b32 main()
                         ui_kit.now = now;
                         if (string_equals(what, (string_address) "press") && frame % 30 == 0)
                         {
-                                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_BUTTON, x, y, false, 0);
-                                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_BUTTON, x - 10 + (int)(frame % 20), y, true, 0);
+                                ui_kit_pointer(&settings.ui, gallery.control, gallery.count, WINDOW_EVENT_BUTTON, x, y, false, 0);
+                                ui_kit_pointer(&settings.ui, gallery.control, gallery.count, WINDOW_EVENT_BUTTON, x - 10 + (int)(frame % 20), y, true, 0);
                         }
                         if (string_equals(what, (string_address) "drag"))
                         {
                                 if (frame == 0)
-                                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_BUTTON, x, y + 30, true, 0);
-                                ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, WINDOW_EVENT_MOTION,
+                                        ui_kit_pointer(&settings.ui, gallery.control, gallery.count, WINDOW_EVENT_BUTTON, x, y + 30, true, 0);
+                                ui_kit_pointer(&settings.ui, gallery.control, gallery.count, WINDOW_EVENT_MOTION,
                                                c->x + (int)(frame * 7 % (unsigned int)(c->w + 120)), y + 30 + (int)(frame % 9), true, 0);
                         }
                         // What the window does for a frame: the rows the moving control reaches cleared, the control drawn.
                         ui_kit.busy = 0;
                         settings.ui.band_top = band_top, settings.ui.band_bottom = band_bottom;
-                        ui_fill(&settings.ui, 0, band_top, SETTINGS_GALLERY_W, band_bottom - band_top, ui_role(UI_SURFACE) | 0xff000000u);
+                        ui_fill(&settings.ui, 0, band_top, GALLERY_W, band_bottom - band_top, ui_role(UI_SURFACE) | 0xff000000u);
                         ui_control_draw(&settings.ui, c);
                 }
                 string_format(log, "  kit bench %s: %p frames, busy at the end %p\n", what, count, (positive)ui_kit.busy);
@@ -150787,10 +150788,10 @@ b32 main()
                 struct ui_control address_to tabs = null;
                 int x, y;
 
-                settings_gallery_build();
-                for (int k = 0; k < settings_gallery.count; k++)
-                        if (settings_gallery.control[k].kind == UI_TABS)
-                                tabs = &settings_gallery.control[k];
+                gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+                for (int k = 0; k < gallery.count; k++)
+                        if (gallery.control[k].kind == UI_TABS)
+                                tabs = &gallery.control[k];
                 x = tabs ? ui_tab_left(&settings.ui, tabs, 2) + ui_tab_width(&settings.ui, tabs, 2) / 2 : 0;
                 y = tabs ? tabs->y + 16 : 0;
                 {
@@ -150842,16 +150843,16 @@ b32 main()
                 frames_run((string_address) "press-up", up, sizeof(up) / sizeof(up[0]), 393, 707, 99, 60);
         }
         // The whole page at rest, for the gallery side by side.
-        settings_gallery_build();
+        gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
         frames_at(5000000000ll);
         frames_at(5016666667ll);
-        frames_write((string_address) "gallery", 0, 0, 0, SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
+        frames_write((string_address) "gallery", 0, 0, 0, GALLERY_W, GALLERY_H);
         // And on the standard theme, dark with white fills.
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
-        settings_gallery_build();
+        gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
         frames_at(6000000000ll);
         frames_at(6016666667ll);
-        frames_write((string_address) "gallery-standard", 0, 0, 0, SETTINGS_GALLERY_W, SETTINGS_GALLERY_H);
+        frames_write((string_address) "gallery-standard", 0, 0, 0, GALLERY_W, GALLERY_H);
 
         // The settings window's Canvas group, light and dark, over the glass a light or a dark theme gives it: the kit's
         // switches, the theme's and the motion's segmented tabs and the accent's swatches in the rows.
@@ -150860,7 +150861,7 @@ b32 main()
                 {
                         unsigned int glass = dark ? 0x2b2b2eu : 0xb4b4b4u;
 
-                        settings_gallery.on = 0;
+                        gallery.on = 0;
                         ui_field_close(&settings.edit), (void)0, settings.page.menu_row = -1, settings.page.pane = 1, settings.page.buffers.shown = -1;
                         for (positive at = 0; at < SETTINGS_ROWS; at++)
                         {
@@ -150896,7 +150897,7 @@ b32 main()
                                 positive at = left - 1, y = at / 700, x = at % 700;
                                 unsigned int pixel = frames_pixels[y * 700 + x];
 
-                                frames_pixels[y * SETTINGS_GALLERY_W + x] = ui_over(pixel, 0xff000000u | glass);
+                                frames_pixels[y * GALLERY_W + x] = ui_over(pixel, 0xff000000u | glass);
                         }
                         frames_write((string_address)(dark ? "settings-dark" : "settings-light"), 0, 0, 0, 700, 520);
                 }
@@ -150942,7 +150943,7 @@ b32 main()
                         {
                                 positive at = left - 1;
 
-                                frames_pixels[(at / 700) * SETTINGS_GALLERY_W + at % 700] = frames_pixels[at];
+                                frames_pixels[(at / 700) * GALLERY_W + at % 700] = frames_pixels[at];
                         }
                         // A choice's menu is a popup of its own, which the frame has no window for: it is drawn over the rows where
                         // the popup is placed, glass as the popup is (no face, the window's ink).
@@ -150952,8 +150953,8 @@ b32 main()
 
                                 glass.opaque = false, glass.glass = true;
                                 ui_inks(&glass, UI_GLASS_GROUND);
-                                glass.pixels = frames_pixels + settings.page.menu_y * SETTINGS_GALLERY_W + settings.page.menu_x;
-                                glass.pitch = SETTINGS_GALLERY_W;
+                                glass.pixels = frames_pixels + settings.page.menu_y * GALLERY_W + settings.page.menu_x;
+                                glass.pitch = GALLERY_W;
                                 glass.width = settings.popup.menu.width, glass.height = settings.popup.menu.height;
                                 glass.top = 0, glass.bottom = glass.height;
                                 ui_popmenu_draw(&glass, &settings.popup.menu);
@@ -150978,7 +150979,7 @@ b32 main()
                 memory_zero(&launcher, sizeof(launcher));
                 launcher.names = (char address_to)names, launcher.count = 6, launcher.from = from, launcher.hashed = hashed;
                 launcher.dirs[0] = "/usr/bin", launcher.dir_count = 1;
-                table.output_width = 1920, table.output_height = 1080, table.stride = SETTINGS_GALLERY_W;
+                table.output_width = 1920, table.output_height = 1080, table.stride = GALLERY_W;
                 launcher.own.table = &table;
                 // The launcher is glass (WINDOW_GLASS): its pieces are drawn in the inks of the glass the dark theme gives it,
                 // and its picture is laid over that glass to be seen, as the settings window's is.
@@ -150994,9 +150995,9 @@ b32 main()
                 for (positive left = (positive)launcher.width * (positive)launcher.height; left > 0; left--)
                 {
                         positive at = left - 1, y = at / (positive)launcher.width, x = at % (positive)launcher.width;
-                        unsigned int pixel = frames_pixels[y * SETTINGS_GALLERY_W + x];
+                        unsigned int pixel = frames_pixels[y * GALLERY_W + x];
 
-                        frames_pixels[y * SETTINGS_GALLERY_W + x] = ui_over(pixel, 0xff000000u | 0x2b2b2eu);
+                        frames_pixels[y * GALLERY_W + x] = ui_over(pixel, 0xff000000u | 0x2b2b2eu);
                 }
                 frames_write((string_address) "launcher", 0, 0, 0, launcher.width, launcher.height);
                 // A dropdown is glass too (ui_popmenu_look): its menu over the same glass, no face and no outline, its hot choice lit.
@@ -151014,14 +151015,14 @@ b32 main()
                         menu_ui.opaque = 0, menu_ui.glass = 1;
                         ui_inks(&menu_ui, 0x2b2b2eu);
                         ui_popmenu_size(&menu_ui, &menu, 0);
-                        ui_begin(&menu_ui, frames_pixels, SETTINGS_GALLERY_W, menu.width, menu.height);
+                        ui_begin(&menu_ui, frames_pixels, GALLERY_W, menu.width, menu.height);
                         ui_popmenu_draw(&menu_ui, &menu);
                         for (positive left = (positive)menu.width * (positive)menu.height; left > 0; left--)
                         {
                                 positive at = left - 1, y = at / (positive)menu.width, x = at % (positive)menu.width;
-                                unsigned int pixel = frames_pixels[y * SETTINGS_GALLERY_W + x];
+                                unsigned int pixel = frames_pixels[y * GALLERY_W + x];
 
-                                frames_pixels[y * SETTINGS_GALLERY_W + x] = ui_over(pixel, 0xff000000u | 0x2b2b2eu);
+                                frames_pixels[y * GALLERY_W + x] = ui_over(pixel, 0xff000000u | 0x2b2b2eu);
                         }
                         frames_write((string_address) "menu", 0, 0, 0, menu.width, menu.height);
                 }
@@ -156006,7 +156007,7 @@ static struct ui_text address_to inputs_target(const struct inputs_input address
         case INPUTS_LAUNCHER: return launcher_field();
         case INPUTS_FILTER: return settings_filter_field();
         case INPUTS_ROW: return &settings.edit;
-        case INPUTS_GALLERY: return &settings_gallery.field[in->arg];
+        case INPUTS_GALLERY: return &gallery.field[in->arg];
         case INPUTS_FIND: return &editor.find.field;
         case INPUTS_VIEW: return &editor_now()->view;
         }
@@ -156041,7 +156042,7 @@ static fn inputs_open(const struct inputs_input address_to in)
                 break;
         case INPUTS_FILTER:
                 settings_edit_end();
-                settings_gallery.on = 0;
+                gallery.on = 0;
                 settings.popup.open = 0, settings.page.menu_row = -1;
                 settings_group_choose(0);
                 settings_layout();
@@ -156053,7 +156054,7 @@ static fn inputs_open(const struct inputs_input address_to in)
                 int row = in->label ? settings_row_named(in->label) : in->arg;
 
                 settings_edit_end();
-                settings_gallery.on = 0;
+                gallery.on = 0;
                 if (row >= (int)SETTINGS_LIST)
                 {
                         // The devices list as a feed of no devices leaves it: its one row is the Add row, which is what this is.
@@ -156075,11 +156076,11 @@ static fn inputs_open(const struct inputs_input address_to in)
         }
         case INPUTS_GALLERY:
                 settings_edit_end();
-                settings_gallery_build();
-                settings_gallery.on = 1;
+                gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
+                gallery.on = 1;
                 for (int k = 0; k < 2; k++)
-                        settings_gallery.field[k].focused = k == in->arg;
-                ui_text_set(&settings_gallery.field[in->arg], (const p8 address_to) "", 0);
+                        gallery.field[k].focused = k == in->arg;
+                ui_text_set(&gallery.field[in->arg], (const p8 address_to) "", 0);
                 break;
         case INPUTS_FIND:
                 inputs_editor_ensure(inputs_windows);
@@ -156751,7 +156752,7 @@ static fn check_input_matrix(struct ui address_to ui, unsigned int address_to pi
                         string_append_bounded((string_address)label, (string_address)inputs_features[f].name, sizeof(label));
                         inputs_check(label, okay);
                 }
-        settings_gallery.on = 0;
+        gallery.on = 0;
         settings_edit_end();
 }
 

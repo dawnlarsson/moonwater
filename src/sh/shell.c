@@ -1104,6 +1104,7 @@ static bool floodlight_parent_supervised;
 #endif
 #endif
 #if MOONWATER_UI_SETTINGS
+#include "../canvas/ui/gallery.c"
 #include "../canvas/ui/settings.c"
 #endif
 #if MOONWATER_UI_LAUNCHER

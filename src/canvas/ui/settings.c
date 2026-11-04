@@ -3747,295 +3747,6 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_STEP;
 }
 
-/* ---- the gallery ---- */
-
-/*
-        The kit's gallery (moonwater settings gallery, -g): every control of
-        ui.c's kit, laid out as Dawning Native's own demo page lays them out in
-        Chrome at 1200 pixels (the provision dialog, the preferences, the tabs,
-        the build target's radios and checkboxes, the actions and the upgrades'
-        progress), and in the grid's empty cell the pieces its demo does not
-        show (badges, tags, keys, avatars, spinners, a callout and a code well).
-        The page is the theme's paper and not glass, so it is the web page's
-        picture to compare, and the wheel scrolls it. Nothing in it runs a
-        verb: it is there to be pressed.
-*/
-#define SETTINGS_GALLERY_W 1092
-#define SETTINGS_GALLERY_H 1538
-#define SETTINGS_GALLERY_MOST 72
-
-static struct
-{
-        b32 on;
-        struct ui_control control[SETTINGS_GALLERY_MOST];
-        int count;
-        struct ui_scroll scroll; // the page, device pixels: the wheel, the keys and its scrollbar move it
-        struct ui_text field[2]; // the fields' engines: a node's name, which takes a name's characters, and a region
-} settings_gallery;
-
-static struct ui_control address_to settings_gallery_put(int kind, int variant, int x, int y, int w, int h, const char address_to label)
-{
-        struct ui_control address_to c = &settings_gallery.control[settings_gallery.count < SETTINGS_GALLERY_MOST - 1 ? settings_gallery.count++ : settings_gallery.count];
-
-        memory_zero(c, sizeof(*c));
-        c->kind = (unsigned char)kind, c->variant = (unsigned char)variant;
-        c->x = x, c->y = y, c->w = w, c->h = h;
-        c->label = label;
-        return c;
-}
-
-static fn settings_gallery_slider(struct ui_control address_to c, int low, int high, int step, int value)
-{
-        c->low = ui_q(low), c->high = ui_q(high), c->step = ui_q(step), c->value = ui_q(value);
-}
-
-// The page, from the demo's layout in Chrome (page pixels, the first card's top left at 24, 24).
-static fn settings_gallery_build(void)
-{
-        settings_gallery.count = 0;
-        settings_gallery_put(UI_WINDOW, 0, 24, 24, 332, 606, "Provision node");
-        settings_gallery_put(UI_CARD, 0, 380, 24, 332, 606, null);
-        settings_gallery_put(UI_CARD, 0, 736, 24, 332, 606, null);
-        settings_gallery_put(UI_CARD, 0, 24, 654, 332, 507, null);
-        settings_gallery_put(UI_CARD, 0, 380, 654, 332, 507, null);
-        settings_gallery_put(UI_CARD, 0, 24, 1185, 1044, 329, null);
-        settings_gallery_put(UI_RULE, 0, 48, 537, 284, 1, null);
-        settings_gallery_put(UI_RULE, 0, 405, 233, 282, 1, null);
-        settings_gallery_put(UI_RULE, 0, 49, 927, 282, 1, null);
-        settings_gallery_put(UI_RULE, 0, 49, 1420, 994, 1, null);
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 49, 282, ui_types[UI_TITLE_MEDIUM].line, "System preferences")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 49, 282, ui_types[UI_TITLE_MEDIUM].line, "Navigation")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Build target")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 405, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Actions")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 49, 1210, 994, ui_types[UI_TITLE_MEDIUM].line, "System upgrades")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1250, 994, ui_types[UI_BODY_MEDIUM].line, "Firmware DB-9 patching in progress\xe2\x80\xa6")->role = UI_ON_SURFACE_VARIANT;
-        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1338, 994, ui_types[UI_BODY_MEDIUM].line, "Node replication (80%)")->role = UI_ON_SURFACE_VARIANT;
-        settings_gallery_put(UI_HEADING, UI_BODY_MEDIUM, 49, 1461, 221, ui_types[UI_BODY_MEDIUM].line, "3 nodes pending a kernel rebuild.")->role = UI_ON_SURFACE_VARIANT;
-        // The fields are the kit's, typed in as any is: the node's name takes what a machine's name takes and says so.
-        for (int k = 0; k < 2; k++)
-        {
-                struct ui_control address_to field = settings_gallery_put(UI_INPUT, 0, UI_FIELD_H, k ? 203 : 117, 284, 78, k ? "Region" : "Node name");
-
-                if (!settings_gallery.field[k].doc.selections)
-                        ui_field_open(&settings_gallery.field[k], &settings.own, "");
-                settings_gallery.field[k].focused = false;
-                settings_gallery.field[k].most = 63;
-                settings_gallery.field[k].keeps_vertical = true; // Up and Down scroll the page
-                field->items[0] = k ? "moon-1" : "my-kernel";
-                field->edit = &settings_gallery.field[k];
-        }
-        settings_gallery.field[0].accept = settings_name_accepts;
-        settings_gallery.field[0].most = SETTINGS_NAME_MOST, settings_gallery.field[0].most_said = "a name is under 32 characters";
-        settings_gallery_slider(settings_gallery_put(UI_SLIDER, 0, 48, 289, 284, 88, "vCPU allocation"), 1, 64, 1, 8);
-        settings_gallery_slider(settings_gallery_put(UI_SLIDER, 0, 405, 266, 282, 88, "Log verbosity"), 0, 100, 1, 70);
-        settings_gallery_slider(settings_gallery_put(UI_SLIDER, UI_SLIDER_STEPS, 405, 370, 282, 88, "Replication limit"), 0, 100, 25, 50);
-        settings_gallery_put(UI_SWITCH, 0, 48, 393, 284, 48, "Pin to bare metal")->on = 1;
-        settings_gallery_put(UI_SWITCH, 0, 48, 457, 284, 48, "Auto-deploy on push")->on = 0;
-        settings_gallery_put(UI_SWITCH, 0, 405, 89, 282, 48, "Telemetry")->on = 1;
-        settings_gallery_put(UI_SWITCH, 0, 405, 153, 282, 48, "Offline cache")->on = 0;
-        settings_gallery_put(UI_CHECKBOX, 0, 49, 960, 282, 48, "Enable WASM target")->on = 1;
-        settings_gallery_put(UI_CHECKBOX, 0, 49, 1024, 282, 48, "Build as no_std")->on = 1;
-        settings_gallery_put(UI_CHECKBOX, 0, 49, 1088, 282, 48, "Strip symbols")->on = 0;
-        {
-                struct ui_control address_to radios = settings_gallery_put(UI_RADIOS, 0, 49, 719, 282, 48, null);
-
-                radios->items[0] = "x86-64";
-                radios->items[1] = "ARM64";
-                radios->items[2] = "RISC-V (experimental)";
-                radios->count = 3;
-                radios->at = 0;
-        }
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_TEXT, 48, 570, 67, 36, "Cancel")->disabled = 0;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 204, 570, 129, 36, "Provision node")->disabled = 0;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 405, 719, 75, 36, "Deploy")->disabled = 0;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_DEFAULT, 492, 719, 62, 36, "Build")->disabled = 0;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_OUTLINED, 566, 719, 63, 36, "Logs")->disabled = 0;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_TEXT, 405, 767, 67, 36, "Cancel")->disabled = 0;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_DEFAULT, 405, 819, 87, 36, "Disabled")->disabled = 1;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_OUTLINED, 504, 819, 87, 36, "Disabled")->disabled = 1;
-        settings_gallery_put(UI_BUTTON, UI_BUTTON_PRIMARY, 916, 1453, 127, 36, "Verify updates")->disabled = 0;
-        {
-                struct ui_control address_to tabs = settings_gallery_put(UI_TABS, UI_TABS_SEGMENTED, 761, 89, 223, 32, null);
-
-                tabs->items[0] = "All";
-                tabs->items[1] = "Running";
-                tabs->items[2] = "Stopped";
-                tabs->count = 3;
-        }
-        settings_gallery_put(UI_PROGRESS, 0, 49, 1294, 994, 6, null)->value = -1;
-        settings_gallery_put(UI_PROGRESS, 0, 49, 1382, 994, 6, null)->value = UI_ONE / 100 * 80;
-        // The pieces, in the grid's cell the demo leaves empty: a heading, then rows that flow left to right (x -1).
-        settings_gallery_put(UI_CARD, 0, 736, 654, 332, 507, null);
-        settings_gallery_put(UI_HEADING, UI_TITLE_MEDIUM, 761, 679, 282, ui_types[UI_TITLE_MEDIUM].line, "Pieces")->role = UI_ON_SURFACE;
-        settings_gallery_put(UI_BADGE, 1, 761, 719, 0, 22, "Accent")->role = UI_PRIMARY;
-        settings_gallery_put(UI_BADGE, 1, -1, 719, 0, 22, "Healthy")->role = UI_SUCCESS;
-        settings_gallery_put(UI_BADGE, 0, -1, 719, 0, 22, "Degraded")->role = UI_WARNING;
-        settings_gallery_put(UI_BADGE, 0, 761, 749, 0, 22, "Failed")->role = UI_ERROR;
-        settings_gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Info")->role = UI_INFO;
-        settings_gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Idle")->role = UI_SURFACE_HIGHEST;
-        settings_gallery_put(UI_BADGE, 0, -1, 749, 0, 22, "Draft")->role = -1;
-        settings_gallery_put(UI_TAG, 0, 761, 787, 0, 26, "riscv64");
-        settings_gallery_put(UI_TAG, 0, -1, 787, 0, 26, "kernel")->on = 1;
-        settings_gallery_put(UI_KBD, 0, -1, 790, 0, 20, "Ctrl");
-        settings_gallery_put(UI_KBD, 0, -1, 790, 0, 20, "K");
-        settings_gallery_put(UI_AVATAR, 0, 761, 829, 32, 32, "AL")->on = 1;
-        settings_gallery_put(UI_AVATAR, 0, 805, 833, 24, 24, "DL");
-        settings_gallery_put(UI_AVATAR, 1, 841, 829, 32, 32, "MW");
-        settings_gallery_put(UI_SPINNER, 0, 905, 838, 14, 14, null);
-        settings_gallery_put(UI_SPINNER, 0, 931, 835, 20, 20, null);
-        settings_gallery_put(UI_SPINNER, 0, 963, 831, 28, 28, null);
-        {
-                struct ui_control address_to callout = settings_gallery_put(UI_CALLOUT, 0, 761, 877, 282, 70, "Kernel rebuild pending");
-
-                callout->role = UI_WARNING;
-                string_copy_bounded((string_address)callout->text, (string_address) "Three nodes wait for it.", sizeof(callout->text));
-        }
-        {
-                struct ui_control address_to code = settings_gallery_put(UI_CODE_WELL, 0, 761, 963, 282, 172, "build.sh");
-
-                code->items[0] = "$ sh build.sh arch/x64";
-                code->items[1] = "  kernel   ok";
-                code->items[2] = "  shell    ok";
-                code->items[3] = "  canvas   ok";
-                code->count = 4;
-        }
-        for (int at = 0; at < settings_gallery.count; at++)
-                ui_control_start(&settings_gallery.control[at]);
-}
-
-static fn settings_gallery_place(void);
-
-// The page drawn into the rows of the band: the paper, then every control, the scroll taken off their places.
-static fn settings_gallery_draw(struct ui address_to ui)
-{
-        int right = 0, row_y = -1, scroll;
-
-        ui_scroll_glide(ui, &settings_gallery.scroll);
-        scroll = settings_gallery.scroll.scroll * 100 / ui->scale;
-        ui->top = 0;
-        ui->bottom = ui->height;
-        ui_fill(ui, 0, 0, ui->width, ui->height, ui_role_surface());
-        for (int at = 0; at < settings_gallery.count; at++)
-        {
-                struct ui_control address_to c = &settings_gallery.control[at];
-                int y = c->y;
-
-                // A piece that flows: after the last on its row, 8 apart.
-                if (c->x < 0 || (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD))
-                {
-                        if (c->x < 0 && (row_y == c->y || row_y == c->y - 3 || row_y == c->y + 3))
-                                c->x = right + 8;
-                        else if (c->x < 0)
-                                c->x = 761;
-                }
-                c->y = y - scroll;
-                if (c->y + c->h + 120 > 0 && c->y - 120 < ui->height * 100 / ui->scale)
-                {
-                        // The page is laid out left to right and turned over its width, as a window is, for a window that reads from the right.
-                        int placed = c->x;
-
-                        ui_control_size(ui, c);
-                        c->x = ui_mirror(c->x, c->w, 0, SETTINGS_GALLERY_W);
-                        ui_control_draw(ui, c);
-                        c->x = placed;
-                }
-                c->y = y;
-                if (c->kind == UI_BADGE || c->kind == UI_TAG || c->kind == UI_KBD)
-                        right = c->x + c->w, row_y = c->y;
-        }
-        settings_gallery_place();
-        ui_scroll_draw(ui, &settings_gallery.scroll);
-        // A finger's selection in either field: its handles and actions bar, over the page.
-        ui_text_overlay(ui, &settings_gallery.field[0]);
-        ui_text_overlay(ui, &settings_gallery.field[1]);
-}
-
-// The page's region: the window, over the whole page's height.
-static fn settings_gallery_place(void)
-{
-        struct ui_scroll address_to s = &settings_gallery.scroll;
-
-        s->x = ui_rtl() ? 0 : settings.width - ui_px(&settings.ui, UI_SCROLL_WIDTH), s->y = 0, s->height = s->view = settings.height;
-        s->inset = UI_CLOSE_BOTTOM; // the window's close button is at its top right: the bar starts below it
-        s->content = ui_px(&settings.ui, SETTINGS_GALLERY_H);
-        ui_scroll_clamp(s);
-}
-
-// The pointer, the wheel and the keys on the page: the kit's controls take the pointer, in page pixels; the region the rest.
-static b32 settings_gallery_event(const struct window_event address_to event)
-{
-        struct ui_scroll address_to s = &settings_gallery.scroll;
-        int offset = s->scroll * 100 / settings.ui.scale;
-        b32 moved = false;
-
-        settings_gallery_place();
-        if (event->type == WINDOW_EVENT_MOTION)
-                ui_kit.pointer_x = event->a, ui_kit.pointer_y = event->b;
-        // The fields are the kit's: the one a press focused has the keys first (Escape gives them back to the page),
-        // and each takes the pointer on its well, the drag it began and the clipboard's answer to its paste.
-        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
-                for (int k = 0; k < 2; k++)
-                        settings_gallery.field[k].focused = ui_text_inside(&settings_gallery.field[k], ui_kit.pointer_x, ui_kit.pointer_y);
-        for (int k = 0; k < 2; k++)
-        {
-                struct ui_text address_to t = &settings_gallery.field[k];
-                p32 asks = t->doc.selections && (event->type != WINDOW_EVENT_KEY || t->focused)
-                               ? ui_field_event(&settings.ui, t, &settings.popup, event, ui_kit.pointer_x, ui_kit.pointer_y)
-                               : 0;
-
-                // A press outside a gallery field is the page's: the field's answer to it (commit or cancel) changes nothing here.
-                if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
-                        asks = 0;
-                if (asks & (UI_TEXT_CANCEL | UI_TEXT_SUBMIT))
-                        t->focused = false;
-                if (asks)
-                {
-                        for (int at = 0; at < settings_gallery.count; at++)
-                                if (settings_gallery.control[at].edit)
-                                        settings_gallery.control[at].focused = settings_gallery.control[at].edit->focused;
-                        ui_page_redraw(&settings.page);
-                        return true;
-                }
-        }
-        if (event->type == WINDOW_EVENT_KEY)
-        {
-                if ((event->flags & WINDOW_KEY_DOWN) && event->a == UI_KEY_ESCAPE)
-                        return false;
-                if ((event->flags & WINDOW_KEY_DOWN) && (event->a == UI_KEY_DOWN || event->a == UI_KEY_UP))
-                        moved = ui_scroll_set(s, s->scroll + (event->a == UI_KEY_DOWN ? 1 : -1) * ui_px(&settings.ui, UI_ROW));
-        }
-        else if (event->type == WINDOW_EVENT_WHEEL)
-                moved = ui_wheel_turn(&settings.ui, s, event);
-        else if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
-        {
-                int x = ui_kit.pointer_x, y = ui_kit.pointer_y, bar;
-
-                if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
-                        return true;
-                bar = ui_scroll_pointer(&settings.ui, s, (int)event->type, x, y, (event->flags & WINDOW_KEY_DOWN) != 0);
-                if (bar >= 0)
-                        moved = ui_scroll_set(s, bar) || true;
-                else
-                {
-                        // The controls are drawn with the scroll taken off; the pointer is put on the page. A press off
-                        // the fields takes their keys away.
-                        for (int at = 0; at < settings_gallery.count; at++)
-                                settings_gallery.control[at].y -= offset;
-                        ui_kit_pointer(&settings.ui, settings_gallery.control, settings_gallery.count, (int)event->type, x, y,
-                                       (event->flags & WINDOW_KEY_DOWN) != 0, event->flags);
-                        for (int at = 0; at < settings_gallery.count; at++)
-                                settings_gallery.control[at].y += offset;
-                        for (int at = 0; at < settings_gallery.count; at++)
-                                if (settings_gallery.control[at].edit)
-                                        settings_gallery.control[at].edit->focused = settings_gallery.control[at].focused;
-                        moved = true;
-                }
-        }
-        if (moved)
-                ui_page_redraw(&settings.page);
-        return true;
-}
-
 /* ---- the pointer and a finger: the kit's page (ui_page_pointer) ---- */
 
 
@@ -4107,8 +3818,14 @@ static fn settings_press_at(void);
 
 static b32 settings_event(const struct window_event address_to event)
 {
-        if (settings_gallery.on)
-                return settings_gallery_event(event);
+        if (gallery.on)
+        {
+                b32 redraw = false, keep = gallery_event(&settings.ui, settings.width, settings.height, &settings.popup, event, &redraw);
+
+                if (redraw)
+                        ui_page_redraw(&settings.page);
+                return keep;
+        }
         /*
                 The map of the screens (above the Display rows): a press in its panel, the drag of a screen it took, and its
                 release. A finger does the same on the map, a tap choosing a screen and a drag moving it, and a drag that starts
@@ -4274,9 +3991,9 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         struct ui_page_parts parts;
 
         ui_paint_into(ui, pixels, settings.own.table->stride, settings.width, settings.height, band_top, band_bottom);
-        if (settings_gallery.on)
+        if (gallery.on)
         {
-                settings_gallery_draw(ui);
+                gallery_draw(ui);
                 return;
         }
         settings.page.title = settings.page.card ? settings.card_title : language_of("Settings");
@@ -4352,16 +4069,16 @@ static int settings_open(void)
         struct windows address_to table = settings.own.table;
         unsigned int row = settings.own.row;
 
-        if (!settings_gallery.on && ui_lift_other(&settings.own, (string_address) "settings", false))
+        if (!gallery.on && ui_lift_other(&settings.own, (string_address) "settings", false))
                 return 0;
 
         settings_refilter();
-        if (settings_gallery.on)
+        if (gallery.on)
         {
-                int width = ui_px(&settings.ui, SETTINGS_GALLERY_W), height = ui_px(&settings.ui, SETTINGS_GALLERY_H);
+                int width = ui_px(&settings.ui, GALLERY_W), height = ui_px(&settings.ui, GALLERY_H);
                 int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
 
-                settings_gallery_build();
+                gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
                 settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
                 ui_centre(table, row, settings.width, settings.height, 0);
                 settings_frame();
@@ -4406,7 +4123,7 @@ static fn settings_chose(int id)
                 settings_filter_asked(asks);
                 ui_page_redraw(&settings.page);
         }
-        else if (t && (t == &settings_gallery.field[0] || t == &settings_gallery.field[1]))
+        else if (t && (t == &gallery.field[0] || t == &gallery.field[1]))
         {
                 ui_text_menu_do(&settings.ui, t, id);
                 ui_page_redraw(&settings.page);
@@ -4418,12 +4135,12 @@ static fn settings_chose(int id)
 static long settings_tick(long timeout, long address_to other)
 {
         // The field with the keys blinks its caret a while after its last key, its well drawn again at each turn.
-        if (!settings.page.card && (settings_gallery.on || settings_editing() >= 0 || settings.filter_open))
+        if (!settings.page.card && (gallery.on || settings_editing() >= 0 || settings.filter_open))
         {
-                struct ui_text address_to t = settings_gallery.on ? &settings_gallery.field[settings_gallery.field[1].focused]
+                struct ui_text address_to t = gallery.on ? &gallery.field[gallery.field[1].focused]
                                               : settings_editing() >= 0 ? &settings.edit : &settings.filter_edit;
 
-                timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, settings_gallery.on ? t->focused : settings.focused);
+                timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, gallery.on ? t->focused : settings.focused);
         }
         if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
         {
@@ -4519,7 +4236,7 @@ static b32 settings_main()
         for (positive at = 1; at < (positive)program_argument_count(); at++)
                 if (string_equals(program_argument(at), (string_address) "-g"))
                 {
-                        settings_gallery.on = 1;
+                        gallery.on = 1;
                         settings_app.glass = 0;
                         settings_app.mono = 1;
                         settings_app.title = (string_address) "Gallery";
