@@ -217424,7 +217424,7 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         int s = scales[k], W = (which == 0 ? LAUNCHER_WIDTH : which == 2 ? MIXER_QUICK_W : which == 4 ? SETTINGS_WIDTH : which == 5 ? GALLERY_W : which == 6 ? 320 : which == 7 ? 480 : MIXER_WIDTH) * s / 100;
                         int H = (which == 0 ? 400 : which == 2 ? MIXER_QUICK_H : which == 4 ? SETTINGS_HEIGHT : which == 5 ? GALLERY_H : which == 6 ? 300 : which == 7 ? 60 : MIXER_HEIGHT) * s / 100, pitch = fixed_pitch ? fixed_pitch : (W + 3) & ~3;
                         int bad = 0;
-                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : which == 6 ? app_popmenu_paint : which == 7 ? app_find_paint : mixer_draw;
+                        void (*paint)(unsigned int address_to pixels) = which == 0 ? launcher_draw : which == 4 ? app_settings_paint : which == 5 ? app_gallery_paint : which == 6 ? app_popmenu_paint : which == 7 ? app_find_paint : which == 8 ? editor_draw : mixer_draw;
 
                         // The app as its window has it, set up here and not by its start: the scale, the faces, the window's table, the picture's size.
                         memory_zero(&app_table, sizeof(app_table));
@@ -217441,6 +217441,31 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                         launcher.entry[i].kind = LAUNCHER_WINDOW, launcher.entry[i].index = (unsigned short)i;
                                 launcher.focused = 1;
                                 launcher.search.kind = 0;
+                        }
+                        else if (which == 8)
+                        {
+                                // The editor: its file (opened by editor_open from a path, written here: lines, a tab, a long line, non-ASCII);
+                                // group 0 is the plain text area, group 1 the code view (every tab is code, and the code view's cells set lost).
+                                static const char text[] = "first line\n\tindented with a tab\n"
+                                                           "a long line that goes on for a while past the width of the window and beyond it, so the view has to cut it, over and over, to the end\n"
+                                                           "na\xc3\xafve caf\xc3\xa9 \xe2\x80\x94 \xc3\xbcnicode \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e text\n"
+                                                           "last\n";
+                                int handle = (int)system_open_at_mode(AT_FDCWD, (string_address)"/tmp/mw-editor-rows.txt", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+                                if (handle >= 0)
+                                {
+                                        system_write_once(handle, (void *)text, sizeof(text) - 1);
+                                        system_close(handle);
+                                }
+                                editor.own.stride = (unsigned int)pitch;
+                                editor.width = W, editor.height = H;
+                                editor.ui.scale = s, editor.ui.engine = &app_engine, editor.ui.regular = editor.ui.bold = editor.ui.mono = &app_face;
+                                editor.ui.scratch = app_scratch, editor.ui.scratch_width = 2000, editor.ui.opaque = 1, editor.ui.glass = 0;
+                                editor.focused = 1, editor.count = 0, editor.tab = 0;
+                                if (!editor_open((string_address)"/tmp/mw-editor-rows.txt"))
+                                        check("gpu apps: the editor opens its file", false);
+                                else if (app_group == 0)
+                                        editor_now()->view.mode = UI_TEXT_AREA;
                         }
                         else if (which == 7)
                         {
@@ -217523,16 +217548,18 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                         app_scene.size = cover_size, app_scene.at = cover_at;
                         if (which == 0)
                                 launcher.ui.scene = &app_scene;
+                        else if (which == 8)
+                                editor.ui.scene = &app_scene;
                         else if (which == 4 || which == 5 || which == 6 || which == 7)
                                 settings.ui.scene = &app_scene;
                         else
                                 mixer.ui.scene = &app_scene;
                         paint(dummy);
-                        launcher.ui.scene = null, mixer.ui.scene = null, settings.ui.scene = null;
+                        launcher.ui.scene = null, mixer.ui.scene = null, settings.ui.scene = null, editor.ui.scene = null;
                         if (app_scene.lost)
                         {
-                                string_format(log, "  known diff: app %p (%p%%, %p) set lost: a painter that is not recorded (R3 or R4)\n", (positive)which, (positive)s,
-                                              (positive)mode);
+                                string_format(log, "  known diff: app %p (%p%%, %p) set lost (%p ops recorded): %s\n", (positive)which, (positive)s, (positive)mode,
+                                              (positive)app_scene.count, (positive)(which == 8 ? "the code view's cell branch (ui_text_draw_line, R4)" : "a painter that is not recorded (R3 or R4)"));
                                 continue;
                         }
                         for (positive i = 0; i < (positive)pitch * H; i++)
@@ -217552,7 +217579,9 @@ static void app_rows(int which, positive pic_at, positive ops_at, positive bins_
                                                 string_format(log, "  FAIL gpu app %p %p%% %p: pixel %p,%p is %p, wanted %p\n", (positive)which, (positive)s, (positive)mode,
                                                               (positive)x, (positive)y, (positive)pic[(positive)y * pitch + x], (positive)cpu[(positive)y * pitch + x]);
                                 }
-                        if (which == 7)
+                        if (which == 8)
+                                check("gpu apps: the editor replays bit for bit", bad == 0);
+                        else if (which == 7)
                                 check("gpu apps: the find bar replays bit for bit", bad == 0);
                         else if (which == 6)
                                 check("gpu apps: the popup menu replays bit for bit", bad == 0);
@@ -219112,6 +219141,12 @@ b32 main(void)
 
                                 for (app_group = 0; app_group < 3; app_group++)
                                         app_rows(7, big, kops, kbins, kbins + (4 << 20), 4u << 20, find_scales, 4, 0);
+                        }
+                        {
+                                static const int editor_scales[4] = {100, 150, 200, 300};
+
+                                for (app_group = 0; app_group < 2; app_group++)
+                                        app_rows(8, big, kops, kbins, kbins + (4 << 20), 4u << 20, editor_scales, 4, 0);
                         }
                 }
         }
