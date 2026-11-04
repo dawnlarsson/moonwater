@@ -34,6 +34,9 @@
 #include "canvas.c"
 #undef CANVAS_ABI_ONLY
 
+// The window list: its format and reader (ui/list.h), which the compositor checks a list with (window_list_valid).
+#include "ui/list.h"
+
 // O_RDWR | O_CLOEXEC, which are the same numbers on all three architectures.
 // A window is this program's, not whatever it goes on to exec.
 #define WINDOW_OPEN_FLAGS 0x80002u
