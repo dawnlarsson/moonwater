@@ -49,7 +49,7 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 | Class | Denial of service by a blocking open in the root compositor; a confused-deputy open of whatever a program names (CWE-367 class: the open is of what the row says, not of what was checked) |
 | Attacker | a window's program (root today, as every table writer is: MW-2026-050), after a press of the person's on its window; and `moonwater clipboard set`'s fields in the header, which any table writer can fill |
 | Moonwater exposure window | from `76914efe` (2026-10-30 16:03 +01:00, the clipboard) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_clip_open`) |
+| Fixed by | `0edafad3` (`src/canvas/compositor.c` `compositor_clip_open`) |
 
 **What it was.** A copy is a sealed memfd the program names in its row (`clip_offer_fd`, with its pid), and the compositor
 opens it again through `/proc/PID/fd/N` to check and keep it. It opened whatever the descriptor was with a blocking read
@@ -81,7 +81,7 @@ is root's, so only root can name one. The program side's paste (`windows_clip_fe
 | Class | Stale index after free (a row number kept past its window): input delivered to another window, and a clipboard gesture with it |
 | Attacker | a program that opens a window when another closes, under a finger held on a touch screen (timing, no privilege beyond being a window) |
 | Moonwater exposure window | from `fcfac726` (2026-11-01 23:59 +01:00, the long press) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_leave`) |
+| Fixed by | `33ce8bff` (`src/canvas/compositor.c` `compositor_leave`) |
 
 **What it was.** A finger held still on a touch screen is a long press: `compositor_touch_tick` takes back the left press,
 sends the right button, and keeps the row under the finger in `compositor.touch.hold_row`; the lift that ends the press
@@ -156,7 +156,7 @@ bytes with zero.
 | Class | Out-of-bounds write in the root compositor (CWE-787): a clamp in the wrong order |
 | Attacker | none in the shipped configuration; the root-only `-s` option at 7 or 8 on a screen under 768 pixels, or a screen narrower than 192 pixels at the 200 percent preset |
 | Moonwater exposure window | from `e00c3a73` (2026-10-11 22:17 +02:00, the first resize) to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_want`) |
+| Fixed by | `b010ceaf` (`src/canvas/compositor.c` `compositor_want`) |
 
 **What it was.** `compositor_want` is where every size a window is asked to be passes (the hand's resize, a divider, a
 tile, a placement, a fit after a scale). It held the size to the least a window is at the desktop's scale, 96 by 48 times
@@ -190,7 +190,7 @@ bounded now (`compositor_take` and `compositor_want`), and a guard there was lef
 | Class | Signed integer overflow (undefined behaviour) on device-supplied input; the wheel and the pointer moved the other way |
 | Attacker | (5) a physical peripheral: a USB HID device whose report descriptor declares 32-bit relative fields |
 | Moonwater exposure window | the wheel's `value * 120` and the counts' `raw_x += value` from `c793b422` / `34945374` (2026-10-11 19:16 +02:00 and 2026-10-12 08:42 +02:00), the place's `real_x += accel` from `c9d0df3b` (2026-11-02 19:23 +01:00), to the fixing commit |
-| Fixed by | the commit that adds this entry (`src/canvas/compositor.c` `compositor_counts`) |
+| Fixed by | `7173b431` (`src/canvas/compositor.c` `compositor_counts`) |
 
 **What it was.** The compositor (root) reads every pointing device through evdev, whose `value` is any 32 bits the
 device sent; the kernel passes a HID device's relative fields through at the width its descriptor declares, so a USB
