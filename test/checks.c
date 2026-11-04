@@ -168991,6 +168991,55 @@ static void db_test_queue(void)
         DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
 }
 
+/*
+        No client can have another's calls refused by the calls it has waiting. Each client may have DBUS_PENDING_PER
+        calls wait for a reply, and the bus's table has room for every client's. (Before, it held 512, eight clients'
+        worth: nine clients calling a callee that never answers took all of it, and every call of every other client to
+        anyone but the bus was LimitsExceeded for as long as they stayed.)
+*/
+static void db_test_pending(void)
+{
+        long sink, caller, made = 0, refused = 0, delivered = 0, waiting = 0;
+        struct db_seen s;
+
+        db_reset();
+        sink = db_connect(0);
+        db_hello(sink);
+        db_request(sink, "org.example.Sink", 0);
+        db_drain(sink);
+        // every client the bus has room for, the sink too (it calls itself), each with all the calls it may have waiting
+        for (int k = 0; k < DBUS_CLIENTS; k++)
+        {
+                caller = k ? db_connect(0) : sink;
+                if (caller < 0)
+                        break;
+                if (k)
+                {
+                        db_hello(caller);
+                        db_drain(caller);
+                }
+                made++;
+                for (int c = 0; c < DBUS_PENDING_PER; c++)
+                        db_call(caller, "org.example.Sink", "/o", "org.example.I", "Hang", "", 0, 0);
+                if (caller != sink)
+                        while (db_find(caller, &s, DBUS_ERROR, 0))
+                                refused++;
+                while (db_find(sink, &s, DBUS_CALL, "Hang")) // the sink reads every call and answers none
+                        delivered++;
+                for (; db_find(sink, &s, DBUS_ERROR, 0);)
+                        refused++;
+                waiting += dbus.client[caller]->pending;
+        }
+        DBCHECK(made == DBUS_CLIENTS && !refused && delivered == (long)DBUS_CLIENTS * DBUS_PENDING_PER && waiting == delivered,
+                "every client may have its %d calls wait for a reply, all of them at once (%ld clients, %ld refused, %ld delivered, %ld waiting)", DBUS_PENDING_PER,
+                made, refused, delivered, waiting);
+        for (long slot = 0; slot < DBUS_CLIENTS; slot++)
+                dbus_drop(slot);
+        DBCHECK(db_allocs == db_releases, "every record is returned (%ld %ld)", db_allocs, db_releases);
+        for (long k = 0; k < DBUS_PENDING; k++)
+                DBCHECK(!dbus.pending[k].used, "no call waits when everyone is gone");
+}
+
 static void db_test_caps(void)
 {
         long slots[DBUS_CLIENTS + 2], made = 0, per_uid = 0;
@@ -169791,6 +169840,7 @@ int main(int argc, char **argv)
         db_test_hostile();
         db_test_caps();
         db_test_queue();
+        db_test_pending();
         db_test_fuzz(rounds);
         db_test_structured(grammar);
         printf("CHECK_dbus: %u checks, %u failures\n", db_checks, db_failures);

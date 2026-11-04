@@ -41,6 +41,33 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-151: a few programs on the session bus could have every other program's calls refused
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-04 |
+| Class | Denial of service across clients and users: a shared table smaller than what its users may take |
+| Attacker | (a) any local program that can open `/run/moonwater/bus` (eight connections; the per-uid cap is 12) |
+| Moonwater exposure window | 2026-11-04 02:33 +01:00 (`0fc46fa3`) to the commit that adds this entry, on main only |
+| Fixed by | the commit that adds this entry (`src/dbus/dbus.c`: `DBUS_PENDING`) |
+
+**What it was.** A method call that waits for a reply takes a row of the bus's pending table until it is answered or a
+side goes; a client may have `DBUS_PENDING_PER` (64) of them, but the table held 512 for all 32 clients. A program with
+nine connections, one owning a name and answering nothing and eight calling it 64 times each, took every row, and from
+then on every call of every other client to any client (a browser's to a keyring, a toolkit's to a notification daemon)
+was answered `LimitsExceeded`, for as long as those connections stayed open; there is no reply timeout to free them.
+
+**The fix.** `DBUS_PENDING` is `DBUS_CLIENTS * DBUS_PENDING_PER` (2048 rows, 32 KiB): every client can have all the calls
+it may have waiting, so no client's calls take another's room. A client that fills its own 64 is refused its 65th, as
+before.
+
+**Tests that fail without it.** CHECK_dbus `db_test_pending`: all 32 clients (the callee calling itself among them) each
+with 64 calls waiting on a callee that answers none, every one delivered and none refused; on the engine before 1,536 of
+the 2,048 were refused. Mutants: the table back at 512 (1,536 refused) and one row short (1 refused) are both red.
+
+**Still open.** Calls waiting on a callee that never answers are held until a side goes (dbus-daemon times them out); a
+client only holds up its own.
+
 ### MW-2026-130: the editor read a dangling link's target past its end
 
 | | |

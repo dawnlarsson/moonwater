@@ -55,8 +55,8 @@
 #define DBUS_NAMES 128           // well-known names, all clients together
 #define DBUS_NAMES_PER 8
 #define DBUS_RULES 64            // match rules one client holds
-#define DBUS_PENDING 512         // method calls waiting for a reply, all clients together
-#define DBUS_PENDING_PER 64
+#define DBUS_PENDING_PER 64      // method calls of one client waiting for a reply
+#define DBUS_PENDING (DBUS_CLIENTS * DBUS_PENDING_PER) // all clients together: room for every client's, so none takes another's
 #define DBUS_SETTINGS 64
 #define DBUS_NAME_TEXT 128       // the longest well-known name kept (the protocol's 255 are refused)
 #define DBUS_DEPTH 32            // how deep the containers of a value nest
