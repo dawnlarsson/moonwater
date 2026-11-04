@@ -694,8 +694,11 @@ static b32 gpu_run(void)
                 named = 0;
                 for (unsigned int i = 0; i < gpu.imports; i++)
                         bos[named++] = gpu.imported[i];
+                // Of the maps, the ones this present used (its records' addresses are in them alone): the kernel looks at the pages of every map named at
+                // every submission (ten 1920 by 1080 window buffers held cost a present 80 to 400 us on the box), and a map not named is not read by this job.
                 for (unsigned int i = 0; i < gpu_map_count; i++)
-                        bos[named++] = gpu_maps[i].handle;
+                        if (gpu_maps[i].used == gpu_tick)
+                                bos[named++] = gpu_maps[i].handle;
                 boin[1] = named | 8ull << 32, boin[2] = (positive)bos;
                 cs[0] = gpu.ctx, cs[1] = named ? 2 : 1; // the main buffer is valid for good (it needs no naming); a job that touches no other buffer names none
                 if (gpu_io(3u, 4, 24, cs))

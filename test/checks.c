@@ -214051,17 +214051,18 @@ b32 main(void)
         // What the maps cost a present: every job names every map, and the kernel looks at the pages of each userptr buffer it is named at every
         // submission. A job of one 64 by 4 fill, best and median of 31, with no maps; the two buffers of five 1920 by 1080 windows of a 3840-wide
         // screen (the window table's rows); those and a band of 34 tabs, 48 rows of 3840, each tab a map of its own slice; and the windows and the tabs
-        // as compositor_gpu_picture maps them (the band as one map).
+        // as compositor_gpu_picture maps them (the band as one map); and the ten window buffers held but not used by the present (a window's other buffer,
+        // a window not shown), which the job does not name.
         {
                 enum { RUNS = 31, TABS = 34, BAND_ROWS = 48, WIDE = 3840 };
-                positive window_bytes = (positive)WIDE * 1080 * 4, band_bytes = (positive)WIDE * BAND_ROWS * 4, took[RUNS], best[4], middle[4];
+                positive window_bytes = (positive)WIDE * 1080 * 4, band_bytes = (positive)WIDE * BAND_ROWS * 4, took[RUNS], best[5], middle[5];
                 long windows = system_call_6(syscall(mmap), 0, 10 * window_bytes, 3, 0x22, (positive)-1, 0), band = system_call_6(syscall(mmap), 0, band_bytes, 3, 0x22, (positive)-1, 0);
 
                 if ((windows < 0 && windows > -4096) || (band < 0 && band > -4096))
                         return 1;
                 memory_fill_u32((unsigned int address_to)windows, 10 * window_bytes / 4, 0xff202020u);
                 memory_fill_u32((unsigned int address_to)band, band_bytes / 4, 0xff303030u);
-                for (int way = 0; way < 4; way++)
+                for (int way = 0; way < 5; way++)
                 {
                         while (gpu_map_count)
                                 gpu_drop(0);
@@ -214090,6 +214091,8 @@ b32 main(void)
                                         string_format(log, "  gpu cost: %p maps for ten window buffers and 34 tabs\n", (positive)gpu_map_count);
                                 check("gpu cost: the tabs of a band are one map, the band's", tabs_mapped && gpu_map_count == 11);
                         }
+                        if (way == 4)
+                                gpu_trim(); // a present is over: the maps are held, and this one uses none of them
                         for (int run = 0; run < RUNS; run++)
                         {
                                 positive began;
@@ -214110,8 +214113,9 @@ b32 main(void)
                         if (way == 2)
                                 string_format(log, "  gpu cost: %p maps held for the windows and the tabs\n", (positive)gpu_map_count);
                 }
-                string_format(log, "  gpu cost: a job with no maps %p us (median %p), ten window buffers %p (%p), and 34 tab slices %p (%p), the tabs as the present maps them %p (%p)\n",
-                              best[0] / 1000, middle[0] / 1000, best[1] / 1000, middle[1] / 1000, best[2] / 1000, middle[2] / 1000, best[3] / 1000, middle[3] / 1000);
+                string_format(log, "  gpu cost: a job with no maps %p us (median %p), ten window buffers %p (%p), and 34 tab slices %p (%p), the tabs as the present maps them %p (%p), ten held and none used %p (%p)\n",
+                              best[0] / 1000, middle[0] / 1000, best[1] / 1000, middle[1] / 1000, best[2] / 1000, middle[2] / 1000, best[3] / 1000, middle[3] / 1000,
+                              best[4] / 1000, middle[4] / 1000);
                 while (gpu_map_count)
                         gpu_drop(0);
         }
