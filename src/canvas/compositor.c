@@ -7870,6 +7870,15 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
 {
         unsigned int close[2] = {handle, 0};
 
+#ifdef MOONWATER_GPU_C
+        // The GPU's import of it goes with it: the card hands a buffer made later the lowest free handle, this one's, and the import (which keeps this
+        // buffer alive) is known by the handle, so the GPU would go on drawing into this one while the screen shows that.
+        if (compositor_gpu_state.out_key == handle && compositor_gpu_state.out)
+                gpu_unimport(compositor_gpu_state.out), compositor_gpu_state.out = 0;
+        for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
+                if (compositor_gpu_state.turn_key[at] == handle && compositor_gpu_state.turn_va[at])
+                        gpu_unimport(compositor_gpu_state.turn_va[at]), compositor_gpu_state.turn_va[at] = 0;
+#endif
         compositor_call(syscall(munmap), (positive)pixels, bytes, 0, 0, 0, 0);
         system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
         system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);

@@ -208149,6 +208149,56 @@ b32 main(void)
                 }
 #undef GPU_HOSTILE
         }
+
+        // The scanout made again twice with no present of the GPU's between (the mode between is one the GPU does not compose: a width that is not a multiple
+        // of 4, or the setting off), by the compositor's own compositor_scanout_make and _free on the card's display node: the card gives the lowest free
+        // handle, so the third buffer has the first's, by which the GPU's import of the first is known. The GPU's present must draw into the third.
+        {
+                char path[] = "/dev/dri/card0", name[8] = "";
+                int card = -1;
+
+                for (int n = 0; n < 8 && card < 0; n++)
+                {
+                        p64 ver[8] = {0, 0, 7, (p64)name};
+
+                        path[13] = (char)('0' + n), name[0] = 0;
+                        card = (int)system_open_at(AT_FDCWD, (string_address)path, 2 | O_CLOEXEC);
+                        if (card >= 0 && !(system_control(card, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0 && string_equals((string_address)name, (string_address) "amdgpu")))
+                                system_close(card), card = -1;
+                }
+                if (card >= 0)
+                {
+                        enum { DW = 256, DH = 64 };
+                        unsigned int fb[3] = {0}, handle[3] = {0}, address_to pixels[3] = {0}, address_to ops_of = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
+                        unsigned long bytes[3] = {0}, pitch[3] = {0};
+                        positive out, stale = 0;
+
+                        compositor.card = card;
+                        check("gpu scanout: the first scanout is made", compositor_scanout_make(DW, DH, &fb[0], &handle[0], &pixels[0], &bytes[0], &pitch[0]) == 0);
+                        compositor.scanout_handle = handle[0], compositor.scanout_bytes = bytes[0];
+                        check("gpu scanout: the GPU imports it", (out = compositor_gpu_output()) != 0);
+                        check("gpu scanout: the second is made", compositor_scanout_make(DW, DH, &fb[1], &handle[1], &pixels[1], &bytes[1], &pitch[1]) == 0);
+                        compositor_scanout_free(fb[0], handle[0], pixels[0], bytes[0]);
+                        check("gpu scanout: the third is made", compositor_scanout_make(DW, DH, &fb[2], &handle[2], &pixels[2], &bytes[2], &pitch[2]) == 0);
+                        compositor_scanout_free(fb[1], handle[1], pixels[1], bytes[1]);
+                        string_format(log, "  gpu scanout: handles %p, %p, %p\n", (positive)handle[0], (positive)handle[1], (positive)handle[2]);
+                        compositor.scanout_handle = handle[2], compositor.scanout_bytes = bytes[2];
+                        out = compositor_gpu_output();
+                        ops_of[0] = 0, ops_of[1] = 0, ops_of[2] = 0, ops_of[3] = DW, ops_of[4] = DH, ops_of[5] = 0xff2468acu, ops_of[6] = ops_of[7] = 0;
+                        check("gpu scanout: the GPU's present into the third finishes", out && gpu_scene(ops_at, 1, bins_at, out, (unsigned int)(pitch[2] / 4), DW, DH, 0, 0, DW, DH));
+                        for (unsigned int y = 0; pixels[2] && y < DH; y++)
+                                for (unsigned int x = 0; x < DW; x++)
+                                        stale += pixels[2][(positive)y * (pitch[2] / 4) + x] != 0xff2468acu;
+                        if (stale)
+                                string_format(log, "  gpu scanout: %p of the third scanout's pixels are not the present's\n", stale);
+                        check("gpu scanout: the GPU draws into the scanout made last, not one given back", !stale);
+                        compositor_scanout_free(fb[2], handle[2], pixels[2], bytes[2]);
+                        compositor.card = -1;
+                        system_close(card);
+                }
+                else
+                        string_format(log, "  gpu scanout: no amdgpu display node, skipped\n");
+        }
         return test_report(null);
 }
 #endif /* CHECK_gpu_kit */
