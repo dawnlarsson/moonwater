@@ -474,6 +474,7 @@ static struct
         long row_percent[WAYLAND_ROWS];  // the percent the window of the row was last told its scale for (0 before the first)
         struct wayland_screen screen[WAYLAND_SCREENS];
         long screens;
+        long output_age[WAYLAND_SCREENS]; // how many times the screen of the number has been removed: its global's name is not used twice
         long clients, objects, surfaces, pools, buffers, fds, rows;
         long pointer_row, pointer_surface, keyboard_row, pointer_x, pointer_y;
         unsigned long mods[4];
@@ -892,6 +893,22 @@ static int wayland_name_is(const unsigned char *text, long length, const char *n
         return name[at] == 0;
 }
 
+/*
+        A screen's global name: 64 and its number, and one screen count further for each time a screen of that number was taken away
+        (a name is never given to two globals, as the protocol has it); the screen a name stands for, or -1 for none that is there.
+*/
+static long wayland_output_name(long screen)
+{
+        return WAYLAND_OUTPUT_NAME + screen + WAYLAND_SCREENS * wayland.output_age[screen];
+}
+
+static long wayland_output_of(long name)
+{
+        long screen = name >= WAYLAND_OUTPUT_NAME ? (name - WAYLAND_OUTPUT_NAME) % WAYLAND_SCREENS : -1;
+
+        return screen >= 0 && screen < wayland.screens && wayland_output_name(screen) == name ? screen : -1;
+}
+
 static void wayland_global_send(struct wayland_client *c, unsigned long registry, long name)
 {
         struct wayland_event e = wayland_begin(c, registry, WLE_wl_registry_global);
@@ -957,6 +974,44 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         percent is 2560 by 1440 of 3840 by 2160), and done, which from version 3 is the wl_output's (the caller sends it after
         the properties of the wl_output, so that the two are one atomic change).
 */
+/*
+        Where a screen is in the one logical space the clients are told of. The desktop is laid out in pixels, and a screen of another
+        scale is another unit in it, so a screen that follows another is placed after what the other measures in units and not in
+        pixels: 3840 pixels at 200 percent are 1920 units, and the screen that abuts it on the right starts at 1920 and not at 3840.
+        Along an axis a screen is at the end of the screen it follows (the nearest to its start that lies wholly before it and
+        shares some of its extent across), a gap between them in its own units; with none before it, at its pixel distance from the
+        origin in its own units. The two axes are each worked out so, and a screen that is first on both keeps what it always had.
+*/
+static long wayland_logical_axis(long screen, int vertical, int depth)
+{
+        const struct wayland_screen *self = &wayland.screen[screen];
+        long start = vertical ? self->y : self->x, across = vertical ? self->x : self->y;
+        long across_size = vertical ? self->width : self->height, best = -1, best_end = 0;
+        long scale120 = wayland_percent120(self->scale);
+
+        for (long at = 0; at < wayland.screens && depth < WAYLAND_SCREENS; at++)
+        {
+                const struct wayland_screen *other = &wayland.screen[at];
+                long other_start = vertical ? other->y : other->x, other_size = vertical ? other->height : other->width;
+                long other_across = vertical ? other->x : other->y, other_across_size = vertical ? other->width : other->height;
+                long stop = other_start + other_size;
+
+                if (at == screen || stop > start || other_across >= across + across_size || across >= other_across + other_across_size)
+                        continue;
+                if (best < 0 || stop > best_end)
+                        best = at, best_end = stop;
+        }
+        if (best < 0)
+                return wayland_units(start, scale120);
+        {
+                const struct wayland_screen *before = &wayland.screen[best];
+
+                return wayland_logical_axis(best, vertical, depth + 1) +
+                       wayland_units(vertical ? before->height : before->width, wayland_percent120(before->scale)) +
+                       wayland_units(start - best_end, scale120);
+        }
+}
+
 static void wayland_xdg_output_send(struct wayland_client *c, long slot, long output)
 {
         const struct wayland_screen *screen;
@@ -968,8 +1023,8 @@ static void wayland_xdg_output_send(struct wayland_client *c, long slot, long ou
         screen = &wayland.screen[output];
         scale120 = wayland_percent120(screen->scale);
         e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_position);
-        wayland_word(&e, (unsigned long)wayland_units(screen->x, scale120));
-        wayland_word(&e, (unsigned long)wayland_units(screen->y, scale120));
+        wayland_word(&e, (unsigned long)wayland_logical_axis(output, 0, 0));
+        wayland_word(&e, (unsigned long)wayland_logical_axis(output, 1, 0));
         wayland_end(&e);
         e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_size);
         wayland_word(&e, (unsigned long)wayland_units(screen->width, scale120));
@@ -1732,7 +1787,7 @@ static int wayland_display_request(struct wayland_client *c, long op, struct way
                 if (wayland_global_offered(name))
                         wayland_global_send(c, c->objects[a[0].slot].id, name);
         for (long screen = 0; screen < wayland.screens; screen++)
-                wayland_global_send(c, c->objects[a[0].slot].id, WAYLAND_OUTPUT_NAME + screen);
+                wayland_global_send(c, c->objects[a[0].slot].id, wayland_output_name(screen));
         return WAYLAND_OK;
 }
 
@@ -1750,7 +1805,7 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
                 iface = wayland_globals[name - 1].iface;
                 version = wayland_globals[name - 1].version;
         }
-        else if (name >= WAYLAND_OUTPUT_NAME && name < WAYLAND_OUTPUT_NAME + wayland.screens)
+        else if (wayland_output_of(name) >= 0)
         {
                 iface = WLI_wl_output;
                 version = 4;
@@ -1766,7 +1821,7 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
                 return wayland_new_fail(c, self->id, id);
         if (iface == WLI_wl_output)
         {
-                c->objects[slot].aux = (unsigned short)(name - WAYLAND_OUTPUT_NAME);
+                c->objects[slot].aux = (unsigned short)wayland_output_of(name);
                 wayland_output_send(c, slot);
         }
         else if (iface == WLI_wl_shm)
@@ -5385,8 +5440,11 @@ WAYLAND_API void wayland_sent(long slot, long count)
 */
 WAYLAND_API void wayland_screens_changed(void)
 {
+        long was;
+
         if (!wayland.host)
                 return;
+        was = wayland.screens;
         wayland.screens = wayland.host->screens(wayland.host->context, wayland.screen, WAYLAND_SCREENS);
         if (wayland.screens < 0)
                 wayland.screens = 0;
@@ -5394,6 +5452,46 @@ WAYLAND_API void wayland_screens_changed(void)
         {
                 struct wayland_client *c = wayland.client[slot];
 
+                //      A screen went: the surfaces on it leave it, and what the client bound of it is told nothing more (its number is
+                //      nobody's: a screen that comes with it later is another global, and these are not it).
+                for (long screen = wayland.screens; c && screen < was && screen < 8; screen++)
+                {
+                        for (long at = 0; at < WAYLAND_SURFACES; at++)
+                        {
+                                struct wayland_surface *surface = &c->surfaces[at];
+
+                                if (!surface->live || !(surface->entered & (1u << screen)))
+                                        continue;
+                                for (long object = 0; object < WAYLAND_OBJECTS; object++)
+                                        if (c->objects[object].iface == WLI_wl_output && c->objects[object].aux == screen)
+                                        {
+                                                struct wayland_event e = wayland_begin(c, surface->id, WLE_wl_surface_leave);
+
+                                                wayland_word(&e, c->objects[object].id);
+                                                wayland_end(&e);
+                                        }
+                                surface->entered &= (unsigned char)~(1u << screen);
+                        }
+                        for (long object = 0; object < WAYLAND_OBJECTS; object++)
+                                if ((c->objects[object].iface == WLI_wl_output || c->objects[object].iface == WLI_zxdg_output_v1) &&
+                                    c->objects[object].aux == screen)
+                                        c->objects[object].aux = 0xffff;
+                }
+                //      Each registry a client holds says so, as the protocol has it: a screen that came is a global to bind, one that went
+                //      is removed.
+                for (long at = 0; c && at < WAYLAND_OBJECTS && wayland.screens != was; at++)
+                        if (c->objects[at].iface == WLI_wl_registry)
+                        {
+                                for (long screen = was; screen < wayland.screens; screen++)
+                                        wayland_global_send(c, c->objects[at].id, wayland_output_name(screen));
+                                for (long screen = wayland.screens; screen < was; screen++)
+                                {
+                                        struct wayland_event e = wayland_begin(c, c->objects[at].id, WLE_wl_registry_global_remove);
+
+                                        wayland_word(&e, (unsigned long)wayland_output_name(screen));
+                                        wayland_end(&e);
+                                }
+                        }
                 for (long at = 0; c && at < WAYLAND_OBJECTS; at++)
                         if (c->objects[at].iface == WLI_zxdg_output_v1)
                                 wayland_xdg_output_send(c, at, c->objects[at].aux);
@@ -5401,6 +5499,8 @@ WAYLAND_API void wayland_screens_changed(void)
                         if (c->objects[at].iface == WLI_wl_output)
                                 wayland_output_send(c, at);
         }
+        for (long screen = wayland.screens; screen < was && screen < WAYLAND_SCREENS; screen++)
+                wayland.output_age[screen]++;
 }
 
 /*

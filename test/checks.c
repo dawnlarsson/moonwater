@@ -160227,6 +160227,8 @@ static struct fake_host_state
         long now;
         long locks, caps, keymap_fd, rate, delay;
         struct wayland_screen screen;
+        long screens; // how many screens the host has: the first is `screen`, the others sit to its right at its size (0 is one)
+        struct wayland_screen extra[4]; // the screens after the first, as a check has set them: a width of 0 is the default one
         // the clipboard the compositor holds: the bytes of each selection, and what the shim asked of it
         long clip_size[2], pull_refuse, pulls, aborts, pushes, clears, pull_client, pull_which, push_row, push_which;
         int pull_wfd, pull_rfd;
@@ -160435,8 +160437,20 @@ static long fake_screens(void *context, struct wayland_screen *screens, long roo
 {
         (void)context;
         (void)room;
-        screens[0] = fake.screen;
-        return 1;
+        long count = fake.screens > 1 ? fake.screens : 1;
+
+        for (long at = 0; at < count && at < room; at++)
+        {
+                screens[at] = fake.screen;
+                screens[at].x = fake.screen.x + at * fake.screen.width;
+                screens[at].name[8] = (char)('1' + at);
+                if (at >= 1 && at <= 4 && fake.extra[at - 1].width)
+                {
+                        screens[at] = fake.extra[at - 1];
+                        screens[at].name[8] = (char)('1' + at);
+                }
+        }
+        return count < room ? count : room;
 }
 
 static long fake_now(void *context)
@@ -164811,6 +164825,233 @@ static void test_scale(void)
         wayland_stop();
 }
 
+/*
+        The screens that come and go. A screen that comes is a global a client can bind, announced to each registry it holds;
+        one that goes is left by the surfaces on it, then removed from the registries, and what a client bound of it hears
+        nothing more; a screen that comes in its place is another global (a name is never used twice), and the old name binds
+        nothing.
+*/
+static long output_names(struct wlc *c, long from, long address[], long room)
+{
+        long count = 0;
+
+        for (long at = from; at < c->events; at++)
+                if (c->ev[at].iface == WLI_wl_registry && c->ev[at].opcode == WLE_wl_registry_global &&
+                    !strcmp(c->ev[at].text[1], "wl_output") && count < room)
+                        address[count++] = (long)c->ev[at].u[0];
+        return count;
+}
+
+static long output_events(struct wlc *c, unsigned long object, long opcode)
+{
+        long count = 0;
+
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].iface == WLI_wl_output && c->ev[at].object == object && c->ev[at].opcode == opcode)
+                        count++;
+        return count;
+}
+
+/*
+        The screens in one logical space. A screen that follows another is placed after what the other measures in units, not in
+        pixels, so two screens that touch in the desktop's pixels touch in the units the clients are told of, whatever their scales
+        are: the xdg_output's logical position and size of one is the end of the other's.
+*/
+static void logical_of(struct wlc *c, unsigned long output, long address[4])
+{
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].iface == WLI_zxdg_output_v1 && c->ev[at].object == output)
+                {
+                        if (c->ev[at].opcode == WLE_zxdg_output_v1_logical_position)
+                                address[0] = (long)c->ev[at].u[0], address[1] = (long)c->ev[at].u[1];
+                        else if (c->ev[at].opcode == WLE_zxdg_output_v1_logical_size)
+                                address[2] = (long)c->ev[at].u[0], address[3] = (long)c->ev[at].u[1];
+                }
+}
+
+static void test_logical_space(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long manager, first, second, third;
+        long a[4], b[4], d[4];
+
+        wl_reset();
+        wayland_start(&fake_host);
+        fake.screen = (struct wayland_screen){0, 0, 3840, 2160, 200, 60000, 600, 340, "Virtual-1"};
+        fake.screens = 2;
+        fake.extra[0] = (struct wayland_screen){3840, 0, 1920, 1080, 100, 60000, 300, 170, "Virtual-2"};
+        wayland_screens_changed();
+        session_open(&s);
+        c = s.c;
+        manager = wl_global(c, s.registry, WLI_zxdg_output_manager_v1, 3);
+        first = wlc_id(c, WLI_zxdg_output_v1, 3);
+        second = wlc_id(c, WLI_zxdg_output_v1, 3);
+        wlc_send(c, manager, WLQ_zxdg_output_manager_v1_get_xdg_output, first, s.output);
+        {
+                unsigned long output2 = wlc_id(c, WLI_wl_output, 4);
+
+                wlc_send(c, s.registry, WLQ_wl_registry_bind, 65L, "wl_output", 4L, output2);
+                wlc_send(c, manager, WLQ_zxdg_output_manager_v1_get_xdg_output, second, output2);
+        }
+        memset(a, 0, sizeof a);
+        memset(b, 0, sizeof b);
+        logical_of(c, first, a);
+        logical_of(c, second, b);
+        WLCHECK(a[0] == 0 && a[1] == 0 && a[2] == 1920 && a[3] == 1080,
+                "a screen of 3840 by 2160 at 200 percent is 1920 by 1080 units at the origin");
+        WLCHECK(b[0] == 1920 && b[1] == 0 && b[2] == 1920 && b[3] == 1080,
+                "the screen that abuts it on the right, at 100 percent, starts where it ends in units, 1920, and not in pixels, 3840");
+        /* the other way round: the 100 percent screen first, the 200 percent one after it */
+        wlc_forget(c);
+        fake.screen = (struct wayland_screen){0, 0, 1920, 1080, 100, 60000, 300, 170, "Virtual-1"};
+        fake.extra[0] = (struct wayland_screen){1920, 0, 3840, 2160, 200, 60000, 600, 340, "Virtual-2"};
+        wayland_screens_changed();
+        wlc_pump(c);
+        memset(a, 0, sizeof a);
+        memset(b, 0, sizeof b);
+        logical_of(c, first, a);
+        logical_of(c, second, b);
+        WLCHECK(a[0] == 0 && b[0] == 1920 && b[2] == 1920 && b[3] == 1080,
+                "and the 200 percent one after the 100 percent one is at 1920 units too, 1920 units wide");
+        /* a screen below, and a gap: the gap is in the screen's own units */
+        wlc_forget(c);
+        fake.screen = (struct wayland_screen){0, 0, 1920, 1080, 100, 60000, 300, 170, "Virtual-1"};
+        fake.extra[0] = (struct wayland_screen){0, 1080 + 300, 2880, 1620, 150, 60000, 450, 255, "Virtual-2"};
+        wayland_screens_changed();
+        wlc_pump(c);
+        memset(b, 0, sizeof b);
+        logical_of(c, second, b);
+        WLCHECK(b[0] == 0 && b[1] == 1080 + 200 && b[2] == 1920 && b[3] == 1080,
+                "a screen below another with a gap of 300 pixels at 150 percent is that gap, 200 units, below its end");
+        /* a screen that follows nothing is at its pixel distance in its own units; one that follows two is after the nearer */
+        wlc_forget(c);
+        fake.screens = 3;
+        fake.screen = (struct wayland_screen){0, 0, 1920, 1080, 100, 60000, 300, 170, "Virtual-1"};
+        fake.extra[0] = (struct wayland_screen){1920, 0, 3840, 2160, 200, 60000, 600, 340, "Virtual-2"};
+        fake.extra[1] = (struct wayland_screen){5760, 0, 1920, 1080, 100, 60000, 300, 170, "Virtual-3"};
+        wayland_screens_changed();
+        third = wlc_id(c, WLI_zxdg_output_v1, 3);
+        {
+                unsigned long output3 = wlc_id(c, WLI_wl_output, 4);
+
+                wlc_send(c, s.registry, WLQ_wl_registry_bind, 66L, "wl_output", 4L, output3);
+                wlc_send(c, manager, WLQ_zxdg_output_manager_v1_get_xdg_output, third, output3);
+        }
+        memset(d, 0, sizeof d);
+        logical_of(c, third, d);
+        WLCHECK(d[0] == 1920 + 1920 && d[1] == 0,
+                "a third screen after the 200 percent one is after its 1920 units, at 3840, and not at 5760 pixels");
+        wlc_end(c);
+        leak_check("logical");
+        wayland_stop();
+}
+
+static void test_outputs(void)
+{
+        struct session s;
+        struct scale_window w;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        long names[4], count, a;
+        unsigned long second, third;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        count = output_names(c, 0, names, 4);
+        WLCHECK(count == 1 && names[0] == 64, "one screen is one wl_output global, named 64");
+        wlc_forget(c);
+        fake.screens = 2;
+        wayland_screens_changed();
+        wlc_pump(c);
+        count = output_names(c, 0, names, 4);
+        WLCHECK(count == 1 && names[0] == 65 && wlc_count(c, WLI_wl_registry, WLE_wl_registry_global_remove) == 0,
+                "a screen that comes is announced to a registry that is open: a new global, 65, and nothing removed");
+        second = wlc_id(c, WLI_wl_output, 4);
+        wlc_forget(c);
+        wlc_send(c, s.registry, WLQ_wl_registry_bind, 65L, "wl_output", 4L, second);
+        a = output_events(c, second, WLE_wl_output_geometry);
+        e = wlc_take(c, WLI_wl_output, WLE_wl_output_mode);
+        WLCHECK(c->errors == 0 && a == 1 && e && e->u[1] == 1280,
+                "and it binds, and says itself: its geometry and a mode of 1280 by 720 (%s)", c->error_text);
+        /* a window on the second screen leaves it when it goes, and then the global is removed */
+        wlc_end(c);
+        wayland_stop();
+        wl_reset();
+        wayland_start(&fake_host);
+        fake.screens = 2;
+        wayland_screens_changed();
+        scale_open(&w, 0, 0);
+        c = w.s.c;
+        second = wlc_id(c, WLI_wl_output, 4);
+        wlc_send(c, w.s.registry, WLQ_wl_registry_bind, 65L, "wl_output", 4L, second);
+        scale_show(&w, 32, 24);
+        fake.row[0].x = 1300;
+        wayland_scales_sweep();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_surface, WLE_wl_surface_enter) >= 1, "a window on the second screen enters it");
+        wlc_forget(c);
+        fake.screens = 1;
+        wayland_screens_changed();
+        wlc_pump(c);
+        a = event_at(c, WLI_wl_surface, WLE_wl_surface_leave, 0);
+        count = event_at(c, WLI_wl_registry, WLE_wl_registry_global_remove, 0);
+        WLCHECK(a >= 0 && c->ev[a].u[0] == second && count > a && c->ev[count].u[0] == 65,
+                "a screen that goes is left by the window on it, and then its global, 65, is removed");
+        wlc_forget(c);
+        fake.screen.scale = 150;
+        wayland_screens_changed();
+        wlc_pump(c);
+        WLCHECK(output_events(c, second, WLE_wl_output_geometry) == 0 && output_events(c, w.s.output, WLE_wl_output_geometry) == 1,
+                "what was bound of the screen that went hears nothing more, and the one that stays is told as before");
+        wlc_forget(c);
+        fake.screen.scale = 100;
+        fake.screens = 2;
+        wayland_screens_changed();
+        wlc_pump(c);
+        count = output_names(c, 0, names, 4);
+        WLCHECK(count == 1 && names[0] == 73, "a screen that comes in its place is another global: 73, and not the 65 that was removed");
+        wlc_forget(c);
+        fake.screen.scale = 125;
+        wayland_screens_changed();
+        wlc_pump(c);
+        WLCHECK(output_events(c, second, WLE_wl_output_geometry) == 0 && output_events(c, w.s.output, WLE_wl_output_geometry) == 1,
+                "and what was bound of the screen that went is not told of the one that came in its place");
+        wlc_forget(c);
+        wlc_send(c, w.s.registry, WLQ_wl_registry_bind, 65L, "wl_output", 4L, wlc_id(c, WLI_wl_output, 4));
+        WLCHECK(refused_with(c, WLN_wl_display_error_invalid_object), "and the name that was removed binds nothing");
+        wlc_end(c);
+        /* a client made after sees the screens there are, and two that go and come again are two new globals */
+        wayland_stop();
+        wl_reset();
+        wayland_start(&fake_host);
+        fake.screens = 3;
+        wayland_screens_changed();
+        session_open(&s);
+        c = s.c;
+        count = output_names(c, 0, names, 4);
+        WLCHECK(count == 3 && names[0] == 64 && names[1] == 65 && names[2] == 66, "a client made with three screens is offered three, 64 to 66");
+        wlc_forget(c);
+        fake.screens = 1;
+        wayland_screens_changed();
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wl_registry, WLE_wl_registry_global_remove) == 2,
+                "two screens gone are two globals removed");
+        wlc_forget(c);
+        fake.screens = 3;
+        wayland_screens_changed();
+        wlc_pump(c);
+        count = output_names(c, 0, names, 4);
+        WLCHECK(count == 2 && names[0] == 73 && names[1] == 74, "and two that come are 73 and 74");
+        third = wlc_id(c, WLI_wl_output, 4);
+        (void)third;
+        wlc_end(c);
+        leak_check("outputs");
+        wayland_stop();
+}
+
 int main(int argc, char **argv)
 {
         long rounds = argc > 1 ? atol(argv[1]) : 20000;
@@ -164833,6 +165074,8 @@ int main(int argc, char **argv)
         test_dmabuf();
         test_games();
         test_scale();
+        test_outputs();
+        test_logical_space();
         test_tree_fuzz(rounds);
         test_clipboard();
         test_clip_fuzz(rounds);
