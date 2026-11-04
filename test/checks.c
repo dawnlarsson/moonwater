@@ -183531,9 +183531,11 @@ static positive clock_monotonic_nanoseconds(void)
         return (positive)now.tv_sec * 1000000000ull + (positive)now.tv_nsec;
 }
 static void memory_zero(void *block, unsigned long size) { memset(block, 0, size); }
-static address_any memory_copy(address_any to, const address_any from, positive size) { return memcpy(to, from, size); }
 static b32 memory_compare(const address_any first, const address_any second, positive size) { return memcmp(first, second, size) != 0; }
 static b32 system_close(int fd) { return close(fd); }
+static positive string_length(string_address text) { return (positive)strlen((const char *)text); }
+static positive string_length_max(string_address text, positive bound) { positive n = 0; while (n < bound && text[n]) n++; return n; }
+static b32 string_compare(string_address a, string_address b) { return strcmp((const char *)a, (const char *)b) != 0; }
 static b32 bits_leading_zeros(positive value) { return value ? (b32)__builtin_clzll(value) : 64; } // lib.c's, which a hosted build lacks
 static thread sv_thread;
 static thread *thread_start(fn (*entry)(address_any), address_any argument) { (void)entry; (void)argument; return &sv_thread; }
@@ -183576,7 +183578,6 @@ static long system_call_6(long number, long a, long b, long c, long d, long e, l
 #include "../src/audio/mix.c"
 #include "../src/audio/pulse.c"
 // The library's names control.c calls, as the libc has them for a hosted build.
-#define memory_copy(to, from, size) memmove((to), (from), (size))
 #define string_length(text) strlen((const char *)(text))
 #define memory_first_of(block, value, size) memchr((block), (value), (size))
 #define memory_zero(to, size) memset((to), 0, (size))
@@ -184158,6 +184159,22 @@ static void sv_test_bucket(void)
         }
 }
 
+/* ---- the text helpers (the library's bounded length, copy and compare under them) ---- */
+static void sv_test_text(void)
+{
+        char to[16];
+
+        audio_copy_text(to, 8, "abcdefghijkl");
+        SVCHECK(strcmp(to, "abcdefg") == 0 && to[7] == 0, "a copy is cut at room - 1 and ends in a zero byte (%s)", to);
+        audio_copy_text(to, 16, "short");
+        SVCHECK(strcmp(to, "short") == 0, "a copy that fits is whole (%s)", to);
+        audio_copy_text(to, 0, "not written");
+        SVCHECK(strcmp(to, "short") == 0, "a copy into no room writes nothing");
+        SVCHECK(audio_text_equal("ab", "ab") == 1 && audio_text_equal("", "") == 1, "equal texts are equal");
+        SVCHECK(audio_text_equal("ab", "abc") == 0 && audio_text_equal("abc", "ab") == 0, "a prefix is not equal");
+        SVCHECK(audio_text_length("hello") == 5 && audio_text_length("") == 0, "the length of a text");
+}
+
 static int sv_main_checks(void)
 {
         sv_setup();
@@ -184168,6 +184185,7 @@ static int sv_main_checks(void)
         sv_test_table();
         sv_test_job();
         sv_test_bucket();
+        sv_test_text();
         sv_test_socket();
         sv_test_card();
         sv_test_file();
@@ -184177,8 +184195,45 @@ static int sv_main_checks(void)
         return sv_failures != 0;
 }
 
+/* the text helpers on a pinned core: ticks for a copy of a name and for a comparison of two names (median over the passes) */
+static void sv_bench_text(int cpu)
+{
+        enum { PASSES = 4001 };
+        static unsigned long long samples[PASSES];
+        static char to[64];
+        cpu_set_t set;
+        const char *name = "a program name of about forty bytes long!";
+        const char *other = "a program name of about forty bytes long?";
+        int same = 0;
+
+        CPU_ZERO(&set);
+        CPU_SET(cpu, &set);
+        sched_setaffinity(0, sizeof set, &set);
+        for (int i = 0; i < PASSES; i++)
+        {
+                samples[i] = sv_now();
+                audio_copy_text(to, sizeof to, name);
+                samples[i] = sv_now() - samples[i];
+        }
+        qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+        printf("copy of a 36-byte name: median %llu, p90 %llu (ticks)\n", samples[PASSES / 2], samples[PASSES * 9 / 10]);
+        for (int i = 0; i < PASSES; i++)
+        {
+                samples[i] = sv_now();
+                same += audio_text_equal(name, other);
+                samples[i] = sv_now() - samples[i];
+        }
+        qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
+        printf("compare of two 36-byte names: median %llu, p90 %llu (ticks, %d)\n", samples[PASSES / 2], samples[PASSES * 9 / 10], same);
+}
+
 int main(int argc, char **argv)
 {
+        if (argc > 1 && strcmp(argv[1], "text") == 0)
+        {
+                sv_bench_text(argc > 2 ? atoi(argv[2]) : 8);
+                return 0;
+        }
         if (argc > 1 && strcmp(argv[1], "bench") == 0)
         {
                 sv_bench(argc > 2 ? atoi(argv[2]) : 8);

@@ -349,6 +349,8 @@ M = [
     ("service", 'a text is kept though the program renamed itself (the cache ignores versions)', '!k->valid || k->owner != c->index || k->owner_version != c->props.version || k->of != own_index || k->of_version != own->version', '!k->valid || k->owner != c->index || k->of != own_index'),
     ("service", 'a stream that is gone keeps its row', '        for (long i = streams; i < (long)build.streams; i++)', '        for (long i = streams; i < (long)streams; i++)'),
     ("service", "a settings file is read on every look, even when it has not moved", "        if (!first && __builtin_memcmp(&now, &stamps[slot], sizeof now) == 0)\n                return 0;", "        if (!first)\n                return 0;"),
+    ("service", "a text equal to a prefix of another is equal", "        return string_compare((string_address)a, (string_address)b) == 0;", "        return 1;"),
+    ("service", "a copy that is cut one byte late", "        for (; i < room - 1 && from[i]; i++)", "        for (; i < room && from[i]; i++)"),
     ("service", "the capture thread keeps the real-time policy", "        audio_call(syscall(sched_setscheduler), 0, 0, (positive)&ordinary, 0, 0, 0); // pid 0: this thread", "        (void)ordinary;"),
     ("service", 'a settings FIFO is waited for (no O_NONBLOCK)', '0x80000 | 0x20000 | 0x800, 0, 0, 0);', '0x80000 | 0x20000, 0, 0, 0);'),
 ]
