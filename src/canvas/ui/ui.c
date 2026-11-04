@@ -11207,14 +11207,54 @@ static struct ui address_to ui_app_ui;
 static unsigned int ui_app_row = WINDOWS;
 static struct ui_draw_list ui_app_list;
 
-// Whether this window's next frame is recorded into its list: the compositor takes lists, this row's list is the app's, and the row was not refused.
+/*
+        The back-off: a window whose frames the recorder keeps losing paints pixels for a while before it tries a list again, so that it does not
+        flip between its list and its pixels on every frame (each flip is a switch moonwater debug counts). A loss waits UI_LIST_BACKOFF_FIRST
+        presents, and each loss after the last doubles the wait up to UI_LIST_BACKOFF_MAX (about two seconds of frames). A whole list frame does
+        not clear it: only UI_LIST_BACKOFF_MAX whole frames in a row do, so a window that loses every few frames settles on pixels. A change of
+        the picture's size or scale (what the loss was made at) tries a list at once.
+*/
+#define UI_LIST_BACKOFF_FIRST 8
+#define UI_LIST_BACKOFF_MAX 128
+static unsigned int ui_list_skip, ui_list_wait, ui_list_whole_run; // presents still painted in pixels, the last wait, whole frames in a row
+static int ui_list_key_width, ui_list_key_height, ui_list_key_scale; // the picture the last loss was made at
+
+// A recorded frame was lost: the next tries wait longer, and the frames before them are the processor's.
+static void ui_list_back_lost(const struct ui address_to ui)
+{
+        ui_list_wait = ui_list_wait ? ui_list_wait * 2 : UI_LIST_BACKOFF_FIRST;
+        ui_list_wait = ui_list_wait > UI_LIST_BACKOFF_MAX ? UI_LIST_BACKOFF_MAX : ui_list_wait;
+        ui_list_skip = ui_list_wait;
+        ui_list_whole_run = 0;
+        ui_list_key_width = ui->width, ui_list_key_height = ui->height, ui_list_key_scale = ui->scale;
+}
+
+// A recorded frame was published whole: after UI_LIST_BACKOFF_MAX of them in a row the back-off is over.
+static void ui_list_back_whole(void)
+{
+        if (++ui_list_whole_run >= UI_LIST_BACKOFF_MAX)
+                ui_list_wait = ui_list_skip = 0, ui_list_whole_run = 0;
+}
+
+// Whether this window's next frame is recorded into its list: the compositor takes lists, this row's list is the app's, and the row was not refused,
+// and the back-off (ui_list_back_lost) has run out. A picture that changed size or scale since the last loss tries at once.
 static b32 ui_list_wanted(const struct window_row address_to own)
 {
         struct windows address_to table = own->table;
 
-        return ui_app_list.ready && own->row == ui_app_row && ui_app_ui &&
-               __atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE) == 1 &&
-               __atomic_load_n(&table->list_state[own->row], __ATOMIC_ACQUIRE) != 2;
+        if (!(ui_app_list.ready && own->row == ui_app_row && ui_app_ui &&
+              __atomic_load_n(&table->list_mode, __ATOMIC_ACQUIRE) == 1 &&
+              __atomic_load_n(&table->list_state[own->row], __ATOMIC_ACQUIRE) != 2))
+                return false;
+        if (!ui_list_skip)
+                return true;
+        if (ui_app_ui->width != ui_list_key_width || ui_app_ui->height != ui_list_key_height || ui_app_ui->scale != ui_list_key_scale)
+        {
+                ui_list_skip = ui_list_wait = ui_list_whole_run = 0;
+                return true;
+        }
+        ui_list_skip--;
+        return false;
 }
 
 // The frame begins in the list: the kit's ui records into it until ui_list_frame_end.
@@ -11237,8 +11277,10 @@ static b32 ui_list_frame_end(struct window_row address_to own, int width, int he
         {
                 table->list_lost[row][why]++;
                 ui_app_ui->scene = null;
+                ui_list_back_lost(ui_app_ui);
                 return false;
         }
+        ui_list_back_whole();
         table->width[row] = (unsigned int)width;
         table->height[row] = (unsigned int)height;
         table->damage_width[row] = 0;

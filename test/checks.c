@@ -221225,11 +221225,64 @@ static void dl_list_rows(void)
         table->list_mode = 1;
 }
 
+// The back-off (ui.c's ui_list_wanted, ui_list_back_lost, ui_list_back_whole): a window's tries are run as ui_app_present runs them, a
+// recorder that loses every "every"-th try (0 never). A switch is a list frame followed by a pixel frame; the rows bound the switches and the tries.
+static void dl_backoff_run(int every, int frames, int *switches, int *tries, int *lists)
+{
+        static struct windows table;
+        struct window_row own = {.table = &table, .row = 0};
+        int last_list = 0;
+
+        memory_zero(&table, sizeof(table));
+        table.list_mode = 1;
+        ui_app_list.ready = 1, ui_app_row = 0, ui_app_ui = &dl_live;
+        ui_list_skip = ui_list_wait = ui_list_whole_run = 0;
+        dl_live.width = DL_W, dl_live.height = DL_H, dl_live.scale = 100;
+        *switches = *tries = *lists = 0;
+        for (int f = 0; f < frames; f++)
+        {
+                if (!ui_list_wanted(&own))
+                {
+                        *switches += last_list, last_list = 0;
+                        continue;
+                }
+                (*tries)++;
+                if (every && *tries % every == 0)
+                {
+                        ui_list_back_lost(&dl_live);
+                        *switches += last_list, last_list = 0;
+                }
+                else
+                {
+                        ui_list_back_whole();
+                        (*lists)++, last_list = 1;
+                }
+        }
+        ui_app_list.ready = 0, ui_app_ui = null;
+}
+
+static void dl_backoff_rows(void)
+{
+        int switches, tries, lists;
+
+        dl_backoff_run(0, 200, &switches, &tries, &lists);
+        check("draw list back-off: a window that never loses draws every frame as a list", lists == 200 && switches == 0 && tries == 200);
+        dl_backoff_run(1, 200, &switches, &tries, &lists);
+        check("draw list back-off: a window whose every frame is lost paints pixels, with at most a few tries in 200 frames", lists == 0 && tries <= 6 && switches == 0);
+        dl_backoff_run(2, 200, &switches, &tries, &lists);
+        check("draw list back-off: a recorder that loses every second try makes a few switches in 200 frames, not one per loss", switches <= 6 && tries <= 12);
+        dl_backoff_run(5, 200, &switches, &tries, &lists);
+        check("draw list back-off: a recorder that loses every fifth try makes a few switches in 200 frames", switches <= 6 && lists > 0);
+        dl_backoff_run(0, 200, &switches, &tries, &lists);
+        check("draw list back-off: the state is reset for the next window", switches == 0);
+}
+
 b32 main(void)
 {
         dl_list_rows();
         dl_app_rows();
         dl_rows();
+        dl_backoff_rows();
         dl_probes();
         return test_report(null);
 }
