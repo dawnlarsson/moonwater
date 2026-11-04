@@ -146726,6 +146726,20 @@ static void hand_report(struct ui address_to ui, struct ui_scroll address_to s, 
 */
 static unsigned int terminal_stretch_still[1 << 21], terminal_stretch_moved[1 << 21];
 
+/*
+    The bar at rest at the live end, with nothing of a stretch or a hand left in it: ui_scroll_stop does not clear a hand's dragging, and a
+    bar left dragging shifts the grid of every frame after it (the caret rows read a picture the shift had moved).
+*/
+static void terminal_stretch_rest(void)
+{
+    unsigned int first, shown, total;
+
+    terminal_view_live();
+    if (terminal_extent(&first, &shown, &total) && total > shown)
+        ui_scroll_set(&terminal.bar, (int)(first * terminal.cell_h));
+    ui_scroll_stop(&terminal.bar);
+}
+
 static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b32 *settled, b32 *list_match)
 {
     struct ui kit = terminal.ui;
@@ -146737,7 +146751,7 @@ static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b3
 
     *peak = 0, *pixels_match = true, *settled = false, *list_match = true;
     kit.scale = terminal_scale();
-    for (int k = 0; k < 300; k++)
+    for (int k = 0; k < 60; k++)
         term_bytes("row\r\n", 5);
     if (top)
         terminal_view_set(0);
@@ -146818,8 +146832,113 @@ static void check_terminal_stretch_run(b32 top, int *peak, b32 *pixels_match, b3
         }
     }
     ui_kit.test_clock = 0;
-    ui_scroll_stop(&terminal.bar);
-    terminal_view_live();
+    terminal_stretch_rest();
+}
+
+/*
+    The stretch's edge cases, each from a stretch past the oldest line: output that arrives while the view is stretched (the grid keeps its
+    stretch and the frame is made), the alternate screen (no scrollback, so no stretch: the shift is 0 while it is up), and a program that
+    asked for the mouse (the wheel is its: the shift is 0). The stretch is brought back when each is left.
+*/
+static void check_terminal_stretch_edges(void)
+{
+    unsigned int first, shown, total;
+    b64 clock = 80000000000ll;
+    int shift_stretched, shift_alternate, shift_mouse, shift_output, shift_back;
+    b32 framed = true;
+
+    for (int k = 0; k < 60; k++)
+        term_bytes("row\r\n", 5);
+    terminal_view_set(0);
+    terminal_extent(&first, &shown, &total);
+    terminal_bar_place(first, shown, total);
+    ui_kit.busy = 0;
+    for (int k = 0; k < 8; k++)
+    {
+        clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+        ui_scroll_hand(&terminal.bar, -12 * UI_SCROLL_SCALE);
+    }
+    shift_stretched = terminal_grid_shift();
+
+    // The alternate screen: the grid is not stretched there, and it is again when the primary screen is back.
+    term_bytes((const p8 address_to) "\x1b[?1049h", 8);
+    shift_alternate = terminal_grid_shift();
+    term_bytes((const p8 address_to) "\x1b[?1049l", 8);
+
+    // A program that asked for the mouse has the wheel: no stretch while it has.
+    term_bytes((const p8 address_to) "\x1b[?1000h", 8);
+    shift_mouse = terminal_grid_shift();
+    term_bytes((const p8 address_to) "\x1b[?1000l", 8);
+
+    // New output while stretched: the frame is made, and the stretch is what it was (the view stays where it is).
+    ui_kit.test_clock = 0;
+    for (int k = 0; k < 3; k++)
+        term_bytes((const p8 address_to) "fresh output\r\n", 14);
+    terminal.own.table->shown[0] = terminal.own.table->frame[0];
+    framed = terminal_frame() && framed;
+    shift_output = terminal_grid_shift();
+
+    terminal_stretch_rest();
+    shift_back = terminal_grid_shift();
+    string_format(log, "  terminal stretch edges: stretched %b px, alternate %b, mouse %b, after output %b (frame %b), back at the live end %b\n",
+                  (bipolar)shift_stretched, (bipolar)shift_alternate, (bipolar)shift_mouse, (bipolar)shift_output, (bipolar)framed, (bipolar)shift_back);
+    check("terminal stretch edges: a pull past the oldest line stretches the grid", shift_stretched > 4);
+    check("terminal stretch edges: on the alternate screen there is no stretch (the shift is 0)", shift_alternate == 0);
+    check("terminal stretch edges: a program that asked for the mouse has the wheel, so no stretch", shift_mouse == 0);
+    check("terminal stretch edges: output that arrives while stretched is drawn, and the stretch holds", framed && shift_output > 4);
+    check("terminal stretch edges: and at rest at the live end there is none", shift_back == 0);
+    ui_kit.test_clock = 0;
+}
+
+/*
+    What a stretched frame costs: a normal frame (the view at rest, one cell changed: the incremental draw) against a stretched one (the grid
+    drawn whole, shifted), each the minimum of N frames made with the compositor taking every picture. Logged as ns a frame; not a check.
+*/
+static void check_terminal_stretch_cost(void)
+{
+    enum { COST_FRAMES = 20 };
+    unsigned int first, shown, total;
+    positive best_normal = ~0ull, best_stretched = ~0ull, t0, t1;
+    b64 clock = 90000000000ll;
+    int shift = 0;
+
+    terminal_view_set(0);
+    terminal_extent(&first, &shown, &total);
+    terminal_bar_place(first, shown, total);
+    for (int k = 0; k < COST_FRAMES; k++)
+    {
+        clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+        term_bytes((const p8 address_to) (k & 1 ? "x" : "y"), 1);
+        terminal.own.table->shown[0] = terminal.own.table->frame[0];
+        t0 = clock_monotonic_nanoseconds();
+        terminal_frame();
+        t1 = clock_monotonic_nanoseconds();
+        if (t1 - t0 < best_normal)
+            best_normal = t1 - t0;
+    }
+    for (int k = 0; k < 8; k++)
+    {
+        clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+        ui_scroll_hand(&terminal.bar, -12 * UI_SCROLL_SCALE);
+    }
+    for (int k = 0; k < COST_FRAMES; k++)
+    {
+        clock += 16666667ll, ui_kit.now = (b64)clock, ui_kit.test_clock = clock;
+        ui_scroll_hand(&terminal.bar, 0);
+        term_bytes((const p8 address_to) (k & 1 ? "x" : "y"), 1);
+        terminal.own.table->shown[0] = terminal.own.table->frame[0];
+        t0 = clock_monotonic_nanoseconds();
+        terminal_frame();
+        t1 = clock_monotonic_nanoseconds();
+        shift = terminal_grid_shift();
+        if (t1 - t0 < best_stretched)
+            best_stretched = t1 - t0;
+    }
+    string_format(log, "  terminal stretch cost: a normal frame %p ns, a stretched frame %p ns (the grid whole, %b px shifted), the minimum of %p frames each\n",
+                  (positive)best_normal, (positive)best_stretched, (bipolar)shift, (positive)COST_FRAMES);
+    terminal_stretch_rest();
+    ui_kit.test_clock = 0;
+    check("terminal stretch cost: a stretched frame was measured (the grid shifted)", shift != 0 && best_stretched > 0);
 }
 
 static void check_terminal_stretch(void)
@@ -146836,6 +146955,13 @@ static void check_terminal_stretch(void)
     check("terminal stretch: a pull past the live end draws the grid moved up by the stretch, row for row the still frame's", end_pixels);
     check("terminal stretch: each stretch peaks past 4 px and springs back to a whole frame that is the still one", peak_top > 4 && peak_end > 4 && top_settled && end_settled);
     check("terminal stretch: the grid's shift is the kit list's overscroll per frame (ui_scroll_past), at both ends", top_list && end_list);
+    // Both buffers are drawn whole and unshifted before anything else reads them: a buffer the run left in a shifted state would
+    // be diffed against cells it does not show by whatever draws the terminal next.
+    for (int k = 0; k < 2; k++)
+    {
+        terminal.own.table->shown[0] = terminal.own.table->frame[0];
+        terminal_frame();
+    }
 }
 
 static void check_terminal_wheel_curve(void)
@@ -159198,7 +159324,9 @@ b32 main()
 #if MOONWATER_UI_ANY
         check_caret_blink();
         check_caret_terminal();
-        check_terminal_stretch(); // last of the terminal's rows: it leaves the terminal scrolled to the live end, with its buffers drawn whole
+        check_terminal_stretch();
+        check_terminal_stretch_edges();
+        check_terminal_stretch_cost();
 #endif
         check_no_input_codes();
         check_no_shapes_by_hand();
