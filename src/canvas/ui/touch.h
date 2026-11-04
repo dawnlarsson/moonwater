@@ -32,7 +32,7 @@
 #define UI_TOUCH_ONE 1                     // the first finger is down: the pointer's, and its press is made
 #define UI_TOUCH_TWO 2                     // two fingers: the wheel, or the right button when they are lifted soon
 #define UI_TOUCH_HELD 3                    // a long press: nothing more until every finger is up
-#define UI_TOUCH_HOLD_NS 400000000ull      // still this long from its landing, the first finger is a long press
+#define UI_TOUCH_HOLD_NS 500000000ull      // still this long from its landing, the first finger is a long press (Android's and iOS's 500 ms)
 #define UI_TOUCH_TAP_NS 400000000ull       // two fingers lifted within this of the second landing, neither moved, are a right click
 #define UI_TOUCH_NOTCH 48                  // the fingers' pixels a notch of the wheel is (120ths), at the scale of 100 percent
 #define UI_TOUCH_EVENTS 12                 // the most events one call answers

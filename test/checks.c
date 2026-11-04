@@ -148379,11 +148379,11 @@ static fn check_kit_touch_gestures(void)
         // A long press: still for UI_TOUCH_HOLD_NS (not before it), the hold; moved on while held, the pointer follows; lifted, the end.
         touch_rig_reset(&r, 0);
         touch_rig_down(&r, 0, 100, 100), touch_rig_frame(&r, t0);
-        touch_rig_tick(&r, t0 + 399000000ll, 1);
-        touch_rig_tick(&r, t0 + 400000000ll, 1);
-        touch_rig_down(&r, 0, 100, 140), touch_rig_frame(&r, t0 + 500000000ll);
+        touch_rig_tick(&r, t0 + 499000000ll, 1);
+        touch_rig_tick(&r, t0 + 500000000ll, 1);
+        touch_rig_down(&r, 0, 100, 140), touch_rig_frame(&r, t0 + 500000000ll + 10000000ll);
         touch_rig_up(&r, 0), touch_rig_frame(&r, t0 + 600000000ll);
-        touch_row("kit touch: a finger still for 400 ms is a long press (at 399 ms it is not), which follows the finger and ends on the lift",
+        touch_row("kit touch: a finger still for 500 ms is a long press (at 499 ms it is not), which follows the finger and ends on the lift",
                   &r, "SPHMIE", -1);
 
         // A long press with no button taken (pressed 0 at the tick): nothing, the lift is a tap.
