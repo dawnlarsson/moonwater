@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        452 routines (428 public, 24 local), 442 of them on all three and 10 local to one.
+        457 routines (433 public, 24 local), 447 of them on all three and 10 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -278,6 +278,7 @@
           memory_into_hex_case           public  yes     yes     yes
           memory_into_spelled            public  yes     yes     yes
           memory_invert_u32              public  yes     yes     yes
+          memory_key_printable           public  yes     yes     yes
           memory_last_of                 public  yes     yes     yes
           memory_last_of_either          public  yes     yes     yes
           memory_mix_u32_rect            public  yes     yes     yes
@@ -301,7 +302,9 @@
           memory_reserve                 public  yes     yes     yes
           memory_reverse                 public  yes     yes     yes
           memory_reverse_lines__room_64  public  yes     yes     yes
+          memory_reverse_units           public  yes     yes     yes
           memory_runs_u32                public  yes     yes     yes
+          memory_s16_to_u8               public  yes     yes     yes
           memory_saturate_u32            public  yes     yes     yes
           memory_search                  public  yes     yes     yes
           memory_search_ascii_case       public  yes     yes     yes
@@ -318,6 +321,7 @@
           memory_sum_swap_u32            public  yes     yes     yes
           memory_sweep_coverage          public  yes     yes     yes
           memory_take                    public  yes     yes     yes
+          memory_text_clean              public  yes     yes     yes
           memory_text_span               public  yes     yes     yes
           memory_tint_u32                public  yes     yes     yes
           memory_to_lower_ascii          public  yes     yes     yes
@@ -329,6 +333,7 @@
           memory_utf8_span               public  yes     yes     yes
           memory_utf8_span_wide          local   yes     yes     yes
           memory_utf8_valid_span         public  yes     yes     yes
+          memory_window_peaks            public  yes     yes     yes
           memory_zero                    public  yes     yes     yes
           montgomery_multiply            public  yes     yes     yes
           moonwater_cpu_detect           public  yes     yes     yes
@@ -44027,6 +44032,26 @@ fn pcm_pack24(p8 address_to dst, const p32 address_to src, positive lanes);
 // One pass, a lookup a sample in a table of 256 floats, four samples in flight (V gathers with the indexed load); a sample is one byte,
 // so exactly frames * channels bytes are read and frames floats written to each plane. A count of frames or channels of 0 is nothing.
 fn f32_planes_from_law(f32 address_to address_to planes, const p8 address_to src, positive frames, positive channels, positive law);
+// memory_s16_to_u8(dst, src, count): count little-endian 16-bit samples at src as unsigned 8-bit samples at dst: the sample plus 128 shifted
+// down 8 (arithmetic), held to 127 above, plus 128 (so -32768 is 0 and 32767 is 255). dst may be src or lie below it.
+fn memory_s16_to_u8(p8 address_to dst, const p8 address_to src, positive count);
+// memory_reverse_units(dst, count, width): each of count units of width bytes at dst reversed in place (the big-endian form of the
+// little-endian samples): 2, 4 and 3 bytes have bodies of their own, any other width a byte loop.
+fn memory_reverse_units(p8 address_to dst, positive count, positive width);
+// memory_key_printable(from, length): 1 when length is 1 to 63 and every byte of from is 0x21 to 0x7e, else 0; reads only length bytes
+// (none for a length of 0 or past 63).
+positive memory_key_printable(const p8 address_to from, positive length);
+// memory_text_clean(to, from, length): the text of a name: from[0..length) up to the first NUL, a byte 0x20 to 0x7e as itself, a whole
+// well-formed UTF-8 sequence (C2..DF, E0..EF, F0..F4 with continuation bytes, not overlong, not a surrogate, not a C1 control, not past
+// U+10FFFF) as itself, every other byte as one '?'; answers the bytes written, never more than the input's. to may be from.
+positive memory_text_clean(p8 address_to to, const p8 address_to from, positive length);
+// memory_window_peaks(out0, out1, left, right, frames, state, count, window, mono): the greatest magnitude of each window of a peak stream
+// over frames of left and right: state[0] and state[1] the greatest so far on each side, *count the frames of the window so far, window (at
+// least 1) its length; a window that completes writes one frame to out0 and out1 (a mono stream's both sides the greater) and clears the
+// state; answers the frames written. The magnitude is x < 0 ? -x : x and a sample counts when it is greater than the state, so a NaN is
+// never a peak and a minus zero is not one.
+positive memory_window_peaks(f32 address_to out0, f32 address_to out1, const f32 address_to left, const f32 address_to right, positive frames,
+                             f32 address_to state, positive address_to count, positive window, positive mono);
 //      One 8-tap group of the SSE2 body: lo and hi are the byte offsets of its two vectors. rdi.. as the routine's;
 //      r15 and r13 the rows, r12 and rbx the inputs, rbp the byte offset of the turn, xmm8 f, xmm10-13 the lanes.
 #define AUDIO_POLY_SSE2_GROUP(lo, hi)                                                                    \
@@ -45120,6 +45145,80 @@ __asm__(
     ASM_RET
     ".pushsection .rodata\n   .balign 64\n.Lfl_table:\n   .long 0xbe2c0000, 0xbe240000, 0xbe3c0000, 0xbe340000, 0xbe0c0000, 0xbe040000, 0xbe1c0000, 0xbe140000\n   .long 0xbe6c0000, 0xbe640000, 0xbe7c0000, 0xbe740000, 0xbe4c0000, 0xbe440000, 0xbe5c0000, 0xbe540000\n   .long 0xbdac0000, 0xbda40000, 0xbdbc0000, 0xbdb40000, 0xbd8c0000, 0xbd840000, 0xbd9c0000, 0xbd940000\n   .long 0xbdec0000, 0xbde40000, 0xbdfc0000, 0xbdf40000, 0xbdcc0000, 0xbdc40000, 0xbddc0000, 0xbdd40000\n   .long 0xbf2c0000, 0xbf240000, 0xbf3c0000, 0xbf340000, 0xbf0c0000, 0xbf040000, 0xbf1c0000, 0xbf140000\n   .long 0xbf6c0000, 0xbf640000, 0xbf7c0000, 0xbf740000, 0xbf4c0000, 0xbf440000, 0xbf5c0000, 0xbf540000\n   .long 0xbeac0000, 0xbea40000, 0xbebc0000, 0xbeb40000, 0xbe8c0000, 0xbe840000, 0xbe9c0000, 0xbe940000\n   .long 0xbeec0000, 0xbee40000, 0xbefc0000, 0xbef40000, 0xbecc0000, 0xbec40000, 0xbedc0000, 0xbed40000\n   .long 0xbc2c0000, 0xbc240000, 0xbc3c0000, 0xbc340000, 0xbc0c0000, 0xbc040000, 0xbc1c0000, 0xbc140000\n   .long 0xbc6c0000, 0xbc640000, 0xbc7c0000, 0xbc740000, 0xbc4c0000, 0xbc440000, 0xbc5c0000, 0xbc540000\n   .long 0xbb300000, 0xbb100000, 0xbb700000, 0xbb500000, 0xba400000, 0xb9800000, 0xbae00000, 0xbaa00000\n   .long 0xbbd80000, 0xbbc80000, 0xbbf80000, 0xbbe80000, 0xbb980000, 0xbb880000, 0xbbb80000, 0xbba80000\n   .long 0xbd2c0000, 0xbd240000, 0xbd3c0000, 0xbd340000, 0xbd0c0000, 0xbd040000, 0xbd1c0000, 0xbd140000\n   .long 0xbd6c0000, 0xbd640000, 0xbd7c0000, 0xbd740000, 0xbd4c0000, 0xbd440000, 0xbd5c0000, 0xbd540000\n   .long 0xbcac0000, 0xbca40000, 0xbcbc0000, 0xbcb40000, 0xbc8c0000, 0xbc840000, 0xbc9c0000, 0xbc940000\n   .long 0xbcec0000, 0xbce40000, 0xbcfc0000, 0xbcf40000, 0xbccc0000, 0xbcc40000, 0xbcdc0000, 0xbcd40000\n   .long 0x3e2c0000, 0x3e240000, 0x3e3c0000, 0x3e340000, 0x3e0c0000, 0x3e040000, 0x3e1c0000, 0x3e140000\n   .long 0x3e6c0000, 0x3e640000, 0x3e7c0000, 0x3e740000, 0x3e4c0000, 0x3e440000, 0x3e5c0000, 0x3e540000\n   .long 0x3dac0000, 0x3da40000, 0x3dbc0000, 0x3db40000, 0x3d8c0000, 0x3d840000, 0x3d9c0000, 0x3d940000\n   .long 0x3dec0000, 0x3de40000, 0x3dfc0000, 0x3df40000, 0x3dcc0000, 0x3dc40000, 0x3ddc0000, 0x3dd40000\n   .long 0x3f2c0000, 0x3f240000, 0x3f3c0000, 0x3f340000, 0x3f0c0000, 0x3f040000, 0x3f1c0000, 0x3f140000\n   .long 0x3f6c0000, 0x3f640000, 0x3f7c0000, 0x3f740000, 0x3f4c0000, 0x3f440000, 0x3f5c0000, 0x3f540000\n   .long 0x3eac0000, 0x3ea40000, 0x3ebc0000, 0x3eb40000, 0x3e8c0000, 0x3e840000, 0x3e9c0000, 0x3e940000\n   .long 0x3eec0000, 0x3ee40000, 0x3efc0000, 0x3ef40000, 0x3ecc0000, 0x3ec40000, 0x3edc0000, 0x3ed40000\n   .long 0x3c2c0000, 0x3c240000, 0x3c3c0000, 0x3c340000, 0x3c0c0000, 0x3c040000, 0x3c1c0000, 0x3c140000\n   .long 0x3c6c0000, 0x3c640000, 0x3c7c0000, 0x3c740000, 0x3c4c0000, 0x3c440000, 0x3c5c0000, 0x3c540000\n   .long 0x3b300000, 0x3b100000, 0x3b700000, 0x3b500000, 0x3a400000, 0x39800000, 0x3ae00000, 0x3aa00000\n   .long 0x3bd80000, 0x3bc80000, 0x3bf80000, 0x3be80000, 0x3b980000, 0x3b880000, 0x3bb80000, 0x3ba80000\n   .long 0x3d2c0000, 0x3d240000, 0x3d3c0000, 0x3d340000, 0x3d0c0000, 0x3d040000, 0x3d1c0000, 0x3d140000\n   .long 0x3d6c0000, 0x3d640000, 0x3d7c0000, 0x3d740000, 0x3d4c0000, 0x3d440000, 0x3d5c0000, 0x3d540000\n   .long 0x3cac0000, 0x3ca40000, 0x3cbc0000, 0x3cb40000, 0x3c8c0000, 0x3c840000, 0x3c9c0000, 0x3c940000\n   .long 0x3cec0000, 0x3ce40000, 0x3cfc0000, 0x3cf40000, 0x3ccc0000, 0x3cc40000, 0x3cdc0000, 0x3cd40000\n   .long 0xbf7af800, 0xbf72f800, 0xbf6af800, 0xbf62f800, 0xbf5af800, 0xbf52f800, 0xbf4af800, 0xbf42f800\n   .long 0xbf3af800, 0xbf32f800, 0xbf2af800, 0xbf22f800, 0xbf1af800, 0xbf12f800, 0xbf0af800, 0xbf02f800\n   .long 0xbef9f000, 0xbef1f000, 0xbee9f000, 0xbee1f000, 0xbed9f000, 0xbed1f000, 0xbec9f000, 0xbec1f000\n   .long 0xbeb9f000, 0xbeb1f000, 0xbea9f000, 0xbea1f000, 0xbe99f000, 0xbe91f000, 0xbe89f000, 0xbe81f000\n   .long 0xbe77e000, 0xbe6fe000, 0xbe67e000, 0xbe5fe000, 0xbe57e000, 0xbe4fe000, 0xbe47e000, 0xbe3fe000\n   .long 0xbe37e000, 0xbe2fe000, 0xbe27e000, 0xbe1fe000, 0xbe17e000, 0xbe0fe000, 0xbe07e000, 0xbdffc000\n   .long 0xbdf3c000, 0xbdebc000, 0xbde3c000, 0xbddbc000, 0xbdd3c000, 0xbdcbc000, 0xbdc3c000, 0xbdbbc000\n   .long 0xbdb3c000, 0xbdabc000, 0xbda3c000, 0xbd9bc000, 0xbd93c000, 0xbd8bc000, 0xbd83c000, 0xbd778000\n   .long 0xbd6b8000, 0xbd638000, 0xbd5b8000, 0xbd538000, 0xbd4b8000, 0xbd438000, 0xbd3b8000, 0xbd338000\n   .long 0xbd2b8000, 0xbd238000, 0xbd1b8000, 0xbd138000, 0xbd0b8000, 0xbd038000, 0xbcf70000, 0xbce70000\n   .long 0xbcdb0000, 0xbcd30000, 0xbccb0000, 0xbcc30000, 0xbcbb0000, 0xbcb30000, 0xbcab0000, 0xbca30000\n   .long 0xbc9b0000, 0xbc930000, 0xbc8b0000, 0xbc830000, 0xbc760000, 0xbc660000, 0xbc560000, 0xbc460000\n   .long 0xbc3a0000, 0xbc320000, 0xbc2a0000, 0xbc220000, 0xbc1a0000, 0xbc120000, 0xbc0a0000, 0xbc020000\n   .long 0xbbf40000, 0xbbe40000, 0xbbd40000, 0xbbc40000, 0xbbb40000, 0xbba40000, 0xbb940000, 0xbb840000\n   .long 0xbb700000, 0xbb600000, 0xbb500000, 0xbb400000, 0xbb300000, 0xbb200000, 0xbb100000, 0xbb000000\n   .long 0xbae00000, 0xbac00000, 0xbaa00000, 0xba800000, 0xba400000, 0xba000000, 0xb9800000, 0x00000000\n   .long 0x3f7af800, 0x3f72f800, 0x3f6af800, 0x3f62f800, 0x3f5af800, 0x3f52f800, 0x3f4af800, 0x3f42f800\n   .long 0x3f3af800, 0x3f32f800, 0x3f2af800, 0x3f22f800, 0x3f1af800, 0x3f12f800, 0x3f0af800, 0x3f02f800\n   .long 0x3ef9f000, 0x3ef1f000, 0x3ee9f000, 0x3ee1f000, 0x3ed9f000, 0x3ed1f000, 0x3ec9f000, 0x3ec1f000\n   .long 0x3eb9f000, 0x3eb1f000, 0x3ea9f000, 0x3ea1f000, 0x3e99f000, 0x3e91f000, 0x3e89f000, 0x3e81f000\n   .long 0x3e77e000, 0x3e6fe000, 0x3e67e000, 0x3e5fe000, 0x3e57e000, 0x3e4fe000, 0x3e47e000, 0x3e3fe000\n   .long 0x3e37e000, 0x3e2fe000, 0x3e27e000, 0x3e1fe000, 0x3e17e000, 0x3e0fe000, 0x3e07e000, 0x3dffc000\n   .long 0x3df3c000, 0x3debc000, 0x3de3c000, 0x3ddbc000, 0x3dd3c000, 0x3dcbc000, 0x3dc3c000, 0x3dbbc000\n   .long 0x3db3c000, 0x3dabc000, 0x3da3c000, 0x3d9bc000, 0x3d93c000, 0x3d8bc000, 0x3d83c000, 0x3d778000\n   .long 0x3d6b8000, 0x3d638000, 0x3d5b8000, 0x3d538000, 0x3d4b8000, 0x3d438000, 0x3d3b8000, 0x3d338000\n   .long 0x3d2b8000, 0x3d238000, 0x3d1b8000, 0x3d138000, 0x3d0b8000, 0x3d038000, 0x3cf70000, 0x3ce70000\n   .long 0x3cdb0000, 0x3cd30000, 0x3ccb0000, 0x3cc30000, 0x3cbb0000, 0x3cb30000, 0x3cab0000, 0x3ca30000\n   .long 0x3c9b0000, 0x3c930000, 0x3c8b0000, 0x3c830000, 0x3c760000, 0x3c660000, 0x3c560000, 0x3c460000\n   .long 0x3c3a0000, 0x3c320000, 0x3c2a0000, 0x3c220000, 0x3c1a0000, 0x3c120000, 0x3c0a0000, 0x3c020000\n   .long 0x3bf40000, 0x3be40000, 0x3bd40000, 0x3bc40000, 0x3bb40000, 0x3ba40000, 0x3b940000, 0x3b840000\n   .long 0x3b700000, 0x3b600000, 0x3b500000, 0x3b400000, 0x3b300000, 0x3b200000, 0x3b100000, 0x3b000000\n   .long 0x3ae00000, 0x3ac00000, 0x3aa00000, 0x3a800000, 0x3a400000, 0x3a000000, 0x39800000, 0x00000000\n.popsection\n"
     ASM_END(f32_planes_from_law)
+
+    //      memory_s16_to_u8: rdi dst, rsi src, rdx count. Sixteen samples a turn: paddsw of 128 (the saturation is the clip), psraw 8, packsswb, xor 0x80.
+    ASM_FUNC(memory_s16_to_u8)
+    "cmp $16, %rdx\n   jb .Lsu_s\n   pcmpeqw %xmm6, %xmm6\n   psrlw $15, %xmm6\n   psllw $7, %xmm6\n   movdqa %xmm6, %xmm7\n   packuswb %xmm7, %xmm7\n.balign 16\n"
+    ".Lsu_v:\n   movdqu (%rsi), %xmm0\n   movdqu 16(%rsi), %xmm1\n   paddsw %xmm6, %xmm0\n   paddsw %xmm6, %xmm1\n   psraw $8, %xmm0\n   psraw $8, %xmm1\n   packsswb %xmm1, %xmm0\n   pxor %xmm7, %xmm0\n   movdqu %xmm0, (%rdi)\n   add $32, %rsi\n   add $16, %rdi\n   sub $16, %rdx\n   cmp $16, %rdx\n   jae .Lsu_v\n"
+    ".Lsu_s:\n   test %rdx, %rdx\n   jz .Lsu_done\n.Lsu_l:\n   movswl (%rsi), %eax\n   add $128, %eax\n   sar $8, %eax\n   mov $127, %ecx\n   cmp %ecx, %eax\n   cmovg %ecx, %eax\n   add $128, %eax\n   mov %al, (%rdi)\n   add $2, %rsi\n   inc %rdi\n   dec %rdx\n   jnz .Lsu_l\n.Lsu_done:\n"
+    ASM_RET
+    ASM_END(memory_s16_to_u8)
+
+    //      memory_reverse_units: rdi dst, rsi count, rdx width. Two and four bytes: psllw and psrlw (and pshuflw and pshufhw for four) 32 bytes a turn;
+    //      three bytes: with AVX2 vpshufb of 12 bytes in each half of a ymm (the bytes past the twelve map to themselves), otherwise a unit at a time.
+    ASM_FUNC(memory_reverse_units)
+    "test %rsi, %rsi\n   jz .Lru_done\n   cmp $2, %rdx\n   je .Lru_2\n   cmp $4, %rdx\n   je .Lru_4\n   cmp $3, %rdx\n   je .Lru_3\n   jmp .Lru_gen\n"
+    ".Lru_2:\n   cmp $16, %rsi\n   jb .Lru_2s\n.balign 16\n.Lru_2v:\n   movdqu (%rdi), %xmm0\n   movdqu 16(%rdi), %xmm1\n   movdqa %xmm0, %xmm2\n   movdqa %xmm1, %xmm3\n   psllw $8, %xmm0\n   psllw $8, %xmm1\n   psrlw $8, %xmm2\n   psrlw $8, %xmm3\n   por %xmm2, %xmm0\n   por %xmm3, %xmm1\n   movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   add $32, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae .Lru_2v\n"
+    ".Lru_2s:\n   test %rsi, %rsi\n   jz .Lru_done\n.Lru_2l:\n   movzwl (%rdi), %eax\n   rol $8, %ax\n   mov %ax, (%rdi)\n   add $2, %rdi\n   dec %rsi\n   jnz .Lru_2l\n   jmp .Lru_done\n"
+    ".Lru_4:\n   cmp $8, %rsi\n   jb .Lru_4s\n.balign 16\n.Lru_4v:\n   movdqu (%rdi), %xmm0\n   movdqu 16(%rdi), %xmm1\n   movdqa %xmm0, %xmm2\n   movdqa %xmm1, %xmm3\n   psllw $8, %xmm0\n   psllw $8, %xmm1\n   psrlw $8, %xmm2\n   psrlw $8, %xmm3\n   por %xmm2, %xmm0\n   por %xmm3, %xmm1\n   pshuflw $0xb1, %xmm0, %xmm0\n   pshufhw $0xb1, %xmm0, %xmm0\n   pshuflw $0xb1, %xmm1, %xmm1\n   pshufhw $0xb1, %xmm1, %xmm1\n   movdqu %xmm0, (%rdi)\n   movdqu %xmm1, 16(%rdi)\n   add $32, %rdi\n   sub $8, %rsi\n   cmp $8, %rsi\n   jae .Lru_4v\n"
+    ".Lru_4s:\n   test %rsi, %rsi\n   jz .Lru_done\n.Lru_4l:\n   mov (%rdi), %eax\n   bswap %eax\n   mov %eax, (%rdi)\n   add $4, %rdi\n   dec %rsi\n   jnz .Lru_4l\n   jmp .Lru_done\n"
+    ".Lru_3:\n"
+    ASM_NARROW("cpu_has_avx2", ".Lru_3s")
+    "   cmp $10, %rsi\n   jb .Lru_3s\n   vmovdqa .Lru_m3(%rip), %ymm7\n.balign 16\n.Lru_3v:\n   vmovdqu (%rdi), %xmm0\n   vinserti128 $1, 12(%rdi), %ymm0, %ymm0\n   vpshufb %ymm7, %ymm0, %ymm0\n   vmovdqu %xmm0, (%rdi)\n   vextracti128 $1, %ymm0, %xmm1\n   vmovq %xmm1, 12(%rdi)\n   vpextrd $2, %xmm1, 20(%rdi)\n   add $24, %rdi\n   sub $8, %rsi\n   cmp $10, %rsi\n   jae .Lru_3v\n   vzeroupper\n"
+    ".Lru_3s:\n   test %rsi, %rsi\n   jz .Lru_done\n.Lru_3l:\n   movzbl (%rdi), %eax\n   movzbl 2(%rdi), %ecx\n   mov %cl, (%rdi)\n   mov %al, 2(%rdi)\n   add $3, %rdi\n   dec %rsi\n   jnz .Lru_3l\n   jmp .Lru_done\n"
+    ".Lru_gen:\n   mov %rdx, %r8\n   shr $1, %r8\n   jz .Lru_done\n.Lru_gu:\n   xor %ecx, %ecx\n.Lru_gk:\n   lea -1(%rdx), %r9\n   sub %rcx, %r9\n   movzbl (%rdi,%rcx), %eax\n   movzbl (%rdi,%r9), %r10d\n   mov %r10b, (%rdi,%rcx)\n   mov %al, (%rdi,%r9)\n   inc %rcx\n   cmp %r8, %rcx\n   jb .Lru_gk\n   add %rdx, %rdi\n   dec %rsi\n   jnz .Lru_gu\n.Lru_done:\n"
+    ASM_RET
+    ".pushsection .rodata\n   .balign 32\n.Lru_m3:\n   .byte 2, 1, 0, 5, 4, 3, 8, 7, 6, 11, 10, 9, 12, 13, 14, 15\n   .byte 2, 1, 0, 5, 4, 3, 8, 7, 6, 11, 10, 9, 12, 13, 14, 15\n.popsection\n"
+    ASM_END(memory_reverse_units)
+
+    //      memory_key_printable: rdi from, rsi length. A key is 1 to 63 bytes of 0x21 to 0x7e: sixteen bytes a turn (a byte less 0x21 is at most 0x5d as an unsigned
+    //      byte), the tail a block ending at the end of the key, under sixteen a byte at a time.
+    ASM_FUNC(memory_key_printable)
+    "lea -1(%rsi), %rax\n   cmp $62, %rax\n   ja .Lkp_no\n   cmp $16, %rsi\n   jb .Lkp_s\n   movdqa .Lkp_c(%rip), %xmm7\n   movdqa .Lkp_c+16(%rip), %xmm6\n   pcmpeqb %xmm5, %xmm5\n"
+    ".Lkp_v:\n   movdqu (%rdi), %xmm0\n   psubb %xmm7, %xmm0\n   movdqa %xmm0, %xmm1\n   pminub %xmm6, %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pand %xmm1, %xmm5\n   add $16, %rdi\n   sub $16, %rsi\n   cmp $16, %rsi\n   jae .Lkp_v\n"
+    "   test %rsi, %rsi\n   jz .Lkp_t\n   movdqu -16(%rdi,%rsi), %xmm0\n   psubb %xmm7, %xmm0\n   movdqa %xmm0, %xmm1\n   pminub %xmm6, %xmm1\n   pcmpeqb %xmm0, %xmm1\n   pand %xmm1, %xmm5\n.Lkp_t:\n   pmovmskb %xmm5, %eax\n   cmp $0xffff, %eax\n   sete %al\n   movzbl %al, %eax\n   jmp .Lkp_done\n"
+    ".Lkp_s:\n   movzbl (%rdi), %eax\n   sub $0x21, %eax\n   cmp $0x5d, %eax\n   ja .Lkp_no\n   inc %rdi\n   dec %rsi\n   jnz .Lkp_s\n   mov $1, %eax\n   jmp .Lkp_done\n"
+    ".Lkp_no:\n   xor %eax, %eax\n.Lkp_done:\n"
+    ASM_RET
+    ".pushsection .rodata\n   .balign 16\n.Lkp_c:\n   .quad 0x2121212121212121, 0x2121212121212121\n   .quad 0x5d5d5d5d5d5d5d5d, 0x5d5d5d5d5d5d5d5d\n.popsection\n"
+    ASM_END(memory_key_printable)
+
+    //      memory_text_clean: rdi to, rsi from, rdx length. Sixteen bytes of printable ASCII (a byte less 0x20 is at most 0x5e) are copied as a block; anything else
+    //      is one byte at a time. A lead byte is told by a table of 51 entries (C2 to F4: the continuation bytes it takes, the lowest second byte it allows and the width
+    //      of the range from it to the highest: C2 and E0 from A0, ED to 9F, F0 from 90, F4 to 8F, the rest 80 to BF), so a sequence is the table's one load, one test
+    //      of the second byte against the range, a test of each further continuation byte and a copy of the whole in one or two moves. The block is tried again only
+    //      where the index is a multiple of sixteen, so a text with a character in it goes on by bytes to the next block and a text of characters pays the block's
+    //      test once in sixteen bytes.
+    ASM_FUNC(memory_text_clean)
+    "xor %r8d, %r8d\n   xor %r9d, %r9d\n   test %rdx, %rdx\n   jle .Ltc_done\n   movdqa .Ltc_c(%rip), %xmm7\n   movdqa .Ltc_c+16(%rip), %xmm6\n"
+    ".balign 16\n.Ltc_loop:\n   cmp %rdx, %r8\n   jge .Ltc_done\n   lea 16(%r8), %rax\n   cmp %rdx, %rax\n   jg .Ltc_scalar\n   movdqu (%rsi,%r8), %xmm0\n   movdqa %xmm0, %xmm1\n   psubb %xmm7, %xmm1\n   movdqa %xmm1, %xmm2\n   pminub %xmm6, %xmm2\n   pcmpeqb %xmm1, %xmm2\n   pmovmskb %xmm2, %eax\n   cmp $0xffff, %eax\n   jne .Ltc_scalar\n   movdqu %xmm0, (%rdi,%r9)\n   add $16, %r8\n   add $16, %r9\n   jmp .Ltc_loop\n"
+    ".Ltc_next:\n   test $15, %r8d\n   jz .Ltc_loop\n"
+    ".Ltc_scalar:\n   cmp %rdx, %r8\n   jge .Ltc_done\n   movzbl (%rsi,%r8), %eax\n   test %eax, %eax\n   jz .Ltc_done\n   lea -0x20(%rax), %ecx\n   cmp $0x5e, %ecx\n   ja .Ltc_hi\n   mov %al, (%rdi,%r9)\n   inc %r8\n   inc %r9\n   jmp .Ltc_next\n"
+    ".Ltc_hi:\n   lea -0xc2(%rax), %ecx\n   cmp $0x32, %ecx\n   ja .Ltc_q\n   lea .Ltc_t(%rip), %r10\n   mov (%r10,%rcx,4), %r11d\n   movzbl %r11b, %ecx\n   lea (%r8,%rcx), %rax\n   cmp %rdx, %rax\n   jge .Ltc_q\n"
+    "movzbl 1(%rsi,%r8), %eax\n   shr $8, %r11d\n   movzbl %r11b, %r10d\n   sub %r10d, %eax\n   shr $8, %r11d\n   cmp %r11d, %eax\n   ja .Ltc_q\n"
+    "cmp $1, %ecx\n   je .Ltc_c1\n   movzbl 2(%rsi,%r8), %eax\n   and $0xc0, %eax\n   cmp $0x80, %eax\n   jne .Ltc_q\n   cmp $2, %ecx\n   je .Ltc_c2\n"
+    "movzbl 3(%rsi,%r8), %eax\n   and $0xc0, %eax\n   cmp $0x80, %eax\n   jne .Ltc_q\n   mov (%rsi,%r8), %eax\n   mov %eax, (%rdi,%r9)\n   add $4, %r8\n   add $4, %r9\n   jmp .Ltc_next\n"
+    ".Ltc_c2:\n   movzwl (%rsi,%r8), %eax\n   movzbl 2(%rsi,%r8), %ecx\n   mov %ax, (%rdi,%r9)\n   mov %cl, 2(%rdi,%r9)\n   add $3, %r8\n   add $3, %r9\n   jmp .Ltc_next\n"
+    ".Ltc_c1:\n   movzwl (%rsi,%r8), %eax\n   mov %ax, (%rdi,%r9)\n   add $2, %r8\n   add $2, %r9\n   jmp .Ltc_next\n"
+    ".Ltc_q:\n   movb $0x3f, (%rdi,%r9)\n   inc %r8\n   inc %r9\n   jmp .Ltc_next\n"
+    ".Ltc_done:\n   mov %r9, %rax\n"
+    ASM_RET
+    ".pushsection .rodata\n   .balign 16\n.Ltc_c:\n   .quad 0x2020202020202020, 0x2020202020202020\n   .quad 0x5e5e5e5e5e5e5e5e, 0x5e5e5e5e5e5e5e5e\n.Ltc_t:\n   .byte 1, 0xa0, 0x1f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 2, 0xa0, 0x1f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x1f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 3, 0x90, 0x2f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x0f, 0\n.popsection\n"
+    ASM_END(memory_text_clean)
+
+    //      memory_window_peaks: rdi out0, rsi out1, rdx left, rcx right, r8 frames, r9 state, then count, window and mono on the stack. A segment of frames to the end of the
+    //      window at a time: four frames a turn with andps and maxps (a magnitude greater than the state, so a NaN is never taken), the rest a frame at a time.
+    ASM_FUNC(memory_window_peaks)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   mov 56(%rsp), %r10\n   mov (%r10), %r11\n   mov 64(%rsp), %r12\n   mov 72(%rsp), %r13\n   movss (%r9), %xmm4\n   movss 4(%r9), %xmm5\n   xor %ebx, %ebx\n   movdqa .Lwp_abs(%rip), %xmm7\n"
+    ".Lwp_loop:\n   test %r8, %r8\n   jle .Lwp_out\n   mov %r12, %rax\n   sub %r11, %rax\n   jg .Lwp_t\n   mov $1, %eax\n.Lwp_t:\n   cmp %r8, %rax\n   cmovg %r8, %rax\n   mov %rax, %r14\n   cmp $8, %rax\n   jb .Lwp_sc\n   shufps $0, %xmm4, %xmm4\n   shufps $0, %xmm5, %xmm5\n"
+    ".Lwp_v:\n   movups (%rdx), %xmm0\n   andps %xmm7, %xmm0\n   maxps %xmm4, %xmm0\n   movaps %xmm0, %xmm4\n   movups (%rcx), %xmm1\n   andps %xmm7, %xmm1\n   maxps %xmm5, %xmm1\n   movaps %xmm1, %xmm5\n   add $16, %rdx\n   add $16, %rcx\n   sub $4, %rax\n   cmp $4, %rax\n   jae .Lwp_v\n"
+    "   movaps %xmm4, %xmm0\n   movhlps %xmm4, %xmm0\n   maxps %xmm0, %xmm4\n   movaps %xmm4, %xmm0\n   shufps $0x55, %xmm0, %xmm0\n   maxss %xmm0, %xmm4\n   movaps %xmm5, %xmm1\n   movhlps %xmm5, %xmm1\n   maxps %xmm1, %xmm5\n   movaps %xmm5, %xmm1\n   shufps $0x55, %xmm1, %xmm1\n   maxss %xmm1, %xmm5\n"
+    ".Lwp_sc:\n   test %rax, %rax\n   jz .Lwp_seg\n.Lwp_s1:\n   movss (%rdx), %xmm0\n   andps %xmm7, %xmm0\n   maxss %xmm4, %xmm0\n   movaps %xmm0, %xmm4\n   movss (%rcx), %xmm1\n   andps %xmm7, %xmm1\n   maxss %xmm5, %xmm1\n   movaps %xmm1, %xmm5\n   add $4, %rdx\n   add $4, %rcx\n   dec %rax\n   jnz .Lwp_s1\n"
+    ".Lwp_seg:\n   add %r14, %r11\n   sub %r14, %r8\n   cmp %r12, %r11\n   jl .Lwp_loop\n   movss %xmm4, (%rdi,%rbx,4)\n   movss %xmm5, (%rsi,%rbx,4)\n   test %r13, %r13\n   jz .Lwp_w\n   movaps %xmm4, %xmm0\n   maxss %xmm5, %xmm0\n   movss %xmm0, (%rdi,%rbx,4)\n   movss %xmm0, (%rsi,%rbx,4)\n.Lwp_w:\n   inc %rbx\n   xorps %xmm4, %xmm4\n   xorps %xmm5, %xmm5\n   xor %r11d, %r11d\n   jmp .Lwp_loop\n"
+    ".Lwp_out:\n   movss %xmm4, (%r9)\n   movss %xmm5, 4(%r9)\n   mov %r11, (%r10)\n   mov %rbx, %rax\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    ASM_RET
+    ".pushsection .rodata\n   .balign 16\n.Lwp_abs:\n   .long 0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff\n.popsection\n"
+    ASM_END(memory_window_peaks)
 );
 #elif ARM64
 __asm__(
@@ -45490,6 +45589,73 @@ __asm__(
     ASM_RET
     ".pushsection .rodata\n   .balign 64\n.Lfl_table:\n   .long 0xbe2c0000, 0xbe240000, 0xbe3c0000, 0xbe340000, 0xbe0c0000, 0xbe040000, 0xbe1c0000, 0xbe140000\n   .long 0xbe6c0000, 0xbe640000, 0xbe7c0000, 0xbe740000, 0xbe4c0000, 0xbe440000, 0xbe5c0000, 0xbe540000\n   .long 0xbdac0000, 0xbda40000, 0xbdbc0000, 0xbdb40000, 0xbd8c0000, 0xbd840000, 0xbd9c0000, 0xbd940000\n   .long 0xbdec0000, 0xbde40000, 0xbdfc0000, 0xbdf40000, 0xbdcc0000, 0xbdc40000, 0xbddc0000, 0xbdd40000\n   .long 0xbf2c0000, 0xbf240000, 0xbf3c0000, 0xbf340000, 0xbf0c0000, 0xbf040000, 0xbf1c0000, 0xbf140000\n   .long 0xbf6c0000, 0xbf640000, 0xbf7c0000, 0xbf740000, 0xbf4c0000, 0xbf440000, 0xbf5c0000, 0xbf540000\n   .long 0xbeac0000, 0xbea40000, 0xbebc0000, 0xbeb40000, 0xbe8c0000, 0xbe840000, 0xbe9c0000, 0xbe940000\n   .long 0xbeec0000, 0xbee40000, 0xbefc0000, 0xbef40000, 0xbecc0000, 0xbec40000, 0xbedc0000, 0xbed40000\n   .long 0xbc2c0000, 0xbc240000, 0xbc3c0000, 0xbc340000, 0xbc0c0000, 0xbc040000, 0xbc1c0000, 0xbc140000\n   .long 0xbc6c0000, 0xbc640000, 0xbc7c0000, 0xbc740000, 0xbc4c0000, 0xbc440000, 0xbc5c0000, 0xbc540000\n   .long 0xbb300000, 0xbb100000, 0xbb700000, 0xbb500000, 0xba400000, 0xb9800000, 0xbae00000, 0xbaa00000\n   .long 0xbbd80000, 0xbbc80000, 0xbbf80000, 0xbbe80000, 0xbb980000, 0xbb880000, 0xbbb80000, 0xbba80000\n   .long 0xbd2c0000, 0xbd240000, 0xbd3c0000, 0xbd340000, 0xbd0c0000, 0xbd040000, 0xbd1c0000, 0xbd140000\n   .long 0xbd6c0000, 0xbd640000, 0xbd7c0000, 0xbd740000, 0xbd4c0000, 0xbd440000, 0xbd5c0000, 0xbd540000\n   .long 0xbcac0000, 0xbca40000, 0xbcbc0000, 0xbcb40000, 0xbc8c0000, 0xbc840000, 0xbc9c0000, 0xbc940000\n   .long 0xbcec0000, 0xbce40000, 0xbcfc0000, 0xbcf40000, 0xbccc0000, 0xbcc40000, 0xbcdc0000, 0xbcd40000\n   .long 0x3e2c0000, 0x3e240000, 0x3e3c0000, 0x3e340000, 0x3e0c0000, 0x3e040000, 0x3e1c0000, 0x3e140000\n   .long 0x3e6c0000, 0x3e640000, 0x3e7c0000, 0x3e740000, 0x3e4c0000, 0x3e440000, 0x3e5c0000, 0x3e540000\n   .long 0x3dac0000, 0x3da40000, 0x3dbc0000, 0x3db40000, 0x3d8c0000, 0x3d840000, 0x3d9c0000, 0x3d940000\n   .long 0x3dec0000, 0x3de40000, 0x3dfc0000, 0x3df40000, 0x3dcc0000, 0x3dc40000, 0x3ddc0000, 0x3dd40000\n   .long 0x3f2c0000, 0x3f240000, 0x3f3c0000, 0x3f340000, 0x3f0c0000, 0x3f040000, 0x3f1c0000, 0x3f140000\n   .long 0x3f6c0000, 0x3f640000, 0x3f7c0000, 0x3f740000, 0x3f4c0000, 0x3f440000, 0x3f5c0000, 0x3f540000\n   .long 0x3eac0000, 0x3ea40000, 0x3ebc0000, 0x3eb40000, 0x3e8c0000, 0x3e840000, 0x3e9c0000, 0x3e940000\n   .long 0x3eec0000, 0x3ee40000, 0x3efc0000, 0x3ef40000, 0x3ecc0000, 0x3ec40000, 0x3edc0000, 0x3ed40000\n   .long 0x3c2c0000, 0x3c240000, 0x3c3c0000, 0x3c340000, 0x3c0c0000, 0x3c040000, 0x3c1c0000, 0x3c140000\n   .long 0x3c6c0000, 0x3c640000, 0x3c7c0000, 0x3c740000, 0x3c4c0000, 0x3c440000, 0x3c5c0000, 0x3c540000\n   .long 0x3b300000, 0x3b100000, 0x3b700000, 0x3b500000, 0x3a400000, 0x39800000, 0x3ae00000, 0x3aa00000\n   .long 0x3bd80000, 0x3bc80000, 0x3bf80000, 0x3be80000, 0x3b980000, 0x3b880000, 0x3bb80000, 0x3ba80000\n   .long 0x3d2c0000, 0x3d240000, 0x3d3c0000, 0x3d340000, 0x3d0c0000, 0x3d040000, 0x3d1c0000, 0x3d140000\n   .long 0x3d6c0000, 0x3d640000, 0x3d7c0000, 0x3d740000, 0x3d4c0000, 0x3d440000, 0x3d5c0000, 0x3d540000\n   .long 0x3cac0000, 0x3ca40000, 0x3cbc0000, 0x3cb40000, 0x3c8c0000, 0x3c840000, 0x3c9c0000, 0x3c940000\n   .long 0x3cec0000, 0x3ce40000, 0x3cfc0000, 0x3cf40000, 0x3ccc0000, 0x3cc40000, 0x3cdc0000, 0x3cd40000\n   .long 0xbf7af800, 0xbf72f800, 0xbf6af800, 0xbf62f800, 0xbf5af800, 0xbf52f800, 0xbf4af800, 0xbf42f800\n   .long 0xbf3af800, 0xbf32f800, 0xbf2af800, 0xbf22f800, 0xbf1af800, 0xbf12f800, 0xbf0af800, 0xbf02f800\n   .long 0xbef9f000, 0xbef1f000, 0xbee9f000, 0xbee1f000, 0xbed9f000, 0xbed1f000, 0xbec9f000, 0xbec1f000\n   .long 0xbeb9f000, 0xbeb1f000, 0xbea9f000, 0xbea1f000, 0xbe99f000, 0xbe91f000, 0xbe89f000, 0xbe81f000\n   .long 0xbe77e000, 0xbe6fe000, 0xbe67e000, 0xbe5fe000, 0xbe57e000, 0xbe4fe000, 0xbe47e000, 0xbe3fe000\n   .long 0xbe37e000, 0xbe2fe000, 0xbe27e000, 0xbe1fe000, 0xbe17e000, 0xbe0fe000, 0xbe07e000, 0xbdffc000\n   .long 0xbdf3c000, 0xbdebc000, 0xbde3c000, 0xbddbc000, 0xbdd3c000, 0xbdcbc000, 0xbdc3c000, 0xbdbbc000\n   .long 0xbdb3c000, 0xbdabc000, 0xbda3c000, 0xbd9bc000, 0xbd93c000, 0xbd8bc000, 0xbd83c000, 0xbd778000\n   .long 0xbd6b8000, 0xbd638000, 0xbd5b8000, 0xbd538000, 0xbd4b8000, 0xbd438000, 0xbd3b8000, 0xbd338000\n   .long 0xbd2b8000, 0xbd238000, 0xbd1b8000, 0xbd138000, 0xbd0b8000, 0xbd038000, 0xbcf70000, 0xbce70000\n   .long 0xbcdb0000, 0xbcd30000, 0xbccb0000, 0xbcc30000, 0xbcbb0000, 0xbcb30000, 0xbcab0000, 0xbca30000\n   .long 0xbc9b0000, 0xbc930000, 0xbc8b0000, 0xbc830000, 0xbc760000, 0xbc660000, 0xbc560000, 0xbc460000\n   .long 0xbc3a0000, 0xbc320000, 0xbc2a0000, 0xbc220000, 0xbc1a0000, 0xbc120000, 0xbc0a0000, 0xbc020000\n   .long 0xbbf40000, 0xbbe40000, 0xbbd40000, 0xbbc40000, 0xbbb40000, 0xbba40000, 0xbb940000, 0xbb840000\n   .long 0xbb700000, 0xbb600000, 0xbb500000, 0xbb400000, 0xbb300000, 0xbb200000, 0xbb100000, 0xbb000000\n   .long 0xbae00000, 0xbac00000, 0xbaa00000, 0xba800000, 0xba400000, 0xba000000, 0xb9800000, 0x00000000\n   .long 0x3f7af800, 0x3f72f800, 0x3f6af800, 0x3f62f800, 0x3f5af800, 0x3f52f800, 0x3f4af800, 0x3f42f800\n   .long 0x3f3af800, 0x3f32f800, 0x3f2af800, 0x3f22f800, 0x3f1af800, 0x3f12f800, 0x3f0af800, 0x3f02f800\n   .long 0x3ef9f000, 0x3ef1f000, 0x3ee9f000, 0x3ee1f000, 0x3ed9f000, 0x3ed1f000, 0x3ec9f000, 0x3ec1f000\n   .long 0x3eb9f000, 0x3eb1f000, 0x3ea9f000, 0x3ea1f000, 0x3e99f000, 0x3e91f000, 0x3e89f000, 0x3e81f000\n   .long 0x3e77e000, 0x3e6fe000, 0x3e67e000, 0x3e5fe000, 0x3e57e000, 0x3e4fe000, 0x3e47e000, 0x3e3fe000\n   .long 0x3e37e000, 0x3e2fe000, 0x3e27e000, 0x3e1fe000, 0x3e17e000, 0x3e0fe000, 0x3e07e000, 0x3dffc000\n   .long 0x3df3c000, 0x3debc000, 0x3de3c000, 0x3ddbc000, 0x3dd3c000, 0x3dcbc000, 0x3dc3c000, 0x3dbbc000\n   .long 0x3db3c000, 0x3dabc000, 0x3da3c000, 0x3d9bc000, 0x3d93c000, 0x3d8bc000, 0x3d83c000, 0x3d778000\n   .long 0x3d6b8000, 0x3d638000, 0x3d5b8000, 0x3d538000, 0x3d4b8000, 0x3d438000, 0x3d3b8000, 0x3d338000\n   .long 0x3d2b8000, 0x3d238000, 0x3d1b8000, 0x3d138000, 0x3d0b8000, 0x3d038000, 0x3cf70000, 0x3ce70000\n   .long 0x3cdb0000, 0x3cd30000, 0x3ccb0000, 0x3cc30000, 0x3cbb0000, 0x3cb30000, 0x3cab0000, 0x3ca30000\n   .long 0x3c9b0000, 0x3c930000, 0x3c8b0000, 0x3c830000, 0x3c760000, 0x3c660000, 0x3c560000, 0x3c460000\n   .long 0x3c3a0000, 0x3c320000, 0x3c2a0000, 0x3c220000, 0x3c1a0000, 0x3c120000, 0x3c0a0000, 0x3c020000\n   .long 0x3bf40000, 0x3be40000, 0x3bd40000, 0x3bc40000, 0x3bb40000, 0x3ba40000, 0x3b940000, 0x3b840000\n   .long 0x3b700000, 0x3b600000, 0x3b500000, 0x3b400000, 0x3b300000, 0x3b200000, 0x3b100000, 0x3b000000\n   .long 0x3ae00000, 0x3ac00000, 0x3aa00000, 0x3a800000, 0x3a400000, 0x3a000000, 0x39800000, 0x00000000\n.popsection\n"
     ASM_END(f32_planes_from_law)
+
+    //      memory_s16_to_u8: x0 dst, x1 src, x2 count. Sixteen a turn: sqrshrn by 8 is (v + 128) >> 8 held to the byte, then xor 0x80.
+    ASM_FUNC(memory_s16_to_u8)
+    "cmp x2, #16\n   b.lo 2f\n   movi v7.16b, #0x80\n"
+    "1:  ld1 {v0.8h, v1.8h}, [x1], #32\n   sqrshrn v2.8b, v0.8h, #8\n   sqrshrn2 v2.16b, v1.8h, #8\n   eor v2.16b, v2.16b, v7.16b\n   st1 {v2.16b}, [x0], #16\n   sub x2, x2, #16\n   cmp x2, #16\n   b.hs 1b\n"
+    "2:  cbz x2, 9f\n3:  ldrsh w3, [x1], #2\n   add w3, w3, #128\n   asr w3, w3, #8\n   mov w4, #127\n   cmp w3, w4\n   csel w3, w4, w3, gt\n   add w3, w3, #128\n   strb w3, [x0], #1\n   subs x2, x2, #1\n   b.ne 3b\n"
+    "9:  \n"
+    ASM_RET
+    ASM_END(memory_s16_to_u8)
+
+    //      memory_reverse_units: x0 dst, x1 count, x2 width. rev16 and rev32 sixty-four bytes a turn, ld3 and st3 (the first and third byte exchanged) sixteen units of three.
+    ASM_FUNC(memory_reverse_units)
+    "cbz x1, 9f\n   cmp x2, #2\n   b.eq 10f\n   cmp x2, #4\n   b.eq 20f\n   cmp x2, #3\n   b.eq 30f\n   b 40f\n"
+    "10: cmp x1, #32\n   b.lo 12f\n11: ld1 {v0.16b, v1.16b, v2.16b, v3.16b}, [x0]\n   rev16 v0.16b, v0.16b\n   rev16 v1.16b, v1.16b\n   rev16 v2.16b, v2.16b\n   rev16 v3.16b, v3.16b\n   st1 {v0.16b, v1.16b, v2.16b, v3.16b}, [x0], #64\n   sub x1, x1, #32\n   cmp x1, #32\n   b.hs 11b\n"
+    "12: cbz x1, 9f\n13: ldrh w3, [x0]\n   rev16 w3, w3\n   strh w3, [x0], #2\n   subs x1, x1, #1\n   b.ne 13b\n   b 9f\n"
+    "20: cmp x1, #16\n   b.lo 22f\n21: ld1 {v0.16b, v1.16b, v2.16b, v3.16b}, [x0]\n   rev32 v0.16b, v0.16b\n   rev32 v1.16b, v1.16b\n   rev32 v2.16b, v2.16b\n   rev32 v3.16b, v3.16b\n   st1 {v0.16b, v1.16b, v2.16b, v3.16b}, [x0], #64\n   sub x1, x1, #16\n   cmp x1, #16\n   b.hs 21b\n"
+    "22: cbz x1, 9f\n23: ldr w3, [x0]\n   rev w3, w3\n   str w3, [x0], #4\n   subs x1, x1, #1\n   b.ne 23b\n   b 9f\n"
+    "30: cmp x1, #16\n   b.lo 32f\n31: ld3 {v0.16b, v1.16b, v2.16b}, [x0]\n   mov v3.16b, v0.16b\n   mov v0.16b, v2.16b\n   mov v2.16b, v3.16b\n   st3 {v0.16b, v1.16b, v2.16b}, [x0], #48\n   sub x1, x1, #16\n   cmp x1, #16\n   b.hs 31b\n"
+    "32: cbz x1, 9f\n33: ldrb w3, [x0]\n   ldrb w4, [x0, #2]\n   strb w4, [x0]\n   strb w3, [x0, #2]\n   add x0, x0, #3\n   subs x1, x1, #1\n   b.ne 33b\n   b 9f\n"
+    "40: lsr x6, x2, #1\n   cbz x6, 9f\n41: mov x3, #0\n42: sub x4, x2, #1\n   sub x4, x4, x3\n   ldrb w5, [x0, x3]\n   ldrb w7, [x0, x4]\n   strb w7, [x0, x3]\n   strb w5, [x0, x4]\n   add x3, x3, #1\n   cmp x3, x6\n   b.lo 42b\n   add x0, x0, x2\n   subs x1, x1, #1\n   b.ne 41b\n"
+    "9:  \n"
+    ASM_RET
+    ASM_END(memory_reverse_units)
+
+    //      memory_key_printable: x0 from, x1 length. Sixteen bytes a turn (a byte less 0x21 is at most 0x5d), the tail a block ending at the end, a byte at a time under sixteen.
+    ASM_FUNC(memory_key_printable)
+    "sub x2, x1, #1\n   cmp x2, #62\n   b.hi 8f\n   cmp x1, #16\n   b.lo 3f\n   movi v7.16b, #0x21\n   movi v6.16b, #0x5d\n   movi v5.16b, #0xff\n"
+    "1:  ldr q0, [x0], #16\n   sub v0.16b, v0.16b, v7.16b\n   umin v1.16b, v0.16b, v6.16b\n   cmeq v1.16b, v1.16b, v0.16b\n   and v5.16b, v5.16b, v1.16b\n   sub x1, x1, #16\n   cmp x1, #16\n   b.hs 1b\n   cbz x1, 2f\n   add x0, x0, x1\n   ldur q0, [x0, #-16]\n   sub v0.16b, v0.16b, v7.16b\n   umin v1.16b, v0.16b, v6.16b\n   cmeq v1.16b, v1.16b, v0.16b\n   and v5.16b, v5.16b, v1.16b\n"
+    "2:  uminv b5, v5.16b\n   umov w0, v5.b[0]\n   cmp w0, #0xff\n   cset w0, eq\n   b 9f\n"
+    "3:  ldrb w2, [x0], #1\n   sub w2, w2, #0x21\n   cmp w2, #0x5d\n   b.hi 8f\n   subs x1, x1, #1\n   b.ne 3b\n   mov w0, #1\n   b 9f\n"
+    "8:  mov w0, #0\n"
+    "9:  \n"
+    ASM_RET
+    ASM_END(memory_key_printable)
+
+    //      memory_text_clean: x0 to, x1 from, x2 length. Sixteen bytes of printable ASCII are copied as a block; anything else a byte at a time. A lead byte is told by
+    //      the table of 51 entries after the body (the continuation bytes it takes, the lowest second byte it allows and the width of the range from it), a sequence being one
+    //      load, one test of the second byte against the range, a test of each further continuation byte and a copy of the whole; the block is tried again only where the
+    //      index is a multiple of sixteen.
+    ASM_FUNC(memory_text_clean)
+    "mov x3, #0\n   mov x4, #0\n   cmp x2, #0\n   b.le 9f\n   movi v7.16b, #0x20\n   movi v6.16b, #0x5e\n"
+    "1:  cmp x3, x2\n   b.ge 9f\n   add x5, x3, #16\n   cmp x5, x2\n   b.gt 3f\n   ldr q0, [x1, x3]\n   sub v1.16b, v0.16b, v7.16b\n   umin v2.16b, v1.16b, v6.16b\n   cmeq v2.16b, v2.16b, v1.16b\n   uminv b2, v2.16b\n   umov w5, v2.b[0]\n   cmp w5, #0xff\n   b.ne 3f\n   str q0, [x0, x4]\n   add x3, x3, #16\n   add x4, x4, #16\n   b 1b\n"
+    "2:  tst x3, #15\n   b.eq 1b\n"
+    "3:  cmp x3, x2\n   b.ge 9f\n   ldrb w5, [x1, x3]\n   cbz w5, 9f\n   sub w6, w5, #0x20\n   cmp w6, #0x5e\n   b.hi 4f\n   strb w5, [x0, x4]\n   add x3, x3, #1\n   add x4, x4, #1\n   b 2b\n"
+    "4:  sub w6, w5, #0xc2\n   cmp w6, #0x32\n   b.hi 8f\n   adr x10, .Ltc_arm64_t\n   ldr w7, [x10, x6, lsl #2]\n   and w6, w7, #0xff\n   add x8, x3, x6\n   cmp x8, x2\n   b.ge 8f\n"
+    "add x9, x1, x3\n   ldrb w10, [x9, #1]\n   ubfx w11, w7, #8, #8\n   sub w10, w10, w11\n   ubfx w11, w7, #16, #8\n   cmp w10, w11\n   b.hi 8f\n"
+    "cmp w6, #1\n   b.eq 6f\n   ldrb w10, [x9, #2]\n   and w10, w10, #0xc0\n   cmp w10, #0x80\n   b.ne 8f\n   cmp w6, #2\n   b.eq 7f\n"
+    "ldrb w10, [x9, #3]\n   and w10, w10, #0xc0\n   cmp w10, #0x80\n   b.ne 8f\n   ldr w10, [x9]\n   str w10, [x0, x4]\n   add x3, x3, #4\n   add x4, x4, #4\n   b 2b\n"
+    "7:  ldrh w10, [x9]\n   ldrb w11, [x9, #2]\n   strh w10, [x0, x4]\n   add x12, x0, x4\n   strb w11, [x12, #2]\n   add x3, x3, #3\n   add x4, x4, #3\n   b 2b\n"
+    "6:  ldrh w10, [x9]\n   strh w10, [x0, x4]\n   add x3, x3, #2\n   add x4, x4, #2\n   b 2b\n"
+    "8:  mov w5, #0x3f\n   strb w5, [x0, x4]\n   add x3, x3, #1\n   add x4, x4, #1\n   b 2b\n"
+    "9:  mov x0, x4\n"
+    ASM_RET
+    ".p2align 2\n.Ltc_arm64_t:\n.byte 1, 0xa0, 0x1f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 2, 0xa0, 0x1f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x1f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 3, 0x90, 0x2f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x0f, 0\n"
+    ASM_END(memory_text_clean)
+
+    //      memory_window_peaks: x0 out0, x1 out1, x2 left, x3 right, x4 frames, x5 state, x6 count, x7 window, mono on the stack. Four frames a turn with fabs and a compare (a magnitude greater
+    //      than the state), the rest a frame at a time.
+    ASM_FUNC(memory_window_peaks)
+    "ldr x8, [sp]\n   ldr x9, [x6]\n   ldr s4, [x5]\n   ldr s5, [x5, #4]\n   mov x10, #0\n"
+    "1:  cmp x4, #0\n   b.le 9f\n   subs x11, x7, x9\n   b.gt 2f\n   mov x11, #1\n2:  cmp x11, x4\n   csel x11, x4, x11, gt\n   mov x12, x11\n   cmp x11, #8\n   b.lo 4f\n   dup v4.4s, v4.s[0]\n   dup v5.4s, v5.s[0]\n"
+    "3:  ldr q0, [x2], #16\n   fabs v0.4s, v0.4s\n   fcmgt v2.4s, v0.4s, v4.4s\n   bit v4.16b, v0.16b, v2.16b\n   ldr q1, [x3], #16\n   fabs v1.4s, v1.4s\n   fcmgt v3.4s, v1.4s, v5.4s\n   bit v5.16b, v1.16b, v3.16b\n   sub x11, x11, #4\n   cmp x11, #4\n   b.hs 3b\n   mov v6.16b, v4.16b\n   fmaxnmv s4, v6.4s\n   mov v6.16b, v5.16b\n   fmaxnmv s5, v6.4s\n"
+    "4:  cbz x11, 6f\n5:  ldr s0, [x2], #4\n   fabs s0, s0\n   fcmp s0, s4\n   fcsel s4, s0, s4, gt\n   ldr s1, [x3], #4\n   fabs s1, s1\n   fcmp s1, s5\n   fcsel s5, s1, s5, gt\n   subs x11, x11, #1\n   b.ne 5b\n"
+    "6:  add x9, x9, x12\n   sub x4, x4, x12\n   cmp x9, x7\n   b.lt 1b\n   fcmp s4, s5\n   fcsel s6, s4, s5, gt\n   str s4, [x0, x10, lsl #2]\n   str s5, [x1, x10, lsl #2]\n   cbz x8, 7f\n   str s6, [x0, x10, lsl #2]\n   str s6, [x1, x10, lsl #2]\n7:  add x10, x10, #1\n   movi d4, #0\n   movi d5, #0\n   mov x9, #0\n   b 1b\n"
+    "9:  str s4, [x5]\n   str s5, [x5, #4]\n   str x9, [x6]\n   mov x0, x10\n"
+    ASM_RET
+    ASM_END(memory_window_peaks)
 );
 #elif RISCV64
 __asm__(
@@ -45901,6 +46067,79 @@ __asm__(
     "   addi t5, t5, 1\n   bltu t5, a3, 22b\n   j 9b\n"
 #endif
     ASM_END(f32_planes_from_law)
+
+    //      memory_s16_to_u8: a0 dst, a1 src, a2 count. With V strips of vnclip by 8 (rounding up, saturating) and xor 0x80; otherwise a sample at a time.
+    ASM_FUNC(memory_s16_to_u8)
+    "beqz a2, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 20f\n   bnez t3, 1f\n"
+    "addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a0, 16(sp)\n   sd a1, 8(sp)\n   sd a2, 0(sp)\n   call cpu_vector_detect\n   ld ra, 24(sp)\n   ld a0, 16(sp)\n   ld a1, 8(sp)\n   ld a2, 0(sp)\n   addi sp, sp, 32\n   j memory_s16_to_u8\n"
+#endif
+    "1:  lh t0, 0(a1)\n   addi t0, t0, 128\n   srai t0, t0, 8\n   li t1, 127\n   ble t0, t1, 2f\n   mv t0, t1\n2:  addi t0, t0, 128\n   sb t0, 0(a0)\n   addi a1, a1, 2\n   addi a0, a0, 1\n   addi a2, a2, -1\n   bnez a2, 1b\n"
+    "9:  \n"
+    ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "20: csrwi vxrm, 0\n   li t1, 0x80\n21: vsetvli t0, a2, e8, m1, ta, ma\n   vle16.v v4, (a1)\n   vnclip.wi v8, v4, 8\n   vxor.vx v8, v8, t1\n   vse8.v v8, (a0)\n   slli t2, t0, 1\n   add a1, a1, t2\n   add a0, a0, t0\n   sub a2, a2, t0\n   bnez a2, 21b\n   j 9b\n"
+#endif
+    ASM_END(memory_s16_to_u8)
+
+    //      memory_reverse_units: a0 dst, a1 count, a2 width. A unit at a time (shifts for two and four bytes), the bytes exchanged for three; the V strips of 2, 3 and 4 below.
+    ASM_FUNC(memory_reverse_units)
+    "beqz a1, 9f\n"
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "lla t3, cpu_has_vector\n   lbu t3, 0(t3)\n   li t4, 2\n   beq t3, t4, 20f\n   bnez t3, 1f\n"
+    "addi sp, sp, -32\n   sd ra, 24(sp)\n   sd a0, 16(sp)\n   sd a1, 8(sp)\n   sd a2, 0(sp)\n   call cpu_vector_detect\n   ld ra, 24(sp)\n   ld a0, 16(sp)\n   ld a1, 8(sp)\n   ld a2, 0(sp)\n   addi sp, sp, 32\n   j memory_reverse_units\n"
+#endif
+    "1:  li t0, 2\n   beq a2, t0, 10f\n   li t0, 4\n   beq a2, t0, 11f\n   li t0, 3\n   beq a2, t0, 12f\n   j 13f\n"
+    "10: lbu t0, 0(a0)\n   lbu t1, 1(a0)\n   sb t1, 0(a0)\n   sb t0, 1(a0)\n   addi a0, a0, 2\n   addi a1, a1, -1\n   bnez a1, 10b\n   j 9f\n"
+    "11: lbu t0, 0(a0)\n   lbu t1, 1(a0)\n   lbu t2, 2(a0)\n   lbu t3, 3(a0)\n   sb t3, 0(a0)\n   sb t2, 1(a0)\n   sb t1, 2(a0)\n   sb t0, 3(a0)\n   addi a0, a0, 4\n   addi a1, a1, -1\n   bnez a1, 11b\n   j 9f\n"
+    "12: lbu t0, 0(a0)\n   lbu t2, 2(a0)\n   sb t2, 0(a0)\n   sb t0, 2(a0)\n   addi a0, a0, 3\n   addi a1, a1, -1\n   bnez a1, 12b\n   j 9f\n"
+    "13: srli a3, a2, 1\n   beqz a3, 9f\n14: li t0, 0\n15: addi t1, a2, -1\n   sub t1, t1, t0\n   add t2, a0, t0\n   add t3, a0, t1\n   lbu t4, 0(t2)\n   lbu t5, 0(t3)\n   sb t5, 0(t2)\n   sb t4, 0(t3)\n   addi t0, t0, 1\n   bltu t0, a3, 15b\n   add a0, a0, a2\n   addi a1, a1, -1\n   bnez a1, 14b\n"
+    "9:  \n"
+    ASM_RET
+#if defined(__ELF__) && !defined(STANDARD_NO_PLATFORM)
+    "20: li t0, 2\n   beq a2, t0, 30f\n   li t0, 4\n   beq a2, t0, 40f\n   li t0, 3\n   beq a2, t0, 50f\n   j 1b\n"
+    "30: vsetvli t0, a1, e16, m2, ta, ma\n   vle16.v v8, (a0)\n   vsll.vi v12, v8, 8\n   vsrl.vi v14, v8, 8\n   vor.vv v12, v12, v14\n   vse16.v v12, (a0)\n   slli t1, t0, 1\n   add a0, a0, t1\n   sub a1, a1, t0\n   bnez a1, 30b\n   j 9b\n"
+    "40: lui t5, 0x10\n   addi t5, t5, -256\n41: vsetvli t0, a1, e32, m4, ta, ma\n   vle32.v v8, (a0)\n   vsll.vi v12, v8, 24\n   vsrl.vi v16, v8, 24\n   vor.vv v12, v12, v16\n   vand.vx v16, v8, t5\n   vsll.vi v16, v16, 8\n   vor.vv v12, v12, v16\n   vsrl.vi v16, v8, 8\n   vand.vx v16, v16, t5\n   vor.vv v12, v12, v16\n   vse32.v v12, (a0)\n   slli t1, t0, 2\n   add a0, a0, t1\n   sub a1, a1, t0\n   bnez a1, 41b\n   j 9b\n"
+    "50: vsetvli t0, a1, e8, m1, ta, ma\n   vlseg3e8.v v8, (a0)\n   vmv.v.v v12, v8\n   vmv.v.v v8, v10\n   vmv.v.v v10, v12\n   vsseg3e8.v v8, (a0)\n   slli t1, t0, 1\n   add t1, t1, t0\n   add a0, a0, t1\n   sub a1, a1, t0\n   bnez a1, 50b\n   j 9b\n"
+#endif
+    ASM_END(memory_reverse_units)
+
+    //      memory_key_printable: a0 from, a1 length. A byte at a time.
+    ASM_FUNC(memory_key_printable)
+    "addi t0, a1, -1\n   li t1, 62\n   bltu t1, t0, 8f\n"
+    "1:  lbu t2, 0(a0)\n   addi t2, t2, -0x21\n   li t3, 0x5d\n   bltu t3, t2, 8f\n   addi a0, a0, 1\n   addi a1, a1, -1\n   bnez a1, 1b\n   li a0, 1\n   j 9f\n"
+    "8:  li a0, 0\n"
+    "9:  \n"
+    ASM_RET
+    ASM_END(memory_key_printable)
+
+    //      memory_text_clean: a0 to, a1 from, a2 length. A byte at a time. A lead byte is told by the table of 51 entries after the body (the continuation bytes it takes, the
+    //      lowest second byte it allows and the width of the range from it), a sequence being one table load, one test of the second byte against the range, a test of
+    //      each further continuation byte and a copy of the whole.
+    ASM_FUNC(memory_text_clean)
+    "li a3, 0\n   li a4, 0\n   blez a2, 9f\n"
+    "1:  bge a3, a2, 9f\n   add t0, a1, a3\n   lbu t1, 0(t0)\n   beqz t1, 9f\n   addi t2, t1, -0x20\n   li t3, 0x5e\n   bltu t3, t2, 4f\n   add t4, a0, a4\n   sb t1, 0(t4)\n   addi a3, a3, 1\n   addi a4, a4, 1\n   j 1b\n"
+    "4:  addi t2, t1, -0xc2\n   li t3, 0x32\n   bltu t3, t2, 8f\n   lla t4, .Ltc_rv_t\n   slli t2, t2, 2\n   add t4, t4, t2\n   lbu t5, 0(t4)\n   lbu t6, 1(t4)\n   lbu t2, 2(t4)\n"
+    "add t3, a3, t5\n   bge t3, a2, 8f\n   lbu t4, 1(t0)\n   sub t4, t4, t6\n   bltu t2, t4, 8f\n"
+    "li t3, 1\n   beq t5, t3, 6f\n   lbu t4, 2(t0)\n   andi t4, t4, 0xc0\n   li t3, 0x80\n   bne t4, t3, 8f\n   li t3, 2\n   beq t5, t3, 6f\n   lbu t4, 3(t0)\n   andi t4, t4, 0xc0\n   li t3, 0x80\n   bne t4, t3, 8f\n"
+    "6:  add t4, a0, a4\n   lbu t2, 0(t0)\n   sb t2, 0(t4)\n   lbu t2, 1(t0)\n   sb t2, 1(t4)\n   li t3, 1\n   beq t5, t3, 7f\n   lbu t2, 2(t0)\n   sb t2, 2(t4)\n   li t3, 2\n   beq t5, t3, 7f\n   lbu t2, 3(t0)\n   sb t2, 3(t4)\n"
+    "7:  add a3, a3, t5\n   addi a3, a3, 1\n   add a4, a4, t5\n   addi a4, a4, 1\n   j 1b\n"
+    "8:  add t4, a0, a4\n   li t2, 0x3f\n   sb t2, 0(t4)\n   addi a3, a3, 1\n   addi a4, a4, 1\n   j 1b\n"
+    "9:  mv a0, a4\n"
+    ASM_RET
+    ".pushsection .rodata\n.Ltc_rv_t:\n.byte 1, 0xa0, 0x1f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 1, 0x80, 0x3f, 0\n.byte 2, 0xa0, 0x1f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x1f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 2, 0x80, 0x3f, 0\n.byte 3, 0x90, 0x2f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x3f, 0\n.byte 3, 0x80, 0x0f, 0\n.popsection\n"
+    ASM_END(memory_text_clean)
+
+    //      memory_window_peaks: a0 out0, a1 out1, a2 left, a3 right, a4 frames, a5 state, a6 count, a7 window, mono on the stack. A frame at a time: a magnitude greater than the state (fgt), so a NaN is never taken.
+    ASM_FUNC(memory_window_peaks)
+    "ld t6, 0(sp)\n   ld t0, 0(a6)\n   flw ft4, 0(a5)\n   flw ft5, 4(a5)\n   li t1, 0\n"
+    "1:  blez a4, 9f\n   sub t2, a7, t0\n   bgtz t2, 2f\n   li t2, 1\n2:  ble t2, a4, 3f\n   mv t2, a4\n3:  mv t3, t2\n"
+    "4:  flw ft0, 0(a2)\n   fabs.s ft0, ft0\n   flt.s t4, ft4, ft0\n   beqz t4, 41f\n   fmv.s ft4, ft0\n41: flw ft1, 0(a3)\n   fabs.s ft1, ft1\n   flt.s t4, ft5, ft1\n   beqz t4, 42f\n   fmv.s ft5, ft1\n42: addi a2, a2, 4\n   addi a3, a3, 4\n   addi t3, t3, -1\n   bnez t3, 4b\n"
+    "   add t0, t0, t2\n   sub a4, a4, t2\n   blt t0, a7, 1b\n   slli t4, t1, 2\n   add t5, a0, t4\n   add t3, a1, t4\n   fsw ft4, 0(t5)\n   fsw ft5, 0(t3)\n   beqz t6, 5f\n   fmv.s ft2, ft4\n   flt.s t4, ft4, ft5\n   beqz t4, 51f\n   fmv.s ft2, ft5\n51: fsw ft2, 0(t5)\n   fsw ft2, 0(t3)\n5:  addi t1, t1, 1\n   fmv.w.x ft4, zero\n   fmv.w.x ft5, zero\n   li t0, 0\n   j 1b\n"
+    "9:  fsw ft4, 0(a5)\n   fsw ft5, 4(a5)\n   sd t0, 0(a6)\n   mv a0, t1\n"
+    ASM_RET
+    ASM_END(memory_window_peaks)
     ".option pop\n"
 );
 #endif

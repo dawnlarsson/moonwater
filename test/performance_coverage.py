@@ -328,6 +328,21 @@ cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'pcm_pack24',
 cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'f32_planes_from_law',
       'paired timing against the table loops of mix.c it took over (-O2, the baseline), A-law and mu-law, 512 frames of two channels and '
       'of six, with AVX2 and SSE2 (one body); V and without on riscv64, NEON on arm64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'memory_text_clean',
+      'paired timing against the loop of pulse.c it took over (-O2, the baseline), a name of 32 and of 120 bytes of ASCII and of '
+      '64 bytes with UTF-8 characters in it, with SSE2 (one body for the AVX2 machines); NEON on arm64, V and without on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'memory_key_printable',
+      'paired timing against the loop of pulse.c it took over (-O2, the baseline), a key of 16 and of 63 bytes, with SSE2; NEON on '
+      'arm64, V and without on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'memory_reverse_units',
+      'paired timing against the loop of pulse.c it took over (-O2, the baseline), 1024 units of 2, 3 and 4 bytes, with AVX2 and SSE2; '
+      'NEON on arm64, V and without on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'memory_s16_to_u8',
+      'paired timing against the loop of pulse.c it took over (-O2, the baseline), 1024 samples, with SSE2; NEON on arm64, V and '
+      'without on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_audiolib', 'memory_window_peaks',
+      'paired timing against the loop of pulse.c it took over (-O2, the baseline), 512 frames of two channels with a window of 1024 '
+      'frames and of 7, with SSE2; NEON on arm64, V and without on riscv64')
 cover('direct_benchmark', 'test/checks.c#BENCH_train', 'fast_argmax_f32',
       'paired timing against the first-NaN-or-first-maximum C loop at -O3 and against '
       'the fast-math two passes the compiler vectorises, for the same instruction set, '

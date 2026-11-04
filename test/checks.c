@@ -9815,6 +9815,31 @@ void f32_planes_from_law(float *const *planes, const unsigned char *src, unsigne
         audio_c_law(planes, src, frames, channels, law);
 }
 
+long memory_text_clean(unsigned char *to, const unsigned char *from, long length)
+{
+        return audio_c_text_clean(to, from, length);
+}
+
+int memory_key_printable(const unsigned char *from, long length)
+{
+        return audio_c_key_printable(from, length);
+}
+
+void memory_reverse_units(unsigned char *dst, long count, long width)
+{
+        audio_c_reverse_units(dst, count, width);
+}
+
+void memory_s16_to_u8(unsigned char *dst, const unsigned char *src, long count)
+{
+        audio_c_s16_to_u8(dst, src, count);
+}
+
+long memory_window_peaks(float *out0, float *out1, const float *left, const float *right, long frames, float *state, long *count, long window, long mono)
+{
+        return audio_c_window_peaks(out0, out1, left, right, frames, state, count, window, (int)mono);
+}
+
 void resample_polyphase2_f32(float *out0, float *out1, const float *x0, const float *x1, const float *table, unsigned long taps,
                              unsigned long phases, unsigned long pos, unsigned long step, unsigned long count)
 {
@@ -174783,6 +174808,320 @@ static void al_zero_tier(void)
         check("memory_zero and memory_fill: cases ran", faults.cases > 1500);
 }
 
+/*
+        The five loops of the protocol engine that are the library's: memory_s16_to_u8, memory_reverse_units, memory_key_printable,
+        memory_text_clean and memory_window_peaks, each against the C of SHARED_audio_loops, at the counts and offsets of a vector body's edges
+        (0, 1, 2, 3, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65 and more), with the bytes put against a page that faults, before and after,
+        in place where the contract allows, and the bytes either side kept.
+*/
+static const unsigned long long al_pulse_counts[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 23, 24, 25, 31, 32, 33, 47, 48, 49, 63, 64, 65,
+                                                       95, 96, 97, 127, 128, 129, 255, 256, 257, 1000, 4096};
+#define AL_PULSE_COUNTS (sizeof(al_pulse_counts) / sizeof(al_pulse_counts[0]))
+
+static void al_s16_u8_case(unsigned long long count, int front, int inplace, unsigned phase, al_faults *faults)
+{
+        p8 *src = front ? (p8 *)al_low[0] + (phase & 15) : (p8 *)al_high[0] - 2 * count;
+        p8 *dst = inplace ? src : front ? (p8 *)al_low[3] + (phase & 15) + 64 : (p8 *)al_high[3] - count;
+        static p8 keep[8192], want[4096];
+        static const short edges[] = {-32768, -32767, -32641, -32640, -32639, -129, -128, -127, -1, 0, 1, 127, 128, 129, 32638, 32639, 32640, 32641, 32767};
+
+        faults->cases++;
+        for (unsigned long long i = 0; i < count; i++)
+        {
+                short v = (i % 7 == 0) ? edges[al_next() % (sizeof(edges) / sizeof(edges[0]))] : (short)al_next();
+
+                src[2 * i] = (p8)v;
+                src[2 * i + 1] = (p8)(v >> 8);
+        }
+        for (unsigned long long i = 0; i < 2 * count; i++)
+                keep[i] = src[i];
+        if (!inplace)
+                for (int i = 0; i < 16; i++)
+                {
+                        dst[i - 16] = (p8)(0xa5 + i);
+                        if (front)
+                                dst[count + i] = (p8)(0x5a + i);
+                }
+        audio_c_s16_to_u8(want, keep, (long)count);
+        VECTOR_FIRST_CALL(al_first);
+        memory_s16_to_u8(dst, src, count);
+        for (unsigned long long i = 0; i < count; i++)
+                faults->bits += dst[i] != want[i];
+        if (inplace)
+                for (unsigned long long i = count; i < 2 * count; i++)
+                        faults->kept += src[i] != keep[i];
+        else
+        {
+                for (unsigned long long i = 0; i < 2 * count; i++)
+                        faults->kept += src[i] != keep[i];
+                for (int i = 0; i < 16; i++)
+                {
+                        faults->outside += dst[i - 16] != (p8)(0xa5 + i);
+                        if (front)
+                                faults->outside += dst[count + i] != (p8)(0x5a + i);
+                }
+        }
+}
+
+static void al_reverse_case(unsigned long long count, unsigned long long width, int front, unsigned phase, al_faults *faults)
+{
+        p8 *buffer = front ? (p8 *)al_low[0] + (phase & 15) : (p8 *)al_high[0] - count * width;
+        static p8 want[4096 * 6];
+        unsigned long long bytes = count * width;
+
+        faults->cases++;
+        if (bytes > sizeof(want))
+                return;
+        for (unsigned long long i = 0; i < bytes; i++)
+                buffer[i] = (p8)al_next();
+        for (unsigned long long i = 0; i < bytes; i++)
+                want[i] = buffer[i];
+        if (front)
+                for (int i = 0; i < 16; i++)
+                        buffer[bytes + i] = (p8)(0x5a + i);
+        audio_c_reverse_units(want, (long)count, (long)width);
+        VECTOR_FIRST_CALL(al_first);
+        memory_reverse_units(buffer, count, width);
+        for (unsigned long long i = 0; i < bytes; i++)
+                faults->bits += buffer[i] != want[i];
+        if (front)
+                for (int i = 0; i < 16; i++)
+                        faults->outside += buffer[bytes + i] != (p8)(0x5a + i);
+}
+
+static void al_key_case(unsigned long long length, int front, unsigned phase, int bad, al_faults *faults)
+{
+        p8 *key = front ? (p8 *)al_low[0] + (phase & 15) : (p8 *)al_high[0] - length;
+        static const p8 odd[] = {0x00, 0x1f, 0x20, 0x21, 0x7e, 0x7f, 0x80, 0xff, 0xa0, 0x41};
+
+        faults->cases++;
+        for (unsigned long long i = 0; i < length; i++)
+                key[i] = (p8)(0x21 + al_next() % 0x5e);
+        if (bad && length)
+                key[al_next() % length] = odd[al_next() % sizeof(odd)];
+        faults->bits += (memory_key_printable(key, length) != 0) != (audio_c_key_printable(key, (long)length) != 0);
+}
+
+//      Names: printable runs, NULs, every form of UTF-8 sequence, valid, truncated and bad, in a random mixture.
+static unsigned long long al_text_make(p8 *to, unsigned long long length)
+{
+        static const unsigned char samples[][4] = {
+            {0xc2, 0xa0}, {0xc2, 0x80}, {0xc2, 0x9f}, {0xc3, 0xa9}, {0xdf, 0xbf}, {0xc0, 0x80}, {0xc1, 0xbf}, {0xe0, 0xa0, 0x80}, {0xe0, 0x9f, 0xbf},
+            {0xe0, 0x80, 0x80}, {0xe2, 0x82, 0xac}, {0xed, 0x9f, 0xbf}, {0xed, 0xa0, 0x80}, {0xed, 0xbf, 0xbf}, {0xef, 0xbf, 0xbd}, {0xf0, 0x90, 0x80, 0x80},
+            {0xf0, 0x8f, 0xbf, 0xbf}, {0xf0, 0x80, 0x80, 0x80}, {0xf1, 0x80, 0x80, 0x80}, {0xf4, 0x8f, 0xbf, 0xbf}, {0xf4, 0x90, 0x80, 0x80}, {0xf4, 0xbf, 0xbf, 0xbf},
+            {0xf5, 0x80, 0x80, 0x80}, {0xff}, {0x80}, {0xbf}, {0x7f}, {0x1f}, {0x00}, {0x20}, {0x7e}};
+        unsigned long long n = 0;
+
+        while (n < length)
+        {
+                unsigned long long pick = al_next() % 8;
+
+                if (pick < 4)
+                {
+                        to[n++] = (p8)(0x20 + al_next() % 0x5f);
+                }
+                else if (pick < 7)
+                {
+                        const unsigned char *sample = samples[al_next() % (sizeof(samples) / sizeof(samples[0]))];
+                        unsigned long long k = 0;
+
+                        for (; k < 4 && sample[k] && n < length; k++)
+                                to[n++] = sample[k];
+                        if (!sample[0] && n < length)
+                                to[n++] = 0;
+                }
+                else
+                        to[n++] = (p8)al_next();
+                if (pick == 7 && (al_next() & 7) == 0)
+                        break;
+        }
+        return n;
+}
+
+static void al_text_case(unsigned long long length, int front, unsigned phase, int inplace, int clean, al_faults *faults)
+{
+        p8 *from = front ? (p8 *)al_low[0] + (phase & 15) : (p8 *)al_high[0] - length;
+        p8 *to = inplace ? from : front ? (p8 *)al_low[3] + 64 + (phase & 7) : (p8 *)al_high[3] - length;
+        static p8 want[4200], keep[4200];
+        unsigned long long made, expect;
+
+        faults->cases++;
+        if (length > 4096)
+                return;
+        if (clean)
+                for (unsigned long long i = 0; i < length; i++)
+                        from[i] = (p8)(0x20 + al_next() % 0x5f);
+        else
+                al_text_make(from, length);
+        if (length && !clean && (al_next() & 3) == 0)
+        {
+                //      A sequence cut by the end of the count: its lead as the last byte read.
+                static const p8 leads[] = {0xc2, 0xe0, 0xe2, 0xed, 0xf0, 0xf4, 0xf1, 0xc3};
+
+                from[length - 1] = leads[al_next() % sizeof(leads)];
+        }
+        for (unsigned long long i = 0; i < length; i++)
+                keep[i] = from[i];
+        expect = (unsigned long long)audio_c_text_clean(want, keep, (long)length);
+        if (!inplace)
+                for (int i = 0; i < 16; i++)
+                {
+                        to[i - 16] = (p8)(0xa5 + i);
+                        if (front)
+                                to[length + i] = (p8)(0x5a + i);
+                }
+        VECTOR_FIRST_CALL(al_first);
+        made = memory_text_clean(to, from, length);
+        faults->exact += made != expect;
+        for (unsigned long long i = 0; i < expect && i < made; i++)
+                faults->bits += to[i] != want[i];
+        if (!inplace)
+        {
+                for (unsigned long long i = 0; i < length; i++)
+                        faults->kept += from[i] != keep[i];
+                for (int i = 0; i < 16; i++)
+                {
+                        faults->outside += to[i - 16] != (p8)(0xa5 + i);
+                        if (front)
+                                faults->outside += to[length + i] != (p8)(0x5a + i);
+                }
+        }
+}
+
+static float al_peak_value(void)
+{
+        unsigned long long pick = al_next() % 40;
+        unsigned bits;
+        float value;
+
+        if (pick == 0)
+                bits = 0x7fc00000u | (unsigned)(al_next() & 0x3fffff);
+        else if (pick == 1)
+                bits = 0xffc00000u;
+        else if (pick == 2)
+                bits = 0x7f800000u;
+        else if (pick == 3)
+                bits = 0xff800000u;
+        else if (pick == 4)
+                bits = 0x80000000u;
+        else if (pick == 5)
+                bits = 0;
+        else if (pick == 6)
+                bits = 1u + (unsigned)(al_next() & 0x7fffff);
+        else
+        {
+                value = al_unit() * (float)(1u << (al_next() % 6));
+                return value;
+        }
+        __builtin_memcpy(&value, &bits, 4);
+        return value;
+}
+
+static void al_peaks_case(unsigned long long frames, unsigned long long window, unsigned long long count_in, int mono, int front, al_faults *faults)
+{
+        float *left = front ? (float *)al_low[0] + 3 : (float *)al_high[0] - frames;
+        float *right = front ? (float *)al_low[1] + 5 : (float *)al_high[1] - frames;
+        float *out0 = front ? (float *)al_low[3] + 64 : (float *)al_high[3] - frames;
+        float *out1 = front ? (float *)al_low[4] + 64 : (float *)al_high[4] - frames;
+        static float want0[4200], want1[4200];
+        float state[2], want_state[2];
+        unsigned long long count = count_in, made, expect;
+        long want_count = (long)count_in;
+
+        faults->cases++;
+        if (frames > 4096)
+                return;
+        for (unsigned long long i = 0; i < frames; i++)
+        {
+                left[i] = al_peak_value();
+                right[i] = al_peak_value();
+        }
+        state[0] = want_state[0] = (al_next() & 1) ? 0.0f : al_abs(al_unit());
+        state[1] = want_state[1] = (al_next() & 1) ? 0.0f : al_abs(al_unit());
+        for (int i = 0; i < 16; i++)
+        {
+                out0[i - 16] = (float)(0x1234 + i);
+                out1[i - 16] = (float)(0x4321 + i);
+                if (front)
+                {
+                        out0[frames + i] = (float)(0x2345 + i);
+                        out1[frames + i] = (float)(0x5432 + i);
+                }
+        }
+        expect = (unsigned long long)audio_c_window_peaks(want0, want1, left, right, (long)frames, want_state, &want_count, (long)window, mono);
+        VECTOR_FIRST_CALL(al_first);
+        made = memory_window_peaks(out0, out1, left, right, frames, state, &count, window, mono);
+        faults->exact += made != expect || (long)count != want_count;
+        faults->weight += al_bits(state[0]) != al_bits(want_state[0]) || al_bits(state[1]) != al_bits(want_state[1]);
+        for (unsigned long long i = 0; i < expect && i < made; i++)
+                faults->bits += al_bits(out0[i]) != al_bits(want0[i]) || al_bits(out1[i]) != al_bits(want1[i]);
+        for (int i = 0; i < 16; i++)
+        {
+                faults->outside += al_bits(out0[i - 16]) != al_bits((float)(0x1234 + i)) || al_bits(out1[i - 16]) != al_bits((float)(0x4321 + i));
+                if (front)
+                        faults->outside += al_bits(out0[frames + i]) != al_bits((float)(0x2345 + i)) || al_bits(out1[frames + i]) != al_bits((float)(0x5432 + i));
+        }
+}
+
+static void al_pulse_tier(void)
+{
+        al_faults u8 = {0, 0, 0, 0, 0, 0, 0}, rev = {0, 0, 0, 0, 0, 0, 0}, key = {0, 0, 0, 0, 0, 0, 0}, text = {0, 0, 0, 0, 0, 0, 0}, peak = {0, 0, 0, 0, 0, 0, 0};
+        static const unsigned long long windows[] = {1, 2, 3, 7, 8, 9, 25, 100, 1000};
+
+        for (unsigned long i = 0; i < AL_PULSE_COUNTS; i++)
+                for (int front = 0; front < 2; front++)
+                        for (int inplace = 0; inplace < 2; inplace++)
+                                for (unsigned phase = 0; phase < 16; phase += 5)
+                                        al_s16_u8_case(al_pulse_counts[i], front, inplace, phase, &u8);
+        for (unsigned long long count = 0; count <= 130; count++)
+                al_s16_u8_case(count, (int)(count & 1), (int)((count >> 1) & 1), (unsigned)count, &u8);
+        check("memory_s16_to_u8: every count, in place and apart, the C's bytes (the edges of the rounding and of the clip)", u8.bits == 0);
+        check("memory_s16_to_u8: the source kept, nothing written past count (the guard page) or before dst", u8.outside == 0 && u8.kept == 0);
+
+        for (unsigned long long width = 2; width <= 6; width++)
+        {
+                for (unsigned long i = 0; i < AL_PULSE_COUNTS; i++)
+                        for (int front = 0; front < 2; front++)
+                                for (unsigned phase = 0; phase < 16; phase += 3)
+                                        al_reverse_case(al_pulse_counts[i], width, front, phase, &rev);
+                for (unsigned long long count = 0; count <= 70; count++)
+                        al_reverse_case(count, width, (int)(count & 1), (unsigned)count, &rev);
+        }
+        check("memory_reverse_units: widths 2 to 6, every count, at every offset of a vector, the C's bytes", rev.bits == 0);
+        check("memory_reverse_units: nothing written past the last unit (the guard page)", rev.outside == 0);
+
+        for (unsigned long long length = 0; length <= 70; length++)
+                for (int front = 0; front < 2; front++)
+                        for (int bad = 0; bad < 3; bad++)
+                                for (unsigned phase = 0; phase < 16; phase += 5)
+                                        al_key_case(length, front, phase, bad != 0, &key);
+        check("memory_key_printable: every length to 70, a bad byte anywhere, the C's answer", key.bits == 0);
+
+        for (unsigned long i = 0; i < AL_PULSE_COUNTS; i++)
+                for (int front = 0; front < 2; front++)
+                        for (int inplace = 0; inplace < 2; inplace++)
+                                for (int round = 0; round < 6; round++)
+                                        al_text_case(al_pulse_counts[i], front, (unsigned)(round * 3), inplace, round == 5, &text);
+        for (unsigned long long length = 0; length <= 120; length++)
+                for (int round = 0; round < 24; round++)
+                        al_text_case(length, (int)(round & 1), (unsigned)round, (int)((round >> 1) & 1), round % 7 == 6, &text);
+        check("memory_text_clean: the count and the bytes the C's (NULs, UTF-8 forms valid, truncated and overlong, in place or apart)", text.exact == 0 && text.bits == 0);
+        check("memory_text_clean: nothing read or written past the count (the guard page), the source kept apart", text.outside == 0 && text.kept == 0);
+
+        for (unsigned long i = 0; i < AL_PULSE_COUNTS; i++)
+                for (unsigned long w = 0; w < sizeof(windows) / sizeof(windows[0]); w++)
+                        for (int mono = 0; mono < 2; mono++)
+                                for (int front = 0; front < 2; front++)
+                                        al_peaks_case(al_pulse_counts[i], windows[w], al_next() % (windows[w] + 2), mono, front, &peak);
+        for (unsigned long long frames = 0; frames <= 70; frames++)
+                for (int round = 0; round < 6; round++)
+                        al_peaks_case(frames, 1 + (unsigned long long)round * 3, (unsigned long long)round, round & 1, (int)(frames & 1), &peak);
+        check("memory_window_peaks: the frames written, the count and the state the C's, every window", peak.exact == 0 && peak.weight == 0);
+        check("memory_window_peaks: the peaks the C's to the bit (a NaN never a peak, minus zero not one)", peak.bits == 0);
+        check("memory_window_peaks: nothing written past what it answers (the guard page, the floats either side)", peak.outside == 0);
+        check("memory_window_peaks / the five loops: cases ran", u8.cases > 600 && rev.cases > 1000 && key.cases > 800 && text.cases > 1500 && peak.cases > 800);
+}
+
 static void al_widen_tier(void)
 {
         static const unsigned long long longs[] = {331, 344, 511, 512, 1000, 4095, 4096};
@@ -175458,6 +175797,23 @@ static void al_abi_all(void)
         al_abi_target = (void *)memory_zero;
         ((void (*)(unsigned char *, unsigned long long))al_abi_call)(bytes + 2048, 136);
         ((void (*)(unsigned char *, unsigned long long))al_abi_call)(bytes + 2048, 300);
+        al_abi_target = (void *)memory_s16_to_u8;
+        ((void (*)(unsigned char *, const unsigned char *, unsigned long long))al_abi_call)(bytes + 2048, bytes, 103);
+        al_abi_target = (void *)memory_reverse_units;
+        ((void (*)(unsigned char *, unsigned long long, unsigned long long))al_abi_call)(bytes + 1024, 33, 3);
+        ((void (*)(unsigned char *, unsigned long long, unsigned long long))al_abi_call)(bytes + 1024, 20, 4);
+        ((void (*)(unsigned char *, unsigned long long, unsigned long long))al_abi_call)(bytes + 1024, 40, 2);
+        al_abi_target = (void *)memory_key_printable;
+        ((unsigned long long (*)(const unsigned char *, unsigned long long))al_abi_call)(bytes, 40);
+        al_abi_target = (void *)memory_text_clean;
+        ((unsigned long long (*)(unsigned char *, const unsigned char *, unsigned long long))al_abi_call)(bytes + 2048, bytes, 103);
+        {
+                float state[2] = {0, 0};
+                unsigned long long count = 0;
+
+                al_abi_target = (void *)memory_window_peaks;
+                ((unsigned long long (*)(float *, float *, const float *, const float *, unsigned long long, float *, unsigned long long *, unsigned long long, unsigned long long))al_abi_call)(out0, out1, left, right, 100, state, &count, 7, 1);
+        }
         al_abi_target = (void *)f32_planes_from_law;
         ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, 2, 1);
         ((void (*)(float **, const unsigned char *, unsigned long long, unsigned long long, unsigned long long))al_abi_call)(planes, bytes, 103, 3, 0);
@@ -175569,6 +175925,7 @@ b32 main(void)
                         al_pack_tier();
                         al_law_tier();
                         al_zero_tier();
+                        al_pulse_tier();
                 }
                 cpu_has_fma = 0;
                 if (had2)
@@ -175584,6 +175941,7 @@ b32 main(void)
                 al_pack_tier();
                 al_law_tier();
                 al_zero_tier();
+                al_pulse_tier();
                 cpu_has_avx2 = had2, cpu_has_fma = hadfma, cpu_has_avx512 = had512;
         }
 #elif RISCV64
@@ -175615,6 +175973,7 @@ b32 main(void)
                         al_pack_tier();
                         al_law_tier();
                         al_zero_tier();
+                        al_pulse_tier();
                 }
                 al_first = false;
                 cpu_has_vector = vector;
@@ -175630,6 +175989,7 @@ b32 main(void)
         al_pack_tier();
         al_law_tier();
         al_zero_tier();
+        al_pulse_tier();
 #endif
         return test_report(null);
 }
@@ -194708,6 +195068,146 @@ static fn al_pack_bench(string_address tier)
         log("\n", 1);
 }
 
+/*
+        The pulse service's five loops (memory_text_clean, memory_key_printable, memory_reverse_units, memory_s16_to_u8,
+        memory_window_peaks), each against the C of SHARED_audio_loops (the loops pulse.c has) at the sizes the service calls them with:
+        a name of 32 and of 120 bytes of ASCII and of 64 bytes with UTF-8 in it, a key of 16 and 63 bytes, a block of 512 frames of two
+        channels in 2, 3 and 4 byte units, the 16-bit block to 8 bits, and a peak window of 1024 frames and of 7 over 512 frames.
+*/
+static unsigned char al_pulse_from[2048] __attribute__((aligned(64))), al_pulse_to[2048] __attribute__((aligned(64)));
+static unsigned char al_pulse_work[2048] __attribute__((aligned(64)));
+static float al_pulse_left[1024] __attribute__((aligned(64))), al_pulse_right[1024] __attribute__((aligned(64)));
+static float al_pulse_out0[1024] __attribute__((aligned(64))), al_pulse_out1[1024] __attribute__((aligned(64)));
+static float al_pulse_state[2];
+static long al_pulse_count_c;
+static positive al_pulse_count_a;
+
+static const struct
+{
+        string_address name;
+        positive kind, size, extra;
+} al_pulse_shapes[] = {
+    {"memory_text_clean, a name of 32 bytes of ASCII", 0, 32, 0},
+    {"memory_text_clean, a name of 120 bytes of ASCII", 0, 120, 0},
+    {"memory_text_clean, a name of 64 bytes with UTF-8 in it", 0, 64, 1},
+    {"memory_key_printable, a key of 16 bytes", 1, 16, 0},
+    {"memory_key_printable, a key of 63 bytes", 1, 63, 0},
+    {"memory_reverse_units, 1024 units of 2 bytes", 2, 1024, 2},
+    {"memory_reverse_units, 1024 units of 3 bytes", 2, 1024, 3},
+    {"memory_reverse_units, 1024 units of 4 bytes", 2, 1024, 4},
+    {"memory_s16_to_u8, 1024 samples", 3, 1024, 0},
+    {"memory_window_peaks, 512 frames, a window of 1024", 4, 512, 1024},
+    {"memory_window_peaks, 512 frames, a window of 7", 4, 512, 7},
+};
+
+__attribute__((noinline, noclone, optimize("O2"))) static long al_pulse_old(positive shape)
+{
+        positive kind = al_pulse_shapes[shape].kind, size = al_pulse_shapes[shape].size, extra = al_pulse_shapes[shape].extra;
+
+        if (kind == 0)
+                return audio_c_text_clean(al_pulse_to, al_pulse_from + (extra ? 1024 : 0), (long)size);
+        if (kind == 1)
+                return audio_c_key_printable(al_pulse_from + 1536, (long)size);
+        if (kind == 2)
+        {
+                audio_c_reverse_units(al_pulse_work, (long)size, (long)extra);
+                return 0;
+        }
+        if (kind == 3)
+        {
+                audio_c_s16_to_u8(al_pulse_to, al_pulse_from, (long)size);
+                return 0;
+        }
+        return audio_c_window_peaks(al_pulse_out0, al_pulse_out1, al_pulse_left, al_pulse_right, (long)size, al_pulse_state, &al_pulse_count_c, (long)extra, 0);
+}
+
+static long al_pulse_new(positive shape)
+{
+        positive kind = al_pulse_shapes[shape].kind, size = al_pulse_shapes[shape].size, extra = al_pulse_shapes[shape].extra;
+
+        if (kind == 0)
+                return (long)memory_text_clean(al_pulse_to, al_pulse_from + (extra ? 1024 : 0), size);
+        if (kind == 1)
+                return (long)memory_key_printable(al_pulse_from + 1536, size);
+        if (kind == 2)
+        {
+                memory_reverse_units(al_pulse_work, size, extra);
+                return 0;
+        }
+        if (kind == 3)
+        {
+                memory_s16_to_u8(al_pulse_to, al_pulse_from, size);
+                return 0;
+        }
+        return (long)memory_window_peaks(al_pulse_out0, al_pulse_out1, al_pulse_left, al_pulse_right, size, al_pulse_state, &al_pulse_count_a, extra, 0);
+}
+
+static p64 al_pulse_run(bool assembly, positive shape, positive reps)
+{
+        p64 start = get_cpu_time();
+        long sink = 0;
+
+        for (positive r = 0; r < reps; r++)
+                sink += assembly ? al_pulse_new(shape) : al_pulse_old(shape);
+        al_pulse_count_c += sink & 1;
+        return get_cpu_time() - start;
+}
+
+static fn al_pulse_bench(string_address tier)
+{
+        positive state = 88172645463325252ull;
+
+        for (positive i = 0; i < 2048; i++)
+        {
+                XORSHIFT64(state);
+                al_pulse_from[i] = (unsigned char)(0x20 + (state >> 33) % 0x5f);
+                al_pulse_work[i] = (unsigned char)(state >> 41);
+        }
+        // a name with UTF-8 at 1024: the ASCII, and a two byte, a three byte and a four byte character every twelve bytes
+        for (positive i = 0; i < 64; i++)
+                al_pulse_from[1024 + i] = al_pulse_from[i];
+        for (positive i = 0; i + 12 < 64; i += 12)
+        {
+                unsigned char *q = al_pulse_from + 1024 + i;
+
+                q[4] = 0xc3, q[5] = 0xa9;
+                q[6] = 0xe2, q[7] = 0x82, q[8] = 0xac;
+                q[9] = 0xf0, q[10] = 0x9f, q[11] = 0x98, q[12] = 0x80;
+        }
+        // a key: 0x21 to 0x7e
+        for (positive i = 0; i < 64; i++)
+                al_pulse_from[1536 + i] = (unsigned char)(0x21 + al_pulse_from[i] % 0x5e);
+        for (positive i = 0; i < 1024; i++)
+        {
+                XORSHIFT64(state);
+                al_pulse_left[i] = (f32)(int)(state >> 40) / 8388608.0f - 1.0f;
+                al_pulse_right[i] = (f32)(int)(state >> 16 & 0xffffff) / 8388608.0f - 1.0f;
+        }
+        for (positive shape = 0; shape < sizeof(al_pulse_shapes) / sizeof(al_pulse_shapes[0]); shape++)
+        {
+                positive reps = (1u << 24) / (al_pulse_shapes[shape].size * (al_pulse_shapes[shape].kind >= 2 ? 3 : 1) + 64) + 1, ratios[TRIES];
+                p64 best_c = ~(p64)0, best_a = ~(p64)0;
+
+                for (positive trial = 0; trial < TRIES; trial++)
+                {
+                        p64 former, assembly;
+
+                        BENCH_ALTERNATE(trial, former, al_pulse_run(false, shape, reps), assembly, al_pulse_run(true, shape, reps));
+                        ratios[trial] = (positive)(assembly * 10000 / (former ? former : 1));
+                        best_c = former < best_c ? former : best_c;
+                        best_a = assembly < best_a ? assembly : best_a;
+                }
+                order(ratios, TRIES);
+                string_format(log, "%s, %s against C -O2 as built: paired median ASM/C ", al_pulse_shapes[shape].name, tier);
+                al_hundredths(ratios[TRIES / 2]);
+                string_format(log, "%%; best ticks a call ASM ");
+                al_hundredths((positive)(best_a * 100 / reps));
+                string_format(log, ", C ");
+                al_hundredths((positive)(best_c * 100 / reps));
+                log("\n", 1);
+        }
+}
+
 static fn al_scale_rows(string_address tier, bool wide, bool has512_tier)
 {
         for (positive shape = 0; shape < sizeof(al_scale_shapes) / sizeof(al_scale_shapes[0]); shape++)
@@ -194866,6 +195366,7 @@ b32 main(void)
                         al_rows_bench(tier == 1 ? "avx2 fma" : "sse2");
                         al_widen_bench(tier == 1 ? "avx2" : "sse2");
                         al_pack_bench(tier == 1 ? "avx2" : "sse2");
+                        al_pulse_bench(tier == 1 ? "avx2" : "sse2");
                 }
                 al_scale_rows(tier == 0 ? "avx512" : tier == 1 ? "avx2" : "sse2", tier <= 1, tier == 0);
                 if (tier)
@@ -194890,6 +195391,7 @@ b32 main(void)
                 al_rows_bench(tier == 0 ? "V" : "no V");
                 al_widen_bench(tier == 0 ? "V" : "no V");
                 al_pack_bench(tier == 0 ? "V" : "no V");
+                al_pulse_bench(tier == 0 ? "V" : "no V");
                 al_scale_rows(tier == 0 ? "V" : "no V", true, false);
                 al_decode_rows(tier == 0 ? "V" : "no V", true);
                 al_encode_rows(tier == 0 ? "V" : "no V", true);
@@ -194901,6 +195403,7 @@ b32 main(void)
         al_rows_bench("neon");
         al_widen_bench("neon");
         al_pack_bench("neon");
+        al_pulse_bench("neon");
         al_scale_rows("neon", true, false);
         al_decode_rows("neon", true);
         al_encode_rows("neon", true);

@@ -401,6 +401,21 @@ cover('folds_already', 'lanes', 'pcm_pack24',
 cover('folds_already', 'frames', 'f32_planes_from_law',
       'the decoder hands it the frames a voice\'s ring holds for a pass (up to 512) and the stream\'s channel count, which the program '
       'chose at run time; a literal count would remove one compare from a loop of lookups')
+cover('folds_already', 'length', 'memory_text_clean',
+      'the length is that of a name a program sent (a stream\'s name, a property\'s text), up to 256 bytes and set by the wire; a literal '
+      'length would remove one compare before a loop of up to sixteen vector turns')
+cover('folds_already', 'length', 'memory_key_printable',
+      'the length is that of a property\'s key as the program wrote it, 1 to 63 bytes by the wire, never a literal; the body is two '
+      'vector turns at most')
+cover('folds_already', 'width', 'memory_reverse_units',
+      'the width is that of the stream\'s sample format, chosen by the program at run time (2, 3 or 4 bytes); a literal width would '
+      'remove three compares before a loop of dozens of vector turns')
+cover('folds_already', 'count', 'memory_s16_to_u8',
+      'the count is the record block\'s samples (up to 2048 a pass), set by the sink\'s period; a literal count would remove one '
+      'compare from a loop of dozens of vector turns')
+cover('folds_already', 'frames', 'memory_window_peaks',
+      'the frames are a source block (the sink\'s period, 16 to 512 or more), and the window is the source\'s rate over the stream\'s, '
+      'both set at run time; a literal count would remove one compare from a loop of vector turns of four frames')
 cover('folds_already', 'count', 'fused_residual_add_f32',
       'a training step hands it a whole activation, batch by context by '
       'width: thousands to millions of floats a call, where a literal count '
