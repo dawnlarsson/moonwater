@@ -136942,6 +136942,7 @@ static positive rtl_compare(const unsigned int address_to left, const unsigned i
 }
 
 static unsigned int rtl_first[SETTINGS_FRAMES_W * SETTINGS_FRAMES_H];
+static int rtl_width, rtl_height; // the size of the picture a view made
 static p8 rtl_settings_kept[sizeof(settings)], rtl_kit_kept[sizeof(ui_kit)];
 
 // The window in group (a number, or -1 for the kit's gallery) drawn whole at the kit's time, right to left or not.
@@ -136950,15 +136951,75 @@ static fn rtl_draw(int group, int scale, b32 rtl)
         ui_kit.rtl = rtl ? 1 : 0;
         ui_kit_settle();
         settings.ui.scale = scale * 100;
-        settings_gallery.on = group < 0;
-        if (group < 0)
+        settings_gallery.on = group == -1;
+        if (group == -2)
+        {
+                // The page of a command's answer, the card: its lines from the right, its bar at the left.
+                static const char said[] = "Canvas is on: the kernel desktop, 2 windows\n  HDMI-1: 1920 by 1080, 60 Hz\nthe third line of it";
+
+                settings_size((unsigned int)(SETTINGS_WIDTH * scale), (unsigned int)(SETTINGS_HEIGHT * scale));
+                memory_copy(settings_large->said, said, sizeof(said) - 1);
+                settings.said_length = sizeof(said) - 1;
+                settings_card_fill();
+                settings_card_open("moonwater status");
+        }
+        else if (group == -3)
+        {
+                // A menu: a check, a radio, a submenu, a header, accelerators, a separator, a choice that is off.
+                static struct ui_popmenu menu;
+                struct ui menu_ui = settings.ui;
+
+                memory_zero(&menu, sizeof(menu));
+                ui_popmenu_add(&menu, "Section", null, UI_MENU_HEADER, 0);
+                ui_popmenu_add(&menu, "Copy", "Ctrl+C", 0, 1);
+                ui_popmenu_add(&menu, "Wrap", null, UI_MENU_CHECK | UI_MENU_ON, 2);
+                ui_popmenu_add(&menu, "", null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(&menu, "Dark", null, UI_MENU_RADIO | UI_MENU_ON, 3);
+                ui_popmenu_add(&menu, "Light", null, UI_MENU_RADIO, 4);
+                ui_popmenu_add(&menu, "More", null, UI_MENU_SUBMENU, 5);
+                ui_popmenu_add(&menu, "Undo", null, UI_MENU_DISABLED, 6);
+                menu.hot = 1;
+                ui_popmenu_size(&menu_ui, &menu, 0);
+                ui_begin(&menu_ui, settings_frames_whole, SETTINGS_FRAMES_W, menu.width, menu.height);
+                ui_popmenu_draw(&menu_ui, &menu);
+                rtl_width = menu.width, rtl_height = menu.height;
+                return;
+        }
+        else if (group == -4)
+        {
+                // The launcher, glass, with nothing typed: its field's words and its list, and the buttons under it.
+                static char names[6][LAUNCHER_NAME];
+                static unsigned char from[6];
+                static unsigned short hashed[LAUNCHER_HASH];
+                static struct windows table;
+                static const char address_to const fixture[] = {"ls", "lsblk", "lsof", "less", "false", "also"};
+
+                for (positive at = 0; at < 6; at++)
+                        string_copy((string_address)names[at], (string_address)fixture[at]);
+                memory_zero(&launcher, sizeof(launcher));
+                memory_zero(&table, sizeof(table));
+                launcher.names = (char address_to)names, launcher.count = 6, launcher.from = from, launcher.hashed = hashed;
+                launcher.dirs[0] = "/usr/bin", launcher.dir_count = 1;
+                table.output_width = 1920, table.output_height = 1080, table.stride = SETTINGS_FRAMES_W;
+                launcher.own.table = &table;
+                launcher.ui = settings.ui;
+                launcher.ui.opaque = 0, launcher.ui.glass = 1;
+                ui_inks(&launcher.ui, 0x2b2b2eu);
+                launcher.width = LAUNCHER_WIDTH;
+                launcher_layout();
+                ui_kit.now = 5000000000ull;
+                launcher_draw(settings_frames_whole);
+                rtl_width = launcher.width, rtl_height = launcher.height;
+                return;
+        }
+        if (group == -1)
         {
                 settings_gallery_build();
                 settings.width = ui_px(&settings.ui, SETTINGS_GALLERY_W);
                 settings.height = ui_px(&settings.ui, SETTINGS_GALLERY_H);
                 settings_gallery.scroll.scroll = 0;
         }
-        else
+        else if (group >= 0)
         {
                 settings_size((unsigned int)(SETTINGS_WIDTH * scale), (unsigned int)(SETTINGS_HEIGHT * scale));
                 settings.group = group;
@@ -136970,6 +137031,7 @@ static fn rtl_draw(int group, int scale, b32 rtl)
         ui_kit.now = 5000000000ull;
         ui_kit.busy = 0;
         settings_draw_rows(settings_frames_whole, 0, 0);
+        rtl_width = settings.width, rtl_height = settings.height;
 }
 
 // A picture as a PPM in the work directory: turned over when asked, and the pixels that are not the other picture's mirror red.
@@ -136987,23 +137049,23 @@ static fn rtl_ppm(const p8 address_to base, string_address tail, const unsigned 
                 return;
         string_copy(head, (string_address) "P6\n");
         length = 3;
-        length += positive_into_string(head + length, (positive)settings.width);
+        length += positive_into_string(head + length, (positive)rtl_width);
         head[length++] = ' ';
-        length += positive_into_string(head + length, (positive)settings.height);
+        length += positive_into_string(head + length, (positive)rtl_height);
         string_copy(head + length, (string_address) "\n255\n");
         length += 5;
         system_write_once((b32)handle, head, length);
-        for (int y = 0; y < settings.height; y++)
+        for (int y = 0; y < rtl_height; y++)
         {
-                for (int x = 0; x < settings.width; x++)
+                for (int x = 0; x < rtl_width; x++)
                 {
-                        unsigned int pixel = pixels[(positive)y * SETTINGS_FRAMES_W + (positive)(turned ? settings.width - 1 - x : x)];
+                        unsigned int pixel = pixels[(positive)y * SETTINGS_FRAMES_W + (positive)(turned ? rtl_width - 1 - x : x)];
 
-                        if (other && !rtl_close(other[(positive)y * SETTINGS_FRAMES_W + (positive)(settings.width - 1 - x)], pixel) && !rtl_kept(x, y))
+                        if (other && !rtl_close(other[(positive)y * SETTINGS_FRAMES_W + (positive)(rtl_width - 1 - x)], pixel) && !rtl_kept(x, y))
                                 pixel = 0xffff0000u;
                         row[x * 3] = (p8)(pixel >> 16), row[x * 3 + 1] = (p8)(pixel >> 8), row[x * 3 + 2] = (p8)pixel;
                 }
-                system_write_once((b32)handle, row, (positive)settings.width * 3);
+                system_write_once((b32)handle, row, (positive)rtl_width * 3);
         }
         system_close(handle);
 }
@@ -137018,7 +137080,7 @@ static b32 rtl_view(string_address name, int group, int scale)
         memory_copy(rtl_first, settings_frames_whole, sizeof(rtl_first));
         rtl_keep_count = 0;
         rtl_draw(group, scale, true);
-        wrong = rtl_compare(rtl_first, settings_frames_whole, SETTINGS_FRAMES_W, settings.width, settings.height, &x, &y);
+        wrong = rtl_compare(rtl_first, settings_frames_whole, SETTINGS_FRAMES_W, rtl_width, rtl_height, &x, &y);
         if (wrong)
         {
                 p8 path[96];
@@ -137090,11 +137152,13 @@ static fn check_rtl_mirror(void)
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
         gallery = rtl_view("the kit's gallery", -1, 1);
+        groups &= rtl_view("a card", -2, 1) && rtl_view("a card", -2, 2) && rtl_view("a menu", -3, 1) && rtl_view("a menu", -3, 2) &&
+                  rtl_view("the launcher", -4, 1);
         for (int scale = 1; scale <= 2; scale++)
                 for (int group = 0; group < settings_groups(); group++)
                         groups &= rtl_view(settings_group_name(group), group, scale);
         check("rtl mirror: the kit's gallery, every control of it, right to left is its picture left to right flipped", gallery);
-        check("rtl mirror: every group of the Settings window, at scales 1 and 2, right to left is its picture left to right flipped", groups);
+        check("rtl mirror: every group of the Settings window, its card, a menu and the launcher, right to left is its picture left to right flipped", groups);
         ui_kit.rtl = 0;
         if (ui_cuts)
                 memory_zero(ui_cuts, sizeof(struct ui_cut) * UI_CUTS);
@@ -146407,6 +146471,178 @@ static fn text_widget_check(string_address inter, string_address mono)
 }
 
 /*
+        The text widget with text that reads from the right, in the real faces (Inter, with Noto Sans Arabic behind it): the line is laid
+        out by the font engine (font_segments), so the caret, the click, the selection and the keys go by what is on the screen. A window that
+        reads from the right has a field's text start at its right, an empty field's caret and placeholder there, and a code view's
+        numbers in a gutter at its right.
+*/
+static fn text_bidi_check(string_address inter)
+{
+        static struct ui bui;
+        static font_face regular, arabic;
+        static struct ui_text_layout l;
+        static const char address_to word = "\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7";                // five Arabic letters
+        static const char address_to mixed = "ab \xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 cd";           // eleven clusters
+        struct ui_text field, view;
+        positive size = 0, bytes;
+        long pixels;
+        unsigned int address_to picture;
+        int first = 0, last = 0;
+        b32 order = true, levels = true, round_trip = true;
+
+        memory_zero(&bui, sizeof(bui));
+        bytes = compositor_map_file(inter, &size);
+        check("text bidi: Inter loads", bytes && font_load(&regular, (const p8 address_to)bytes, size, 0) == 0);
+        bytes = compositor_map_file((string_address) "fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf", &size);
+        check("text bidi: Noto Sans Arabic loads", bytes && font_load(&arabic, (const p8 address_to)bytes, size, 0) == 0);
+        if (failures || !ui_engine_open_sized(&bui, 256))
+                return;
+        font_fallback(bui.engine, &arabic, null);
+        bui.regular = &regular;
+        bui.bold = null;
+        bui.scale = 100;
+        pixels = ui_map(800 * 600 * 4);
+        picture = (unsigned int address_to)pixels;
+        ui_scratch_fit(&bui, 800);
+        ui_kit_theme(UI_THEME_DARK, UI_ACCENT_DAWN, 1);
+
+        // Arabic in a field of a window that reads from the right: a line that reads from the right, its caret at the right end at the start.
+        ui_kit.rtl = 1;
+        ui_begin(&bui, picture, 800, 800, 600);
+        ui_text_open(&field, UI_TEXT_FIELD, (const p8 address_to)word, 10, ui_text_keymap());
+        ui_text_draw(&bui, &field, 10, 10, 300, 30, 0);
+        ui_text_layout_line(&bui, &field, 0, &l);
+        check("text bidi: Arabic is one line of five clusters that reads from the right", l.bidi && l.base == 1 && l.count == 5 && l.level[0] == 1);
+        for (p32 k = 0; k < l.count; k++)
+                order &= l.x[k] > l.x[k + 1];
+        check("text bidi: its caret goes from the right end of the line at the start to the left end as the text goes on",
+              order && l.x[l.count] == 0 && l.width > 0 && l.x[0] >= l.width - 1 && l.x[0] <= l.width + 1);
+        for (int y = 10; y < 40; y++)
+                for (int x = 10; x < 310; x++)
+                        if (picture[(positive)y * 800 + (positive)x] != picture[(positive)y * 800 + 5])
+                                last = x > last ? x : last, first = first && first < x ? first : x;
+        check("text bidi: the field's text is at its right end", first > 310 - l.width - 4 && last > 305 && last < 311);
+        check("text bidi: the caret at the start of the line is at the right end of the box",
+              field.right == 310 && ui_text_origin(&field, &l) + l.x[0] >= 308 && ui_text_origin(&field, &l) + l.x[0] <= 311);
+        // Left goes forward in a line that reads from the right, and Right back.
+        field.focused = true;
+        doc_select_set(&field.doc, 0, 0);
+        ui_text_command(&bui, &field, DOC_CMD_LEFT);
+        check("text bidi: Left in Arabic goes on in the text, to the next letter", field.doc.selections[0].active == 2);
+        ui_text_command(&bui, &field, DOC_CMD_RIGHT);
+        check("text bidi: and Right goes back", field.doc.selections[0].active == 0);
+        ui_text_command(&bui, &field, DOC_CMD_SELECT_LEFT);
+        check("text bidi: Shift+Left selects the next letter", doc_sel_start(&field.doc.selections[0]) == 0 && doc_sel_end(&field.doc.selections[0]) == 2);
+        ui_text_close(&field);
+        // A word goes by the way the line reads too: Ctrl+Left in two Arabic words goes to the end of the first, and Ctrl+Right back to the start.
+        ui_text_open(&field, UI_TEXT_FIELD, (const p8 address_to)"\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7 \xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7", 21,
+                     ui_text_keymap());
+        ui_text_draw(&bui, &field, 10, 10, 300, 30, 0);
+        field.focused = true;
+        doc_select_set(&field.doc, 0, 0);
+        ui_text_command(&bui, &field, DOC_CMD_WORD_LEFT);
+        check("text bidi: Ctrl+Left in Arabic goes on to the end of the word", field.doc.selections[0].active == 10);
+        ui_text_command(&bui, &field, DOC_CMD_WORD_RIGHT);
+        check("text bidi: and Ctrl+Right goes back to its start", field.doc.selections[0].active == 0);
+        ui_text_close(&field);
+
+        // The same field, empty, with its words: the words and the caret start at the right.
+        ui_text_open(&field, UI_TEXT_FIELD, (const p8 address_to) "", 0, ui_text_keymap());
+        field.placeholder = "Search";
+        memory_fill_u32(picture, 800 * 600, 0);
+        ui_text_draw(&bui, &field, 10, 10, 300, 30, 0);
+        first = last = 0;
+        for (int y = 10; y < 40; y++)
+                for (int x = 10; x < 310; x++)
+                        if (picture[(positive)y * 800 + (positive)x])
+                                last = x > last ? x : last, first = first && first < x ? first : x;
+        check("text bidi: a placeholder starts at the right of the field in a window that reads from the right", first > 155 && last > 280);
+        ui_kit.rtl = 0;
+        memory_fill_u32(picture, 800 * 600, 0);
+        ui_text_draw(&bui, &field, 10, 10, 300, 30, 0);
+        first = last = 0;
+        for (int y = 10; y < 40; y++)
+                for (int x = 10; x < 310; x++)
+                        if (picture[(positive)y * 800 + (positive)x])
+                                last = x > last ? x : last, first = first && first < x ? first : x;
+        check("text bidi: and at the left where it reads from the left", first && first < 30 && last < 155);
+        ui_text_close(&field);
+
+        // Latin and Arabic in a window that reads from the left: the Arabic is a run of its own inside the Latin.
+        ui_text_open(&field, UI_TEXT_FIELD, (const p8 address_to)mixed, 16, ui_text_keymap());
+        ui_text_draw(&bui, &field, 10, 10, 300, 30, 0);
+        ui_text_layout_line(&bui, &field, 0, &l);
+        check("text bidi: a line with Arabic in a window that reads from the left reads from the left, eleven clusters", l.bidi && l.base == 0 && l.count == 11);
+        for (p32 k = 0; k < l.count; k++)
+                levels &= (l.level[k] & 1) == (k >= 3 && k <= 7 ? 1u : 0u);
+        check("text bidi: the Arabic letters are at an odd level and the Latin around them at an even one", levels);
+        // Inside the Arabic the caret goes right to left; at its two ends it is next to the Latin it follows and the Latin that follows it.
+        order = l.x[4] > l.x[5] && l.x[5] > l.x[6] && l.x[6] > l.x[7] && l.x[3] <= l.x[7] && l.x[8] >= l.x[4] && l.x[0] < l.x[1] && l.x[1] < l.x[2] &&
+                l.x[2] < l.x[3] && l.x[8] < l.x[9] && l.x[9] < l.x[10] && l.x[10] < l.x[11];
+        check("text bidi: the caret goes right to left through the Arabic and left to right through the rest", order);
+        for (p32 k = 0; k <= l.count; k++)
+        {
+                int at = ui_text_hit(&bui, &field, ui_text_origin(&field, &l) + l.x[k], field.top + 1);
+                p32 j = 0;
+
+                while (j <= l.count && l.offset[j] != (p64)at)
+                        j++;
+                round_trip &= j <= l.count && l.x[j] == l.x[k];
+        }
+        check("text bidi: a click at a boundary's place is a boundary at that place, in each of the twelve", round_trip);
+        // Right from the start visits every place on the line, left to right, once.
+        {
+                int places = 1, here;
+                b32 rising = true;
+
+                field.focused = true;
+                doc_select_set(&field.doc, 0, 0);
+                here = ui_text_x_of(&l, 0);
+                for (int step = 0; step < 14; step++)
+                {
+                        int now;
+
+                        ui_text_command(&bui, &field, DOC_CMD_RIGHT);
+                        now = ui_text_x_of(&l, field.doc.selections[0].active);
+                        if (now == here)
+                                continue;
+                        rising &= now > here;
+                        places++, here = now;
+                }
+                check("text bidi: Right goes to the place on the screen to the right, each in turn, and ends at the line's right end",
+                      rising && places >= 9 && here >= l.width - 1);
+                for (int step = 0; step < 14; step++)
+                        ui_text_command(&bui, &field, DOC_CMD_LEFT);
+                check("text bidi: and Left back to the left end", ui_text_x_of(&l, field.doc.selections[0].active) == 0);
+        }
+        ui_text_close(&field);
+
+        // A code view's numbers are in a gutter at the start of the lines: at the left, and at the right where the window reads from the right.
+        for (int mode = 0; mode < 2; mode++)
+        {
+                int gutter_start = 0, gutter_end = 0;
+
+                ui_kit.rtl = (unsigned int)mode;
+                memory_fill_u32(picture, 800 * 600, 0);
+                ui_text_open(&view, UI_TEXT_CODE, (const p8 address_to) "a\nb\n", 4, ui_text_keymap());
+                view.numbers = true;
+                ui_text_draw(&bui, &view, 10, 10, 300, 90, 0);
+                for (int y = 10; y < 100; y++)
+                        for (int x = 10; x < 310; x++)
+                                if (picture[(positive)y * 800 + (positive)x] && x < 10 + 36)
+                                        gutter_start++;
+                                else if (picture[(positive)y * 800 + (positive)x] && x >= 310 - 36)
+                                        gutter_end++;
+                if (mode)
+                        check("text bidi: a code view's line numbers are in a gutter at its right where the window reads from the right", gutter_end > 0 && view.right == 274);
+                else
+                        check("text bidi: and at its left where it reads from the left, the text after them", gutter_start > 0 && gutter_end == 0 && view.left == 46);
+                ui_text_close(&view);
+        }
+        ui_kit.rtl = 0;
+}
+
+/*
         The kit's field (ui_field_event over the engine), the one every input of Canvas is, driven as a window drives
         it: keys as the compositor sends them, the pointer on its well, a paste's text. A blank and any character are
         typed anywhere; the caret moves by characters (whole ones of several bytes), words and ends; Shift selects and
@@ -152626,6 +152862,7 @@ b32 main()
 
         if (program_argument_count() > 3)
                 text_widget_check(program_argument(3), program_argument(1));
+                text_bidi_check(program_argument(3));
         text_menu_keys_check();
         for (unsigned int at = 0; at < 256; at++)
                 terminal_colour[at] = window_cell_colour(at);

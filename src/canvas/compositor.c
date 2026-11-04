@@ -245,6 +245,15 @@ struct compositor_frame
         edges, and none on a window too small to hold it beside its corner.
         For drawing and for the press alike.
 */
+#if MOONWATER_UI_ANY
+static inline int language_rtl(void); // the language taken reads from the right (ui/language.c, which is built after this file)
+#else
+static inline int language_rtl(void)
+{
+        return 0; // a build with no window of the kit has no language to read from
+}
+#endif
+
 static int compositor_close_box(const struct compositor_frame *frame, int *x, int *y, int *side)
 {
         int box = UI_CLOSE * frame->scale / 100, in = UI_CLOSE_IN * frame->scale / 100;
@@ -252,7 +261,8 @@ static int compositor_close_box(const struct compositor_frame *frame, int *x, in
         if (!frame->close || frame->builtin || frame->width < box + 2 * in + 4 * box || frame->height < box + 2 * in)
                 return 0;
         *side = box;
-        *x = frame->x + frame->width - box - in;
+        // At the window's start corner: the top right, or the top left where the language reads from the right.
+        *x = language_rtl() ? frame->x + in : frame->x + frame->width - box - in;
         *y = frame->y + in;
         return 1;
 }
@@ -412,7 +422,7 @@ static int compositor_minimize_box(const struct compositor_frame *frame, int *x,
         if (!compositor_close_box(frame, &bx, &by, &box) || frame->width < 2 * box + 3 * in + 4 * box)
                 return 0;
         *side = box;
-        *x = bx - in - box;
+        *x = language_rtl() ? bx + box + in : bx - in - box;
         *y = by;
         return 1;
 }

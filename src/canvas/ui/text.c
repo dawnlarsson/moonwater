@@ -79,9 +79,11 @@
         sequence, a flag, a keycap, a Hangul syllable of jamo or a CR LF;
         Delete takes a whole cluster. That is what macOS and Windows do.
 
-        Bidirectional text is stored and stepped in logical order and drawn
-        left to right in that order, not reordered: a right to left run reads
-        backwards on the screen. That is a known limit.
+        Bidirectional text is stored and stepped here in logical order, and
+        that is all this file knows of it: the look (ui.c) lays a line out by
+        the font engine's bidirectional algorithm, draws it reordered and
+        shaped, and goes by what is on the screen for the caret, the click and
+        Left and Right. A wrapped line of such text is one row.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater

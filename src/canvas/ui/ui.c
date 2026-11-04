@@ -597,11 +597,17 @@ static int ui_pen_width(const struct ui_pen address_to pen)
         return (int)(pen->reach >> 16);
 }
 
-// A run's advance in whole pixels, laid out and not drawn.
+// A run's advance in whole pixels, laid out and not drawn, with the engine's flags.
+static int ui_advance_flagged(struct ui address_to ui, const font_face address_to const address_to faces, string_address text,
+                              positive length, p32 em, p32 flags)
+{
+        return (int)(font_extent(ui->engine, faces, 2, (const p8 address_to)text, length, em, flags) >> 16);
+}
+
 static int ui_advance(struct ui address_to ui, const font_face address_to const address_to faces, string_address text,
                       positive length, p32 em)
 {
-        return (int)(font_extent(ui->engine, faces, 2, (const p8 address_to)text, length, em, ui_font_flags(ui, faces[0])) >> 16);
+        return ui_advance_flagged(ui, faces, text, length, em, ui_font_flags(ui, faces[0]));
 }
 
 /*
@@ -806,13 +812,13 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
         scene->used += (bytes + 15) & ~15ul;
 }
 
-static int ui_run_in(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
-                     string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
-                     unsigned int stroke)
+static int ui_run_flagged(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
+                          string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
+                          unsigned int stroke, p32 flags)
 {
         p32 em = ((p32)(size * ui->scale) << 6) / 100;
         positive length = string_length(text);
-        int width = ui_advance(ui, faces, text, length, em);
+        int width = ui_advance_flagged(ui, faces, text, length, em, flags);
         font_metrics metrics = font_metrics_at(faces[0], em);
         int above = metrics.baseline + 2 * ui->scale / 100, rows = metrics.cell_height + 4 * ui->scale / 100;
         int left = 2 * ui->scale / 100, wide = width + 2 * left, top = baseline - above;
@@ -830,7 +836,7 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
         {
                 font_target line = {ui->scratch, (positive)wide, wide, rows};
 
-                font_draw(ui->engine, faces, 2, (const p8 address_to)text, length, em, ui_font_flags(ui, faces[0]), &line, (b32)left << 16, above,
+                font_draw(ui->engine, faces, 2, (const p8 address_to)text, length, em, flags, &line, (b32)left << 16, above,
                           light ? 0xffffffu : 0, paper);
         }
 
@@ -944,6 +950,13 @@ static int ui_run_in(struct ui address_to ui, const font_face address_to const a
 #endif
         }
         return width;
+}
+
+static int ui_run_in(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
+                     string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
+                     unsigned int stroke)
+{
+        return ui_run_flagged(ui, faces, x, baseline, text, size, colour, alpha, low, high, stroke, ui_font_flags(ui, faces[0]));
 }
 
 // A run's capital height at size, in whole pixels: font.c's metrics are 16.16.
@@ -6812,8 +6825,11 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 case 107: m->hot = 0; ui_popmenu_step(m, -1); return UI_MENU_NOTHING;
                 case 104: ui_popmenu_page(m, -1); return UI_MENU_NOTHING;
                 case 109: ui_popmenu_page(m, 1); return UI_MENU_NOTHING;
-                case 1: case 105: return UI_MENU_GONE;
-                case 106:
+                case 1: return UI_MENU_GONE;
+                case 105: case 106:
+                        // The arrow toward the start of what is read closes the menu, the one toward its end opens a submenu (the mark is there).
+                        if (ui_arrow((int)event->a) < 0)
+                                return UI_MENU_GONE;
                         return ui_popmenu_choosable(m, m->hot) && (m->items[m->hot].flags & UI_MENU_SUBMENU) ? UI_MENU_OPEN : UI_MENU_NOTHING;
                 case 28: case 96: case 57:
                         if (!ui_popmenu_choosable(m, m->hot))
@@ -9242,6 +9258,16 @@ struct ui_text_layout
         p8 shown[UI_TEXT_CLUSTERS * 8];
         p32 shown_length;
         p32 count;
+        /*
+                A line the font engine reorders (it has a run that reads from the right, or the window does, and a field's text
+                follows its first strong letter): x[k] is where the caret is at boundary k, which is the cluster's edge on the side
+                its direction ends at, left[k] and right[k] are the cluster's own place and level[k] its level, base is the paragraph's
+                (1 reads from the right) and width the line's. A line the engine does not reorder has base 0 and x as it was.
+        */
+        b32 bidi;
+        int base, width;
+        int left[UI_TEXT_CLUSTERS], right[UI_TEXT_CLUSTERS];
+        p8 level[UI_TEXT_CLUSTERS];
 };
 
 static const font_face address_to ui_text_face(const struct ui address_to ui, const struct ui_text address_to t)
@@ -9255,6 +9281,52 @@ static p32 ui_text_em(const struct ui address_to ui, const struct ui_text addres
 
         size = size < 6 ? 6 : size > 72 ? 72 : size;
         return ((p32)(size * ui->scale) << 6) / 100;
+}
+
+// The flags a text widget's lines are laid out and drawn with: the first strong letter's direction, the window's where there is none.
+static p32 ui_text_flags(const struct ui_text address_to t)
+{
+        return FONT_AUTO | (t->mode != UI_TEXT_CODE && ui_rtl() ? FONT_RTL : 0);
+}
+
+// Each cluster's place on a line the engine reorders (font_segments), and the place of the caret at each boundary between them.
+static fn ui_text_bidi(struct ui address_to ui, const struct ui_text address_to t, struct ui_text_layout address_to l,
+                       const font_face address_to const address_to faces, p32 em)
+{
+        static b32 from[UI_TEXT_CLUSTERS], to[UI_TEXT_CLUSTERS];
+        p32 flags = ui_text_flags(t);
+        positive count = l->count;
+
+        if (!count)
+        {
+                // An empty line's caret is at its start: the box's right where the line reads from the right.
+                l->base = font_base_level(l->shown, l->shown_length, flags);
+                l->width = 0, l->x[0] = 0;
+                return;
+        }
+        if (font_segments(ui->engine, faces, 2, l->shown, l->shown_length, em, flags, l->shown_at, count, from, to, l->level) != count)
+                return; // a line too long for the engine to lay out as one keeps the pen's reckoning, left to right
+        l->base = font_base_level(l->shown, l->shown_length, flags);
+        l->width = (int)(font_extent(ui->engine, faces, 2, l->shown, l->shown_length, em, flags) >> 16);
+        for (positive k = 0; k < count; k++)
+                l->left[k] = (int)((from[k] + 0x8000) >> 16), l->right[k] = (int)((to[k] + 0x8000) >> 16);
+        for (positive b = 0; b <= count; b++)
+        {
+                // The edge of the cluster before it where that cluster ends reading, or of the one after it where that one begins; where the two
+                // run the same way they share one edge, and where they do not the one that runs the way the line does is the caret's.
+                b32 before = b > 0, after = b < count, odd_before = before && (l->level[b - 1] & 1), odd_after = after && (l->level[b] & 1);
+                int trailing = before ? (odd_before ? l->left[b - 1] : l->right[b - 1]) : 0, leading = after ? (odd_after ? l->right[b] : l->left[b]) : 0;
+
+                if (!before)
+                        l->x[b] = leading;
+                else if (!after)
+                        l->x[b] = trailing;
+                else if (odd_before == odd_after)
+                        l->x[b] = odd_before ? l->left[b - 1] : l->right[b - 1];
+                else
+                        l->x[b] = odd_before == (b32)(l->base & 1) ? trailing : leading;
+        }
+        l->bidi = 1;
 }
 
 static fn ui_text_layout_line(struct ui address_to ui, const struct ui_text address_to t, p64 line, struct ui_text_layout address_to l)
@@ -9327,6 +9399,24 @@ static fn ui_text_layout_line(struct ui address_to ui, const struct ui_text addr
         l->shown_at[l->count] = l->shown_length;
         l->x[l->count] = t->mode == UI_TEXT_CODE ? (int)column * cell : ui_pen_width(&pen);
         l->shown[l->shown_length] = 0;
+        l->bidi = 0, l->base = 0, l->width = l->x[l->count];
+        // A field and a page of text take their direction from their first strong letter, and from the window where there is none; a code
+        // view's lines read from the left unless they have a letter that does not. Reordered, the line is the engine's, whole.
+        if (t->mode == UI_TEXT_CODE ? !font_is_simple(l->shown, l->shown_length) : ui_rtl() || !font_is_simple(l->shown, l->shown_length))
+                ui_text_bidi(ui, t, l, faces, em);
+}
+
+// Where a laid line's x = 0 is on the window: the box's left less the scroll, and for a line that reads from the right the box's right less
+// the line's width, the scroll bringing the end of it into view (the scroll is a distance from the line's start either way).
+static int ui_text_origin(const struct ui_text address_to t, const struct ui_text_layout address_to l)
+{
+        return l->base ? t->right - l->width + (int)t->scroll_x : t->left - (int)t->scroll_x;
+}
+
+// A distance along a line from its start edge: x reading from the left, and from its right end reading from the right.
+static int ui_text_along(const struct ui_text_layout address_to l, int x)
+{
+        return l->base ? l->width - x : x;
 }
 
 // The x of an offset on its laid line (its cluster's left edge).
@@ -9375,6 +9465,8 @@ static int ui_text_wrap_indent(const struct ui_text_layout address_to l, int roo
 {
         int indent = 0;
 
+        if (l->bidi)
+                return 0;
         while (indent < (int)l->count && l->shown[l->shown_at[indent]] == ' ')
                 indent++;
         return l->x[indent] < room / 2 ? l->x[indent] : 0;
@@ -9386,6 +9478,8 @@ static p32 ui_text_wrap_to(const struct ui_text_layout address_to l, p32 from, i
         p32 to = from, blank = 0;
         int offset_x = l->x[from] - (from ? indent : 0);
 
+        if (l->bidi)
+                return l->count; // a line of reordered text is one row: its rows would each be reordered again
         while (to < l->count && l->x[to + 1] - offset_x <= room)
         {
                 if (l->shown[l->shown_at[to]] == ' ')
@@ -9476,7 +9570,7 @@ static b32 ui_text_nth_row(struct ui address_to ui, struct ui_text address_to t,
                 {
                         to = ui_text_wrap_to(l, from, room, indent);
                         row->line = line, row->from = from, row->to = to, row->last = to >= l->count;
-                        row->shift = l->x[from] - (from ? indent : 0);
+                        row->shift = l->bidi ? 0 : l->x[from] - (from ? indent : 0);
                         if (at == index)
                                 return true;
                         at++;
@@ -9515,7 +9609,7 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
         for (k = 0; k < l.count && l.offset[k] < offset; k++)
                 ;
         place = l.x[k];
-        if (wrapped)
+        if (wrapped && !l.bidi)
         {
                 indent = ui_text_wrap_indent(&l, room);
                 for (;;)
@@ -9531,7 +9625,7 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
                         return 1;
         }
         *top = t->top + at * t->line_height;
-        *x = t->left - (int)t->scroll_x + place;
+        *x = ui_text_origin(t, &l) + place;
         return *x < t->left ? -1 : *x > t->right ? 1 : 0;
 }
 
@@ -9571,7 +9665,7 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
                 return;
         }
         ui_text_layout_line(ui, t, line, &l);
-        x = ui_text_x_of(&l, caret);
+        x = ui_text_along(&l, ui_text_x_of(&l, caret)); // from the line's start, which is its right where it reads from the right
         if (x - t->scroll_x < 0)
                 t->scroll_x = x - width / 4 > 0 ? x - width / 4 : 0;
         else if (x - t->scroll_x > width - 2 * ui->scale / 100)
@@ -9579,7 +9673,7 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
         // A field whose line fits is not scrolled at all; one longer shows no blank past its end.
         if (t->mode == UI_TEXT_FIELD && width > 0)
         {
-                b64 most = (b64)l.x[l.count] - width + 2 * ui->scale / 100;
+                b64 most = (b64)l.width - width + 2 * ui->scale / 100;
 
                 t->scroll_x = t->scroll_x > most ? (most > 0 ? most : 0) : t->scroll_x;
         }
@@ -9597,6 +9691,16 @@ static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int
         int index = y > t->top && t->line_height ? (y - t->top) / t->line_height : 0, px;
 
         ui_text_nth_row(ui, t, index < 4096 ? index : 4096, &l, &row);
+        if (l.bidi)
+        {
+                // A reordered line: the boundary whose place is nearest, whichever way it runs.
+                int along = x - ui_text_origin(t, &l), best = 0;
+
+                for (p32 b = 1; b <= l.count; b++)
+                        if ((l.x[b] > along ? l.x[b] - along : along - l.x[b]) < (l.x[best] > along ? l.x[best] - along : along - l.x[best]))
+                                best = (int)b;
+                return l.offset[best];
+        }
         px = x - t->left + (int)t->scroll_x + row.shift;
         for (p32 k = row.from; k < row.to; k++)
                 if (px < (l.x[k] + l.x[k + 1]) / 2)
@@ -9905,6 +10009,51 @@ static p32 ui_text_masked_command(p32 command)
         A command of the keymap that needs the view or the clipboard; the rest go to text.c's doc_command. Answers 0
         for a command that is not the widget's (a field's app does it), else what changed (UI_TEXT_MOVED at least).
 */
+/*
+        Left and Right go where the screen says: on a line that reads from the right Left is forward in the text, and on a line of both
+        directions the caret goes to the boundary that is next to it on the screen (by the clusters, as the line is laid out), none
+        being next, the line's logical end. A line that reads from the left is the default. A word goes by the line's direction.
+*/
+static b32 ui_text_visual(struct ui address_to ui, struct ui_text address_to t, p32 address_to command)
+{
+        static struct ui_text_layout l;
+        static const p32 pairs[4][2] = {{DOC_CMD_LEFT, DOC_CMD_RIGHT}, {DOC_CMD_SELECT_LEFT, DOC_CMD_SELECT_RIGHT},
+                                        {DOC_CMD_WORD_LEFT, DOC_CMD_WORD_RIGHT}, {DOC_CMD_SELECT_WORD_LEFT, DOC_CMD_SELECT_WORD_RIGHT}};
+        int pair = -1, side = 0;
+        struct doc_selection address_to caret = &t->doc.selections[t->doc.primary];
+        p32 at = 0, best = 0;
+        b32 found = false;
+
+        for (int k = 0; k < 4; k++)
+                for (int j = 0; j < 2; j++)
+                        if (*command == pairs[k][j])
+                                pair = k, side = j;
+        if (pair < 0)
+                return false;
+        ui_text_layout_line(ui, t, doc_line_of(&t->doc, caret->active), &l);
+        if (!l.bidi)
+                return false;
+        if (pair >= 2 || t->doc.selection_count != 1)
+        {
+                // A word, or carets in a number: the way the line reads decides, as the text goes.
+                *command = pairs[pair][l.base ? 1 - side : side];
+                return false;
+        }
+        while (at < l.count && l.offset[at] < caret->active)
+                at++;
+        for (p32 b = 0; b <= l.count; b++)
+                if (side ? l.x[b] > l.x[at] : l.x[b] < l.x[at])
+                        if (!found || (side ? l.x[b] < l.x[best] : l.x[b] > l.x[best]))
+                                best = b, found = true;
+        if (!found)
+        {
+                *command = pairs[pair][l.base ? 1 - side : side]; // the line's end: on to the next or the one before
+                return false;
+        }
+        doc_select_set(&t->doc, pair == 1 ? caret->anchor : l.offset[best], l.offset[best]);
+        return true;
+}
+
 static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
 {
         p64 version = t->doc.version;
@@ -9914,6 +10063,12 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                 return 0;
         if (t->masked && (command = ui_text_masked_command(command)) == DOC_CMD_NONE)
                 return UI_TEXT_MOVED;
+        if (ui_text_visual(ui, t, &command))
+        {
+                ui_text_wake(t);
+                ui_text_reveal(ui, t);
+                return UI_TEXT_MOVED;
+        }
         switch (command)
         {
         case DOC_CMD_COPY:
@@ -9956,7 +10111,7 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                 p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret);
 
                 ui_text_layout_line(ui, t, line, &l);
-                t->menu_x = t->left + ui_text_x_of(&l, caret) - (int)t->scroll_x;
+                t->menu_x = ui_text_origin(t, &l) + ui_text_x_of(&l, caret);
                 t->menu_y = t->top + (int)(line >= t->top_line ? line - t->top_line + 1 : 1) * t->line_height;
                 return UI_TEXT_MENU;
         }
@@ -11038,7 +11193,7 @@ static fn ui_text_fill(struct ui address_to ui, const struct ui_text address_to 
 static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, const struct ui_text_layout address_to l, p64 line,
                             int y, int baseline, unsigned int ground)
 {
-        int origin = t->left - (int)t->scroll_x;
+        int origin = ui_text_origin(t, l);
         unsigned int selection = ui_well(ui, UI_SELECTION, 40), text = ui_text_colour(ui, UI_ON_SURFACE);
         static struct doc_token tokens[512];
         positive token_count = t->mode == UI_TEXT_CODE ? doc_tokens(&t->doc, line, tokens, 512) : 0;
@@ -11051,29 +11206,45 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
 
                 if (range->kind != DOC_RANGE_HIGHLIGHT || range->finish <= l->offset[0] || range->start >= l->offset[l->count])
                         continue;
-                ui_text_fill(ui, t, origin + ui_text_x_of(l, range->start), y, ui_text_x_of(l, range->finish) - ui_text_x_of(l, range->start),
-                             t->line_height, 0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
-        }
-        // The selection: one rectangle a run of selected clusters, and a sliver past the end of a line the selection
-        // goes on from.
-        for (p32 k = 0; k < l->count;)
-        {
-                p32 from = k;
-
-                while (k < l->count && ui_text_selected(t, l->offset[k]))
-                        k++;
-                if (k > from)
-                        ui_text_fill(ui, t, origin + l->x[from], y, l->x[k] - l->x[from], t->line_height,
-                                     ui_tone(selection & 0xffffffu, selection >> 24));
+                if (!l->bidi)
+                        ui_text_fill(ui, t, origin + ui_text_x_of(l, range->start), y, ui_text_x_of(l, range->finish) - ui_text_x_of(l, range->start),
+                                     t->line_height, 0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
                 else
+                        for (p32 k = 0; k < l->count; k++)
+                                if (l->offset[k] >= range->start && l->offset[k] < range->finish)
+                                        ui_text_fill(ui, t, origin + l->left[k], y, l->right[k] - l->left[k], t->line_height,
+                                                     0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
+        }
+        // The selection: one rectangle a run of selected clusters that lie side by side (all of them on a line that reads one way), and a
+        // sliver past the end of a line the selection goes on from, at the end the line runs to.
+        for (p32 k = 0; k < l->count; k++)
+        {
+                int x0, x1;
+
+                if (!ui_text_selected(t, l->offset[k]))
+                        continue;
+                x0 = l->bidi ? l->left[k] : l->x[k], x1 = l->bidi ? l->right[k] : l->x[k + 1];
+                while (k + 1 < l->count && ui_text_selected(t, l->offset[k + 1]))
+                {
+                        int next0 = l->bidi ? l->left[k + 1] : l->x[k + 1], next1 = l->bidi ? l->right[k + 1] : l->x[k + 2];
+
+                        if (next0 == x1)
+                                x1 = next1;
+                        else if (next1 == x0)
+                                x0 = next0;
+                        else
+                                break;
                         k++;
+                }
+                ui_text_fill(ui, t, origin + x0, y, x1 - x0, t->line_height, ui_tone(selection & 0xffffffu, selection >> 24));
         }
         if (ui_text_selected(t, l->offset[l->count]) && t->mode != UI_TEXT_FIELD)
-                ui_text_fill(ui, t, origin + l->x[l->count], y, t->cell / 2 + ui_px(ui, 1), t->line_height, ui_tone(selection & 0xffffffu, selection >> 24));
+                ui_text_fill(ui, t, origin + l->x[l->count] - (l->base ? t->cell / 2 + ui_px(ui, 1) : 0), y, t->cell / 2 + ui_px(ui, 1), t->line_height,
+                             ui_tone(selection & 0xffffffu, selection >> 24));
 
-        if (t->mode != UI_TEXT_CODE)
-                ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, origin, baseline, (string_address)l->shown,
-                          t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0);
+        if (t->mode != UI_TEXT_CODE || l->bidi)
+                ui_run_flagged(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, origin, baseline, (string_address)l->shown,
+                               t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0, ui_text_flags(t));
         else
         {
                 // A run is the clusters of one role; each cluster of a single code point one cell is part of a run drawn
@@ -11236,7 +11407,8 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                         digits++;
                 t->gutter = (digits + 2) * t->cell;
         }
-        t->left = x + t->gutter, t->top = y, t->right = x + width, t->bottom = y + height;
+        // The gutter is at the start of the lines: the left, or the right where the window reads from the right.
+        t->left = x + (ui_rtl() ? 0 : t->gutter), t->top = y, t->right = x + width - (ui_rtl() ? t->gutter : 0), t->bottom = y + height;
         t->well_left = x, t->well_top = y, t->well_right = x + width, t->well_bottom = y + height;
         // A field's caret is always in sight, in the box it is drawn in now (its text set by the app, or the box moved).
         if (t->mode == UI_TEXT_FIELD)
@@ -11261,7 +11433,10 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 // and the quiet ink is held at the readable threshold (ui_glass_quiet). The kit's surfaces keep the 36%.
                 if (ui->glass)
                         text = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), alpha = 255;
-                ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, t->left, t->top + m.baseline, (string_address)t->placeholder,
+                const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
+                int start = ui_rtl() ? t->right - ui_run_in(ui, faces, 0, 0, (string_address)t->placeholder, t->size + t->zoom, 0, 0, 0, ui->width, 0) : t->left;
+
+                ui_run_in(ui, faces, start, t->top + m.baseline, (string_address)t->placeholder,
                           t->size + t->zoom, text & 0xffffffu, alpha, t->left, t->right, 0);
         }
         for (row_y = t->top; row_y + t->line_height <= t->bottom + (t->mode == UI_TEXT_FIELD) && line < lines; line++)
@@ -11283,7 +11458,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                             range->finish >= doc_line_start(&t->doc, line))
                                 line_ground = window_mix(line_ground, ui_text_range_role(range->data) & 0xffffffu, 40);
                         if (range->kind == DOC_RANGE_MARK && t->gutter && doc_line_of(&t->doc, range->start) == line)
-                                ui_round(ui, x + t->cell / 4, row_y + (t->line_height - t->cell / 2) / 2, t->cell / 2, t->cell / 2, t->cell / 4,
+                                ui_round(ui, ui_mirror(x + t->cell / 4, t->cell / 2, x, width), row_y + (t->line_height - t->cell / 2) / 2, t->cell / 2, t->cell / 2, t->cell / 4,
                                          ui_tone(ui_text_range_role(range->data) & 0xffffffu, 255));
                 }
                 if (t->mode == UI_TEXT_CODE && t->focused && t->doc.selection_count == 1 &&
@@ -11299,12 +11474,15 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                         int wide = (int)digits * t->cell;
 
                         number[digits] = 0;
-                        ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, t->left - t->cell - wide, baseline,
-                                  (string_address)number, t->size + t->zoom, ui_role(UI_ON_SURFACE) & 0xffffffu, current ? 220 : 110, x, t->left, 0);
+                        // The numbers are right-aligned in the gutter, which is at the left of the lines, or left-aligned at their right.
+                        ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, ui_rtl() ? t->right + t->cell : t->left - t->cell - wide,
+                                  baseline, (string_address)number, t->size + t->zoom, ui_role(UI_ON_SURFACE) & 0xffffffu, current ? 220 : 110,
+                                  ui_rtl() ? t->right : x, ui_rtl() ? x + width : t->left, 0);
                         if (doc_folded_at(&t->doc, line, &hidden_to))
-                                ui_chevron(ui, x + t->cell / 2, row_y + t->line_height / 2, t->cell / 3, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 160));
+                                ui_chevron(ui, ui_mirror(x + t->cell / 2 - t->cell / 3, 2 * (t->cell / 3) + 1, x, width) + t->cell / 3, row_y + t->line_height / 2, t->cell / 3,
+                                           ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 160));
                 }
-                if (!t->wrap || t->mode == UI_TEXT_FIELD)
+                if (!t->wrap || t->mode == UI_TEXT_FIELD || l.bidi)
                 {
                         ui_text_draw_line(ui, t, &l, line, row_y, baseline, line_ground);
                         row_y += t->line_height;

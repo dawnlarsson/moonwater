@@ -3886,17 +3886,20 @@ static b32 settings_key(const struct window_event address_to event)
                         settings_forget();
                 break;
         case UI_KEY_LEFT:
-                // A step moves; on a switch and on any other row Left goes back to the column.
-                if (settings.pane && settings_steps(settings.list.focus))
-                        settings_activate(settings.list.focus, -1);
-                else if (settings.pane)
-                {
-                        settings.pane = 0;
-                        settings_dirty();
-                }
-                break;
         case UI_KEY_RIGHT:
-                if (!settings.pane)
+                // The arrow toward the start of what is read (Left, or Right where the window reads from the right) goes back: a step
+                // moves down, and on a switch and on any other row it goes back to the column, which is at the start. The other goes on.
+                if (ui_arrow((int)event->a) < 0)
+                {
+                        if (settings.pane && settings_steps(settings.list.focus))
+                                settings_activate(settings.list.focus, -1);
+                        else if (settings.pane)
+                        {
+                                settings.pane = 0;
+                                settings_dirty();
+                        }
+                }
+                else if (!settings.pane)
                         settings_rows_enter();
                 else if (settings_steps(settings.list.focus))
                         settings_activate(settings.list.focus, 1);

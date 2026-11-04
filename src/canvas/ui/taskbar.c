@@ -58,6 +58,8 @@ static void compositor_meet(int *into, const int *other);
 static const unsigned int *compositor_grain_row(unsigned int light, int x, int y);
 static unsigned int compositor_vivid(unsigned int pixel);
 
+static inline b32 language_rtl(void); // the language taken reads from the right (ui/language.c)
+
 // The band's geometry as one struct: computed once for a call, from the view and the state.
 struct taskbar_layout
 {
@@ -220,6 +222,10 @@ static int taskbar_along(const struct taskbar_layout *lay, int which, int *along
         }
         else
                 return 0;
+        // Along a bottom or top band, reading from the right, the band is the same band turned over its length: the launcher's
+        // button at its right end, the tabs in the order the windows showed from the right, the tray at its left end.
+        if (!lay->vertical && language_rtl())
+                *along = lay->origin + lay->length - (*along - lay->origin) - *length;
         return 1;
 }
 
@@ -296,7 +302,11 @@ static int taskbar_span(const struct taskbar_view *view, int *x, int *y, int *wi
         last = along + length;
         first = along;
         if (lay.count && taskbar_along(&lay, 0, &tab, &length))
-                first = tab;
+        {
+                // The first tab is before the tray, or after it reading from the right: the span is whichever side it runs to.
+                first = tab < first ? tab : first;
+                last = tab + length > last ? tab + length : last;
+        }
         taskbar_span_rect(&lay, first, last, rect);
         *x = rect[0], *y = rect[1], *width = rect[2], *height = rect[3];
         return 1;
