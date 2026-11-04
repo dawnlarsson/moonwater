@@ -41,6 +41,29 @@ Times are UTC unless a `+02:00` follows. Commit times are the author dates in
 
 ## Log
 
+### MW-2026-111: a Wayland client's extra descriptors stayed open in the compositor
+
+| | |
+|---|---|
+| Status | Fixed 2026-11-04 |
+| Class | Descriptor leak in a root process; denial of service by descriptor exhaustion |
+| Attacker | any program that can connect to `/run/moonwater/wayland-0` (mode 0666: every local user, every bowl program) |
+| Moonwater exposure window | from `329b24d5` (2026-11-04 00:02 +0100, the shim on by default) to the fix the same day; built in since `0a4629ac` (2026-11-03 19:44 +0100) where `CONFIG_MOONWATER_WAYLAND` was set |
+| Fixed by | the commit that adds this entry (`src/canvas/wayland_host.c`, `compositor_wl_read`) |
+| Tests that fail without it | `test/wayland_e2e.sh` row "a client that sends more descriptors than the shim takes leaves none open in the compositor": 32 descriptors left open after four clients on the parent, 0 with the fix |
+
+**What it was.** `compositor_wl_read` receives with a control buffer of 160 bytes, so the kernel installs up to 36
+descriptors of one `SCM_RIGHTS` message in the compositor without setting `MSG_CTRUNC`. The parse loop stopped taking
+them at the shim's cap (28, `WAYLAND_FDS`) and never closed the rest: every message with 29 to 36 descriptors left up to 8
+of the client's files open in the root compositor for as long as it ran, whatever became of the client. A client that
+connects, sends one such message and goes, again and again, runs the compositor out of descriptors (it can then accept
+no client, open no pipe for the clipboard and no file at all), and keeps the files it sent alive.
+
+**Fix.** Every descriptor past the cap is closed in the parse loop, and the client is dropped as for `MSG_CTRUNC` (it sent
+more than it may, and the stream no longer lines up with what the shim was given). Reproduced first on the box against
+the parent's compositor (`unshare -rm`, a private `/run`, four connections each sending one `wl_display.sync` with 36
+descriptors of `/dev/null`): 32 more descriptors open in `/proc/PID/fd` afterwards; 0 with the fix.
+
 ### MW-2026-081: the sound server's name cleaner let overlong and out-of-range four-byte UTF-8 through as text
 
 | | |

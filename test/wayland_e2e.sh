@@ -267,6 +267,32 @@ for _ in range(40):
 time.sleep(0.2)
 s.close()
 PY
+# More descriptors with one message than the shim takes (28) and fewer than the compositor's control buffer holds (36): the kernel
+# puts all of them in the compositor, and every one is closed again when the client is gone (8 a message stayed open, MW-2026-111).
+leaked=$(python3 - "$cpid" << 'PY'
+import os, socket, struct, sys, time
+fds = lambda: len(os.listdir('/proc/%s/fd' % sys.argv[1]))
+time.sleep(0.2)
+before = fds()
+for _ in range(4):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1)
+    s.connect('/run/moonwater/wayland-0')
+    null = os.open('/dev/null', os.O_RDONLY)
+    socket.send_fds(s, [struct.pack('<III', 1, (12 << 16) | 0, 2)], [null] * 36)
+    os.close(null)
+    try:
+        while s.recv(65536):
+            pass
+    except OSError:
+        pass
+    s.close()
+time.sleep(0.5)
+print(fds() - before)
+PY
+)
+[ "$leaked" = 0 ] && row ok "a client that sends more descriptors than the shim takes leaves none open in the compositor" ||
+        row FAIL "a client that sends more descriptors than the shim takes leaves none open in the compositor" "$leaked more open after four such clients"
 if alive; then
         out=$("$client" -n 5 -q 2>&1)
         status=$?

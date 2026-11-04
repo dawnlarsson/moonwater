@@ -1659,6 +1659,7 @@ static void compositor_wl_read(long slot)
                 positive control[(sizeof(positive) * 3 + WAYLAND_FDS * sizeof(int) + 15) / sizeof(positive) + 2];
                 positive message[7], vector[2] = {(positive)bytes, sizeof bytes};
                 long got, fds[WAYLAND_FDS], count = 0;
+                int excess = 0;
 
                 memory_zero(message, sizeof message);
                 memory_zero(control, sizeof control);
@@ -1675,7 +1676,9 @@ static void compositor_wl_read(long slot)
                         compositor_wl_drop(slot);
                         return;
                 }
-                // The descriptors, from the control data: SCM_RIGHTS in SOL_SOCKET.
+                // The descriptors, from the control data: SCM_RIGHTS in SOL_SOCKET. The kernel puts as many in this process as
+                // the control buffer holds, which is more than the shim takes (36 against 28): one past the shim's are closed
+                // here, and the client is one that sent more than it may, so none of them stays open in the compositor.
                 for (unsigned char *at = (unsigned char *)control; message[5] >= 16 && at < (unsigned char *)control + message[5];)
                 {
                         unsigned long length = *(unsigned long *)at;
@@ -1684,12 +1687,18 @@ static void compositor_wl_read(long slot)
                         if (length < 16 || at + length > (unsigned char *)control + message[5])
                                 break;
                         if (level == 1 && type == 1)
-                                for (unsigned long item = 16; item + 4 <= length && count < WAYLAND_FDS; item += 4)
-                                        fds[count++] = *(int *)(at + item);
+                                for (unsigned long item = 16; item + 4 <= length; item += 4)
+                                        if (count < WAYLAND_FDS)
+                                                fds[count++] = *(int *)(at + item);
+                                        else
+                                        {
+                                                system_close(*(int *)(at + item));
+                                                excess = 1;
+                                        }
                         at += (length + 7) & ~7ul;
                 }
                 // MSG_CTRUNC: descriptors were lost, and what is left of the stream can no longer be trusted to line up.
-                if (message[6] & 0x8)
+                if ((message[6] & 0x8) || excess)
                 {
                         for (long item = 0; item < count; item++)
                                 system_close((int)fds[item]);
