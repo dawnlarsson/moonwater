@@ -164325,6 +164325,7 @@ static struct fake_host_state
         long dmabuf_off, syncs, skip_next, dmabuf_maps, asked, pattern_at;
         const char *pattern; // what the GPU says each time it is asked: N for not done, R for done; done once it has no more to say
         long hold_row, hold_mode, holds; // the window that holds the pointer and how
+        long clock_still; // the clock does not move by itself (each now() is 16 ms on otherwise)
         int dmabuf_table_fd;
 } fake;
 
@@ -164544,7 +164545,7 @@ static long fake_screens(void *context, struct wayland_screen *screens, long roo
 static long fake_now(void *context)
 {
         (void)context;
-        return fake.now += 16;
+        return fake.clock_still ? fake.now : (fake.now += 16);
 }
 
 /* The keymap is a file the compositor owns and keeps: the shim hands out its descriptor and never closes it. */
@@ -168154,6 +168155,88 @@ static int feedback_in_order(struct wlc *c, unsigned long object, const long *wa
         return seen == count;
 }
 
+/*
+        A client's share of the copies (WAYLAND_BUDGET_*): one read of twenty commits of a window's buffer (52 bytes each) is made
+        only as far as two of the largest screen's pixels, then waits, stalled as a commit of a dma-buf whose GPU is not done does,
+        and goes on in the next window of time (16 ms), the rest still in its order. A buffer larger than the budget is never
+        refused: it is made in a window of its own. On the box, before this, one read of 1000 such commits of a 4K window held the
+        compositor for 4.5 s.
+*/
+static void test_budget(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned char run[20 * 52];
+        long fd, pictures, due, at = 0;
+        unsigned long big;
+
+        wl_reset();
+        fake.screen.width = 64;
+        fake.screen.height = 48;
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        session_window(&s, 0xff123456); // 32 by 24: 768 pixels a picture, and a budget of 2 * 64 * 48 = 6144, eight pictures
+        fake.clock_still = 1;
+        fake.now += WAYLAND_BUDGET_MS;
+        for (int k = 0; k < 20; k++)
+        {
+                wlc_put(run + at, s.surface);
+                wlc_put(run + at + 4, WLQ_wl_surface_attach | 20UL << 16);
+                wlc_put(run + at + 8, s.buffer);
+                wlc_put(run + at + 12, 0);
+                wlc_put(run + at + 16, 0);
+                wlc_put(run + at + 20, s.surface);
+                wlc_put(run + at + 24, WLQ_wl_surface_damage_buffer | 24UL << 16);
+                wlc_put(run + at + 28, 0);
+                wlc_put(run + at + 32, 0);
+                wlc_put(run + at + 36, 32);
+                wlc_put(run + at + 40, 24);
+                wlc_put(run + at + 44, s.surface);
+                wlc_put(run + at + 48, WLQ_wl_surface_commit | 8UL << 16);
+                at += 52;
+        }
+        pictures = fake.row[0].pictures;
+        wayland_feed(c->slot, run, at, 0, 0);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - pictures == 8 && wayland_stalled(c->slot),
+                "twenty commits in one read: eight pictures, the budget, and the rest wait (%ld)", fake.row[0].pictures - pictures);
+        due = wayland_stall_due(c->slot, &fd);
+        WLCHECK(due == fake.now + WAYLAND_BUDGET_MS && fd == -1, "the client is due again at the end of its window, with no buffer to poll");
+        WLCHECK(wayland_resume(c->slot) == 1 && fake.row[0].pictures - pictures == 8, "and nothing more is made before then");
+        fake.now += WAYLAND_BUDGET_MS;
+        wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - pictures == 16 && wayland_stalled(c->slot), "the next window makes eight more (%ld)",
+                fake.row[0].pictures - pictures);
+        fake.now += WAYLAND_BUDGET_MS;
+        wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - pictures == 20 && !wayland_stalled(c->slot) && c->errors == 0,
+                "and the one after the last four, in their order, and the client goes on (%ld, %s)", fake.row[0].pictures - pictures,
+                c->error_text);
+        // A picture larger than the budget: made, in a window of its own.
+        big = wl_buffer_of(&s, 128, 96, 0xff00ff00, WLN_wl_shm_format_xrgb8888);
+        fake.now += WAYLAND_BUDGET_MS;
+        pictures = fake.row[0].pictures;
+        for (int k = 0; k < 2; k++)
+        {
+                wlc_send(c, s.surface, WLQ_wl_surface_attach, big, 0L, 0L);
+                wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 128L, 96L);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        }
+        WLCHECK(fake.row[0].pictures - pictures == 1 && wayland_stalled(c->slot), "a picture past the budget is made, and the next waits");
+        fake.now += WAYLAND_BUDGET_MS;
+        wayland_resume(c->slot);
+        wlc_pump(c);
+        WLCHECK(fake.row[0].pictures - pictures == 2 && !wayland_stalled(c->slot) && c->errors == 0, "for a window of its own (%s)",
+                c->error_text);
+        fake.clock_still = 0;
+        wlc_end(c);
+        leak_check("budget");
+        wayland_stop();
+}
+
 static void test_dmabuf(void)
 {
         struct session s, other;
@@ -168246,6 +168329,15 @@ static void test_dmabuf(void)
         WLCHECK(c->errors == 0 && wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x200000u) &&
                     wlc_count(c, WLI_wl_buffer, WLE_wl_buffer_release) == 0 && strcmp(fake.row[0].title, "after the commit") != 0,
                 "a commit of a buffer whose GPU is not done is not made, its buffer is not released, and what comes after it waits (%ld asked)", fake.asked);
+        {
+                // The host is told the buffer to poll and to come back at the end of the client's time, not a millisecond at a time.
+                long due, fd;
+
+                due = wayland_stall_due(c->slot, &fd);
+                WLCHECK(fd >= 0 && fd == wayland.client[c->slot]->stalled_fd &&
+                            due == wayland.client[c->slot]->stalled_at + WAYLAND_STALL_MS + 1,
+                        "a client that waits for its GPU names its buffer to poll and is due at the end of its time (%ld)", due);
+        }
         resumed = wayland_resume(c->slot);
         wlc_pump(c);
         WLCHECK(resumed == 1 && wayland_stalled(c->slot) && fake.row[0].pixels[6 * FAKE_W + 12] == (PATTERN(12, 6) | 0x200000u) &&
@@ -169255,6 +169347,7 @@ int main(int argc, char **argv)
         test_tree_cost();
         test_geometry();
         test_cursor();
+        test_budget();
         test_dmabuf();
         test_games();
         test_scale();

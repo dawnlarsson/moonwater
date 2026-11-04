@@ -1526,13 +1526,24 @@ static void compositor_wl_transfers_drop(long client)
                         compositor_wl_transfer_cancel(at);
 }
 
-// A millisecond on while a client's commit waits for its GPU, else 0: the loop wakes for it. A transfer's thread keeps its own time.
+/*
+        When the loop is to wake for a client whose commit waits, or 0: the end of its window of time when it waits for its budget, the
+        end of its time when it waits for its GPU (whose dma-buf the loop polls, so it wakes the moment the buffer is ready, and not a
+        millisecond at a time for ten seconds). A transfer's thread keeps its own time.
+*/
 static positive compositor_wl_due(void)
 {
+        positive first = 0;
+
         for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
-                if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
-                        return clock_monotonic_nanoseconds() + 1000000ull;
-        return 0;
+        {
+                long fd, due = compositor_wl.fd[slot] >= 0 ? wayland_stall_due(slot, &fd) : 0;
+                positive at = due > 0 ? ((positive)due + 1) * 1000000ull : 0; // the shim's clock is this one in ms
+
+                if (at && (!first || at < first))
+                        first = at;
+        }
+        return first;
 }
 
 // Whether a dma-buf has no writer: asked at once, never waited for.
@@ -1837,6 +1848,14 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
         }
         // The knock of a transfer's thread that has ended, after the clients (a descriptor of -1, with no eventfd, is not polled).
         wanted[count++] = (struct compositor_poll){compositor_wl.wake, COMPOSITOR_POLLIN, 0};
+        // The dma-bufs that stalled clients wait for, readable when their GPU is done (nothing is read of them: the pass resumes).
+        for (long slot = 0; slot < WAYLAND_CLIENTS; slot++)
+        {
+                long fd = -1;
+
+                if (compositor_wl.fd[slot] >= 0 && wayland_stall_due(slot, &fd) && fd >= 0)
+                        wanted[count++] = (struct compositor_poll){(int)fd, COMPOSITOR_POLLIN, 0};
+        }
         return count;
 }
 

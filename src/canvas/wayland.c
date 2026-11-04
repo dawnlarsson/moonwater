@@ -117,6 +117,16 @@
 #define WAYLAND_STALL 1
 #define WAYLAND_STASH 20480        // one read of the host (16384) and the message it was completing (4096)
 #define WAYLAND_STALL_MS 10000     // a client whose buffer is not ready by then is ended: its GPU hung
+/*
+        A commit is also made to wait when its client has had more pictures copied than its share of a frame: what a picture costs
+        the compositor is its pixels, copied at the commit, and a commit is 52 bytes, so a client that sent 64 KB of commits of a
+        window the size of a 4K screen held the compositor (every window, the pointer, the keys) for 4.5 s a read. A client may have
+        WAYLAND_BUDGET_SCREENS of the largest screen copied in WAYLAND_BUDGET_MS, which a window that draws every frame of a screen at
+        twice 60 Hz keeps within; the commit past it waits, with the rest, until the next window of time. A client whose budget is
+        untouched always has its commit made, so one picture larger than the budget is never refused.
+*/
+#define WAYLAND_BUDGET_MS 16
+#define WAYLAND_BUDGET_SCREENS 2
 
 struct wayland_rect
 {
@@ -429,7 +439,8 @@ struct wayland_client
         unsigned char in[WAYLAND_MESSAGE];
         // A commit that waits for its GPU, and what the client sent from it on: the bytes, the descriptor to ask of, since when.
         unsigned char stash[WAYLAND_STASH];
-        long stash_length, stalled, stalled_fd, stalled_at;
+        long stash_length, stalled, stalled_fd, stalled_at; // stalled_fd -1: a commit that waits for its budget, not for a GPU
+        long budget_at, budget_used; // the window of time the client's copies are counted in (its start, ms), and its pixels so far
         long out_length;
         unsigned char out[WAYLAND_OUT];
         long out_fds[WAYLAND_OUT_FDS], out_fd_at[WAYLAND_OUT_FDS], out_fd_count;
@@ -1398,6 +1409,24 @@ static struct wayland_rect wayland_window_of(struct wayland_client *c, const str
         return window;
 }
 
+/*
+        A client's budget (WAYLAND_BUDGET_*): its window of time begun again when it is over (or the clock went back), and whether
+        the pixels copied for it in this one leave room. The largest screen is the unit, a screen of 1920 by 1080 with none.
+*/
+static int wayland_budget_left(struct wayland_client *c)
+{
+        long now = wayland.host->now(wayland.host->context), most = wayland.screens ? 0 : 1920L * 1080L;
+
+        for (long at = 0; at < wayland.screens; at++)
+                most = wayland_max(most, wayland.screen[at].width * wayland.screen[at].height);
+        if (now - c->budget_at >= WAYLAND_BUDGET_MS || now < c->budget_at)
+        {
+                c->budget_at = now;
+                c->budget_used = 0;
+        }
+        return c->budget_used < WAYLAND_BUDGET_SCREENS * most;
+}
+
 /* A subsurface's held buffer laid over the window's picture, all of it or where only (row pixels) says; window is its root's. */
 static void wayland_child_copy(struct wayland_client *c, struct wayland_surface *child, const struct wayland_rect *only,
                                const struct wayland_rect *window)
@@ -1441,6 +1470,7 @@ static void wayland_child_copy(struct wayland_client *c, struct wayland_surface 
         }
         if (wayland.host->row_picture(wayland.host->context, root->row, &picture) > 0)
                 root->need_full = 1;
+        c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : picture.damage[0].width * picture.damage[0].height;
 }
 
 // The children of a surface laid over where it was just drawn (the whole picture for a null rectangle), in their order.
@@ -2138,6 +2168,9 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 picture.damage[picture.damages++] = r;
         }
         status = wayland.host->row_picture(wayland.host->context, s->row, &picture);
+        c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;
+        for (long at = 0; !picture.full && at < picture.damages; at++)
+                c->budget_used += picture.damage[at].width * picture.damage[at].height;
         if (status < 0)
                 return wayland_fail(c, self->id, WAYLAND_IMPLEMENTATION, "the window refused the picture");
         if (status > 0)
@@ -2184,6 +2217,12 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         long buffer = -1;
         int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0;
 
+        // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time.
+        if (!wayland_budget_left(c))
+        {
+                c->stalled_fd = -1;
+                return WAYLAND_STALL;
+        }
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
                 return wayland_sub_commit(c, self, s);
         if (xdg)
@@ -5420,6 +5459,24 @@ WAYLAND_API long wayland_stalled(long slot)
 }
 
 /*
+        When a stalled client is next worth asking of, on the host's clock (ms), and in fd the dma-buf it waits for, which the host
+        may poll to be told the moment it is ready (-1 for none): a client that waits for its budget at the end of its window of time,
+        one that waits for its GPU at the end of its time to finish. 0 for a client that does not wait.
+*/
+WAYLAND_API long wayland_stall_due(long slot, long *fd)
+{
+        struct wayland_client *c = slot >= 0 && slot < WAYLAND_CLIENTS && wayland.host ? wayland.client[slot] : 0;
+
+        *fd = -1;
+        if (!c || c->dead || !c->stalled)
+                return 0;
+        if (c->stalled_fd < 0)
+                return c->budget_at + WAYLAND_BUDGET_MS;
+        *fd = c->stalled_fd;
+        return c->stalled_at + WAYLAND_STALL_MS + 1;
+}
+
+/*
         The commit a client waits for is made again if its buffer is ready now, and what the client sent after it is taken, which
         may be a commit that waits in its turn. Answers 1 while it is still waiting, else 0; a client whose buffer is not ready in
         WAYLAND_STALL_MS is ended, since its GPU is not going to finish.
@@ -5431,9 +5488,11 @@ WAYLAND_API int wayland_resume(long slot)
 
         if (!c || c->dead || !c->stalled)
                 return 0;
-        if (wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
+        // A commit that waits for its budget is made in the client's next window of time; one that waits for its GPU, when it is done.
+        if (c->stalled_fd < 0 ? !wayland_budget_left(c)
+                              : wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
         {
-                if (wayland.host->now(wayland.host->context) - c->stalled_at > WAYLAND_STALL_MS)
+                if (c->stalled_fd >= 0 && wayland.host->now(wayland.host->context) - c->stalled_at > WAYLAND_STALL_MS)
                 {
                         c->stalled = 0;
                         c->stash_length = 0;

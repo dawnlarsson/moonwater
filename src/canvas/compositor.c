@@ -15769,7 +15769,8 @@ static b32 compositor_main()
 
         while (running)
         {
-                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 16]; // the last 16: the Wayland shim's transfers
+                // The Wayland shim's: its socket, its clients, its transfers' knock and the dma-bufs its stalled clients wait for.
+                struct compositor_poll wanted[5 + COMPOSITOR_INPUTS + WINDOWS + 1 + 32 + 1 + 32];
                 unsigned int count = 0, inputs, doors, card_at = 0, uevents_at = 0, clip_at = 0, wayland_at = 0;
                 positive now = 0, until = 0;
                 long awaited, wait[2];
