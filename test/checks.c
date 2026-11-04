@@ -134907,7 +134907,7 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.ui = ui;
                         settings.width = 300;
                         settings.height = 160; // the card runs to the window's bottom, so this keeps its view at the 100 px it had
-                        settings.view = false;
+                        settings.page.card = false;
                         memory_copy(settings_large->said, said, sizeof(said) - 1);
                         settings.said_length = sizeof(said) - 1;
                         settings_card_fill();
@@ -134967,9 +134967,9 @@ static fn check_settings(string_address regular, string_address bold)
                         }
                         settings_card_open("moonwater status");
                         settings_press(UI_KEY_DOWN);
-                        check("settings: a card is scrolled by the keys", settings.view && settings.card.scroll > 0);
+                        check("settings: a card is scrolled by the keys", settings.page.card && settings.card.scroll > 0);
                         check("settings: Escape on it goes back to the list, and keeps the window",
-                              settings_press(UI_KEY_ESCAPE) && !settings.view);
+                              settings_press(UI_KEY_ESCAPE) && !settings.page.card);
                         settings.card.scroll = 0;
                 }
 
@@ -134981,7 +134981,7 @@ static fn check_settings(string_address regular, string_address bold)
 
                         settings.width = SETTINGS_WIDTH;
                         settings.height = SETTINGS_HEIGHT;
-                        settings.view = false;
+                        settings.page.card = false;
                         settings.editing = -1;
                         settings.filter_length = 0;
                         settings.filter[0] = 0;
@@ -135086,7 +135086,7 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_event(&land);
                                 settings_event(&taken);
                                 check("settings: a mouse's press the compositor takes back opens nothing, and is no click",
-                                      settings.choice < 0 && settings.queued == 0 && !settings.press.down);
+                                      settings.choice < 0 && settings.queued == 0 && !settings.page.press.down);
                                 settings_event(&land);
                                 settings_event(&lift);
                                 check("settings: a mouse's press and lift on a choice row, unmoved, opens its list", settings.choice == kb);
@@ -135109,10 +135109,10 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings_event(&finger);
                                 settings_event(&land);
                                 check("settings: a finger on a choice row shows it pressed at once and opens nothing yet",
-                                      settings.choice < 0 && ui_pressed(&settings.finger.press, kb));
+                                      settings.choice < 0 && ui_pressed(&settings.page.finger.press, kb));
                                 settings_event(&lift);
                                 check("settings: lifted there, it opens the list, its choices a finger's 44 pixels high",
-                                      settings.choice == kb && settings.popup.menu.touch && !ui_pressed(&settings.finger.press, kb) &&
+                                      settings.choice == kb && settings.popup.menu.touch && !ui_pressed(&settings.page.finger.press, kb) &&
                                           settings.popup.menu.height == (13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD) > settings.height
                                                                          ? settings.height
                                                                          : 13 * ui_px(&settings.ui, UI_MENU_TOUCH_ROW) + 2 * ui_px(&settings.ui, UI_MENU_PAD)));
@@ -135127,9 +135127,9 @@ static fn check_settings(string_address regular, string_address bold)
                                 settings.queued = 0;
                                 // What a press lands on shows pressed for a mouse and a finger alike (settings_press_show): a row by its
                                 // number, and a press on no row shows none.
-                                settings_press_show(3, 0, 0);
+                                ui_page_press_show(&settings.ui, &settings.page, &settings.list,3, 0, 0);
                                 check("settings: a press that lands on a row shows that row pressed, and one on nothing shows none",
-                                      settings.list.down == 3 && (settings_press_show(-1, 0, 0), settings.list.down == 3));
+                                      settings.list.down == 3 && (ui_page_press_show(&settings.ui, &settings.page, &settings.list,-1, 0, 0), settings.list.down == 3));
                                 settings.list.down = -1;
 
                                 settings.height = 220;
@@ -135529,7 +135529,7 @@ static fn check_settings(string_address regular, string_address bold)
                         }
                         settings.own.table = table;
                         settings.group = bt_group;
-                        settings.view = false;
+                        settings.page.card = false;
                         settings.editing = -1;
                         settings.filter_length = 0;
                         settings.queued = 0;
@@ -135554,9 +135554,9 @@ static fn check_settings(string_address regular, string_address bold)
                         settings.editing = 0;
                         check("settings: nor while a field is typed in", settings_feed_tick() == -1);
                         settings.editing = -1;
-                        settings.view = true;
+                        settings.page.card = true;
                         check("settings: nor while a card fills the window", settings_feed_tick() == -1);
-                        settings.view = false;
+                        settings.page.card = false;
                         settings.queued = 1;
                         check("settings: nor while a change waits", settings_feed_tick() == -1);
                         settings.queued = 0;
@@ -135624,7 +135624,7 @@ static fn check_settings_edges(void)
         settings.pane = 1;
         settings.editing = -1;
         settings.choice = -1;
-        settings.view = 0;
+        settings.page.card = 0;
         settings.child = 1;
         settings.job = 0;
         settings.job_sets = false;
@@ -135685,7 +135685,7 @@ static fn check_settings_keys(void)
         settings.filter[0] = 0;
         settings.editing = -1;
         settings.choice = -1;
-        settings.view = 0;
+        settings.page.card = 0;
         //      A feed left running by an earlier check would be finished by a change: this one is not a feed.
         settings.child = 1;
         settings.job = 0;
@@ -135881,7 +135881,7 @@ static fn settings_frames_scenario(string_address name, b32 switches_only, b32 c
 
         settings_frames.scenario = name;
         settings_frames.wrong = false;
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         for (positive at = 0; at < SETTINGS_ROWS; at++)
                 if (settings_rows[at].kind == SETTINGS_SWITCH)
@@ -135995,7 +135995,7 @@ static fn settings_frames_play(string_address name, int group, const struct sett
 
         settings_frames.scenario = name;
         settings_frames.wrong = false;
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         settings.group = group;
@@ -136202,7 +136202,7 @@ static fn settings_fit_check(void)
         int group = 0, fewest = 1 << 30, thumb_top = 0, thumb_length = 0, seen = 0;
         b32 still = true;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -136235,7 +136235,7 @@ static fn settings_column_fit_check(void)
         int heights[2] = {520, 560};
         b32 ends = true;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.ui.scale = 100;
         for (int k = 0; k < 2; k++)
         {
@@ -136255,7 +136255,7 @@ static fn settings_group_glide_check(void)
         struct ui_scroll address_to list = &settings.list.scroll;
         int other;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.ui.scale = 100;
         settings_size(SETTINGS_WIDTH, 300);
         other = settings.group == 0 ? 1 : 0;
@@ -136273,7 +136273,7 @@ static fn settings_column_check(void)
         int most, edge = 0, x, y, at_bottom = 0, at_top = 0;
         b32 wheel_ok = false, pull_bottom_ok = false, pull_top_ok = false, items_ok = false;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.ui.scale = 100;
         ui_kit_settle();
@@ -136315,7 +136315,7 @@ static fn settings_end_check(void)
         int group = 0, best = -1, expected = 0, track_top = 0, track_height = 0, last = 0;
         b32 wheel_ok = true, bar_ok = true, finger_ok = true, clear_ok = true, rows_ok = true;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -136403,7 +136403,7 @@ static fn settings_wheel_end_check(string_address name, positive gap, int notche
         int most, group = 0, best = -1;
         b32 settled;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -136449,7 +136449,7 @@ static b32 settings_flick_check(string_address name, int start, int step, int st
         struct settings_end_probe p = {0, 0, 0, -(1ll << 40)};
         int most, group = 0, best = -1, x, y;
 
-        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.view = 0;
+        settings.filter_length = 0, settings.filter[0] = 0, settings.editing = -1, settings.choice = -1, settings.page.card = 0;
         settings.pane = 1, settings.queued = 0, settings.child = 1, settings.job = 0, settings.job_sets = false, ui_confirm_drop(&settings.confirm);
         settings.list.hover = settings.list.down = -1;
         for (int g = 0; g < settings_groups(); g++)
@@ -136690,7 +136690,7 @@ static fn check_display_section(void)
         check("display section: no separate displays window: no row runs settings displays", !window);
 
         // The map is shown above the Display group only: its panel is placed at the page's top, the list under it.
-        settings.group = settings_group_of(screen_row), settings.filter_length = 0, settings.view = false;
+        settings.group = settings_group_of(screen_row), settings.filter_length = 0, settings.page.card = false;
         settings.page.top = 100, settings.page.left = 0, settings.page.right = 700;
         settings.ui.scale = 100;
         check("display section: the map is on for the Display group and off for another", settings_map_on() && settings.group == settings_group_of(screen_row));
@@ -136730,8 +136730,8 @@ static fn check_display_section(void)
 
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
-                settings_gallery.on = 0, settings.choice = -1, settings.editing = -1, settings.view = false, settings.filter_length = 0;
-                settings.map.display = settings.map.drag = -1, settings.list.down = -1, settings.touching = false;
+                settings_gallery.on = 0, settings.choice = -1, settings.editing = -1, settings.page.card = false, settings.filter_length = 0;
+                settings.map.display = settings.map.drag = -1, settings.list.down = -1;
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
                 settings_event(&touch);
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
@@ -136739,7 +136739,7 @@ static fn check_display_section(void)
                 check("display section: a finger's press on a screen of the map is the map's: it chooses the screen and starts its drag",
                       taken && settings.map.display == 1 && settings.map.drag == 1);
                 check("display section: a finger's press on the map starts no press of the page, so a drag there never scrolls",
-                      settings.list.down < 0 && !settings.touching);
+                      settings.list.down < 0);
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2 + 200, ty + th / 2};
                 settings_event(&touch);
                 check("display section: a finger dragged on the map moves the screen it took, to the place it is over",
@@ -136807,7 +136807,7 @@ static fn check_display_section(void)
                 grid_count = settings_map_load(grid, grid_number);
                 settings_map_view_of(grid, grid_count, settings.map.field_x, settings.map.field_y, settings.map.field_w, settings.map.field_h, &grid_view);
                 settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
-                settings.popup.open = 0, settings.editing = -1, settings.view = false, settings.filter_length = 0, settings.map.keys = false;
+                settings.popup.open = 0, settings.editing = -1, settings.page.card = false, settings.filter_length = 0, settings.map.keys = false;
                 settings.map.display = settings.map.drag = -1, settings.map.nudged = false;
                 event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
                 settings_event(&event);
@@ -136840,7 +136840,7 @@ static fn check_display_section(void)
                 memory_copy(table.output_name[0], "DP-4", 5), memory_copy(table.output_name[1], "DP-3", 5);
                 memory_copy(table.output_name[2], "DP-2", 5), memory_copy(table.output_name[3], "DP-1", 5);
                 settings.map.display = 0, settings.map.keys = false, settings.map.nudged = false, settings.map.drag = -1;
-                settings.pane = 1, settings.list.focus = screen_row, settings.editing = -1, settings.view = false;
+                settings.pane = 1, settings.list.focus = screen_row, settings.editing = -1, settings.page.card = false;
                 settings.filter_length = 0, settings.choice = -1;
                 key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_UP, 0};
                 settings_key(&key);
@@ -137093,7 +137093,7 @@ static fn check_settings_groups(void)
         check("settings groups: no row of the display options is listed under Machine, or anywhere but Display", screens);
 
         settings.ui.scale = 100;
-        settings.view = 0, settings.editing = -1, settings.choice = -1, settings.pane = 1;
+        settings.page.card = 0, settings.editing = -1, settings.choice = -1, settings.pane = 1;
         settings.filter_length = 0, settings.filter[0] = 0;
         for (positive at = 0; at < sizeof(placed) / sizeof(placed[0]); at++)
         {
@@ -138027,7 +138027,7 @@ static fn rtl_draw(int group, int scale, b32 rtl)
                 settings_size((unsigned int)(SETTINGS_WIDTH * scale), (unsigned int)(SETTINGS_HEIGHT * scale));
                 settings.group = group;
                 settings.filter_length = 0, settings.filter[0] = 0;
-                settings.view = 0, settings.editing = -1, settings.choice = -1;
+                settings.page.card = 0, settings.editing = -1, settings.choice = -1;
                 settings.focused = 0;
                 settings_refilter();
         }
@@ -138085,19 +138085,19 @@ static b32 rtl_view(string_address name, int group, int scale)
         if (group >= 0)
                 for (int gy = 0; gy < rtl_height / 5 && gy < 400; gy++)
                         for (int gx = 0; gx < rtl_width / 5 && gx < 400; gx++)
-                                rtl_pressed[gy][gx] = settings_press_target(gx * 5, gy * 5);
+                                rtl_pressed[gy][gx] = ui_page_target(&settings.ui, &settings.page, &settings.list, gx * 5, gy * 5);
         rtl_keep_count = 0;
         rtl_draw(group, scale, true);
         wrong = rtl_compare(rtl_first, settings_frames_whole, SETTINGS_FRAMES_W, rtl_width, rtl_height, &x, &y);
         if (group >= 0)
                 for (int gy = 0; gy < rtl_height / 5 && gy < 400; gy++)
                         for (int gx = 0; gx < rtl_width / 5 && gx < 400; gx++)
-                                if (settings_press_target(rtl_width - 1 - gx * 5, gy * 5) != rtl_pressed[gy][gx])
+                                if (ui_page_target(&settings.ui, &settings.page, &settings.list, rtl_width - 1 - gx * 5, gy * 5) != rtl_pressed[gy][gx])
                                 {
                                         if (!rtl_pressed_wrong)
                                                 string_format(log, "  rtl mirror: a press at %b,%b of %s at scale %b is on %b, at the mirrored place on %b\n", (bipolar)(gx * 5),
                                                               (bipolar)(gy * 5), name, (bipolar)scale, (bipolar)rtl_pressed[gy][gx],
-                                                              (bipolar)settings_press_target(rtl_width - 1 - gx * 5, gy * 5));
+                                                              (bipolar)ui_page_target(&settings.ui, &settings.page, &settings.list, rtl_width - 1 - gx * 5, gy * 5));
                                         rtl_pressed_wrong++;
                                 }
         if (wrong)
@@ -145025,6 +145025,114 @@ static fn check_kit_event_context(void)
         not_key = !ui_kit_touch;
         check("kit event context: a finger's event says so and a mouse's or a key's says not, and the time is the one it is handled at",
               touch && not_mouse && not_key);
+}
+
+// The kit's two buffers' state (ui_buffers): rows add as a union with the empty one none, a window starts lacking the whole picture in
+// both buffers and shown none, and a change says which rows the next picture draws, or all of it.
+static fn check_kit_buffers(void)
+{
+        struct ui_buffers b;
+        int top = 0, bottom = 0;
+        b32 ok;
+
+        ui_rows_add(&top, &bottom, 10, 20);
+        ui_rows_add(&top, &bottom, 5, 8);
+        ok = top == 5 && bottom == 20;
+        ui_rows_add(&top, &bottom, 30, 30);
+        ok = ok && top == 5 && bottom == 20;
+        memory_zero(&b, sizeof(b));
+        ui_buffers_start(&b);
+        ok = ok && b.shown == -1 && b.change_all && b.stale_all[0] && b.stale_all[1];
+        b.change_all = false;
+        ui_buffers_rows(&b, 40, 50);
+        ok = ok && !b.change_all && b.change_top == 40 && b.change_bottom == 50;
+        ui_buffers_all(&b);
+        ok = ok && b.change_all;
+        check("kit buffers: rows add as a union with the empty one none, a window starts lacking the whole picture in both buffers, and a change says which rows or all", ok);
+}
+
+// The kit's page pointer (ui_page_pointer): a card's press is done on its release where it went down, a press on nothing is done at
+// once, a release the compositor took back is no click, a finger's press is done as it lifts with ui_kit_touch set, and a finger that
+// drags past the slop is no click.
+static int kit_pointer_done, kit_pointer_touch;
+
+static void check_kit_pointer_done(void)
+{
+        kit_pointer_done++;
+        kit_pointer_touch = ui_kit_touch;
+}
+
+static fn check_kit_page_pointer(void)
+{
+        struct ui ui;
+        struct ui_page p;
+        struct ui_list l;
+        struct window_event motion = {WINDOW_EVENT_MOTION, 0, 10, 10};
+        struct window_event down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        struct window_event up = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        struct window_event cancel = {WINDOW_EVENT_BUTTON, WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0};
+        struct window_event finger_down = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+        struct window_event finger_up = {WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+        struct window_event finger_drag = {WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, 300, 10};
+        int card_done, card_held, nothing_done, nothing_held, cancelled_done, touch_done, touch_said, drag_done, drag_held;
+
+        memory_zero(&ui, sizeof(ui));
+        memory_zero(&l, sizeof(l));
+        l.down = l.hover = l.focus = -1;
+        ui.scale = 100;
+        kit_pointer_done = 0, kit_pointer_touch = 0;
+        ui_kit.now = (positive)clock_monotonic_nanoseconds();
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 400, p.top = 0, p.bottom = 400;
+        p.card = 1;
+        ui_page_track(&p, &motion);
+        ui_event_context(&down);
+        ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
+        card_held = p.press.down && kit_pointer_done == 0;
+        ui_event_context(&up);
+        ui_page_pointer(&ui, &p, &l, &up, check_kit_pointer_done);
+        card_done = kit_pointer_done == 1 && !p.press.down;
+        check("kit page pointer: a press on the card is done on its release, not its press", card_held && card_done);
+
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 400, p.top = 0, p.bottom = 400;
+        ui_page_track(&p, &motion);
+        kit_pointer_done = 0;
+        ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
+        nothing_done = kit_pointer_done == 1 && !p.press.down;
+        ui_page_pointer(&ui, &p, &l, &up, check_kit_pointer_done);
+        nothing_held = kit_pointer_done == 1;
+        check("kit page pointer: a press on nothing is done at once, and its release does nothing more", nothing_done && nothing_held);
+
+        memory_zero(&p, sizeof(p));
+        p.width = 400, p.height = 400, p.top = 0, p.bottom = 400;
+        p.card = 1;
+        ui_page_track(&p, &motion);
+        kit_pointer_done = 0;
+        ui_page_pointer(&ui, &p, &l, &down, check_kit_pointer_done);
+        ui_page_pointer(&ui, &p, &l, &cancel, check_kit_pointer_done);
+        cancelled_done = kit_pointer_done == 0 && !p.press.down;
+        check("kit page pointer: a release the compositor took back is no click", cancelled_done);
+
+        kit_pointer_done = 0, kit_pointer_touch = 0;
+        ui_event_context(&finger_down);
+        ui_page_pointer(&ui, &p, &l, &finger_down, check_kit_pointer_done);
+        ui_event_context(&finger_up);
+        ui_page_pointer(&ui, &p, &l, &finger_up, check_kit_pointer_done);
+        touch_done = kit_pointer_done == 1;
+        touch_said = kit_pointer_touch == 1;
+        check("kit page pointer: a finger's press is done as it lifts, with the touch flag its event carries", touch_done && touch_said);
+
+        kit_pointer_done = 0;
+        ui_event_context(&finger_down);
+        ui_page_pointer(&ui, &p, &l, &finger_down, check_kit_pointer_done);
+        ui_event_context(&finger_drag);
+        ui_page_pointer(&ui, &p, &l, &finger_drag, check_kit_pointer_done);
+        drag_held = p.finger.press.dragged;
+        ui_event_context(&finger_up);
+        ui_page_pointer(&ui, &p, &l, &finger_up, check_kit_pointer_done);
+        drag_done = kit_pointer_done == 0;
+        check("kit page pointer: a finger that drags past the slop is no click", drag_held && drag_done);
 }
 
 // A finger pulling a bounded region past an end holds it by at most a view, however far it goes, and the stretch springs home in
@@ -153131,7 +153239,7 @@ static fn check_field_hands(string_address regular)
                 settings.own.table = &table;
                 settings.width = 800, settings.height = 520;
                 settings.ui.pitch = 800, settings.ui.width = 800, settings.ui.height = 520;
-                settings.focused = 1, settings.pane = 1, settings.choice = -1, settings.view = 0;
+                settings.focused = 1, settings.pane = 1, settings.choice = -1, settings.page.card = 0;
                 settings.child = 1, settings.queued = 0, settings.job = 0, settings.job_sets = false;
                 settings_edit_end();
                 settings_group_choose(0);
@@ -155772,6 +155880,8 @@ b32 main()
         check_kit_ripple_pace();
         check_kit_ripple_cover();
         check_kit_event_context();
+        check_kit_buffers();
+        check_kit_page_pointer();
         check_kit_finger_pull();
         check_kit_confirm_repeat();
         check_kit_hand();

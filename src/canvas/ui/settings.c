@@ -691,13 +691,10 @@ static struct
         int choice;              // the row whose choice menu is open (its popup is settings.popup), or -1
         int choice_x, choice_y;  // where that menu is placed, in the window's pixels
         char choice_label[UI_MENU_ITEMS][SETTINGS_VALUE], choice_mark[UI_MENU_ITEMS][2 * SETTINGS_VALUE];
-        struct ui_finger finger;
-        struct ui_press press;   // a mouse's press on a row, done on its release where it went down
         struct ui_scroll card;
         int editing;             // the row typed in, -1 none
         int group;               // the group whose rows are at the right
         b32 pane;                // where the keys are: 0 the column of groups, 1 the rows
-        b32 touching;            // a finger's press is being done: what it opens is a finger's
         char head[SETTINGS_VALUE]; // the verb of a command being typed, as its row's label
         char accents[SETTINGS_VALUE]; // the accents' colours, a blank apart, as the swatches' words
         struct battery_name battery_menu[BATTERY_LIST]; // the batteries a picker list was opened with
@@ -719,7 +716,6 @@ static struct
         b32 focused, dirty;
 
         // What a command said, as a card in place of the list: lines cut to the window's width.
-        b32 view;
         positive card_length;
         int card_lines;
         char card_title[SETTINGS_STATUS];
@@ -1267,7 +1263,7 @@ static b32 settings_map_on(void)
 {
         int row = settings_output_row(SETTINGS_OUT_SCREEN);
 
-        return row >= 0 && !settings.view && !settings.filter_length && settings_group_of(row) == settings.group;
+        return row >= 0 && !settings.page.card && !settings.filter_length && settings_group_of(row) == settings.group;
 }
 
 static int settings_map_height(void)
@@ -1514,8 +1510,8 @@ static fn settings_layout(void)
                 }
         }
         // The page's column shows with the rows and not with a card, which has the body and the whole width.
-        settings.page.column_on = !settings.view;
-        settings.page.body = settings.view ? &settings.card : &settings.list.scroll;
+        settings.page.column_on = !settings.page.card;
+        settings.page.body = settings.page.card ? &settings.card : &settings.list.scroll;
         settings.page.damaged = settings_changed;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         ui_page_layout(ui, &settings.page, settings.width, settings.height);
@@ -1545,14 +1541,14 @@ static fn settings_layout(void)
 // The list or the card scrolled, and drawn again.
 static fn settings_scroll_to(int scroll)
 {
-        if (ui_scroll_set(settings.view ? &settings.card : &settings.list.scroll, scroll))
+        if (ui_scroll_set(settings.page.card ? &settings.card : &settings.list.scroll, scroll))
                 settings_changed(settings.page.top, settings.page.bottom);
 }
 
 // The row with the focus kept in sight.
 static fn settings_reveal(void)
 {
-        if (!settings.view)
+        if (!settings.page.card)
                 ui_list_reveal(&settings.ui, &settings.list);
 }
 
@@ -1985,7 +1981,7 @@ static fn settings_card_open(const char address_to title)
 {
         settings_card_fill();
         string_copy_bounded((string_address)settings.card_title, (string_address)title, sizeof(settings.card_title));
-        settings.view = true;
+        settings.page.card = true;
         settings.card.scroll = 0;
         settings_wrap();
         settings_layout();
@@ -1994,7 +1990,7 @@ static fn settings_card_open(const char address_to title)
 
 static fn settings_card_leave(void)
 {
-        settings.view = false;
+        settings.page.card = false;
         settings.status[0] = 0;
         settings_layout();
         settings_dirty();
@@ -2628,7 +2624,7 @@ static long settings_feed_tick(void)
         string_address words[SETTINGS_WORDS];
         positive count = 1;
 
-        if (feed < 0 || settings.view || settings.editing >= 0 || settings.filter_length ||
+        if (feed < 0 || settings.page.card || settings.editing >= 0 || settings.filter_length ||
             (settings.own.table->state[settings.own.row] & WINDOW_MINIMIZED) || settings.child > 0 || settings.queued ||
             settings_unread_any() || settings.help == 1)
                 return -1;
@@ -2665,7 +2661,7 @@ static fn settings_reading_changed(int row)
 {
         if (settings.choice == row)
                 settings_dirty();
-        else if (!settings.view)
+        else if (!settings.page.card)
                 ui_list_damage(&settings.ui, &settings.list, row);
 }
 
@@ -3158,7 +3154,7 @@ static fn settings_menu_open(int row)
 {
         const struct settings_row address_to which = &settings_rows[row];
         struct ui_popmenu address_to m = &settings.popup.menu;
-        struct ui_menu_sizes sizes = ui_menu_sizes(&settings.ui, settings.touching);
+        struct ui_menu_sizes sizes = ui_menu_sizes(&settings.ui, ui_kit_touch);
         char word[SETTINGS_VALUE];
         int at = settings_pos(row), current = -1, x, y;
 
@@ -3169,7 +3165,7 @@ static fn settings_menu_open(int row)
         settings.list.focus = row;
         m->count = 0, m->top = 0, m->typed_length = 0;
         memory_zero(&m->press, sizeof(m->press));
-        m->touch = settings.touching;
+        m->touch = ui_kit_touch;
         for (int k = 0; k < UI_MENU_ITEMS && settings_choice(which, (positive)k, word, sizeof(word)); k++)
         {
                 const char address_to shown = settings_label_of(row, word);
@@ -3199,7 +3195,7 @@ static fn settings_menu_open(int row)
         settings.popup.field = null;
         settings.choice = row, settings.choice_x = x, settings.choice_y = y;
         settings_reveal();
-        ui_popup_open(&settings.popup, &settings.own, &settings.ui, x, y, 0, 0, WINDOW_POPUP_POINT, settings.touching);
+        ui_popup_open(&settings.popup, &settings.own, &settings.ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch);
         settings.popup.menu.hot = current >= 0 ? current : 0;
         if (settings.popup.open)
                 ui_popup_present(&settings.popup);
@@ -3777,7 +3773,7 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_type(event);
                 return true;
         }
-        if (settings.view)
+        if (settings.page.card)
         {
                 settings_card_key(event);
                 return true;
@@ -4308,133 +4304,8 @@ static b32 settings_gallery_event(const struct window_event address_to event)
         return true;
 }
 
-/* ---- the pointer and a finger ---- */
+/* ---- the pointer and a finger: the kit's page (ui_page_pointer) ---- */
 
-// A press is numbered by what it went down on: a row by its number, a group and a choice of the open menu past them, and the card.
-#define SETTINGS_PRESS_GROUP (SETTINGS_ALL + 1)
-#define SETTINGS_PRESS_CARD (SETTINGS_PRESS_GROUP + 64)
-
-static int settings_press_target(int x, int y)
-{
-        int at;
-
-        if (settings.view)
-                return SETTINGS_PRESS_CARD;
-        if ((at = ui_page_column_hit(&settings.ui, &settings.page, x, y)) >= 0)
-                return SETTINGS_PRESS_GROUP + at;
-        return ui_list_hit(&settings.ui, &settings.list, x, y);
-}
-
-static fn settings_press_at(void);
-
-// What a press on target shows pressed as it goes down, for a mouse and a finger alike: a row's state layer, a group's ripple.
-static fn settings_press_show(int target, int x, int y)
-{
-        if (target < 0)
-                return;
-        if (target < SETTINGS_PRESS_GROUP)
-                settings.list.down = target;
-        else if (target < SETTINGS_PRESS_CARD)
-                ui_page_column_press(&settings.ui, &settings.page, target - SETTINGS_PRESS_GROUP, x, y);
-}
-
-// A press done where it went down (a mouse's, or a finger's that did not move off it): the press runs at the point it went down
-// and the list lets go; the pointer is put back where the release was, and a finger's press is the touch one.
-static fn settings_press_done(int press_x, int press_y, int x, int y, b32 touch)
-{
-        settings.page.pointer_x = press_x, settings.page.pointer_y = press_y;
-        settings.touching = touch;
-        settings_press_at();
-        settings.touching = false;
-        // The target was pressed again to be done: let it go now, the release has come.
-        ui_list_let_go(&settings.ui, &settings.list);
-        ui_kit_ripples_exit(&settings.page.column);
-        settings.page.pointer_x = x, settings.page.pointer_y = y;
-}
-
-/*
-        A mouse's press on a row, a group or the card is begun here and done on its release,
-        where it went down, as a finger's is: what it is on shows pressed (a row's state layer, a group's ripple), a slide
-        off it shows none, and a release off it runs nothing. True when the press was on something and is held; a press on
-        nothing is done at once (it closes the menu), as it always was.
-*/
-static b32 settings_press_begin(void)
-{
-        int x = settings.page.pointer_x, y = settings.page.pointer_y, target = settings_press_target(x, y);
-
-        if (target < 0)
-                return false;
-        ui_press_begin(&settings.press, x, y, target, false);
-        settings_press_show(target, x, y);
-        settings_dirty();
-        return true;
-}
-
-// The pointer moved with a mouse's press held: a row is shown pressed while it is on the row the press went down on.
-static fn settings_press_slide(int x, int y)
-{
-        // A row's press is shown pressed while the pointer is on it (the kit's rule); a group, a choice or the card has no such state.
-        if (settings.press.target < SETTINGS_PRESS_GROUP && ui_list_press_slide(&settings.ui, &settings.list, &settings.press, settings_press_target(x, y)))
-                settings_dirty();
-}
-
-// A mouse's release with a row's press held: done where it went down, if the release is on that row too; one the compositor
-// took back (WINDOW_KEY_CANCEL) is no click, and does nothing.
-static fn settings_press_up(b32 cancelled)
-{
-        int clicked = ui_press_end(&settings.press, cancelled), x = settings.page.pointer_x, y = settings.page.pointer_y;
-
-        ui_list_let_go(&settings.ui, &settings.list);
-        settings_dirty();
-        if (clicked < 0 || clicked != settings_press_target(x, y))
-                return;
-        settings_press_done(settings.press.x, settings.press.y, x, y, false);
-}
-
-/*
-        A finger: down, what it is on shows pressed and nothing is done yet; past the slop it drags the region it went
-        down on, which follows it; up, the press is done where it went down if it did not move off it (as a mouse's
-        press is done at once), and the region is thrown if it was moving; a press taken back does nothing.
-*/
-static fn settings_finger(const struct window_event address_to event)
-{
-        int x = settings.page.pointer_x, y = settings.page.pointer_y;
-
-        if (event->type == WINDOW_EVENT_MOTION)
-        {
-                b32 dragged = settings.finger.press.dragged;
-
-                if (ui_finger_move(&settings.ui, &settings.finger, event->a, event->b))
-                {
-                        if (!dragged && settings.finger.press.dragged)
-                                ui_list_let_go(&settings.ui, &settings.list);
-                        ui_page_moved(&settings.ui, &settings.page, settings.finger.region);
-                }
-                return;
-        }
-        if (event->a != UI_POINTER_LEFT)
-                return;
-        if (event->flags & WINDOW_KEY_DOWN)
-        {
-                int target = settings_press_target(x, y);
-
-                ui_finger_down(&settings.finger, x, y, target, ui_page_region(&settings.ui, &settings.page, x, y));
-                settings_press_show(target, x, y);
-                settings_dirty();
-                return;
-        }
-        {
-                int clicked, release_x = x, release_y = y;
-
-                x = settings.finger.press.x, y = settings.finger.press.y;
-                clicked = ui_finger_up(&settings.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
-                ui_list_let_go(&settings.ui, &settings.list);
-                settings_dirty();
-                // Done where it went down, as a mouse's press is: the target it was shown on is what is under that point.
-                if (clicked >= 0 && clicked == settings_press_target(x, y))
-                        settings_press_done(x, y, release_x, release_y, true);
-        }
-}
 
 // The map's drag: the screen taken moves with the pointer, snapped to a neighbour's edge within the compositor's snap band
 // (COMPOSITOR_SNAP, in device pixels as the compositor draws it), and where it is let go is written on release.
@@ -4500,12 +4371,13 @@ static void settings_map_release(void)
         settings_dirty();
 }
 
+static fn settings_press_at(void);
+
 static b32 settings_event(const struct window_event address_to event)
 {
         if (settings_gallery.on)
                 return settings_gallery_event(event);
-        if (event->type == WINDOW_EVENT_MOTION)
-                settings.page.pointer_x = event->a, settings.page.pointer_y = event->b;
+        ui_page_track(&settings.page, event);
         /*
                 The map of the screens (above the Display rows): a press in its panel, the drag of a screen it took, and its
                 release. A finger does the same on the map, a tap choosing a screen and a drag moving it, and a drag that starts
@@ -4543,7 +4415,7 @@ static b32 settings_event(const struct window_event address_to event)
                 clipboard's answer to a paste they asked for: the field a row is typed in while it shows, and the
                 search field. A press on the search field ends the typing in a row, as a press anywhere else does.
         */
-        if (event->type != WINDOW_EVENT_KEY && event->type != WINDOW_EVENT_WHEEL && !settings.view && settings.choice < 0)
+        if (event->type != WINDOW_EVENT_KEY && event->type != WINDOW_EVENT_WHEEL && !settings.page.card && settings.choice < 0)
         {
                 int x = settings.page.pointer_x, y = settings.page.pointer_y;
                 p32 asks;
@@ -4557,7 +4429,7 @@ static b32 settings_event(const struct window_event address_to event)
                     (asks = ui_field_event(&settings.ui, &settings.edit, &settings.popup, event, x, y)))
                 {
                         b32 outside = event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL);
-                        b32 own = outside && settings_press_target(x, y) == settings.editing;
+                        b32 own = outside && ui_page_target(&settings.ui, &settings.page, &settings.list, x, y) == settings.editing;
 
                         settings_edit_asked(asks);
                         if (!outside || own)
@@ -4579,51 +4451,15 @@ static b32 settings_event(const struct window_event address_to event)
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
-                ui_drag_stop(&settings.finger.drag);
+                ui_page_stop(&settings.page);
                 return settings_key(event);
         case WINDOW_EVENT_MOTION:
-                if (event->flags & WINDOW_KEY_TOUCH)
-                {
-                        settings_finger(event);
-                        break;
-                }
-                if (settings.press.down)
-                        settings_press_slide(event->a, event->b);
-                // The rows and the column: what is under the pointer is lit (a choice's menu is a popup, and has the pointer).
-                if (!settings.view)
-                {
-                        ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_MOTION, event->a, event->b, false);
-                        if (ui_control_hit(&settings.ui, &settings.page.column, event->a, event->b) != settings.page.column.item)
-                                settings_changed(settings.page.top, settings.page.bottom);
-                }
-                break;
         case WINDOW_EVENT_BUTTON:
-                if (event->a != UI_POINTER_LEFT)
-                        break;
-                // The release: the column's ripple and the row's go out (a finger's as a mouse's).
-                if (!(event->flags & WINDOW_KEY_DOWN))
-                {
-                        ui_kit_ripples_exit(&settings.page.column);
-                        ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, settings.page.pointer_x, settings.page.pointer_y, false);
-                        settings_dirty();
-                        if (!(event->flags & WINDOW_KEY_TOUCH) && settings.press.down)
-                                settings_press_up((event->flags & WINDOW_KEY_CANCEL) != 0);
-                }
-                if (event->flags & WINDOW_KEY_TOUCH)
-                {
-                        settings_finger(event);
-                        break;
-                }
-                if (event->flags & WINDOW_KEY_DOWN)
-                {
-                        ui_drag_stop(&settings.finger.drag);
-                        if (!settings_press_begin())
-                                settings_press_at();
-                }
+                // The rows, the column, a press and a finger: the kit's page (its press is done by settings_press_at).
+                ui_page_pointer(&settings.ui, &settings.page, &settings.list, event, settings_press_at);
                 break;
         case WINDOW_EVENT_WHEEL:
                 // The menu turns under the wheel, and nothing else does while it is open; else what is under the pointer.
-                ui_drag_stop(&settings.finger.drag);
                 ui_page_wheel(&settings.ui, &settings.page, event);
                 break;
         }
@@ -4636,7 +4472,7 @@ static fn settings_press_at(void)
         int x = settings.page.pointer_x, y = settings.page.pointer_y, row, before = settings.list.focus;
 
         // A press on the card of what a command said is done with it.
-        if (settings.view)
+        if (settings.page.card)
         {
                 settings_card_leave();
                 return;
@@ -4715,15 +4551,15 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
                 settings_gallery_draw(ui);
                 return;
         }
-        settings.page.title = settings.view ? settings.card_title : language_of("Settings");
+        settings.page.title = settings.page.card ? settings.card_title : language_of("Settings");
         settings.page.status = settings.status;
         settings.list.empty = WORDS(settings_nothing_matches);
         // The search field is the filter: the kit's bare field, the text engine's field in it (typing, a selection, the
         // clipboard, its caret), with the keys while the window has them and no row is typed in.
-        settings.page.search.items[0] = settings.view ? null : WORDS(settings_filter_hint);
-        settings.page.search.edit = settings.view ? null : settings_filter_field();
+        settings.page.search.items[0] = settings.page.card ? null : WORDS(settings_filter_hint);
+        settings.page.search.edit = settings.page.card ? null : settings_filter_field();
         ui_page_draw(ui, &settings.page, settings.editing < 0 && settings.focused);
-        if (settings.view)
+        if (settings.page.card)
                 ui_lines_draw(ui, &settings.card, ui_px(ui, UI_PAD), settings.card_lines, settings_card_line);
         else
         {
@@ -4741,7 +4577,7 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
         // A finger's selection in the field a row is typed in, or in the filter: its handles and actions bar, over the rows.
         if (settings.editing >= 0 && settings_edit_shown())
                 ui_text_overlay(ui, &settings.edit);
-        if (settings.filter_open && !settings.view)
+        if (settings.filter_open && !settings.page.card)
                 ui_text_overlay(ui, &settings.filter_edit);
 }
 
@@ -4767,7 +4603,7 @@ static fn settings_size(unsigned int width, unsigned int height)
         settings.width = (int)(width > table->output_width ? table->output_width : width);
         settings.height = (int)(height > table->output_height ? table->output_height : height);
         ui_scratch_fit(&settings.ui, (unsigned int)settings.width);
-        if (settings.view)
+        if (settings.page.card)
                 settings_wrap();
         settings_layout();
         settings_side_reveal();
@@ -4860,7 +4696,7 @@ static fn settings_chose(int id)
 static long settings_tick(long timeout, long address_to other)
 {
         // The field with the keys blinks its caret a while after its last key, its well drawn again at each turn.
-        if (!settings.view && (settings_gallery.on || settings.editing >= 0 || settings.filter_open))
+        if (!settings.page.card && (settings_gallery.on || settings.editing >= 0 || settings.filter_open))
         {
                 struct ui_text address_to t = settings_gallery.on ? &settings_gallery.field[settings_gallery.field[1].focused]
                                               : settings.editing >= 0 ? &settings.edit : &settings.filter_edit;
