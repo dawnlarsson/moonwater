@@ -6439,6 +6439,31 @@ static void ui_scroll_release(struct ui_scroll address_to s)
         s->absorb = !s->precise && s->bounds && s->back.live;
 }
 
+/*
+        A thumb held past an end holds a stretch (ui_scroll_pointer): its release lets it go, as a finger's does, or it never springs
+        home. A region the hand has (a wheel's notch, a trackpad's motion) lets go on its own release, so the thumb's does not.
+        Answers whether it let go.
+*/
+static b32 ui_scroll_thumb_release(struct ui_scroll address_to s, int type, b32 down, b32 held)
+{
+        if (type != WINDOW_EVENT_BUTTON || down || !held || !s->dragging || s->hand)
+                return false;
+        ui_scroll_let_go(s, 0, 0);
+        return true;
+}
+
+/*
+        Where a region is drawn: its track down the x edge (its width is the kit's), from y, height long, below inset (a window's close
+        button), what it scrolls (content) and how much shows (view), bounded (a stretch past an end) at the scale. The unit is 0 (a
+        pixel), and the scroll stays as it is; the app puts it where it means it to be.
+*/
+static void ui_scroll_place(struct ui_scroll address_to s, int x, int y, int height, int inset, int content, int view, int scale)
+{
+        s->x = x, s->y = y, s->height = height, s->inset = inset;
+        s->content = content, s->view = view;
+        s->bounds = 1, s->scale = scale, s->unit = 0;
+}
+
 // The hand's move, in 256ths of a device pixel (positive: the content moves down the region). It takes the region from where it is
 // drawn: a glide or a spring is stopped there, and a region at rest starts from its place. Its reports are fitted for the release,
 // and the region may be held past its ends by UI_SCROLL_VIEW_PAST views (the stretch draws how far, through ui_scroll_pull).
@@ -9642,8 +9667,7 @@ static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to
                                 ui_scroll_set(bars[k], scroll);
                 }
                 // Only a thumb that was held lets go: a finger dragging the content has the region dragging too, and its own release throws it.
-                if (type == WINDOW_EVENT_BUTTON && !down && held && bars[k]->dragging)
-                        ui_scroll_let_go(bars[k], 0, 0);
+                ui_scroll_thumb_release(bars[k], type, down, held);
                 if (scroll >= 0 || lit != bars[k]->hover)
                         ui_page_moved(ui, p, bars[k]);
         }

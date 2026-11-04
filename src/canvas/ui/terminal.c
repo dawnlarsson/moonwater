@@ -561,15 +561,8 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
 {
         int cell = (int)terminal.cell_h;
 
-        terminal.bar.x = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100;
-        terminal.bar.y = 0;
-        terminal.bar.height = (int)terminal.height;
-        terminal.bar.inset = UI_CLOSE_BOTTOM;
-        terminal.bar.content = (int)total * cell;
-        terminal.bar.view = (int)shown * cell;
-        terminal.bar.bounds = 1;
-        terminal.bar.scale = terminal_scale();
-        terminal.bar.unit = 0;
+        ui_scroll_place(&terminal.bar, (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100, 0, (int)terminal.height,
+                        UI_CLOSE_BOTTOM, (int)total * cell, (int)shown * cell, terminal_scale());
         // Where the view is, unless the kit is moving the bar (a wheel's glide, a finger's hold or throw): then the kit's place stands.
         if (!ui_scroll_going(&terminal.bar) && terminal.bar.scroll != (int)first * cell)
                 ui_scroll_set(&terminal.bar, (int)first * cell);
@@ -682,12 +675,9 @@ static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to
         lit = terminal_bar_key();
         held = terminal.bar.held;
         scroll = ui_scroll_pointer(&kit, &terminal.bar, type, x, y, down);
-        // A thumb dragged past an end holds a stretch: its release lets it go (the page's bars do the same), or it never springs home.
-        if (type == WINDOW_EVENT_BUTTON && !down && held && terminal.bar.dragging && !terminal.bar.hand)
-        {
-                ui_scroll_let_go(&terminal.bar, 0, 0);
+        // A thumb dragged past an end holds a stretch, and its release lets it go (ui_scroll_thumb_release, the page's bars' too).
+        if (ui_scroll_thumb_release(&terminal.bar, type, down, held))
                 *moved = true;
-        }
         *moved = *moved || terminal_bar_key() != lit;
         if (scroll < 0)
                 return false;
